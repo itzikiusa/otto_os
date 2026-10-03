@@ -82,6 +82,7 @@ below). Clients need no change: keep sending, and treat a dropped socket or a
 {"type":"resync","lines":2000}                      // typed over a dropped local backlog: discard my queued output, send ONE snapshot (see below)
 {"type":"credit","window":1048576}                  // credit flow control: send me at most `window` unacknowledged binary bytes (see below)
 {"type":"ack","bytes":4194304}                      // credit: cumulative binary bytes consumed (parsed or dropped) since the grant
+{"type":"probe","id":7}                             // latency probe: answered at once with `probe_ack` (see below); read-only safe
 ```
 
 **Credit flow control (`credit` / `ack`) — preferred.** `pause`/`resume`
@@ -230,7 +231,20 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
                                                     // are still delivered in order). Sent once per failing stretch.
 {"type":"search_result","query":"foo","matches":[{"line":42,"text":"foo bar baz"},...]}  // up to 200 matches; always valid JSON
                                                     // (text is ANSI-stripped but may contain tabs/C0 bytes, JSON-escaped)
+{"type":"probe_ack","id":7,"echo":{"last_ms":3.2,"avg_ms":4.1,"max_ms":48.0,"samples":120}}  // reply to `probe`; `echo` null with no live PTY
 ```
+
+#### Latency probe (`probe` / `probe_ack`)
+
+Diagnostics for the terminal latency HUD (opt-in in the UI:
+`localStorage['otto.debug.termLatency']='1'`). The connection loop answers a
+`probe` immediately with `probe_ack` carrying the same `id` (default 0), so the
+client's round trip is websocket + daemon loop with no child process in the
+path. `echo` is the PTY's keystroke-echo clock since spawn: the time from an
+input write reaching the PTY to the child's first output after it (`last_ms`,
+`avg_ms` — an EWMA with α = 1/8 —, `max_ms`, `samples`). It measures "first
+output after input", so a spinner frame landing in between under-reads a
+sample. `null` when the viewer has no live PTY. Viewers (read-only) may probe.
 
 #### Server-side search (`{"type":"search"}`)
 

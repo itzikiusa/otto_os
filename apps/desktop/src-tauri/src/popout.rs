@@ -233,6 +233,7 @@ fn build(
         .transparent(true)
         .accept_first_mouse(true)
         .disable_drag_drop_handler()
+        .background_throttling(crate::NO_THROTTLE)
         .initialization_script(format!(
             "window.__OTTO_WIN__='{label}';window.__OTTO_POPOUT__={{title:{title_js}}};"
         ))

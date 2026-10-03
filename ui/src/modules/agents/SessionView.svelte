@@ -24,6 +24,7 @@
   import { copyText } from '../../lib/clipboard';
   import StartRoomModal from '../rooms/StartRoomModal.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { popoutItems } from '../../lib/popoutMenu';
   import { now } from '../../lib/stores/now.svelte';
   import { idleSuspend } from '../../lib/stores/idleSuspend.svelte';
@@ -520,8 +521,29 @@
         action: () => ui.termZoomReset(),
       },
       { label: 'Copy on select', checked: ui.termCopyOnSelect, action: () => ui.setTermCopyOnSelect(!ui.termCopyOnSelect) },
+      {
+        label: 'Redraw terminal',
+        icon: 'refresh',
+        title: 'Rebuild the screen from the session — fixes a garbled or half-drawn pane',
+        action: () => termRef?.redraw(),
+      },
     ];
   }
+
+  // ⌘K "Redraw terminal" for the pane the keyboard is in (same action as the
+  // ⋯ menu row above).
+  $effect(() => {
+    if (!kbFocused || view !== 'terminal' || viewport.isPhone) return;
+    return registry.register('session-terminal', [
+      {
+        id: 'terminal.redraw',
+        title: 'Redraw terminal',
+        group: 'Sessions',
+        keywords: 'garbled repaint refresh screen broken tui',
+        run: () => termRef?.redraw(),
+      },
+    ]);
+  });
 
   /** Single source of truth for the session actions menu — served both by the
    *  header ⋯ button and the title's right-click, through the global clamped

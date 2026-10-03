@@ -187,6 +187,15 @@ enum ClientFrame {
     Ack {
         bytes: u64,
     },
+    // Latency probe (terminal latency HUD, review 01 L1). Answered right away
+    // by this loop with `probe_ack` echoing `id`, so the client's round trip
+    // is websocket + daemon loop without the child; the ack also carries the
+    // PTY's keystroke-echo statistics (see `otto_pty::EchoStats`). Read-only
+    // safe: it touches neither the PTY nor any shared state.
+    Probe {
+        #[serde(default)]
+        id: u64,
+    },
 }
 
 /// A paused viewer that never sends `resume` (renderer wedged, buggy client)
@@ -592,6 +601,11 @@ async fn apply_credit_step(
 /// ANSI-stripped but keep tabs, BEL, backspace and other C0 bytes, which JSON
 /// forbids raw — the old hand-rolled escaper emitted them verbatim, the
 /// client's `JSON.parse` threw, and the find bar spun on "…" forever (SA-11).
+/// `{"type":"probe_ack","id":N,"echo":{last_ms,avg_ms,max_ms,samples}|null}`.
+fn probe_ack_frame(id: u64, echo: Option<otto_pty::EchoStats>) -> String {
+    serde_json::json!({ "type": "probe_ack", "id": id, "echo": echo }).to_string()
+}
+
 fn search_result_frame(query: &str, matches: Vec<(usize, String)>) -> String {
     let matches: Vec<serde_json::Value> = matches
         .into_iter()
@@ -1538,6 +1552,12 @@ async fn serve_terminal<S: SessionsCtx>(
                             c.superseded();
                         }
                     }
+                    ClientFrame::Probe { id } => {
+                        let frame = probe_ack_frame(id, handle.as_ref().map(|h| h.echo_stats()));
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            return;
+                        }
+                    }
                     ClientFrame::Search { query } => {
                         // Server-side search: grep the ring buffer (survives WS
                         // reconnects, unlike the xterm SearchAddon which only
@@ -2130,6 +2150,33 @@ mod tests {
             !wakes_on_input(false, true, false),
             "classic socket: unchanged"
         );
+    }
+
+    #[test]
+    fn probe_frame_parses_and_ack_carries_echo_stats() {
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"probe","id":7}"#),
+            Ok(ClientFrame::Probe { id: 7 })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"probe"}"#),
+            Ok(ClientFrame::Probe { id: 0 })
+        ));
+        let ack: serde_json::Value = serde_json::from_str(&probe_ack_frame(7, None)).unwrap();
+        assert_eq!(ack["type"], "probe_ack");
+        assert_eq!(ack["id"], 7);
+        assert!(ack["echo"].is_null());
+        let stats = otto_pty::EchoStats {
+            last_ms: 1.5,
+            avg_ms: 2.0,
+            max_ms: 9.25,
+            samples: 3,
+        };
+        let ack: serde_json::Value =
+            serde_json::from_str(&probe_ack_frame(8, Some(stats))).unwrap();
+        assert_eq!(ack["echo"]["last_ms"], 1.5);
+        assert_eq!(ack["echo"]["max_ms"], 9.25);
+        assert_eq!(ack["echo"]["samples"], 3);
     }
 
     #[test]

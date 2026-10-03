@@ -324,6 +324,15 @@ respawn frames its first snapshot correctly. The client only sends a resize on
 an *actual* dimension change (not on every `fit()`), to avoid SIGWINCH flicker
 on `claude`/`codex` repaints.
 
+Agent panes go one step further: while the pane's box is still settling (a tab
+switch, a split animation, a window restore) they only *measure*, and resize
+the local xterm once the same grid has measured twice (≈350 ms). A passing size
+never reflows the TUI's screen. If the local grid did change and came back to
+the size the PTY already has (no SIGWINCH, so no repaint), the pane asks for a
+fresh snapshot instead. A pane parked by a tab switch is put back to the PTY's
+grid first. If a pane still looks garbled, **⋯ → Redraw terminal** (or ⌘K
+"Redraw terminal") rebuilds the screen from the session without reconnecting.
+
 ### Watching, splitting, tiling
 
 - **Split view** (`Splits.svelte` + `SplitNode.svelte`) — a nested split **tree**:
@@ -1200,6 +1209,23 @@ devices' sessions stay hidden here (they still run on the daemon)."* This is a
   processes (`pgrep -fl pty-holder`), one per kept session.
 - **Custom provider not appearing.** Confirm it's in the `providers` settings
   JSON and that `cmd` is on `PATH` (`GET /meta.tools` reports detected tools).
+- **A TUI pane is garbled after switching tabs** (blank rows, fragments on the
+  wrong rows, stray characters at the right edge). Use **⋯ → Redraw terminal**
+  (⌘K "Redraw terminal"). To see which layout step produced the stray grid,
+  turn on the latency flag below: every local xterm resize is logged to the
+  webview console as `local resize A → B (reason, pty C)`.
+- **Typing or scrolling lags but the CPU is idle.** Turn on the latency HUD:
+  run `localStorage.setItem('otto.debug.termLatency','1')` in the webview
+  console (Develop menu) and reopen the pane. A corner overlay shows `rtt`
+  (websocket + daemon loop), `echo` (the CLI answering a keystroke, measured in
+  the daemon), `wire`/`parse`/`paint` (the keystroke's trip through the
+  webview), timer `drift`, the `rAF` interval, page visibility and the
+  renderer. High `echo` means the CLI itself: a long claude session re-renders
+  its whole UI on every key, so `/compact` or a new session helps. Low `rtt`
+  with high `parse`/`paint`/`drift` means the webview is throttled or busy.
+  High `rtt` means the daemon. `render: dom` on a pane that should use the GPU
+  recovers on window focus or when the pane is focused. Remove the key to turn
+  it off.
 
 ---
 

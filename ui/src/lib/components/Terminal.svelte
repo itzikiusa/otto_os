@@ -16,6 +16,50 @@
     }
   })();
 
+  // ── GPU slot arbitration (review 01 L4) ───────────────────────────────────
+  // A full budget used to deny the GPU to whichever terminal asked last — the
+  // focused pane included — and a lost context fell back to DOM for good.
+  // Every mounted Terminal registers here: a freed slot goes to the most
+  // recently focused terminal still waiting for one, and focusing a DOM-
+  // rendered pane while the budget is full takes the slot of the least
+  // recently focused GPU terminal.
+  interface GpuClient {
+    lastFocus: number;
+    hasGpu(): boolean;
+    /** Wants the GPU, has none, and is not backing off a context loss. */
+    waiting(): boolean;
+    yieldGpu(): void;
+    tryGpu(): void;
+  }
+  const gpuClients = new Set<GpuClient>();
+  let gpuGrantQueued = false;
+  function releaseGpuSlot(): void {
+    liveWebgl = Math.max(0, liveWebgl - 1);
+    if (gpuGrantQueued) return;
+    gpuGrantQueued = true;
+    // Deferred: the releasing terminal finishes its own bookkeeping (a
+    // context loss arms its backoff) before anyone is offered the slot.
+    queueMicrotask(() => {
+      gpuGrantQueued = false;
+      grantFreeGpuSlots();
+    });
+  }
+  function grantFreeGpuSlots(): void {
+    while (liveWebgl < MAX_WEBGL_TERMINALS) {
+      let best: GpuClient | null = null;
+      for (const c of gpuClients) if (c.waiting() && (!best || c.lastFocus > best.lastFocus)) best = c;
+      if (!best) return;
+      best.tryGpu();
+      if (!best.hasGpu()) return; // creation failed (no WebGL2): stop here
+    }
+  }
+  function stealGpuSlotFor(me: GpuClient): void {
+    if (liveWebgl < MAX_WEBGL_TERMINALS) return;
+    let victim: GpuClient | null = null;
+    for (const c of gpuClients) if (c !== me && c.hasGpu() && (!victim || c.lastFocus < victim.lastFocus)) victim = c;
+    victim?.yieldGpu();
+  }
+
   // ── Parked terminals (r3-09-05, see termPark.ts for the bounds) ───────────
   import type { Terminal as XTerm } from '@xterm/xterm';
   import type { FitAddon as XFit } from '@xterm/addon-fit';
@@ -43,6 +87,9 @@
     exitCode: number | null;
     lastCols: number;
     lastRows: number;
+    /** The xterm reflowed locally (or was put back to the PTY grid on
+     *  parking) without the PTY repainting: the adopter asks for a snapshot. */
+    needsCompact: boolean;
   }
 
   function disposeParked(e: ParkedEngine): void {
@@ -141,8 +188,9 @@
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
   import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
-  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermResyncFrame } from '../api/types';
-  import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, withInOrderReset } from './termFlow';
+  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermProbeAckFrame, WsTermProbeFrame, WsTermResyncFrame } from '../api/types';
+  import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, resizeDecision, withInOrderReset } from './termFlow';
+  import { KeyLatency, ProbeClock, fmtMs, fmtPair, loopMonitor, termLatencyEnabled, type EchoStats } from './termLatency';
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
   import { terminalTheme } from '../termtheme';
   import { ui } from '../stores/ui.svelte';
@@ -311,10 +359,71 @@
   let webglWanted = false;
   let webglRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let webglRetries = 0;
-  /** Context-loss recoveries attempted per terminal before settling on DOM. */
-  const WEBGL_MAX_RETRIES = 2;
+  /** Context-loss recoveries per terminal: 5 s doubling to a 60 s cap (a GPU
+   *  waking from sleep can take longer than the old two 5 s tries). Window
+   *  focus, the page becoming visible, scrolling back into view and focusing
+   *  the pane all start a fresh round (retryWebglNow). */
+  const WEBGL_MAX_RETRIES = 8;
   const WEBGL_RETRY_MS = 5000;
+  const WEBGL_RETRY_MAX_MS = 60_000;
+  const gpuClient: GpuClient = {
+    lastFocus: 0,
+    hasGpu: () => webglAddon !== null,
+    waiting: () => !!term && webglWanted && !webglAddon && webglRetryTimer === null,
+    yieldGpu: () => {
+      dropWebgl();
+      forceViewportRefresh();
+    },
+    tryGpu: () => {
+      attachWebgl();
+      if (webglAddon) forceViewportRefresh();
+    },
+  };
   let sock: WebSocket | null = null;
+
+  // ── Latency HUD (review 01 L1, termLatency.ts) ─────────────────────────────
+  // Opt-in per mount: `localStorage['otto.debug.termLatency'] = '1'`, then
+  // reopen the pane. Off, the hooks below are a null check each.
+  const latencyOn = termLatencyEnabled();
+  const keyLat: KeyLatency | null = latencyOn ? new KeyLatency() : null;
+  const probes: ProbeClock | null = latencyOn ? new ProbeClock() : null;
+  let echoStats: EchoStats | null = null;
+  interface HudRow {
+    k: string;
+    v: string;
+    title: string;
+  }
+  let hud = $state.raw<HudRow[] | null>(null);
+  function refreshHud(): void {
+    if (!keyLat || !probes) return;
+    const lost = probes.outstanding > 1 ? ` · ${probes.outstanding} waiting` : '';
+    const gpu = webglAddon ? 'webgl' : webglWanted ? (webglRetryTimer !== null ? 'dom · gpu retry' : 'dom · no gpu slot') : 'dom';
+    hud = [
+      { k: 'rtt', v: fmtPair(probes.rtt) + lost, title: 'probe → probe_ack: websocket + daemon loop, no child (p50/p95 ms)' },
+      {
+        k: 'echo',
+        v: echoStats && echoStats.samples > 0 ? `${fmtMs(echoStats.avg_ms)} avg · ${fmtMs(echoStats.max_ms)} max` : '–',
+        title: 'Daemon side: input reached the PTY → the child\'s first output (ms)',
+      },
+      { k: 'wire', v: fmtPair(keyLat.wire), title: 'Keystroke sent → first output frame back (p50/p95 ms)' },
+      { k: 'parse', v: fmtPair(keyLat.parse), title: 'That frame handed to xterm → parsed (p50/p95 ms)' },
+      { k: 'paint', v: fmtPair(keyLat.paint), title: 'Parsed → next render pass (p50/p95 ms)' },
+      { k: 'drift', v: fmtPair(loopMonitor.drift), title: 'Lateness of a 1 s timer: timer throttling or a busy main thread (p50/p95 ms)' },
+      { k: 'rAF', v: fmtPair(loopMonitor.raf), title: 'Animation-frame interval (p50/p95 ms); ~16.7 is healthy' },
+      {
+        k: 'page',
+        v: `${document.visibilityState}${document.hasFocus() ? ' · focused' : ''}`,
+        title: 'document.visibilityState and window focus',
+      },
+      { k: 'render', v: `${gpu} (${liveWebgl}/${MAX_WEBGL_TERMINALS})`, title: 'Renderer, and GPU terminals in this window / budget' },
+      {
+        k: 'queue',
+        v: `${Math.round(writes.backlog / 1024)} KB${loopMonitor.longTaskSupported ? ` · ${loopMonitor.longTasks} long tasks` : ''}`,
+        title: 'Bytes received but not yet parsed by xterm',
+      },
+    ];
+  }
+
   /** Coalesce interactive-redraw refreshes (up-arrow history, multi-line
    *  composer resize, etc.) into one rAF so rapid TUI frames don't thrash. */
   let tuiRefreshRaf: number | null = null;
@@ -660,6 +769,9 @@
     connectedSid = sessionId;
     compactPending = false;
     snapshotEpoch = null;
+    // The snapshot this socket requests on open rebuilds the screen anyway.
+    localReflowed = false;
+    keyLat?.reset();
     // A fresh server stream starts unpaused. Bytes still queued in front of
     // xterm belong to the old stream and are superseded by the snapshot this
     // socket requests on open — drop them. What is already inside xterm stays
@@ -720,7 +832,7 @@
         // stacked "-- INSERT --" lines). Agent panes get ONE trailing full
         // viewport repaint per output burst; shells only after cursor/erase
         // frames (paintPtyBytes).
-        paintPtyBytes(bytes, false, flow.credit);
+        paintPtyBytes(bytes, false, flow.credit, keyLat?.frame(performance.now(), () => performance.now()));
         return;
       }
       if (typeof ev.data !== 'string') return;
@@ -804,6 +916,12 @@
           case 'error':
             term?.write(`\r\n\x1b[31m[otto] ${msg.code}: ${msg.message ?? ''}\x1b[0m\r\n`);
             break;
+          case 'probe_ack': {
+            const ack = msg as WsTermProbeAckFrame;
+            probes?.ack(typeof ack.id === 'number' ? ack.id : -1, performance.now());
+            echoStats = ack.echo ?? null;
+            break;
+          }
           case 'search_result': {
             // Server-side ring-buffer search result. Populate the find-bar's
             // match list (next/prev navigation) and forward to any parent listener.
@@ -873,6 +991,19 @@
   // ahead of it while a trailing send is pending).
   let lastCols = 0;
   let lastRows = 0;
+  /** The LOCAL xterm grid changed since the last resize decision — xterm
+   *  reflowed its own buffer. With the PTY back at the same grid nothing
+   *  repaints the TUI, so the decision asks for a snapshot (G1). */
+  let localReflowed = false;
+
+  /** Agent TUI panes measure while their box settles and resize xterm only
+   *  once the grid is stability-confirmed (confirmResizeStep): the passing
+   *  sizes of a tab switch, a split animation or a window restore never
+   *  touch the buffer. Shells (their scrollback reflows natively) and phones
+   *  (the soft keyboard must not wait) resize immediately. */
+  function deferLocalResize(): boolean {
+    return preferDom && connected && !viewport.isPhone;
+  }
 
   function cancelResizeTimer(): void {
     if (resizeSendTimer !== null) {
@@ -891,21 +1022,31 @@
       resizeForcePending = false;
       return;
     }
-    safeFit(); // re-measure the CURRENT box (no-op when unchanged/not laid out)
-    const { cols, rows } = term;
+    // Re-measure the CURRENT box (no-op when unchanged/not laid out). A TUI
+    // pane only measures here; the grid is applied once it is confirmed.
+    const defer = deferLocalResize();
+    const measured = safeFit(!defer) ? measuredGrid : null;
+    const cols = measured?.cols ?? term.cols;
+    const rows = measured?.rows ?? term.rows;
     if (confirmGrid && confirmGrid.cols === cols && confirmGrid.rows === rows) {
       confirmGrid = null;
       const force = resizeForcePending;
       resizeForcePending = false;
-      if (!force && cols === lastCols && rows === lastRows) return;
-      const changed = cols !== lastCols || rows !== lastRows;
-      lastCols = cols;
-      lastRows = rows;
-      // Forced path pushes even when unchanged locally: the server may hold a
+      if (defer && measured) applyGrid(measured, 'confirmed');
+      const sentChanged = term.cols !== lastCols || term.rows !== lastRows;
+      // Forced path pushes even when unchanged: the server may hold a
       // different grid (daemon restart / another viewer) and drops same-size
-      // resizes before the ioctl, so this is free when nothing changed.
-      sendJson({ type: 'resize', cols, rows });
-      if (changed) scheduleResizeCompact();
+      // resizes before the ioctl, so this is free when nothing changed. A
+      // local reflow with an unchanged PTY grid sends nothing but still
+      // compacts (resizeDecision).
+      const d = resizeDecision({ sentChanged, localReflowed, force, preferDom });
+      localReflowed = false;
+      if (d.send) {
+        lastCols = term.cols;
+        lastRows = term.rows;
+        sendJson({ type: 'resize', cols: lastCols, rows: lastRows });
+      }
+      if (d.compact) scheduleResizeCompact();
       return;
     }
     confirmGrid = { cols, rows };
@@ -976,7 +1117,8 @@
       confirmResizeStep();
       return;
     }
-    if (resizeSendTimer === null && term.cols === lastCols && term.rows === lastRows) return;
+    const grid = deferLocalResize() && measuredGrid ? measuredGrid : term;
+    if (resizeSendTimer === null && grid.cols === lastCols && grid.rows === lastRows && !localReflowed) return;
     cancelResizeTimer();
     resizeSendTimer = setTimeout(confirmResizeStep, RESIZE_SETTLE_MS);
   }
@@ -994,7 +1136,7 @@
     verifyTimers = [200, 650].map((ms) =>
       setTimeout(() => {
         if (!term || !connected) return;
-        if (safeFit()) sendResize();
+        if (safeFit(!deferLocalResize())) sendResize();
       }, ms),
     );
   }
@@ -1006,7 +1148,39 @@
   // its scrollback to → garbled wrapping / broken scroll until the next re-fit.
   // Skipping the fit when 0×0 (or when proposeDimensions() can't measure)
   // guarantees we only ever push a correct grid to xterm and the backend.
-  function safeFit(): boolean {
+  /** A measured grid plus what applying it needs (see applyGrid). */
+  interface FitGrid {
+    cols: number;
+    rows: number;
+    /** Columns that actually fit the box (cols may exceed it: MIN_FIT_COLS). */
+    fitCols: number;
+    cellWidth: number;
+  }
+  /** The grid the last successful safeFit measured. */
+  let measuredGrid: FitGrid | null = null;
+
+  /** Resize the xterm to `g` (it reflows its buffer when the grid differs). */
+  function applyGrid(g: FitGrid, reason: string): void {
+    if (!term) return;
+    if (term.element) {
+      const scrollbar = term.options.scrollback === 0 ? 0 : (term.options.overviewRuler?.width || 15);
+      horizontalOverflow = g.cols > g.fitCols;
+      term.element.style.width = horizontalOverflow
+        ? `${Math.ceil(g.cols * g.cellWidth + scrollbar)}px` : '100%';
+    }
+    const from = `${term.cols}x${term.rows}`;
+    term.resize(g.cols, g.rows);
+    const to = `${term.cols}x${term.rows}`;
+    if (from !== to) {
+      localReflowed = true;
+      // Diagnostics next to the daemon's "pty resize" log: which layout step
+      // produced a passing grid on the affected Mac.
+      if (latencyOn) console.debug(`[otto term ${sessionId}] local resize ${from} → ${to} (${reason}, pty ${lastCols}x${lastRows})`);
+    }
+    container?.setAttribute('data-cols', String(term.cols));
+  }
+
+  function safeFit(apply = true): boolean {
     if (!term || !fit || !container) return false;
     if (container.clientWidth < 1 || container.clientHeight < 1) return false;
     let dims: { cols: number; rows: number } | undefined;
@@ -1054,16 +1228,17 @@
       const cell = (term as unknown as {
         _core: { _renderService: { dimensions: { css: { cell: { width: number; height: number } } } } };
       })._core._renderService.dimensions.css.cell;
-      if (term.element) {
-        const scrollbar = term.options.scrollback === 0 ? 0 : (term.options.overviewRuler?.width || 15);
-        horizontalOverflow = cols > dims.cols;
-        term.element.style.width = horizontalOverflow
-          ? `${Math.ceil(cols * cell.width + scrollbar)}px` : '100%';
-      }
       // clientHeight excludes classic horizontal scrollbars; overlay macOS
       // scrollbars consume no height. Keep the last terminal row reachable.
       const rows = Math.floor(container.clientHeight / cell.height);
-      term.resize(cols, Number.isFinite(rows) && rows >= 3 ? rows : dims.rows);
+      const grid: FitGrid = {
+        cols,
+        rows: Number.isFinite(rows) && rows >= 3 ? rows : dims.rows,
+        fitCols: dims.cols,
+        cellWidth: cell.width,
+      };
+      measuredGrid = grid;
+      if (apply) applyGrid(grid, 'fit');
     } catch {
       return false; // detached mid-fit
     }
@@ -1106,10 +1281,10 @@
    * Every write goes through the `writes` queue (≤ 64 KB slices, ≤ 128 KB
    * inside xterm) and is counted for flow control (`flow`, termFlow.ts).
    */
-  function paintPtyBytes(bytes: Uint8Array, alwaysRedraw = false, stream = 0): void {
+  function paintPtyBytes(bytes: Uint8Array, alwaysRedraw = false, stream = 0, onParsed?: () => void): void {
     // No emulator: the queue still settles (and acks) the bytes, or a
     // credited stream would leak window.
-    if (!term) return writes.push(bytes, undefined, stream);
+    if (!term) return writes.push(bytes, onParsed, stream);
     const n = bytes.byteLength;
     const redraw: (() => void) | null = alwaysRedraw
       ? scheduleFullRedraw
@@ -1118,7 +1293,8 @@
         : n < TUI_FRAME_BYTES && hasCursorOrErase(bytes)
           ? scheduleFullRedraw
           : null;
-    writes.push(bytes, redraw ?? undefined, stream);
+    const after = onParsed && redraw ? () => { onParsed(); redraw(); } : (onParsed ?? redraw ?? undefined);
+    writes.push(bytes, after, stream);
   }
 
   /** Force the emulator to repaint every visible row (a true redraw). Does
@@ -1186,18 +1362,33 @@
     }
     if (webglAddon === which) {
       webglAddon = null;
-      liveWebgl = Math.max(0, liveWebgl - 1);
+      releaseGpuSlot();
     }
   }
 
   function scheduleWebglRetry(): void {
     if (webglRetryTimer !== null || webglRetries >= WEBGL_MAX_RETRIES) return;
+    const delay = Math.min(WEBGL_RETRY_MS * 2 ** webglRetries, WEBGL_RETRY_MAX_MS);
     webglRetries++;
     webglRetryTimer = setTimeout(() => {
       webglRetryTimer = null;
+      if (!term || webglAddon || !webglWanted) return;
       attachWebgl();
       if (webglAddon) forceViewportRefresh();
-    }, WEBGL_RETRY_MS);
+      // Still DOM with a free slot: the context could not be created yet
+      // (GPU still waking). A full budget hands the slot over when one frees.
+      else if (liveWebgl < MAX_WEBGL_TERMINALS) scheduleWebglRetry();
+    }, delay);
+  }
+
+  /** The user is back (window focus, page visible, pane on screen or
+   *  focused): try the GPU again now and restart the backoff. */
+  function retryWebglNow(): void {
+    if (!term || !webglWanted || webglAddon) return;
+    cancelWebglRetry();
+    webglRetries = 0;
+    attachWebgl();
+    if (webglAddon) forceViewportRefresh();
   }
 
   function cancelWebglRetry(): void {
@@ -1612,6 +1803,7 @@
   function onTermData(data: string): void {
     if (readOnly) return;
     const user = !terminalReply(data);
+    if (user) keyLat?.input(performance.now());
     sendJson({ type: 'input', data: textToBase64(data), user });
     if (user) resyncOnInput();
   }
@@ -1686,6 +1878,13 @@
     // clicking into a pane reclaims it, then re-push our grid.
     sendJson({ type: 'claim' });
     sendResize(true);
+    // The pane the user works in renders on the GPU (L4): take a slot from
+    // the least recently focused terminal when the budget is full.
+    gpuClient.lastFocus = performance.now();
+    if (term && webglWanted && !webglAddon) {
+      stealGpuSlotFor(gpuClient);
+      retryWebglNow();
+    }
   }
   function onTermBlur(): void {
     keyContext.terminalFocused = false;
@@ -1701,6 +1900,7 @@
     const linkProvider = t.registerLinkProvider(makeLinkProvider());
     t.attachCustomKeyEventHandler(termKeyHandler);
     const subs = [t.onData(onTermData), t.onSelectionChange(onTermSelection), t.onBinary(onTermBinary)];
+    if (keyLat) subs.push(t.onRender(() => keyLat?.rendered(performance.now())));
     // The find bar's "3/12" (fires only for decorated passes — 2+ chars).
     if (search) {
       subs.push(
@@ -1765,6 +1965,19 @@
     const key = connectedSid!;
     dropWebgl();
     if ((t.options.scrollback ?? 0) > PARK_SCROLLBACK) t.options.scrollback = PARK_SCROLLBACK;
+    // Park at the PTY's grid, not at whatever passing size the leaving layout
+    // measured: a parked engine keeps parsing the TUI's cursor moves for
+    // minutes, and at the wrong size they land on the wrong cells (G1).
+    let needsCompact = localReflowed;
+    if (lastCols > 0 && lastRows > 0 && (t.cols !== lastCols || t.rows !== lastRows)) {
+      try {
+        t.resize(lastCols, lastRows);
+        needsCompact = true;
+      } catch {
+        /* disposed mid-park */
+      }
+    }
+    localReflowed = false;
     onTermBlur();
     // Out of the document entirely: xterm's IntersectionObserver pauses the
     // renderer, nothing lays it out, and no page query (or e2e locator) can
@@ -1784,6 +1997,7 @@
       exitCode,
       lastCols,
       lastRows,
+      needsCompact: needsCompact && preferDom,
     };
     wireParked(key, e);
     termPark.put(key, e);
@@ -1821,6 +2035,9 @@
     exitCode = e.exitCode;
     lastCols = e.lastCols;
     lastRows = e.lastRows;
+    // Reflowed before parking: the forced sync in afterAdopt compacts.
+    localReflowed = e.needsCompact;
+    keyLat?.reset();
     connectedSid = sid;
     closedByUs = false;
     connected = true;
@@ -1855,7 +2072,9 @@
           /* private API moved — worst case is uneven glyph spacing until a font change */
         }
       }
-      safeFit();
+      // A TUI pane keeps the PTY's grid until this host's box confirms
+      // (settle-then-apply); a reflow on the way compacts from a snapshot.
+      safeFit(!deferLocalResize());
       sendResize(true);
       verifyFitSoon();
       forceViewportRefresh();
@@ -1964,7 +2183,30 @@
     //   • `localStorage['otto.term.renderer'] = 'dom'` (FORCE_DOM_RENDERER).
     webglRetries = 0;
     webglWanted = !rtl && !wantDom;
+    gpuClients.add(gpuClient);
     attachWebgl();
+    // GPU recovery (L4): the window regaining focus, the page becoming
+    // visible again (wake from sleep, Space switch) or the pane scrolling
+    // back into view restart the WebGL backoff right away.
+    const onGpuWake = (): void => {
+      if (document.visibilityState === 'visible') retryWebglNow();
+    };
+    document.addEventListener('visibilitychange', onGpuWake);
+    window.addEventListener('focus', onGpuWake);
+    const gpuIo = typeof IntersectionObserver === 'function'
+      ? new IntersectionObserver((entries) => {
+          if (entries.some((en) => en.isIntersecting)) retryWebglNow();
+        })
+      : null;
+    gpuIo?.observe(container);
+    // Latency HUD: one probe + one HUD refresh a second while enabled.
+    const releaseLoop = latencyOn ? loopMonitor.acquire() : null;
+    const hudTimer = latencyOn
+      ? setInterval(() => { // ui-guards: allow — diagnostics clock; must run while hidden
+          if (connected && probes) sendJson({ type: 'probe', id: probes.next(performance.now()) } satisfies WsTermProbeFrame);
+          refreshHud();
+        }, 1000)
+      : null;
     // NOTE: do NOT fit() here. The container has no real size yet on first open
     // (grid/flex layout isn't resolved this tick). The ResizeObserver below
     // fires once the pane gets its real box and performs the first valid fit,
@@ -2017,7 +2259,7 @@
     let didFirstFit = adopted;
     let refitTimer: ReturnType<typeof setTimeout> | null = null;
     const refit = () => {
-      const ok = safeFit();
+      const ok = safeFit(!deferLocalResize());
       if (!ok) return; // 0×0 / not laid out / detached — try again on next RO tick
       sendResize();
       if (!didFirstFit) {
@@ -2099,6 +2341,12 @@
       }
       tuiCleanup.cancel();
       cancelWebglRetry();
+      gpuClients.delete(gpuClient);
+      document.removeEventListener('visibilitychange', onGpuWake);
+      window.removeEventListener('focus', onGpuWake);
+      gpuIo?.disconnect();
+      if (hudTimer !== null) clearInterval(hudTimer);
+      releaseLoop?.();
       if (localFindTimer !== null) {
         clearTimeout(localFindTimer);
         localFindTimer = null;
@@ -2305,6 +2553,29 @@
   export function focus(): void {
     term?.focus();
   }
+
+  /** "Redraw terminal" (pane ⋯ menu, ⌘K): sync the grid and rebuild the
+   *  screen from a fresh server snapshot — the rebuild a reconnect or Reset
+   *  does, without dropping the socket. One-click recovery for a garbled TUI. */
+  export function redraw(): void {
+    if (!term || !connected) return;
+    cancelResizeTimer();
+    resizeForcePending = false;
+    if (safeFit() && (term.cols !== lastCols || term.rows !== lastRows)) {
+      lastCols = term.cols;
+      lastRows = term.rows;
+      sendJson({ type: 'resize', cols: lastCols, rows: lastRows });
+    }
+    localReflowed = false;
+    if (resizeCompactTimer !== null) {
+      clearTimeout(resizeCompactTimer);
+      resizeCompactTimer = null;
+    }
+    // Not a guarded compact: the user asked, so it applies even while
+    // scrolled up (snapshotApplies only guards compactPending replies).
+    compactPending = false;
+    sendJson({ type: 'scrollback', lines: term.options.scrollback ?? scrollback });
+  }
 </script>
 
 <!-- term-outer wraps the terminal canvas + the phone-only key bar below it.
@@ -2382,6 +2653,14 @@
          desktop when ui.termToolbar is on; phone controls live in phone-controls
          below (unchanged). The toolbar sits flush bottom-left so it doesn't
          overlap the find-bar (top-right) or the overlay badges (also top-right). -->
+    {#if hud}
+      <!-- Latency HUD (opt-in diagnostics, termLatency.ts): never announced. -->
+      <div class="lat-hud" aria-live="off" role="group" aria-label="Terminal latency diagnostics">
+        {#each hud as row (row.k)}
+          <span class="lat-k" title={row.title}>{row.k}</span><span class="lat-v">{row.v}</span>
+        {/each}
+      </div>
+    {/if}
     {#if !viewport.isPhone && ui.termToolbar && showToolbar}
       <div class="desk-toolbar" role="toolbar" aria-label="Terminal controls">
         <button
@@ -2799,6 +3078,37 @@
     background: var(--accent-solid);
     color: var(--accent-contrast);
     border-color: var(--accent-solid);
+  }
+
+  /* ── Latency HUD (opt-in, termLatency.ts) — top-start corner, clear of the
+     find bar (top-end) and the toolbar (bottom-start). Click-through. */
+  .lat-hud {
+    position: absolute;
+    top: 6px;
+    inset-inline-start: 8px;
+    z-index: 6;
+    display: grid;
+    grid-template-columns: auto auto;
+    column-gap: 8px;
+    padding: 4px 8px;
+    max-width: calc(100% - 16px);
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    line-height: 1.35;
+    pointer-events: none;
+  }
+  .lat-k {
+    color: var(--text-dim);
+    pointer-events: auto;
+  }
+  .lat-v {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   /* ── Desktop terminal toolbar (font zoom + copy-on-select) ─────────────

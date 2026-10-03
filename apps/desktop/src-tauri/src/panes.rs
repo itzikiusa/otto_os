@@ -250,6 +250,7 @@ pub async fn pane_open(
     )
     .initialization_script(init)
     .disable_drag_drop_handler()
+    .background_throttling(crate::NO_THROTTLE)
     .on_navigation(local_url)
     .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
     #[cfg(debug_assertions)]
