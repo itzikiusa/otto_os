@@ -1222,6 +1222,23 @@ mod tests {
             .await
             .expect("preview finishes without the whole file")
             .unwrap();
+            // Bytes the `get` actually wrote: bounded by the cap plus at most
+            // one poll interval of slack, never the file's real size.
+            let written = std::fs::metadata(&local).unwrap().len();
+            assert!(
+                written < cap + 8 * 1024 * 1024,
+                "{size:?} {body_kb:?}: get wrote {written} bytes for a {cap}-byte cap"
+            );
+            if want_truncated {
+                // And the transfer is really over (the child was killed), not
+                // still streaming behind the returned preview.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                let later = std::fs::metadata(&local).unwrap().len();
+                assert_eq!(
+                    later, written,
+                    "the oversized get kept writing after the cap"
+                );
+            }
             let (text, over) = read_capped(&local).unwrap();
             assert_eq!(stopped || over, want_truncated, "{size:?} {body_kb:?}");
             assert!(text.len() as u64 <= SFTP_READ_CAP);
