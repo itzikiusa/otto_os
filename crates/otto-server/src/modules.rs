@@ -5551,16 +5551,19 @@ pub(crate) async fn pr_draft_prompt(
     let source = git.current_branch().await?;
     let resolved = git.resolve_base(base).await?;
     let base = resolved.branch.as_str();
-    let diff = git.diff_text_against(&resolved.diff_ref).await?;
+    // Cap the diff fed to the drafting agent — a title/description doesn't need
+    // every line, and a huge prompt is slow + can exceed input limits. git is
+    // stopped at twice the cap (enough to know it was cut) instead of the whole
+    // patch being buffered just to keep 40 KB of it.
+    const MAX_DIFF: usize = 40_000;
+    let (diff, _) = git
+        .diff_text_capped(Some(&resolved.diff_ref), 2 * MAX_DIFF)
+        .await?;
     if diff.trim().is_empty() {
         return Err(Error::Invalid(format!(
             "no changes between '{source}' and '{base}'"
         )));
     }
-
-    // Cap the diff fed to the drafting agent — a title/description doesn't need
-    // every line, and a huge prompt is slow + can exceed input limits.
-    const MAX_DIFF: usize = 40_000;
     let truncated = diff.len() > MAX_DIFF;
     let diff_slice = if truncated {
         let mut end = MAX_DIFF;
@@ -5751,13 +5754,18 @@ async fn draft_commit_message(
     // Prefer the staged diff (what's actually about to be committed). When the
     // index is empty, fall back to the full working diff so the button is still
     // useful before staging.
-    let staged = git
-        .staged_diff_text()
+    //
+    // Cap the diff fed to the drafting agent — a commit message doesn't need
+    // every line, and a huge prompt is slow + can exceed input limits. git is
+    // stopped at twice the cap instead of buffering the whole patch.
+    const MAX_DIFF: usize = 40_000;
+    let (staged, _) = git
+        .staged_diff_text_capped(2 * MAX_DIFF)
         .await
         .map_err(crate::error::ApiError)?;
     let (diff, from_staged) = if staged.trim().is_empty() {
-        let working = git
-            .working_diff_text()
+        let (working, _) = git
+            .diff_text_capped(None, 2 * MAX_DIFF)
             .await
             .map_err(crate::error::ApiError)?;
         (working, false)
@@ -5769,10 +5777,6 @@ async fn draft_commit_message(
             "nothing to commit — no staged or unstaged changes".into(),
         )));
     }
-
-    // Cap the diff fed to the drafting agent — a commit message doesn't need
-    // every line, and a huge prompt is slow + can exceed input limits.
-    const MAX_DIFF: usize = 40_000;
     let truncated = diff.len() > MAX_DIFF;
     let diff_slice = if truncated {
         let mut end = MAX_DIFF;
