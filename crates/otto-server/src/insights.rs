@@ -654,7 +654,15 @@ pub fn routes() -> Router<ServerCtx> {
 
 async fn get_config(State(ctx): State<ServerCtx>) -> ApiResult<Json<InsightsConfig>> {
     let dir = insights_dir(&ctx);
-    Ok(Json(read_config(&dir)))
+    // std::fs off the async workers, like every other insights file read.
+    let cfg = tokio::task::spawn_blocking(move || read_config(&dir))
+        .await
+        .map_err(|e| {
+            ApiError(otto_core::Error::Internal(format!(
+                "read insights config: {e}"
+            )))
+        })?;
+    Ok(Json(cfg))
 }
 
 async fn put_config(
@@ -664,11 +672,16 @@ async fn put_config(
 ) -> ApiResult<Json<InsightsConfig>> {
     require_root(&user)?;
     let dir = insights_dir(&ctx);
-    write_config(&dir, &cfg).map_err(|e| {
-        ApiError(otto_core::Error::Internal(format!(
-            "write insights config: {e}"
-        )))
-    })?;
+    let to_write = cfg.clone();
+    tokio::task::spawn_blocking(move || write_config(&dir, &to_write))
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))
+        .and_then(|r| r)
+        .map_err(|e| {
+            ApiError(otto_core::Error::Internal(format!(
+                "write insights config: {e}"
+            )))
+        })?;
     Ok(Json(cfg))
 }
 

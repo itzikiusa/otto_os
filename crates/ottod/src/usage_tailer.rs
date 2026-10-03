@@ -430,8 +430,9 @@ impl UsageTailer {
             .unwrap_or_default(),
         );
 
-        // Pass 1 (blocking pool, streaming, O(1) memory): the oldest event
-        // date bounds the purge, and the purge must precede every insert.
+        // Pass 1 (blocking pool, head of each file only, O(1) memory): the
+        // oldest event date bounds the purge, and the purge must precede every
+        // insert.
         let f1 = Arc::clone(&files);
         let (n_usage, min_date) = tokio::task::spawn_blocking(move || rebuild_min_date(&f1))
             .await
@@ -1357,6 +1358,17 @@ const REBUILD_BATCH: usize = 5_000;
 /// line)` with a bounded buffer. Returns the offset just past the last
 /// newline (0 if none). Blocking.
 fn for_each_complete_line(file: &Path, mut f: impl FnMut(u64, &str)) -> std::io::Result<u64> {
+    for_each_complete_line_until(file, |off, line| {
+        f(off, line);
+        true
+    })
+}
+
+/// [`for_each_complete_line`] that stops as soon as `f` returns `false`.
+fn for_each_complete_line_until(
+    file: &Path,
+    mut f: impl FnMut(u64, &str) -> bool,
+) -> std::io::Result<u64> {
     use std::io::BufRead;
     let file = std::fs::File::open(file)?;
     let mut r = std::io::BufReader::with_capacity(256 * 1024, file);
@@ -1370,30 +1382,41 @@ fn for_each_complete_line(file: &Path, mut f: impl FnMut(u64, &str)) -> std::io:
             return Ok(offset);
         }
         let line = String::from_utf8_lossy(&buf);
-        f(offset, &line);
+        let more = f(offset, &line);
         offset += n as u64;
+        if !more {
+            return Ok(offset);
+        }
         if buf.capacity() > 8 * 1024 * 1024 {
             buf = Vec::with_capacity(64 * 1024); // drop a one-off giant line
         }
     }
 }
 
-/// Rebuild pass 1: how many usage lines exist and the oldest event date.
+/// Rebuild pass 1: how many files hold usage lines, and the oldest event
+/// date. Transcripts are append-only and chronological (a resumed session's
+/// replayed history comes first), so each file is read only up to its FIRST
+/// timestamped usage line — pass 1 is O(files × head) instead of a second
+/// full parse of every transcript (R7).
 fn rebuild_min_date(files: &[PathBuf]) -> (usize, Option<String>) {
     let mut n = 0usize;
     let mut min_date: Option<String> = None;
     for file in files {
-        let _ = for_each_complete_line(file, |_, line| {
+        let mut has_usage = false;
+        let _ = for_each_complete_line_until(file, |_, line| {
             let Some(parsed) = parse_claude_line(line) else {
-                return;
+                return true;
             };
-            n += 1;
-            if let Some(date) = parsed.timestamp.as_deref().and_then(|t| t.get(..10)) {
-                if min_date.as_deref().map(|m| date < m).unwrap_or(true) {
-                    min_date = Some(date.to_string());
-                }
+            has_usage = true;
+            let Some(date) = parsed.timestamp.as_deref().and_then(|t| t.get(..10)) else {
+                return true; // keep looking for a dated line
+            };
+            if min_date.as_deref().is_none_or(|m| date < m) {
+                min_date = Some(date.to_string());
             }
+            false
         });
+        n += usize::from(has_usage);
     }
     (n, min_date)
 }
@@ -1910,7 +1933,8 @@ mod tests {
         )
         .unwrap();
         let files = vec![a.clone(), b.clone()];
-        assert_eq!(rebuild_min_date(&files), (4, Some("2026-10-03".into())));
+        // Two files with usage; each read only to its first dated usage line.
+        assert_eq!(rebuild_min_date(&files), (2, Some("2026-10-03".into())));
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
         let attr = HashMap::new();
         let out = tokio::task::spawn_blocking(move || rebuild_events(&files, &attr, tx))
