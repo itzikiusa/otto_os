@@ -16,7 +16,7 @@
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { autoFetchAllowed, git } from '../../lib/stores/git.svelte';
+  import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import DiffViewer from './DiffViewer.svelte';
   import { repoDiffFileLoader } from './diff-load';
@@ -188,10 +188,12 @@
   // diff in place: the change list can stay identical (the file was already
   // modified) while its content moved on. No blanking — the old diff stays
   // until the new one lands. Only when the change touched THIS file (the
-  // event's `paths`; unknown → yes), and only in the window the user is in:
-  // a visible-but-unfocused window marks the diff stale and catches up once
-  // on its next focus/visibility instead of re-reading per save.
+  // event's `paths`; unknown → yes), and only while the window is visible —
+  // a visible-but-unfocused window (the diff beside an editor) refreshes
+  // live too; a hidden one marks the diff stale and catches up once when it
+  // shows again instead of re-reading per save.
   let diffLiveStale = false;
+  const diffLiveAllowed = (): boolean => typeof document === 'undefined' || !document.hidden;
   function refetchOpenDiff(path: string, target: typeof selTarget): () => void {
     const ctl = new AbortController();
     void api
@@ -213,7 +215,7 @@
     const path = untrack(() => selectedPath);
     const target = untrack(() => selTarget);
     if (path === null || !untrack(() => git.liveTouches(repoId, path))) return;
-    if (!autoFetchAllowed()) {
+    if (!diffLiveAllowed()) {
       diffLiveStale = true;
       return;
     }
@@ -228,7 +230,7 @@
   $effect(() => {
     let cancel: (() => void) | null = null;
     const catchUp = (): void => {
-      if (!diffLiveStale || !autoFetchAllowed()) return;
+      if (!diffLiveStale || !diffLiveAllowed()) return;
       diffLiveStale = false;
       const path = selectedPath;
       if (path === null) return;

@@ -264,8 +264,9 @@ mutating route reads the status it returns after releasing its lock.
 **The open diff re-reads only for its own file.** `repo_status_changed`
 carries the paths a burst touched (absent when unknown — an index/HEAD move,
 or more than 64 paths). The WIP panel re-reads the open file's diff only when
-its path is among them, and only in the focused window; an unfocused window
-catches up once when it is focused again.
+its path is among them, and only while the window is visible — a
+visible-but-unfocused window (the diff beside your editor) refreshes live too;
+a hidden window catches up once when it shows again.
 
 **Forge reads are cached.** PR list, PR detail (comments, reviews,
 discussions), PR commits and CI reads go through a per-account ETag cache: a
