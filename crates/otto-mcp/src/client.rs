@@ -16,10 +16,17 @@
 //! drops the session (the child is killed); the next op starts a fresh one. A
 //! reused session is retried once, fresh, ONLY when the request provably never
 //! reached the server (write failed / stream already closed before we wrote) —
-//! a tool call is never replayed after the server may have run it. A busy
-//! session is never waited on: a concurrent op runs on a one-shot session, so
-//! parallel calls keep their old parallelism. `health` is always one-shot (it
-//! probes that the server can START). Children are `kill_on_drop`.
+//! a tool call is never replayed after the server may have run it.
+//!
+//! **Concurrency (perf2/10-mcp R3).** A client parks up to [`SESSION_SLOTS`]
+//! sessions. An op takes an idle parked session; when every opened session is
+//! busy it waits up to [`BUSY_WAIT`] for one (most ops are far shorter than a
+//! spawn), then opens a second parked session in a free slot, and only when
+//! all slots are busy past the wait does it fall back to a one-shot child.
+//! Two concurrent `gateway_call`s to one `npx` server used to pay a fresh
+//! 1–3 s spawn for the second; now it reuses the first session or the second
+//! slot. `health` is always one-shot (it probes that the server can START).
+//! Children are `kill_on_drop`.
 //!
 //! Hard caps mirror the inward server: 20 s per op, 1 MiB body. Redaction/row-cap
 //! of results happens in the service layer.
@@ -34,6 +41,14 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const OP_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// Parked (reusable) sessions per client: a second one serves sustained
+/// two-way parallelism without a spawn per call; more would only keep idle
+/// children alive.
+const SESSION_SLOTS: usize = 2;
+/// How long an op waits for a busy parked session before opening another.
+const BUSY_WAIT: Duration = Duration::from_millis(250);
+
+type SlotGuard<'a> = tokio::sync::MutexGuard<'a, Option<Live>>;
 
 /// Result of a `tools/call`.
 pub struct CallResult {
@@ -86,21 +101,63 @@ enum OpError {
 
 pub struct McpClient {
     transport: Transport,
-    live: tokio::sync::Mutex<Option<Live>>,
+    live: [tokio::sync::Mutex<Option<Live>>; SESSION_SLOTS],
 }
 
 impl McpClient {
     pub fn new(transport: Transport) -> Self {
         Self {
             transport,
-            live: tokio::sync::Mutex::new(None),
+            live: std::array::from_fn(|_| tokio::sync::Mutex::new(None)),
         }
     }
 
     /// True while an initialized session is parked on this client (tests /
-    /// pool diagnostics).
+    /// pool diagnostics). A busy slot counts as live.
     pub fn has_live_session(&self) -> bool {
-        self.live.try_lock().map(|g| g.is_some()).unwrap_or(true)
+        self.live
+            .iter()
+            .any(|s| s.try_lock().map(|g| g.is_some()).unwrap_or(true))
+    }
+
+    /// The slot an op runs on, or `None` ⇒ run it on a one-shot session.
+    /// Order: an idle parked session → (nothing in flight) the first free slot
+    /// → wait up to [`BUSY_WAIT`] for a busy session → a free slot (a second
+    /// parked session) → `None`.
+    async fn checkout(&self) -> Option<SlotGuard<'_>> {
+        let mut free: Option<SlotGuard<'_>> = None;
+        let mut busy: Vec<usize> = Vec::with_capacity(SESSION_SLOTS);
+        for (i, slot) in self.live.iter().enumerate() {
+            match slot.try_lock() {
+                Ok(g) if g.is_some() => return Some(g),
+                Ok(g) => {
+                    if free.is_none() {
+                        free = Some(g);
+                    }
+                }
+                Err(_) => busy.push(i),
+            }
+        }
+        if busy.is_empty() {
+            return free;
+        }
+        // A session is mid-op. Ops are usually far shorter than a spawn, so
+        // wait briefly for it rather than start another server process.
+        let waited = match busy.as_slice() {
+            [a] => tokio::time::timeout(BUSY_WAIT, self.live[*a].lock())
+                .await
+                .ok(),
+            [a, b, ..] => tokio::time::timeout(BUSY_WAIT, async {
+                tokio::select! {
+                    g = self.live[*a].lock() => g,
+                    g = self.live[*b].lock() => g,
+                }
+            })
+            .await
+            .ok(),
+            [] => None,
+        };
+        waited.or(free)
     }
 
     /// `tools/list` → the advertised tool objects.
@@ -141,11 +198,11 @@ impl McpClient {
         self.open().await.map(drop)
     }
 
-    /// Run one post-initialize op, returning its `result`. Uses (and keeps) the
-    /// parked session; a busy session makes this op a one-shot instead of
-    /// queueing behind it.
+    /// Run one post-initialize op, returning its `result`. Uses (and keeps) a
+    /// parked session ([`Self::checkout`]); only when every slot stays busy
+    /// past [`BUSY_WAIT`] does this op run on a one-shot session.
     async fn op(&self, request: Value) -> Result<Value, String> {
-        let Ok(mut guard) = self.live.try_lock() else {
+        let Some(mut guard) = self.checkout().await else {
             return self.one_shot(request).await;
         };
         let reused = guard.is_some();
@@ -493,7 +550,8 @@ mod tests {
     // initialize→list/call sequence is exercised end to end (no external deps).
     // Replies echo the request id (a pooled session numbers its requests).
     // `$SPAWNS` (optional) gets one line per server start; `$EXIT_AFTER_CALL`
-    // makes the server exit after answering one tools/call.
+    // makes the server exit after answering one tools/call; `$CALL_SLEEP`
+    // (seconds) delays each tools/call answer.
     fn echo_server_script() -> String {
         r#"
 [ -n "$SPAWNS" ] && echo x >> "$SPAWNS"
@@ -502,7 +560,7 @@ while IFS= read -r line; do
   case "$line" in
     *'"initialize"'*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"mock","version":"1"}}}\n' ;;
     *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
-    *'"tools/call"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}\n' "$id"; [ -n "$EXIT_AFTER_CALL" ] && exit 0 ;;
+    *'"tools/call"'*) [ -n "$CALL_SLEEP" ] && sleep "$CALL_SLEEP"; printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}\n' "$id"; [ -n "$EXIT_AFTER_CALL" ] && exit 0 ;;
     *'"notifications/initialized"'*) : ;;
   esac
 done
@@ -591,12 +649,48 @@ done
         assert_eq!(spawns(&log), 2);
     }
 
-    // Concurrent ops never queue behind the parked session.
+    // Concurrent ops all complete.
     #[tokio::test]
     async fn concurrent_ops_do_not_serialize() {
         let c = stdio_client();
         let args = json!({});
         let (a, b) = tokio::join!(c.call_tool("echo", &args), c.call_tool("echo", &args));
         assert!(a.is_ok() && b.is_ok());
+    }
+
+    // R3: a short op in flight is waited for (≤ BUSY_WAIT) instead of paying a
+    // second server spawn — two concurrent calls, ONE process.
+    #[tokio::test]
+    async fn a_concurrent_call_reuses_the_busy_session_instead_of_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("spawns");
+        let c = stdio_client_with(&[("SPAWNS", log.display().to_string())]);
+        let args = json!({});
+        let (a, b) = tokio::join!(c.call_tool("echo", &args), c.call_tool("echo", &args));
+        assert!(a.is_ok() && b.is_ok());
+        assert_eq!(
+            spawns(&log),
+            1,
+            "the second call waited for the first session"
+        );
+    }
+
+    // R3: ops slower than BUSY_WAIT open a SECOND parked session (not a
+    // one-shot per call): later concurrent pairs reuse both — 2 spawns for
+    // 3 rounds of 2 parallel calls (one-shots would be 1 + 3).
+    #[tokio::test]
+    async fn slow_parallel_calls_keep_a_pool_of_two_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("spawns");
+        let c = stdio_client_with(&[
+            ("SPAWNS", log.display().to_string()),
+            ("CALL_SLEEP", "0.6".into()),
+        ]);
+        let args = json!({});
+        for _ in 0..3 {
+            let (a, b) = tokio::join!(c.call_tool("echo", &args), c.call_tool("echo", &args));
+            assert!(a.is_ok() && b.is_ok());
+        }
+        assert_eq!(spawns(&log), 2, "two parked sessions serve every round");
     }
 }
