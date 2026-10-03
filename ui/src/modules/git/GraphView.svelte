@@ -844,7 +844,26 @@
     if (id !== repoId) return;
     const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
     if (!raw || id !== repoId) return; // transient failure — keep what we have, try next round
-    if (applyRefs(withoutRemoteHeads(raw))) await backgroundReload();
+    const next = withoutRemoteHeads(raw);
+    if (!historyMoved(refs, next)) {
+      setRefs(next);
+      return;
+    }
+    // History moved: land the new refs together WITH the re-read page (one
+    // layout pass, whose name-change floor sees the moved refs). Applying them
+    // first re-laid out every held row under the new names, and the splice
+    // after it could then never converge with that pass.
+    pendingRefs = { id, refs: next };
+    await backgroundReload();
+  }
+
+  /** Refs read by {@link resyncRefs} that wait for the history re-read they
+   *  triggered, so both land in one layout pass. */
+  let pendingRefs: { id: string; refs: RefsResp } | null = null;
+  function flushPendingRefs(): void {
+    const p = pendingRefs;
+    pendingRefs = null;
+    if (p && p.id === repoId) setRefs(p.refs);
   }
 
   // Background-triggered history re-reads (auto-fetch, repo watcher) are
@@ -860,11 +879,14 @@
   let bgPending = false;
   async function backgroundReload(): Promise<void> {
     if (bgRunning) {
+      // Throttled: don't hold the new refs back for the trailing reload.
+      flushPendingRefs();
       bgPending = true;
       return;
     }
     const wait = bgLast + BG_RELOAD_GAP_MS - Date.now();
     if (wait > 0) {
+      flushPendingRefs();
       bgTimer ??= setTimeout(() => {
         bgTimer = null;
         void backgroundReload();
@@ -1016,7 +1038,10 @@
   async function reloadGraph(full = false): Promise<void> {
     const id = repoId;
     const g = await fetchGraph(id, full);
-    if (id === repoId) applyGraph(g);
+    if (id !== repoId) return;
+    // Same synchronous block as the history, so the layout runs once.
+    flushPendingRefs();
+    applyGraph(g);
   }
 
   /** Run a mutating POST that returns RepoStatusResp, then refresh + toast.
