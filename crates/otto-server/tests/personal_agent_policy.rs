@@ -563,3 +563,199 @@ async fn an_agent_rule_forces_approval_only_for_matching_targets() {
     let env = d.invoke(&token, "create_pr", pr_args("docs typo")).await;
     assert_eq!(env["executed"], true, "{env}");
 }
+
+/// Perf N2/N4 budgets through the real router.
+/// - `GET …/activity?after_seq=N&runs=false` is a constant number of
+///   statements whatever the ring holds: approvals in ONE `IN` statement, no
+///   run history, no per-item reads.
+/// - The guard's read-only check and the governed call's session + autonomy
+///   reads are cached: repeating them reads neither `sessions` nor
+///   `personal_agent_autonomy` again.
+/// - A cursor from another daemon process (wrong `epoch`, or ahead of the
+///   counter) is answered in full with `reset: true`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activity_and_guard_reads_stay_within_budget() {
+    let d = boot(&["create_pr", "list_repos"]).await;
+    d.rule_for("create_pr").await;
+    let agent = d.agent_with_rules(&["Ask before touching prod"]).await;
+    let token = d.agent_session(json!({"personal_agent": agent})).await;
+    let path = format!("/personal-agents/{agent}/activity");
+    let probe = d.pool.statement_probe();
+
+    // One waiting approval + one plain call.
+    let env = d.invoke(&token, "create_pr", pr_args("prod 0")).await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    d.invoke(&token, "list_repos", json!({})).await;
+    let (st, first) = d.send("GET", &d.human, &path, None).await;
+    assert_eq!(st, 200, "{first}");
+    let epoch = first["epoch"].as_str().unwrap().to_string();
+    assert_eq!(first["reset"], false);
+    let cursor = first["seq"].as_u64().unwrap();
+
+    let measure = |stmts: Vec<String>| {
+        let approvals = stmts.iter().filter(|q| q.contains("mcp_approvals")).count();
+        let runs = stmts
+            .iter()
+            .filter(|q| q.contains("personal_agent_runs"))
+            .count();
+        (stmts.len(), approvals, runs)
+    };
+    let incremental = format!("{path}?after_seq={cursor}&epoch={epoch}&runs=false");
+    probe.reset();
+    let (st, small) = d.send("GET", &d.human, &incremental, None).await;
+    assert_eq!(st, 200, "{small}");
+    let small_stmts = probe.take();
+    let (n_small, ap_small, runs_small) = measure(small_stmts.clone());
+    assert_eq!(ap_small, 1, "approvals in one statement: {small_stmts:?}");
+    assert_eq!(runs_small, 1, "the running run only: {small_stmts:?}");
+    assert!(small["runs"].is_null());
+    assert!(small["items"].as_array().unwrap().is_empty());
+
+    // Grow the ring: 15 more waiting approvals and 40 plain calls.
+    for i in 1..=15 {
+        d.invoke(&token, "create_pr", pr_args(&format!("prod {i}")))
+            .await;
+    }
+    for _ in 0..40 {
+        d.invoke(&token, "list_repos", json!({})).await;
+    }
+    probe.reset();
+    let (st, big) = d.send("GET", &d.human, &incremental, None).await;
+    assert_eq!(st, 200, "{big}");
+    let big_stmts = probe.take();
+    let (n_big, ap_big, runs_big) = measure(big_stmts.clone());
+    assert_eq!(ap_big, 1, "still one approvals statement: {big_stmts:?}");
+    assert_eq!(runs_big, 1, "{big_stmts:?}");
+    assert_eq!(
+        n_big, n_small,
+        "statement count independent of ring size: {small_stmts:?} vs {big_stmts:?}"
+    );
+    assert_eq!(big["approvals"].as_array().unwrap().len(), 16);
+    assert!(big["items"].as_array().unwrap().len() >= 55);
+
+    // The guard + governed path: repeated calls re-read neither the session
+    // row nor the agent's autonomy (cached; perf N4).
+    probe.reset();
+    for _ in 0..5 {
+        d.invoke(&token, "list_repos", json!({})).await;
+    }
+    let calls = probe.take();
+    assert!(
+        !calls.iter().any(|q| q.contains("personal_agent_autonomy")),
+        "autonomy cached: {calls:?}"
+    );
+    let ro = d
+        .agent_session(json!({"personal_agent": agent, "read_only": true}))
+        .await;
+    let (st, _) = d
+        .send(
+            "POST",
+            &ro,
+            "/agent-rooms/r1/messages",
+            Some(json!({"text": "x"})),
+        )
+        .await;
+    assert_eq!(st, 403);
+    probe.reset();
+    for _ in 0..5 {
+        let (st, _) = d
+            .send(
+                "POST",
+                &ro,
+                "/agent-rooms/r1/messages",
+                Some(json!({"text": "x"})),
+            )
+            .await;
+        assert_eq!(st, 403, "still refused from the cache");
+    }
+    let guard = probe.take();
+    assert!(
+        !guard
+            .iter()
+            .any(|q| q.contains("SELECT * FROM sessions WHERE id")),
+        "read-only flag cached: {guard:?}"
+    );
+
+    // A cursor from a previous daemon process → full answer, reset.
+    for stale in [
+        format!("{path}?after_seq={cursor}&epoch=previous-boot&runs=false"),
+        format!("{path}?after_seq=999999999&runs=false"),
+    ] {
+        let (st, ans) = d.send("GET", &d.human, &stale, None).await;
+        assert_eq!(st, 200, "{ans}");
+        assert_eq!(ans["reset"], true, "{stale}: {ans}");
+        assert_eq!(ans["epoch"], epoch.as_str());
+        assert!(ans["items"].as_array().unwrap().len() >= 55, "{ans}");
+    }
+}
+
+/// Perf N2 (swarm W7 budget, reusing this file's full-daemon harness): an
+/// ACTIVE swarm with nothing ready and no events costs nothing between
+/// safety ticks. Its coordinator ticks when started and once for the
+/// start's own status event (≤ 6 statements each), then parks on the
+/// swarm's bell: no swarm statement runs for several MIN_GAPs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_swarm_coordinator_issues_no_statements_between_safety_ticks() {
+    let d = boot(&[]).await;
+    let swarm = SwarmRepo::new(d.pool.clone())
+        .create_swarm(otto_state::NewSwarm {
+            workspace_id: "ws1".into(),
+            name: "Idle".into(),
+            description: String::new(),
+            preset_slug: None,
+            config: json!({}),
+            // A budget, so the tick also reads spend.
+            max_total_runs: Some(100),
+            max_cost_usd: None,
+            max_runtime_secs: None,
+            max_attempts: None,
+            created_by: "alice".into(),
+        })
+        .await
+        .unwrap();
+    let probe = d.pool.statement_probe();
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human,
+            &format!("/workspaces/ws1/swarm/swarms/{}/start", swarm.id),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    // The first tick runs at start; the start's own `swarm_status` event
+    // rings the bell once more (after MIN_GAP). One tick of an idle swarm
+    // with a budget: swarm + spend + active count + ready tasks.
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    probe.reset();
+    tokio::time::sleep(otto_server::swarm_wake::MIN_GAP + std::time::Duration::from_millis(1000))
+        .await;
+    let tick: Vec<String> = probe
+        .take()
+        .into_iter()
+        .filter(|q| q.contains("swarm"))
+        .collect();
+    assert!(
+        tick.len() <= 6,
+        "an idle tick is at most 6 statements: {tick:?}"
+    );
+    // Then nothing: no event, and the safety tick is a minute away.
+    tokio::time::sleep(
+        otto_server::swarm_wake::MIN_GAP * 2 + std::time::Duration::from_millis(500),
+    )
+    .await;
+    let idle: Vec<String> = probe
+        .take()
+        .into_iter()
+        .filter(|q| q.contains("swarm"))
+        .collect();
+    assert!(
+        idle.is_empty(),
+        "an idle coordinator parks until an event or the {:?} safety tick: {idle:?}",
+        otto_server::swarm_wake::SAFETY_TICK
+    );
+    assert!(
+        otto_server::swarm_wake::has_bell(&swarm.id),
+        "parked on its bell"
+    );
+}
