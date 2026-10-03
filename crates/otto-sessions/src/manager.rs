@@ -2934,6 +2934,7 @@ impl SessionManager {
             session.workspace_id.clone(),
             session.provider.clone(),
             handle,
+            false,
         );
         // Providers that mint their own session id (codex): capture it from the
         // on-disk rollout now that the CLI is running, so the session becomes
@@ -5285,7 +5286,13 @@ impl SessionManager {
             self.stamp_suspended(&session, None).await;
         }
         self.record_lifecycle(&session, "Session resumed");
-        self.start_status_task(id.clone(), session.workspace_id, session.provider, handle);
+        self.start_status_task(
+            id.clone(),
+            session.workspace_id,
+            session.provider,
+            handle,
+            false,
+        );
         self.repo.get(id).await
     }
 
@@ -5419,6 +5426,7 @@ impl SessionManager {
                 session.workspace_id.clone(),
                 session.provider.clone(),
                 handle,
+                true,
             );
             // A codex/agy id capture that was still pending died with the old
             // daemon: re-arm it (it waits for the next input, as at spawn).
@@ -5578,12 +5586,17 @@ impl SessionManager {
     /// activity; on exit mark `exited` and stop. When an [`OutputScanner`] is
     /// configured, also spawns a sibling task that streams the PTY's live
     /// output into the scanner (mid-session re-auth detection).
+    /// `readopted`: `handle` is a held PTY re-adopted after a daemon restart.
+    /// Until it prints something new, its status ticks are corrections, not
+    /// activity, so they must not stamp `last_active_at` (A14) — the first
+    /// tick turns the adoption's `Running` into `Idle`.
     fn start_status_task(
         &self,
         id: Id,
         workspace_id: Id,
         provider: String,
         handle: Arc<PtyHandle>,
+        readopted: bool,
     ) {
         // Mid-session output scan: subscribe to the PTY broadcast and forward
         // chunks to the scanner. Ends when the PTY closes (broadcast Closed).
@@ -5624,6 +5637,9 @@ impl SessionManager {
         tokio::spawn(async move {
             let mut exit_rx = handle.on_exit();
             let mut current = SessionStatus::Running;
+            // A re-adopted handle's (back-dated) last-output clock: while it
+            // still reads this, nothing new happened since the restart.
+            let mut adopted_quiet_at = readopted.then(|| handle.last_output_at());
             // Unviewed-history cap (UNVIEWED_HISTORY_AFTER): one in-memory map
             // read per tick; `attach` restores the full cap.
             let mut unviewed_since: Option<std::time::Instant> = None;
@@ -5658,7 +5674,14 @@ impl SessionManager {
                                 continue;
                             }
                             current = next;
-                            let _ = repo.update_status(&id, next).await;
+                            let quiet = adopted_quiet_at
+                                .is_some_and(|at| handle.last_output_at() == at);
+                            if quiet {
+                                let _ = repo.update_status_keep_activity(&id, next).await;
+                            } else {
+                                adopted_quiet_at = None;
+                                let _ = repo.update_status(&id, next).await;
+                            }
                             let _ = events.send(Event::SessionStatus {
                                 session_id: id.clone(),
                                 workspace_id: workspace_id.clone(),
@@ -7256,6 +7279,7 @@ mod tests {
             ws.id.clone(),
             "claude".into(),
             Arc::clone(&handle),
+            false,
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -7282,7 +7306,13 @@ mod tests {
         let id = seed_session(&repo, &ws, &user, Some("sid-respawn")).await;
         let old = Arc::new(PtyHandle::spawn(&slow_hup_spec()).expect("spawn old"));
         mgr.live.insert(id.clone(), Arc::clone(&old));
-        mgr.start_status_task(id.clone(), ws.id.clone(), "claude".into(), Arc::clone(&old));
+        mgr.start_status_task(
+            id.clone(),
+            ws.id.clone(),
+            "claude".into(),
+            Arc::clone(&old),
+            false,
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // What `restart_locked` does: untrack + kill the old, track the new,
@@ -7322,6 +7352,7 @@ mod tests {
             ws.id.clone(),
             "claude".into(),
             Arc::clone(&handle),
+            false,
         );
 
         wait_child_exit_and_settle(&handle).await;

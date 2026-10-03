@@ -245,6 +245,22 @@ async fn user_sessions_survive_a_daemon_restart_and_engine_ones_do_not() {
         before,
         "re-adoption must not stamp last_active_at"
     );
+    // …nor may the adopted status task's first write (the quiet shell's
+    // Running → Idle is a status correction, not activity). Wait for that
+    // write, so this is checked deterministically instead of racing the tick.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while second.get(&id).await.unwrap().status != SessionStatus::Idle {
+        assert!(
+            Instant::now() < deadline,
+            "re-adopted shell never went idle"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        second.get(&id).await.unwrap().last_active_at,
+        before,
+        "the re-adopted status task's Idle write must not stamp last_active_at"
+    );
     let quiet = second
         .live_handle(&id)
         .expect("live")
