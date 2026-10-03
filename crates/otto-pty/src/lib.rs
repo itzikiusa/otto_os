@@ -61,6 +61,10 @@ pub fn resolve_grid(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
 }
 /// Capacity of the output broadcast channel (chunks).
 const BROADCAST_CAPACITY: usize = 1024;
+/// Largest single PTY read (and the smallest block remainder worth reading into).
+const READ_CHUNK: usize = 8192;
+/// Read-buffer block the PTY reader splits chunks off (perf 01 N8).
+const READ_BLOCK: usize = 64 * 1024;
 
 /// Pause between kill-escalation steps: `SIGHUP` → grace → `SIGTERM` → grace
 /// → `SIGKILL`, each step skipped once the child has exited.
@@ -326,8 +330,16 @@ impl Mirror {
         }
     }
 
-    /// One chunk of child output → emulator + ring + broadcast.
+    /// One chunk of child output → emulator + ring + broadcast (borrowed;
+    /// the production readers own their chunks and use [`Self::feed_bytes`]).
+    #[cfg(test)]
     pub(crate) fn feed(&self, data: &[u8]) {
+        self.feed_bytes(Bytes::copy_from_slice(data));
+    }
+
+    /// [`Self::feed`] for a chunk already owned as `Bytes` (the PTY reader's
+    /// split-off block, a holder OUTPUT frame): published without a copy.
+    pub(crate) fn feed_bytes(&self, data: Bytes) {
         self.last_output_ms
             .store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
         self.echo.output();
@@ -335,15 +347,15 @@ impl Mirror {
         // snapshot_and_subscribe must never include a chunk in its replay and
         // then receive that chunk again.
         let mut parser = lock_unpoisoned(&self.parser);
-        parser.process(data);
+        parser.process(&data);
         // No receivers is fine — the screen state still records.
-        let _ = self.tx.send(Bytes::copy_from_slice(data));
+        let _ = self.tx.send(data.clone());
         drop(parser);
         // The raw ring is not part of the snapshot hand-over (only emulator
         // + broadcast must be atomic), so it is filled AFTER the parser lock
         // is released (perf 01 F3): its line split + allocations no longer
         // lengthen the window in which captures and resizes wait.
-        lock_unpoisoned(&self.ring).push(data);
+        lock_unpoisoned(&self.ring).push(&data);
     }
 
     /// Replace the emulator with one rebuilt from a holder snapshot (a fresh
@@ -485,11 +497,18 @@ impl PtyHandle {
         {
             let mirror = mirror.clone();
             std::thread::spawn(move || {
-                let mut buf = [0u8; 8192];
+                // Read straight into a shared block (perf 01 N8): each chunk
+                // is split off and frozen into the `Bytes` the broadcast
+                // carries — no per-chunk copy. A block is zeroed once (calloc)
+                // and replaced when less than one read's worth is left.
+                let mut buf = bytes::BytesMut::new();
                 loop {
-                    match reader.read(&mut buf) {
+                    if buf.len() < READ_CHUNK {
+                        buf = bytes::BytesMut::zeroed(READ_BLOCK);
+                    }
+                    match reader.read(&mut buf[..READ_CHUNK]) {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => mirror.feed(&buf[..n]),
+                        Ok(n) => mirror.feed_bytes(buf.split_to(n).freeze()),
                     }
                 }
                 let _ = done_tx.send(true);

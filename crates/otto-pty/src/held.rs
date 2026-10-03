@@ -343,7 +343,7 @@ impl ExitSignal {
 fn reader_loop(mut stream: UnixStream, conn: Arc<HeldConn>, mirror: Mirror, exit: ExitSignal) {
     loop {
         match frame::read_sync(&mut stream) {
-            Ok((frame::OUTPUT, data)) => mirror.feed(&data),
+            Ok((frame::OUTPUT, data)) => mirror.feed_bytes(data.into()),
             Ok((frame::SNAPSHOT, payload)) => {
                 if let Some((cols, rows, data)) = frame::parse_grid(&payload) {
                     mirror.reset_to(cols, rows, data);
