@@ -498,6 +498,16 @@ the live planning sessions as they spawn.
 - **Secrets in the Keychain.** The SQLite state DB stores only opaque key
   references; tokens/passwords/app-passwords live in `otto-keychain`. The raw
   token secret is shown once and stored only as a SHA-256 hash.
+- **Encrypted secret storage.** Secrets live in `secrets.enc` (AES-256-GCM)
+  sealed with one master key held in the macOS Keychain — at most one Keychain
+  prompt per rebuild instead of one per secret. Installs that still keep the
+  legacy plaintext `secrets.json` see a warning in **Settings ▸ Trust & safety ▸
+  Secret storage** with a root-only **Secure secrets…** action
+  (`POST /admin/secrets/secure`): every secret is verified to read back from the
+  encrypted store before the plaintext file is wiped and deleted, and the
+  running daemon switches over without a restart. It never runs on its own — a
+  Keychain prompt must not block an unattended deploy. A locked Keychain shows
+  as "locked" (bounded 8 s wait), never a hung request.
 - **Append-only audit log.** Security-relevant actions (login success/failure/
   lockout, token mint/revoke, settings change, listener toggle, confirmed guarded
   writes, grant changes, session terminate, impersonate start/stop) are written
