@@ -247,6 +247,17 @@ second, fabricated instruction line once inside the fence.
   and breaks lines at lists, quotes, sections and tables. Links and code-block
   indentation are not preserved yet.
 - Tab URLs must be `http(s)` (or `about:blank`) and at most 8 KiB.
+- Reader renders are reused: the daemon caches a rendered page per workspace
+  and URL (the `#fragment` is ignored) for 60 s — at most 32 pages / 32 MB —
+  and concurrent requests for one URL share a single in-flight render. So an
+  agent's `browser_navigate` → `browser_page` → `browser_query` →
+  `browser_summarize` renders the page once, and `/query` runs its selector
+  against that cached page (bounded: ≤500 matches, ≤16 KB `outer_html` each,
+  ≤1 MB total, parsed off the async workers). `?fresh=1` (the reader's Retry)
+  forces a new render; a credential login drops that host's cached pages. The
+  UI also keeps the last 16 reader pages per tab, so switching back to a tab
+  is instant and only revalidates in the background once it is over a minute
+  old.
 - `/summarize` and `/vault-save`'s fresh-fetch path cap the markdown handed to the
   prompt at 30,000 chars; `/annotations/{id}/send` caps the excerpt at 2,000.
 - `browser_navigate`'s title comes from a real fetch (it PATCHes the new tab with
