@@ -403,6 +403,12 @@ pub fn protected_routes() -> Router<ServerCtx> {
         // Work-graph attribution drilldown + pre-launch cost forecast (B1).
         .route("/usage/attribution", get(usage::attribution))
         .route("/usage/forecast", post(usage::forecast))
+        // Per-session tokens + cost for the Agents page (review A5).
+        .route("/sessions/{id}/usage", get(usage::session_usage))
+        .route(
+            "/workspaces/{wid}/sessions/usage",
+            get(usage::workspace_sessions_usage),
+        )
         .route(
             "/notifications",
             get(notifications::list).delete(notifications::clear),
