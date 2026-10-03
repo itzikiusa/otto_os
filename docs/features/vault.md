@@ -212,6 +212,45 @@ iframes, or event handlers survive), with the Obsidian constructs:
   renders — agents often omit the language tag. Parse errors keep the source
   visible with the error message above it.
 
+### 4.2a Structured view for typed notes
+
+A note whose frontmatter `type` is a recognised OKF concept — **Service**,
+**API Endpoint**, **Runbook**, **Repository**, **Decision**, **Metric**,
+**Data Asset** (incl. Database Table / Collection / Redis Key) or **Flow** —
+opens in the reading view with a structured panel above the unchanged
+markdown body (`ui/src/modules/vault/StructuredNote.svelte`, model in
+`structuredNote.ts`). Plain notes, reserved files (`index.md`, `log.md`) and
+the editor are untouched. The panel holds:
+
+- **Metadata header** — the type, `status`, `owner`/`owners`/`team`,
+  `resource` (an API endpoint's `METHOD /path` is shown as the operation) and
+  tag chips (click = tag search).
+- **Key-field cards** — endpoints, environments, dependencies, data stores,
+  SLOs, errors / options / safe actions / dimensions (by kind). Each card reads
+  the frontmatter key first (`endpoints`, `environments`, `depends_on`,
+  `databases`, …) and otherwise the bullets / first table column of the
+  matching body section. An item that is a resolved wikilink navigates.
+- **Expected sections** — the kind's required content from the
+  `okf-authoring` concept patterns, with the missing ones flagged.
+- **Links to / Linked from** — outgoing links and backlinks as chips, each
+  with a hover (and keyboard-focus) preview of the target's title, type and
+  description or first lines.
+- **Live context** — the note's entity hints matched against the rest of
+  Otto through the modules' existing read APIs: K8s Monitor workloads on
+  monitored clusters (ready pods, memory, rps/error rate; links to the
+  workload and the cluster's Monitor tab), registered repos (branch,
+  ahead/behind, changed files, open PRs; links to the repo and its PRs), DB
+  connections and DB dashboards, and API-client collections. Hints come from
+  `service`/`workload`/`k8s: {cluster, namespace, workload}`, `repository` /
+  a path `resource`, `connections`/`databases`, `api_collection`,
+  `dashboards`, plus a Service/Repository note's own title and file name.
+  Names match after normalisation (`Orders-API` ≡ `orders_api`); hints under
+  three characters never match. Sources the user can't access are simply
+  absent; other failures show inline with Retry. Reads are cached for 60 s.
+
+The layout button in the note header hides/shows the panels (a per-device
+preference).
+
 ### 4.2b Non-markdown file viewers
 
 Clicking a non-`.md` file in the tree opens it in a matching viewer (same
