@@ -86,6 +86,7 @@ function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}
         hydrateEditorHistory: async () => {},
       },
       '../../modules/database/grid-tab-state': { dropGridState: noop },
+      '../../modules/database/error-normalize': { normalizeDbError: (_e: unknown, msg: string) => ({ title: msg }) },
       './clipHistory.svelte': { clipHistory: { setGuard: noop } },
     },
     { localStorage, crypto: globalThis.crypto, performance: globalThis.performance, sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop } },

@@ -11,6 +11,8 @@ function store() {
     '../external': { openExternal: async () => {} },
     './workspace.svelte': { ws: { sessions: [] } },
     '../desktop': { isEmbedded: false },
+    '../router.svelte': { router: { go() {} } },
+    '../noticeRoute': { parseNoticeRoute: () => null },
   });
   return notifications;
 }
@@ -63,6 +65,8 @@ function storeWith(active: string | null) {
     '../external': { openExternal: async () => {} },
     './workspace.svelte': { ws: { sessions: [], activeSessionId: active } },
     '../desktop': { isEmbedded: false },
+    '../router.svelte': { router: { go() {} } },
+    '../noticeRoute': { parseNoticeRoute: () => null },
   });
   return notifications;
 }
