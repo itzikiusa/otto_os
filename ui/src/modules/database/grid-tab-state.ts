@@ -50,3 +50,10 @@ export function parkedEditCount(tabKey: string): number {
 export function dropGridState(tabKey: string): void {
   states.delete(tabKey);
 }
+
+/** Drop the parked state's reference to its result (the result was released
+ *  by the memory budget) while keeping sort/search/filters for the re-run. */
+export function releaseGridResult(tabKey: string): void {
+  const s = states.get(tabKey);
+  if (s) s.result = null;
+}

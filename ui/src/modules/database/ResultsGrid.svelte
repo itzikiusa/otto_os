@@ -13,6 +13,8 @@
   import { onDestroy, untrack } from 'svelte';
   import { stashGridState, takeGridState, type GridTabState } from './grid-tab-state';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { isReleased, releasedRows, resultBudget } from '../../lib/stores/db-result-budget';
   import { findInPage } from '../../lib/findinpage.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import {
@@ -209,8 +211,17 @@
     };
     // Immediately: no "0s" flash for a run that has been going for minutes.
     tick();
-    const iv = setInterval(tick, 250);
-    return () => clearInterval(iv);
+    // The label shows whole seconds: tick once per second, aligned to the next
+    // second boundary of the run (not 4×/s).
+    let iv: ReturnType<typeof setInterval> | undefined;
+    const align = setTimeout(() => {
+      tick();
+      iv = setInterval(tick, 1000);
+    }, 1000 - ((Date.now() - start) % 1000) + 5);
+    return () => {
+      clearTimeout(align);
+      if (iv !== undefined) clearInterval(iv);
+    };
   });
 
   // ── Footer pager (single auto-limited result only) ───────────────────────────
@@ -254,7 +265,7 @@
       search: searchInput,
       sortCol,
       sortDir,
-      colFilters,
+      colFilters: colFiltersInput,
       pending: flow.pending,
     };
   }
@@ -270,6 +281,8 @@
     // un-applied edits, and bring back the incoming tab's (when its result is
     // still the one they were made on) — never carry one tab's onto another.
     const key = tabKey ?? null;
+    // Viewing a tab keeps its result resident (least-recently-VIEWED goes first).
+    if (key) resultBudget.touch(key);
     if (key !== prevTabKey) {
       if (prevTabKey) stashGridState(prevTabKey, untrack(currentGridState));
       prevTabKey = key;
@@ -278,7 +291,7 @@
         setSearch(saved.search);
         sortCol = saved.sortCol;
         sortDir = saved.sortDir;
-        colFilters = saved.colFilters;
+        setColFilters(saved.colFilters);
         detailIdx = null;
         expansion = newExpansionState();
         prevColKey = colKey;
@@ -299,7 +312,7 @@
       setSearch('');
       sortCol = null;
       sortDir = null;
-      colFilters = {};
+      setColFilters({});
       detailIdx = null;
       // A different result shape invalidates every per-path toggle.
       expansion = newExpansionState();
@@ -479,23 +492,92 @@
   // >n / <n, NULL, !NULL). Keyed by ORIGINAL column index; cleared when the
   // result's shape changes.
   let filterRow = $state(false);
-  let colFilters = $state<Record<number, string>>({});
+  // `colFiltersInput` is what the boxes show; `colFilters` is what filters —
+  // the same split (and the same SEARCH_DEBOUNCE_ROWS rule) as the toolbar
+  // search, so typing into a header box over 100k rows doesn't run a full
+  // filter pass per key.
+  let colFiltersInput = $state.raw<Record<number, string>>({});
+  let colFilters = $state.raw<Record<number, string>>({});
+  let colFilterTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Replace BOTH maps at once (reset / tab restore) — never debounced. */
+  function setColFilters(next: Record<number, string>): void {
+    if (colFilterTimer !== null) clearTimeout(colFilterTimer);
+    colFilterTimer = null;
+    colFiltersInput = next;
+    colFilters = next;
+  }
+  function setColFilter(ci: number, text: string): void {
+    colFiltersInput = { ...colFiltersInput, [ci]: text };
+    if (colFilterTimer !== null) clearTimeout(colFilterTimer);
+    colFilterTimer = null;
+    // Clearing a box (or a small result) applies at once.
+    if (text.trim() === '' || liveRows.length <= SEARCH_DEBOUNCE_ROWS) {
+      colFilters = colFiltersInput;
+      return;
+    }
+    colFilterTimer = setTimeout(() => {
+      colFilterTimer = null;
+      colFilters = colFiltersInput;
+    }, SEARCH_DEBOUNCE_MS);
+  }
+  $effect(() => () => {
+    if (colFilterTimer !== null) clearTimeout(colFilterTimer);
+  });
   const activeColFilters = $derived(
     Object.entries(colFilters)
       .filter(([, t]) => t.trim() !== '')
       .map(([ci, t]) => [Number(ci), t] as const),
   );
-  function colFilterMatches(row: unknown[]): boolean {
+  // Per-column display text, built lazily on a column's FIRST filtered key and
+  // reused for every following key (and every other box) until the rows
+  // change. For a JSON column `cellStr` is a full `JSON.stringify` per document
+  // — doing that per row per keystroke is what made the filter row stutter.
+  // Non-reactive on purpose: keyed by the `liveRows` array identity.
+  let colScanRows: unknown[][] | null = null;
+  const colScan = new Map<number, (string | null)[]>();
+  function colScanFor(ci: number): (string | null)[] {
+    if (colScanRows !== liveRows) {
+      colScan.clear();
+      colScanRows = liveRows;
+    }
+    let col = colScan.get(ci);
+    if (!col) {
+      col = new Array<string | null>(liveRows.length);
+      for (let i = 0; i < liveRows.length; i++) {
+        const v = liveRows[i][ci];
+        // null = SQL NULL; strings past SCAN_MAX are clipped like scanRows.
+        col[i] = v === null || v === undefined ? null : clipScan(cellStr(v));
+      }
+      colScan.set(ci, col);
+    }
+    return col;
+  }
+  function clipScan(s: string): string {
+    return s.length > SCAN_MAX ? s.slice(0, SCAN_MAX) : s;
+  }
+  function colFilterMatches(idx: number): boolean {
     for (const [ci, text] of activeColFilters) {
-      const v = row[ci];
-      const isNull = v === null || v === undefined;
-      if (!cellMatchesFilter(isNull ? '' : cellStr(v), isNull, text)) return false;
+      const s = colScanFor(ci)[idx];
+      const isNull = s === null || s === undefined;
+      if (!cellMatchesFilter(isNull ? '' : s, isNull, text)) return false;
     }
     return true;
   }
   function toggleFilterRow(): void {
     filterRow = !filterRow;
-    if (!filterRow) colFilters = {};
+    if (!filterRow) setColFilters({});
+  }
+
+  // The unfiltered `{row, idx}` wrappers, memoised per rows array: switching
+  // back to a 100k-row tab used to re-allocate 100k wrappers every time.
+  const unfilteredMemo = new WeakMap<unknown[][], { row: unknown[]; idx: number }[]>();
+  function unfilteredView(rows: unknown[][]): { row: unknown[]; idx: number }[] {
+    let v = unfilteredMemo.get(rows);
+    if (!v) {
+      v = rows.map((row, idx) => ({ row, idx }));
+      unfilteredMemo.set(rows, v);
+    }
+    return v;
   }
 
   // Rows passing the filter, carrying their original index so edits target the
@@ -503,12 +585,12 @@
   const filteredRows = $derived.by<{ row: unknown[]; idx: number }[]>(() => {
     const hasChips = activeChips.length > 0;
     const hasCols = activeColFilters.length > 0;
-    if (!filtering && !hasChips && !hasCols) return liveRows.map((row, idx) => ({ row, idx }));
+    if (!filtering && !hasChips && !hasCols) return unfilteredView(liveRows);
     const out: { row: unknown[]; idx: number }[] = [];
     for (let idx = 0; idx < liveRows.length; idx++) {
       const row = liveRows[idx];
       if (hasChips && !chipMatches(row)) continue;
-      if (hasCols && !colFilterMatches(row)) continue;
+      if (hasCols && !colFilterMatches(idx)) continue;
       if (filtering && !rowMatches(idx)) continue;
       out.push({ row, idx });
     }
@@ -695,6 +777,17 @@
   $effect(()=>{if(connectionId)void resourceAccess.load('connection',connectionId,accessChild);});
   $effect(()=>{if(connectionId&&editAccessChild!==accessChild)void resourceAccess.load('connection',connectionId,editAccessChild);});
 
+  // `viewOrder` per view array (memoised like `unfilteredView`): a tab switch
+  // back to an unchanged 100k-row view reuses it instead of re-mapping.
+  const viewOrderMemo = new WeakMap<{ row: unknown[]; idx: number }[], number[]>();
+  function viewOrderOf(view: { row: unknown[]; idx: number }[]): number[] {
+    let o = viewOrderMemo.get(view);
+    if (!o) {
+      o = view.map((r) => r.idx);
+      viewOrderMemo.set(view, o);
+    }
+    return o;
+  }
   const flow = new EditFlow();
   // While an error is shown, `result` is still the PREVIOUS run's while
   // `statement` is the failed one — never pair them (BUG-7: the edit flow and
@@ -712,7 +805,7 @@
       canModify,
       uniqueColNames,
       mini,
-      viewOrder: viewRows.map((r) => r.idx),
+      viewOrder: viewOrderOf(viewRows),
       resultCount: resultSets.length,
     });
   });
@@ -911,13 +1004,77 @@
   function exportRows(): unknown[][] {
     return filtering || sorting || chipFiltering ? viewRows.map((r) => r.row) : liveRows;
   }
-  function toTsv(): string {
-    if (!result) return '';
-    const header = result.columns.map((c) => c.name).join('\t');
-    const body = exportRows()
-      .map((r) => r.map((v) => exportText(v).replace(/\t/g, ' ').replace(/\n/g, ' ')).join('\t'))
-      .join('\n');
-    return `${header}\n${body}`;
+  // ── Chunked export text ─────────────────────────────────────────────────────
+  // Copy / Download of a 100k-row result used to build the whole string in ONE
+  // task (hundreds of ms of frozen UI, no feedback). Past CHUNKED_FROM rows the
+  // text is built CHUNK_ROWS at a time, yielding between chunks, behind a
+  // "Preparing…" toast; downloads hand the parts straight to a Blob (no single
+  // giant string). Small results stay synchronous.
+  const CHUNKED_FROM = 20_000;
+  const CHUNK_ROWS = 5_000;
+  const yieldTask = (): Promise<void> => new Promise((res) => setTimeout(res, 0));
+  /** `header` + one line per row (joined by `sep`), as string parts. */
+  async function buildParts(header: string, line: (r: unknown[]) => string, sep = '\n', tail = ''): Promise<string[]> {
+    const rows = exportRows();
+    const parts: string[] = [header];
+    for (let i = 0; i < rows.length; i += CHUNK_ROWS) {
+      if (i > 0) await yieldTask();
+      const chunk = rows.slice(i, i + CHUNK_ROWS).map(line).join(sep);
+      parts.push(i > 0 ? sep + chunk : chunk);
+    }
+    if (tail) parts.push(tail);
+    return parts;
+  }
+  /** Run `work` behind a "Preparing…" toast when the export is large. */
+  async function withProgress<T>(what: string, work: () => Promise<T>): Promise<T> {
+    const big = exportRows().length > CHUNKED_FROM;
+    const id = big ? toasts.info(`Preparing ${what}…`, `${exportRows().length.toLocaleString()} rows`) : null;
+    try {
+      return await work();
+    } finally {
+      if (id !== null) toasts.dismiss(id);
+    }
+  }
+  function tsvLine(r: unknown[]): string {
+    return r.map((v) => exportText(v).replace(/\t/g, ' ').replace(/\n/g, ' ')).join('\t');
+  }
+  function tsvParts(): Promise<string[]> {
+    if (!result) return Promise.resolve(['']);
+    return buildParts(`${result.columns.map((c) => c.name).join('\t')}\n`, tsvLine);
+  }
+  function csvParts(): Promise<string[]> {
+    if (!result) return Promise.resolve(['']);
+    return buildParts(`${result.columns.map((c) => csvCell(c.name)).join(',')}\n`, (r) => r.map(csvCell).join(','));
+  }
+  function jsonParts(): Promise<string[]> {
+    if (!result || exportRows().length === 0) return Promise.resolve(['[]']);
+    const names = uniqueColNames;
+    // Each element pretty-printed and indented one level: byte-identical to
+    // JSON.stringify(array, null, 2).
+    return buildParts(
+      '[\n',
+      (r) => '  ' + JSON.stringify(Object.fromEntries(names.map((n, i) => [n, r[i] ?? null])), null, 2).replace(/\n/g, '\n  '),
+      ',\n',
+      '\n]',
+    );
+  }
+  /**
+   * Copy text that may take a while to build. WebKit only honours a clipboard
+   * write inside the click's activation, so the write starts NOW with a
+   * promised ClipboardItem; browsers without it fall back to writeText.
+   */
+  async function copyBuilt(build: () => Promise<string[]>): Promise<void> {
+    const text = build().then((p) => p.join(''));
+    const CI = (globalThis as { ClipboardItem?: typeof ClipboardItem }).ClipboardItem;
+    if (CI && navigator.clipboard?.write) {
+      try {
+        await navigator.clipboard.write([new CI({ 'text/plain': text.then((t) => new Blob([t], { type: 'text/plain' })) })]);
+        return;
+      } catch {
+        /* fall through to writeText */
+      }
+    }
+    await navigator.clipboard.writeText(await text);
   }
   function csvCell(v: unknown): string {
     let s = exportText(v);
@@ -926,18 +1083,6 @@
     // Non-string values (a bare -5 is data, not a formula) are left alone.
     if (typeof v === 'string' && /^[=+\-@]/.test(s)) s = `'${s}`;
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  }
-  function toCsv(): string {
-    if (!result) return '';
-    const header = result.columns.map((c) => csvCell(c.name)).join(',');
-    const body = exportRows().map((r) => r.map(csvCell).join(',')).join('\n');
-    return `${header}\n${body}`;
-  }
-  function toJson(): string {
-    if (!result) return '[]';
-    const names = uniqueColNames;
-    const objs = exportRows().map((r) => Object.fromEntries(names.map((n, i) => [n, r[i] ?? null])));
-    return JSON.stringify(objs, null, 2);
   }
 
   const exportScope = $derived.by(() => {
@@ -949,14 +1094,14 @@
 
   async function copyTsv(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(toTsv());
+      await withProgress('TSV', () => copyBuilt(tsvParts));
       toasts.success('Copied', `Result copied as TSV${exportScope}`);
     } catch {
       toasts.error('Copy failed');
     }
   }
-  function download(text: string, name: string, mime: string): void {
-    const blob = new Blob([text], { type: mime });
+  function download(parts: string[], name: string, mime: string): void {
+    const blob = new Blob(parts, { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -966,18 +1111,18 @@
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
-  function exportCsv(): void {
+  async function exportCsv(): Promise<void> {
     if (!canExport) return;
-    download(toCsv(), 'result.csv', 'text/csv');
+    download(await withProgress('CSV', csvParts), 'result.csv', 'text/csv');
   }
-  function exportJson(): void {
+  async function exportJson(): Promise<void> {
     if (!canExport) return;
-    download(toJson(), 'result.json', 'application/json');
+    download(await withProgress('JSON', jsonParts), 'result.json', 'application/json');
   }
   async function copyAs(kind: 'csv' | 'json' | 'columns'): Promise<void> {
-    const text = kind === 'csv' ? toCsv() : kind === 'json' ? toJson() : (result?.columns ?? []).map((c) => c.name).join(', ');
     try {
-      await navigator.clipboard.writeText(text);
+      if (kind === 'columns') await navigator.clipboard.writeText((result?.columns ?? []).map((c) => c.name).join(', '));
+      else await withProgress(kind.toUpperCase(), () => copyBuilt(kind === 'csv' ? csvParts : jsonParts));
       const what = kind === 'columns' ? 'Column names copied' : `Result copied as ${kind.toUpperCase()}${exportScope}`;
       toasts.success('Copied', what);
     } catch {
@@ -1222,6 +1367,23 @@
       </div>
     {/if}
   {/if}
+{:else if isReleased(resultProp)}
+  <!-- The memory budget released this hidden tab's rows (db-result-budget.ts):
+       columns/stats survive, the rows come back by re-running the statement. -->
+  {#if running}
+    {#if !mini}{@render loadingFrame()}{/if}
+  {:else if !mini}
+    <div class="grid-released" data-testid="db-result-released">
+      <EmptyState
+        icon="refresh"
+        title="Result released to save memory"
+        body={`${releasedRows(resultProp).toLocaleString()} rows were dropped while this tab was in the background. Re-run the query to bring them back.`}
+        actionLabel={hosted && statement ? 'Re-run' : undefined}
+        actionIcon="play"
+        onaction={() => void database.rerunReleased()}
+      />
+    </div>
+  {/if}
 {:else if !result || result.columns.length === 0}
   {#if running && !mini}
     {@render loadingFrame()}
@@ -1438,8 +1600,8 @@
           {sortDir}
           resetToken={colKey}
           filterRow={filterRow && !mini}
-          {colFilters}
-          oncolfilter={(ci, t) => (colFilters = { ...colFilters, [ci]: t })}
+          colFilters={colFiltersInput}
+          oncolfilter={setColFilter}
           onfocusrow={(i) => { if (i !== null) detailIdx = i; }}
           oncellmenu={cellMenu}
           onheadermenu={headerMenu}
@@ -1789,6 +1951,11 @@
     padding: 28px 16px;
     color: var(--text-dim);
     font-size: var(--fs-s);
+  }
+  .grid-released {
+    display: flex;
+    justify-content: center;
+    padding-block-start: 10vh;
   }
   .grid-empty.idle {
     flex-direction: column;

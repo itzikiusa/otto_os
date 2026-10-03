@@ -8,6 +8,7 @@
   import { isInertAt } from './completion-gate';
   import type { EditorState } from '@codemirror/state';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
+  import { loadCmLang } from '../../lib/components/cm-langs';
   import { sqlDialectForKind } from '../../lib/sql-dialects';
   import ResultsGrid from './ResultsGrid.svelte';
   import PlanView from './PlanView.svelte';
@@ -89,6 +90,13 @@
         ? 'js'
         : 'sql',
   );
+  // SQL / Redis packs are static in cm-langs.ts; the Mongo editor's JS pack and
+  // the document editors' JSON pack load on demand. Warm both as soon as a
+  // Mongo connection is active so the workbench doesn't open them plain.
+  $effect(() => {
+    if (lang !== 'js') return;
+    for (const ext of ['js', 'json']) void loadCmLang(ext).catch(() => {});
+  });
   // The connection's SQL dialect: it decides what the editor tokenizes as a
   // string or comment (MySQL `\'` escapes and `#` comments), which gates
   // completion inside literals and scopes the completion span to a statement.

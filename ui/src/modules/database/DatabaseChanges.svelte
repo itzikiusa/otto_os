@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
+  import { pollWhileVisible } from '../../lib/poll';
   import { databaseChangesApi as changesApi, type DatabaseChange, type ChangeDetail, type ChangeInput, type ChangeTarget } from '../../lib/api/database-changes';
   import { database } from '../../lib/stores/database.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -48,7 +49,8 @@
   function action(which:'submit'|'approve'|'reject'|'execute'|'cancel') {if(selected)void perform(()=>changesApi.action(selected!.id,selected!.revision,which,note));}
   $effect(()=>{const id=connectionId;const currentChild=child;untrack(()=>{detail=null;editing=false;targetDb=currentChild ?? '';void resourceAccess.load('connection',id,currentChild);void refresh();});});
   $effect(()=>{for(const target of draftTargets){const db=target.node.replace(/^db:/,'');if(db)void resourceAccess.load('connection',target.connection_id,db);}});
-  onMount(()=>{const interval=window.setInterval(()=>{if(!busy&&!editing&&!document.hidden)void refresh();},5000);return()=>{generation++;window.clearInterval(interval);};});
+  // Hidden-paused, jittered, backed-off polling (lib/poll.ts) instead of a raw 5 s interval.
+  onMount(()=>{const poller=pollWhileVisible(async()=>{if(!busy&&!editing)await refresh();},{ms:5000,immediate:false,maxBackoff:8});return()=>{generation++;poller.stop();};});
 </script>
 <div class="changes" data-testid="database-changes">
   <div class="toolbar"><div><h2>Database changes</h2><p>Review scripts independently, then execute the approved revision.</p></div><button onclick={draft} disabled={busy || !resourceAccess.can('connection',connectionId,'change_submit','database','edit',child)}>New change</button><button onclick={()=>void refresh()} disabled={busy}>Refresh</button></div>

@@ -12,11 +12,6 @@
   import SchemaTree from './SchemaTree.svelte';
   import QueryEditor from './QueryEditor.svelte';
   import ConnectionComparison from './ConnectionComparison.svelte';
-  import QueryBuilder from './QueryBuilder.svelte';
-  import StructureView from './StructureView.svelte';
-  import DiagramView from './DiagramView.svelte';
-  import Dashboards from './Dashboards.svelte';
-  import DbAssistantPanel from './DbAssistantPanel.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import DatabaseChanges from './DatabaseChanges.svelte';
   import ResourceAccess from '../../lib/components/ResourceAccess.svelte';
@@ -24,10 +19,8 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import ConnectionForm from '../connections/ConnectionForm.svelte';
   import ConnectionImportDialog from '../connections/ConnectionImportDialog.svelte';
-  import SftpBrowser from '../connections/SftpBrowser.svelte';
-  import ClusterForm from '../brokers/ClusterForm.svelte';
-  import ClusterViewer from '../brokers/ClusterViewer.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent, whenIdle } from '../../lib/lazy-component.svelte';
   import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import ImportDialog from './ImportDialog.svelte';
   import ExportDialog from './ExportDialog.svelte';
@@ -51,6 +44,30 @@
     DbSavedQuery,
     Session,
   } from '../../lib/api/types';
+
+  // Secondary views and the SSH/Kafka/SFTP panes load on first open, not with
+  // the page: xterm, the Kafka viewer (+ lag alerts) and ~4.7k lines of
+  // builder/structure/diagram used to ride in the page chunk every DB open
+  // paid for. The common views are warmed on idle after first paint; the
+  // terminal/Kafka/SFTP chunks only when a pane of that kind opens.
+  const QueryBuilderLazy = lazyComponent(() => import('./QueryBuilder.svelte'));
+  const StructureLazy = lazyComponent(() => import('./StructureView.svelte'));
+  const DiagramLazy = lazyComponent(() => import('./DiagramView.svelte'));
+  const DashboardsLazy = lazyComponent(() => import('./Dashboards.svelte'));
+  const TerminalLazy = lazyComponent(() => import('../../lib/components/Terminal.svelte'));
+  const ClusterViewerLazy = lazyComponent(() => import('../brokers/ClusterViewer.svelte'));
+  const ClusterFormLazy = lazyComponent(() => import('../brokers/ClusterForm.svelte'));
+  const SftpLazy = lazyComponent(() => import('../connections/SftpBrowser.svelte'));
+  // The assistant embeds a Terminal (xterm) — only loaded when it's opened.
+  const AssistantLazy = lazyComponent(() => import('./DbAssistantPanel.svelte'));
+  $effect(() =>
+    whenIdle(() => {
+      StructureLazy.prefetch();
+      QueryBuilderLazy.prefetch();
+      DashboardsLazy.prefetch();
+      DiagramLazy.prefetch();
+    }, 4000),
+  );
 
   // The unified Connections hub: EVERY profile kind is created/managed in this
   // tree — DB engines open the workbench, ssh/custom open a terminal session,
@@ -1176,7 +1193,7 @@
 
       {#if database.activePane?.kind === 'kafka'}
         {#if activeCluster}
-          <ClusterViewer cluster={activeCluster} onEdit={editCluster} onRemove={(c) => void deleteCluster(c)} />
+          <LazyMount lazy={ClusterViewerLazy} what="the Kafka cluster viewer" props={{ cluster: activeCluster, onEdit: editCluster, onRemove: (c: BrokerCluster) => void deleteCluster(c) }} />
         {:else}
           <EmptyState icon="box" title="Cluster closed" body="This Kafka cluster tab is no longer open." />
         {/if}
@@ -1184,7 +1201,7 @@
         {#if activeSsh}
           <div class="term-pane">
             {#key activeSsh.sessionId}
-              <Terminal sessionId={activeSsh.sessionId} scrollback={PRIMARY_SCROLLBACK} />
+              <LazyMount lazy={TerminalLazy} what="the terminal" props={{ sessionId: activeSsh.sessionId, scrollback: PRIMARY_SCROLLBACK }} />
             {/key}
           </div>
         {:else}
@@ -1265,13 +1282,13 @@
           {#if database.mainTab === 'query'}
             <QueryEditor />
           {:else if database.mainTab === 'builder'}
-            <QueryBuilder />
+            <LazyMount lazy={QueryBuilderLazy} what="the query builder" />
           {:else if database.mainTab === 'structure'}
-            <StructureView />
+            <LazyMount lazy={StructureLazy} what="the structure view" />
           {:else if database.mainTab === 'diagram'}
-            <DiagramView />
+            <LazyMount lazy={DiagramLazy} what="the diagram" />
           {:else}
-            <Dashboards />
+            <LazyMount lazy={DashboardsLazy} what="dashboards" />
           {/if}
           </ConnectionComparison>
           {/key}
@@ -1287,7 +1304,7 @@
             onpointerdown={startAssistResize}
           ></div>
           <aside class="assist-pane" style="width:{assistW}px">
-            <DbAssistantPanel />
+            <LazyMount lazy={AssistantLazy} what="the assistant" variant="panel" />
           </aside>
         {/if}
       </div>
@@ -1678,11 +1695,11 @@
 {/if}
 
 {#if clusterFormOpen}
-  <ClusterForm cluster={editingCluster} onclose={() => (clusterFormOpen = false)} />
+  <LazyMount lazy={ClusterFormLazy} what="the cluster form" quiet props={{ cluster: editingCluster, onclose: () => (clusterFormOpen = false) }} />
 {/if}
 
 {#if sftpFor}
-  <SftpBrowser conn={sftpFor} onclose={() => (sftpFor = null)} />
+  <LazyMount lazy={SftpLazy} what="the SFTP browser" quiet props={{ conn: sftpFor, onclose: () => (sftpFor = null) }} />
 {/if}
 
 <!-- Import connection profiles from another DB tool (MySQL Workbench / DBeaver /

@@ -59,7 +59,8 @@ import { normalizeDbError } from '../../modules/database/error-normalize';
 import { copyTextOrThrow } from '../clipboard';
 import { mapLimit, pollWhileVisible, type Poller } from '../poll';
 import { forgetEditorState, forgetEditorStates, hydrateEditorHistory } from '../editor-history';
-import { dropGridState } from '../../modules/database/grid-tab-state';
+import { dropGridState, parkedEditCount, releaseGridResult } from '../../modules/database/grid-tab-state';
+import { estimateResultBytes, isReleased, releasedStub, resultBudget } from './db-result-budget';
 import { clipHistory } from './clipHistory.svelte';
 
 /** Connection kinds the explorer can browse (the DB engines). */
@@ -642,6 +643,7 @@ export const TAB_HISTORY_PREFIX = 'dbtab:';
 function forgetTabHistory(t: QueryTab): void {
   forgetEditorState(TAB_HISTORY_PREFIX + t.uid);
   dropGridState(t.uid);
+  resultBudget.forget(t.uid);
 }
 
 let nextTabId = 1;
@@ -1237,6 +1239,7 @@ class DatabaseStore {
         tab.pending = null;
         tab.running = false;
         tab.result = null;
+        resultBudget.forget(tab.uid);
         tab.ran_statement = null;
         tab.ran_node = null;
         tab.error = null;
@@ -1400,6 +1403,55 @@ class DatabaseStore {
     this.tabs = ordered.tabs;
     this.activeTab = ordered.activeTab;
     this.persistTabs();
+  }
+
+  // ── Result memory budget (lib/stores/db-result-budget.ts) ─────────────────
+  /**
+   * Land a result on a tab and account for it: every resident result across
+   * the live tabs AND every parked connection snapshot shares one budget; past
+   * it the least-recently-viewed results are released (rows dropped, columns
+   * and stats kept) and the grid offers a Re-run.
+   */
+  private installResult(t: QueryTab, result: QueryResult): void {
+    t.result = rawResult(result);
+    resultBudget.note(t.uid, estimateResultBytes(result));
+    this.enforceResultBudget();
+  }
+
+  /** Release least-recently-viewed results until the total fits the budget. */
+  enforceResultBudget(): void {
+    const pinned = new Set<string>();
+    const shown = this.tabs[this.activeTab];
+    if (shown) pinned.add(shown.uid);
+    const consider = (tabs: QueryTab[]) => {
+      for (const t of tabs) {
+        // Never under a running query or un-applied cell edits.
+        if (t.running || t.pending || parkedEditCount(t.uid) > 0) pinned.add(t.uid);
+      }
+    };
+    consider(this.tabs);
+    for (const snap of this.snapshots.values()) consider(snap.tabs);
+    for (const uid of resultBudget.pick(pinned)) {
+      resultBudget.forget(uid);
+      const t = this.tabByUid(uid);
+      if (!t?.result || isReleased(t.result)) continue;
+      t.result = rawResult(releasedStub(t.result));
+      releaseGridResult(uid);
+    }
+  }
+
+  /**
+   * Re-run the statement that produced the active tab's RELEASED result (same
+   * statement, scope, offset and page size) — the grid's "Re-run" button.
+   */
+  rerunReleased(): Promise<QueryResult | null> {
+    const t = this.tab;
+    if (!t?.result || !isReleased(t.result) || !t.ran_statement) return Promise.resolve(null);
+    return this.runQuery(t.ran_statement, t.ran_node, {
+      keepOffset: true,
+      transient: true,
+      ...(t.result.auto_limited ? { maxRows: t.result.auto_limited } : {}),
+    });
   }
 
   /** A query tab by its stable uid, across the live set and every parked
@@ -2762,29 +2814,42 @@ class DatabaseStore {
       return;
     }
     const seq = ++this.objectSearchSeq;
+    // A newer keystroke ABORTS the superseded catalog search instead of only
+    // ignoring its answer (the daemon stops scanning a big catalog early).
+    this.objectSearchAbort?.abort();
+    const ac = (this.objectSearchAbort = new AbortController());
     this.objectSearching = true;
     try {
-      const r = await api.post<ObjectSearchResult>(`${this.connBase(connId)}/search-objects`, {
-        q: q.trim(),
-        schema: this.objectSearchScope === 'schema' ? schema : undefined,
-        scope: this.objectSearchScope,
-      });
+      const r = await api.post<ObjectSearchResult>(
+        `${this.connBase(connId)}/search-objects`,
+        {
+          q: q.trim(),
+          schema: this.objectSearchScope === 'schema' ? schema : undefined,
+          scope: this.objectSearchScope,
+        },
+        ac.signal,
+      );
       if (seq !== this.objectSearchSeq) return; // a newer keystroke won
       this.objectSearchHits = r.hits;
       this.objectSearchTruncated = r.truncated;
       this.objectSearchScanned = r.scanned;
       this.objectSearchSupported = r.supported;
     } catch (e) {
-      if (seq === this.objectSearchSeq) {
+      if (seq === this.objectSearchSeq && !isAbortError(e)) {
         this.objectSearchHits = [];
         toasts.error('Object search failed', errMsg(e));
       }
     } finally {
-      if (seq === this.objectSearchSeq) this.objectSearching = false;
+      if (seq === this.objectSearchSeq) {
+        this.objectSearching = false;
+        this.objectSearchAbort = null;
+      }
     }
   }
 
   clearObjectSearch(): void {
+    this.objectSearchAbort?.abort();
+    this.objectSearchAbort = null;
     this.objectSearchSeq++;
     this.objectSearchQuery = '';
     this.objectSearchHits = null;
@@ -2794,6 +2859,7 @@ class DatabaseStore {
   }
 
   private objectSearchSeq = 0;
+  private objectSearchAbort: AbortController | null = null;
 
   private async loadChildren(connId: string, nodeId: string): Promise<void> {
     const epoch = this.epochOf(connId);
@@ -3160,7 +3226,7 @@ class DatabaseStore {
         if (outcome) Object.assign(outcome, { status: 'aborted', error: 'the run was stopped or superseded' });
         return null;
       }
-      t.result = rawResult(result);
+      this.installResult(t, result);
       t.ran_statement = sql;
       t.ran_node = scopeNode;
       t.err_statement = null;
@@ -3350,7 +3416,7 @@ class DatabaseStore {
       if (opts?.readOnly) body.read_only = true;
       const result = await api.post<QueryResult>(`${this.connBase(id)}/query`, body);
       if(accessEpoch!==this.accessEpoch)return null;
-      t.result = rawResult(result);
+      this.installResult(t, result);
       t.ran_statement = stmt;
       t.ran_node = this.activeDb || null;
       return result;
@@ -3561,7 +3627,7 @@ class DatabaseStore {
           t.error = st.error;
           t.err_statement = pending.sql ?? null;
         } else if (st.result) {
-          t.result = rawResult(st.result);
+          this.installResult(t, st.result);
           // The statement + scope the run was ISSUED with (kept in the marker).
           // Never the editor buffer: it is usually a multi-statement script the
           // run only took one statement of, and the pager re-runs ran_statement.

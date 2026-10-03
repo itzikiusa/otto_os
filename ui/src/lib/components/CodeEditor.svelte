@@ -10,6 +10,7 @@
     prepareEditorHistory,
     registerLiveParker,
     saveEditorState,
+    PERSIST_MAX_BYTES,
   } from '../editor-history';
   import { search, searchKeymap, openSearchPanel } from '@codemirror/search';
   import {
@@ -831,7 +832,9 @@
         hk.key,
         state.toJSON({ history: historyField }) as { doc: string },
         scrollTop,
-        hk.persist,
+        // A doc already past the disk cap would only be serialized again and
+        // dropped (editor-history.ts) — keep it in the memory tier only.
+        hk.persist && state.doc.length <= PERSIST_MAX_BYTES,
       );
     } catch {
       /* a state without the history field — nothing worth keeping */
@@ -855,6 +858,12 @@
   const historySaver = EditorView.updateListener.of((u) => {
     if (!u.docChanged) return;
     if (historySaveTimer !== null) clearTimeout(historySaveTimer);
+    historySaveTimer = null;
+    // The idle save exists so a RELOAD finds the history on disk. A doc past
+    // the disk cap can't go there, so serializing it (doc + every undo step)
+    // every 1.5 s of typing bought nothing; unmount / page hide still park it
+    // in the memory tier (parkLive / registerLiveParker).
+    if (u.state.doc.length > PERSIST_MAX_BYTES) return;
     historySaveTimer = setTimeout(() => {
       historySaveTimer = null;
       if (view) parkHistory(livePath, view.state, view.scrollDOM.scrollTop);
