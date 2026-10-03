@@ -141,6 +141,15 @@ test('Send to → Database — Run on… opens prefilled with the brand sweep', 
     route.request().method() === 'GET' ? route.fulfill({ json: [] }) : route.abort(),
   );
   await page.route('**/api/v1/db/multi-run/plan', (route: Route) => route.abort());
+  // The throwaway daemon is shared by every spec in the run, and the DB specs
+  // seed their own connections into the same workspace — narrow the list to
+  // ours so "the only connection is picked" holds whatever ran before.
+  await page.route(/\/api\/v1\/workspaces\/[^/]+\/connections(\?.*)?$/, async (route: Route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const res = await route.fetch();
+    const all = (await res.json()) as { id: string }[];
+    await route.fulfill({ response: res, json: all.filter((c) => c.id === connId) });
+  });
   const doc = await daemon<DocRow>(page, 'POST', `/workspaces/${workspaceId}/workbench/docs`, {
     name: `brands-${suffix}.sql`,
     language: 'sql',
