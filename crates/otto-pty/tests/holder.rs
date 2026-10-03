@@ -216,9 +216,10 @@ fn exit_while_detached_is_reported_on_adoption() {
         screen_text(&h).contains("READY")
     });
     let holder_pid = h.holder().unwrap().holder_pid;
-    h.write(b"z\n").expect("write");
-    // Detach right away: the child finishes while no daemon is attached.
+    // Detach BEFORE the input that makes the child exit: its EXITED report can
+    // then race the hang-up without the detached handle releasing the holder.
     h.detach();
+    h.write(b"z\n").expect("write");
     drop(h);
     std::thread::sleep(Duration::from_millis(800));
     assert!(

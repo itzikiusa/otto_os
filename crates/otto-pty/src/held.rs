@@ -327,8 +327,13 @@ fn reader_loop(mut stream: UnixStream, conn: Arc<HeldConn>, mirror: Mirror, exit
                 conn.exited.store(true, Ordering::SeqCst);
                 conn.fail_pending(io::ErrorKind::BrokenPipe);
                 exit.fire(code);
-                // We hold the whole final state: the holder may go.
-                conn.release();
+                // We hold the whole final state: the holder may go — unless
+                // this handle was detached (daemon handing over for a
+                // restart): then the next daemon adopts the exited holder and
+                // learns the exit from it, so it must linger.
+                if !conn.is_detached() {
+                    conn.release();
+                }
             }
             Ok((frame::SUPERSEDED, _)) => {
                 // Another daemon adopted this session: it is theirs now. Let
