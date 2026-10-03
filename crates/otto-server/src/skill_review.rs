@@ -114,6 +114,7 @@ impl Staged {
 
 /// Recursively copy a skill tree, skipping [`IGNORED_ENTRIES`] (and symlinks —
 /// a symlink could point back outside the package at the very files we strip).
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 fn copy_skill_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
@@ -135,6 +136,7 @@ fn copy_skill_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Remove any [`IGNORED_ENTRIES`] from an already-staged tree (bundled skills
 /// are written by the install primitive, so they get pruned instead of copied).
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 fn prune_ignored(dir: &Path) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;

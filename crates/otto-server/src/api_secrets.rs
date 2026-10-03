@@ -454,6 +454,7 @@ pub fn mask_jwts(input: &str) -> String {
 /// entry means empty; unavailable or corrupt storage must abort the mutation.
 /// Error text deliberately excludes the secret store's potentially sensitive
 /// payload and serde's offending-value diagnostics.
+#[allow(clippy::disallowed_methods)] // pure: only called over a `Prefetched` snapshot (no backend I/O) and in tests
 pub fn load_blob_checked(
     secrets: &dyn SecretStore,
     r: &str,
@@ -468,6 +469,7 @@ pub fn load_blob_checked(
 }
 
 /// Read a Keychain blob (`member → value`); absent/corrupt → empty.
+#[allow(clippy::disallowed_methods)] // pure: only reached via resolve_auth_markers over a `Prefetched` snapshot
 pub fn load_blob(secrets: &dyn SecretStore, r: &str) -> BTreeMap<String, String> {
     secrets
         .get(r)
@@ -475,21 +477,6 @@ pub fn load_blob(secrets: &dyn SecretStore, r: &str) -> BTreeMap<String, String>
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
-}
-
-/// Write (or delete, when empty) a Keychain blob.
-pub fn store_blob(
-    secrets: &dyn SecretStore,
-    r: &str,
-    blob: &BTreeMap<String, String>,
-) -> otto_core::Result<()> {
-    if blob.is_empty() {
-        secrets.delete(r)
-    } else {
-        let body = serde_json::to_string(blob)
-            .map_err(|e| otto_core::Error::Internal(format!("secret blob serialize: {e}")))?;
-        secrets.put(r, &body)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -520,17 +507,20 @@ pub async fn load_blob_checked_async(
     load_blob_checked(&Prefetched::one(r, value), r)
 }
 
-/// [`store_blob`] for async callers: the Keychain write runs on the blocking
-/// pool.
+/// Write (or delete, when empty) a Keychain blob. The Keychain write runs on
+/// the blocking pool via `otto_core::secrets::{put,delete}_async`.
 pub async fn store_blob_async(
     secrets: &std::sync::Arc<dyn SecretStore>,
     r: &str,
     blob: &BTreeMap<String, String>,
 ) -> otto_core::Result<()> {
-    let (secrets, r, blob) = (secrets.clone(), r.to_string(), blob.clone());
-    tokio::task::spawn_blocking(move || store_blob(secrets.as_ref(), &r, &blob))
-        .await
-        .map_err(|e| otto_core::Error::Internal(format!("secret write task: {e}")))?
+    if blob.is_empty() {
+        otto_core::secrets::delete_async(secrets, r).await
+    } else {
+        let body = serde_json::to_string(blob)
+            .map_err(|e| otto_core::Error::Internal(format!("secret blob serialize: {e}")))?;
+        otto_core::secrets::put_async(secrets, r, &body).await
+    }
 }
 
 /// [`resolve_auth_markers`] for async callers: every referenced blob is read
@@ -613,6 +603,7 @@ pub fn strip_secret_variables(variables: &Value, secret_keys: &[String]) -> Valu
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod tests {
     struct ReadFixture(Option<&'static str>, bool);
     impl otto_core::secrets::SecretStore for ReadFixture {

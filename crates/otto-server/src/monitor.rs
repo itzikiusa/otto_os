@@ -259,7 +259,8 @@ impl CredentialMonitor {
     async fn check_agent_clis(&self) {
         self.check_agent(
             "claude",
-            claude_credentials_present(),
+            // `security` subprocess: blocking pool, not a runtime worker.
+            crate::offload::blocking(claude_credentials_present).await,
             "Claude: re-login needed",
             "Claude credentials are missing. Run `claude login` to re-authenticate.",
             "agent_auth:claude",
@@ -344,6 +345,7 @@ enum AgentHealth {
 /// errSecItemNotFound (exit 44) ⇒ missing; anything else ⇒ unknown (skip, so we
 /// never false-alarm on a transient error).
 #[cfg(target_os = "macos")]
+#[allow(clippy::disallowed_methods)] // sync helper: check_agent_clis runs it via offload::blocking
 fn claude_credentials_present() -> AgentHealth {
     let status = std::process::Command::new("/usr/bin/security")
         .args(["find-generic-password", "-s", "Claude Code-credentials"])

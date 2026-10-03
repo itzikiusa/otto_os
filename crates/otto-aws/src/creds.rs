@@ -217,6 +217,7 @@ impl SsoIndex {
 }
 
 /// Every start URL's latest token in `dir`, in one pass over the directory.
+#[allow(clippy::disallowed_methods)] // sync helper: only reached via SsoIndex::load, which load_async runs in spawn_blocking
 pub fn sso_tokens_in(dir: &Path) -> HashMap<String, (DateTime<Utc>, bool)> {
     let mut best: HashMap<String, (DateTime<Utc>, bool)> = HashMap::new();
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -274,6 +275,7 @@ pub fn combine(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / secret store is fine
 mod tests {
     use super::*;
 

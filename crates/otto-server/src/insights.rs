@@ -305,6 +305,7 @@ pub struct ReportView {
 /// One report per period = one `summary-*.md` / `report-*.html` / `metrics-*.json`
 /// triple keyed by `(kind, start, end)`. We enumerate the three subdirs and
 /// build a view per discovered period, preferring the HTML mtime for `created_at`.
+#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
 pub fn list_reports(dir: &Path) -> Vec<ReportView> {
     let mut out: Vec<ReportView> = Vec::new();
     for kind in Kind::ALL {

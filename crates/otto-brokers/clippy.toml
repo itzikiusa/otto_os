@@ -1,0 +1,16 @@
+# Blocking calls that must not run on a tokio worker (perf/03 F5, perf2 N3).
+# Clippy reads the clippy.toml nearest the crate manifest, so this applies to
+# this crate only. In async code use `tokio::process` / `tokio::fs`, the
+# `otto_core::secrets::{get,put,delete}_async` helpers, or wrap the work in
+# `tokio::task::spawn_blocking`. A call that is reviewed to run in a sync
+# context (a blocking-pool closure, a dedicated thread, a test) carries
+# `#[allow(clippy::disallowed_methods)]` with a one-line reason.
+disallowed-methods = [
+    { path = "std::process::Command::output", reason = "blocks the thread until the child exits; use tokio::process or spawn_blocking in async code" },
+    { path = "std::process::Command::status", reason = "blocks the thread until the child exits; use tokio::process or spawn_blocking in async code" },
+    { path = "std::fs::remove_dir_all", reason = "recursive delete can take seconds; use tokio::fs::remove_dir_all or spawn_blocking in async code" },
+    { path = "std::fs::read_dir", reason = "directory walks block; use tokio::fs::read_dir or spawn_blocking in async code" },
+    { path = "otto_core::secrets::SecretStore::put", reason = "blocking backend (Keychain IPC / encrypted-file fsync); use otto_core::secrets::{get,put,delete}_async in async code" },
+    { path = "otto_core::secrets::SecretStore::get", reason = "blocking backend (Keychain IPC / encrypted-file fsync); use otto_core::secrets::{get,put,delete}_async in async code" },
+    { path = "otto_core::secrets::SecretStore::delete", reason = "blocking backend (Keychain IPC / encrypted-file fsync); use otto_core::secrets::{get,put,delete}_async in async code" },
+]

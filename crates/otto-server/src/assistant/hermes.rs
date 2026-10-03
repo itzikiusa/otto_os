@@ -49,6 +49,7 @@ pub fn parse_entries(content: &str) -> Vec<String> {
 /// Read every `*.md` regular file directly in `dir` (no recursion, no
 /// symlinks, no lock files), sorted by name. A missing dir is an empty result.
 /// Read-only: `symlink_metadata` + `File::open` for reading, nothing else.
+#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
 pub fn scan_dir(dir: &Path) -> Vec<HermesFile> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -104,6 +105,7 @@ pub fn tags_for(file: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod tests {
     use super::*;
 

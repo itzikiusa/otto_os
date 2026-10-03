@@ -866,6 +866,7 @@ pub struct SubagentMetaCache {
 
 impl SubagentMetaCache {
     /// id → (description, meta mtime) for every valid sidecar in `dir`.
+    #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — the turn-oracle probe calls it
     fn read(&mut self, dir: &Path) -> BTreeMap<String, (Option<String>, Option<SystemTime>)> {
         let mut meta = BTreeMap::new();
         let mut seen = std::collections::HashMap::with_capacity(self.files.len());
@@ -960,6 +961,7 @@ pub fn subagents_cached(
 /// Newest mtime over the main transcript, `subagents/*.jsonl` and
 /// `tasks/*.output` — the stall clock. `None` when nothing exists yet
 /// (never "no progress").
+#[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — the turn-oracle probe calls it
 pub fn progress_stamp(
     main: &Path,
     subagent_dir: Option<&Path>,

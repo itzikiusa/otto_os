@@ -205,6 +205,7 @@ fn read_capped(path: &Path, start: u64, cap: u64) -> std::io::Result<Chunk> {
     })
 }
 
+#[allow(clippy::disallowed_methods)] // sync helper: read_daemon_logs runs via spawn_blocking
 fn list_log_files(log_dir: &Path) -> Result<Vec<LogFileEntry>, Error> {
     let entries = std::fs::read_dir(log_dir)
         .map_err(|e| Error::Internal(format!("read log directory {}: {e}", log_dir.display())))?;

@@ -68,6 +68,7 @@ fn secret_ref(id: &str) -> String {
 }
 
 /// Read a server's secret blob; absent/corrupt → empty object.
+#[allow(clippy::disallowed_methods)] // sync McpProvider path: enabled_servers is blocking by contract (already blocks on a bridge thread)
 fn load_secret_blob(secrets: &dyn SecretStore, id: &str) -> Value {
     secrets
         .get(&secret_ref(id))
@@ -388,6 +389,7 @@ fn merge_secret_env(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod tests {
     use super::*;
     use otto_state::NewMcpServer;

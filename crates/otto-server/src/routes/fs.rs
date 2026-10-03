@@ -292,6 +292,7 @@ pub async fn browse(
     .map(Json)
 }
 
+#[allow(clippy::disallowed_methods)] // sync helper: browse runs it via filesystem_work (blocking pool)
 fn browse_sync(
     params: BrowseParams,
     cancel: &std::sync::atomic::AtomicBool,

@@ -158,6 +158,7 @@ struct SearchOutcome {
 /// The walk itself. Blocking; checks `cancel` and the budgets between files.
 /// Each file is lowercased ONCE and skipped whole unless it contains the
 /// needle — the old loop lowercased (and allocated) every line of every file.
+#[allow(clippy::disallowed_methods)] // sync helper: code_search runs it via offload::blocking
 fn search_tree(
     root: &Path,
     search_root: &Path,

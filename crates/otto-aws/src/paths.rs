@@ -62,6 +62,7 @@ pub fn owned_file(dir: &Path, stem: &str, ext: &str) -> Result<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / secret store is fine
 mod tests {
     use super::*;
 

@@ -809,6 +809,7 @@ async fn codex_baseline_ordinal(p: std::path::PathBuf) -> u64 {
 /// Newest `subagents/*.jsonl` mtime. A grandchild still writing resets the
 /// oracle's idle-confirm window — the only guard for nested sub-agents, whose
 /// launches are recorded in the CHILD's transcript (design §8.11).
+#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
 fn newest_subagent_write(dir: &std::path::Path) -> Option<std::time::SystemTime> {
     let rd = std::fs::read_dir(dir).ok()?;
     rd.flatten()
@@ -823,6 +824,7 @@ fn newest_subagent_write(dir: &std::path::Path) -> Option<std::time::SystemTime>
 /// scanned (claude honours `$TMPDIR`, but the daemon's differs from the CLI's
 /// under launchd). Purely an extra stall-clock input — a miss degrades the
 /// clock to transcript + sub-agents, never to "no progress".
+#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
 fn claude_tasks_dir(cwd_canon: &str, psid: &str) -> Option<std::path::PathBuf> {
     let enc: String = cwd_canon
         .chars()

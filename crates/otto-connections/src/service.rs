@@ -287,7 +287,7 @@ impl ConnectionsService {
                     // Write a fresh secret first: a failed Keychain write leaves the row
                     // untouched, and a failed DB write cannot replace its old secret.
                     let key = format!("conn-{}-{}", id, otto_core::new_id());
-                    self.secrets.put(&key, &password)?;
+                    otto_core::secrets::put_async(&self.secrets, &key, &password).await?;
                     let superseded = conn.secret_ref.clone();
                     conn.params["conn_string"] = template.into();
                     conn = self
@@ -307,7 +307,8 @@ impl ConnectionsService {
                     // used to reference would otherwise linger in the Keychain
                     // forever (nothing else ever reads or deletes it).
                     if let Some(old) = superseded.filter(|old| *old != key) {
-                        if let Err(e) = self.secrets.delete(&old) {
+                        if let Err(e) = otto_core::secrets::delete_async(&self.secrets, &old).await
+                        {
                             tracing::warn!(connection = %id, "failed to delete superseded secret: {e}");
                         }
                     }
@@ -530,7 +531,7 @@ impl ConnectionsService {
             .await?;
         if let Some(secret) = req.secret {
             let secret_ref = secret_ref_for(&conn.id);
-            self.secrets.put(&secret_ref, &secret)?;
+            otto_core::secrets::put_async(&self.secrets, &secret_ref, &secret).await?;
             return self
                 .repo
                 .update(
@@ -593,7 +594,7 @@ impl ConnectionsService {
                 .secret_ref
                 .clone()
                 .unwrap_or_else(|| secret_ref_for(id));
-            self.secrets.put(&secret_ref, secret)?;
+            otto_core::secrets::put_async(&self.secrets, &secret_ref, secret).await?;
             new_secret_ref = Some(Some(secret_ref));
         }
 
@@ -638,7 +639,7 @@ impl ConnectionsService {
         self.authorize(id, user_id, "configure").await?;
         let conn = self.repo.get(id).await?;
         if let Some(secret_ref) = &conn.secret_ref {
-            if let Err(e) = self.secrets.delete(secret_ref) {
+            if let Err(e) = otto_core::secrets::delete_async(&self.secrets, secret_ref).await {
                 tracing::warn!(connection = %id, "failed to delete secret: {e}");
             }
         }
@@ -958,6 +959,7 @@ fn needs_credential_migration(conn: &Connection) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / secret store is fine
 mod tests {
     use super::*;
     use std::collections::HashMap;

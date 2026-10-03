@@ -14,6 +14,7 @@
 //! Adding a suite: create `tests/<name>.rs` and add a `#[path]` line below —
 //! `every_integration_test_file_is_linked` fails until you do (Cargo.toml has
 //! `autotests = false`, so an unlisted file would otherwise never run).
+#![allow(clippy::disallowed_methods)] // integration tests: plain sync fs / secret store is fine
 
 #[path = "activity_isolation.rs"]
 mod activity_isolation;

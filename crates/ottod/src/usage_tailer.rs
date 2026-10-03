@@ -1236,6 +1236,7 @@ fn list_codex_files(home: &Path) -> Vec<(PathBuf, u64)> {
 }
 
 /// Immediate subdirectories of `dir` (empty on any error).
+#[allow(clippy::disallowed_methods)] // sync helper: list_claude_files/list_codex_files only run inside spawn_blocking
 fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -1249,6 +1250,7 @@ fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
 
 /// Files in `dir` with the given extension whose name passes `name_ok`, with
 /// their sizes (non-recursive; empty on any error; unstat-able files skipped).
+#[allow(clippy::disallowed_methods)] // sync helper: list_claude_files/list_codex_files only run inside spawn_blocking
 fn read_files_with_ext(
     dir: &Path,
     ext: &str,
@@ -1507,6 +1509,7 @@ fn codex_thread_uuid(file: &Path) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs is fine
 mod tests {
     use super::*;
 

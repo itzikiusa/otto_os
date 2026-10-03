@@ -644,7 +644,8 @@ impl AwsService {
         crate::access::initialize(&self.pool, &user, &row.id).await?;
         let row = if let Some(s) = secret {
             let sref = secret_ref_for(&row.id);
-            self.secrets.put(&sref, &serde_json::to_string(&s)?)?;
+            otto_core::secrets::put_async(&self.secrets, &sref, &serde_json::to_string(&s)?)
+                .await?;
             self.repo
                 .update(
                     &row.id,
@@ -789,7 +790,7 @@ impl AwsService {
                 if req.auth_mode.is_some() && cur.auth_mode != "profile" {
                     // Switching away from keys: drop the secret.
                     if let Some(sref) = &cur.secret_ref {
-                        let _ = self.secrets.delete(sref);
+                        let _ = otto_core::secrets::delete_async(&self.secrets, sref).await;
                     }
                     patch.secret_ref = Some(None);
                     params.remove("access_key_id");
@@ -835,7 +836,12 @@ impl AwsService {
                         None => existing.and_then(|e| e.session_token),
                     },
                 };
-                self.secrets.put(&sref, &serde_json::to_string(&merged)?)?;
+                otto_core::secrets::put_async(
+                    &self.secrets,
+                    &sref,
+                    &serde_json::to_string(&merged)?,
+                )
+                .await?;
                 patch.secret_ref = Some(Some(sref));
                 if req.auth_mode.is_some() && cur.auth_mode != "access_keys" {
                     patch.profile = Some(None);
@@ -854,7 +860,7 @@ impl AwsService {
     pub async fn delete(&self, id: &Id) -> Result<()> {
         let cur = self.repo.get(id).await?;
         if let Some(sref) = &cur.secret_ref {
-            let _ = self.secrets.delete(sref);
+            let _ = otto_core::secrets::delete_async(&self.secrets, sref).await;
         }
         assume_cache_evict(id);
         crate::creds::evict(id);
@@ -866,7 +872,7 @@ impl AwsService {
     // ----- Env / run --------------------------------------------------------
 
     /// Static creds for a keys-mode account (from the Keychain).
-    fn static_creds(&self, account: &AwsAccountRow) -> Result<StaticCreds> {
+    async fn static_creds(&self, account: &AwsAccountRow) -> Result<StaticCreds> {
         let akid = account
             .params
             .get("access_key_id")
@@ -877,9 +883,8 @@ impl AwsService {
             .secret_ref
             .as_deref()
             .ok_or_else(|| Error::Invalid("account has no stored secret".into()))?;
-        let raw = self
-            .secrets
-            .get(sref)?
+        let raw = otto_core::secrets::get_async(&self.secrets, sref)
+            .await?
             .ok_or_else(|| Error::Invalid("login required: the stored secret key is missing from the Keychain — re-enter the access keys".into()))?;
         let ks: KeySecret = serde_json::from_str(&raw)?;
         Ok(StaticCreds {
@@ -900,7 +905,7 @@ impl AwsService {
         let mode = AuthMode::parse(&account.auth_mode).unwrap_or(AuthMode::Profile);
         let base_creds = match mode {
             AuthMode::Profile => None,
-            AuthMode::AccessKeys => Some(self.static_creds(account)?),
+            AuthMode::AccessKeys => Some(self.static_creds(account).await?),
         };
         let endpoint = endpoint_url_of(account);
         let mut base = build_env(
@@ -1304,6 +1309,7 @@ pub fn with_json_output(args: &[&str]) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / secret store is fine
 mod tests {
     use super::*;
 

@@ -1146,6 +1146,8 @@ async fn run(cfg: Config) -> Result<(), String> {
                     Ok(ids) if !ids.is_empty() => {
                         let root = ctx_root.clone();
                         let n = ids.len();
+                        // Runs inside spawn_blocking (std fs is fine there).
+                        #[allow(clippy::disallowed_methods)]
                         let dirs = tokio::task::spawn_blocking(move || {
                             ids.iter()
                                 .filter_map(|id| otto_core::paths::confine_join(&root, id))
@@ -1714,6 +1716,8 @@ impl BootPhases {
     }
 }
 
+// Sync by design: spawned on the blocking pool after the listener starts.
+#[allow(clippy::disallowed_methods)]
 fn sweep_stray_deploy_jobs() {
     let Some(list) = probe_cmd("launchctl", &["list"]) else {
         return;
@@ -1788,6 +1792,9 @@ fn prepend_path(dirs: &[String]) {
 
 /// Run `cmd args`, returning trimmed stdout on success (best-effort; `None` if
 /// the command is missing or fails). Used to discover tool install prefixes.
+// Sync by design: called from `augment_path` before the runtime starts and
+// from `sweep_stray_deploy_jobs`, which runs on the blocking pool.
+#[allow(clippy::disallowed_methods)]
 fn probe_cmd(cmd: &str, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new(cmd).args(args).output().ok()?;
     out.status

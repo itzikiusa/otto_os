@@ -363,6 +363,7 @@ impl ProgressProbeSchedule {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / secret store is fine
 mod tests {
     use super::*;
     #[test]
@@ -408,6 +409,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs is fine
 mod transport_tests {
     use super::*;
     use crate::http::open_sftp;

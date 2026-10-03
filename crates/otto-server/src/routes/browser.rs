@@ -1472,8 +1472,8 @@ async fn create_credential(
 
     let id = otto_core::new_id();
     let keychain_ref = keychain_ref_for(&id);
-    ctx.secrets
-        .put(&keychain_ref, &req.password)
+    otto_core::secrets::put_async(&ctx.secrets, &keychain_ref, &req.password)
+        .await
         .map_err(ApiError)?;
 
     let created = ctx
@@ -1522,8 +1522,8 @@ async fn update_credential(
         if password.is_empty() {
             return Err(ApiError(Error::Invalid("password cannot be empty".into())));
         }
-        ctx.secrets
-            .put(&existing.keychain_ref, password)
+        otto_core::secrets::put_async(&ctx.secrets, &existing.keychain_ref, password)
+            .await
             .map_err(ApiError)?;
     }
 

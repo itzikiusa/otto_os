@@ -1812,6 +1812,7 @@ fn render_diff(diff: &otto_core::api::DiffResp, cap: usize) -> (String, bool) {
 /// Append every `references/*.md` file sitting beside `skill_md` to `out`
 /// (sorted for determinism), so agents that cannot read files still get the
 /// skill's full method. Best-effort: a missing/unreadable dir is ignored.
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 fn append_skill_references(out: &mut String, skill_md: &std::path::Path) {
     let Some(refs_dir) = skill_md.parent().map(|d| d.join("references")) else {
         return;
@@ -2017,6 +2018,7 @@ fn is_safe_skill_package_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 fn remove_staged_package_path(path: &std::path::Path) -> std::result::Result<(), String> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
@@ -2028,6 +2030,7 @@ fn remove_staged_package_path(path: &std::path::Path) -> std::result::Result<(),
     }
 }
 
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 fn collect_staged_package_files(
     dir: &std::path::Path,
     root: &std::path::Path,
@@ -6509,13 +6512,17 @@ pub(crate) async fn cancel_running_review(ctx: &ServerCtx, review: &Review, work
     //    durable prompt/diff rows (0100) — same lifecycle, cancelled runs are
     //    not retryable.
     let prefix = format!("otto-review-{review_id}");
-    if let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) {
-        for entry in rd.flatten() {
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                let _ = std::fs::remove_file(entry.path());
+    #[allow(clippy::disallowed_methods)] // runs on the blocking pool via offload::blocking
+    let () = crate::offload::blocking(move || {
+        if let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) {
+            for entry in rd.flatten() {
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
             }
         }
-    }
+    })
+    .await;
     let _ = ctx.reviews_store.delete_run_artifacts(&review_id).await;
 
     // 5. Broadcast the terminal status to subscribers.
@@ -8379,6 +8386,7 @@ mod terminal_input_access_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod readiness_tests {
     use super::local_branch_facts;
     use std::path::Path;

@@ -60,6 +60,7 @@ impl CacheKey {
         )
     }
 
+    #[allow(clippy::disallowed_methods)] // sync helper: callers run it via spawn_blocking
     fn stamp(&self) -> Result<Stamp> {
         let target = match self.sub.as_deref() {
             Some(sub) => otto_transcript::subagent_path(&self.path, sub)

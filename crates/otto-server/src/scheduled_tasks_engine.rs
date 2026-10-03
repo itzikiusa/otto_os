@@ -1213,6 +1213,7 @@ async fn gc_old_worktrees(
     // Directory scan + deletes off the runtime (perf: a worktree's
     // `remove_dir_all` can take seconds on a big checkout).
     let dir = worktrees_dir.to_path_buf();
+    #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
     let listed = tokio::task::spawn_blocking(move || {
         std::fs::read_dir(&dir).map(|rd| {
             rd.filter_map(|e| e.ok())
@@ -1376,6 +1377,7 @@ async fn deliver(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod tests {
     use super::*;
     use serde_json::json;

@@ -611,6 +611,7 @@ impl RunContextFiles {
 
     /// The `jira-<KEY>.md` this run fetched, if any. The engine writes exactly
     /// one per run (`prepare_context`), so the first match is the ticket.
+    #[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
     pub fn read_jira_md(&self) -> Option<String> {
         let dir = self.dir.as_ref()?;
         let mut names: Vec<String> = std::fs::read_dir(dir)
@@ -623,6 +624,7 @@ impl RunContextFiles {
         self.read_named(names.first()?)
     }
 
+    #[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
     pub fn list_step_mds(&self) -> Vec<String> {
         let Some(dir) = &self.dir else { return vec![] };
         let Ok(rd) = std::fs::read_dir(dir) else {
