@@ -57,6 +57,12 @@ self.addEventListener('fetch', (event) => {
   // Never intercept API or WebSocket traffic — always the live daemon.
   if (url.pathname.startsWith('/api') || url.pathname.startsWith('/ws')) return;
   if (event.request.method !== 'GET') return;
+  // Vite dev-server modules (`npm run dev`) are never intercepted. The
+  // network-first branch below cached every one of them (each HMR `?t=` URL a
+  // new entry) and put the worker on every module fetch, which also hid them
+  // from Playwright's `page.route`. A built app never serves these paths, so
+  // production caching is unchanged (no CACHE_NAME bump).
+  if (/^\/(src|@vite|@fs|@id|node_modules)\//.test(url.pathname)) return;
 
   // App shell (navigations / HTML): NETWORK-FIRST, cache as offline fallback.
   const isNav =
