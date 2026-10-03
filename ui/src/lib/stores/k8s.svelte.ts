@@ -31,6 +31,7 @@ import type {
   OttoEvent,
   UpsertK8sClusterReq,
 } from '../api/types';
+import { announceModule } from '../lazyModule';
 
 export type { K8sDrawerTab, K8sMonitorUi, K8sClusterUi } from '../../modules/kubernetes/viewState';
 /** How many (cluster, kind, namespace) row sets stay cached so switching back
@@ -736,4 +737,7 @@ class K8sStore {
 }
 
 export const k8s = new K8sStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf G2): let it see this store
+// however it was first imported.
+announceModule('k8s', k8s);
 resourceAccess.subscribe(change=>k8s.onAccessChange(change));

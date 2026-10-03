@@ -8,6 +8,7 @@ import { toasts } from '../toast.svelte';
 import { loadErrorText } from '../loadError';
 import { exportCsv, downloadJson } from '../components/exporters';
 import type { Id } from './types';
+import { announceModule } from '../lazyModule';
 
 export interface ProviderUsage {
   provider: string;
@@ -668,3 +669,6 @@ class UsageStore {
 }
 
 export const usage = new UsageStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf G2): let it see this store
+// however it was first imported.
+announceModule('usage', usage);

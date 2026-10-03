@@ -62,6 +62,7 @@ import { forgetEditorState, forgetEditorStates, hydrateEditorHistory } from '../
 import { dropGridState, parkedEditCount, releaseGridResult } from '../../modules/database/grid-tab-state';
 import { estimateResultBytes, isReleased, releasedStub, resultBudget } from './db-result-budget';
 import { clipHistory } from './clipHistory.svelte';
+import { announceModule } from '../lazyModule';
 
 /** Connection kinds the explorer can browse (the DB engines). */
 export const DB_KINDS = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'] as const;
@@ -4347,6 +4348,9 @@ function isQuotaError(e: unknown): boolean {
 }
 
 export const database = new DatabaseStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf G2): let it see this store
+// however it was first imported.
+announceModule('database', database);
 // Copies made while a masked tab is active never reach the clipboard ring.
 clipHistory.setGuard(() => database.tab?.mask === true);
 if (typeof window !== 'undefined') {

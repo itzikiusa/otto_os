@@ -36,3 +36,54 @@ test('lazyModule: a failed import drops its calls and retries on the next use', 
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual(seen, [2]);
 });
+
+test('lazyModule: peek() sees a module that announced itself under the key, and never imports', async () => {
+  const { announceModule } = await import('../src/lib/lazyModule.ts');
+  let loads = 0;
+  const m = lazyModule(async () => {
+    loads += 1;
+    return { id: 'via-handle' };
+  }, 'g2-test-store');
+  const other = lazyModule(async () => ({ id: 'x' }), 'g2-other');
+  assert.equal(m.peek(), null);
+  // A page imported the store statically: it announces itself at evaluation.
+  const store = { id: 'static' };
+  announceModule('g2-test-store', store);
+  assert.equal(m.peek(), store);
+  assert.equal(other.peek(), null, 'another key stays unloaded');
+  assert.equal(loads, 0, 'peek never imports');
+});
+
+// Events that only matter to a store someone already uses route through
+// peek() (perf G2): `use()` there imported the page store into every document.
+test('events: reconnect / restart / periodic events peek page stores instead of loading them', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const src = join(import.meta.dirname, '..', 'src');
+  const ev = readFileSync(join(src, 'lib/events.svelte.ts'), 'utf8');
+  for (const call of [
+    'swarmStore.peek()?.resync()',
+    'databaseStore.peek()?.onDaemonRestart()',
+    'usageStore.peek()?.applyMetricsTick()',
+    'swarmStore.peek()?.applyEvent(parsed)',
+    "if (parsed.type === 'k8s_monitor_cycle') k8sStore.peek()?.applyEvent(parsed)",
+    'personalAgentsStore.peek()?.resyncRooms()',
+  ]) {
+    assert.ok(ev.includes(call), `expected ${call}`);
+  }
+  for (const banned of ['swarm.resync()', 'database.onDaemonRestart()', 'usage.applyMetricsTick()']) {
+    assert.ok(!ev.includes(`.use((${banned.split('.')[0]}) => ${banned})`) && !ev.includes(`=> void ${banned}`), banned);
+  }
+  // Every peeked handle has a key, and its store announces itself under it.
+  const files: Record<string, string> = {
+    swarm: 'lib/stores/swarm.svelte.ts',
+    database: 'lib/stores/database.svelte.ts',
+    usage: 'lib/api/usage.svelte.ts',
+    personalAgents: 'lib/stores/personalAgents.svelte.ts',
+    k8s: 'lib/stores/k8s.svelte.ts',
+  };
+  for (const [key, file] of Object.entries(files)) {
+    assert.match(ev, new RegExp(`const ${key}Store = lazyModule\\([^\\n]*, '${key}'\\);`), `${key}Store needs its key`);
+    assert.match(readFileSync(join(src, file), 'utf8'), new RegExp(`^announceModule\\('${key}', ${key}\\);$`, 'm'), file);
+  }
+});
