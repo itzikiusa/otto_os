@@ -619,14 +619,73 @@ async fn get_snapshot(
     }))
 }
 
+/// Query for a raw-body media upload (`POST /proof-packs/{id}/media?kind=…&title=…`
+/// with the bytes as the body and the mime as `Content-Type`).
+#[derive(Debug, Deserialize)]
+struct RawMediaQuery {
+    kind: Option<String>,
+    title: Option<String>,
+}
+
 async fn add_media(
     State(ctx): State<ServerCtx>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
-    Json(req): Json<AttachMediaReq>,
+    Query(rq): Query<RawMediaQuery>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> ApiResult<Json<ProofPackResp>> {
     use base64::Engine;
     let pack = pack_for(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let ct = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    // Raw body (the UI's path: no base64 inflation, no JSON parse) or the
+    // legacy base64 JSON envelope — both decoded/parsed off the runtime.
+    struct MediaIn {
+        kind: String,
+        title: String,
+        mime: String,
+        data_base64: String,
+        metadata: Option<Value>,
+        raw: Option<Vec<u8>>,
+    }
+    let req: MediaIn = if ct == "application/json" || ct.is_empty() {
+        let j =
+            tokio::task::spawn_blocking(move || serde_json::from_slice::<AttachMediaReq>(&body))
+                .await
+                .map_err(|e| ApiError(Error::Internal(format!("media parse join: {e}"))))?
+                .map_err(|e| ApiError(Error::Invalid(format!("invalid media request: {e}"))))?;
+        MediaIn {
+            kind: j.kind,
+            title: j.title,
+            mime: j.mime,
+            data_base64: j.data_base64,
+            metadata: j.metadata,
+            raw: None,
+        }
+    } else {
+        MediaIn {
+            kind: rq.kind.unwrap_or_else(|| {
+                if ct.starts_with("video/") {
+                    "video".into()
+                } else {
+                    "screenshot".into()
+                }
+            }),
+            title: rq.title.unwrap_or_default(),
+            mime: ct.clone(),
+            data_base64: String::new(),
+            metadata: None,
+            raw: Some(body.to_vec()),
+        }
+    };
     let kind = parse_kind(&req.kind)?;
     if !kind.is_media() {
         return Err(ApiError(Error::Invalid(
@@ -640,14 +699,19 @@ async fn add_media(
             engine::ALLOWED_MEDIA_MIMES.join(", ")
         ))));
     }
-    // Decoding ~34 MiB of base64 is CPU work — off the async workers.
-    let b64 = req.data_base64;
-    let data = tokio::task::spawn_blocking(move || {
-        base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())
-    })
-    .await
-    .map_err(|e| ApiError(Error::Internal(format!("media decode join: {e}"))))?
-    .map_err(|_| ApiError(Error::Invalid("data_base64 is not valid base64".into())))?;
+    let data = match req.raw {
+        Some(raw) => raw,
+        None => {
+            // Decoding ~34 MiB of base64 is CPU work — off the async workers.
+            let b64 = req.data_base64;
+            tokio::task::spawn_blocking(move || {
+                base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())
+            })
+            .await
+            .map_err(|e| ApiError(Error::Internal(format!("media decode join: {e}"))))?
+            .map_err(|_| ApiError(Error::Invalid("data_base64 is not valid base64".into())))?
+        }
+    };
     if data.is_empty() {
         return Err(ApiError(Error::Invalid("empty media".into())));
     }
