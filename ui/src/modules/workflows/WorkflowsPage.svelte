@@ -36,6 +36,7 @@
   import { workflowsPagePort } from '../../lib/uiCommands/workflows';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { findPlaceholder, resultDestinations, runInputExample, runInputSkeleton } from './runInput';
   import type {
     Workflow,
     WorkflowGraph,
@@ -841,34 +842,17 @@
     return s;
   }
 
-  // A starter run-input JSON tailored to what this graph needs (repo for
-  // review/PR nodes, story for product nodes), so the user knows what to fill in.
-  function suggestRunInput(): string {
-    const k = collectKinds();
-    const obj: Record<string, unknown> = {};
-    // Where the agents run (the repo/path to work in). Defaults to the workspace
-    // root if omitted; set it to operate on a different repo.
-    obj.working_directory = '~/path/to/repo';
-    if (k.has('review_run') || k.has('git_pr')) {
-      // Declare the repos/branches the run operates on — source AND
-      // destination; several entries (branches, worktrees, repos) supported.
-      // Omitted `source` ⇒ the repo's detected default branch.
-      obj.repos = [
-        { repo: '<repo id, name, or path>', type: 'branch', name: '<work branch>', source: '<target branch — optional>' },
-      ];
+  // The run-input template is guidance only (W2): the full annotated example
+  // is the textarea placeholder; "Suggest" inserts just the `<…>` slots this
+  // graph needs. Placeholder values are rejected before the run is sent.
+  const runInputPlaceholder = $derived(runInputExample(collectKinds()));
+  const runDestinations = $derived.by(() => {
+    try {
+      return resultDestinations(JSON.parse(runInputText));
+    } catch {
+      return [];
     }
-    if (k.has('product_analyze') || k.has('product_rewrite') || k.has('product_plan') || k.has('product_publish')) {
-      obj.story_id = '<product story id>';
-    }
-    obj.msg = 'What you want done — instructions for the agents.';
-    obj.jira_ticket = 'PROJ-0000';
-    obj.goals = ['e.g. 100% test coverage (services)', 'under 2 minutes runtime'];
-    // Optional: post the result somewhere specific (else it replies to the
-    // trigger's origin; a manual run posts nowhere unless you set this).
-    obj.result_channel = 'slack';
-    obj.result_chat = '<channel id — optional>';
-    return JSON.stringify(obj, null, 2);
-  }
+  });
 
   // Invalid run-input JSON is a field error: said inline under the field (the
   // panel opens if a "Run from here" found it), never as a toast.
@@ -881,7 +865,14 @@
     const t = runInputText.trim();
     if (!t) return undefined;
     try {
-      return JSON.parse(t);
+      const parsed = JSON.parse(t);
+      const slot = findPlaceholder(parsed);
+      if (slot) {
+        runInputError = `Replace the placeholder in \`${slot}\` with a real value, or remove the key.`;
+        runInputOpen = true;
+        return null;
+      }
+      return parsed;
     } catch (e) {
       runInputError = `Run input isn't valid JSON (${e instanceof Error ? e.message : 'parse error'}). Fix it, or clear the field to run with no input.`;
       runInputOpen = true;
@@ -890,7 +881,6 @@
   }
 
   function openRunInput(): void {
-    if (!runInputText.trim()) runInputText = suggestRunInput();
     runInputOpen = !runInputOpen;
   }
 
@@ -1829,7 +1819,7 @@
           <div class="ri-head">
             <strong>Run input</strong>
             <span class="ri-hint">JSON the Start trigger emits to the graph — fill in repo_id / story_id / goals as needed. Leave empty to run with no input.</span>
-            <button class="btn small ghost" onclick={() => { runInputText = suggestRunInput(); }} title="Reset to a suggested template">Suggest</button>
+            <button class="btn small ghost" onclick={() => { runInputText = runInputSkeleton(collectKinds()); }} title="Insert the keys this workflow needs, as placeholders to replace">Suggest</button>
           </div>
           <textarea
             class="ri-text mono"
@@ -1839,7 +1829,7 @@
             aria-label="Run input (JSON)"
             aria-invalid={runInputError ? 'true' : undefined}
             aria-describedby={runInputError ? 'wf-run-input-err' : undefined}
-            placeholder={'{\n  "repo_id": "…",\n  "goals": ["…"]\n}'}
+            placeholder={runInputPlaceholder}
           ></textarea>
           {#if runInputError}<p class="ri-err" id="wf-run-input-err" role="alert">{runInputError}</p>{/if}
           <div class="ri-head">
@@ -1856,6 +1846,11 @@
             <option value="fan_out">Fan-out</option>
             <option value="orchestrator">Orchestrator</option>
           </select>
+          {#if runDestinations.length}
+            <p class="ri-dest" data-testid="run-result-destination">
+              <Icon name="send" size={12} /> Results will be posted to {runDestinations.join(' and ')}.
+            </p>
+          {/if}
           <div class="ri-actions">
             <button class="btn small" onclick={() => (runInputOpen = false)}>Cancel</button>
             <button class="btn primary small" disabled={running} onclick={confirmRun}>
@@ -3173,6 +3168,14 @@
   .wf-tog.on {
     background: var(--accent-soft);
     color: var(--accent-text);
+  }
+  .ri-dest {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--warning);
   }
   .ri-err {
     margin: 0;
