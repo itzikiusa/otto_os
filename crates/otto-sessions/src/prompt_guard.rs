@@ -121,29 +121,31 @@ pub fn detect_approval(provider: &str, screen: &str) -> Option<&'static [u8]> {
     None
 }
 
+/// [`detect_approval`] over a rolling byte tail + the next output chunk
+/// (see [`crate::tail_scan::scan_chunk`]); `tail` keeps [`TAIL_CAP`] bytes.
+pub fn detect_approval_in_chunk(
+    provider: &str,
+    tail: &mut Vec<u8>,
+    chunk: &[u8],
+) -> Option<&'static [u8]> {
+    let approvals = approvals_for(provider);
+    let needles: Vec<&'static str> = approvals
+        .iter()
+        .flat_map(|a| a.needles.iter().copied())
+        .collect();
+    let hit = crate::tail_scan::scan_chunk(tail, chunk, &needles, TAIL_CAP)?;
+    approvals
+        .iter()
+        .find(|a| a.needles.contains(&hit))
+        .map(|a| a.keys)
+}
+
 /// Max retained tail bytes per session — long enough to hold a multi-line trust
 /// dialog, short enough to stay cheap.
 const TAIL_CAP: usize = 1024;
 /// Don't re-approve the same session more than once per window (avoid spamming
 /// keys if the prompt redraws while the CLI processes the first acceptance).
 const DEBOUNCE: Duration = Duration::from_secs(5);
-
-/// Trim `buf` in place to at most `cap` bytes, keeping the most-recent content and
-/// NEVER splitting a UTF-8 code point. The tail holds lowercased PTY output, which
-/// routinely contains multi-byte glyphs (Powerline prompt separators U+E0B0 ``,
-/// emoji, box-drawing, CJK), so a naive `buf[buf.len() - cap..]` byte slice can
-/// land mid-char and panic the scan worker. Advance the cut to the next char
-/// boundary instead — we keep ≤ `cap` bytes, still well over the longest needle.
-fn trim_tail(buf: &mut String, cap: usize) {
-    if buf.len() <= cap {
-        return;
-    }
-    let mut cut = buf.len() - cap;
-    while cut < buf.len() && !buf.is_char_boundary(cut) {
-        cut += 1;
-    }
-    buf.replace_range(..cut, "");
-}
 
 /// Runtime guard that auto-accepts known trust/approval prompts. Wire it into
 /// the `SessionManager` (see [`crate::CompositeScanner`]) and call
@@ -152,7 +154,7 @@ pub struct PromptGuard {
     /// Set after construction (the manager owns the scanner, so this is a Weak
     /// to avoid a reference cycle).
     manager: OnceLock<Weak<SessionManager>>,
-    tails: Mutex<HashMap<Id, String>>,
+    tails: Mutex<HashMap<Id, Vec<u8>>>,
     last_approved: Mutex<HashMap<Id, Instant>>,
 }
 
@@ -192,16 +194,15 @@ impl OutputScanner for PromptGuard {
             return;
         }
 
-        // Append to the rolling tail (prompts can straddle chunk boundaries).
-        let combined = {
+        // Scan the rolling tail + the WHOLE chunk (prompts can straddle
+        // chunk boundaries; a prompt early in a large chunk used to be trimmed
+        // away before the search — perf 01 F6), keeping only a short tail.
+        let keys = {
             let mut tails = lock(&self.tails);
             let buf = tails.entry(session_id.clone()).or_default();
-            buf.push_str(&String::from_utf8_lossy(chunk).to_lowercase());
-            trim_tail(buf, TAIL_CAP);
-            buf.clone()
+            detect_approval_in_chunk(provider, buf, chunk)
         };
-
-        let Some(keys) = detect_approval(provider, &combined) else {
+        let Some(keys) = keys else {
             return;
         };
 
@@ -383,16 +384,21 @@ mod tests {
     /// Regression: a tail full of multi-byte glyphs must not panic when trimmed.
     /// The Powerline separator U+E0B0 is 3 bytes, so the byte cut point lands
     /// inside a code point — the old `buf[len-cap..]` slice panicked here.
+    /// Perf 01 F6: a trust prompt at the START of a large chunk (followed
+    /// by more than the tail's worth of redraw bytes) is still detected — the
+    /// old append-trim-search order cut it off before looking.
     #[test]
-    fn trim_tail_handles_multibyte_glyphs() {
-        let glyph = '\u{e0b0}';
-        let mut s: String = std::iter::repeat_n(glyph, TAIL_CAP).collect(); // 3×cap bytes
-        trim_tail(&mut s, TAIL_CAP); // must not panic on a mid-char byte index
-        assert!(s.len() <= TAIL_CAP);
-        assert!(
-            s.chars().all(|c| c == glyph),
-            "no split/garbled code points"
+    fn prompt_early_in_a_large_chunk_is_detected() {
+        let mut chunk = b"\n  Do you trust the files in this folder?\n".to_vec();
+        chunk.extend(std::iter::repeat_n(b' ', 6000));
+        let mut tail = Vec::new();
+        assert_eq!(
+            detect_approval_in_chunk("claude", &mut tail, &chunk),
+            detect_approval("claude", "do you trust the files in this folder")
         );
+        assert!(detect_approval_in_chunk("claude", &mut tail, &chunk).is_some());
+        assert!(tail.len() <= TAIL_CAP);
+        assert_eq!(detect_approval_in_chunk("shell", &mut tail, &chunk), None);
     }
 
     /// A multi-byte trust dialog drives the full scanner path without panicking

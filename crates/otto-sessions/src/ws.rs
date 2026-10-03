@@ -137,8 +137,18 @@ enum ClientFrame {
     // coherent current-screen frame. Honors the requested `lines`. The client
     // treats every snapshot as a full rebuild (reset + repaint), so this must
     // always carry the complete retained history.
+    //
+    // Optional `cols`/`rows` (perf 01 F1): the client's measured grid. When
+    // this viewer may resize, the PTY + emulator are resized to it BEFORE the
+    // capture, so the snapshot is already at the client's width (no second
+    // "compact" snapshot after the resize confirms) and the TUI's SIGWINCH
+    // repaint arrives as ordinary live bytes after it.
     Scrollback {
         lines: usize,
+        #[serde(default)]
+        cols: Option<u16>,
+        #[serde(default)]
+        rows: Option<u16>,
     },
     // Server-side search: grep the ring-buffer scrollback for `query` (plain
     // substring, case-insensitive). The server replies with a JSON
@@ -173,6 +183,10 @@ enum ClientFrame {
     Resync {
         #[serde(default)]
         lines: usize,
+        #[serde(default)]
+        cols: Option<u16>,
+        #[serde(default)]
+        rows: Option<u16>,
     },
     // Credit-based flow control (supersedes `pause`/`resume` for clients that
     // opt in). Sent once, first thing on a new socket: from the server's
@@ -582,6 +596,7 @@ async fn apply_credit_step(
     socket: &mut WebSocket,
     out_rx: &mut Option<broadcast::Receiver<Bytes>>,
     handle: Option<&Arc<PtyHandle>>,
+    history: usize,
 ) -> std::result::Result<(), ()> {
     let msg = match step {
         CreditStep::Idle => return Ok(()),
@@ -590,7 +605,7 @@ async fn apply_credit_step(
             let (Some(rx), Some(h)) = (out_rx.as_mut(), handle) else {
                 return Ok(());
             };
-            let frame = resync_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await;
+            let frame = resync_frame(rx, pty_capture(h, history)).await;
             Message::Text(frame.into())
         }
     };
@@ -627,6 +642,16 @@ const MAX_SEARCH_RESULTS: usize = 200;
 /// emulator depth: clients rebuild from snapshots, so anything less silently
 /// truncates the user's visible scrollback.
 const DEFAULT_ATTACH_HISTORY_LINES: usize = otto_pty::EMULATOR_SCROLLBACK_LINES;
+
+/// The history depth a `scrollback`/`resync` request asks for: `0` means the
+/// full retained depth; anything larger than the emulator keeps is clamped.
+fn requested_history(lines: usize) -> usize {
+    if lines == 0 {
+        DEFAULT_ATTACH_HISTORY_LINES
+    } else {
+        lines.min(DEFAULT_ATTACH_HISTORY_LINES)
+    }
+}
 
 /// Fixed first subprotocol the browser offers alongside the token; the gate
 /// echoes it back on a successful upgrade so the handshake completes. Mirrors
@@ -981,6 +1006,7 @@ async fn revive_viewer<S: SessionsCtx>(
     handle: &mut Option<Arc<PtyHandle>>,
     out_rx: &mut Option<broadcast::Receiver<Bytes>>,
     exit_rx: &mut Option<watch::Receiver<Option<i32>>>,
+    history: usize,
 ) -> std::result::Result<bool, ()> {
     let Some(fresh) = ctx.manager().live_handle(session_id) else {
         return Ok(false);
@@ -992,7 +1018,7 @@ async fn revive_viewer<S: SessionsCtx>(
     // `resync_frame`), built off the async worker. `epoch` = PTY spawn
     // counter: the client resets its local buffer when it changes (see the
     // Scrollback arm).
-    let capture = pty_capture(&fresh, DEFAULT_ATTACH_HISTORY_LINES);
+    let capture = pty_capture(&fresh, history);
     let (frame, output) = match off_worker(move || {
         let (data, epoch, output) = capture();
         (scrollback_frame(&data, epoch), output)
@@ -1031,13 +1057,16 @@ async fn next_can_input(rx: &mut watch::Receiver<bool>) -> Option<bool> {
 /// Periodic re-authorization for one attached terminal, run OFF the socket's
 /// `select!` loop so no arm of that loop ever awaits SQLite (investigation H2).
 ///
-/// It owns the `can_input` watch: each pass narrows the capability
-/// monotonically (a share downgraded mid-connection loses input and can never
-/// regain it, exactly as the old inline check did) and publishes the new value.
+/// It owns the `can_input` watch and publishes each pass's raw verdict; every
+/// subscribed socket narrows its own capability with it monotonically (a
+/// share downgraded mid-connection loses input and can never regain it,
+/// exactly as the old inline check did). Production sockets share one pass
+/// per token + session ([`shared_reauth`]); this wrapper is the unshared form.
 /// Revocation is signalled by RETURNING: dropping `can_tx` closes the channel,
 /// which the select loop reads as "evict this viewer". The task also stops the
 /// moment the socket goes away (`can_tx.closed()`), so a detached session never
 /// leaves a timer — or a DB query — behind.
+#[cfg(test)]
 async fn reauth_loop<S: SessionsCtx>(
     ctx: S,
     session_id: Id,
@@ -1045,16 +1074,97 @@ async fn reauth_loop<S: SessionsCtx>(
     can_tx: watch::Sender<bool>,
     period: Duration,
 ) {
+    reauth_loop_shared(ctx, session_id, live_auth, can_tx, period, None).await;
+}
+
+/// Key of one shared re-auth pass: the verdict is a pure function of the
+/// token and the session (and the cadence decides how stale it may get), so
+/// every socket presenting the same token to the same session can share it.
+type ReauthKey = (Id, String, Duration);
+
+/// One running re-auth pass per [`ReauthKey`] (perf 01 F8). A pane, its
+/// tile in the overview and a parked copy of it used to run three identical
+/// SQLite passes every 5 s; now they subscribe to one.
+static SHARED_REAUTH: LazyLock<dashmap::DashMap<ReauthKey, (u64, watch::Sender<bool>)>> =
+    LazyLock::new(dashmap::DashMap::new);
+
+/// Subscribe this socket to the shared re-auth pass for its token +
+/// session, starting one when none runs. The watch carries the latest raw
+/// verdict (`true` = may input); each socket narrows its own capability
+/// with it, so sharing never widens what any one socket may do. The channel
+/// closing still means "revoked: evict".
+fn shared_reauth<S: SessionsCtx>(
+    ctx: &S,
+    session_id: &Id,
+    live_auth: LiveTerminalAuth,
+    period: Duration,
+) -> watch::Receiver<bool> {
+    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let key: ReauthKey = (session_id.clone(), live_auth.token.clone(), period);
+    match SHARED_REAUTH.entry(key.clone()) {
+        dashmap::mapref::entry::Entry::Occupied(e) => e.get().1.subscribe(),
+        dashmap::mapref::entry::Entry::Vacant(v) => {
+            let (tx, rx) = watch::channel(true);
+            let generation = GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            v.insert((generation, tx.clone()));
+            tokio::spawn(reauth_loop_shared(
+                ctx.clone(),
+                session_id.clone(),
+                live_auth,
+                tx,
+                period,
+                Some((key, generation)),
+            ));
+            rx
+        }
+    }
+}
+
+/// Drop this pass's registry entry: unconditionally on revocation (sockets
+/// that arrive later must start a fresh check, not join a dying one), or —
+/// `only_if_unwatched` — only while nobody is subscribed, decided under the
+/// map's shard lock so a socket joining at that instant keeps the pass alive.
+fn unregister_reauth(
+    shared: &Option<(ReauthKey, u64)>,
+    can_tx: &watch::Sender<bool>,
+    only_if_unwatched: bool,
+) -> bool {
+    let Some((key, generation)) = shared else {
+        return true;
+    };
+    SHARED_REAUTH
+        .remove_if(key, |_, (g, _)| {
+            *g == *generation && (!only_if_unwatched || can_tx.receiver_count() == 0)
+        })
+        .is_some()
+        || !SHARED_REAUTH.get(key).is_some_and(|e| e.0 == *generation)
+}
+
+async fn reauth_loop_shared<S: SessionsCtx>(
+    ctx: S,
+    session_id: Id,
+    live_auth: LiveTerminalAuth,
+    can_tx: watch::Sender<bool>,
+    period: Duration,
+    shared: Option<(ReauthKey, u64)>,
+) {
     let mut tick = tokio::time::interval(period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await; // consume the immediate first tick — attach just authorized
     loop {
         tokio::select! {
-            _ = can_tx.closed() => return,
+            _ = can_tx.closed() => {
+                // Every socket left. Stop — unless one joined just now.
+                if unregister_reauth(&shared, &can_tx, true) {
+                    return;
+                }
+                continue;
+            }
             _ = tick.tick() => {}
         }
         let started = std::time::Instant::now();
         let Ok(current) = ctx.manager().get(&session_id).await else {
+            unregister_reauth(&shared, &can_tx, false);
             return;
         };
         let get_ms = started.elapsed().as_millis() as u64;
@@ -1069,16 +1179,17 @@ async fn reauth_loop<S: SessionsCtx>(
             );
         }
         match verdict {
-            // Capability only ever narrows for a live connection.
+            // The raw verdict; each socket narrows its own capability with
+            // it (capability only ever narrows for a live connection).
             Ok(allowed) => {
                 can_tx.send_if_modified(|cur| {
-                    let next = *cur && allowed;
-                    let changed = next != *cur;
-                    *cur = next;
+                    let changed = allowed != *cur;
+                    *cur = allowed;
                     changed
                 });
             }
             Err(_) => {
+                unregister_reauth(&shared, &can_tx, false);
                 // Access revoked mid-connection. Killing the session stays the
                 // owner-only path (unchanged): a guest losing a share must not
                 // take the owner's terminal down with it.
@@ -1190,13 +1301,17 @@ async fn serve_terminal<S: SessionsCtx>(
     // Credit-based flow control, once the client sends `credit` (else the
     // legacy pause gate above is all there is).
     let mut credit: Option<CreditGate> = None;
+    // History depth this client asked for in its last `scrollback`/`resync`
+    // (perf 01 F4): every server-initiated snapshot (credit skip, lag,
+    // resume, revive) honours it instead of always sending the full 4000
+    // rows to a 2000-row embed that then trims them.
+    let mut history = DEFAULT_ATTACH_HISTORY_LINES;
 
     // Re-authorization runs OFF this loop (investigation H2): every arm here
     // must stay free of SQLite, or a slow statement elsewhere in the daemon
     // freezes the terminal in BOTH directions. The task publishes `can_input`
     // through the watch and signals revocation by dropping its sender. The
     // resource binding is read once, from the session we already have in hand.
-    let (can_tx, mut can_rx) = watch::channel(can_input);
     let reauth_period = if ctx.resource_bound(&current) {
         REAUTH_INTERVAL_RESOURCE
     } else {
@@ -1204,13 +1319,9 @@ async fn serve_terminal<S: SessionsCtx>(
     };
     let input_user = live_auth.user.id.clone();
     let input_scoped = live_auth.scoped;
-    tokio::spawn(reauth_loop(
-        ctx.clone(),
-        session_id.clone(),
-        live_auth,
-        can_tx,
-        reauth_period,
-    ));
+    let mut can_rx = shared_reauth(&ctx, &session_id, live_auth, reauth_period);
+    // Joining a pass that already narrowed: apply its latest verdict now.
+    can_input &= *can_rx.borrow_and_update();
 
     loop {
         tokio::select! {
@@ -1219,7 +1330,7 @@ async fn serve_terminal<S: SessionsCtx>(
             // gone) → tell the client and drop the socket.
             update = next_can_input(&mut can_rx) => {
                 match update {
-                    Some(allowed) => can_input = allowed,
+                    Some(allowed) => can_input &= allowed,
                     None => {
                         let _ = socket.send(Message::Close(None)).await;
                         return;
@@ -1234,7 +1345,7 @@ async fn serve_terminal<S: SessionsCtx>(
                 flow.resume();
                 tracing::debug!(session = %session_id, "terminal ws flow auto-resume (no resume within {FLOW_AUTO_RESUME:?})");
                 if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                    if let Some(frame) = resume_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await {
+                    if let Some(frame) = resume_frame(rx, pty_capture(h, history)).await {
                         if socket.send(Message::Text(frame.into())).await.is_err() {
                             return;
                         }
@@ -1281,7 +1392,7 @@ async fn serve_terminal<S: SessionsCtx>(
                             Some(c) => c.push(buf, tokio::time::Instant::now()),
                             None => CreditStep::Send(Bytes::from(buf)),
                         };
-                        if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref()).await.is_err() {
+                        if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref(), history).await.is_err() {
                             return;
                         }
                     }
@@ -1295,7 +1406,7 @@ async fn serve_terminal<S: SessionsCtx>(
                         // fresh full snapshot; the client rebuilds from it.
                         tracing::debug!(session = %session_id, "terminal ws lagged by {n} chunks; resyncing from snapshot");
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                            let frame = resync_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await;
+                            let frame = resync_frame(rx, pty_capture(h, history)).await;
                             if socket.send(Message::Text(frame.into())).await.is_err() {
                                 return;
                             }
@@ -1329,7 +1440,7 @@ async fn serve_terminal<S: SessionsCtx>(
             // happens while this loop holds the dead handle — `exit_rx` is the
             // reliable "my process is gone" signal.) Armed only while dead.
             _ = revive_tick.tick(), if exit_rx.is_none() || out_rx.is_none() => {
-                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx).await {
+                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx, history).await {
                     Err(()) => return,
                     Ok(true) => {
                         if let Some(c) = credit.as_mut() {
@@ -1380,7 +1491,7 @@ async fn serve_terminal<S: SessionsCtx>(
                             // keystroke lands); with nothing live, `input`
                             // fails and the notice below says so.
                             if exit_rx.is_none() {
-                                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx).await {
+                                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx, history).await {
                                     Err(()) => return,
                                     Ok(true) => {
                                         if let Some(c) = credit.as_mut() {
@@ -1398,7 +1509,7 @@ async fn serve_terminal<S: SessionsCtx>(
                             // its startup, not in the prompt the user saw).
                             if wakes_on_input(view_only, user, exit_rx.is_some()) {
                                 match ctx.manager().ensure_live(&session_id).await {
-                                    Ok(()) => match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx).await {
+                                    Ok(()) => match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx, history).await {
                                         Err(()) => return,
                                         Ok(true) => {
                                             warned_input = false;
@@ -1476,7 +1587,7 @@ async fn serve_terminal<S: SessionsCtx>(
                     ClientFrame::Resume => {
                         if flow.resume() {
                             if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                                if let Some(frame) = resume_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await {
+                                if let Some(frame) = resume_frame(rx, pty_capture(h, history)).await {
                                     if socket.send(Message::Text(frame.into())).await.is_err() {
                                         return;
                                     }
@@ -1487,12 +1598,14 @@ async fn serve_terminal<S: SessionsCtx>(
                             }
                         }
                     }
-                    ClientFrame::Resync { lines } => {
-                        let want = if lines == 0 {
-                            DEFAULT_ATTACH_HISTORY_LINES
-                        } else {
-                            lines
-                        };
+                    ClientFrame::Resync { lines, cols, rows } => {
+                        let want = requested_history(lines);
+                        history = want;
+                        if let (Some(c), Some(r)) = (cols, rows) {
+                            if can_input && ctx.manager().may_resize(&session_id, conn_id) {
+                                let _ = ctx.manager().human_resize(&session_id, &input_user, input_scoped, c, r).await;
+                            }
+                        }
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
                             let frame = client_resync_frame(&mut flow, rx, pty_capture(h, want)).await;
                             if socket.send(Message::Text(frame.into())).await.is_err() {
@@ -1515,22 +1628,28 @@ async fn serve_terminal<S: SessionsCtx>(
                     ClientFrame::Ack { bytes } => {
                         if let Some(c) = credit.as_mut() {
                             let step = c.ack(bytes, tokio::time::Instant::now());
-                            if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref()).await.is_err() {
+                            if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref(), history).await.is_err() {
                                 return;
                             }
                         }
                     }
-                    ClientFrame::Scrollback { lines } => {
+                    ClientFrame::Scrollback { lines, cols, rows } => {
                         // Reproduce the live screen as one coherent frame (what
                         // tmux does on attach) PRECEDED by up to `lines` rows of
                         // scrollback history, so reconnecting restores history
                         // above the viewport instead of losing it. A `lines` of
-                        // 0 falls back to the bare current-screen snapshot.
-                        let want = if lines == 0 {
-                            DEFAULT_ATTACH_HISTORY_LINES
-                        } else {
-                            lines
-                        };
+                        // 0 falls back to the full retained depth.
+                        let want = requested_history(lines);
+                        history = want;
+                        // Attach-with-grid (perf 01 F1): reflow to the client's
+                        // grid FIRST, so this one snapshot is already at its
+                        // width (same size-authority rules as `resize`; a
+                        // same-size grid is a no-op end to end).
+                        if let (Some(c), Some(r)) = (cols, rows) {
+                            if can_input && ctx.manager().may_resize(&session_id, conn_id) {
+                                let _ = ctx.manager().human_resize(&session_id, &input_user, input_scoped, c, r).await;
+                            }
+                        }
                         // `epoch` = PTY spawn counter. When the process was
                         // respawned since the client's last attach (suspend →
                         // resume, restart, daemon restart) the client's local
@@ -1566,10 +1685,20 @@ async fn serve_terminal<S: SessionsCtx>(
                         if query.trim().is_empty() {
                             continue;
                         }
-                        let matches = handle
-                            .as_ref()
-                            .map(|h| h.search(&query, MAX_SEARCH_RESULTS))
-                            .unwrap_or_default();
+                        // The scan runs on the blocking pool (perf 01 F3):
+                        // up to 10k ring lines are copied under a brief lock
+                        // and searched after it is released, so neither this
+                        // worker nor the session's PTY reader waits on it.
+                        let matches = match handle.as_ref() {
+                            Some(h) => {
+                                let lines = h.search_lines();
+                                let q = query.clone();
+                                off_worker(move || otto_pty::ring::search_lines(&lines, &q, MAX_SEARCH_RESULTS))
+                                    .await
+                                    .unwrap_or_default()
+                            }
+                            None => Vec::new(),
+                        };
                         let frame = search_result_frame(&query, matches);
                         if socket.send(Message::Text(frame.into())).await.is_err() {
                             return;
@@ -2101,6 +2230,65 @@ mod tests {
         );
     }
 
+    /// Perf 01 F8: sockets presenting the same token to the same session
+    /// share ONE re-auth pass; it stops once the last socket leaves, a later
+    /// socket starts a fresh one, and a revocation still evicts every
+    /// subscriber within a tick.
+    #[tokio::test]
+    async fn sockets_share_one_reauth_pass_per_token_and_session() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        let sid = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let st = build(&pool).await;
+        let token = mint_share(&pool, "alice", &sid, WorkspaceRole::Editor).await;
+        let user = st
+            .auth
+            .authenticate(&token)
+            .await
+            .expect("share token authenticates")
+            .effective_user;
+        let live_auth = LiveTerminalAuth {
+            scoped: true,
+            user,
+            token: token.clone(),
+            auth: st.auth.clone(),
+        };
+        let period = Duration::from_millis(25);
+        let key: ReauthKey = (sid.clone(), token.clone(), period);
+        let entries = || SHARED_REAUTH.iter().filter(|e| *e.key() == key).count();
+
+        let a = shared_reauth(&st.ctx, &sid, live_auth.clone(), period);
+        let b = shared_reauth(&st.ctx, &sid, live_auth.clone(), period);
+        assert_eq!(entries(), 1, "one pass for both sockets");
+        assert_eq!(SHARED_REAUTH.get(&key).unwrap().1.receiver_count(), 2);
+        drop(a);
+        drop(b);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while entries() > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the unwatched pass never stopped"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let mut c = shared_reauth(&st.ctx, &sid, live_auth.clone(), period);
+        let mut d = shared_reauth(&st.ctx, &sid, live_auth, period);
+        assert!(*c.borrow_and_update() && *d.borrow_and_update());
+        AuthRepo::new(pool.clone())
+            .revoke(&token)
+            .await
+            .expect("revoke the share");
+        for rx in [&mut c, &mut d] {
+            let verdict = tokio::time::timeout(Duration::from_secs(2), next_can_input(rx))
+                .await
+                .expect("every subscriber is evicted within a tick");
+            assert_eq!(verdict, None);
+        }
+        assert_eq!(entries(), 0, "a revoked pass leaves no registry entry");
+    }
+
     // ── Flow control + search_result framing (SA-02 / SA-11) ──────────────
 
     /// SA-11: a matched line with a TAB (make output, Go/Java stack traces)
@@ -2302,11 +2490,15 @@ mod tests {
     async fn client_resync_opens_the_gate_and_replaces_the_backlog_with_one_snapshot() {
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"resync","lines":2000}"#),
-            Ok(ClientFrame::Resync { lines: 2000 })
+            Ok(ClientFrame::Resync {
+                lines: 2000,
+                cols: None,
+                rows: None
+            })
         ));
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"resync"}"#),
-            Ok(ClientFrame::Resync { lines: 0 })
+            Ok(ClientFrame::Resync { lines: 0, .. })
         ));
         let (tx, mut rx) = broadcast::channel::<Bytes>(64);
         let mut gate = FlowGate::default();
@@ -2695,5 +2887,44 @@ mod tests {
         g.superseded();
         assert!(g.held.is_empty() && !g.skipped && g.stall_deadline().is_none());
         assert_eq!(g.ack(64 * KB, now), CreditStep::Idle);
+    }
+
+    /// Attach-with-grid (perf 01 F1): `scrollback`/`resync` carry the client's
+    /// grid optionally; old clients (no grid) still parse. The requested depth
+    /// (perf 01 F4) is what later server-initiated snapshots reuse: `0` = the
+    /// full retained depth, larger values are clamped to it.
+    #[test]
+    fn scrollback_frame_carries_an_optional_grid_and_depth() {
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(
+                r#"{"type":"scrollback","lines":2000,"cols":132,"rows":40}"#
+            ),
+            Ok(ClientFrame::Scrollback {
+                lines: 2000,
+                cols: Some(132),
+                rows: Some(40)
+            })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"scrollback","lines":10000}"#),
+            Ok(ClientFrame::Scrollback {
+                lines: 10000,
+                cols: None,
+                rows: None
+            })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(
+                r#"{"type":"resync","lines":500,"cols":80,"rows":24}"#
+            ),
+            Ok(ClientFrame::Resync {
+                lines: 500,
+                cols: Some(80),
+                rows: Some(24)
+            })
+        ));
+        assert_eq!(requested_history(0), DEFAULT_ATTACH_HISTORY_LINES);
+        assert_eq!(requested_history(2000), 2000);
+        assert_eq!(requested_history(10_000), DEFAULT_ATTACH_HISTORY_LINES);
     }
 }
