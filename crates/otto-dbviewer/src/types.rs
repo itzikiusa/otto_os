@@ -1168,9 +1168,11 @@ pub fn unimplemented(engine: Engine, op: &str) -> Error {
 }
 
 /// Convenience: turn any driver-level error into [`otto_core::Error::Upstream`]
-/// (a 502 — the failure is the database's, not the request's).
-pub fn upstream<E: std::fmt::Display>(e: E) -> Error {
-    Error::Upstream(e.to_string())
+/// (a 502 — the failure is the database's, not the request's). Engine errors
+/// this crate knows (sqlx, Mongo, klickhouse) keep their structure as tagged
+/// trailer lines instead of a lossy `Display` — see [`crate::errors`].
+pub fn upstream<E: std::fmt::Display + 'static>(e: E) -> Error {
+    crate::errors::upstream_any(e)
 }
 
 /// Convenience: an invalid-request error (400).
