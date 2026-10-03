@@ -10904,3 +10904,12 @@ export interface WorkspaceSessionsUsage {
 export type * from './room-types';
 export type * from './room-recap-types';
 export type * from './db-multirun-types';
+
+// ── DB Explorer: re-attach probe (POST /connections/{id}/db/query-status) ──
+/** `QueryStatus` (otto-dbviewer types.rs). `elapsed_ms` only while running. */
+export interface DbQueryStatus {
+  status: 'running' | 'done' | 'unknown';
+  result?: QueryResult;
+  error?: string;
+  elapsed_ms?: number;
+}

@@ -538,6 +538,9 @@ class EventsClient {
     this.bootId = boot;
     if (!changed) return;
     void auth.refreshMeta();
+    // Every DB pool/tunnel died with the old daemon: mark open connections
+    // stale and re-warm them (selected first) instead of showing "ready".
+    database.onDaemonRestart();
     // "Otto restarted — N kept running · M suspended" (A4), once per boot id
     // across every window (the key is shared; storage may be unavailable).
     const text = restartSummaryText(restore);

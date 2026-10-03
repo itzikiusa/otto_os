@@ -806,6 +806,11 @@ pub struct QueryStatus {
     /// The failure message, when `status == "done"` and the query errored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Milliseconds since the query started, when `status == "running"` — so a
+    /// client that did not start the run (an agent, another window, a reload)
+    /// shows the real running time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

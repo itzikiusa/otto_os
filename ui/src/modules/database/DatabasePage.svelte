@@ -210,6 +210,12 @@
       ...(c.kind === 'ssh' && connectionAccess(c,'sftp_read','view')
         ? [{ label: 'Browse files (SFTP)', icon: 'folder', action: () => (sftpFor = c) }]
         : []),
+      ...(isDb && database.isWarming(c.id)
+        ? [{ label: 'Stop connecting', icon: 'stop', action: () => database.stopConnecting(c.id) }]
+        : []),
+      ...(isDb && database.connStatus.get(c.id)?.phase === 'idle' && database.selectedConnId !== c.id
+        ? [{ label: 'Connect in background', icon: 'refresh', action: () => void database.warm(c.id) }]
+        : []),
       ...(isDb ? popoutItems(`database/${c.id}`, c.name) : []),
       { separator: true },
       ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit', icon: 'edit', action: () => editConnection(c) }, { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteConnection(c) }] : []),
@@ -1119,9 +1125,11 @@
               {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
             </button>
             {#if st?.phase === 'connecting'}
-              <span class="conn-tab-spin spin" title="Connecting…"><Icon name="refresh" size={10} /></span>
+              <span class="conn-tab-spin spin" title={database.isWarming(c.id) ? 'Connecting in the background… (right-click to stop)' : 'Connecting…'} data-testid="conn-tab-connecting"><Icon name="refresh" size={10} /></span>
             {:else if st?.phase === 'error'}
               <span class="conn-tab-dot" title={st.error}></span>
+            {:else if st?.phase === 'idle'}
+              <span class="conn-tab-idle" title="Not connected yet — opens on click" aria-label="Not connected yet" data-testid="conn-tab-idle"></span>
             {/if}
             <button
               class="conn-tab-close"
@@ -2457,6 +2465,15 @@
   }
   .conn-tab-spin {
     color: var(--text-dim);
+    margin-inline-start: 4px;
+    flex-shrink: 0;
+  }
+  /* Restored but not connected yet: a hollow muted ring (no colour = no claim). */
+  .conn-tab-idle {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border: 1.5px solid var(--text-dim);
     margin-inline-start: 4px;
     flex-shrink: 0;
   }

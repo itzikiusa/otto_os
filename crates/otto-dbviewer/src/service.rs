@@ -207,6 +207,23 @@ struct InFlightQuery {
     /// stops Otto's side: a mongosh child is killed (`kill_on_drop`) and no
     /// further statement of a batch is sent.
     abort: Option<tokio::task::AbortHandle>,
+    /// When the query was registered. `query_status` reports it as
+    /// `elapsed_ms`, so a client that did not start the run itself (an agent's
+    /// UI-control run, another window, a reload with an old marker) still shows
+    /// the real running time instead of counting from 0.
+    started: Instant,
+}
+
+impl InFlightQuery {
+    /// The `running` status of this in-flight query, with its elapsed time.
+    fn running_status(&self) -> QueryStatus {
+        QueryStatus {
+            status: "running",
+            result: None,
+            error: None,
+            elapsed_ms: Some(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+        }
+    }
 }
 
 /// How long a cancel waits for an execution to end on its own after an
@@ -1802,6 +1819,7 @@ impl DbViewerService {
                     resolved: Some(r.clone()),
                     token: token.clone(),
                     abort: None,
+                    started: Instant::now(),
                 },
             );
         }
@@ -1957,31 +1975,29 @@ impl DbViewerService {
         self.authorize(conn_id, user_id, None, "discover").await?;
         if self.is_enforced(conn_id).await? {
             let key = format!("{user_id}:{query_id}");
-            let running = self
-                .in_flight
-                .lock()
-                .is_ok_and(|m| m.get(&key).is_some_and(|q| &q.conn_id == conn_id));
-            return Ok(QueryStatus {
-                status: if running { "running" } else { "unknown" },
+            let running = self.in_flight.lock().ok().and_then(|m| {
+                m.get(&key)
+                    .filter(|q| &q.conn_id == conn_id)
+                    .map(InFlightQuery::running_status)
+            });
+            return Ok(running.unwrap_or(QueryStatus {
+                status: "unknown",
                 result: None,
                 error: None,
-            });
+                elapsed_ms: None,
+            }));
         }
         Ok(self.legacy_query_status(conn_id, query_id))
     }
 
     fn legacy_query_status(&self, conn_id: &Id, query_id: &str) -> QueryStatus {
-        let running = self
-            .in_flight
-            .lock()
-            .map(|m| m.get(query_id).is_some_and(|q| &q.conn_id == conn_id))
-            .unwrap_or(false);
-        if running {
-            return QueryStatus {
-                status: "running",
-                result: None,
-                error: None,
-            };
+        let running = self.in_flight.lock().ok().and_then(|m| {
+            m.get(query_id)
+                .filter(|q| &q.conn_id == conn_id)
+                .map(InFlightQuery::running_status)
+        });
+        if let Some(st) = running {
+            return st;
         }
         if let Ok(mut store) = self.finished.lock() {
             if let Some(f) = store.get(query_id, conn_id, Instant::now()) {
@@ -1990,11 +2006,13 @@ impl DbViewerService {
                         status: "done",
                         result: Some(res.clone()),
                         error: None,
+                        elapsed_ms: None,
                     },
                     Err(e) => QueryStatus {
                         status: "done",
                         result: None,
                         error: Some(e.clone()),
+                        elapsed_ms: None,
                     },
                 };
             }
@@ -2003,6 +2021,7 @@ impl DbViewerService {
             status: "unknown",
             result: None,
             error: None,
+            elapsed_ms: None,
         }
     }
 
@@ -3045,7 +3064,23 @@ mod tests {
             resolved: None,
             token,
             abort: None,
+            started: Instant::now(),
         }
+    }
+
+    #[test]
+    fn running_status_reports_elapsed_time() {
+        let mut q = entry("c1", None);
+        q.started = Instant::now()
+            .checked_sub(Duration::from_millis(3_200))
+            .expect("monotonic clock past 3.2 s");
+        let st = q.running_status();
+        assert_eq!(st.status, "running");
+        let ms = st.elapsed_ms.expect("a running query reports elapsed_ms");
+        assert!((3_200..60_000).contains(&ms), "elapsed_ms = {ms}");
+        let json = serde_json::to_value(&st).unwrap();
+        assert!(json.get("result").is_none() && json.get("error").is_none());
+        assert!(json["elapsed_ms"].as_u64().is_some());
     }
 
     // --- ensure_read_only: the MCP read-only policy gate (no DB needed) --------
