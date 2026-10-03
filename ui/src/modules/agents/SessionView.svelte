@@ -88,7 +88,7 @@
 
   const maximized = $derived(ws.maximizedId === sessionId);
 
-  const session = $derived(ws.sessions.find((s) => s.id === sessionId) ?? null);
+  const session = $derived(ws.getSession(sessionId) ?? null);
   const status = $derived(ws.statusMap[sessionId] ?? session?.status ?? 'idle');
 
   // "X min idle / suspends in N" countdown hint for idle agent sessions.
@@ -206,8 +206,13 @@
       : null,
   );
   const handoverFrom = $derived(
-    handoverFromId ? (ws.sessions.find((s) => s.id === handoverFromId) ?? null) : null,
+    handoverFromId ? (ws.getSession(handoverFromId) ?? null) : null,
   );
+  // The source may not be a sidebar session (the list carries only those):
+  // fetch it by id once so the breadcrumb resolves.
+  $effect(() => {
+    if (handoverFromId && !ws.getSession(handoverFromId)) void ws.ensureSession(handoverFromId);
+  });
   const handoverPending = $derived(session?.meta?.handover_pending === true);
 
   // --- Additional directories editor (meta.extra_dirs → `--add-dir` args) -----

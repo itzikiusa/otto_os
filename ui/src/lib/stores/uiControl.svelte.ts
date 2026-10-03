@@ -144,7 +144,7 @@ class UiControlStore {
   // ── grant ────────────────────────────────────────────────────────────────
 
   private session(id: Id): Session | null {
-    return ws.sessions.find((s) => s.id === id) ?? ws.otherWsSessions.find((s) => s.id === id) ?? null;
+    return ws.getSession(id) ?? ws.otherWsSessions.find((s) => s.id === id) ?? null;
   }
 
   granted(sessionId: Id): boolean {

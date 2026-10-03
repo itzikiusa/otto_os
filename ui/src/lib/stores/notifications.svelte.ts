@@ -286,7 +286,7 @@ class NotificationStore {
     const key = notice.source_key ?? '';
     const sid = key.startsWith('session:') ? key.split(':')[1] : null;
     if (!sid) return false;
-    return ws.sessions.find((x) => x.id === sid)?.meta?.source === 'channel';
+    return ws.getSession(sid)?.meta?.source === 'channel';
   }
 
   ingest(notice: Notice): void {
@@ -450,8 +450,9 @@ class NotificationStore {
         await openExternal(action.url);
         break;
       case 'open_session': {
-        const found = ws.sessions.some((s) => s.id === action.session_id);
-        if (!found) {
+        // The main list carries only sidebar sessions — fetch others by id.
+        const found = ws.getSession(action.session_id) ?? (await ws.ensureSession(action.session_id));
+        if (!found || !ws.getSession(action.session_id)) {
           toasts.warn('Session unavailable', 'It may have been closed or belongs to another workspace.');
           return;
         }

@@ -32,13 +32,13 @@
 
   function title(id: string): string {
     if (id === DB_PANE_ID) return 'Database';
-    return ws.sessions.find((s) => s.id === id)?.title ?? '…';
+    return ws.getSession(id)?.title ?? '…';
   }
 
   /** Rich hover tooltip: title · provider · cwd (+ suspended note). */
   function tabTooltip(id: string): string {
     if (id === DB_PANE_ID) return 'Database Explorer';
-    const s = ws.sessions.find((x) => x.id === id);
+    const s = ws.getSession(id);
     if (!s) return 'Double-click to rename';
     // One short line per fact: a single very long line made a native tooltip
     // wider than the window, pinned to its edge and clipped.
@@ -100,7 +100,7 @@
   // come from `sessionState` — the same state the sidebar row shows. A stale
   // events socket stops the working pulse ("Reconnecting…").
   function tabState(id: string): SessionStateInfo {
-    const s = ws.sessions.find((x) => x.id === id);
+    const s = ws.getSession(id);
     return sessionState(s, ws.statusMap[id] ?? 'idle', needsYou(id), { stale: events.state !== 'connected' });
   }
   function isResumable(id: string): boolean {
@@ -148,7 +148,7 @@
   // pane ⋯ menu and the sidebar row (Rename · Share… · Restart · Archive ·
   // Delete), so a session means the same thing wherever it is right-clicked.
   function sessionRows(id: string): MenuItem[] {
-    const s = ws.sessions.find((x) => x.id === id);
+    const s = ws.getSession(id);
     if (!s || !ws.canEditSession(s)) return [];
     const st = ws.statusMap[id] ?? s.status;
     return [
@@ -268,7 +268,7 @@
             : []),
           ...(id === DB_PANE_ID
             ? popoutItems('database', 'Database')
-            : popoutItems(`agents/${id}`, ws.sessions.find((x) => x.id === id)?.title)),
+            : popoutItems(`agents/${id}`, ws.getSession(id)?.title)),
           { separator: true },
           { label: 'Close tab', icon: 'x', action: () => void ws.requestCloseTab(id) },
           ...(ws.openTabs.length > 1

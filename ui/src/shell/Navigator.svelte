@@ -123,7 +123,22 @@
     await ws.killSessions(ids);
     setAgentSelMode(false);
   }
-  const archSelCount = $derived([...archSel].filter((id) => ws.archivedSessions.some((s) => s.id === id)).length);
+  const archivedIds = $derived(new Set(ws.archivedSessions.map((s) => s.id)));
+  const archSelCount = $derived([...archSel].filter((id) => archivedIds.has(id)).length);
+  /** Expand / fold the Archived section; the first open loads page one. */
+  function toggleArchived(): void {
+    archivedOpen = !archivedOpen;
+    if (archivedOpen && !ws.archivedLoaded) void loadArchivedPage(false);
+  }
+  let archivedError = $state<string | null>(null);
+  async function loadArchivedPage(more: boolean): Promise<void> {
+    archivedError = null;
+    try {
+      await ws.loadArchived(more);
+    } catch (e) {
+      archivedError = e instanceof Error ? e.message : String(e);
+    }
+  }
   function toggleArchSel(id: string): void {
     const next = new Set(archSel);
     if (next.has(id)) next.delete(id);
@@ -174,9 +189,17 @@
   // sort and the row tooltip. Read once a minute at most (store-throttled).
   const canUsage = $derived(auth.can('usage', 'view'));
   const usageWs = $derived(ws.currentId ?? SCRATCH_WORKSPACE_ID);
+  // Polled only while the Tokens sort is on (the order must stay current);
+  // otherwise the rollup only feeds row tooltips, so one read per workspace
+  // switch is enough (F4).
+  const tokensMode = $derived(sessionOrder.mode === 'tokens');
   $effect(() => {
     if (!canUsage) return;
     const wid = usageWs;
+    if (!tokensMode) {
+      void sessionUsage.loadWorkspace(wid);
+      return;
+    }
     const p = pollWhileVisible(() => sessionUsage.loadWorkspace(wid), { ms: 60_000 });
     return () => p.stop();
   });
@@ -371,7 +394,7 @@
   }
 
   function startRename(id: string, current: string): void {
-    const s = ws.sessions.find((x) => x.id === id);
+    const s = ws.getSession(id);
     if (!s || !ws.canEditSession(s)) return;
     renamingId = id;
     draft = current;
@@ -1363,11 +1386,13 @@
 
     <!-- Archived sessions: parked rows under the Agents lists (restore /
          delete), folded by default. -->
-    {#if ws.archivedSessions.length > 0}
-      <button class="nav-item subtle" onclick={() => (archivedOpen = !archivedOpen)}>
+    {#if ws.hasArchived || ws.archivedSessions.length > 0}
+      <button class="nav-item subtle" aria-expanded={archivedOpen} data-testid="archived-toggle" onclick={toggleArchived}>
         <Icon name="archive" size={14} />
         <span class="grow">Archived</span>
-        <span class="count-chip">{ws.archivedSessions.length}</span>
+        {#if ws.archivedLoaded}
+          <span class="count-chip">{ws.archivedSessions.length}{ws.archivedHasMore ? '+' : ''}</span>
+        {/if}
         <Icon name={archivedOpen ? 'chevronDown' : 'chevronRight'} size={11} />
       </button>
       {#if archivedOpen}
@@ -1420,6 +1445,18 @@
               {/if}
             </div>
           {/each}
+          {#if archivedError}
+            <div class="arch-state" role="alert">
+              <span class="grow">Couldn’t load archived sessions.</span>
+              <button class="show-more" onclick={() => void loadArchivedPage(ws.archivedLoaded)}>Retry</button>
+            </div>
+          {:else if ws.archivedLoading}
+            <div class="arch-state" aria-live="polite">Loading…</div>
+          {:else if ws.archivedLoaded && ws.archivedSessions.length === 0}
+            <div class="arch-state">No archived sessions.</div>
+          {:else if ws.archivedHasMore}
+            <button class="show-more" data-testid="archived-load-more" onclick={() => void loadArchivedPage(true)}>Load more</button>
+          {/if}
         </div>
       {/if}
     {/if}
@@ -2096,6 +2133,8 @@
     display: inline-flex;
   }
   .arch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; padding: 2px 6px 4px 8px; font-size: var(--fs-xs); color: var(--text-dim); }
+  .arch-state { display: flex; align-items: center; gap: 6px; padding: 4px 10px 6px; font-size: var(--fs-xs); color: var(--text-dim); }
+  .arch-state .show-more { width: auto; padding: 0; }
   .arch-all { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }
   .arch-all input, .arch-check { margin: 0; accent-color: var(--accent); }
   .arch-check { flex-shrink: 0; }

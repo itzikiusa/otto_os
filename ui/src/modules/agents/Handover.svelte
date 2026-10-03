@@ -25,7 +25,7 @@
   }
   let { sessionId, onclose }: Props = $props();
 
-  const source = $derived(ws.sessions.find((s) => s.id === sessionId) ?? null);
+  const source = $derived(ws.getSession(sessionId) ?? null);
   // A handover target must be able to reason — shell is not a valid target, so
   // the list is registry-sourced AGENT providers only (never plain shell).
   const providers = $derived(agentProviders());

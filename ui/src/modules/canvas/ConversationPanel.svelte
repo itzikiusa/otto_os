@@ -40,9 +40,9 @@
   // Make sure the workspace store knows about the canvas session (best-effort —
   // the Terminal works without it, this just enriches the header/status).
   onMount(() => {
-    if (canvas.sessionId && !ws.sessions.find((s) => s.id === canvas.sessionId)) {
-      void ws.refreshSessions().catch(() => {});
-    }
+    // By id: the main list only carries sidebar sessions, so a full refresh
+    // would not bring this background (`canvas_assist`) row in anyway.
+    if (canvas.sessionId && !ws.getSession(canvas.sessionId)) void ws.ensureSession(canvas.sessionId);
   });
 
   async function send(): Promise<void> {

@@ -169,7 +169,7 @@
   });
 
   function sessOf(sid: string) {
-    return ws.sessions.find((s) => s.id === sid) ?? sessionDetails[sid] ?? null;
+    return ws.getSession(sid) ?? sessionDetails[sid] ?? null;
   }
   function reviewAgent(sid: string) {
     for (const id of relatedIds) {

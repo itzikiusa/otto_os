@@ -11260,4 +11260,26 @@ export interface K8sPodActionInput {
   body_template?: string | null;
 }
 
+// ── Session list query (perf: Agents page, F1/F3) ────────────────────────────
+/** Query of `GET /workspaces/{id}/sessions` (#17) and `GET /sessions` (#17b).
+ *  Every field narrows in SQL. Comma lists are sent comma-joined. */
+export interface SessionListQuery {
+  archived?: boolean;
+  kind?: 'agent' | 'connection';
+  /** Exact `meta.source`; `'none'` = no string source. */
+  source?: string;
+  status?: SessionStatus;
+  /** Newest N matching rows (1–1000), still returned oldest-first. */
+  limit?: number;
+  /** RFC 3339 cursor: rows created strictly before it. */
+  before?: string;
+  /** `true` = sidebar rows (connections + foreground agents + `with_sources`);
+   *  `false` = background agents only. */
+  foreground?: boolean;
+  /** Background sources to keep with `foreground=true` (≤ 64), e.g. `channel`. */
+  with_sources?: string[];
+  /** Fetch-by-id (≤ 64). On #17b it also lifts the `archived=false` default. */
+  ids?: Id[];
+}
+
 export type * from './maintenance-types';

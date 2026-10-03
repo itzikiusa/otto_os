@@ -849,6 +849,18 @@ the updated `Session`.
 - **Quit hook** — `POST /api/v1/app/kill-sessions` terminates every live PTY
   (the desktop app's quit hook).
 
+**How the sidebar loads (performance).** The Agents sidebar asks the daemon
+only for the rows it shows — `?archived=false&foreground=true&with_sources=channel`
+(live connections, foreground agents, Slack/Telegram tickets). Background
+engine sessions (review agents, workflow steps, assists, …) are never bulk
+downloaded: open tabs and panes are fetched by id (`GET /sessions?ids=…`) in
+the same round trip, a background session opened from its panel (or a
+notification) is fetched by id on demand, and the swarm views add `swarm` to
+`with_sources` while mounted. The Archived section loads lazily, 100 rows at a
+time, the first time it is expanded ("Load more" pages further back); the
+header shows whenever a 1-row probe finds any archived session. The per-session
+tokens rollup is polled every minute only while the **Tokens** sort is active.
+
 ---
 
 ## 5. Workspace auto-trust & the prompt-guard
@@ -1024,7 +1036,7 @@ resolve the owning workspace from the row and role-check against it.
 | Method & path | Auth | Notes |
 |---|---|---|
 | `GET /meta` | public | `MetaResp` — `providers`, `default_provider`, `tools` |
-| `GET /workspaces/{id}/sessions` | ws viewer (`Agents:View`) | `Session[]` (you see your own; ws-admin/root see all); optional `?archived=&kind=&source=&status=` filters; rows carry transient `live` + `viewers` |
+| `GET /workspaces/{id}/sessions` | ws viewer (`Agents:View`) | `Session[]` (you see your own; ws-admin/root see all); optional `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` filters (`foreground=true` = what the sidebar lists: connections + foreground agents + any `with_sources`; `ids` ≤ 64); rows carry transient `live` + `viewers` |
 | `POST /workspaces/{id}/sessions` | ws editor (`Agents:Edit`) | `CreateSessionReq` → `Session` |
 | `GET /workspaces/scratch` | `Agents:View` | the hidden scratch `Workspace` (`id: "scratch"`, `root_path` = daemon `$HOME`); every user is an implicit Editor there, so `…/scratch/sessions` starts / lists workspace-less sessions (§2); `PATCH`/`DELETE` + member edits → 409 |
 | `GET /sessions/{id}` | owner-or-admin | `Session` (with transient `live`, `viewers`) |
