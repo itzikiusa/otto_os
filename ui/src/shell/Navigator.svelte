@@ -7,6 +7,7 @@
   import StatusDot from '../lib/components/StatusDot.svelte';
   import ProviderIcon, { hasProviderIcon } from '../lib/components/ProviderIcon.svelte';
   import { router } from '../lib/router.svelte';
+  import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { startMouseDrag } from '../lib/dragCursor';
   import { ws, SCRATCH_WORKSPACE_ID } from '../lib/stores/workspace.svelte';
@@ -1056,6 +1057,7 @@
     class:drop-after={dragOverId === m.id && dropSide === 'after'}
     class:dragging={dragId === m.id}
     data-nav-id={m.id}
+    aria-busy={navPending.id === m.id || undefined}
     title={sidePane.supported ? SPLIT_HINT : undefined}
     onclick={(e) => navClick(e, m.id, m.label)}
     oncontextmenu={(e) => moduleMenu(e, m)}
@@ -1157,6 +1159,7 @@
       class:active={router.module === 'agents' || router.module === ''}
       aria-current={router.module === 'agents' || router.module === '' ? 'page' : undefined}
       data-nav-id={m.id}
+      aria-busy={navPending.id === m.id || undefined}
       title={sidePane.supported ? SPLIT_HINT : undefined}
       onclick={(e) => navClick(e, 'agents', m.label)}
       oncontextmenu={(e) => ctxMenu.show(e, [

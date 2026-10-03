@@ -141,13 +141,32 @@ test('every registered handler is in the catalog', () => {
   assert.deepEqual(extra, []);
 });
 
-test('uiCommands/index.ts imports every handler module', () => {
+test('uiCommands/index.ts registers every handler module (eager import or lazy names)', () => {
   const index = readFileSync(join(CMD_DIR, 'index.ts'), 'utf8');
   const imported = new Set([...index.matchAll(/import\s+'\.\/([\w-]+)(?:\.ts)?';/g)].map((m) => m[1]));
+  // registerLazyUiCommands('module', ['name', …], () => import('./file'), …)
+  const lazy = new Map<string, { module: string; names: string[] }>();
+  for (const m of index.matchAll(/registerLazyUiCommands\(\s*'([\w-]+)',\s*\[([^\]]*)\],\s*\(\)\s*=>\s*import\('\.\/([\w-]+)'\)/g)) {
+    assert.ok(!lazy.has(m[3]), `index.ts registers ./${m[3]} lazily twice`);
+    lazy.set(m[3], { module: m[1], names: [...m[2].matchAll(/'([\w-]+)'/g)].map((n) => n[1]).sort() });
+  }
   const files = [...new Set(regs.filter((r) => r.file.startsWith(CMD_DIR)).map((r) => basename(r.file, '.ts')))];
-  assert.deepEqual(files.filter((f) => !imported.has(f)), []);
-  // …and every side-effect import names a real file.
-  for (const m of imported) assert.ok(readdirSync(CMD_DIR).includes(`${m}.ts`), `index.ts imports missing ./${m}`);
+  assert.deepEqual(files.filter((f) => !imported.has(f) && !lazy.has(f)), []);
+  // A lazy entry lists exactly the names (and module) its file registers —
+  // a stale list would advertise a capability the file no longer has.
+  for (const [file, entry] of lazy) {
+    const own = regs.filter((r) => r.file === join(CMD_DIR, `${file}.ts`));
+    assert.deepEqual(entry.names, own.map((r) => r.name).sort(), `index.ts lazy names for ./${file}`);
+    for (const r of own) assert.equal(r.module, entry.module, `${r.name}: index.ts module for ./${file}`);
+  }
+  // …and every import names a real file.
+  for (const m of [...imported, ...lazy.keys()]) assert.ok(readdirSync(CMD_DIR).includes(`${m}.ts`), `index.ts imports missing ./${m}`);
+});
+
+test('shell-side uiCommands stay light: no handler file or catalog JSON statically imported by index.ts', () => {
+  const index = readFileSync(join(CMD_DIR, 'index.ts'), 'utf8');
+  const statics = [...index.matchAll(/^import\s+(?:[^'\n]*from\s+)?'([^']+)';/gm)].map((m) => m[1]);
+  assert.deepEqual(statics.filter((s) => s !== '../uiCommands' && s !== './nav'), []);
 });
 
 test('frames: commands are normalised and validated', () => {

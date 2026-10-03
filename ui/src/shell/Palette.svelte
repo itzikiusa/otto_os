@@ -164,6 +164,7 @@
     const open = ui.paletteOpen;
     untrack(() => {
       if (open) {
+        registry.want();
         // Hand focus back to whatever had it (a terminal, a list row) on close.
         returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         mode = ui.paletteMode;

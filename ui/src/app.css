@@ -615,3 +615,55 @@ html[data-scheme='dark'] .hljs-type {
     inset: -6px;
   }
 }
+
+/* Cold page switch (lib/navPending.svelte.ts, perf F7): the tapped sidebar /
+   rail / bottom-nav item while its page chunk loads, and the thin progress
+   bar along the top of the content column once the load is slow. */
+[data-nav-id][aria-busy='true'] {
+  cursor: progress;
+  background: var(--accent-soft);
+}
+.nav-pending-slot {
+  position: relative;
+  block-size: 0;
+  flex: none;
+}
+.nav-pending-bar {
+  position: absolute;
+  inset-inline: 0;
+  inset-block-start: 0;
+  block-size: 2px;
+  overflow: hidden;
+  z-index: 5;
+  pointer-events: none;
+  background: var(--accent-soft);
+}
+.nav-pending-bar::after {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  inline-size: 30%;
+  background: var(--accent-solid);
+}
+@media (prefers-reduced-motion: no-preference) {
+  [data-nav-id][aria-busy='true'] {
+    animation: nav-pending-pulse 0.9s ease-in-out infinite alternate;
+  }
+  .nav-pending-bar::after {
+    animation: nav-pending-slide 1.1s ease-in-out infinite;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nav-pending-bar::after {
+    inline-size: 100%;
+    opacity: 0.6;
+  }
+}
+@keyframes nav-pending-pulse {
+  from { opacity: 1; }
+  to { opacity: 0.65; }
+}
+@keyframes nav-pending-slide {
+  from { inset-inline-start: -30%; }
+  to { inset-inline-start: 100%; }
+}

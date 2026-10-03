@@ -404,6 +404,7 @@
 
   function onFocusIn(): void {
     focused = true;
+    if (inApp) registry.want();
     unread = false;
     if (inApp) keyContext.barFocused = true;
   }

@@ -439,17 +439,14 @@ class WorkspaceStore {
     }
     const selection = this.selectionGeneration;
     const current = () => generation === this.loadGeneration && token === getToken() && selection === this.selectionGeneration;
+    // The hidden scratch workspace — best-effort: a daemon without it leaves
+    // `scratch` null and the sheet falls back to `~`. Fetched WITH the list
+    // (perf F3: one round-trip instead of two before the session list).
+    const scratchReq = api.get<Workspace>(`/workspaces/${SCRATCH_WORKSPACE_ID}`).catch(() => null);
     const workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
     if (!current()) return;
     this.workspaces = workspaces;
-    // The hidden scratch workspace — best-effort: a daemon without it leaves
-    // `scratch` null and the sheet falls back to `~`.
-    let scratch: Workspace | null = null;
-    try {
-      scratch = await api.get<Workspace>(`/workspaces/${SCRATCH_WORKSPACE_ID}`);
-    } catch {
-      // Optional workspace unavailable.
-    }
+    const scratch = await scratchReq;
     if (!current()) return;
     this.scratch = scratch;
     const saved = lsGet(winKey(LS_CURRENT));

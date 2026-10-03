@@ -3,6 +3,7 @@
   import Icon from '../lib/components/Icon.svelte';
   import NotificationBell from './NotificationBell.svelte';
   import { router } from '../lib/router.svelte';
+  import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { assistant } from '../lib/stores/assistant.svelte';
@@ -144,6 +145,7 @@
           aria-label={`${m.label}${inSide ? ' (in the side pane)' : ''}${railCount(m.id)}`}
           data-testid={`rail-${m.id}`}
           data-nav-id={m.id}
+          aria-busy={navPending.id === m.id || undefined}
         >
           <Icon name={m.icon} />
           <!-- A session waiting on you outranks "working": the expanded sidebar

@@ -39,6 +39,7 @@
   import { availableSections, groupLabel as settingsGroupLabel } from '../modules/settings/sections';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { router } from '../lib/router.svelte';
+  import { navPending } from '../lib/navPending.svelte';
   import { startSnip } from '../lib/snip';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { startWindowDrag } from '../lib/windowDrag';
@@ -109,6 +110,18 @@
     if (!untrack(() => loadedPage(pageKey))) void loadPage(pageKey).catch(() => {});
   });
   $effect(() => installNavPrefetch());
+  // Boot timing marks (perf F1: e2e/desktop-boot-perf.spec.ts budgets them).
+  // Once per document: `otto:shell-mounted` on the shell's first effect,
+  // `otto:page-painted` after the frame that first paints a page.
+  $effect(() => {
+    if (!performance.getEntriesByName('otto:shell-mounted').length) performance.mark('otto:shell-mounted');
+  });
+  let pagePaintMarked = false;
+  $effect(() => {
+    if (!Page || pagePaintMarked) return;
+    pagePaintMarked = true;
+    requestAnimationFrame(() => setTimeout(() => performance.mark('otto:page-painted'), 0));
+  });
   // Dock badge = sessions waiting on you (A1). Once per window; the shell
   // command itself only honours the main window. Unmount (sign-out) → 0.
   if (isTauri && !isEmbedded) {
@@ -769,10 +782,12 @@
   });
 
   // ---- palette commands: connections ("connect <name>") ----
+  // Fetched only once ⌘K / the floating bar has been opened in this document
+  // (perf F8) — every boot and workspace switch used to pay for the list.
   $effect(() => {
     const wsId = ws.currentId;
     // The side pane's palette is the window's (its commands are mirrored).
-    if (!wsId || isEmbedded) return;
+    if (!wsId || isEmbedded || !registry.wanted) return;
     let cancelled = false;
     let unreg: (() => void) | null = null;
     void api
@@ -1060,6 +1075,13 @@
     <!-- Pages without a PageHeader (Agents, Browser…): the agent-driving
          strip sits above the page instead of under its toolbar. -->
     <AgentDrivingBar />
+  {/if}
+  {#if navPending.slow}
+    <!-- Zero-height anchor: the bar overlays the content's top edge without
+         shifting it (perf F7). -->
+    <div class="nav-pending-slot">
+      <div class="nav-pending-bar" role="progressbar" aria-label="Loading page" data-testid="nav-pending-bar"></div>
+    </div>
   {/if}
   <div class="content">
     <!-- The page for the current route (shell/pages.svelte.ts). A component swap is

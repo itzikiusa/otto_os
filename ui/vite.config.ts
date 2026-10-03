@@ -40,6 +40,9 @@ function d2WorkerReady(): Plugin {
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [d2WorkerReady(), svelte()],
+  // dist/.vite/manifest.json feeds scripts/bundle-budget.mjs (the CI byte
+  // budget walks each entry's static-import closure from it).
+  build: { manifest: true },
   optimizeDeps: { exclude: ['@terrastruct/d2'] },
   // The LSP client's nested open-rpc transport uses EventEmitter. Resolve its
   // Node-style import to the browser implementation in dev and production.

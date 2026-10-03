@@ -14,6 +14,7 @@ import { availableModules, moduleLabel } from '../sidebar';
 import {
   UiCommandError,
   describeDocument,
+  ensureUiModuleState,
   localModuleState,
   registerUiCommands,
   type UiCommandCtx,
@@ -213,8 +214,10 @@ async function focus(args: { pane?: unknown }): Promise<unknown> {
   return { ui_visible: true, pane };
 }
 
-function state(): unknown {
+async function state(): Promise<unknown> {
   const doc = describeDocument();
+  // The module's handler file (and its `registerUiState`) loads lazily.
+  await ensureUiModuleState(doc.module);
   const out: Record<string, unknown> = {
     ui_visible: true,
     document: { ...doc, label: labelFor(doc.route) },
@@ -241,7 +244,7 @@ function state(): unknown {
 }
 
 registerUiCommands('shell', {
-  state: async () => state(),
+  state: () => state(),
   open: (args, ctx) => open(args ?? {}, ctx),
   focus: (args) => focus(args ?? {}),
 });

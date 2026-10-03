@@ -8,11 +8,13 @@ import './app.css';
 import '@fontsource/cousine/latin.css';
 import '@fontsource/cousine/hebrew.css';
 import App from './App.svelte';
-import { mockEnabled, setupMock } from './lib/api/mock';
+import { mockEnabled } from './lib/api/mockGate';
 import { setToken, getToken, baseUrl } from './lib/api/client';
 import { isEmbedded } from './lib/desktop';
 
 if (mockEnabled()) {
+  // The fixtures load only in mock mode — and before `mount`, below.
+  const { setupMock } = await import('./lib/api/mock');
   setupMock();
   // mock auth: ensure a token exists so the shell loads straight away
   if (!getToken()) setToken('mock-token');

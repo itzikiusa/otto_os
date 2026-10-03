@@ -33,14 +33,7 @@ import type {
 import { base64ToText, textToBytes } from '../b64';
 import { isForeground } from '../stores/sessionBuckets';
 
-export function mockEnabled(): boolean {
-  try {
-    if (import.meta.env.VITE_OTTO_MOCK === '1') return true;
-    return localStorage.getItem('otto_mock') === '1';
-  } catch {
-    return false;
-  }
-}
+export { mockEnabled } from './mockGate';
 
 // ---------------------------------------------------------------------------
 // Fixtures
