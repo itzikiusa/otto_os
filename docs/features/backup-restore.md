@@ -130,6 +130,7 @@ install (one real `otto.db` reached 514 MB). The daemon prunes them **hourly**
 | `mcp_call_log` (MCP control-plane call log) | **90 days** |
 | `audit_log` (security audit trail) | **90 days** |
 | `review_agent_prompts` + `review_diffs` (per-agent review retry data) | **14 days** after the artifact was written, and only for a finished review (`done` / `error` / `cancelled`, or the review row is gone). A running review keeps them. Past the window, retrying a review agent falls back to "prompt unavailable" |
+| Run history (`run_history_days`, default **90**, floor 14) | `otto_runs` + `otto_run_events` (Run with Otto): terminal runs (`completed` / `failed` / `rejected` / `cancelled`) last updated before the window, unless a Proof Pack is attached. `swarm_runs`: terminal runs (`done` / `error` / `stopped`) finished before the window — first added to the swarm's `pruned_runs` / `pruned_cost_usd` rollup (migration `0174`), so `max_total_runs` / `max_cost_usd` budgets still count them. `swarm_messages`: older than the window. `goal_loop_iterations`: every iteration but the last of a loop that finished (terminal) before the window. Live runs and loops are never touched |
 
 Rows younger than their window are never touched. The policy lives in the
 `data_retention` setting (a partial object merges over the defaults) and is
@@ -138,7 +139,7 @@ re-read every pass; set it with `POST /settings/import`:
 ```json
 {"data_retention": {"enabled": true, "work_events_days": 30, "work_events_keep_per_item": 500,
                     "work_events_idle_days": 90, "mcp_audit_days": 90, "audit_log_days": 90,
-                    "review_retry_days": 14}}
+                    "review_retry_days": 14, "run_history_days": 90}}
 ```
 
 `enabled: false` turns the job off. Floors a setting can't go below: 7 days

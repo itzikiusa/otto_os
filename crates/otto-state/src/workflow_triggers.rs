@@ -303,6 +303,44 @@ mod tests {
         pool.into()
     }
 
+    /// Perf W12 budget: the workflow-trigger scheduler's per-minute scan is
+    /// ONE statement for any number of schedule triggers (a tick with nothing
+    /// due does nothing else).
+    #[tokio::test]
+    async fn schedule_scan_is_one_query_for_any_n() {
+        let pool = mem_pool().await;
+        let workflows = WorkflowsRepo::new(pool.clone());
+        let repo = TriggersRepo::new(pool.clone());
+        let wf = workflows
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        for _ in 0..8 {
+            repo.create(NewWorkflowTrigger {
+                workflow_id: wf.id.clone(),
+                kind: "schedule".into(),
+                spec: serde_json::json!({"cron": "0 9 * * *"}),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        }
+        let probe = pool.statement_probe();
+        probe.reset();
+        assert_eq!(
+            repo.list_enabled_by_kind("schedule").await.unwrap().len(),
+            8
+        );
+        assert_eq!(probe.take().len(), 1);
+    }
+
     /// Regression for the `chat` trigger kind: it was added to route
     /// validation (`create_trigger` in otto-server) and documented, but the
     /// original 0058 `workflow_triggers.kind` CHECK only allowed
