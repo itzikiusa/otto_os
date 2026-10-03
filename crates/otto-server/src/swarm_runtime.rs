@@ -61,7 +61,6 @@ pub fn new_registry() -> CoordinatorRegistry {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-const TICK: Duration = Duration::from_secs(5);
 /// "Stuck" window for a planner / recruiter turn — NOT a wall-clock cap. The
 /// old 120–150s caps killed perfectly healthy turns: the claude cold-start (MCP
 /// handshake + hook init) alone could eat them before reasoning began. Planning
@@ -93,6 +92,7 @@ pub fn start_coordinator(ctx: ServerCtx, swarm_id: Id) {
             crate::swarm_verify::recover(&ctx, &swarm_id).await;
         });
     }
+    crate::swarm_wake::ensure_listener(&ctx);
     tokio::spawn(coordinator_loop(ctx, swarm_id, handle));
 }
 
@@ -126,6 +126,7 @@ fn tick_lock(swarm_id: &str) -> Arc<tokio::sync::Mutex<()>> {
 
 async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandle) {
     loop {
+        let ticked_at = std::time::Instant::now();
         if handle.cancel.is_cancelled() {
             return;
         }
@@ -158,8 +159,10 @@ async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandl
                 tracing::warn!(swarm = %swarm_id, "swarm coordinator tick: {e}");
             }
         }
-        // One timer per tick; stop/restart wakes it (SG-12: no 500 ms slices).
-        if handle.cancel.sleep(TICK).await {
+        // Event-driven (perf W7): park until a swarm event rings this swarm's
+        // bell (≥ MIN_GAP after the last tick) or the 60 s safety tick; was a
+        // fixed 5 s poll. Stop/restart still wakes it at once.
+        if crate::swarm_wake::wait(&handle.cancel, &swarm_id, ticked_at).await {
             return;
         }
     }

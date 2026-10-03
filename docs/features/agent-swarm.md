@@ -247,8 +247,11 @@ work in a real terminal (§5.3).
 ## 4. The coordinator (how autonomous work actually runs)
 
 When a swarm is **active**, `start_coordinator` spawns a per-swarm background loop
-(`swarm_runtime::coordinator_loop`) that **ticks every 5 seconds** (with
-responsive 500 ms cancel slices). Each tick:
+(`swarm_runtime::coordinator_loop`) that ticks **when something changed** — a
+`swarm_task_updated`, `swarm_run_updated`, `swarm_status`, `swarm_goal_updated`
+or `swarm_project_cleared` event for the swarm rings its bell
+(`swarm_wake.rs`), at most once per 2 s — plus a **60 s safety tick** (was a
+fixed 5 s poll; stop/restart still wakes it at once). Each tick:
 
 1. **Re-reads the swarm.** If it isn't `active`, the tick no-ops.
 2. **Checks budgets first.** If any per-swarm budget is exhausted
