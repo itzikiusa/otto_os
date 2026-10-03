@@ -105,6 +105,14 @@ Rooms (`agent_rooms` / `agent_room_members` / `agent_room_messages`) are the
   pages back. (It used to start from the room's first message.)
 - The rooms list shows each room's member count and last activity; names are
   capped at 120 characters.
+- **Live feed cost.** The `agent_room_message` WS event carries the whole
+  message, so an open room appends it without a request; nothing is fetched for
+  rooms you haven't opened or while the Rooms view is closed (only the list's
+  activity line moves), and leaving the view drops every held feed but the
+  selected room's. The rooms list's count / last activity are stored on the
+  room row (kept in the same transaction as each post, recounted after
+  retention prunes), and the tail / paging reads are range scans on
+  `(room_id, rowid)` — no query scans a room's whole history.
 
 ## 4b. Autonomy — permission modes, standing goals, rules, activity, memory
 

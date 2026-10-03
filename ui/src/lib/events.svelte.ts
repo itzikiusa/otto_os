@@ -526,6 +526,8 @@ class EventsClient {
     });
     void notifications.load();
     assistant.resync();
+    // Live room messages append straight from events — a gap needs a re-read.
+    personalAgents.resyncRooms();
   }
 
   /** The daemon's boot id from `hello_ack`: a different one than before
@@ -789,7 +791,7 @@ class EventsClient {
           // Personal Agents page refreshes the agent's runs + schedule cursors.
           personalAgents.applyRunEvent(parsed);
         } else if (parsed.type === 'agent_room_message') {
-          // Agent-room feeds fetch the room's messages after their cursor.
+          // Agent-room feeds append the event's message (open Rooms view only).
           personalAgents.applyRoomEvent(parsed);
         } else if (
           parsed.type === 'k8s_cluster_updated' ||

@@ -1062,6 +1062,28 @@ blind timer.
 
 ---
 
+### `agent_room_message`
+
+```json
+{ "type": "agent_room_message", "workspace_id": "<Id>", "room_id": "<Id>",
+  "message_id": "<Id>", "author_kind": "agent|user", "author_id": "<Id>",
+  "text": "…", "created_at": "<RFC3339>" }
+```
+
+- Emitted by `POST /agent-rooms/{id}/messages` (a user post, or an agent post
+  over the room MCP tools) after the message is persisted.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- Carries the **whole message** (`message_id` is the `AgentRoomMessage.id`;
+  `text` ≤ 16 KB): an open Rooms view appends it to a held feed with no GET
+  (deduped by id). With no Rooms view mounted, or for a room never opened, the
+  client only bumps the rooms list's `message_count` / `last_message_at`. After
+  a WS gap (reconnect / lag `resync`) the shown room re-reads its tail
+  (`GET /agent-rooms/{id}/messages?tail=true`). Before 2026-10 the event was
+  ids only and every event forced a GET.
+- TypeScript type: `{ type: 'agent_room_message'; workspace_id: Id; room_id: Id; message_id: Id; author_kind: string; author_id: Id; text: string; created_at: string }`.
+
+---
+
 ### `otto_run_updated`
 
 ```json
