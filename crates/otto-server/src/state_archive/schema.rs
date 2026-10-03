@@ -564,7 +564,25 @@ pub fn sanitize(
     inert(table, row);
 }
 pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> ApiResult<Vec<ArchiveRow>> {
-    let sql = format!("SELECT * FROM {}", quoted(table));
+    // Name the stored columns (`PRAGMA table_info`, which leaves generated
+    // ones out) instead of `SELECT *`, which returns generated columns too —
+    // e.g. `sessions.source` (migration 0194) — that `insert_row` can't write
+    // back and that `schema()` doesn't list.
+    let columns: Vec<String> = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "PRAGMA table_info({})",
+        quoted(table)
+    )))
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(super::db_error)?
+    .iter()
+    .map(|r| quoted(&r.get::<String, _>("name")))
+    .collect();
+    let sql = if columns.is_empty() {
+        format!("SELECT * FROM {}", quoted(table))
+    } else {
+        format!("SELECT {} FROM {}", columns.join(","), quoted(table))
+    };
     let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).fetch(conn);
     let mut output = Vec::new();
     let mut size = 0;
