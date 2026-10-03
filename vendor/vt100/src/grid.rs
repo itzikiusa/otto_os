@@ -10,7 +10,11 @@ pub struct Grid {
     scroll_bottom: u16,
     origin_mode: bool,
     saved_origin_mode: bool,
-    scrollback: std::collections::VecDeque<crate::row::Row>,
+    // OTTO PATCH 5 (vendor/vt100/README-OTTO.md): scrollback rows are
+    // trimmed of trailing default blanks and shared (`Arc`), so a 4000-row
+    // history of short lines costs a fraction of `rows × cols × 32 B` and
+    // cloning the screen for a snapshot is refcount bumps, not a deep copy.
+    scrollback: std::collections::VecDeque<std::sync::Arc<crate::row::Row>>,
     scrollback_len: usize,
     scrollback_offset: usize,
 }
@@ -133,15 +137,16 @@ impl Grid {
                     self.rows.pop();
                 } else {
                     let row = self.rows.remove(0);
-                    self.scrollback.push_back(row);
-                    while self.scrollback.len() > self.scrollback_len {
-                        self.scrollback.pop_front();
-                    }
+                    self.push_scrollback(row);
                     self.pos.row = self.pos.row.saturating_sub(1);
                 }
             }
             while self.rows.len() < want {
                 if let Some(row) = self.scrollback.pop_back() {
+                    // Trimmed in scrollback: back on the grid it must be
+                    // full width again (writes index cells by column).
+                    let mut row = unshare_row(row);
+                    row.pad_to(size.cols);
                     self.rows.insert(0, row);
                     self.pos.row = self.pos.row.saturating_add(1);
                 } else {
@@ -176,8 +181,12 @@ impl Grid {
         //    continues into the next; only the FINAL row of a line sheds its
         //    trailing default-blank padding (wrapped rows are full by
         //    definition, and their blanks are real content positions).
-        let all: Vec<crate::row::Row> =
-            self.scrollback.drain(..).chain(self.rows.drain(..)).collect();
+        let all: Vec<crate::row::Row> = self
+            .scrollback
+            .drain(..)
+            .map(unshare_row)
+            .chain(self.rows.drain(..))
+            .collect();
         let mut lines: Vec<Vec<crate::Cell>> = vec![];
         let mut acc: Vec<crate::Cell> = vec![];
         let mut cursor: (usize, usize) = (0, 0);
@@ -253,10 +262,12 @@ impl Grid {
         }
         seq.truncate((start + vis).min(seq.len().max(start + 1)));
         let mut visible: Vec<crate::row::Row> = seq.split_off(start.min(seq.len()));
-        self.scrollback = seq.into();
-        while self.scrollback.len() > self.scrollback_len {
-            self.scrollback.pop_front();
-        }
+        let keep_from = seq.len().saturating_sub(self.scrollback_len);
+        self.scrollback = seq
+            .into_iter()
+            .skip(keep_from)
+            .map(scrollback_row)
+            .collect();
         for row in &mut visible {
             row.pad_to(size.cols);
         }
@@ -300,6 +311,7 @@ impl Grid {
         let rows_len = self.rows.len();
         self.scrollback
             .iter()
+            .map(|row| &**row)
             .skip(scrollback_len - self.scrollback_offset)
             // when scrollback_offset > rows_len (e.g. rows = 3,
             // scrollback_len = 10, offset = 9) the skip(10 - 9)
@@ -371,7 +383,38 @@ impl Grid {
     pub(crate) fn scrollback_rows(
         &self,
     ) -> impl Iterator<Item = &crate::row::Row> {
-        self.scrollback.iter()
+        self.scrollback.iter().map(|row| &**row)
+    }
+
+    // OTTO PATCH 5: change the retention cap at runtime (an unviewed
+    // terminal keeps a shallower history, see otto-pty). Lowering it drops
+    // the oldest rows now; raising it lets history grow again from here.
+    pub fn set_scrollback_len(&mut self, len: usize) {
+        if self.scrollback_len == 0 {
+            // The alternate screen never keeps scrollback.
+            return;
+        }
+        self.scrollback_len = len.max(1);
+        while self.scrollback.len() > self.scrollback_len {
+            self.scrollback.pop_front();
+        }
+        self.scrollback_offset = self.scrollback_offset.min(self.scrollback.len());
+    }
+
+    // OTTO PATCH 5: retained scrollback rows and their total cell count
+    // (memory accounting / budgets in otto-pty).
+    pub fn scrollback_stats(&self) -> (usize, usize) {
+        let cells = self.scrollback.iter().map(|r| usize::from(r.cols())).sum();
+        (self.scrollback.len(), cells)
+    }
+
+    // OTTO PATCH 5: move a row into scrollback — trimmed + shared (see the
+    // `scrollback` field) — evicting the oldest past the cap.
+    fn push_scrollback(&mut self, row: crate::row::Row) {
+        self.scrollback.push_back(scrollback_row(row));
+        while self.scrollback.len() > self.scrollback_len {
+            self.scrollback.pop_front();
+        }
     }
 
     pub fn scrollback(&self) -> usize {
@@ -766,10 +809,7 @@ impl Grid {
             // entire codex history. Interior regions (scroll_top > 0) still
             // discard, matching xterm.js's live behavior.
             if self.scrollback_len > 0 && self.scroll_top == 0 {
-                self.scrollback.push_back(removed);
-                while self.scrollback.len() > self.scrollback_len {
-                    self.scrollback.pop_front();
-                }
+                self.push_scrollback(removed);
                 if self.scrollback_offset > 0 {
                     self.scrollback_offset =
                         self.scrollback.len().min(self.scrollback_offset + 1);
@@ -944,4 +984,17 @@ pub struct Size {
 pub struct Pos {
     pub row: u16,
     pub col: u16,
+}
+
+// OTTO PATCH 5: a row entering scrollback sheds its trailing default blanks
+// (see `Row::trim_for_scrollback`) and becomes shared.
+fn scrollback_row(mut row: crate::row::Row) -> std::sync::Arc<crate::row::Row> {
+    row.trim_for_scrollback();
+    std::sync::Arc::new(row)
+}
+
+// OTTO PATCH 5: take a scrollback row back out (reflow, height growth),
+// cloning only if a screen copy (a snapshot capture) still shares it.
+fn unshare_row(row: std::sync::Arc<crate::row::Row>) -> crate::row::Row {
+    std::sync::Arc::try_unwrap(row).unwrap_or_else(|shared| (*shared).clone())
 }
