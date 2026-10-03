@@ -28,7 +28,9 @@ test.beforeAll(async () => {
   base = seeded.base;
   workspaceId = await seedWorkspace(seeded.ctx, base);
   const r = await seeded.ctx.patch(`${base}/api/v1/mcp/otto-server`, {
-    data: { tools: ['create_pr', 'comment_pr', 'merge_pr', 'list_repos'] },
+    // `enabled`: the always-allow test invokes a tool, and the outward
+    // server's master switch defaults off on a fresh daemon.
+    data: { enabled: true, tools: ['create_pr', 'comment_pr', 'merge_pr', 'list_repos'] },
   });
   expect(r.ok(), `enable tools → ${r.status()} ${await r.text()}`).toBeTruthy();
   await clearRules(seeded.ctx);

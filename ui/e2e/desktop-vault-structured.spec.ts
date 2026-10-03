@@ -72,7 +72,7 @@ test('typed note renders structured panels with previews and live context', asyn
   await expectFullyInViewport(page, tip);
 
   // Live context resolves to a designed state (no matches in an empty daemon).
-  await expect(panel.getByLabel('Live context')).toContainText(/Nothing in Otto matches|Open|Couldn’t read/);
+  await expect(panel.getByLabel('Live context', { exact: true })).toContainText(/Nothing in Otto matches|Open|Couldn’t read/);
   await expectNoHorizontalOverflow(page);
 
   // Chip navigates.
