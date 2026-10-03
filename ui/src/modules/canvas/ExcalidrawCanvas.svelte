@@ -340,7 +340,8 @@
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const w = window as any;
     if (!w.EXCALIDRAW_ASSET_PATH) {
-      w.EXCALIDRAW_ASSET_PATH = 'https://unpkg.com/@excalidraw/excalidraw@0.18.1/dist/prod/';
+      // Fonts are served by Otto (vite.config.ts `excalidrawFonts`), not a CDN.
+      w.EXCALIDRAW_ASSET_PATH = `${import.meta.env.BASE_URL}assets/excalidraw/`;
     }
     const React = await import('react');
     const { createRoot } = await import('react-dom/client');

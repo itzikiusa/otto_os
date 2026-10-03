@@ -276,9 +276,13 @@ its native export menu). Behavior:
 - **Live agent edits** arrive over `canvas_updated` and reload in place.
 - On a phone the board is read-only (`viewModeEnabled`); tablets/desktops edit.
 
-> The Excalidraw font/asset bundle is loaded from a CDN
-> (`EXCALIDRAW_ASSET_PATH = unpkg.com/@excalidraw/excalidraw@0.18.1/…`) on first
-> use, so an Excalidraw board needs network access the first time it mounts.
+> Excalidraw's hand-drawn fonts are served by Otto itself
+> (`EXCALIDRAW_ASSET_PATH = <base>assets/excalidraw/`): the UI build copies them
+> from the package into `dist/assets/excalidraw/fonts/` (`vite.config.ts`
+> `excalidrawFonts`; Vite dev serves them from `node_modules`) and the daemon
+> serves those content-hashed files `immutable`. No CDN, so a board works offline
+> and under the desktop CSP (`font-src 'self'`). The 12 MB CJK face (Xiaolai) is
+> not bundled: CJK text tries the package's CDN fallback, else the system font.
 
 ### Mermaid board (`MermaidCanvas.svelte`)
 
@@ -424,8 +428,8 @@ that lists the Canvas scenes linked to a story.
   scenes.
 - **Mermaid and D2 are fully offline** (`mermaid` and `@terrastruct/d2` are both
   bundled and lazy-loaded, no CDN — D2's ~7.8 MB WASM chunk downloads once on
-  first use of a D2 scene, then stays cached for the session). **Excalidraw loads
-  its asset/font bundle from the unpkg CDN** on first mount.
+  first use of a D2 scene, then stays cached for the session). Excalidraw's fonts are
+  served locally too (all but the CJK Xiaolai face).
 - **No Present mode in the current canvas.** Present mode (PowerPoint-style slide
   stepping) and the top **Toolbar** (Undo/Redo, **Export JSON**, Present) belong to
   the older node-graph design and are **not wired** into the shipping file-backed
@@ -495,9 +499,10 @@ that lists the Canvas scenes linked to a story.
   file the agent left; an agent turn that rewrites the whole file replaces hand
   layout. Use the Mermaid **Code** panel / Excalidraw edits *between* turns, and ask
   the agent to "refine" rather than "redraw".
-- **The Excalidraw board is blank / fonts look wrong.** Its asset bundle loads from
-  the unpkg CDN on first mount; confirm the daemon host has network access, or that
-  `EXCALIDRAW_ASSET_PATH` is reachable.
+- **The Excalidraw board's fonts look wrong.** Fonts load from
+  `/assets/excalidraw/fonts/` on the daemon; a 404 there means the UI was built
+  without the `excalidrawFonts` copy step (rebuild the UI). CJK text uses the system
+  font unless the CDN fallback is reachable.
 - **A scene I created in another workspace isn't in the list.** It is — the page
   lists *your* scenes across all workspaces (`GET /canvas/scenes`); use search.
 
