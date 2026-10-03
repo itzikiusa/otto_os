@@ -163,6 +163,40 @@ export function routeFind(fallback: () => void): void {
   fallback();
 }
 
+/** Minimal shape of the focused element `editorOwnsChord` needs (kept
+ *  structural so the unit test can pass a stub instead of a DOM node). */
+export interface FocusLike {
+  tagName?: string;
+  isContentEditable?: boolean;
+  closest?: (selector: string) => unknown;
+}
+
+/** True when a ⌘-chord belongs to the focused text editor rather than the
+ *  global map: inside a CodeMirror `.cm-editor`, ⌘D, ⌘[ / ⌘], ⌘U / ⌘⇧U and
+ *  ⌘I are CM's own commands; ⌘U / ⌘⇧U are also left alone in any plain
+ *  input/textarea/contenteditable (a global install is never what a typist
+ *  meant). ⌘K, ⌘W, ⌘T, ⌘J, ⌘1, ⌘F and zoom keep working everywhere. */
+export function editorOwnsChord(
+  e: Pick<KeyboardEvent, 'key' | 'shiftKey' | 'altKey'>,
+  focused: FocusLike | Element | null | undefined,
+): boolean {
+  if (!focused || e.altKey) return false;
+  const el = focused as FocusLike;
+  const k = e.key.toLowerCase();
+  const inEditor = !!el.closest?.('.cm-editor');
+  if (k === 'u') {
+    return (
+      inEditor ||
+      el.tagName === 'INPUT' ||
+      el.tagName === 'TEXTAREA' ||
+      el.isContentEditable === true
+    );
+  }
+  if (!inEditor) return false;
+  if (k === 'd' || k === 'i') return !e.shiftKey;
+  return e.key === '[' || e.key === ']';
+}
+
 /** `index` is the 1-based session number for the `jumpSession` action. */
 export type KeyDispatcher = (action: KeyAction, e: KeyboardEvent, index?: number) => void;
 
@@ -237,6 +271,11 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
     }
 
     if (!mod) return;
+    // A focused CodeMirror owns ⌘D / ⌘[ / ⌘] / ⌘U / ⌘I (select next match,
+    // indent, undo selection, select parent syntax). CM skips keydowns that
+    // are already defaultPrevented, so the global map must not even touch
+    // them — otherwise ⌘U in an editor launched "Update all CLIs".
+    if (!term && editorOwnsChord(e, document.activeElement)) return;
     // Page-scoped chords (e.g. the API client's ⌘D) win over the global map
     // while that page is mounted — outside a terminal, which owns its keys.
     if (!term && !e.altKey && keyContext.pageChords?.(e)) return;
@@ -415,9 +454,9 @@ export const KEYMAP: ShortcutGroup[] = [
     bindings: [
       { keys: '⌘K', label: 'Floating bar — commands & Ask Otto (palette on phone/tablet)' },
       { keys: '⌃1…⌃4', label: 'In the floating bar: switch space' },
-      { keys: '⌘I', label: 'Ask Otto (plain English)' },
+      { keys: '⌘I', label: 'Ask Otto (plain English; not in a code editor)' },
       { keys: '⌘⇧B', label: 'Broadcast to sessions' },
-      { keys: '⌘U / ⌘⇧U', label: 'Update all agent CLIs' },
+      { keys: '⌘U / ⌘⇧U', label: 'Update all agent CLIs (asks first; not in a text field)' },
       { keys: '⌘⇧S', label: 'Snip — capture screen region & annotate' },
       { keys: '⌘⇧R', label: 'Hard reload — refresh UI (sessions kept)' },
       { keys: '⌘,', label: 'Settings' },
@@ -432,10 +471,10 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘⇧T', label: 'Reopen closed tab' },
       { keys: '⌃Tab', label: 'Next tab' },
       { keys: '⌃⇧Tab', label: 'Previous tab' },
-      { keys: '⌘]', label: 'Next session' },
-      { keys: '⌘[', label: 'Previous session' },
+      { keys: '⌘]', label: 'Next session (not in a code editor)' },
+      { keys: '⌘[', label: 'Previous session (not in a code editor)' },
       { keys: '⌃1…⌃9', label: 'Jump to session N' },
-      { keys: '⌘D', label: 'Split vertically' },
+      { keys: '⌘D', label: 'Split vertically (not in a code editor)' },
       { keys: '⌘⇧D', label: 'Split horizontally' },
       { keys: '⌘⌥←', label: 'Move pane left (in a Database pane: previous query tab)' },
       { keys: '⌘⌥→', label: 'Move pane right (in a Database pane: next query tab)' },
