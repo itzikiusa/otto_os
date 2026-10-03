@@ -158,10 +158,14 @@
   }
 </script>
 
+<!-- The scroller is the top-level drop target; only the agent/session rows
+     sit inside role="tree" (a tree may own nothing but treeitems — axe
+     aria-required-children), so the toolbar, empty state and Add button
+     stay outside it. -->
 <div
   class="tree"
-  role="tree"
-  tabindex="-1"
+  role="group"
+  aria-label="Agent org tree"
   ondragover={(e) => onNodeDragOver(e, null)}
   ondragleave={() => onNodeDragLeave(null)}
   ondrop={(e) => onNodeDrop(e, null)}
@@ -185,9 +189,13 @@
       <Icon name="user" size={13} /> Drop here to make top-level
     </div>
   {/if}
-  {#each roots as r (r.id)}
-    {@render node(r, 0)}
-  {/each}
+  {#if roots.length > 0}
+    <div role="tree" tabindex="-1" aria-label="Agents">
+      {#each roots as r (r.id)}
+        {@render node(r, 0)}
+      {/each}
+    </div>
+  {/if}
   {#if !draggingAgentId && roots.length > 0}
     <button class="add-top-btn dim" onclick={() => onadd?.(null)} title="Add an agent at the top level">
       <Icon name="plus" size={13} /> Add agent
@@ -258,6 +266,7 @@
   </div>
   {#if isOpen}
     {#each sessions as s (s.id)}
+      <div role="treeitem" aria-selected={swarm.selectedSessionId === s.id}>
       <button
         class="session-row"
         class:selected={swarm.selectedSessionId === s.id}
@@ -270,6 +279,7 @@
         <span class="grow mono ellipsis">{s.title || s.provider}</span>
         <span class="state {ws.statusMap[s.id] ?? s.status}" role="img" aria-label={sentenceCase(ws.statusMap[s.id] ?? s.status)} title={sentenceCase(ws.statusMap[s.id] ?? s.status)}></span>
       </button>
+      </div>
     {/each}
     {#each kids as k (k.id)}
       {@render node(k, depth + 1)}
