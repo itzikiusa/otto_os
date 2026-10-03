@@ -263,6 +263,40 @@ test('wide 20k × 300 result: only the columns in view are mounted', { tag: '@ci
   expect(percentile(h, 95), 'horizontal step to painted frame p95').toBeLessThan(budgetMs(40));
 });
 
+// ── 1b. wide result, RTL ─────────────────────────────────────────────────────
+test('wide 20k × 300 result in RTL: the column window follows a negative scrollLeft', async ({ page }, info) => {
+  webkitOnly(info.project.name);
+  test.setTimeout(180_000);
+  await page.addInitScript(() => document.addEventListener('DOMContentLoaded', () => (document.documentElement.dir = 'rtl')));
+  await routeQueries(page);
+  await openConn(page);
+  await run(page, 'SELECT * FROM wide');
+  await expect(page.locator('.grid-scroll tbody td.hpad').first()).toBeVisible({ timeout: 5_000 });
+  expect(await page.locator('.grid-scroll thead tr:first-child th:not(.hpad)').count()).toBeLessThan(60);
+  // Scroll toward the inline end (left in RTL: scrollLeft goes negative).
+  const h = await hScrollFrameWork(page, '.grid-scroll', -400, 20);
+  const res = await page.evaluate(() => {
+    const el = document.querySelector('.grid-scroll') as HTMLElement;
+    const tr = document.querySelector<HTMLTableRowElement>('.grid-scroll tbody tr:not(.spacer)')!;
+    const tds = [...tr.querySelectorAll<HTMLElement>('td.cell')];
+    const r = Number(tds[0].dataset.r);
+    const ps = tds.map((td) => Number(td.dataset.p));
+    const bad = tds.find((td) => Number(td.dataset.p) > 0 && td.textContent !== `w${(r + Number(td.dataset.p)) % 997}`);
+    // Every mounted cell that should be on screen is: the viewport is covered.
+    const vp = el.getBoundingClientRect();
+    const covered = tds.some((td) => {
+      const b = td.getBoundingClientRect();
+      return b.left <= vp.left + vp.width / 2 && b.right >= vp.left + vp.width / 2;
+    });
+    return { scrollLeft: el.scrollLeft, min: Math.min(...ps), max: Math.max(...ps), bad: bad?.dataset.p ?? null, covered };
+  });
+  perfLine(`wide RTL: scrollLeft ${res.scrollLeft}; window p${res.min}–p${res.max}; h-step painted p95 ${percentile(h, 95).toFixed(1)} ms`);
+  expect(res.scrollLeft).toBeLessThan(-2_000);
+  expect(res.min).toBeGreaterThan(10);
+  expect(res.bad).toBeNull();
+  expect(res.covered, 'a mounted cell spans the middle of the viewport').toBe(true);
+});
+
 // ── 2. column filter ─────────────────────────────────────────────────────────
 test('column filter over 100k rows with a JSON column: debounced + cached', { tag: '@ci' }, async ({ page }, info) => {
   webkitOnly(info.project.name);

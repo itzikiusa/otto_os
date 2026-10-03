@@ -101,8 +101,9 @@
   // arithmetic (prefix sums of the widths in ch × a measured px-per-ch), never
   // a read of N header cells. Cells keep their real `data-p` (display
   // position), so delegated clicks, the keyboard cursor and find are
-  // unaffected. Off in RTL (scrollLeft and offsets flip there) and for mini
-  // grids.
+  // unaffected. RTL works the same way: the edges are measured from the
+  // table's inline START, and RTL's scrollLeft runs 0 → negative, so the
+  // window reads |scrollLeft|. Off for mini grids.
   const HVIRT_MIN = 40;
   /** Columns rendered beyond each side of the viewport. */
   const COL_OVERSCAN = 3;
@@ -211,7 +212,9 @@
     if (hvirt) scrollLeft = scrollEl.scrollLeft;
   }
 
-  const hvirt = $derived(virtualize && !rtl && result.columns.length > HVIRT_MIN);
+  const hvirt = $derived(virtualize && result.columns.length > HVIRT_MIN);
+  /** Horizontal scroll offset from the inline start (RTL scrolls negative). */
+  const inlineScroll = $derived(Math.abs(scrollLeft));
   /** Right edge (px, from the table's start) of each display position:
    *  row-number width + prefix sum of the column widths. Pure arithmetic —
    *  recomputed when widths / order change, never per scroll step. */
@@ -264,8 +267,8 @@
   const colWindow = $derived.by<[number, number]>(() => {
     const n = cols.length;
     if (!hvirt || colEdges.length !== n || n === 0) return [0, n];
-    const first = colAt(scrollLeft);
-    const last = colAt(scrollLeft + Math.max(viewportW, 1));
+    const first = colAt(inlineScroll);
+    const last = colAt(inlineScroll + Math.max(viewportW, 1));
     const start = Math.max(0, Math.floor((first - COL_OVERSCAN) / COL_CHUNK) * COL_CHUNK);
     const end = Math.min(n, Math.ceil((last + 1 + COL_OVERSCAN) / COL_CHUNK) * COL_CHUNK);
     return [start, end];
@@ -279,8 +282,10 @@
     if (right === undefined) return;
     const left = pos > 0 ? colEdges[pos - 1] : 0;
     const rn = (scrollEl.querySelector<HTMLElement>('thead th.rownum')?.offsetWidth ?? 0);
-    if (left - rn < scrollEl.scrollLeft) scrollEl.scrollLeft = Math.max(0, left - rn);
-    else if (right > scrollEl.scrollLeft + viewportW) scrollEl.scrollLeft = right - viewportW;
+    const cur = Math.abs(scrollEl.scrollLeft);
+    const sign = rtl ? -1 : 1;
+    if (left - rn < cur) scrollEl.scrollLeft = sign * Math.max(0, left - rn);
+    else if (right > cur + viewportW) scrollEl.scrollLeft = sign * (right - viewportW);
     scrollLeft = scrollEl.scrollLeft;
   }
 
