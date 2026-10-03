@@ -26,7 +26,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { CanvasDoc } from './types';
   import { buildExcalidrawElements, isSimplified } from './excalidraw-build';
-  import { filesForSave, resolveFiles, sha256Hex } from './canvasFiles';
+  import { filesForSave, releaseFiles, resolveFiles, sha256Hex } from './canvasFiles';
   import type { ExFile } from './canvasFileRefs';
 
   interface Props {
@@ -58,6 +58,9 @@
   // image the server already holds (learned from loaded refs, or after a save
   // that carried it inline lands). Those autosave as refs, not base64.
   const knownFiles = new Map<string, string>();
+  // This board's claim on the shared file cache; released on unmount so its
+  // images don't outlive it (unless another open board uses them).
+  const fileOwner = {};
   const inlineOf = new WeakMap<CanvasDoc, ExFile[]>();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -196,7 +199,7 @@
       // fetched again.
       if (raw?.files && typeof raw.files === 'object') {
         const have = new Set(Object.keys(ex.getFiles?.() ?? {}));
-        void resolveFiles(raw.files, knownFiles, have).then((files) => {
+        void resolveFiles(raw.files, knownFiles, fileOwner, have).then((files) => {
           if (files.length && liveApi === ex) ex.addFiles?.(files);
         });
       }
@@ -362,7 +365,7 @@
     }
     const elements = normalizeScene(raw);
     lastApplied = canvas.source ?? '';
-    const resolved = raw?.files && typeof raw.files === 'object' ? await resolveFiles(raw.files, knownFiles) : [];
+    const resolved = raw?.files && typeof raw.files === 'object' ? await resolveFiles(raw.files, knownFiles, fileOwner) : [];
     return {
       elements,
       appState: { viewBackgroundColor: raw?.appState?.viewBackgroundColor ?? '#ffffff' },
@@ -423,6 +426,7 @@
     root = null;
     if (liveApi === excaliApi) liveApi = null;
     excaliApi = null;
+    releaseFiles(fileOwner);
   });
 </script>
 
