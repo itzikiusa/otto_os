@@ -654,7 +654,9 @@ export function newTabUid(): string {
   } catch {
     /* insecure context — fall through */
   }
-  return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  // getRandomValues works in insecure contexts too (randomUUID doesn't).
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return `t${Date.now().toString(36)}${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
 }
 function blankTab(statement = ''): QueryTab {
   return {
