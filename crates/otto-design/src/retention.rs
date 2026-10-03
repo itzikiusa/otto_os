@@ -96,9 +96,7 @@ pub async fn run_scheduled_once(
 pub fn spawn_scheduler(svc: crate::DesignService) {
     let cfg = SchedulerConfig::from_env();
     if !cfg.enabled {
-        tracing::info!(
-            "design: scheduled retention off (opt in with OTTO_DESIGN_AUTO_PRUNE=1)"
-        );
+        tracing::info!("design: scheduled retention off (opt in with OTTO_DESIGN_AUTO_PRUNE=1)");
         return;
     }
     tokio::spawn(async move {
