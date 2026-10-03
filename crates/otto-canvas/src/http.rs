@@ -1,9 +1,9 @@
 //! Canvas Studio router + handlers.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
 use otto_core::api::Problem;
 use otto_core::auth::{AuthUser, RoleChecker};
@@ -74,6 +74,12 @@ struct SceneIdPath {
     id: Id,
 }
 
+#[derive(Deserialize)]
+struct VersionPath {
+    id: Id,
+    vid: Id,
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -89,15 +95,29 @@ pub fn router<S: CanvasCtx>() -> Router<S> {
         .route("/canvas/scenes", get(list_scenes_global::<S>))
         .route(
             "/workspaces/{ws}/canvas/scenes",
-            get(list_scenes::<S>).post(create_scene::<S>),
+            get(list_scenes::<S>)
+                .merge(post(create_scene::<S>).layer(DefaultBodyLimit::max(SCENE_BODY_LIMIT))),
         )
         .route(
             "/canvas/scenes/{id}",
             get(get_scene::<S>)
-                .put(update_scene::<S>)
+                .merge(put(update_scene::<S>).layer(DefaultBodyLimit::max(SCENE_BODY_LIMIT)))
                 .delete(delete_scene::<S>),
         )
+        // Version history (C5): snapshots taken before agent commits, restores
+        // and (throttled) user saves.
+        .route("/canvas/scenes/{id}/versions", get(list_versions::<S>))
+        .route(
+            "/canvas/scenes/{id}/versions/{vid}/restore",
+            post(restore_version::<S>),
+        )
 }
+
+/// Body cap for scene create/update (C1). An Excalidraw board inlines its
+/// pasted images as base64 in `doc.source` (`files`), so one screenshot blew
+/// axum's 2 MB default and every autosave failed with 413 from then on. Only
+/// the two document-carrying routes get the larger cap.
+pub const SCENE_BODY_LIMIT: usize = 25 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Helper: resolve workspace from a scene id, then role-check
@@ -212,6 +232,23 @@ async fn update_scene<S: CanvasCtx>(
     Json(req): Json<UpdateSceneReq>,
 ) -> ApiResult<Response> {
     check_scene_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    if req.doc.is_some() {
+        // Keep the pre-save document in the scene's history — at most one
+        // user snapshot per window, so a 700 ms autosave stream doesn't churn
+        // the 30-entry ring. Best-effort: a failed snapshot never blocks a save.
+        if let Err(e) = ctx
+            .canvas_repo()
+            .snapshot(
+                &id,
+                "user",
+                Some(&user.id),
+                Some(otto_state::USER_SNAPSHOT_EVERY_SECS),
+            )
+            .await
+        {
+            tracing::warn!(scene = %id, error = %e, "canvas user-save snapshot failed");
+        }
+    }
     let patch = SceneUpdate {
         title: req.title,
         doc_json: req.doc.map(|v| v.to_string()),
@@ -237,4 +274,47 @@ async fn delete_scene<S: CanvasCtx>(
     check_scene_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     ctx.canvas_repo().delete(&id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Handlers — version history (C5)
+// ---------------------------------------------------------------------------
+
+async fn list_versions<S: CanvasCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(SceneIdPath { id }): Path<SceneIdPath>,
+) -> ApiResult<Response> {
+    check_scene_role(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    let versions = ctx.canvas_repo().list_versions(&id).await?;
+    Ok(Json(versions).into_response())
+}
+
+/// Restore a version: the current document is snapshotted first (origin
+/// `restore`), so a restore is itself undoable. Answers with the full scene.
+async fn restore_version<S: CanvasCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(VersionPath { id, vid }): Path<VersionPath>,
+) -> ApiResult<Response> {
+    check_scene_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let doc = ctx
+        .canvas_repo()
+        .version_doc(&id, &vid)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("canvas scene version {vid}")))?;
+    ctx.canvas_repo()
+        .snapshot(&id, "restore", Some(&user.id), None)
+        .await?;
+    let updated = ctx
+        .canvas_repo()
+        .update(
+            &id,
+            SceneUpdate {
+                doc_json: Some(doc),
+                ..Default::default()
+            },
+        )
+        .await?;
+    Ok(Json(updated).into_response())
 }
