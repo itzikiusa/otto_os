@@ -90,7 +90,7 @@ test('undo survives a Query → Structure → Query round trip', async ({ page }
 test('undo survives a reload', async ({ page }) => {
   await openEditor(page);
   await typeTwoEdits(page);
-  // History is written 2 s after the last edit (and on page hide).
+  // History reaches IndexedDB ~2 s after the last edit (and on page hide).
   await page.waitForTimeout(2_600);
   await page.reload();
   await expect(page.locator('.qe-edit .cm-content')).toBeVisible({ timeout: 30_000 });
@@ -113,10 +113,25 @@ test('⌥⌘V pastes a copy made in the editor from the clipboard ring', async (
     el.dispatchEvent(new ClipboardEvent('copy', { clipboardData: new DataTransfer(), bubbles: true, cancelable: true }));
   });
   await page.keyboard.press('ControlOrMeta+End');
-  await page.keyboard.insertText('\n');
+  // Enter, not insertText('\n'): Chromium turns an inserted "\n" in a
+  // contenteditable into a paragraph break CodeMirror reads as TWO newlines.
+  await page.keyboard.press('Enter');
   await page.keyboard.press('Alt+ControlOrMeta+KeyV');
   const item = page.locator('.ctx-menu [role="menuitem"]', { hasText: 'ring_marker_42' });
   await expect(item.first()).toBeVisible({ timeout: 5_000 });
   await item.first().click();
   await expect.poll(() => text(page)).toBe('SELECT ring_marker_42\nSELECT ring_marker_42');
+});
+
+test('undo survives an immediate reload (the page-hide flush)', async ({ page }) => {
+  await openEditor(page);
+  await typeTwoEdits(page);
+  // No wait: the last edit is still in the editor's save debounce when the
+  // page goes away — the page-hide hook parks and writes it.
+  await page.waitForTimeout(400); // the draft text itself (300 ms debounce)
+  await page.reload();
+  await expect(page.locator('.qe-edit .cm-content')).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => text(page)).toBe('SELECT 1 + 2');
+  await undo(page);
+  await expect.poll(() => text(page)).toBe('SELECT 1');
 });

@@ -33,7 +33,9 @@ export interface SavedEditorState {
 const MEM_MAX = 48;
 const PERSIST_MAX_BYTES = 512 * 1024;
 const PERSIST_TOTAL_BYTES = 10 * 1024 * 1024;
-const WRITE_DELAY_MS = 2_000;
+/** Disk write delay after a save. The editor saves 1.5 s after the last edit,
+ *  so a doc reaches IndexedDB about 2 s after typing stops. */
+const WRITE_DELAY_MS = 500;
 const DB_NAME = 'otto-editor-history';
 const STORE = 'docs';
 
@@ -66,6 +68,9 @@ export function saveEditorState(
   if (persist) {
     persistable.add(key);
     dirty.add(key);
+    // Open the database now, so a flush on page hide (a reload) only has to
+    // start its transaction — an open still pending at unload never completes.
+    void openDb();
     scheduleWrite();
   } else if (persistable.delete(key)) {
     // It just became non-persistable (the tab was masked): drop the disk copy.
@@ -80,6 +85,12 @@ export function unpersistEditorState(key: string): void {
   if (!persistable.delete(key)) return;
   dirty.add(key);
   void flushEditorHistory();
+}
+
+/** Open the database ahead of need (an editor that keeps history mounted):
+ *  a page-hide flush must only START a transaction, never wait on an open. */
+export function prepareEditorHistory(): void {
+  void openDb();
 }
 
 /** The parked state for `key` (memory, incl. what hydration loaded), or null. */
@@ -117,13 +128,28 @@ function openDb(): Promise<IDBDatabase | null> {
   dbPromise = new Promise((resolve) => {
     try {
       if (typeof indexedDB === 'undefined') return resolve(null);
-      const req = indexedDB.open(DB_NAME, 1);
-      req.onupgradeneeded = () => {
-        if (!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE);
+      const open = (version?: number): void => {
+        const req = version ? indexedDB.open(DB_NAME, version) : indexedDB.open(DB_NAME);
+        req.onupgradeneeded = () => {
+          if (!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE);
+        };
+        req.onsuccess = () => {
+          const db = req.result;
+          // A database that exists without our store (created by something
+          // else, or an interrupted upgrade) would fail every transaction
+          // forever: bump the version once to create it.
+          if (!db.objectStoreNames.contains(STORE) && !version) {
+            const next = db.version + 1;
+            db.close();
+            open(next);
+            return;
+          }
+          resolve(db.objectStoreNames.contains(STORE) ? db : null);
+        };
+        req.onerror = () => resolve(null);
+        req.onblocked = () => resolve(null);
       };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => resolve(null);
-      req.onblocked = () => resolve(null);
+      open();
     } catch {
       resolve(null); // private mode / blocked site data: memory tier only
     }
@@ -187,6 +213,59 @@ export async function flushEditorHistory(): Promise<void> {
   });
 }
 
+const RELOAD_PREFIX = 'otto_editor_history:';
+
+/** Synchronously copy queued (not yet on disk) persistable entries to
+ *  sessionStorage — the reload-safe path. Size-capped like the disk tier. */
+function stashDirtyForReload(): void {
+  if (typeof sessionStorage === 'undefined') return;
+  for (const key of dirty) {
+    const entry = mem.get(key);
+    if (!entry || !persistable.has(key)) continue;
+    try {
+      const text = JSON.stringify(entry.json);
+      if (text.length > PERSIST_MAX_BYTES) continue;
+      sessionStorage.setItem(
+        RELOAD_PREFIX + key,
+        JSON.stringify({ text, scrollTop: entry.scrollTop, at: entry.at }),
+      );
+    } catch {
+      /* quota / unavailable — IndexedDB may still make it */
+    }
+  }
+}
+
+/** Take the entries `stashDirtyForReload` left (newer than IndexedDB's). */
+function takeReloadStash(keep: (key: string) => boolean): void {
+  if (typeof sessionStorage === 'undefined') return;
+  let keys: string[] = [];
+  try {
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const k = sessionStorage.key(i);
+      if (k?.startsWith(RELOAD_PREFIX)) keys.push(k);
+    }
+  } catch {
+    keys = [];
+  }
+  for (const sk of keys) {
+    try {
+      const raw = sessionStorage.getItem(sk);
+      sessionStorage.removeItem(sk);
+      const key = sk.slice(RELOAD_PREFIX.length);
+      if (!raw || !keep(key) || mem.has(key)) continue;
+      const v = JSON.parse(raw) as { text: string; scrollTop?: number; at?: number };
+      const json = JSON.parse(v.text) as SavedEditorState['json'];
+      if (typeof json?.doc !== 'string') continue;
+      persistable.add(key);
+      touch(key, { json, scrollTop: v.scrollTop ?? 0, at: v.at ?? Date.now(), fromDisk: true });
+      dirty.add(key); // now make it durable
+    } catch {
+      /* malformed — dropped */
+    }
+  }
+  if (dirty.size) scheduleWrite();
+}
+
 let hydrated: Promise<void> | null = null;
 /**
  * Load persisted entries into memory once (newest first, within the total
@@ -195,6 +274,8 @@ let hydrated: Promise<void> | null = null;
  */
 export function hydrateEditorHistory(keep: (key: string) => boolean = () => true): Promise<void> {
   if (hydrated) return hydrated;
+  // The reload stash first: it is newer than anything on disk.
+  takeReloadStash(keep);
   hydrated = withStore('readwrite', (store) => {
     const rows: { key: string; text: string; scrollTop: number; at: number }[] = [];
     const req = store.openCursor();
@@ -240,11 +321,42 @@ export function hydrateEditorHistory(keep: (key: string) => boolean = () => true
   return hydrated;
 }
 
+/** Live editors' "park my current state now" hooks (CodeEditor registers
+ *  one). Run before a page-hide flush, so the last ≤1.5 s of typing — still in
+ *  the editor's save debounce — reaches the disk on a reload too. */
+const liveParkers = new Set<() => void>();
+export function registerLiveParker(park: () => void): () => void {
+  liveParkers.add(park);
+  return () => liveParkers.delete(park);
+}
+
 if (typeof window !== 'undefined') {
   const flush = (): void => {
+    for (const park of liveParkers) {
+      try {
+        park();
+      } catch {
+        /* one editor failing must not lose the others */
+      }
+    }
     void flushEditorHistory();
   };
-  window.addEventListener('pagehide', flush);
+  // An IndexedDB transaction started while the page unloads (a reload) is not
+  // guaranteed to commit, so the unload path ALSO writes the not-yet-flushed
+  // entries synchronously to sessionStorage (survives a reload of this tab);
+  // hydration moves them into IndexedDB.
+  const unload = (): void => {
+    for (const park of liveParkers) {
+      try {
+        park();
+      } catch {
+        /* keep going */
+      }
+    }
+    stashDirtyForReload();
+    void flushEditorHistory();
+  };
+  window.addEventListener('pagehide', unload);
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') flush();

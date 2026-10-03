@@ -5,7 +5,12 @@
   import { EditorView, lineNumbers, keymap, drawSelection, placeholder as cmPlaceholder } from '@codemirror/view';
   import { EditorState, Compartment, Prec, Text, type StateEffect } from '@codemirror/state';
   import { defaultKeymap, history, historyField, historyKeymap, selectAll } from '@codemirror/commands';
-  import { loadEditorState, saveEditorState } from '../editor-history';
+  import {
+    loadEditorState,
+    prepareEditorHistory,
+    registerLiveParker,
+    saveEditorState,
+  } from '../editor-history';
   import { search, searchKeymap, openSearchPanel } from '@codemirror/search';
   import {
     autocompletion,
@@ -790,6 +795,7 @@
     // rebuild it with THIS instance's extensions, then reconcile the text with
     // `content` as one undoable change. A disk entry whose doc no longer
     // matches the draft is ignored (its history belongs to another text).
+    if (hk?.persist) prepareEditorHistory();
     const saved = hk ? loadEditorState(hk.key) : null;
     if (saved && (!saved.fromDisk || saved.json.doc === fileContent)) {
       try {
@@ -849,14 +855,15 @@
       if (view) view.scrollDOM.scrollTop = top;
     });
   }
-  // Save 2 s after the last edit, so a reload (no unmount) still finds it.
+  // Save 1.5 s after the last edit (on disk ≈ 2 s), so a reload (no unmount)
+  // still finds it; a page hide parks it immediately (registerLiveParker).
   const historySaver = EditorView.updateListener.of((u) => {
     if (!u.docChanged) return;
     if (historySaveTimer !== null) clearTimeout(historySaveTimer);
     historySaveTimer = setTimeout(() => {
       historySaveTimer = null;
       if (view) parkHistory(livePath, view.state, view.scrollDOM.scrollTop);
-    }, 2000);
+    }, 1500);
   });
   // Copies/cuts made in the editor feed the clipboard ring (oncopy).
   const copyRecorder = EditorView.domEventHandlers({
@@ -1121,7 +1128,13 @@
     revealLine(line, col);
   });
 
+  // A reload / app hide parks the live doc right away (only with historyKey;
+  // parkHistory is a no-op otherwise).
+  const unregisterParker = registerLiveParker(() => {
+    if (historySaveTimer !== null) parkLive();
+  });
   onDestroy(() => {
+    unregisterParker();
     // Same doc, going away (a tab/view toggle): deliver its last edit.
     changes.flush();
     // Keep every doc's undo history for the next editor instance (historyKey).
