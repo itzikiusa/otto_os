@@ -128,9 +128,6 @@ class WorkspaceStore {
   private pendingStatus = new Map<Id, StatusPatch>();
   private statusFlushRaf: number | null = null;
   private statusFlushTimer: ReturnType<typeof setTimeout> | null = null;
-  /** `selectionGeneration` the archived "any?" probe last ran for (perf R4):
-   *  once per workspace switch, not on every refresh. */
-  private archivedProbedFor = -1;
 
   /** In-flight workflow runs (pending|running) in the current workspace, for the
    *  "Running" sidebar list + the Workflows nav count chip. Refreshed on each
@@ -809,7 +806,10 @@ class WorkspaceStore {
       // id (in parallel), and anything else is fetched on demand
       // ({@link ensureSession}). Archived rows load lazily ({@link loadArchived}).
       const q = shownListQuery(this.extraSources.keys());
-      const probeArchived = !this.archivedLoaded && !this.archivedKnown && this.archivedProbedFor !== selection;
+      // Not once rows are known (G7, which also covers R4's "once per selection"
+      // for any workspace that has archived rows); "none yet" is re-asked so an
+      // archive from another client still shows the header.
+      const probeArchived = !this.archivedLoaded && !this.archivedKnown;
       const probe = (w: Id) =>
         api
           .get<Session[]>(`/workspaces/${w}/sessions?archived=true&limit=1`)
@@ -832,10 +832,8 @@ class WorkspaceStore {
           ),
         ).then((pages) => pages.flat()),
         // Once a page is loaded the section knows on its own; until then a
-        // 1-row probe decides whether the folded header shows at all — ONCE
-        // per selection (R4), and not at all once it found rows (G7): reconnects,
-        // isolation flips and palette creates refresh too, and archiving here
-        // flips `hasArchived` locally.
+        // 1-row probe decides whether the folded header shows at all; archiving
+        // here flips `hasArchived` locally.
         probeArchived
           ? Promise.all([...(wsId ? [probe(wsId)] : []), probe(SCRATCH_WORKSPACE_ID)]).then((r) =>
               r.some(Boolean),
@@ -852,11 +850,8 @@ class WorkspaceStore {
         seen.add(s.id);
         all.push(s);
       }
-      if (probeArchived) {
-        this.archivedProbedFor = selection;
-        if (archivedAny) this.archivedKnown = true;
-        this.hasArchived = archivedAny || this.archivedSessions.length > 0;
-      }
+      if (archivedAny) this.archivedKnown = true;
+      this.hasArchived = this.archivedKnown || this.archivedSessions.length > 0;
       // Background engine sessions that ARE here (open tabs, live ones this
       // document saw created, `includeSources` panels) stay in `this.sessions`
       // so their owning panels can look them up / open them; every
@@ -1519,7 +1514,6 @@ class WorkspaceStore {
     this.dropArchived(id);
     // Maybe that was the last one: the next refresh probes again.
     this.archivedKnown = false;
-    this.archivedProbedFor = -1;
     this.hasArchived = this.archivedSessions.length > 0 || this.archivedHasMore || !this.archivedLoaded;
     this.sessions = this.sessionById.has(id)
       ? this.sessions.map((x) => (x.id === id ? s : x))
