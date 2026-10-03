@@ -1582,11 +1582,13 @@ pub(crate) async fn governed_invoke(
     // The calling session's workspace: the audit row's workspace when the
     // call itself names none, so the row is scoped to a workspace (and never
     // falls into the NULL-workspace bucket every MCP viewer could read).
-    let session_ws = if audit.caller_session_id.is_some() {
-        crate::agent_refs::caller_session_ws(ctx, auth).await
-    } else {
-        None
+    // The calling session's row, read ONCE per call: its workspace here, and
+    // the personal-agent policy below (which used to read it again).
+    let calling_session = match &audit.caller_session_id {
+        Some(sid) => ctx.manager.get(sid).await.ok(),
+        None => None,
     };
+    let session_ws = calling_session.as_ref().map(|s| s.workspace_id.clone());
     audit.workspace_id = arguments
         .get("workspace_id")
         .and_then(Value::as_str)
@@ -1634,8 +1636,14 @@ pub(crate) async fn governed_invoke(
     // enable gate and BEFORE reference resolution (like the scope check, a
     // refused call never resolves anything); rules and the sensitive check
     // read the caller's own arguments (the names it typed, e.g. `prod-api`).
-    let (agent_gate, calling_agent) =
-        crate::personal_agent_policy::evaluate(ctx, auth, &short, arguments).await;
+    let (agent_gate, calling_agent) = crate::personal_agent_policy::evaluate_with(
+        ctx,
+        auth,
+        &short,
+        arguments,
+        calling_session.as_ref(),
+    )
+    .await;
     if let crate::personal_agent_policy::AgentGate::Deny(reason) = &agent_gate {
         return Ok(deny_audit(ctx, &mut audit, reason).await);
     }

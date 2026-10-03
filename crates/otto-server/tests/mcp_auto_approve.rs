@@ -262,6 +262,10 @@ struct Daemon {
     agent: String,
     sid: Id,
     http: reqwest::Client,
+    /// The daemon's database (query-budget probes: `DbPool::op_count`).
+    pool: DbPool,
+    /// The daemon's event bus (stands in for ottod's approval-change hook).
+    events: broadcast::Sender<otto_core::event::Event>,
     _tmp: tempfile::TempDir,
 }
 
@@ -310,6 +314,7 @@ async fn boot() -> Daemon {
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");
     let ctx = test_ctx(&pool, base.clone(), tmp.path()).await;
+    let events = ctx.events.clone();
     let (api_extras, root_extras) = otto_server::modules::module_routers(&ctx);
     let app = otto_server::build_router(ctx, api_extras, root_extras);
     tokio::spawn(async move {
@@ -321,6 +326,8 @@ async fn boot() -> Daemon {
         agent,
         sid: s.id,
         http: reqwest::Client::new(),
+        pool: pool.clone(),
+        events,
         _tmp: tmp,
     };
     // The operator exposes the PR tools (create_pr / merge_pr are off by default).
@@ -725,4 +732,305 @@ async fn an_agent_credential_cannot_decide_approvals_but_its_owner_can() {
     let env = d.agent_invoke("create_pr", pr_args()).await;
     assert_eq!(env["executed"], true, "{env}");
     assert_eq!(d.last_audit("create_pr").await["decision"], "approved");
+}
+
+// ---------------------------------------------------------------------------
+// Performance guards (perf/10-mcp F2/F4/F5/F8/F9) — and proof the governance
+// semantics the caches sit under are unchanged.
+// ---------------------------------------------------------------------------
+
+/// The light enabled read answers names only (+ the caller session's UI
+/// grant), agrees with the full status, and is reachable by the agent token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn light_enabled_read_matches_the_status_and_reports_the_grant() {
+    let d = boot().await;
+    let (st, light) = d
+        .send("GET", &d.agent, "/mcp/otto-server/enabled", None)
+        .await;
+    assert_eq!(st, 200, "{light}");
+    let (_, full) = d.send("GET", &d.human, "/mcp/otto-server", None).await;
+    let from_status: Vec<&str> = full["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["enabled"] == json!(true))
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    let light_names: Vec<&str> = light["enabled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    assert_eq!(light_names, from_status);
+    assert_eq!(light["outward_enabled"], json!(true));
+    assert_eq!(light["ui_granted"], json!(false));
+    let bytes_light = serde_json::to_vec(&light).unwrap().len();
+    let bytes_full = serde_json::to_vec(&full).unwrap().len();
+    assert!(
+        bytes_light * 10 < bytes_full,
+        "the light read must be a small fraction of the status ({bytes_light} vs {bytes_full})"
+    );
+    // The human grants UI control → the agent's next read says so.
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human,
+            &format!("/sessions/{}/ui-control", d.sid),
+            Some(json!({"enabled": true})),
+        )
+        .await;
+    assert_eq!(st, 200, "grant: {body}");
+    let (_, light) = d
+        .send("GET", &d.agent, "/mcp/otto-server/enabled", None)
+        .await;
+    assert_eq!(light["ui_granted"], json!(true), "{light}");
+    // A person's own credential is not a session: never granted.
+    let (_, human) = d
+        .send("GET", &d.human, "/mcp/otto-server/enabled", None)
+        .await;
+    assert_eq!(human["ui_granted"], json!(false));
+}
+
+/// Settings are cached for the governed path, but an operator's change is
+/// effective on the very next call (write-through invalidation): turning the
+/// dangerous-approval gate off / on flips `create_pr` between running and
+/// asking at once, and a disabled tool disappears from the next read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operator_setting_changes_apply_to_the_next_call() {
+    let d = boot().await;
+    // Warm the cache with the gate ON.
+    let env = d.agent_invoke("create_pr", pr_args()).await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    let (st, body) = d
+        .send(
+            "PUT",
+            &d.human,
+            "/settings",
+            Some(json!({"mcp_require_approval_dangerous": false})),
+        )
+        .await;
+    assert!(st == 200 || st == 204, "settings: {st} {body}");
+    let env = d
+        .agent_invoke(
+            "create_pr",
+            json!({"repo_id": "repo1", "title": "Other", "description": "B",
+            "source_branch": "fix/other", "target_branch": "main"}),
+        )
+        .await;
+    assert_ne!(
+        env["decision"], "pending_approval",
+        "the gate was turned off — the next call must not ask: {env}"
+    );
+    let (st, _) = d
+        .send(
+            "PUT",
+            &d.human,
+            "/settings",
+            Some(json!({"mcp_require_approval_dangerous": true})),
+        )
+        .await;
+    assert!(st == 200 || st == 204);
+    let env = d
+        .agent_invoke(
+            "create_pr",
+            json!({"repo_id": "repo1", "title": "Third", "description": "C",
+            "source_branch": "fix/third", "target_branch": "main"}),
+        )
+        .await;
+    assert_eq!(env["decision"], "pending_approval", "gate back on: {env}");
+    // The enable list: dropping a tool is visible to the very next read.
+    let (st, body) = d
+        .send(
+            "PATCH",
+            &d.human,
+            "/mcp/otto-server",
+            Some(json!({"tools": ["comment_pr", "merge_pr", "list_repos"]})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    let (_, light) = d
+        .send("GET", &d.agent, "/mcp/otto-server/enabled", None)
+        .await;
+    assert!(
+        !light["enabled"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("otto.create_pr")),
+        "disabling is visible at once: {light}"
+    );
+}
+
+/// An approval decision resumes the waiting call as soon as the change event
+/// fires — not on the next 1 s poll (and not on the 5 s fallback).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_approval_resumes_the_waiting_call_on_the_change_event() {
+    let d = boot().await;
+    let d = Arc::new(d);
+    let waiter = {
+        let d = d.clone();
+        tokio::spawn(async move {
+            let (st, body) = d
+                .send(
+                    "POST",
+                    &d.agent,
+                    "/mcp/otto-tools/invoke",
+                    Some(json!({"tool": "otto.create_pr", "arguments": pr_args(),
+                                "wait_seconds": 10})),
+                )
+                .await;
+            (st, body, std::time::Instant::now())
+        })
+    };
+    // Wait until the card exists, then decide it as the human owner.
+    let id = loop {
+        if let Some(a) = d.pending_approvals().await.first() {
+            break a["id"].as_str().unwrap().to_string();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human,
+            &format!("/mcp/approvals/{id}/decide"),
+            Some(json!({"approved": true})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    // ottod's approval-change hook publishes this; the test router has no
+    // hook installed, so publish it the same way.
+    let decided = std::time::Instant::now();
+    let _ = d.events.send(otto_core::event::Event::McpApprovalChanged {
+        approval_id: Some(id.clone()),
+        workspace_id: Some("ws1".into()),
+        status: "approved".into(),
+    });
+    let (st, env, done) = waiter.await.unwrap();
+    assert_eq!(st, 200, "{env}");
+    // It RAN on the approval (the fixture repo has no git provider, so the
+    // PR route itself errors — after execution, not as a pending/denied gate).
+    assert_eq!(env["executed"], true, "the waiting call ran: {env}");
+    let latency = done.saturating_duration_since(decided);
+    assert!(
+        latency < std::time::Duration::from_millis(500),
+        "resumed {latency:?} after the decision (event-driven wake expected)"
+    );
+    assert_eq!(d.last_audit("create_pr").await["decision"], "approved");
+}
+
+/// Statement budget for one governed READ call (dry-run, so the self-call's
+/// own route is not measured): the whole request — token auth, the feature
+/// guard, the governed pipeline and its audit insert. Before: the settings
+/// reads alone were 4–5 per call, plus the status catalog the bridge fetched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_governed_read_call_stays_within_its_statement_budget() {
+    let d = boot().await;
+    let call = || {
+        d.send(
+            "POST",
+            &d.agent,
+            "/mcp/otto-tools/invoke",
+            Some(json!({"tool": "otto.list_repos", "arguments": {}, "dry_run": true})),
+        )
+    };
+    let (st, env) = call().await; // warm caches (auth, settings)
+    assert_eq!(st, 200, "{env}");
+    assert_eq!(env["decision"], "dry_run", "{env}");
+    let before = d.pool.op_count();
+    let (st, env) = call().await;
+    assert_eq!(st, 200, "{env}");
+    let used = d.pool.op_count() - before;
+    eprintln!("governed dry-run read: {used} statements");
+    assert!(
+        used <= GOVERNED_READ_BUDGET,
+        "{used} statements > budget {GOVERNED_READ_BUDGET}"
+    );
+    // And the light enabled read the bridge makes per tools/list.
+    let before = d.pool.op_count();
+    let (st, _) = d
+        .send("GET", &d.agent, "/mcp/otto-server/enabled", None)
+        .await;
+    assert_eq!(st, 200);
+    let used = d.pool.op_count() - before;
+    eprintln!("enabled read: {used} statements");
+    assert!(
+        used <= ENABLED_READ_BUDGET,
+        "{used} > {ENABLED_READ_BUDGET}"
+    );
+}
+/// Measured 4 (token auth + guard + pipeline + audit insert, settings cached).
+const GOVERNED_READ_BUDGET: u64 = 8;
+/// Measured 3.
+const ENABLED_READ_BUDGET: u64 = 5;
+
+/// `GET /mcp/audit` over 200 rows from 2 downstream servers: visibility is
+/// memoized per (server, tool), so the page costs a fixed handful of
+/// statements instead of ~5–8 per row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_audit_list_does_not_query_per_row() {
+    let d = boot().await;
+    let reg = otto_state::McpRegistryRepo::new(d.pool.clone());
+    let mut servers = Vec::new();
+    for name in ["alpha", "beta"] {
+        let s = reg
+            .create(otto_state::NewServerRow {
+                workspace_id: "ws1".into(),
+                name: name.into(),
+                transport: "stdio".into(),
+                command: "true".into(),
+                args: vec![],
+                env: Default::default(),
+                url: None,
+                description: None,
+                headers: Default::default(),
+                secret_ref: None,
+                secret_env_keys: vec![],
+                secret_header_keys: vec![],
+                injection_risk: "low".into(),
+                default_tool_access: "allow".into(),
+                enabled: true,
+                created_by: "alice".into(),
+            })
+            .await
+            .unwrap();
+        servers.push(s);
+    }
+    let log = otto_state::McpCallLogRepo::new(d.pool.clone());
+    for i in 0..200 {
+        let s = &servers[i % 2];
+        log.insert(otto_state::NewCallLog {
+            workspace_id: Some("ws1".into()),
+            server_id: Some(s.id.clone()),
+            server_name: Some(s.name.clone()),
+            tool: format!("tool_{}", i % 3),
+            direction: "outbound".into(),
+            caller_user_id: Some("alice".into()),
+            decision: "allowed".into(),
+            args_redacted_json: "{}".into(),
+            ok: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    let (one_row, all_rows) = ("/mcp/audit?limit=1", "/mcp/audit?limit=200");
+    let _ = d.send("GET", &d.human, one_row, None).await; // warm auth
+    let before = d.pool.op_count();
+    let (st, rows) = d.send("GET", &d.human, one_row, None).await;
+    assert_eq!(st, 200, "{rows}");
+    let one = d.pool.op_count() - before;
+    let before = d.pool.op_count();
+    let (st, rows) = d.send("GET", &d.human, all_rows, None).await;
+    assert_eq!(st, 200, "{rows}");
+    assert_eq!(rows.as_array().unwrap().len(), 200);
+    let many = d.pool.op_count() - before;
+    eprintln!("audit list: 1 row = {one} statements, 200 rows = {many}");
+    // A fixed cost per distinct server (row + live policy), nothing per row:
+    // measured 5 (1 row) vs 12 (200 rows); per-row checks cost ~600.
+    assert!(
+        many <= 15,
+        "200 rows cost {many} statements vs {one} for 1 — visibility is per row again"
+    );
 }

@@ -412,13 +412,32 @@ pub async fn evaluate(
     bare: &str,
     args: &Value,
 ) -> (AgentGate, Option<CallingAgent>) {
+    evaluate_with(ctx, auth, bare, args, None).await
+}
+
+/// [`evaluate`] reusing a calling-session row the caller already loaded this
+/// request (the governed pipeline reads it for the audit workspace). Used
+/// only when it IS the bound session; otherwise the row is read here, so the
+/// verdict is identical either way.
+pub async fn evaluate_with(
+    ctx: &ServerCtx,
+    auth: &AuthContext,
+    bare: &str,
+    args: &Value,
+    preloaded: Option<&otto_core::domain::Session>,
+) -> (AgentGate, Option<CallingAgent>) {
     let Some(sid) = bound_session(auth) else {
         return (decide(false, &[], bare, args), None);
     };
-    let session = match otto_state::SessionsRepo::new(ctx.pool.clone())
-        .get(&sid)
-        .await
-    {
+    let loaded = match preloaded.filter(|s| s.id == sid) {
+        Some(s) => Ok(s.clone()),
+        None => {
+            otto_state::SessionsRepo::new(ctx.pool.clone())
+                .get(&sid)
+                .await
+        }
+    };
+    let session = match loaded {
         Ok(s) => s,
         Err(_) => {
             if read_only_denies(bare) {

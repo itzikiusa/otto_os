@@ -6504,7 +6504,7 @@ mod tests {
         use std::sync::atomic::Ordering;
         let app = axum::Router::new()
             .route(
-                "/api/v1/mcp/otto-server/enabled",
+                "/mcp/otto-server/enabled",
                 get(
                     |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>| async move {
                         m.enabled_hits.fetch_add(1, Ordering::SeqCst);
@@ -6517,7 +6517,7 @@ mod tests {
                 ),
             )
             .route(
-                "/api/v1/mcp/otto-server",
+                "/mcp/otto-server",
                 get(
                     |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>| async move {
                         m.status_hits.fetch_add(1, Ordering::SeqCst);
@@ -6526,7 +6526,7 @@ mod tests {
                 ),
             )
             .route(
-                "/api/v1/mcp/gateway/tools",
+                "/mcp/gateway/tools",
                 get(
                     |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>| async move {
                         m.gateway_hits.fetch_add(1, Ordering::SeqCst);
@@ -6535,7 +6535,7 @@ mod tests {
                 ),
             )
             .route(
-                "/api/v1/mcp/otto-tools/invoke",
+                "/mcp/otto-tools/invoke",
                 post(
                     |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>,
                      axum::Json(body): axum::Json<Value>| async move {
@@ -6556,6 +6556,10 @@ mod tests {
                 ),
             )
             .with_state(state);
+        // Nested so the route literals above carry the same paths the
+        // daemon registers (the route-inventory / policy-coverage scanners
+        // read every `.route` literal in the workspace).
+        let app = axum::Router::new().nest("/api/v1", app);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
