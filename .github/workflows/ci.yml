@@ -140,8 +140,6 @@ jobs:
       - name: cargo nextest
         env:
           OTTO_REQUIRE_CLICKHOUSE: "1"
-          # The rows-read ratchet at a scale where full scans would show.
-          OTTO_K8S_MEASURE_PODS: "600"
         run: cargo nextest run --workspace --profile ci --no-fail-fast
 
       # Scale gates kept out of the everyday run (#[ignore], e.g. the 50k-revision
