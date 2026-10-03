@@ -2490,6 +2490,23 @@ the UI restores the admin's own token.
 
 The audit log is an **append-only** ledger written best-effort by the daemon at security-relevant sites — it is never updated or deleted, and an audit-insert failure never fails the audited request. `AuditEntry` = `{id, ts, user_id?, action, target?, detail?, ip?}` where `action` is a stable snake_case verb. Wired actions today: `login.success`, `login.failure`, `login.lockout` (`user_id` null — the actor is unauthenticated; `target` = attempted username; `ip` = real socket peer), `token.mint` / `token.revoke` (`target` = token id), `settings.change` (`target` = changed key list; `detail.keys`; secret values are NOT captured), `network_listener.toggle` (`target` = `on`/`off`; `detail` = the new listener config), `db.write_confirmed` (a confirmed write on a guarded production/read-only connection; `target` = connection name; `detail.environment` + truncated `detail.statement`), `grant.changed` (`target` = the user whose grants changed; `detail.old`/`detail.new` grant lists), `session.terminated` (an admin force-terminated a session via `POST /admin/sessions/{id}/terminate`; `target` = session id; `detail.owner_id` + `detail.workspace_id`), and `impersonate.start` / `impersonate.stop` (an admin began / ended acting-as another user; `user_id` = the real admin, `target` = the effective/impersonated user, `detail.real_user_id` + `detail.effective_user_id`). The posture summary derives entirely from existing settings + the auth store (no new state): the network listener key drives `network_listener` / `network_listener_port` / `loopback_only`, and `active_api_tokens` counts unexpired API tokens instance-wide.
 
+## Database maintenance
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /admin/db/stats | root | — | `DbStatsResp {size_bytes, free_bytes, auto_vacuum: 0\|1\|2, compacting}` |
+| POST /admin/db/compact | root | `{confirm: true}` | `DbCompactReport {before_bytes, after_bytes, freed_bytes, duration_ms, auto_vacuum}` · 400 without `confirm` · 409 while one is running |
+
+- `compact` is the one-time `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;` rewrite
+  of `otto.db`. It holds the SQLite write lock for the whole rewrite (tens of
+  seconds on a large DB), so it never runs automatically: the UI sends it only
+  after a confirm dialog that says writes stall meanwhile. Audited as
+  `db.compact` (`detail` = the report). Once `auto_vacuum = 2`, the daemon's
+  hourly maintenance runs `PRAGMA incremental_vacuum(4000)`.
+- Hourly maintenance (no endpoint): `PRAGMA optimize`, then
+  `wal_checkpoint(TRUNCATE)` (PASSIVE when a reader pins the WAL). The writer
+  sets `journal_size_limit = 64 MiB`.
+
 ## Usage tracking & system metrics (embedded ClickHouse)
 
 | Method & path | Auth | Request | Response |

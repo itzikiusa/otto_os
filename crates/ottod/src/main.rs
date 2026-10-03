@@ -923,9 +923,12 @@ async fn run(cfg: Config) -> Result<(), String> {
     // younger than its window). See docs/features/backup-restore.md.
     {
         let pool = pool.clone();
+        let auth_cache = auth_cache.clone();
         let interval = std::time::Duration::from_secs(60 * 60); // hourly
         tokio::spawn(async move {
             let settings = SettingsRepo::new(pool.clone());
+            let auth = otto_rbac::AuthRepo::with_cache(pool.clone(), auth_cache);
+            let maint_pool = pool.clone();
             let repo = otto_state::RetentionRepo::new(pool);
             loop {
                 let raw = settings
@@ -937,14 +940,85 @@ async fn run(cfg: Config) -> Result<(), String> {
                 match repo.prune(&policy).await {
                     Ok(r) if r.total() > 0 => tracing::info!(
                         "retention: pruned {} work_events, {} mcp_tool_calls, \
-                         {} mcp_call_log, {} audit_log row(s)",
+                         {} mcp_call_log, {} audit_log, {} review_agent_prompts, \
+                         {} review_diffs row(s)",
                         r.work_events,
                         r.mcp_tool_calls,
                         r.mcp_call_log,
-                        r.audit_log
+                        r.audit_log,
+                        r.review_agent_prompts,
+                        r.review_diffs
                     ),
                     Ok(_) => {}
                     Err(e) => tracing::warn!("retention prune failed: {e}"),
+                }
+                // Expired credentials (14-daemon-perf P10): a week of grace
+                // past expiry, then gone; the cache drops each hash too.
+                match auth.purge_expired(7).await {
+                    Ok(n) if n > 0 => {
+                        tracing::info!("retention: purged {n} expired auth session(s)")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("expired auth-session purge failed: {e}"),
+                }
+                // SQLite housekeeping (P3): planner stats, WAL truncate, and
+                // incremental vacuum once the DB was compacted by an admin.
+                match otto_state::maintenance::hourly(&maint_pool).await {
+                    Ok(m) => {
+                        if m.checkpoint_fell_back {
+                            tracing::debug!("db maintenance: WAL busy, ran a PASSIVE checkpoint");
+                        }
+                        if m.vacuumed_pages > 0 {
+                            tracing::info!(
+                                "db maintenance: reclaimed {} free page(s)",
+                                m.vacuumed_pages
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!("db maintenance failed: {e}"),
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    // Workflow run-history retention (08-workflows R1): daily, first pass at
+    // startup. Per workflow keep the newest 200 terminal runs AND every run
+    // younger than 30 days; never active/approval-parked runs or runs a
+    // Proof Pack / scheduled-task run references (all enforced in
+    // `WorkflowsRepo::prune_runs`). Each pruned run's
+    // `workflow-context/<run_id>/` dir is removed, confined to that root.
+    {
+        let pool = pool.clone();
+        let ctx_root = cfg.data_dir.join("workflow-context");
+        let interval = std::time::Duration::from_secs(24 * 60 * 60);
+        tokio::spawn(async move {
+            let repo = otto_state::WorkflowsRepo::new(pool);
+            loop {
+                match repo
+                    .prune_runs(
+                        otto_state::workflows::RUN_RETENTION_KEEP,
+                        otto_state::workflows::RUN_RETENTION_DAYS,
+                    )
+                    .await
+                {
+                    Ok(ids) if !ids.is_empty() => {
+                        let root = ctx_root.clone();
+                        let n = ids.len();
+                        let dirs = tokio::task::spawn_blocking(move || {
+                            ids.iter()
+                                .filter_map(|id| otto_core::paths::confine_join(&root, id))
+                                .filter(|d| d.is_dir() && std::fs::remove_dir_all(d).is_ok())
+                                .count()
+                        })
+                        .await
+                        .unwrap_or(0);
+                        tracing::info!(
+                            "retention: pruned {n} workflow run(s), removed {dirs} context dir(s)"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("workflow run retention failed: {e}"),
                 }
                 tokio::time::sleep(interval).await;
             }
@@ -1146,6 +1220,9 @@ async fn run(cfg: Config) -> Result<(), String> {
     // run via the same path as schedule/webhook triggers. Best-effort: errors
     // inside the listener are logged and never propagate to the event producer.
     let _workflow_event_trigger_handle = spawn_workflow_event_trigger_listener(ctx.clone());
+    // Notification-center notices for failed / waiting workflow runs and goal
+    // loops (review 08 · N1); scheduled tasks and personal agents notify inline.
+    otto_server::run_notices::spawn_listener(ctx.clone());
     tracing::info!("workflow event-trigger listener started");
 
     // --- Workflow schedule-trigger scheduler ---
