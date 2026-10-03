@@ -157,7 +157,11 @@ vaults stay cheap). Row click opens a note; context menu:
   reports "N links updated". Rename refuses to overwrite an existing target;
   case-only renames use a two-step move (APFS is case-insensitive); after a
   rename the whole vault re-resolves, so a basename that just became ambiguous
-  surfaces as unresolved rather than silently re-pointing.
+  surfaces as unresolved rather than silently re-pointing. A rename never
+  fails halfway: every index read happens before the move, and once the move
+  succeeds a source whose links couldn't be rewritten is skipped (left
+  untouched), listed in `links_failed`, and named in a warning toast — the
+  index is always refreshed to the new path.
 - **Delete (→ .trash)** — a **soft delete**: the note moves to
   `<vault>/.trash/…` inside the vault. Nothing is ever destroyed.
 
@@ -295,6 +299,10 @@ path:services/ kafka        # restrict to a subtree
 type:Decision retention     # OKF type filter
 ```
 
+Filters run inside the SQL query, before the result limit: `foo tag:x` finds
+every tagged match (also nested `x/…` tags), however low it ranks overall, and a
+search never reads the whole notes or tags table.
+
 **Tags** mode lists every tag with its count (frontmatter + inline, nested
 `a/b` tags included); clicking a tag jumps to a `tag:` search. Notes **>4 MiB**
 are indexed by filename and exact hash, without parsing body metadata or outgoing
@@ -354,6 +362,11 @@ The graph toolbar button switches the center pane to a **Canvas2D graph of the
 whole vault** — engineered so scale is a rendering problem, not a feature
 limit (design budget: **100k nodes / 1–2M edges on an M-series laptop**):
 
+- **Refetch only on shape changes** — the view refetches when the vault's
+  `graph_generation` moves (a note added/removed, or links/titles/tags/types
+  changed), not on every body-only autosave. The daemon caches built payloads
+  per vault for one graph generation, and the right panel's local graph walks
+  only the open note's neighbourhood over the indexed link table.
 - **Wire format** — one compact JSON payload of parallel arrays
   (`paths/titles/groups/flags` + a flat `[src,dst,…]` edge index list); ~1M
   edges is 8–14 MB of local JSON, no per-object overhead.
@@ -429,7 +442,7 @@ Authoritative contract: `docs/contracts/api.md` → **Vault v3 — the docs home
 | Area | Routes |
 |---|---|
 | Vaults | `GET/POST /vault/vaults`, `PATCH/DELETE /vault/vaults/{id}`, `POST …/rescan`, `GET …/status` |
-| Files | `GET …/dir?path=`, `GET/PUT/DELETE …/note`, `POST …/rename` (→ `{links_updated}`), `POST …/folder`, `GET …/asset?path=` |
+| Files | `GET …/dir?path=`, `GET/PUT/DELETE …/note`, `POST …/rename` (→ `{links_updated, links_failed}`), `POST …/folder`, `GET …/asset?path=` |
 | Knowledge | `GET …/backlinks?path=`, `POST …/search`, `GET …/switcher?q=`, `GET …/tags`, `GET …/graph?mode=full\|local&…` |
 | OKF | `POST …/okf/validate`, `POST …/okf/indexes` |
 

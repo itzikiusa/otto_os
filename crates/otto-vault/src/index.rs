@@ -21,6 +21,10 @@ pub(crate) struct IndexRecord {
     pub okf_type: Option<String>,
     pub reserved: bool,
     pub aliases: Vec<String>,
+    /// Hash of everything the graph reads from this note (title, type,
+    /// reserved, tags, link targets). `None` = unknown (hydrated from the DB),
+    /// so the first re-index of such a note counts as a graph change.
+    pub graph_sig: Option<u64>,
 }
 impl IndexRecord {
     pub fn note(row: &NoteRow) -> Self {
@@ -31,6 +35,7 @@ impl IndexRecord {
             okf_type: row.okf_type.clone(),
             reserved: row.reserved,
             aliases: serde_json::from_str(&row.aliases_json).unwrap_or_default(),
+            graph_sig: None,
         }
     }
     pub fn file(path: String) -> Self {
@@ -41,6 +46,7 @@ impl IndexRecord {
             okf_type: None,
             reserved: false,
             aliases: vec![],
+            graph_sig: None,
         }
     }
     fn entry(&self) -> DirEntry {
@@ -201,6 +207,7 @@ impl IndexState {
                 reserved: r.get::<i64, _>("reserved") != 0,
                 aliases: serde_json::from_str(&r.get::<String, _>("aliases_json"))
                     .unwrap_or_default(),
+                graph_sig: None,
             })
             .chain(files.into_iter().map(IndexRecord::file))
             .collect();

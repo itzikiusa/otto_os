@@ -596,7 +596,11 @@
   let reqSeq = 0;
   // A PRIMITIVE change token: effects reading it re-run only when its value
   // changes — not whenever the status poll hands back an equal object.
-  const gen = $derived(vault.status?.generation ?? vault.status?.last_scan_at ?? null);
+  // Keyed on the GRAPH generation (V1): a body-only autosave moves
+  // `generation` but not the graph's shape, so it no longer refetches.
+  const gen = $derived(
+    vault.status?.graph_generation ?? vault.status?.generation ?? vault.status?.last_scan_at ?? null,
+  );
   /** FNV-1a over everything `ingest` reads: an identical refetch (an edit that
    *  moved no link, title, tag or type) must not restart the layout. */
   function payloadSig(p: VaultGraphPayload): string {
