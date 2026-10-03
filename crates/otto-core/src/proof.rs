@@ -294,6 +294,11 @@ pub struct ProofPack {
     /// When the pack was waived (RFC3339), set alongside `waived_by`.
     #[serde(default)]
     pub waived_at: Option<String>,
+    /// Set by the opt-in "archive stale session packs" admin action
+    /// (migration 0191); cleared automatically when the pack changes or gains
+    /// evidence. Archived packs are hidden from the summary + default list.
+    #[serde(default)]
+    pub archived_at: Option<String>,
     pub created_by: Id,
     pub created_at: String,
     pub updated_at: String,
@@ -1487,6 +1492,7 @@ mod tests {
             waived_by: None,
             waived_reason: None,
             waived_at: None,
+            archived_at: None,
             created_by: "u1".into(),
             created_at: "2026-06-26T00:00:00Z".into(),
             updated_at: "2026-06-26T00:00:00Z".into(),

@@ -3534,9 +3534,30 @@ export interface ProofPack {
   waived_by?: string | null;
   waived_reason?: string | null;
   waived_at?: string | null;
+  /** Set by the opt-in stale-session archive; cleared when the pack changes. */
+  archived_at?: string | null;
   created_by: Id;
   created_at: string;
   updated_at: string;
+}
+
+/** `POST /workspaces/{id}/proof-packs/archive-sessions` body (opt-in, ws admin). */
+export interface ProofArchiveSessionsReq {
+  /** Default 30, minimum 7. */
+  older_than_days?: number;
+  /** Dry run (count only) unless true. */
+  apply?: boolean;
+}
+
+/** `POST /workspaces/{id}/proof-packs/archive-sessions` result. Nothing is deleted. */
+export interface ProofArchiveSessionsResp {
+  applied: boolean;
+  older_than_days: number;
+  cutoff: string;
+  /** Packs that match (stale, session, no evidence, not waived/archived). */
+  matched: number;
+  /** Packs stamped `archived_at` by this call (0 on a dry run). */
+  archived: number;
 }
 
 export interface ProofArtifact {

@@ -40,6 +40,10 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/workspaces/{id}/proof-packs", get(list).post(create))
         .route("/workspaces/{id}/proof-summary", get(summary))
         .route(
+            "/workspaces/{id}/proof-packs/archive-sessions",
+            post(archive_sessions),
+        )
+        .route(
             "/proof-packs/{id}",
             get(detail).patch(patch_pack).delete(remove),
         )
@@ -158,6 +162,9 @@ struct ListQuery {
     limit: Option<u32>,
     /// Opaque keyset cursor from a previous page's `x-next-cursor` header.
     cursor: Option<String>,
+    /// Also list packs the opt-in session archive hid (default false).
+    #[serde(default)]
+    include_archived: bool,
 }
 
 /// `<updated_at>|<id>` — both are RFC3339 / ULID-ish text without `|`.
@@ -188,6 +195,7 @@ async fn list(
             q.work_item_id.as_deref(),
             q.limit.map(|l| l.clamp(1, 500)),
             after.as_ref(),
+            q.include_archived,
         )
         .await
         .map_err(ApiError)?;
@@ -312,6 +320,63 @@ async fn summary(
         });
     }
     Ok(Json(ProofSummaryResp { rows }))
+}
+
+/// Default / minimum age (days) for the opt-in session-pack archive.
+const ARCHIVE_DEFAULT_DAYS: u32 = 30;
+const ARCHIVE_MIN_DAYS: u32 = 7;
+
+#[derive(Deserialize, Default)]
+struct ArchiveSessionsReq {
+    /// Only packs last updated more than this many days ago (default 30, min 7).
+    #[serde(default)]
+    older_than_days: Option<u32>,
+    /// Dry run unless true.
+    #[serde(default)]
+    apply: bool,
+}
+
+/// `POST /workspaces/{id}/proof-packs/archive-sessions` — OPT-IN, workspace
+/// admin. Hides stale `session` packs that never got any evidence from the
+/// summary + default list by stamping `archived_at`; nothing is deleted, and a
+/// pack un-archives itself the moment it changes or gains evidence. Dry run
+/// (count only) unless `apply: true`.
+async fn archive_sessions(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(ws): Path<Id>,
+    body: Option<Json<ArchiveSessionsReq>>,
+) -> ApiResult<Json<Value>> {
+    check(&ctx, &user, &ws, WorkspaceRole::Admin).await?;
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let days = req.older_than_days.unwrap_or(ARCHIVE_DEFAULT_DAYS);
+    if days < ARCHIVE_MIN_DAYS {
+        return Err(ApiError(Error::Invalid(format!(
+            "older_than_days must be at least {ARCHIVE_MIN_DAYS}"
+        ))));
+    }
+    // Same RFC3339 shape the repo stamps `updated_at` with (lexical compare).
+    let cutoff = (chrono::Utc::now() - chrono::Duration::days(i64::from(days))).to_rfc3339();
+    let matched = ctx
+        .proof_repo
+        .archive_stale_session_packs(&ws, &cutoff, false)
+        .await
+        .map_err(ApiError)?;
+    let archived = if req.apply && matched > 0 {
+        ctx.proof_repo
+            .archive_stale_session_packs(&ws, &cutoff, true)
+            .await
+            .map_err(ApiError)?
+    } else {
+        0
+    };
+    Ok(Json(json!({
+        "applied": req.apply,
+        "older_than_days": days,
+        "cutoff": cutoff,
+        "matched": matched,
+        "archived": archived,
+    })))
 }
 
 async fn create(

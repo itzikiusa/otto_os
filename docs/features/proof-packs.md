@@ -587,6 +587,18 @@ read is an index probe per listed session — at 10k session packs the sidebar
 still reads only its own rows. Without `work_items` the endpoint returns every
 pack in the workspace (kept as a fallback).
 
+**Archiving stale session packs (opt-in, never deletes).** Every agent session
+gets a pack, so a busy workspace accumulates thousands of empty session packs.
+A workspace admin can run **Archive stale session packs…** (Proof page header,
+⋯ menu) or `POST /workspaces/{id}/proof-packs/archive-sessions
+{older_than_days (default 30, min 7), apply}`. It is a dry run unless `apply`
+(the UI shows the count and asks first). Only `session` packs with no evidence
+artifacts, not waived, and untouched since the cutoff are stamped `archived_at`
+(migration 0191). They drop out of the summary roll-up and the default list
+(`?include_archived=true` lists them) but stay stored, and any later change to
+the pack or a new artifact clears the stamp (DB triggers), so a session that
+gets evidence reappears by itself.
+
 Review proof-pack exports (`POST /reviews/{id}/proof-pack/export`) keep every
 snapshot by default — an older snapshot is the only record of the review as it
 stood then. Pass `keep_last: N` to keep only the newest N for that review.

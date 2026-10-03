@@ -15,6 +15,8 @@ import type {
   KafkaEvidenceReq,
   PrCheckReq,
   Problem,
+  ProofArchiveSessionsReq,
+  ProofArchiveSessionsResp,
   ProofPackDetail,
   ProofPackResp,
   ProofSnapshotMeta,
@@ -86,6 +88,15 @@ export const PROOF_SUMMARY_CHUNK = 200;
 export function proofSummary(wsId: string, workItems?: string[]): Promise<ProofSummaryResp> {
   const q = workItems ? `?work_items=${encodeURIComponent(workItems.join(','))}` : '';
   return api.get<ProofSummaryResp>(`/workspaces/${wsId}/proof-summary${q}`);
+}
+
+/** OPT-IN (ws admin): hide stale, evidence-less session packs from the
+ *  summary + default list. Dry run unless `apply`; never deletes. */
+export function archiveStaleSessionPacks(
+  wsId: string,
+  body: ProofArchiveSessionsReq,
+): Promise<ProofArchiveSessionsResp> {
+  return api.post<ProofArchiveSessionsResp>(`/workspaces/${wsId}/proof-packs/archive-sessions`, body);
 }
 
 /** Create (or reuse, by work item) a proof pack. */

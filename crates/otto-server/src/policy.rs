@@ -1040,6 +1040,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/workspaces/{id}/proof-summary" {
         return Require(ProofPack, View);
     }
+    if p == "/workspaces/{id}/proof-packs/archive-sessions" {
+        // Opt-in archive of stale session packs (hides, never deletes).
+        return Require(ProofPack, Admin);
+    }
     if p == "/proof-packs/{id}" {
         // GET detail = View; PATCH = Edit; DELETE = Edit.
         return Require(ProofPack, if get { View } else { Edit });
@@ -1752,6 +1756,13 @@ mod tests {
         assert_eq!(
             pol(Method::GET, "/api/v1/workspaces/{id}/proof-summary"),
             Require(ProofPack, View),
+        );
+        assert_eq!(
+            pol(
+                Method::POST,
+                "/api/v1/workspaces/{id}/proof-packs/archive-sessions"
+            ),
+            Require(ProofPack, Admin),
         );
         assert_eq!(
             pol(Method::GET, "/api/v1/proof-packs/{id}"),
