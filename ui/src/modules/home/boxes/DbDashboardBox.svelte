@@ -17,8 +17,10 @@
     viewId: string;
     zoomed: boolean;
     tick: number;
+    /** False while this box's Home space is off screen (review 06 F3). */
+    active?: boolean;
   }
-  let { box, viewId, zoomed, tick }: Props = $props();
+  let { box, viewId, zoomed, tick, active = true }: Props = $props();
 
   let loading = $state(false);
   let loadedFor = '';
@@ -40,6 +42,7 @@
   }
   $effect(() => {
     void ws.currentId;
+    if (!active) return;
     untrack(() => void ensureLoaded());
   });
   $effect(() => {
@@ -79,7 +82,7 @@
   {:else}
     <div class="grid">
       {#each widgets as w (w.id)}
-        <WidgetCard widget={w} refreshSecs={dashboard.refresh_secs ?? null} />
+        <WidgetCard widget={w} refreshSecs={dashboard.refresh_secs ?? null} {active} />
       {/each}
     </div>
   {/if}
