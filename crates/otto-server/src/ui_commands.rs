@@ -426,7 +426,11 @@ mod tests {
         let (version, cmds) = parse(CATALOG_JSON).expect("ui-commands.json parses");
         assert!(!cmds.is_empty(), "catalog is empty");
         let problems = catalog_problems(version, &cmds);
-        assert!(problems.is_empty(), "catalog problems:\n{}", problems.join("\n"));
+        assert!(
+            problems.is_empty(),
+            "catalog problems:\n{}",
+            problems.join("\n")
+        );
         assert_eq!(catalog().len(), cmds.len());
     }
 
@@ -451,7 +455,10 @@ mod tests {
         ] {
             assert!(get(n).is_some(), "missing catalog command {n}");
         }
-        assert_eq!(get("db_run_query").unwrap().headless.as_deref(), Some("db_mcp_query"));
+        assert_eq!(
+            get("db_run_query").unwrap().headless.as_deref(),
+            Some("db_mcp_query")
+        );
         assert_eq!(
             get("db_list_connections").unwrap().headless.as_deref(),
             Some("db_list_connections")
@@ -488,7 +495,13 @@ mod tests {
         assert_eq!(pane_key("scheduled-tasks"), "scheduled-tasks");
     }
 
-    fn spec(name: &str, module: &str, route: &str, risk: Risk, headless: Option<&str>) -> UiCommandSpec {
+    fn spec(
+        name: &str,
+        module: &str,
+        route: &str,
+        risk: Risk,
+        headless: Option<&str>,
+    ) -> UiCommandSpec {
         UiCommandSpec {
             name: name.into(),
             module: module.into(),
@@ -504,19 +517,61 @@ mod tests {
 
     #[test]
     fn catalog_problems_catch_each_rule() {
-        let ok = spec("x", "connections", "database", Risk::Read, Some("db_mcp_query"));
+        let ok = spec(
+            "x",
+            "connections",
+            "database",
+            Risk::Read,
+            Some("db_mcp_query"),
+        );
         assert!(catalog_problems(1, std::slice::from_ref(&ok)).is_empty());
         let has = |cmds: &[UiCommandSpec], needle: &str| {
             let p = catalog_problems(1, cmds);
-            assert!(p.iter().any(|m| m.contains(needle)), "{needle} not in {p:?}");
+            assert!(
+                p.iter().any(|m| m.contains(needle)),
+                "{needle} not in {p:?}"
+            );
         };
         has(&[ok.clone(), ok.clone()], "duplicate name");
-        has(&[spec("Bad-Name", "connections", "database", Risk::Read, None)], "snake_case");
-        has(&[spec("x", "nowhere", "nowhere", Risk::Read, None)], "unknown module");
-        has(&[spec("x", "git", "database", Risk::Read, None)], "belongs to");
+        has(
+            &[spec(
+                "Bad-Name",
+                "connections",
+                "database",
+                Risk::Read,
+                None,
+            )],
+            "snake_case",
+        );
+        has(
+            &[spec("x", "nowhere", "nowhere", Risk::Read, None)],
+            "unknown module",
+        );
+        has(
+            &[spec("x", "git", "database", Risk::Read, None)],
+            "belongs to",
+        );
         has(&[spec("x", "shell", "git", Risk::Read, None)], "no route");
-        has(&[spec("x", "connections", "database", Risk::Navigate, Some("db_mcp_query"))], "only allowed on a read");
-        has(&[spec("x", "connections", "database", Risk::Read, Some("rm_rf"))], "unknown headless");
+        has(
+            &[spec(
+                "x",
+                "connections",
+                "database",
+                Risk::Navigate,
+                Some("db_mcp_query"),
+            )],
+            "only allowed on a read",
+        );
+        has(
+            &[spec(
+                "x",
+                "connections",
+                "database",
+                Risk::Read,
+                Some("rm_rf"),
+            )],
+            "unknown headless",
+        );
         let mut t = ok.clone();
         t.timeout_ms = 500;
         has(&[t], "timeout_ms");
@@ -530,10 +585,12 @@ mod tests {
         s.input_schema = json!({"type":"array","additionalProperties":false,"properties":{}});
         has(&[s], "type must be");
         let mut s = ok.clone();
-        s.input_schema = json!({"type":"object","additionalProperties":false,"properties":{},"required":["a"]});
+        s.input_schema =
+            json!({"type":"object","additionalProperties":false,"properties":{},"required":["a"]});
         has(&[s], "required 'a'");
         let mut s = ok.clone();
-        s.input_schema = json!({"type":"object","additionalProperties":false,"properties":{"a":{}}});
+        s.input_schema =
+            json!({"type":"object","additionalProperties":false,"properties":{"a":{}}});
         has(&[s], "no type");
         assert!(!catalog_problems(2, &[]).is_empty());
     }

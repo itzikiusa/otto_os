@@ -23,3 +23,17 @@ test('history walks and remote git still use the long lane', () => {
   assert.equal(isLongPath('/repos/r1/fetch'), true);
   assert.equal(isLongPath('/repos/r1/prs'), true);
 });
+
+test('a DB schema load or object open (both can dial) uses the long lane', () => {
+  const { isLongPath } = client();
+  // `GET …/db/schema` is the call that dials (keychain + ssh + pool connect):
+  // on the interactive lane a parallel reconnect starved the whole app.
+  assert.equal(isLongPath('/connections/c1/db/schema'), true);
+  assert.equal(isLongPath('/connections/c1/db/schema?refresh=true'), true);
+  assert.equal(isLongPath('/connections/c1/db/object'), true);
+  assert.equal(isLongPath('/connections/c1/db/schema/children?path=a'), true);
+  assert.equal(isLongPath('/connections/c1/db/schema-graph'), true);
+  // Neighbours that merely share a prefix stay interactive.
+  assert.equal(isLongPath('/connections/c1/db/objects-pinned'), false);
+  assert.equal(isLongPath('/connections/c1/db/schemas'), false);
+});

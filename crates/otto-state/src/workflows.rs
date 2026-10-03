@@ -1001,7 +1001,7 @@ impl WorkflowsRepo {
              RETURNING rev"
         );
         let projection = crate::workflow_progress::nodes_projection(nodes)?;
-        let rev: Option<i64> = sqlx::query_scalar(&sql)
+        let rev: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(status.as_str())
             .bind(&nodes_json)
             .bind(&projection)
@@ -1099,6 +1099,92 @@ impl WorkflowsRepo {
         .await
         .map_err(dberr("update run progress"))?;
         Ok(rev)
+    }
+}
+
+/// Run-history retention defaults (08-workflows R1): per workflow, keep the
+/// newest [`RUN_RETENTION_KEEP`] terminal runs AND every run younger than
+/// [`RUN_RETENTION_DAYS`]; only a run outside both is pruned.
+pub const RUN_RETENTION_KEEP: i64 = 200;
+pub const RUN_RETENTION_DAYS: i64 = 30;
+/// Rows deleted per write transaction by [`WorkflowsRepo::prune_runs`].
+const RUN_PRUNE_BATCH: usize = 100;
+
+impl WorkflowsRepo {
+    /// Retention sweep for `workflow_runs` (+ their `workflow_checkpoints`).
+    ///
+    /// A run is deleted only when ALL hold: it is terminal (`success` /
+    /// `error` / `canceled`) and not parked on an approval; it is outside its
+    /// workflow's newest `keep` terminal runs; it started before
+    /// `now - older_than_days`; no Proof Pack references it (the run's
+    /// `proof_pack_id` or a `proof_packs` row of kind `workflow_run`); and no
+    /// scheduled-task run links to it (`scheduled_task_runs.workflow_run_id`).
+    /// Candidates are found by one read, then deleted in
+    /// [`RUN_PRUNE_BATCH`]-row transactions. Returns the deleted run ids so
+    /// the caller can remove each `workflow-context/<id>` dir.
+    pub async fn prune_runs(&self, keep: i64, older_than_days: i64) -> Result<Vec<Id>> {
+        let keep = keep.max(1);
+        let cutoff = fmt(Utc::now() - chrono::Duration::days(older_than_days.max(1)));
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM (
+                 SELECT r.id, r.started_at, r.proof_pack_id,
+                        ROW_NUMBER() OVER (PARTITION BY r.workflow_id
+                                           ORDER BY r.started_at DESC, r.id DESC) AS rn
+                 FROM workflow_runs r
+                 WHERE r.status IN ('success','error','canceled')
+                   AND COALESCE(r.waiting_approval, 0) = 0
+             ) t
+             WHERE t.rn > ? AND t.started_at < ? AND t.proof_pack_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM proof_packs p
+                               WHERE p.work_item_kind = 'workflow_run' AND p.work_item_id = t.id)
+               AND NOT EXISTS (SELECT 1 FROM scheduled_task_runs s
+                               WHERE s.workflow_run_id = t.id)",
+        )
+        .bind(keep)
+        .bind(&cutoff)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("prune runs: scan"))?;
+        let mut deleted = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(RUN_PRUNE_BATCH) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(dberr("prune runs: begin"))?;
+            // Re-check terminal status under the write lock: a run retried
+            // between the scan and here is live again and must survive.
+            let q = format!(
+                "DELETE FROM workflow_runs WHERE id IN ({marks}) \
+                 AND status IN ('success','error','canceled') RETURNING id"
+            );
+            let mut del = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(q.as_str()));
+            for id in chunk {
+                del = del.bind(id);
+            }
+            let gone = del
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(dberr("prune runs: delete"))?;
+            // Checkpoints go by FK cascade on a real DB; delete explicitly
+            // too so a connection without `foreign_keys` leaves no orphans.
+            if !gone.is_empty() {
+                let marks = vec!["?"; gone.len()].join(",");
+                let q = format!("DELETE FROM workflow_checkpoints WHERE run_id IN ({marks})");
+                let mut del = sqlx::query(sqlx::AssertSqlSafe(q.as_str()));
+                for id in &gone {
+                    del = del.bind(id);
+                }
+                del.execute(&mut *tx)
+                    .await
+                    .map_err(dberr("prune runs: checkpoints"))?;
+            }
+            tx.commit().await.map_err(dberr("prune runs: commit"))?;
+            deleted.extend(gone);
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        Ok(deleted)
     }
 }
 
@@ -1806,5 +1892,81 @@ mod tests {
         let got = repo.get_run(&run.id).await.unwrap();
         assert!(!got.waiting_approval);
         assert!(got.approval_node_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn prune_runs_keeps_newest_young_active_and_referenced() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        // 6 old terminal runs (started 40+ days ago, newest first by index).
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            let run = repo
+                .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
+                .await
+                .unwrap();
+            repo.update_run(&run.id, RunStatus::Success, &[], None, true)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE workflow_runs SET started_at = ? WHERE id = ?")
+                .bind(fmt(Utc::now() - chrono::Duration::days(40 + i)))
+                .bind(&run.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            ids.push(run.id);
+        }
+        // A young terminal run, an old running run, an old proof-linked run
+        // and an old scheduled-task-linked run: all must survive.
+        let young = repo
+            .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
+            .await
+            .unwrap();
+        repo.update_run(&young.id, RunStatus::Error, &[], Some("x"), true)
+            .await
+            .unwrap();
+        let live = repo
+            .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE workflow_runs SET status='running', started_at = ? WHERE id = ?")
+            .bind(fmt(Utc::now() - chrono::Duration::days(90)))
+            .bind(&live.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        repo.set_run_proof_pack(&ids[4], "pack1").await.unwrap();
+        sqlx::query(
+            "INSERT INTO scheduled_task_runs (id, task_id, workspace_id, status, started_at, \
+             workflow_run_id, created_at) VALUES ('str1', 't1', 'ws1', 'ok', ?1, ?2, ?1)",
+        )
+        .bind(fmt(Utc::now()))
+        .bind(&ids[5])
+        .execute(&pool)
+        .await
+        .unwrap();
+        // keep=3 → the 3 newest terminal runs (young + ids[0..2]) stay.
+        let gone = repo.prune_runs(3, 30).await.unwrap();
+        let mut gone_sorted = gone.clone();
+        gone_sorted.sort();
+        let mut want = vec![ids[2].clone(), ids[3].clone()];
+        want.sort();
+        assert_eq!(gone_sorted, want);
+        for keep in [&young.id, &live.id, &ids[0], &ids[1], &ids[4], &ids[5]] {
+            assert!(repo.get_run(keep).await.is_ok(), "{keep} must survive");
+        }
+        // Idempotent.
+        assert!(repo.prune_runs(3, 30).await.unwrap().is_empty());
     }
 }

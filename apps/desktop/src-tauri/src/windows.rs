@@ -298,6 +298,9 @@ fn build_window_with_init(
         .transparent(true)
         .accept_first_mouse(true)
         .disable_drag_drop_handler()
+        // Terminal parse (setTimeout) and paint (rAF) stall for ~1 s per
+        // frame when WebKit decides an occluded window is "inactive".
+        .background_throttling(crate::NO_THROTTLE)
         .initialization_script(format!(
             "window.__OTTO_WIN__='{}';{}",
             frame.label,
@@ -454,8 +457,20 @@ mod tests {
     fn ephemeral_and_remote_windows_never_enter_registry() {
         assert!(is_registry_window("main"));
         assert!(is_registry_window("w2"));
-        for label in ["otto-pane-window-main", "otto-pane-main", "room-1", "host-room-1", "otto-browser-1", "otto-bar", "otto-tray", "popout-1"] {
-            assert!(!is_registry_window(label), "{label} must not be restored as a host");
+        for label in [
+            "otto-pane-window-main",
+            "otto-pane-main",
+            "room-1",
+            "host-room-1",
+            "otto-browser-1",
+            "otto-bar",
+            "otto-tray",
+            "popout-1",
+        ] {
+            assert!(
+                !is_registry_window(label),
+                "{label} must not be restored as a host"
+            );
         }
     }
 

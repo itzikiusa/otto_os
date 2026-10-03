@@ -30,6 +30,8 @@ pub mod integrations;
 pub mod issues;
 pub mod k8s_clusters;
 pub mod k8s_monitor;
+pub mod k8s_pod_actions;
+pub mod maintenance;
 pub mod mcp_audit;
 pub mod mcp_auto_approve;
 pub mod mcp_control;
@@ -45,10 +47,10 @@ pub mod product_chat;
 pub mod product_discovery;
 pub mod product_mockup;
 pub mod product_refinement;
-pub mod proof;
 pub mod projects;
-pub mod provider_models;
+pub mod proof;
 pub mod provider_accounts;
+pub mod provider_models;
 pub mod repo_rules;
 pub mod resource_access;
 pub mod retention;
@@ -101,7 +103,6 @@ pub use connections::{ConnectionsRepo, NewConnection};
 pub use db::open;
 // Re-exported so daemon-side background tasks can name the pool type without
 // taking a direct sqlx dependency.
-pub use pool::DbPool;
 pub use db_explorer::{
     Dashboard, DbExplorerRepo, HistoryEntry, NewSavedQuery, NewWidget, SavedQuery, Widget,
 };
@@ -110,6 +111,7 @@ pub use git::{GitStore, NewGitAccount, NewRepo};
 pub use goal_loops::{GoalLoopsRepo, NewGoalLoop};
 pub use grants::{capability_for_role, GrantCache, GrantsRepo, GRANT_CACHE_TTL};
 pub use name_themes::{CustomTheme, NameThemesRepo};
+pub use pool::DbPool;
 pub use proof::{ProofBlob, ProofRepo, ProofSnapshotRow};
 pub use provider_models::{ProviderModel, ProviderModelsRepo};
 // The raw sqlx pool type, for callers that build their own (tests, tools);
@@ -117,7 +119,10 @@ pub use provider_models::{ProviderModel, ProviderModelsRepo};
 pub use sqlx::SqlitePool;
 // NewRun/RunPatch/NewRunEvent are referenced via the `runs::` path downstream to
 // avoid colliding with swarm's `RunPatch`/`RunFilter` re-exports.
-pub use canvas::{CanvasRepo, CanvasScene, CanvasSceneSummary, NewScene, SceneUpdate};
+pub use canvas::{
+    CanvasRepo, CanvasScene, CanvasSceneSummary, CanvasSceneVersion, NewScene, SceneUpdate,
+    SCENE_VERSIONS_KEPT, USER_SNAPSHOT_EVERY_SECS,
+};
 pub use eval_lab::{EvalMatricesRepo, GoldenTaskInput, GoldenTasksRepo};
 pub use finding_events::FindingEventsRepo;
 pub use improvements::{ImprovementsRepo, NewEdit};
@@ -127,19 +132,23 @@ pub use k8s_clusters::{
     K8sCluster, K8sClusterPatch, K8sClusterSource, K8sClustersRepo, NewK8sCluster,
 };
 pub use k8s_monitor::{K8sMonitorConfigRow, K8sMonitorRepo, K8sMonitorStatusRow};
+pub use k8s_pod_actions::{K8sPodActionsRepo, PodAction, PodActionFilter, UpsertPodAction};
 pub use mcp_audit::{McpAuditRepo, McpToolCallRow, NewMcpToolCall};
 pub use mcp_auto_approve::{
     AutoApproveRulePatch, McpAutoApproveRepo, McpAutoApproveRule, NewAutoApproveRule,
 };
 pub use mcp_control::{
-    set_approval_change_hook, ApprovalChange, CallLogQuery, DiscoveredTool, McpAllowlistEntry, McpAllowlistRepo, McpApproval,
-    McpApprovalRepo, McpCallLogRepo, McpCallLogRow, McpPolicy, McpPolicyRepo, McpRegistryRepo,
-    McpServerDetail, McpTool, McpToolStats, McpToolsRepo, NewAllowlistEntry, NewApproval,
-    NewCallLog, NewPolicy, NewServerRow,
+    set_approval_change_hook, ApprovalChange, CallLogQuery, DiscoveredTool, McpAllowlistEntry,
+    McpAllowlistRepo, McpApproval, McpApprovalRepo, McpCallLogRepo, McpCallLogRow, McpPolicy,
+    McpPolicyRepo, McpRegistryRepo, McpServerDetail, McpTool, McpToolStats, McpToolsRepo,
+    NewAllowlistEntry, NewApproval, NewCallLog, NewPolicy, NewServerRow,
 };
 pub use mcp_servers::{McpServersRepo, NewMcpServer};
 pub use memory::{GovernedImport, MemoriesRepo};
 pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};
+pub use personal_agents::{
+    AgentAutonomy, AgentRule, ProactiveConfig, RuleEnforcement, StandingGoal,
+};
 pub use personal_agents::{
     AgentRoom, AgentRoomMessage, AgentRoomsRepo, AgentSchedulePatch, FinishAgentRun, NewAgentRun,
     NewAgentSchedule, NewPersonalAgent, NewRoomMessage, PersonalAgent, PersonalAgentPatch,
@@ -162,7 +171,7 @@ pub use product_refinement::{
 };
 pub use repo_rules::RepoRulesRepo;
 pub use resource_access::ResourceAccessRepo;
-pub use retention::{RetentionPolicy, RetentionReport, RetentionRepo};
+pub use retention::{RetentionPolicy, RetentionRepo, RetentionReport};
 pub use review_findings::{
     compute_fingerprint, FindingPatch, FindingState, NewFinding, ReviewFindingRow,
     ReviewFindingsRepo,
@@ -174,7 +183,9 @@ pub use saved_views::{NewSavedView, SavedView, SavedViewsRepo};
 pub use scheduled_tasks::{
     FinishRun, NewRun as NewScheduledRun, NewScheduledTask, ScheduledTaskPatch, ScheduledTasksRepo,
 };
-pub use sessions::{NewSession, SessionListFilter, SessionScope, SessionsRepo, UsageAttrRow};
+pub use sessions::{
+    DormantPass, NewSession, SessionListFilter, SessionScope, SessionsRepo, UsageAttrRow,
+};
 pub use settings::{
     otto_mcp_enabled_for, pr_draft_model_from, SettingsRepo, OTTO_MCP_ENABLED_KEY,
     PR_DRAFT_MODEL_DEFAULT, PR_DRAFT_MODEL_KEY,

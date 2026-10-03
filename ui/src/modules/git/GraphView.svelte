@@ -799,8 +799,49 @@
     if (id !== repoId) return;
     const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
     if (!raw || id !== repoId) return; // transient failure — keep what we have, try next round
-    if (applyRefs(withoutRemoteHeads(raw))) await reloadGraph();
+    if (applyRefs(withoutRemoteHeads(raw))) await backgroundReload();
   }
+
+  // Background-triggered history re-reads (auto-fetch, repo watcher) are
+  // THROTTLED: each is a `log --all -n ≥10k` walk + 2–3 MB of JSON + a full
+  // lane relayout, and an agent committing in a loop or a fetch bringing one
+  // upstream commit at a time used to trigger one per event. At most one runs
+  // per BG_RELOAD_GAP_MS; triggers inside the gap (or during a run) coalesce
+  // into ONE trailing reload. User actions still reload immediately.
+  const BG_RELOAD_GAP_MS = 4_000;
+  let bgLast = 0;
+  let bgTimer: ReturnType<typeof setTimeout> | null = null;
+  let bgRunning = false;
+  let bgPending = false;
+  async function backgroundReload(): Promise<void> {
+    if (bgRunning) {
+      bgPending = true;
+      return;
+    }
+    const wait = bgLast + BG_RELOAD_GAP_MS - Date.now();
+    if (wait > 0) {
+      bgTimer ??= setTimeout(() => {
+        bgTimer = null;
+        void backgroundReload();
+      }, wait);
+      return;
+    }
+    bgRunning = true;
+    bgLast = Date.now();
+    try {
+      await reloadGraph();
+    } finally {
+      bgRunning = false;
+      if (bgPending) {
+        bgPending = false;
+        void backgroundReload();
+      }
+    }
+  }
+  $effect(() => () => {
+    if (bgTimer) clearTimeout(bgTimer);
+    bgTimer = null;
+  });
 
   // ── Context-menu helpers ────────────────────────────────────────────────────
   /** Copy `text` to the clipboard and toast success/failure with `label`. */
@@ -4018,7 +4059,7 @@
     width: 14px;
     height: 14px;
     border-radius: 50%;
-    background: var(--accent);
+    background: var(--accent-solid);
     color: var(--accent-contrast);
   }
   /* Worktree pip: violet folder so it never reads as "checked out here". */

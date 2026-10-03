@@ -28,10 +28,12 @@ use otto_core::api::{ApiTokenInfo, McpTokenInfo, ShareInfo};
 use otto_core::auth::{AuthContext, McpScope, SessionScope};
 use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{new_id, Error, Id, Result};
-use rand::RngCore;
+use otto_state::DbPool;
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use otto_state::DbPool;
 
 use crate::cache::AuthCache;
 
@@ -72,11 +74,11 @@ pub fn token_hash(token: &str) -> String {
 }
 
 /// Generate a uniformly-distributed 6-digit numeric OTP (`"000000"`..="999999")
-/// from `OsRng`. Rejection-samples to avoid the modulo bias a bare `% 1_000_000`
+/// from the OS RNG (`SysRng`). Rejection-samples to avoid the modulo bias a bare `% 1_000_000`
 /// would introduce, so every code is equally likely. The plaintext is returned
 /// to the caller exactly once (to email); only its SHA-256 is ever stored.
 pub fn generate_otp() -> String {
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = UnwrapErr(SysRng);
     // Largest multiple of 1_000_000 that fits in u32, used as the rejection
     // bound so the sampled value maps onto [0, 1_000_000) without bias.
     const BOUND: u32 = (u32::MAX / 1_000_000) * 1_000_000;
@@ -98,9 +100,12 @@ fn parse_ts(s: &str) -> Result<DateTime<Utc>> {
 /// Never use a human-controlled label for automatic revocation.
 fn legacy_session_label(label: &str) -> Option<&str> {
     let id = label.strip_prefix("otto-mcp:")?;
-    (id.len() == 26 && id.as_bytes()[0] <= b'7'
-        && id.bytes().all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b)))
-        .then_some(id)
+    (id.len() == 26
+        && id.as_bytes()[0] <= b'7'
+        && id
+            .bytes()
+            .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b)))
+    .then_some(id)
 }
 
 /// Repository for `auth_sessions`.
@@ -140,7 +145,7 @@ impl AuthRepo {
     /// time it exists in plaintext).
     pub async fn issue(&self, user_id: &Id) -> Result<String> {
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let now = Utc::now();
         sqlx::query(
@@ -230,14 +235,21 @@ impl AuthRepo {
         // check: deleting a session must close access even after a restart.
         let managed_session: Option<String> = if kind == "api" {
             row.get("session_scope")
-        } else { None };
+        } else {
+            None
+        };
         if let Some(sid) = &managed_session {
             let exists: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND created_by = ?)",
-            ).bind(sid).bind(row.get::<String, _>("id"))
-                .fetch_one(&self.pool).await
-                .map_err(|e| Error::Internal(format!("managed token session: {e}")))?;
-            if !exists { return Err(Error::Unauthorized); }
+            )
+            .bind(sid)
+            .bind(row.get::<String, _>("id"))
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("managed token session: {e}")))?;
+            if !exists {
+                return Err(Error::Unauthorized);
+            }
         }
 
         let last_seen = parse_ts(&row.get::<String, _>("last_seen_at"))?;
@@ -316,7 +328,7 @@ impl AuthRepo {
                 mcp_scope: None,
                 mcp_internal: false,
                 mcp_session_id: None,
-            managed_session_id: None,
+                managed_session_id: None,
             });
         }
 
@@ -375,7 +387,7 @@ impl AuthRepo {
                 mcp_scope: None,
                 mcp_internal: false,
                 mcp_session_id: None,
-            managed_session_id: None,
+                managed_session_id: None,
             });
         }
 
@@ -479,6 +491,41 @@ impl AuthRepo {
         Ok(res.rows_affected())
     }
 
+    /// Purge credentials that expired more than `grace_days` ago (14-daemon-perf
+    /// P10). Every other DELETE here is targeted, so expired login / API /
+    /// impersonation rows (thousands of `otto-mcp:<session>` API tokens on a
+    /// real install) piled up forever. `share` rows are left to their own
+    /// window (`max_expires_at`). Runs in 500-row batches (one short write transaction each), evicting each
+    /// deleted hash from the auth cache. Returns the rows deleted.
+    pub async fn purge_expired(&self, grace_days: i64) -> Result<u64> {
+        const BATCH: i64 = 500;
+        let cutoff = (Utc::now() - Duration::days(grace_days.max(0))).to_rfc3339();
+        let mut total = 0u64;
+        loop {
+            let hashes: Vec<String> = sqlx::query_scalar(
+                "DELETE FROM auth_sessions WHERE rowid IN \
+                 (SELECT rowid FROM auth_sessions \
+                  WHERE kind IN ('session','api','agent_mcp','impersonation') \
+                    AND expires_at < ? LIMIT ?) \
+                 RETURNING token_hash",
+            )
+            .bind(&cutoff)
+            .bind(BATCH)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("purge expired tokens: {e}")))?;
+            if let Some(cache) = &self.cache {
+                for h in &hashes {
+                    cache.evict(h);
+                }
+            }
+            total += hashes.len() as u64;
+            if (hashes.len() as i64) < BATCH {
+                return Ok(total);
+            }
+        }
+    }
+
     /// Mint a long-lived API (personal access) token for `user_id`. Returns the
     /// RAW token (shown to the caller exactly once) plus its metadata.
     pub async fn issue_api_token(
@@ -492,21 +539,37 @@ impl AuthRepo {
     /// A durable lifecycle association, separate from the human-readable label.
     /// The credential is replaced on spawn and revoked on removal/failed spawn.
     pub async fn issue_session_api_token(
-        &self, user_id: &Id, session_id: &Id,
+        &self,
+        user_id: &Id,
+        session_id: &Id,
     ) -> Result<(String, ApiTokenInfo)> {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND created_by = ?)",
-        ).bind(session_id).bind(user_id).fetch_one(&self.pool).await
-            .map_err(|e| Error::Internal(format!("issue session token: {e}")))?;
-        if !exists { return Err(Error::Unauthorized); }
-        self.issue_api_token_inner(user_id, Some(&format!("otto-mcp:{session_id}")), Some(session_id)).await
+        )
+        .bind(session_id)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("issue session token: {e}")))?;
+        if !exists {
+            return Err(Error::Unauthorized);
+        }
+        self.issue_api_token_inner(
+            user_id,
+            Some(&format!("otto-mcp:{session_id}")),
+            Some(session_id),
+        )
+        .await
     }
 
     async fn issue_api_token_inner(
-        &self, user_id: &Id, label: Option<&str>, session_id: Option<&Id>,
+        &self,
+        user_id: &Id,
+        label: Option<&str>,
+        session_id: Option<&Id>,
     ) -> Result<(String, ApiTokenInfo)> {
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let prefix: String = token.chars().take(12).collect();
         let id = new_id();
@@ -551,10 +614,16 @@ impl AuthRepo {
         let hashes: Vec<String> = sqlx::query_scalar(
             "DELETE FROM auth_sessions WHERE user_id = ? AND session_scope = ?
              AND kind IN ('api', 'agent_mcp') RETURNING token_hash",
-        ).bind(owner).bind(session_id).fetch_all(&self.pool).await
-            .map_err(|e| Error::Internal(format!("revoke session tokens: {e}")))?;
+        )
+        .bind(owner)
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("revoke session tokens: {e}")))?;
         if let Some(cache) = &self.cache {
-            for hash in &hashes { cache.evict(hash); }
+            for hash in &hashes {
+                cache.evict(hash);
+            }
         }
         Ok(hashes.len() as u64)
     }
@@ -697,7 +766,7 @@ impl AuthRepo {
             .ok_or_else(|| Error::Invalid(format!("unknown user '{user_id}'")))?;
 
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let prefix: String = token.chars().take(12).collect();
         let id = new_id();
@@ -772,7 +841,7 @@ impl AuthRepo {
         let scope_json = serde_json::to_string(&scope)
             .map_err(|e| Error::Internal(format!("serialize reviewer scope: {e}")))?;
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let id = new_id();
         let now = Utc::now();
@@ -978,7 +1047,7 @@ impl AuthRepo {
         ttl: Duration,
     ) -> Result<String> {
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let prefix: String = token.chars().take(12).collect();
         let now = Utc::now();
@@ -1021,11 +1090,18 @@ impl AuthRepo {
                 let label: Option<String> = row.get("label");
                 let session_id: Option<Id> = row.get("session_scope");
                 let legacy_session_id = if session_id.is_none() {
-                    label.as_deref().and_then(legacy_session_label).map(str::to_owned)
-                } else { None };
+                    label
+                        .as_deref()
+                        .and_then(legacy_session_label)
+                        .map(str::to_owned)
+                } else {
+                    None
+                };
                 let session_exists = if session_id.is_some() || legacy_session_id.is_some() {
                     Some(row.get::<i64, _>("session_exists") != 0)
-                } else { None };
+                } else {
+                    None
+                };
                 Ok(ApiTokenInfo {
                     id: row.get("id"),
                     label,
@@ -1132,7 +1208,7 @@ impl AuthRepo {
         let ttl_secs = ttl_secs.clamp(SHARE_TOKEN_TTL_MIN_SECS, SHARE_TOKEN_TTL_MAX_SECS);
 
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let prefix: String = token.chars().take(12).collect();
         let id = new_id();
@@ -1175,7 +1251,7 @@ impl AuthRepo {
     /// Task 7.2 / design addendum "Email-OTP gate for share links").
     ///
     /// Like [`issue_share_token`] but additionally:
-    /// - generates a **6-digit OTP** from `OsRng` and stores only its SHA-256
+    /// - generates a **6-digit OTP** from the OS RNG and stores only its SHA-256
     ///   (`otp_hash`) — the plaintext is returned exactly once so the caller can
     ///   email it (the DB never holds the raw code);
     /// - locks the share to `recipient_email` (immutable; Task 7.4 extension only
@@ -1211,7 +1287,7 @@ impl AuthRepo {
         let window_secs = duration_secs.clamp(SHARE_TOKEN_TTL_MIN_SECS, SHARE_OTP_WINDOW_MAX_SECS);
 
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let prefix: String = token.chars().take(12).collect();
         let otp = generate_otp();
@@ -1578,14 +1654,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn purge_expired_drops_only_long_expired_non_share_rows() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "purge").await;
+        let live = repo.issue(&owner).await.unwrap();
+        let fresh_expired = repo.issue(&owner).await.unwrap();
+        let old_expired = repo.issue(&owner).await.unwrap();
+        let (old_api, _) = repo.issue_api_token(&owner, Some("x")).await.unwrap();
+        let set_exp = |tok: &str, days: i64, kind: &str| {
+            let pool = pool.clone();
+            let hash = token_hash(tok);
+            let kind = kind.to_string();
+            async move {
+                sqlx::query(
+                    "UPDATE auth_sessions SET expires_at = ?, kind = ? WHERE token_hash = ?",
+                )
+                .bind((Utc::now() - Duration::days(days)).to_rfc3339())
+                .bind(kind)
+                .bind(hash)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+        set_exp(&fresh_expired, 1, "session").await;
+        set_exp(&old_expired, 30, "session").await;
+        set_exp(&old_api, 30, "api").await;
+        // A long-expired share row is left to its own window.
+        let share = repo.issue(&owner).await.unwrap();
+        set_exp(&share, 30, "share").await;
+
+        assert_eq!(repo.purge_expired(7).await.unwrap(), 2);
+        let left: Vec<String> = sqlx::query_scalar("SELECT token_hash FROM auth_sessions")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        for keep in [&live, &fresh_expired, &share] {
+            assert!(left.contains(&token_hash(keep)));
+        }
+        assert_eq!(left.len(), 3);
+        assert_eq!(repo.purge_expired(7).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn token_inventory_distinguishes_durable_ownership_from_legacy_label_candidates() {
         let pool = mem_pool().await;
         let repo = AuthRepo::new(pool.clone());
         let owner = seed_user(&pool, "inventory").await;
         let sid = seed_managed_session(&pool, &owner).await;
         let (_, managed) = repo.issue_session_api_token(&owner, &sid).await.unwrap();
-        let (legacy_raw, legacy) = repo.issue_api_token(&owner, Some(&format!("otto-mcp:{sid}"))).await.unwrap();
-        let (_, personal) = repo.issue_api_token(&owner, Some("CI deploy")).await.unwrap();
+        let (legacy_raw, legacy) = repo
+            .issue_api_token(&owner, Some(&format!("otto-mcp:{sid}")))
+            .await
+            .unwrap();
+        let (_, personal) = repo
+            .issue_api_token(&owner, Some("CI deploy"))
+            .await
+            .unwrap();
         let list = repo.list_api_tokens(&owner).await.unwrap();
         let managed = list.iter().find(|t| t.id == managed.id).unwrap();
         assert_eq!(managed.session_id.as_ref(), Some(&sid));
@@ -1594,11 +1720,29 @@ mod tests {
         assert!(legacy.session_id.is_none());
         assert_eq!(legacy.legacy_session_id.as_ref(), Some(&sid));
         assert_eq!(legacy.session_exists, Some(true));
-        assert_eq!(list.iter().find(|t| t.id == personal.id).unwrap().session_exists, None);
-        sqlx::query("DELETE FROM sessions WHERE id = ?").bind(&sid).execute(&pool).await.unwrap();
+        assert_eq!(
+            list.iter()
+                .find(|t| t.id == personal.id)
+                .unwrap()
+                .session_exists,
+            None
+        );
+        sqlx::query("DELETE FROM sessions WHERE id = ?")
+            .bind(&sid)
+            .execute(&pool)
+            .await
+            .unwrap();
         let list = repo.list_api_tokens(&owner).await.unwrap();
-        assert_eq!(list.iter().filter(|t| t.session_exists == Some(false)).count(), 2);
-        assert!(repo.authenticate(&legacy_raw).await.is_ok(), "a matching label is not durable ownership or permission to automatically revoke");
+        assert_eq!(
+            list.iter()
+                .filter(|t| t.session_exists == Some(false))
+                .count(),
+            2
+        );
+        assert!(
+            repo.authenticate(&legacy_raw).await.is_ok(),
+            "a matching label is not durable ownership or permission to automatically revoke"
+        );
     }
 
     #[tokio::test]
@@ -1608,10 +1752,22 @@ mod tests {
         let owner = seed_user(&pool, "managed_origin").await;
         let sid = seed_managed_session(&pool, &owner).await;
         let (agent, _) = repo.issue_session_api_token(&owner, &sid).await.unwrap();
-        let (personal, _) = repo.issue_api_token(&owner, Some(&format!("otto-mcp:{sid}"))).await.unwrap();
+        let (personal, _) = repo
+            .issue_api_token(&owner, Some(&format!("otto-mcp:{sid}")))
+            .await
+            .unwrap();
         for _ in 0..2 {
-            assert_eq!(repo.authenticate(&agent).await.unwrap().managed_session_id, Some(sid.clone()));
-            assert_eq!(repo.authenticate(&personal).await.unwrap().managed_session_id, None);
+            assert_eq!(
+                repo.authenticate(&agent).await.unwrap().managed_session_id,
+                Some(sid.clone())
+            );
+            assert_eq!(
+                repo.authenticate(&personal)
+                    .await
+                    .unwrap()
+                    .managed_session_id,
+                None
+            );
         }
     }
 
@@ -1621,14 +1777,26 @@ mod tests {
         let (repo, _) = cached_repo(pool.clone());
         let uid = seed_user(&pool, "managed_deleted").await;
         let sid = seed_managed_session(&pool, &uid).await;
-        let (token, info) = repo.issue_api_token(&uid, Some("managed fixture")).await.unwrap();
+        let (token, info) = repo
+            .issue_api_token(&uid, Some("managed fixture"))
+            .await
+            .unwrap();
         sqlx::query("UPDATE auth_sessions SET session_scope = ? WHERE id = ?")
-            .bind(&sid).bind(&info.id).execute(&pool).await.unwrap();
+            .bind(&sid)
+            .bind(&info.id)
+            .execute(&pool)
+            .await
+            .unwrap();
         assert!(repo.authenticate(&token).await.is_ok());
         sqlx::query("DELETE FROM sessions WHERE id = ?")
-            .bind(&sid).execute(&pool).await.unwrap();
-        assert!(matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)),
-            "a deleted session must not retain API access through its managed token");
+            .bind(&sid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)),
+            "a deleted session must not retain API access through its managed token"
+        );
     }
 
     #[tokio::test]
@@ -1640,16 +1808,31 @@ mod tests {
         let sid = seed_managed_session(&pool, &owner).await;
         let (first, _) = repo.issue_session_api_token(&owner, &sid).await.unwrap();
         let (second, _) = repo.issue_session_api_token(&owner, &sid).await.unwrap();
-        let (personal, _) = repo.issue_api_token(&owner, Some(&format!("otto-mcp:{sid}"))).await.unwrap();
+        let (personal, _) = repo
+            .issue_api_token(&owner, Some(&format!("otto-mcp:{sid}")))
+            .await
+            .unwrap();
         assert!(repo.authenticate(&first).await.is_ok());
         assert!(repo.authenticate(&second).await.is_ok());
         assert!(repo.issue_session_api_token(&other, &sid).await.is_err());
         assert_eq!(repo.revoke_session_tokens(&other, &sid).await.unwrap(), 0);
         let restarted = AuthRepo::with_cache(pool, cache);
-        assert_eq!(restarted.revoke_session_tokens(&owner, &sid).await.unwrap(), 2);
-        assert!(matches!(repo.authenticate(&first).await, Err(Error::Unauthorized)));
-        assert!(matches!(repo.authenticate(&second).await, Err(Error::Unauthorized)));
-        assert!(repo.authenticate(&personal).await.is_ok(), "labels do not confer lifecycle ownership");
+        assert_eq!(
+            restarted.revoke_session_tokens(&owner, &sid).await.unwrap(),
+            2
+        );
+        assert!(matches!(
+            repo.authenticate(&first).await,
+            Err(Error::Unauthorized)
+        ));
+        assert!(matches!(
+            repo.authenticate(&second).await,
+            Err(Error::Unauthorized)
+        ));
+        assert!(
+            repo.authenticate(&personal).await.is_ok(),
+            "labels do not confer lifecycle ownership"
+        );
     }
 
     /// Boot sweep: managed credentials of sessions whose processes died with
@@ -1662,14 +1845,23 @@ mod tests {
         let owner = seed_user(&pool, "boot_managed").await;
         let sid = seed_managed_session(&pool, &owner).await;
         let (managed, info) = repo.issue_session_api_token(&owner, &sid).await.unwrap();
-        let (personal, _) = repo.issue_api_token(&owner, Some("CI deploy")).await.unwrap();
+        let (personal, _) = repo
+            .issue_api_token(&owner, Some("CI deploy"))
+            .await
+            .unwrap();
         assert!(repo.authenticate(&managed).await.is_ok());
 
         assert_eq!(repo.expire_managed_session_tokens().await.unwrap(), 1);
-        assert!(matches!(repo.authenticate(&managed).await, Err(Error::Unauthorized)));
+        assert!(matches!(
+            repo.authenticate(&managed).await,
+            Err(Error::Unauthorized)
+        ));
         assert!(repo.authenticate(&personal).await.is_ok());
         let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_sessions WHERE id = ?")
-            .bind(&info.id).fetch_one(&pool).await.unwrap();
+            .bind(&info.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(kept, 1, "the sweep revokes, it does not delete rows");
         // Idempotent.
         assert_eq!(repo.expire_managed_session_tokens().await.unwrap(), 0);
@@ -1735,7 +1927,11 @@ mod tests {
             async move {
                 let (raw, info) = repo.issue_api_token(&owner, Some(&label)).await.unwrap();
                 sqlx::query("UPDATE auth_sessions SET created_at = ? WHERE id = ?")
-                    .bind(old).bind(&info.id).execute(&pool).await.unwrap();
+                    .bind(old)
+                    .bind(&info.id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
                 raw
             }
         };
@@ -1749,13 +1945,29 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(repo.expire_legacy_session_label_tokens(cutover).await.unwrap(), 2);
-        assert!(matches!(repo.authenticate(&gone).await, Err(Error::Unauthorized)));
-        assert!(matches!(repo.authenticate(&own).await, Err(Error::Unauthorized)));
+        assert_eq!(
+            repo.expire_legacy_session_label_tokens(cutover)
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(matches!(
+            repo.authenticate(&gone).await,
+            Err(Error::Unauthorized)
+        ));
+        assert!(matches!(
+            repo.authenticate(&own).await,
+            Err(Error::Unauthorized)
+        ));
         assert!(repo.authenticate(&foreign).await.is_ok());
         assert!(repo.authenticate(&not_ulid).await.is_ok());
         assert!(repo.authenticate(&recent).await.is_ok());
-        assert_eq!(repo.expire_legacy_session_label_tokens(cutover).await.unwrap(), 0);
+        assert_eq!(
+            repo.expire_legacy_session_label_tokens(cutover)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     /// Interactive login token: mint → authenticate → revoke → auth fails.

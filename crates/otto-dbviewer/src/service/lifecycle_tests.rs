@@ -200,6 +200,7 @@ async fn lifecycle_cancelled_close_caller_keeps_owned_cleanup_alive() {
             resolved: Some(resolved),
             token,
             abort: None,
+            started: std::time::Instant::now(),
         },
     );
     let closing = service.clone();
@@ -261,6 +262,7 @@ async fn lifecycle_native_cancel_deadline_releases_old_ownership() {
             resolved: Some(resolved),
             token,
             abort: None,
+            started: std::time::Instant::now(),
         },
     );
     tokio::time::timeout(Duration::from_secs(2), service.close_connection(&conn))
@@ -314,6 +316,7 @@ async fn cancel_without_native_handle_aborts_the_task_and_reports_it() {
             resolved: None,
             token: CancelToken::new(),
             abort: Some(task.abort_handle()),
+            started: std::time::Instant::now(),
         },
     );
     let outcome = service.cancel(&conn, &user, "script").await.unwrap();
@@ -335,7 +338,15 @@ async fn cancel_without_native_handle_aborts_the_task_and_reports_it() {
             resolved: None,
             token: CancelToken::new(),
             abort: None,
+            started: std::time::Instant::now(),
         },
+    );
+    // A client that did not start the run learns how long it has been going.
+    let status = service.query_status(&conn, &user, "inline").await.unwrap();
+    assert_eq!(status.status, "running");
+    assert!(
+        status.elapsed_ms.is_some(),
+        "running status carries elapsed_ms"
     );
     assert_eq!(
         service.cancel(&conn, &user, "inline").await.unwrap().status,

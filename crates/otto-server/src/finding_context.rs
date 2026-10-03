@@ -51,7 +51,9 @@ pub fn render_repo_rules_block(rules: &[RepoRule]) -> String {
 pub async fn apply_repo_rules_to_context(ctx: &ServerCtx, workspace_id: &str) -> Result<()> {
     let rules = ctx.repo_rules_store.list_enabled(workspace_id).await?;
     let block = render_repo_rules_block(&rules);
-    ctx.workspaces.update_repo_rules(&workspace_id.to_string(), &block).await?;
+    ctx.workspaces
+        .update_repo_rules(&workspace_id.to_string(), &block)
+        .await?;
     Ok(())
 }
 

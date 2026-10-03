@@ -391,7 +391,7 @@
     align-self: center;
     border: none;
     border-radius: 999px;
-    background: var(--accent);
+    background: var(--accent-solid);
     color: var(--accent-contrast);
     font-size: var(--fs-m);
     font-weight: 600;

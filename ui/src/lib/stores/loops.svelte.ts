@@ -14,7 +14,9 @@ import type {
   GoalLoopDetail,
   GoalLoopDraft,
   GoalLoopIteration,
+  GoalLoopLimits,
   OttoEvent,
+  UpdateGoalLoopReq,
 } from '../api/types';
 
 class LoopsStore {
@@ -155,6 +157,13 @@ class LoopsStore {
   }
   async stop(id: string): Promise<void> {
     await this.lifecycle(id, 'stop');
+  }
+
+  /** Raise a paused/blocked/exhausted loop's limits (`PATCH /goal-loops/{id}
+   *  {limits}`) — Resume alone re-exhausts at once when a cap was hit. */
+  async updateLimits(id: string, limits: GoalLoopLimits): Promise<void> {
+    const updated = await api.patch<GoalLoop>(`/goal-loops/${id}`, { limits } satisfies UpdateGoalLoopReq);
+    this.mergeLoop(updated);
   }
 
   async verifyCriterion(id: string, criterion: string, evidence: string): Promise<void> {

@@ -17,11 +17,11 @@ chrono = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
-include_dir = "0.7"
+include_dir = "0.7.4"
 
 [dev-dependencies]
 sqlx = { workspace = true }
-tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
-wiremock = "0.6"
+tower = { version = "0.5.3", features = ["util"] }
+http-body-util = "0.1.5"
+wiremock = "0.6.5"
 tempfile = { workspace = true }

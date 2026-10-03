@@ -121,6 +121,34 @@ where
                 .into_response()
             };
         }
+        // READ-ONLY AGENT SESSIONS (crate::personal_agent_policy). A session
+        // confined read-only (a proactive personal-agent run, or a run of a
+        // read-only schedule) may READ through its own token but never write:
+        // every non-GET request is refused unless it is an allow-listed read
+        // route (searches, introspection, the governed invoke — which applies
+        // the same policy per tool). This is what makes the native stdio tools
+        // (room posts, canvas/swarm writes, PR comments…) read-only too, not
+        // just the governed catalog. A session row that no longer exists is not
+        // read-only (its tokens are revoked when the session is removed).
+        if let Some(sid) = ctx
+            .managed_session_id
+            .clone()
+            .or(ctx.mcp_session_id.clone())
+        {
+            if !crate::personal_agent_policy::read_only_route_allowed(&method, &template) {
+                if let Some(pool) = state.resource_pool() {
+                    let read_only = crate::personal_agent_policy::session_read_only(&pool, &sid)
+                        .await
+                        .unwrap_or(false);
+                    if read_only {
+                        return forbidden(
+                            "this agent session is read-only: it may read but not change anything",
+                        )
+                        .into_response();
+                    }
+                }
+            }
+        }
         if let Some(scope) = ctx.scope.clone() {
             // EMAIL-OTP GATE (mobile plan Task 7.3). A share locked to a recipient
             // email is OTP-pending until the guest redeems the emailed code via

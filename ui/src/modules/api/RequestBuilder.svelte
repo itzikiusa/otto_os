@@ -549,9 +549,10 @@
         url: draft.url, proto: draft.proto ?? '', method: draft.grpc_method, body: draft.body,
         headers: draft.headers.filter((h) => h.enabled !== false && h.key.trim() !== ''),
       });
-      if (ws.currentId === wid && apiClient.draft.tabId === tabId) { apiClient.lastResponse = res; apiClient.lastError = null; }
+      // Lands in the initiating tab's slot even if another tab is in front.
+      if (ws.currentId === wid) apiClient.setTabResult(tabId, res, null);
     } catch (e) {
-      if (ws.currentId === wid && apiClient.draft.tabId === tabId) apiClient.lastError = e instanceof Error ? e.message : String(e);
+      if (ws.currentId === wid) apiClient.setTabResult(tabId, null, e instanceof Error ? e.message : String(e));
     } finally {
       grpcInvoking = false;
     }
@@ -1287,7 +1288,8 @@
   }
   .name-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
     background: var(--surface-2);
   }
   .name-input::placeholder {
@@ -1370,7 +1372,7 @@
   }
   .url-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .url-input::placeholder {

@@ -11,6 +11,8 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { agentProviders } from '../../lib/providers';
+  import { confirmer, type ChoiceOption } from '../../lib/confirm.svelte';
+  import { toasts } from '../../lib/toast.svelte';
 
   interface Props {
     editor: { generate: (p: string) => Promise<void>; isGenerating: () => boolean } | undefined;
@@ -62,6 +64,52 @@
   }
 
   const working = $derived(busy || editor?.isGenerating());
+
+  // Version history (C5): snapshots taken before each Ask AI commit, before a
+  // restore, and at most every 10 min across manual saves. Offer the newest few.
+  const ORIGIN_LABEL: Record<string, string> = {
+    agent: 'Before Ask AI',
+    user: 'Manual edit',
+    restore: 'Before restore',
+  };
+  function ago(iso: string): string {
+    const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.round(s / 60)} min ago`;
+    if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+    return new Date(iso).toLocaleString();
+  }
+  let restoring = $state(false);
+  async function restorePrevious(): Promise<void> {
+    const id = canvas.currentId;
+    if (!id || restoring) return;
+    restoring = true;
+    try {
+      const versions = await canvas.listVersions(id);
+      if (!versions.length) {
+        toasts.info('No previous versions yet', 'A version is kept before each Ask AI turn and every 10 minutes of editing.');
+        return;
+      }
+      const picked = await confirmer.choose(
+        'Restore this canvas to an earlier version? The current board is kept as a version too, so you can undo the restore.',
+        {
+          title: 'Restore previous version',
+          options: versions.slice(0, 6).map((v, i): ChoiceOption => ({
+            label: `${ORIGIN_LABEL[v.origin] ?? v.origin} · ${ago(v.created_at)}`,
+            value: v.id,
+            kind: i === 0 ? 'primary' : 'normal',
+          })),
+        },
+      );
+      if (!picked.value || canvas.currentId !== id) return;
+      await canvas.restoreVersion(id, picked.value);
+      toasts.success('Canvas restored');
+    } catch (e) {
+      toasts.error('Could not restore the canvas', e instanceof Error ? e.message : String(e));
+    } finally {
+      restoring = false;
+    }
+  }
 </script>
 
 <aside class="assistant">
@@ -81,6 +129,15 @@
       </select>
     {/if}
     {#if working}<span class="working">working…</span>{/if}
+    <button
+      class="hist-btn history"
+      onclick={restorePrevious}
+      disabled={restoring || working || !canvas.currentId}
+      aria-label="Restore previous version"
+      title="Restore previous version…"
+    >
+      <Icon name="undo" size={15} />
+    </button>
     <button class="close" onclick={onclose} aria-label="Close assistant" title="Close assistant">
       <Icon name="x" size={15} />
     </button>
@@ -166,6 +223,28 @@
   }
   .close:hover {
     background: color-mix(in srgb, var(--text) 8%, transparent);
+  }
+  .hist-btn {
+    display: inline-flex;
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 6px;
+  }
+  .hist-btn.history {
+    margin-inline-start: auto;
+  }
+  .hist-btn.history + .close {
+    margin-inline-start: 0;
+  }
+  .hist-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text) 8%, transparent);
+  }
+  .hist-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .shell {
     flex: 1 1 auto;

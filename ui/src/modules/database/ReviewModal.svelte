@@ -177,7 +177,7 @@
     border-radius: 9px;
     font-size: var(--fs-xs);
     color: var(--accent-contrast);
-    background: var(--accent);
+    background: var(--accent-solid);
   }
   .rd-row,
   .rd-op {
@@ -251,13 +251,13 @@
   }
   .tb-btn.primary {
     border-color: transparent;
-    background: var(--accent);
+    background: var(--accent-solid);
     color: var(--accent-contrast);
     font-weight: 600;
   }
   .tb-btn.primary:hover {
     color: var(--accent-contrast);
-    background: color-mix(in srgb, var(--accent) 88%, black);
+    background: color-mix(in srgb, var(--accent-solid) 88%, black);
   }
   .tb-btn:disabled {
     opacity: 0.5;

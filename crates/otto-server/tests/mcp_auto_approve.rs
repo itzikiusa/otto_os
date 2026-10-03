@@ -418,6 +418,17 @@ async fn create_pr_without_a_rule_enqueues_an_approval() {
         d.last_audit("create_pr").await["decision"],
         "pending_approval"
     );
+    // The card names the requesting session; the audit row carries the
+    // session and the call's resolved workspace.
+    assert_eq!(pending[0]["requested_by_session_id"], d.sid.as_str());
+    let audit = d.last_audit("create_pr").await;
+    assert_eq!(audit["caller_session_id"], d.sid.as_str(), "{audit}");
+    assert_eq!(audit["workspace_id"], "ws1", "{audit}");
+    // A retry while it is still waiting reuses the same card.
+    let again = d.agent_invoke("create_pr", pr_args()).await;
+    assert_eq!(again["decision"], "pending_approval", "{again}");
+    assert_eq!(again["approval_id"], env["approval_id"], "{again}");
+    assert_eq!(d.pending_approvals().await.len(), 1, "no duplicate card");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

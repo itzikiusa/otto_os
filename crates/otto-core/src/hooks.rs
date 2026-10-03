@@ -34,11 +34,22 @@ pub struct SpawnInjection {
 /// panic) and return an empty [`SpawnInjection`] on failure. A hook failure must
 /// never block a session from spawning.
 pub trait PreSpawnHook: Send + Sync {
-    fn before_spawn_session(&self, ws: &Workspace, cwd: &str, provider: &str, _context: &SessionSpawnContext) -> SpawnInjection {
+    fn before_spawn_session(
+        &self,
+        ws: &Workspace,
+        cwd: &str,
+        provider: &str,
+        _context: &SessionSpawnContext,
+    ) -> SpawnInjection {
         self.before_spawn(ws, cwd, provider)
     }
 
-    fn resume_session(&self, cwd: &str, provider: &str, _context: &SessionSpawnContext) -> SpawnInjection {
+    fn resume_session(
+        &self,
+        cwd: &str,
+        provider: &str,
+        _context: &SessionSpawnContext,
+    ) -> SpawnInjection {
         self.resume_injection(cwd, provider)
     }
 

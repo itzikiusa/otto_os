@@ -403,25 +403,29 @@ mod tests {
     #[test]
     fn blocks_ipv6_forms_that_embed_a_blocked_ipv4() {
         for ip in [
-            "64:ff9b::a9fe:a9fe",   // NAT64 → 169.254.169.254
-            "64:ff9b::7f00:1",      // NAT64 → 127.0.0.1
-            "64:ff9b:1::1",         // local-use NAT64, blocked outright
-            "2002:7f00:1::",        // 6to4 → 127.0.0.1
-            "2002:a9fe:a9fe::1",    // 6to4 → 169.254.169.254
-            "2002:c0a8:101::",      // 6to4 → 192.168.1.1
-            "::127.0.0.1",          // IPv4-compatible → 127.0.0.1
-            "::a9fe:a9fe",          // IPv4-compatible → 169.254.169.254
+            "64:ff9b::a9fe:a9fe",       // NAT64 → 169.254.169.254
+            "64:ff9b::7f00:1",          // NAT64 → 127.0.0.1
+            "64:ff9b:1::1",             // local-use NAT64, blocked outright
+            "2002:7f00:1::",            // 6to4 → 127.0.0.1
+            "2002:a9fe:a9fe::1",        // 6to4 → 169.254.169.254
+            "2002:c0a8:101::",          // 6to4 → 192.168.1.1
+            "::127.0.0.1",              // IPv4-compatible → 127.0.0.1
+            "::a9fe:a9fe",              // IPv4-compatible → 169.254.169.254
             "2001:0:1:2:3:4:80ff:fffe", // Teredo client ^0xffffffff → 127.0.0.1
-            "fec0::1",              // site-local
-            "fe80::1",              // link-local
-            "fd00::1",              // ULA
-            "2001:db8::1",          // documentation
+            "fec0::1",                  // site-local
+            "fe80::1",                  // link-local
+            "fd00::1",                  // ULA
+            "2001:db8::1",              // documentation
         ] {
             let v6: Ipv6Addr = ip.parse().unwrap();
             assert!(is_blocked_ip(IpAddr::V6(v6)), "{ip} must be blocked");
         }
         // Transition forms wrapping a PUBLIC v4 stay reachable.
-        for ip in ["64:ff9b::808:808", "2002:808:808::1", "2606:4700:4700::1111"] {
+        for ip in [
+            "64:ff9b::808:808",
+            "2002:808:808::1",
+            "2606:4700:4700::1111",
+        ] {
             let v6: Ipv6Addr = ip.parse().unwrap();
             assert!(!is_blocked_ip(IpAddr::V6(v6)), "{ip} must be allowed");
         }

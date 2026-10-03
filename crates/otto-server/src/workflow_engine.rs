@@ -51,7 +51,9 @@ fn record_association(state: &mut NodeRunState, association: AgentAssociation) -
         AgentAssociation::Session(id) => (&mut state.sessions, id),
         AgentAssociation::Review(id) => (&mut state.review_ids, id),
     };
-    if ids.contains(&id) { return false; }
+    if ids.contains(&id) {
+        return false;
+    }
     ids.push(id);
     true
 }
@@ -5330,7 +5332,8 @@ async fn execute_node(
                             for a in &r.agents {
                                 if let Some(sid) = &a.session_id {
                                     if seen_sessions.insert(sid.clone()) {
-                                        let _ = session_tx.send(AgentAssociation::Session(sid.clone()));
+                                        let _ =
+                                            session_tx.send(AgentAssociation::Session(sid.clone()));
                                     }
                                 }
                             }
@@ -9509,11 +9512,21 @@ mod tests {
     #[test]
     fn review_association_survives_completed_async_steps_and_retry_sessions() {
         let mut state = nstate("review", NodeStatus::Running);
-        assert!(record_association(&mut state, AgentAssociation::Review("review-id".into())));
-        assert!(record_association(&mut state, AgentAssociation::Session("first".into())));
-        assert!(!record_association(&mut state, AgentAssociation::Review("review-id".into())));
+        assert!(record_association(
+            &mut state,
+            AgentAssociation::Review("review-id".into())
+        ));
+        assert!(record_association(
+            &mut state,
+            AgentAssociation::Session("first".into())
+        ));
+        assert!(!record_association(
+            &mut state,
+            AgentAssociation::Review("review-id".into())
+        ));
         state.status = NodeStatus::Success; // await:false has already returned.
-        let mut restored: NodeRunState = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        let mut restored: NodeRunState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
         assert_eq!(restored.review_ids, ["review-id"]);
         record_association(&mut restored, AgentAssociation::Session("retry".into()));
         assert_eq!(restored.sessions, ["first", "retry"]);
@@ -9616,7 +9629,13 @@ mod tests {
         assert!(lp.flush_at.is_none() && lp.unpersisted == 0);
         // The live cap evicts only phase lines, oldest first, like the end cap.
         let mut logs: Vec<String> = (0..NODE_LIVE_LOG_CAP + 50)
-            .map(|i| if i % 2 == 0 { format!("⏳ phase {i}") } else { format!("▶ line {i}") })
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("⏳ phase {i}")
+                } else {
+                    format!("▶ line {i}")
+                }
+            })
             .collect();
         cap_node_logs(&mut logs, NODE_LIVE_LOG_CAP);
         assert_eq!(logs.len(), NODE_LIVE_LOG_CAP);

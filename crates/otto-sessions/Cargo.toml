@@ -30,7 +30,7 @@ otto-rbac = { workspace = true }
 # Upserting the `otto` MCP server into grok's project-scoped
 # `<cwd>/.grok/config.toml` (grok doesn't read the workspace `.mcp.json`).
 # Format-preserving so a hand-edited project config survives.
-toml_edit = "0.25"
+toml_edit = "0.25.15"
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -38,5 +38,5 @@ chrono = { workspace = true }
 sqlx = { workspace = true }
 # Session-isolation tests drive the real REST router via tower's oneshot, read
 # the response body, and build a `RoleChecker` from a migrated SQLite pool.
-tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
+tower = { version = "0.5.3", features = ["util"] }
+http-body-util = "0.1.5"

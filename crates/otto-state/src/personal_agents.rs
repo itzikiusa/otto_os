@@ -12,12 +12,12 @@
 
 use std::collections::HashMap;
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json};
 
@@ -65,8 +65,17 @@ pub struct PersonalAgentSchedule {
     /// before it. `None` on pre-0147 rows.
     #[serde(default)]
     pub armed_at: Option<String>,
+    /// The schedule's own permission set (0153): `read_only` confines its runs
+    /// (no mutating otto.* tools, no sends, writes only inside the agent
+    /// folder); `directed` runs under the normal approval + auto-approve rules.
+    #[serde(default = "default_permission")]
+    pub permission: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn default_permission() -> String {
+    "directed".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,7 +98,99 @@ pub struct PersonalAgentRun {
     pub report_hash: Option<String>,
     pub attempts: i64,
     pub skipped_delivery: bool,
+    /// The permission mode the run executed under (0153): `proactive` (a
+    /// standing-goal run — always read-only, feed only, never delivered),
+    /// `directed` (Run now / delegation / chat-initiated) or `scheduled`.
+    #[serde(default = "default_permission")]
+    pub mode: String,
+    /// The standing goal a proactive run worked on.
+    #[serde(default)]
+    pub goal_id: Option<String>,
+    /// True when the run's session was confined read-only.
+    #[serde(default)]
+    pub read_only: bool,
     pub created_at: String,
+}
+
+/// Per-agent autonomy config (`personal_agent_autonomy.config_json`, 0153):
+/// the proactive budget, standing goals, custom rules and the primary flag.
+/// Every field defaults, so a missing row (or an older document) reads as
+/// "proactive off, no goals, no rules, not primary".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentAutonomy {
+    pub proactive: ProactiveConfig,
+    pub goals: Vec<StandingGoal>,
+    pub rules: Vec<AgentRule>,
+    /// The workspace's primary assistant ("your agent") — at most one per
+    /// workspace (the route clears the flag on every other agent).
+    pub primary: bool,
+}
+
+/// Proactive mode: the agent works its standing goals in the background,
+/// STRICTLY read-only, within a daily budget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProactiveConfig {
+    pub enabled: bool,
+    /// Proactive runs per day across all goals (1..=24).
+    pub runs_per_day: u32,
+    /// Wall-clock cap per proactive run, in minutes (1..=60).
+    pub max_minutes: u32,
+}
+
+impl Default for ProactiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            runs_per_day: 4,
+            max_minutes: 15,
+        }
+    }
+}
+
+/// A goal the agent works on continuously (proactive runs), producing findings
+/// into its feed rather than acting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StandingGoal {
+    pub id: String,
+    pub text: String,
+    pub enabled: bool,
+    /// Server-maintained: when a proactive run last worked this goal.
+    pub last_run_at: Option<String>,
+}
+
+impl Default for StandingGoal {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            text: String::new(),
+            enabled: true,
+            last_run_at: None,
+        }
+    }
+}
+
+/// A plain-language rule, injected into the agent's instructions and — where
+/// it is expressible — enforced at the tool layer (`enforce`, derived by the
+/// server from the text; never trusted from the client).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentRule {
+    pub id: String,
+    pub text: String,
+    pub enforce: Option<RuleEnforcement>,
+}
+
+/// The enforceable part of a rule: `approval` (force a human approval) or
+/// `deny` (refuse) for a MUTATING tool call whose tool name or arguments
+/// mention any of `terms`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuleEnforcement {
+    pub kind: String,
+    pub terms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,6 +359,9 @@ fn row_to_schedule(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgentSchedule>
         last_run_at: r.get("last_run_at"),
         next_run_at: r.get("next_run_at"),
         armed_at: r.get("armed_at"),
+        permission: r
+            .try_get::<String, _>("permission")
+            .unwrap_or_else(|_| default_permission()),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     })
@@ -283,6 +387,11 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgentRun> {
         report_hash: r.get("report_hash"),
         attempts: r.get("attempts"),
         skipped_delivery: r.get::<i64, _>("skipped_delivery") != 0,
+        mode: r
+            .try_get::<String, _>("mode")
+            .unwrap_or_else(|_| default_permission()),
+        goal_id: r.try_get("goal_id").unwrap_or(None),
+        read_only: r.try_get::<i64, _>("read_only").unwrap_or(0) != 0,
         created_at: r.get("created_at"),
     })
 }
@@ -374,15 +483,24 @@ impl PersonalAgentsRepo {
 
     /// User-maintained context is independent of filesystem memory and persona.
     pub async fn context(&self, id: &str) -> Result<(String, String)> {
-        let row = sqlx::query("SELECT content, version FROM personal_agent_context WHERE agent_id = ?")
-            .bind(id).fetch_optional(&self.pool).await.map_err(dberr("get agent context"))?;
-        Ok(row.map(|r| (r.get("content"), r.get("version")))
+        let row =
+            sqlx::query("SELECT content, version FROM personal_agent_context WHERE agent_id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(dberr("get agent context"))?;
+        Ok(row
+            .map(|r| (r.get("content"), r.get("version")))
             .unwrap_or_else(|| (String::new(), "missing".into())))
     }
 
     /// One atomic compare-and-swap; concurrent editors never silently overwrite.
     pub async fn save_context(&self, id: &str, expected: &str, content: &str) -> Result<String> {
-        if content.len() > 1024 * 1024 { return Err(otto_core::Error::Invalid("agent context exceeds 1 MiB".into())); }
+        if content.len() > 1024 * 1024 {
+            return Err(otto_core::Error::Invalid(
+                "agent context exceeds 1 MiB".into(),
+            ));
+        }
         let version = new_id();
         let result = sqlx::query(
             "INSERT INTO personal_agent_context (agent_id, content, version, updated_at) \
@@ -393,7 +511,11 @@ impl PersonalAgentsRepo {
         ).bind(id).bind(content).bind(&version).bind(fmt(Utc::now()))
             .bind(expected).bind(id).bind(expected).bind(expected)
             .execute(&self.pool).await.map_err(dberr("save agent context"))?;
-        if result.rows_affected() == 0 { return Err(otto_core::Error::Conflict("Context changed since you opened it. Reload and reconcile your edits.".into())); }
+        if result.rows_affected() == 0 {
+            return Err(otto_core::Error::Conflict(
+                "Context changed since you opened it. Reload and reconcile your edits.".into(),
+            ));
+        }
         Ok(version)
     }
 
@@ -663,6 +785,144 @@ impl PersonalAgentsRepo {
             .await
             .map_err(dberr("set personal agent run session"))?;
         Ok(())
+    }
+
+    /// Record the permission mode (and standing goal) a run executes under.
+    pub async fn set_run_mode(
+        &self,
+        run_id: &str,
+        mode: &str,
+        read_only: bool,
+        goal_id: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE personal_agent_runs SET mode = ?, read_only = ?, goal_id = ? WHERE id = ?",
+        )
+        .bind(mode)
+        .bind(read_only as i64)
+        .bind(goal_id)
+        .bind(run_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set personal agent run mode"))?;
+        Ok(())
+    }
+
+    /// Runs of `mode` started at/after `since` (RFC3339) — the proactive
+    /// daily budget counter.
+    pub async fn count_runs_since(&self, agent_id: &str, mode: &str, since: &str) -> Result<i64> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS n FROM personal_agent_runs \
+             WHERE agent_id = ? AND mode = ? AND started_at >= ?",
+        )
+        .bind(agent_id)
+        .bind(mode)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("count personal agent runs"))?;
+        Ok(row.get("n"))
+    }
+
+    /// Set one schedule's permission set (`read_only` | `directed`).
+    pub async fn set_schedule_permission(&self, id: &str, permission: &str) -> Result<()> {
+        if !matches!(permission, "read_only" | "directed") {
+            return Err(otto_core::Error::Invalid(format!(
+                "schedule permission must be read_only or directed, got {permission}"
+            )));
+        }
+        sqlx::query("UPDATE personal_agent_schedules SET permission = ? WHERE id = ?")
+            .bind(permission)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set personal agent schedule permission"))?;
+        Ok(())
+    }
+
+    /// Enabled agents whose autonomy config turns proactive mode on, with that
+    /// config — the proactive scheduler's scan.
+    pub async fn list_proactive(&self) -> Result<Vec<(PersonalAgent, AgentAutonomy)>> {
+        let rows = sqlx::query(
+            "SELECT a.*, x.config_json AS autonomy_json FROM personal_agents a \
+             JOIN personal_agent_autonomy x ON x.agent_id = a.id \
+             WHERE a.enabled = 1 AND json_valid(x.config_json) \
+               AND json_extract(x.config_json, '$.proactive.enabled') = 1",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list proactive personal agents"))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let cfg: AgentAutonomy =
+                serde_json::from_str(&r.get::<String, _>("autonomy_json")).unwrap_or_default();
+            out.push((row_to_agent(r)?, cfg));
+        }
+        Ok(out)
+    }
+
+    /// The agent's autonomy config (defaults when no row exists).
+    pub async fn autonomy(&self, agent_id: &str) -> Result<AgentAutonomy> {
+        let row = sqlx::query("SELECT config_json FROM personal_agent_autonomy WHERE agent_id = ?")
+            .bind(agent_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("get agent autonomy"))?;
+        Ok(row
+            .and_then(|r| serde_json::from_str(&r.get::<String, _>("config_json")).ok())
+            .unwrap_or_default())
+    }
+
+    /// Replace the agent's autonomy config.
+    pub async fn save_autonomy(&self, agent_id: &str, cfg: &AgentAutonomy) -> Result<()> {
+        let body = serde_json::to_string(cfg)
+            .map_err(|e| otto_core::Error::Internal(format!("autonomy json: {e}")))?;
+        sqlx::query(
+            "INSERT INTO personal_agent_autonomy (agent_id, config_json, updated_at) \
+             VALUES (?, ?, ?) ON CONFLICT(agent_id) DO UPDATE SET \
+             config_json = excluded.config_json, updated_at = excluded.updated_at",
+        )
+        .bind(agent_id)
+        .bind(body)
+        .bind(fmt(Utc::now()))
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("save agent autonomy"))?;
+        Ok(())
+    }
+
+    /// "Reset agent": drop its schedules and run history and forget its chat
+    /// session id. Memory files and the chat session itself are handled by the
+    /// server (filesystem + session manager). Returns the removed report paths.
+    pub async fn reset_agent(&self, agent_id: &str) -> Result<Vec<String>> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("reset agent: begin"))?;
+        let paths: Vec<String> = sqlx::query(
+            "SELECT report_path FROM personal_agent_runs WHERE agent_id = ? AND report_path IS NOT NULL",
+        )
+        .bind(agent_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(dberr("reset agent: runs"))?
+        .iter()
+        .map(|r| r.get::<String, _>("report_path"))
+        .collect();
+        for sql in [
+            "DELETE FROM personal_agent_runs WHERE agent_id = ?",
+            "DELETE FROM personal_agent_schedules WHERE agent_id = ?",
+            "UPDATE personal_agents SET chat_session_id = NULL WHERE id = ?",
+        ] {
+            sqlx::query(sql)
+                .bind(agent_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("reset agent"))?;
+        }
+        tx.commit().await.map_err(dberr("reset agent: commit"))?;
+        Ok(paths)
     }
 
     pub async fn get_run(&self, run_id: &str) -> Result<PersonalAgentRun> {
@@ -1058,11 +1318,26 @@ mod tests {
         let pool = pool().await;
         seed_ws(&pool, "w").await;
         let repo = PersonalAgentsRepo::new(pool);
-        let agent = repo.create(NewPersonalAgent::defaults("w".into(), "Context".into())).await.unwrap();
-        assert_eq!(repo.context(&agent.id).await.unwrap(), (String::new(), "missing".into()));
-        let version = repo.save_context(&agent.id, "missing", "user context").await.unwrap();
-        assert!(repo.save_context(&agent.id, "missing", "stale").await.is_err());
-        assert_eq!(repo.context(&agent.id).await.unwrap(), ("user context".into(), version));
+        let agent = repo
+            .create(NewPersonalAgent::defaults("w".into(), "Context".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.context(&agent.id).await.unwrap(),
+            (String::new(), "missing".into())
+        );
+        let version = repo
+            .save_context(&agent.id, "missing", "user context")
+            .await
+            .unwrap();
+        assert!(repo
+            .save_context(&agent.id, "missing", "stale")
+            .await
+            .is_err());
+        assert_eq!(
+            repo.context(&agent.id).await.unwrap(),
+            ("user context".into(), version)
+        );
     }
 
     #[tokio::test]
@@ -1319,13 +1594,22 @@ mod tests {
         // page before a cursor; an unknown cursor reads nothing.
         let tail = rooms.list_messages_before(&room.id, None, 1).await.unwrap();
         assert_eq!(tail.iter().map(|m| &m.id).collect::<Vec<_>>(), vec![&m2.id]);
-        let both = rooms.list_messages_before(&room.id, None, 50).await.unwrap();
-        assert_eq!(both.iter().map(|m| &m.id).collect::<Vec<_>>(), vec![&m1.id, &m2.id]);
+        let both = rooms
+            .list_messages_before(&room.id, None, 50)
+            .await
+            .unwrap();
+        assert_eq!(
+            both.iter().map(|m| &m.id).collect::<Vec<_>>(),
+            vec![&m1.id, &m2.id]
+        );
         let older = rooms
             .list_messages_before(&room.id, Some(&m2.id), 50)
             .await
             .unwrap();
-        assert_eq!(older.iter().map(|m| &m.id).collect::<Vec<_>>(), vec![&m1.id]);
+        assert_eq!(
+            older.iter().map(|m| &m.id).collect::<Vec<_>>(),
+            vec![&m1.id]
+        );
         assert!(rooms
             .list_messages_before(&room.id, Some(&m1.id), 50)
             .await
@@ -1395,5 +1679,98 @@ mod tests {
         // Deleting the room cascades its messages.
         rooms.delete(&room.id).await.unwrap();
         assert!(rooms.get(&room.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn autonomy_permissions_modes_and_reset_round_trip() {
+        let pool = pool().await;
+        seed_ws(&pool, "w1").await;
+        let repo = PersonalAgentsRepo::new(pool.clone());
+        let a = repo.create(new_agent("w1", "Scout")).await.unwrap();
+
+        // No row ⇒ every default (proactive off, budget 4/day, 15 min).
+        let cfg = repo.autonomy(&a.id).await.unwrap();
+        assert_eq!(cfg, AgentAutonomy::default());
+        assert!(!cfg.proactive.enabled);
+        assert_eq!(cfg.proactive.runs_per_day, 4);
+
+        let mut next = cfg.clone();
+        next.proactive.enabled = true;
+        next.goals.push(StandingGoal {
+            id: "g1".into(),
+            text: "Watch CI".into(),
+            ..Default::default()
+        });
+        next.rules.push(AgentRule {
+            id: "r1".into(),
+            text: "Ask before touching prod".into(),
+            enforce: Some(RuleEnforcement {
+                kind: "approval".into(),
+                terms: vec!["prod".into()],
+            }),
+        });
+        repo.save_autonomy(&a.id, &next).await.unwrap();
+        assert_eq!(repo.autonomy(&a.id).await.unwrap(), next);
+        let pro = repo.list_proactive().await.unwrap();
+        assert_eq!(pro.len(), 1);
+        assert_eq!(pro[0].0.id, a.id);
+        assert_eq!(pro[0].1.goals.len(), 1);
+
+        let s = repo
+            .create_schedule(NewAgentSchedule {
+                agent_id: a.id.clone(),
+                schedule: json!({"cadence":"interval","every_min":60}),
+                timezone: "UTC".into(),
+                directive: "d".into(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(s.permission, "directed");
+        repo.set_schedule_permission(&s.id, "read_only")
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_schedule(&s.id).await.unwrap().permission,
+            "read_only"
+        );
+        assert!(repo.set_schedule_permission(&s.id, "root").await.is_err());
+
+        let run = repo
+            .create_run(NewAgentRun {
+                agent_id: a.id.clone(),
+                schedule_id: None,
+                workspace_id: "w1".into(),
+                trigger: "proactive".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(run.mode, "directed");
+        repo.set_run_mode(&run.id, "proactive", true, Some("g1"))
+            .await
+            .unwrap();
+        let got = repo.get_run(&run.id).await.unwrap();
+        assert_eq!(got.mode, "proactive");
+        assert_eq!(got.goal_id.as_deref(), Some("g1"));
+        assert!(got.read_only);
+        let since = "2000-01-01T00:00:00Z";
+        assert_eq!(
+            repo.count_runs_since(&a.id, "proactive", since)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            repo.count_runs_since(&a.id, "directed", since)
+                .await
+                .unwrap(),
+            0
+        );
+
+        repo.set_chat_session(&a.id, Some("s1")).await.unwrap();
+        repo.reset_agent(&a.id).await.unwrap();
+        assert!(repo.list_runs(&a.id, 10).await.unwrap().is_empty());
+        assert!(repo.list_schedules(&a.id).await.unwrap().is_empty());
+        assert!(repo.get(&a.id).await.unwrap().chat_session_id.is_none());
     }
 }

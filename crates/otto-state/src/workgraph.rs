@@ -555,7 +555,7 @@ impl WorkGraphRepo {
         let q = format!(
             "SELECT {ITEM_COLS} FROM work_items WHERE workspace_id = ? AND kind = ? AND source_id = ?"
         );
-        let row = sqlx::query(&q)
+        let row = sqlx::query(sqlx::AssertSqlSafe(q.as_str()))
             .bind(workspace_id)
             .bind(kind.as_str())
             .bind(source_id)
@@ -567,7 +567,7 @@ impl WorkGraphRepo {
 
     async fn get_unscoped(&self, id: &Id) -> Result<WorkItem> {
         let q = format!("SELECT {ITEM_COLS} FROM work_items WHERE id = ?");
-        let row = sqlx::query(&q)
+        let row = sqlx::query(sqlx::AssertSqlSafe(q.as_str()))
             .bind(id)
             .fetch_one(&self.pool)
             .await
@@ -578,7 +578,7 @@ impl WorkGraphRepo {
     /// Fetch one item, scoped to a workspace (404 if absent or other workspace).
     pub async fn get_item(&self, workspace_id: &Id, id: &Id) -> Result<WorkItem> {
         let q = format!("SELECT {ITEM_COLS} FROM work_items WHERE id = ? AND workspace_id = ?");
-        let row = sqlx::query(&q)
+        let row = sqlx::query(sqlx::AssertSqlSafe(q.as_str()))
             .bind(id)
             .bind(workspace_id)
             .fetch_one(&self.pool)
@@ -690,7 +690,7 @@ impl WorkGraphRepo {
              AND (? IS NULL OR title LIKE ?) \
              ORDER BY updated_at DESC LIMIT ?"
         );
-        let rows = sqlx::query(&q)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(q.as_str()))
             .bind(workspace_id)
             .bind(&kind)
             .bind(&kind)
@@ -748,7 +748,7 @@ impl WorkGraphRepo {
             "SELECT {ITEM_COLS} FROM work_items WHERE workspace_id = ? AND source_id = ? \
              AND kind IN ('session','external_trigger') LIMIT 1"
         );
-        let row = sqlx::query(&q)
+        let row = sqlx::query(sqlx::AssertSqlSafe(q.as_str()))
             .bind(workspace_id)
             .bind(source_id)
             .fetch_optional(&self.pool)
@@ -1138,7 +1138,7 @@ impl WorkGraphRepo {
             "SELECT {col} AS key, COUNT(*) AS count FROM work_items WHERE workspace_id = ? \
              GROUP BY {col} ORDER BY count DESC"
         );
-        let rows = sqlx::query(&q)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(q.as_str()))
             .bind(workspace_id)
             .fetch_all(&self.pool)
             .await

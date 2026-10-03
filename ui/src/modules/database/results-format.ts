@@ -3,6 +3,7 @@
 // components or runes here — `copyText` is the one impure helper, and it only
 // touches the clipboard + the toast store.
 import { toasts } from '../../lib/toast.svelte';
+import { clipHistory } from '../../lib/stores/clipHistory.svelte';
 import { bsonScalar } from './bson';
 import { CELL_MAX, previewJson } from './json-preview';
 
@@ -160,6 +161,7 @@ export function fmtBytes(n: number): string {
 export async function copyText(s: string, successToast?: [title: string, body?: string]): Promise<void> {
   try {
     await navigator.clipboard.writeText(s);
+    clipHistory.record(s, 'Results');
     if (successToast) toasts.success(successToast[0], successToast[1]);
   } catch {
     toasts.error('Copy failed');

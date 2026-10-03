@@ -71,7 +71,9 @@ pub fn guard<R>(what: &str, f: impl FnOnce() -> R) -> Option<R> {
     match panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(r) => Some(r),
         Err(_) => {
-            append(&format!("=== contained: panic in {what} callback (skipped)\n\n"));
+            append(&format!(
+                "=== contained: panic in {what} callback (skipped)\n\n"
+            ));
             None
         }
     }

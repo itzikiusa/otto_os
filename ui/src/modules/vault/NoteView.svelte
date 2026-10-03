@@ -46,6 +46,10 @@
   import { renderD2 } from '../canvas/d2';
   import { renderNote, resolverFrom, slugifyHeading, stripFrontmatter } from './mdRender';
   import RefineDrawer from './RefineDrawer.svelte';
+  import StructuredNote from './StructuredNote.svelte';
+  import LinkPreview from './LinkPreview.svelte';
+  import { linkPreview } from './previewStore.svelte';
+  import { structuredModel } from './structuredNote';
   import { vault, vaultConflictKind } from './vault.svelte';
 
   // -- "Refine with AI" drawer — open state lives here keyed BY PATH (outside
@@ -150,6 +154,23 @@
       });
     }
   }
+
+  // Page previews on inline wikilinks (delegated; same popover as the
+  // structured panel's chips). Leaving the link, scrolling or switching
+  // notes closes it.
+  function onReadOver(e: Event): void {
+    const a = (e.target as HTMLElement).closest?.('a.internal-link[data-path]');
+    if (a) linkPreview.show(a, a.getAttribute('data-path'));
+  }
+  function onReadOut(e: Event): void {
+    const a = (e.target as HTMLElement).closest?.('a.internal-link[data-path]');
+    if (a && !a.contains((e as MouseEvent).relatedTarget as Node | null)) linkPreview.hide();
+  }
+  $effect(() => {
+    void vault.notePath;
+    void vault.editing;
+    linkPreview.hide();
+  });
 
   function scrollToHeading(anchor: string): void {
     requestAnimationFrame(() => {
@@ -298,6 +319,16 @@
   }
 
   const crumb = $derived((vault.notePath ?? '').split('/'));
+
+  // -- structured view for typed OKF notes (plain notes: model is null) ---------
+  // The toggle is a per-device preference (all typed notes at once).
+  const STRUCTURED_KEY = 'otto.vault.structuredView';
+  let structuredOn = $state((() => { try { return localStorage.getItem(STRUCTURED_KEY) !== 'off'; } catch { return true; } })());
+  const structured = $derived(vault.note && !vault.editing ? structuredModel(vault.note) : null);
+  function toggleStructured(): void {
+    structuredOn = !structuredOn;
+    try { localStorage.setItem(STRUCTURED_KEY, structuredOn ? 'on' : 'off'); } catch { /* private window */ }
+  }
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -321,6 +352,18 @@
           <span class="save-state" role="status">Saving…</span>
         {:else if vault.dirty}
           <span class="save-state" title="Autosaves in a moment">Unsaved</span>
+        {/if}
+        {#if structured}
+          <button
+            class="mode-btn"
+            class:refine-on={structuredOn}
+            title={structuredOn ? 'Hide structured panels' : 'Show structured panels'}
+            aria-label="Structured view"
+            aria-pressed={structuredOn}
+            onclick={toggleStructured}
+          >
+            <Icon name="layout" size={14} />
+          </button>
         {/if}
         <button class="mode-btn" title="Note edit history" aria-label="Note edit history" onclick={() => void vault.openHistory(vault.notePath ?? '')}><Icon name="clock" size={14} /></button>
         <button
@@ -369,11 +412,25 @@
       </div>
     {:else}
       <!-- Rendered markdown is sanitized in mdRender (allowlist). -->
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <div class="read md-body" bind:this={readEl} onclick={onReadClick}>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions, a11y_mouse_events_have_key_events -->
+      <div
+        class="read md-body"
+        bind:this={readEl}
+        onclick={onReadClick}
+        onmouseover={onReadOver}
+        onmouseout={onReadOut}
+        onfocusin={onReadOver}
+        onfocusout={() => linkPreview.hide()}
+        onscroll={() => linkPreview.hide()}
+      >
+        {#if structured && structuredOn && vault.note}
+          <StructuredNote model={structured} note={vault.note} />
+        {/if}
         {@html rendered}
       </div>
     {/if}
+
+    <LinkPreview />
 
     {#if refineShown && vault.notePath}
       <!-- Keyed by path (NOT by note content): reloading the same note after

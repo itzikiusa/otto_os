@@ -132,7 +132,7 @@ impl CdpClient {
             frame["sessionId"] = json!(sid);
         }
         self.out
-            .send(Message::Text(frame.to_string()))
+            .send(Message::Text(frame.to_string().into()))
             .map_err(|_| CdpError::Closed)?;
 
         let resp = tokio::time::timeout(Duration::from_secs(PAGE_TIMEOUT_SECS), rx)
@@ -1069,10 +1069,12 @@ mod tests {
                             }
                             _ => json!({"id": id, "result": {}}),
                         };
-                        ws.send(Message::Text(reply.to_string())).await.unwrap();
+                        ws.send(Message::Text(reply.to_string().into()))
+                            .await
+                            .unwrap();
                         if method == "Page.navigate" {
                             let ev = json!({"method": "Page.loadEventFired", "sessionId": "S1", "params": {}});
-                            ws.send(Message::Text(ev.to_string())).await.unwrap();
+                            ws.send(Message::Text(ev.to_string().into())).await.unwrap();
                         }
                     }
                 });

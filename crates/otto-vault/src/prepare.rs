@@ -202,7 +202,7 @@ fn prepare_reader(
         word_count: parsed.word_count as i64,
         size: size as i64,
         mtime_ns,
-        hash: format!("{:x}", hash.finalize()),
+        hash: hex::encode(hash.finalize()),
         reserved: matches!(base.as_str(), "index.md" | "log.md"),
         has_frontmatter: parsed.has_frontmatter,
         parse_error: parsed.parse_error,
@@ -237,7 +237,7 @@ mod tests {
             ContentIndexStatus::SizeLimited
         );
         assert!(large.body.is_empty() && large.links.is_empty());
-        assert_eq!(large.row.hash, format!("{:x}", Sha256::digest(&body)));
+        assert_eq!(large.row.hash, hex::encode(Sha256::digest(&body)));
         assert_eq!(large.row.tags_json, "[]");
     }
 

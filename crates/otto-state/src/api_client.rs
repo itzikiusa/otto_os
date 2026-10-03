@@ -7,6 +7,7 @@
 //! columns. Timestamps are RFC3339 TEXT. At most one environment per workspace
 //! is active; [`ApiClientRepo::set_active`] enforces this.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{
     ApiAutomation, ApiCollection, ApiEnvironment, ApiHistoryEntry, ApiHistorySourceSummary,
@@ -14,7 +15,6 @@ use otto_core::domain::{
 };
 use otto_core::{new_id, Id, Result};
 use sqlx::{QueryBuilder, Row, Sqlite};
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 
@@ -273,10 +273,12 @@ impl ApiClientRepo {
             .bind(cid)
             .fetch_one(&self.pool)
             .await,
-            None => sqlx::query_scalar("SELECT COUNT(*) FROM api_requests WHERE workspace_id = ?")
-                .bind(ws)
-                .fetch_one(&self.pool)
-                .await,
+            None => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM api_requests WHERE workspace_id = ?")
+                    .bind(ws)
+                    .fetch_one(&self.pool)
+                    .await
+            }
         }
         .map_err(dberr("count api requests"))
     }
@@ -792,13 +794,14 @@ impl ApiClientRepo {
         let mut deleted = 0u64;
         if max_age_days > 0 {
             let cutoff = fmt(Utc::now() - chrono::Duration::days(max_age_days));
-            deleted += sqlx::query("DELETE FROM api_history WHERE workspace_id = ? AND executed_at < ?")
-                .bind(ws)
-                .bind(&cutoff)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("prune api history"))?
-                .rows_affected();
+            deleted +=
+                sqlx::query("DELETE FROM api_history WHERE workspace_id = ? AND executed_at < ?")
+                    .bind(ws)
+                    .bind(&cutoff)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(dberr("prune api history"))?
+                    .rows_affected();
         }
         if max_rows > 0 {
             deleted += sqlx::query(
@@ -1496,10 +1499,16 @@ mod tests {
             extras,
             position: 0,
         };
-        repo.create_request(req("human", "https://{{host}}/v1", None)).await.unwrap();
-        repo.create_request(req("docs", "https://docs.test/v1", Some(jval!({"docs":"x"}))))
+        repo.create_request(req("human", "https://{{host}}/v1", None))
             .await
             .unwrap();
+        repo.create_request(req(
+            "docs",
+            "https://docs.test/v1",
+            Some(jval!({"docs":"x"})),
+        ))
+        .await
+        .unwrap();
         repo.create_request(req(
             "agent",
             "https://agent-only.test/v1",
@@ -1532,9 +1541,17 @@ mod tests {
         let (mut requests, mut history) = repo.known_host_urls(&ws).await.unwrap();
         requests.sort();
         history.sort();
-        assert_eq!(requests, vec!["https://docs.test/v1", "https://{{host}}/v1"]);
-        assert_eq!(history, vec!["https://human-run.test/x", "https://legacy.test/x"]);
-        assert_eq!(repo.known_host_urls(&new_id()).await.unwrap(), (vec![], vec![]));
+        assert_eq!(
+            requests,
+            vec!["https://docs.test/v1", "https://{{host}}/v1"]
+        );
+        assert_eq!(
+            history,
+            vec!["https://human-run.test/x", "https://legacy.test/x"]
+        );
+        assert_eq!(
+            repo.known_host_urls(&new_id()).await.unwrap(),
+            (vec![], vec![])
+        );
     }
-
 }

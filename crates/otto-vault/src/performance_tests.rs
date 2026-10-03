@@ -745,20 +745,41 @@ async fn quiet_rescan_writes_no_scan_state() {
     assert_eq!(e.store.get_vault(id).await.unwrap().scan_state, "idle");
 }
 
-/// SD-15 (listing half): history for one note in a vault with 50k revisions
-/// reads the index, not 50k `meta.json` files — and the index is a cache that
-/// learns revisions it doesn't know (older history, other writers) once.
+/// SD-15 (listing half): history for one note in a vault with many revisions
+/// reads the index, not every `meta.json` — and the index is a cache that
+/// learns revisions it doesn't know (older history, other writers) once. The
+/// meta-read counter is the load-bearing check and is size-independent, so the
+/// everyday run uses 5k revisions; the 50k-scale timing budget is the ignored
+/// variant below (CI runs it in its own step).
 #[tokio::test(flavor = "multi_thread")]
+async fn revision_listing_reads_only_the_path_index() {
+    revision_listing_reads_only_the_path_index_at(5_000).await;
+}
+
+/// The SD-15 scale gate: the same scenario at 50k revisions (~40 s of file
+/// creation in a debug build). `cargo nextest run --run-ignored only -E
+/// 'test(/at_50k_revisions/)'` — CI runs it in a dedicated step.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "50k-scale perf gate; run with --run-ignored (CI: dedicated step)"]
 async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
+    revision_listing_reads_only_the_path_index_at(50_000).await;
+}
+
+async fn revision_listing_reads_only_the_path_index_at(n: usize) {
     use crate::recovery::INDEX_META_READS;
+    // INDEX_META_READS is process-global: keep the two sizes from interleaving
+    // under `cargo test --include-ignored` (threads in one process).
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _serial = SERIAL.lock().await;
     let (e, dir, id) = fixture().await;
     let hist = dir.path().join(".otto-history");
     std::fs::create_dir_all(&hist).unwrap();
-    const N: usize = 50_000;
-    for i in 0..N {
-        // Time-sortable ids like `new_id()`; every 1000th revision is `a.md`.
+    // Every `stride`-th revision is `a.md`: always 50 hits, whatever the size.
+    let stride = n / 50;
+    for i in 0..n {
+        // Time-sortable ids like `new_id()`.
         let rid = format!("r{i:08}");
-        let path = if i % 1000 == 0 { "a.md" } else { "other.md" };
+        let path = if i % stride == 0 { "a.md" } else { "other.md" };
         let rdir = hist.join(&rid);
         std::fs::create_dir(&rdir).unwrap();
         let rev = VaultRevision {
@@ -776,8 +797,8 @@ async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
     // First listing learns every revision once (pre-index history) and
     // persists the index.
     let first = e.revisions("ws", id, Some("a.md")).await.unwrap();
-    assert_eq!(first.len(), N / 1000);
-    assert_eq!(first[0].id, format!("r{:08}", N - 1000), "newest first");
+    assert_eq!(first.len(), n / stride);
+    assert_eq!(first[0].id, format!("r{:08}", n - stride), "newest first");
     assert!(hist.join(".path-index.jsonl").is_file());
 
     // Warm: no meta read beyond the 50 hits themselves, well under 50 ms.
@@ -785,7 +806,7 @@ async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
     let t = std::time::Instant::now();
     let warm = e.revisions("ws", id, Some("a.md")).await.unwrap();
     let warm_ms = t.elapsed().as_millis();
-    assert_eq!(warm.len(), N / 1000);
+    assert_eq!(warm.len(), n / stride);
     assert_eq!(
         INDEX_META_READS.load(Relaxed),
         reads,
@@ -796,11 +817,11 @@ async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
     let budget = if cfg!(debug_assertions) { 250 } else { 50 };
     assert!(
         warm_ms < budget,
-        "warm 50k-revision listing took {warm_ms} ms"
+        "warm {n}-revision listing took {warm_ms} ms"
     );
 
     // A revision the index has never seen (another writer) is learned once.
-    let rid = format!("r{:08}", N);
+    let rid = format!("r{:08}", n);
     std::fs::create_dir(hist.join(&rid)).unwrap();
     let rev = VaultRevision {
         id: rid.clone(),
@@ -825,5 +846,179 @@ async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
         .revisions_page("ws", id, Some("a.md"), Some(&next[1].id))
         .await
         .unwrap();
-    assert_eq!(older.len(), N / 1000 - 1);
+    assert_eq!(older.len(), n / stride - 1);
+}
+
+fn graph_opts(mode: &str, path: Option<&str>, depth: usize) -> GraphOpts {
+    GraphOpts {
+        mode: mode.into(),
+        path: path.map(Into::into),
+        depth,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn body_only_save_keeps_graph_generation_and_cached_graph() {
+    let (e, _dir, id) = fixture().await;
+    let full = graph_opts("full", None, 1);
+    let first = e.graph("ws", id, &full).await.unwrap();
+    let builds = e.graph_builds.load(Relaxed);
+    let graph_gen = e.graph_generation(id).load(Relaxed);
+    e.write_note("ws", id, "a.md", "# Before\n[[b]]\n\nMore prose.", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        e.graph_generation(id).load(Relaxed),
+        graph_gen,
+        "a body-only save must not move the graph generation"
+    );
+    let again = e.graph("ws", id, &full).await.unwrap();
+    assert_eq!(e.graph_builds.load(Relaxed), builds, "served from cache");
+    assert_eq!(again.paths, first.paths);
+    // A link change moves the graph generation and rebuilds.
+    e.write_note("ws", id, "a.md", "# Before\nno links now", None)
+        .await
+        .unwrap();
+    assert_ne!(e.graph_generation(id).load(Relaxed), graph_gen);
+    let rebuilt = e.graph("ws", id, &full).await.unwrap();
+    assert_eq!(e.graph_builds.load(Relaxed), builds + 1);
+    assert!(rebuilt.edges.is_empty(), "{:?}", rebuilt.edges);
+    let status = e.status("ws", id).await.unwrap();
+    assert_eq!(
+        status.graph_generation,
+        Some(e.graph_generation(id).load(Relaxed).to_string())
+    );
+}
+
+#[tokio::test]
+async fn local_graph_bfs_uses_indexed_neighbourhood() {
+    let engine = Arc::new(VaultEngine::new(otto_state::db::test_pool().await));
+    let dir = tempfile::tempdir().unwrap();
+    for (name, body) in [
+        ("a.md", "[[b]]"),
+        ("b.md", "[[c]] [[a]]"),
+        ("c.md", "[[d]]"),
+        ("d.md", "end"),
+        ("x.md", "[[y]]"),
+        ("y.md", "far away"),
+        ("index.md", "[[a]] [[x]]"),
+    ] {
+        std::fs::write(dir.path().join(name), body).unwrap();
+    }
+    let id = engine
+        .store
+        .create_vault("ws", "T", dir.path().to_str().unwrap(), true)
+        .await
+        .unwrap();
+    engine.scan(id).await.unwrap();
+    for depth in 1..=3 {
+        let o = graph_opts("local", Some("a.md"), depth);
+        let indexed = engine.graph_local_indexed(id, &o).await.unwrap();
+        let built = engine.graph_build(id, &o).await.unwrap();
+        let mut a: Vec<_> = indexed.paths.clone();
+        let mut b: Vec<_> = built.paths.clone();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "depth {depth}");
+        let pairs = |g: &GraphPayload| {
+            let mut v: Vec<(String, String)> = g
+                .edges
+                .chunks(2)
+                .map(|p| {
+                    (
+                        g.paths[p[0] as usize].clone(),
+                        g.paths[p[1] as usize].clone(),
+                    )
+                })
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        assert_eq!(pairs(&indexed), pairs(&built), "depth {depth}");
+    }
+    let o = graph_opts("local", Some("index.md"), 1);
+    assert!(
+        engine.graph_local_indexed(id, &o).await.is_err(),
+        "a reserved focus is hidden unless reserved=true"
+    );
+}
+
+#[tokio::test]
+async fn search_filters_apply_before_the_limit_without_full_reads() {
+    let engine = Arc::new(VaultEngine::new(otto_state::db::test_pool().await));
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("deep")).unwrap();
+    for i in 0..260 {
+        std::fs::write(
+            dir.path().join(format!("n{i:03}.md")),
+            "alpha alpha alpha alpha",
+        )
+        .unwrap();
+    }
+    let filler = "lorem ipsum dolor sit amet ".repeat(80);
+    std::fs::write(
+        dir.path().join("deep/rare.md"),
+        format!("---\ntype: Runbook\ntags: [rare/sub]\n---\nalpha {filler}"),
+    )
+    .unwrap();
+    let id = engine
+        .store
+        .create_vault("ws", "T", dir.path().to_str().unwrap(), false)
+        .await
+        .unwrap();
+    engine.scan(id).await.unwrap();
+    let reads = engine.store.all_reads.load(Relaxed);
+    let search = |q: &str| SearchReq {
+        query: q.into(),
+        limit: 10,
+        ..Default::default()
+    };
+    for q in [
+        "alpha tag:rare",
+        "alpha tag:#rare/sub",
+        "alpha path:deep/",
+        "alpha type:runbook",
+        "tag:rare",
+    ] {
+        let hits = engine.search("ws", id, &search(q)).await.unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(),
+            vec!["deep/rare.md"],
+            "{q}"
+        );
+    }
+    assert!(engine
+        .search("ws", id, &search("alpha tag:rar"))
+        .await
+        .unwrap()
+        .is_empty());
+    let plain = engine.search("ws", id, &search("alpha")).await.unwrap();
+    assert_eq!(plain.len(), 10);
+    assert_eq!(
+        engine.store.all_reads.load(Relaxed),
+        reads,
+        "search must not read the whole notes table"
+    );
+}
+
+#[tokio::test]
+async fn rename_survives_a_failed_link_rewrite() {
+    let (e, dir, id) = fixture().await;
+    *e.rename_fail.lock().unwrap() = Some("a.md".into());
+    let r = e.rename("ws", id, "b.md", "sub/c.md").await.unwrap();
+    assert_eq!(r.links_failed, vec!["a.md".to_string()]);
+    assert_eq!(r.links_updated, 0);
+    assert!(dir.path().join("sub/c.md").is_file());
+    assert!(
+        e.store.note_meta(id, "sub/c.md").await.is_ok(),
+        "the moved note is indexed"
+    );
+    assert!(e.store.note_meta(id, "b.md").await.is_err());
+    // The source kept its (now unresolved) link; nothing was half-written.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.md")).unwrap(),
+        "# Before\n[[b]]"
+    );
 }

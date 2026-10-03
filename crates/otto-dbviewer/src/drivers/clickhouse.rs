@@ -168,6 +168,11 @@ struct JsonResponse {
     data: Vec<Vec<Value>>,
     #[serde(default)]
     statistics: Statistics,
+    /// Set when the query failed AFTER the 200 status went out (a mid-stream
+    /// failure) and `http_write_exception_in_output_format` is on: the rows
+    /// above are partial, so the reply is an error, never a success.
+    #[serde(default)]
+    exception: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -820,13 +825,14 @@ impl Conn {
         // A big reply (up to HTTP_RESPONSE_BYTE_CAP) is hundreds of ms of JSON
         // parsing — do that on the blocking pool, not a runtime worker every
         // other request shares. Small replies (introspection) stay inline.
-        if text.len() < OFF_RUNTIME_PARSE_BYTES {
-            return serde_json::from_str(&text).map_err(types::upstream);
-        }
-        tokio::task::spawn_blocking(move || serde_json::from_str(&text))
-            .await
-            .map_err(|e| types::upstream(format!("clickhouse: decode task failed: {e}")))?
-            .map_err(types::upstream)
+        let parsed = if text.len() < OFF_RUNTIME_PARSE_BYTES {
+            decode_json_reply(&text)
+        } else {
+            tokio::task::spawn_blocking(move || decode_json_reply(&text))
+                .await
+                .map_err(|e| types::upstream(format!("clickhouse: decode task failed: {e}")))?
+        };
+        parsed.map_err(otto_core::Error::Upstream)
     }
 
     /// Run a statement and return the raw response text (for DDL / SHOW CREATE
@@ -922,7 +928,9 @@ impl Conn {
         let text = String::from_utf8(buf)
             .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
         if !status.is_success() {
-            return Err(types::upstream(text.trim().to_string()));
+            return Err(otto_core::Error::Upstream(crate::errors::clean_ch_message(
+                text.trim(),
+            )));
         }
         Ok(text)
     }
@@ -973,7 +981,9 @@ impl Conn {
         let resp = req.body(body).send().await.map_err(req_err)?;
         if !resp.status().is_success() {
             let text = resp.text().await.map_err(types::upstream)?;
-            return Err(types::upstream(text.trim().to_string()));
+            return Err(otto_core::Error::Upstream(crate::errors::clean_ch_message(
+                text.trim(),
+            )));
         }
         Ok(resp)
     }
@@ -1127,9 +1137,32 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     }
 }
 
+/// Decode a `FORMAT JSONCompact` reply, turning a mid-stream failure into the
+/// server's real error (E7): the in-band `"exception"` field (rows above it are
+/// partial — never report them as success), or, when the body is broken JSON,
+/// the raw `Code: N. DB::Exception: …` the server appended to it — instead of
+/// serde's `trailing characters at line 1 column 98213`.
+fn decode_json_reply(text: &str) -> std::result::Result<JsonResponse, String> {
+    match serde_json::from_str::<JsonResponse>(text) {
+        Ok(reply) => match &reply.exception {
+            Some(ex) => Err(crate::errors::ch_midstream_message(
+                ex,
+                Some(reply.data.len()),
+            )),
+            None => Ok(reply),
+        },
+        Err(e) => match crate::errors::ch_trailing_exception(text) {
+            Some(ex) => Err(crate::errors::ch_midstream_message(&ex, None)),
+            None => Err(e.to_string()),
+        },
+    }
+}
+
 /// Map a `klickhouse` error to an Upstream error (a 502 — the database's fault).
+/// A server exception keeps `Code: N. DB::Exception: …` (the HTTP shape) and
+/// sends its stack trace to the debug log, never into the message.
 fn native_err(e: klickhouse::KlickhouseError) -> otto_core::Error {
-    otto_core::Error::Upstream(e.to_string())
+    otto_core::Error::Upstream(crate::errors::ch_native_message(&e))
 }
 
 /// Enforce a per-statement wall clock on the NATIVE transport (which has no
@@ -1944,6 +1977,14 @@ impl Driver for ClickhouseDriver {
         self.completions.invalidate(&cfg.cache_key());
     }
 
+    fn cached_completion_snapshot(
+        &self,
+        cfg: &ResolvedConfig,
+        scope: &str,
+    ) -> Option<std::sync::Arc<crate::complete::SchemaSnapshot>> {
+        self.completions.get_snapshot(&cfg.cache_key(), scope)
+    }
+
     fn assemble_completion(
         &self,
         snap: &crate::complete::SchemaSnapshot,
@@ -2278,6 +2319,36 @@ const FUNCTIONS: &[(&str, &str)] = &[
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn mid_stream_exception_field_is_an_error_not_partial_rows() {
+        let body = r#"{"meta":[{"name":"x","type":"UInt8"}],"data":[[1],[2],[3]],"rows":3,"exception":"Code: 241. DB::Exception: Memory limit (for query) exceeded. (MEMORY_LIMIT_EXCEEDED) (version 24.8.4.13 (official build))"}"#;
+        let err = decode_json_reply(body).unwrap_err();
+        assert_eq!(
+            err,
+            "Code: 241. DB::Exception: Memory limit (for query) exceeded. (MEMORY_LIMIT_EXCEEDED)\nSTREAMED_ROWS: 3"
+        );
+    }
+
+    #[test]
+    fn mid_stream_broken_json_surfaces_the_server_error() {
+        let body = "{\"meta\":[{\"name\":\"x\",\"type\":\"UInt8\"}],\"data\":[[1],[2]\nCode: 159. DB::Exception: Timeout exceeded: elapsed 30.0001 seconds, maximum: 30. (TIMEOUT_EXCEEDED) (version 24.8.4.13 (official build))\n";
+        let err = decode_json_reply(body).unwrap_err();
+        assert!(
+            err.starts_with("Code: 159. DB::Exception: Timeout exceeded"),
+            "{err}"
+        );
+        assert!(
+            err.ends_with("(TIMEOUT_EXCEEDED)\nSTREAMED_ROWS: unknown"),
+            "{err}"
+        );
+        assert!(!err.contains("trailing characters"));
+        // A plain broken body with no server error keeps serde's text.
+        assert!(decode_json_reply("{\"data\":[[1]").is_err());
+        // A clean reply still decodes.
+        let ok = decode_json_reply(r#"{"meta":[],"data":[[1]]}"#).unwrap();
+        assert_eq!(ok.data.len(), 1);
+    }
 
     #[test]
     fn capabilities_are_honest() {

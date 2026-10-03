@@ -17,10 +17,9 @@ fn busy() -> Error {
     Error::Conflict("workflow progress busy; retry shortly".into())
 }
 fn version(value: &Value) -> Result<String> {
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(value).map_err(json_error)?)
-    ))
+    Ok(hex::encode(Sha256::digest(
+        serde_json::to_vec(value).map_err(json_error)?,
+    )))
 }
 fn clip(value: Option<&Value>, max: usize) -> Value {
     value
@@ -277,9 +276,9 @@ pub async fn progress(pool: &DbPool, id: &Id, after_rev: Option<i64>) -> Result<
             .begin()
             .await
             .map_err(dberr("begin workflow progress"))?;
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id=?"
-        ))
+        )))
         .bind(id)
         .fetch_one(&mut *tx)
         .await

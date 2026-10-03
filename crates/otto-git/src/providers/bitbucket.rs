@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use otto_core::api::{
     CreatePrReq, DiffResp, FileChangeStatus, FileDiff, MergeStrategy, NewPrCommentReq, PrComment,
-    PrCommit, PrDetail, PrReviewer, PrState, PrSummary, UpdatePrReq,
+    PrCommentSide, PrCommit, PrDetail, PrReviewer, PrState, PrSummary, UpdatePrReq,
 };
 use otto_core::{Error, Result};
 use serde_json::{json, Value};
@@ -352,13 +352,41 @@ fn member_from(v: &Value) -> Member {
     }
 }
 
+/// `inline` object of a Bitbucket comment: `to` anchors a new-side line,
+/// `from` a deleted (old-side) one — sending a deleted line as `to` pins the
+/// comment to whatever new line shares the number.
+pub(crate) fn inline_anchor(c: &NewPrCommentReq, path: &str) -> Value {
+    let mut inline = serde_json::Map::new();
+    inline.insert("path".into(), json!(path));
+    if let Some(line) = c.line {
+        let key = match c.side.unwrap_or_default() {
+            PrCommentSide::Old => "from",
+            PrCommentSide::New => "to",
+        };
+        inline.insert(key.into(), json!(line));
+    }
+    Value::Object(inline)
+}
+
 fn comment_from(v: &Value) -> PrComment {
     let path = vstr_opt(v, &["inline", "path"]);
-    let line = v
+    let inline_num = |k: &str| {
+        v.get("inline")
+            .and_then(|i| i.get(k))
+            .and_then(Value::as_u64)
+            .map(|l| l as u32)
+    };
+    // `to` = new-side line; only `from` ⇒ a comment on a deleted line.
+    let (line, side) = match (inline_num("to"), inline_num("from")) {
+        (Some(to), _) => (Some(to), Some(PrCommentSide::New)),
+        (None, Some(from)) => (Some(from), Some(PrCommentSide::Old)),
+        (None, None) => (None, None),
+    };
+    let outdated = v
         .get("inline")
-        .and_then(|i| i.get("to"))
-        .and_then(Value::as_u64)
-        .map(|l| l as u32);
+        .and_then(|i| i.get("outdated"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     // Bitbucket marks a resolved comment with a non-null `resolution` object
     // ({user, date}); absent/null ⇒ open.
     let resolved = v.get("resolution").is_some_and(|r| !r.is_null());
@@ -372,6 +400,8 @@ fn comment_from(v: &Value) -> PrComment {
         replies: Vec::new(),
         resolved,
         thread_id: None, // stamped on thread heads in get_pr
+        side,
+        outdated,
     }
 }
 
@@ -406,21 +436,19 @@ impl super::GitProvider for Bitbucket {
     }
 
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {
-        let pr = self
-            .send_json(
-                reqwest::Method::GET,
-                &Self::pr_path(r, &format!("/{number}")),
-                None,
-            )
-            .await?;
         // A PR detail must be WHOLE — follow the `next` cursor instead of
-        // stopping at the first 100 comments.
-        let comments_v = self
-            .paginate_values(&format!(
-                "{}?pagelen=100",
-                Self::pr_path(r, &format!("/{number}/comments"))
-            ))
-            .await?;
+        // stopping at the first 100 comments. The PR and its comments are
+        // independent, so they're fetched together.
+        let pr_path = Self::pr_path(r, &format!("/{number}"));
+        let comments_path = format!(
+            "{}?pagelen=100",
+            Self::pr_path(r, &format!("/{number}/comments"))
+        );
+        let (pr, comments_v) = tokio::join!(
+            self.send_json(reqwest::Method::GET, &pr_path, None),
+            self.paginate_values(&comments_path),
+        );
+        let (pr, comments_v) = (pr?, comments_v?);
 
         // Thread by parent.id.
         let mut top: Vec<PrComment> = Vec::new();
@@ -625,12 +653,7 @@ impl super::GitProvider for Bitbucket {
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!({ "raw": c.body }));
         if let Some(path) = &c.path {
-            let mut inline = serde_json::Map::new();
-            inline.insert("path".into(), json!(path));
-            if let Some(line) = c.line {
-                inline.insert("to".into(), json!(line));
-            }
-            body.insert("inline".into(), Value::Object(inline));
+            body.insert("inline".into(), inline_anchor(c, path));
         }
         if let Some(reply_to) = &c.in_reply_to {
             let id: u64 = reply_to
@@ -720,6 +743,9 @@ impl super::GitProvider for Bitbucket {
                     path: None,
                     line: None,
                     in_reply_to: None,
+                    side: None,
+                    old_line: None,
+                    commit_id: None,
                 },
             )
             .await?;

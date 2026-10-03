@@ -899,81 +899,242 @@ fn parse_path_segments(path: &str) -> Vec<PathSeg> {
 // Assertion evaluation (automation runner)
 // ===========================================================================
 
-/// Outcome of evaluating a single assertion: a human-readable description and
-/// whether it held.
+/// Outcome of evaluating a single assertion: a worded description that carries
+/// the actual value ("Status code is less than 400: got 500"), whether it held,
+/// and the actual value itself (`Null` when the target was missing).
 pub struct AssertionResult {
     pub desc: String,
     pub passed: bool,
+    pub actual: Value,
 }
 
-/// Evaluate one assertion against an executed step's outcome.
-///
-/// `assertion` is a `{ "kind", "op", "value", "path"? }` object:
-/// - `kind = "status"`   — compares the numeric HTTP status against `value`.
-/// - `kind = "duration_ms"` — compares elapsed milliseconds against `value`.
-/// - `kind = "json_path"` — evaluates `path` against `body` (the parsed JSON
-///   response, or `Value::Null` when the body wasn't JSON) and compares.
-///
-/// `op` is one of `eq | ne | contains | lt | gt`. `eq`/`ne`/`contains` compare
-/// loosely (string- and number-aware); `lt`/`gt` are numeric. A malformed
-/// assertion never panics — it returns a failed result describing the problem.
+/// Everything an assertion can be evaluated against: one executed step's
+/// response. `headers` is the response's `[{key,value}]` array (`Null` when
+/// unknown); `body_text` the raw body; `body` its JSON parse (`Null` when the
+/// body wasn't JSON).
+pub struct StepOutcome<'a> {
+    pub status: Option<u16>,
+    pub duration_ms: i64,
+    pub body: &'a Value,
+    pub body_text: &'a str,
+    pub headers: &'a Value,
+}
+
+/// Longest regex pattern a `matches` assertion accepts, and the compiled-size
+/// cap handed to the regex engine — a pasted pathological pattern fails the
+/// assertion instead of burning CPU/memory in the run.
+const MAX_REGEX_PATTERN: usize = 1_000;
+const MAX_REGEX_COMPILED: usize = 1 << 20;
+/// Longest haystack a `matches`/`contains` on the body considers.
+const MAX_MATCH_HAYSTACK: usize = 1 << 20;
+
+/// Evaluate one assertion with only status/duration/JSON-body known (no
+/// headers or raw text) — see [`eval_assertion_with`].
 pub fn eval_assertion(
     assertion: &Value,
     status: Option<u16>,
     duration_ms: i64,
     body: &Value,
 ) -> AssertionResult {
+    eval_assertion_with(
+        assertion,
+        &StepOutcome {
+            status,
+            duration_ms,
+            body,
+            body_text: "",
+            headers: &Value::Null,
+        },
+    )
+}
+
+/// Evaluate one assertion against an executed step's outcome.
+///
+/// `assertion` is a `{ "kind", "op", "value", "path"? }` object:
+/// - `kind = "status"`      — the numeric HTTP status.
+/// - `kind = "duration_ms"` — elapsed milliseconds.
+/// - `kind = "json_path"`   — `path` evaluated against the parsed JSON body.
+/// - `kind = "header"`      — the response header named by `path`
+///   (case-insensitive; repeated headers are joined with `, `).
+/// - `kind = "body_text"`   — the raw response body text.
+///
+/// `op` is one of `eq | ne | contains | lt | gt | lte | gte | exists |
+/// not_exists | matches`. `eq`/`ne`/`contains` compare loosely (string- and
+/// number-aware); `lt`/`gt`/`lte`/`gte` are numeric; `matches` is a regex
+/// (size-capped). A MISSING target (absent JSON field, absent header, no
+/// response) fails every op except `not_exists` — `ne` on a missing field used
+/// to pass silently. A malformed assertion never panics — it returns a failed
+/// result describing the problem.
+pub fn eval_assertion_with(assertion: &Value, o: &StepOutcome<'_>) -> AssertionResult {
     let kind = assertion.get("kind").and_then(Value::as_str).unwrap_or("");
     let op = assertion.get("op").and_then(Value::as_str).unwrap_or("eq");
     let expected = assertion.get("value").cloned().unwrap_or(Value::Null);
+    let path = assertion.get("path").and_then(Value::as_str).unwrap_or("");
 
-    match kind {
-        "status" => {
-            let actual = status.map(Value::from).unwrap_or(Value::Null);
-            let passed = compare(&actual, op, &expected);
-            AssertionResult {
-                desc: format!("status {} {}", op, value_label(&expected)),
-                passed,
+    // (subject label, actual value or None when missing, what "missing" means)
+    let (subject, actual, missing): (String, Option<Value>, &str) = match kind {
+        "status" => (
+            "Status code".into(),
+            o.status.map(Value::from),
+            "no response",
+        ),
+        "duration_ms" => (
+            "Response time (ms)".into(),
+            Some(Value::from(o.duration_ms)),
+            "no response",
+        ),
+        "json_path" => (
+            if path.is_empty() {
+                "$".into()
+            } else {
+                path.to_string()
+            },
+            json_path(o.body, path).cloned(),
+            "field missing",
+        ),
+        "header" => (
+            format!("Header {path}"),
+            header_value(o.headers, path).map(Value::String),
+            "header missing",
+        ),
+        "body_text" => (
+            "Body".into(),
+            Some(Value::String(o.body_text.to_string())),
+            "no body",
+        ),
+        other => {
+            return AssertionResult {
+                desc: format!("unknown assertion kind '{other}'"),
+                passed: false,
+                actual: Value::Null,
             }
         }
-        "duration_ms" => {
-            let actual = Value::from(duration_ms);
-            let passed = compare(&actual, op, &expected);
-            AssertionResult {
-                desc: format!("duration_ms {} {}", op, value_label(&expected)),
-                passed,
-            }
-        }
-        "json_path" => {
-            let path = assertion.get("path").and_then(Value::as_str).unwrap_or("");
-            let actual = json_path(body, path).cloned().unwrap_or(Value::Null);
-            let passed = compare(&actual, op, &expected);
-            AssertionResult {
-                desc: format!("{} {} {}", path, op, value_label(&expected)),
-                passed,
-            }
-        }
-        other => AssertionResult {
-            desc: format!("unknown assertion kind '{other}'"),
-            passed: false,
+    };
+
+    let phrase = op_phrase(op);
+    let takes_value = !matches!(op, "exists" | "not_exists");
+    let head = if takes_value {
+        format!("{subject} {phrase} {}", value_label(&expected))
+    } else {
+        format!("{subject} {phrase}")
+    };
+    let Some(actual) = actual else {
+        return AssertionResult {
+            desc: format!("{head}: {missing}"),
+            passed: op == "not_exists",
+            actual: Value::Null,
+        };
+    };
+    let (passed, note) = match op {
+        "exists" => (true, None),
+        "not_exists" => (false, None),
+        "matches" => match regex_matches(&actual, &expected) {
+            Ok(m) => (m, None),
+            Err(e) => (false, Some(e)),
         },
+        _ => (compare(&actual, op, &expected), None),
+    };
+    let desc = match note {
+        Some(e) => format!("{head}: {e}"),
+        None => format!("{head}: got {}", actual_label(&actual)),
+    };
+    AssertionResult {
+        desc,
+        passed,
+        actual,
+    }
+}
+
+/// Human wording for an assertion operator.
+fn op_phrase(op: &str) -> String {
+    match op {
+        "eq" => "equals".into(),
+        "ne" => "does not equal".into(),
+        "contains" => "contains".into(),
+        "lt" => "is less than".into(),
+        "gt" => "is greater than".into(),
+        "lte" => "is at most".into(),
+        "gte" => "is at least".into(),
+        "exists" => "exists".into(),
+        "not_exists" => "does not exist".into(),
+        "matches" => "matches".into(),
+        other => format!("{other} (unknown operator)"),
+    }
+}
+
+/// The response header `name` (case-insensitive) from a `[{key,value}]` array;
+/// repeated headers join with `, `. `None` when absent (or `name` is empty).
+pub fn header_value(headers: &Value, name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let vals: Vec<&str> = headers
+        .as_array()?
+        .iter()
+        .filter(|h| {
+            h.get("key")
+                .and_then(Value::as_str)
+                .is_some_and(|k| k.eq_ignore_ascii_case(name))
+        })
+        .filter_map(|h| h.get("value").and_then(Value::as_str))
+        .collect();
+    if vals.is_empty() {
+        None
+    } else {
+        Some(vals.join(", "))
+    }
+}
+
+/// `matches`: `expected` is a regex tested against the stringified actual.
+/// Pattern length and compiled size are capped; the haystack is cut at
+/// [`MAX_MATCH_HAYSTACK`] (on a char boundary).
+fn regex_matches(actual: &Value, expected: &Value) -> std::result::Result<bool, String> {
+    let pattern = coerce_str(expected);
+    if pattern.len() > MAX_REGEX_PATTERN {
+        return Err(format!(
+            "pattern is longer than {MAX_REGEX_PATTERN} characters"
+        ));
+    }
+    let re = regex::RegexBuilder::new(&pattern)
+        .size_limit(MAX_REGEX_COMPILED)
+        .build()
+        .map_err(|_| "invalid regular expression".to_string())?;
+    let hay = coerce_str(actual);
+    let mut cut = hay.len().min(MAX_MATCH_HAYSTACK);
+    while !hay.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    Ok(re.is_match(&hay[..cut]))
+}
+
+/// A compact label for an actual value in a report line — long values (a
+/// whole body) are cut so the report stays readable.
+fn actual_label(v: &Value) -> String {
+    const MAX: usize = 120;
+    let s = value_label(v);
+    if s.chars().count() <= MAX {
+        s
+    } else {
+        let cut: String = s.chars().take(MAX).collect();
+        format!("{cut}…")
     }
 }
 
 /// Apply a comparison operator between an actual and expected JSON value.
 fn compare(actual: &Value, op: &str, expected: &Value) -> bool {
+    let num = |f: fn(f64, f64) -> bool| match (as_number(actual), as_number(expected)) {
+        (Some(a), Some(b)) => f(a, b),
+        _ => false,
+    };
     match op {
         "eq" => loose_eq(actual, expected),
         "ne" => !loose_eq(actual, expected),
         "contains" => contains(actual, expected),
-        "lt" => match (as_number(actual), as_number(expected)) {
-            (Some(a), Some(b)) => a < b,
-            _ => false,
-        },
-        "gt" => match (as_number(actual), as_number(expected)) {
-            (Some(a), Some(b)) => a > b,
-            _ => false,
-        },
+        "lt" => num(|a, b| a < b),
+        "gt" => num(|a, b| a > b),
+        "lte" => num(|a, b| a <= b),
+        "gte" => num(|a, b| a >= b),
         _ => false,
     }
 }
@@ -1470,15 +1631,111 @@ mod tests {
             )
             .passed
         );
-        assert!(
-            eval_assertion(
-                &json!({"kind":"json_path","path":"nope","op":"ne","value":"x"}),
-                Some(200),
-                1,
-                &body
-            )
-            .passed
+        // …and a missing field fails `ne` too — it used to pass silently.
+        let r = eval_assertion(
+            &json!({"kind":"json_path","path":"nope","op":"ne","value":"x"}),
+            Some(200),
+            1,
+            &body,
         );
+        assert!(!r.passed);
+        assert_eq!(r.desc, "nope does not equal \"x\": field missing");
+        assert_eq!(r.actual, Value::Null);
+    }
+
+    #[test]
+    fn assertion_desc_carries_the_actual_value() {
+        let r = eval_assertion(
+            &json!({"kind":"status","op":"lt","value":400}),
+            Some(500),
+            1,
+            &Value::Null,
+        );
+        assert!(!r.passed);
+        assert_eq!(r.desc, "Status code is less than 400: got 500");
+        assert_eq!(r.actual, json!(500));
+        let r = eval_assertion(
+            &json!({"kind":"status","op":"eq","value":200}),
+            None,
+            0,
+            &Value::Null,
+        );
+        assert_eq!(r.desc, "Status code equals 200: no response");
+    }
+
+    #[test]
+    fn assert_exists_not_exists_lte_gte() {
+        let body = json!({ "data": { "id": 7, "gone": null } });
+        let a = |a: Value| eval_assertion(&a, Some(200), 10, &body).passed;
+        assert!(a(
+            json!({"kind":"json_path","path":"$.data.id","op":"exists"})
+        ));
+        // present-but-null still exists
+        assert!(a(
+            json!({"kind":"json_path","path":"data.gone","op":"exists"})
+        ));
+        assert!(!a(
+            json!({"kind":"json_path","path":"data.nope","op":"exists"})
+        ));
+        assert!(a(
+            json!({"kind":"json_path","path":"data.nope","op":"not_exists"})
+        ));
+        assert!(!a(
+            json!({"kind":"json_path","path":"data.id","op":"not_exists"})
+        ));
+        assert!(a(
+            json!({"kind":"json_path","path":"data.id","op":"lte","value":7})
+        ));
+        assert!(a(
+            json!({"kind":"json_path","path":"data.id","op":"gte","value":"7"})
+        ));
+        assert!(!a(
+            json!({"kind":"json_path","path":"data.id","op":"gte","value":8})
+        ));
+        assert!(a(json!({"kind":"duration_ms","op":"lte","value":10})));
+    }
+
+    #[test]
+    fn assert_header_and_body_text_and_regex() {
+        let headers = json!([
+            {"key":"Content-Type","value":"application/json; charset=utf-8"},
+            {"key":"set-cookie","value":"a=1"},
+            {"key":"Set-Cookie","value":"b=2"},
+        ]);
+        let o = StepOutcome {
+            status: Some(201),
+            duration_ms: 3,
+            body: &Value::Null,
+            body_text: "order ORD-1234 created",
+            headers: &headers,
+        };
+        let a = |a: Value| eval_assertion_with(&a, &o);
+        assert!(
+            a(json!({"kind":"header","path":"content-type","op":"contains","value":"json"})).passed
+        );
+        assert!(
+            a(json!({"kind":"header","path":"Set-Cookie","op":"eq","value":"a=1, b=2"})).passed
+        );
+        let miss = a(json!({"kind":"header","path":"X-Trace","op":"ne","value":"x"}));
+        assert!(!miss.passed);
+        assert_eq!(
+            miss.desc,
+            "Header X-Trace does not equal \"x\": header missing"
+        );
+        assert!(a(json!({"kind":"header","path":"X-Trace","op":"not_exists"})).passed);
+        assert!(a(json!({"kind":"body_text","op":"contains","value":"created"})).passed);
+        assert!(a(json!({"kind":"body_text","op":"matches","value":"ORD-\\d{4}"})).passed);
+        assert!(!a(json!({"kind":"body_text","op":"matches","value":"^created"})).passed);
+        let bad = a(json!({"kind":"body_text","op":"matches","value":"("}));
+        assert!(!bad.passed);
+        assert!(
+            bad.desc.ends_with("invalid regular expression"),
+            "{}",
+            bad.desc
+        );
+        let long =
+            a(json!({"kind":"body_text","op":"matches","value":"a".repeat(MAX_REGEX_PATTERN + 1)}));
+        assert!(!long.passed);
     }
 
     #[test]

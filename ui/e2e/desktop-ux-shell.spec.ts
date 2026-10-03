@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedGitRepo, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
@@ -52,6 +52,29 @@ test('Home space shortcuts do not act through a dialog', async ({ page }) => {
   await dialog.getByRole('button', { name: 'Close', exact: true }).focus();
   await page.keyboard.press('ArrowRight');
   await expect(page.getByRole('tab', { name: 'First', exact: true })).toHaveAttribute('aria-selected', 'true');
+});
+test('⌘K search hits open their page (they used to do nothing)', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const { repoId } = await seedGitRepo(ctx, base, workspaceId);
+  await boot(page, true); // phone: ⌘K is the palette sheet, not the floating bar
+  await page.keyboard.press('Control+k');
+  const palette = page.getByRole('dialog', { name: 'Command palette' });
+  await expect(palette).toBeVisible();
+  await palette.getByPlaceholder('Type a command…').fill('e2e-repo');
+  const hit = palette.locator('.pal-hit', { hasText: 'e2e-repo' }).first();
+  await expect(hit).toBeVisible({ timeout: 10_000 });
+  // Only actions with a handler are offered (no dead "Review" / "Rerun").
+  await expect(hit.locator('.pal-hit-btn', { hasText: 'Review' })).toHaveCount(0);
+  await hit.getByRole('button', { name: 'Open' }).click();
+  await expect(palette).toBeHidden();
+  await expect(page).toHaveURL(new RegExp(`#/git/${repoId}`));
+});
+test('the current page is announced with aria-current on the nav', async ({ page }) => {
+  await boot(page);
+  const current = page.locator('[data-nav-id="home"][aria-current="page"]');
+  await expect(current.first()).toBeVisible();
+  await expect(page.locator('[data-nav-id="git"][aria-current="page"]')).toHaveCount(0);
+  await expect(page).toHaveTitle(/^Home — Otto$/);
 });
 test('Plain English palette traps focus and Escape works from its buttons', async ({ page }) => {
   await boot(page);

@@ -151,7 +151,7 @@
               <span class="file-name mono" title={f.path}>{leaf(f.path)}</span>
               <span class="badge {f.enforcement}">{f.enforcement}</span>
               <span class="file-size dim">{fmtBytes(f.size)}</span>
-              <span class="chevron" class:open={openFile === f.path}><Icon name="chevronRight" size={10} /></span>
+              <span class="chevron" class:open={openFile === f.path}><Icon name="chevronRight" noflip size={10} /></span>
             </button>
             {#if openFile === f.path}
               <pre class="file-body mono">{f.first_lines}{f.truncated ? '\n…' : ''}</pre>

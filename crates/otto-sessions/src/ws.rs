@@ -81,7 +81,9 @@ struct TokenQuery {
     token: Option<String>,
 }
 
-fn user_input_default() -> bool { true }
+fn user_input_default() -> bool {
+    true
+}
 
 /// Attach intent, from the upgrade URL (`/ws/term/{id}?view=1`).
 ///
@@ -184,6 +186,15 @@ enum ClientFrame {
     // has parsed OR the client dropped. Sent every ~64 KB consumed.
     Ack {
         bytes: u64,
+    },
+    // Latency probe (terminal latency HUD, review 01 L1). Answered right away
+    // by this loop with `probe_ack` echoing `id`, so the client's round trip
+    // is websocket + daemon loop without the child; the ack also carries the
+    // PTY's keystroke-echo statistics (see `otto_pty::EchoStats`). Read-only
+    // safe: it touches neither the PTY nor any shared state.
+    Probe {
+        #[serde(default)]
+        id: u64,
     },
 }
 
@@ -590,6 +601,11 @@ async fn apply_credit_step(
 /// ANSI-stripped but keep tabs, BEL, backspace and other C0 bytes, which JSON
 /// forbids raw — the old hand-rolled escaper emitted them verbatim, the
 /// client's `JSON.parse` threw, and the find bar spun on "…" forever (SA-11).
+/// `{"type":"probe_ack","id":N,"echo":{last_ms,avg_ms,max_ms,samples}|null}`.
+fn probe_ack_frame(id: u64, echo: Option<otto_pty::EchoStats>) -> String {
+    serde_json::json!({ "type": "probe_ack", "id": id, "echo": echo }).to_string()
+}
+
 fn search_result_frame(query: &str, matches: Vec<(usize, String)>) -> String {
     let matches: Vec<serde_json::Value> = matches
         .into_iter()
@@ -1536,6 +1552,12 @@ async fn serve_terminal<S: SessionsCtx>(
                             c.superseded();
                         }
                     }
+                    ClientFrame::Probe { id } => {
+                        let frame = probe_ack_frame(id, handle.as_ref().map(|h| h.echo_stats()));
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            return;
+                        }
+                    }
                     ClientFrame::Search { query } => {
                         // Server-side search: grep the ring buffer (survives WS
                         // reconnects, unlike the xterm SearchAddon which only
@@ -2091,7 +2113,10 @@ mod tests {
     fn view_only_attach_resumes_only_on_real_input() {
         let parse = |q: &str| {
             let uri: axum::http::Uri = format!("/ws/term/s{q}").parse().unwrap();
-            Query::<AttachQuery>::try_from_uri(&uri).unwrap().0.view_only()
+            Query::<AttachQuery>::try_from_uri(&uri)
+                .unwrap()
+                .0
+                .view_only()
         };
         assert!(parse("?view=1"));
         assert!(parse("?token=abc&view=true"));
@@ -2100,13 +2125,58 @@ mod tests {
         assert!(!parse("?view=0"));
 
         assert!(resume_on_attach(true, false), "classic attach resumes");
-        assert!(!resume_on_attach(true, true), "view-only attach never spawns");
-        assert!(!resume_on_attach(false, false), "read-only shares never spawn");
+        assert!(
+            !resume_on_attach(true, true),
+            "view-only attach never spawns"
+        );
+        assert!(
+            !resume_on_attach(false, false),
+            "read-only shares never spawn"
+        );
 
-        assert!(wakes_on_input(true, true, false), "typing wakes a dormant view");
-        assert!(!wakes_on_input(true, false, false), "DA/CPR replies never wake");
-        assert!(!wakes_on_input(true, true, true), "already live: plain input");
-        assert!(!wakes_on_input(false, true, false), "classic socket: unchanged");
+        assert!(
+            wakes_on_input(true, true, false),
+            "typing wakes a dormant view"
+        );
+        assert!(
+            !wakes_on_input(true, false, false),
+            "DA/CPR replies never wake"
+        );
+        assert!(
+            !wakes_on_input(true, true, true),
+            "already live: plain input"
+        );
+        assert!(
+            !wakes_on_input(false, true, false),
+            "classic socket: unchanged"
+        );
+    }
+
+    #[test]
+    fn probe_frame_parses_and_ack_carries_echo_stats() {
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"probe","id":7}"#),
+            Ok(ClientFrame::Probe { id: 7 })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"probe"}"#),
+            Ok(ClientFrame::Probe { id: 0 })
+        ));
+        let ack: serde_json::Value = serde_json::from_str(&probe_ack_frame(7, None)).unwrap();
+        assert_eq!(ack["type"], "probe_ack");
+        assert_eq!(ack["id"], 7);
+        assert!(ack["echo"].is_null());
+        let stats = otto_pty::EchoStats {
+            last_ms: 1.5,
+            avg_ms: 2.0,
+            max_ms: 9.25,
+            samples: 3,
+        };
+        let ack: serde_json::Value =
+            serde_json::from_str(&probe_ack_frame(8, Some(stats))).unwrap();
+        assert_eq!(ack["echo"]["last_ms"], 1.5);
+        assert_eq!(ack["echo"]["max_ms"], 9.25);
+        assert_eq!(ack["echo"]["samples"], 3);
     }
 
     #[test]
@@ -2245,7 +2315,8 @@ mod tests {
             tx.send(Bytes::from(format!("flood{i}\n"))).unwrap();
         }
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let frame = client_resync_frame(&mut gate, &mut rx, test_capture(&tx, b"screen", 9, &calls)).await;
+        let frame =
+            client_resync_frame(&mut gate, &mut rx, test_capture(&tx, b"screen", 9, &calls)).await;
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(!gate.is_paused(), "resync leaves the paused state");
         assert!(!gate.resume(), "a trailing resume finds the gate open");
@@ -2257,7 +2328,8 @@ mod tests {
             Err(broadcast::error::TryRecvError::Empty)
         ));
         // Nothing queued and not paused: still answers with a snapshot.
-        let frame = client_resync_frame(&mut gate, &mut rx, test_capture(&tx, b"s2", 9, &calls)).await;
+        let frame =
+            client_resync_frame(&mut gate, &mut rx, test_capture(&tx, b"s2", 9, &calls)).await;
         let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(B64.decode(v["data"].as_str().unwrap()).unwrap(), b"s2");
         tx.send(Bytes::from_static(b"live")).unwrap();
@@ -2270,7 +2342,9 @@ mod tests {
     async fn resume_without_skipped_output_sends_nothing() {
         let (tx, mut rx) = broadcast::channel::<Bytes>(8);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        assert!(resume_frame(&mut rx, test_capture(&tx, b"", 0, &calls)).await.is_none());
+        assert!(resume_frame(&mut rx, test_capture(&tx, b"", 0, &calls))
+            .await
+            .is_none());
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
@@ -2289,7 +2363,10 @@ mod tests {
         let frame = resync_frame(&mut rx, test_capture(&tx, b"snap", 4, &calls)).await;
         let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(v["epoch"], 4);
-        assert!(matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
         tx.send(Bytes::from_static(b"after")).unwrap();
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"after"));
     }
@@ -2486,11 +2563,17 @@ mod tests {
         gate.push(b"held output".to_vec(), now);
         let reply = serde_json::from_str::<ClientFrame>(
             r#"{"type":"input","data":"G1swOzBS","user":false}"#,
-        ).unwrap();
-        let ClientFrame::Input { user, .. } = reply else { panic!("input expected") };
+        )
+        .unwrap();
+        let ClientFrame::Input { user, .. } = reply else {
+            panic!("input expected")
+        };
         gate.skip_on_input(user, now);
         assert!(!gate.skipped);
-        assert_eq!(gate.ack(64 * KB, now), CreditStep::Send(Bytes::from_static(b"held output")));
+        assert_eq!(
+            gate.ack(64 * KB, now),
+            CreditStep::Send(Bytes::from_static(b"held output"))
+        );
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"input","data":"Aw=="}"#),
             Ok(ClientFrame::Input { user: true, .. })
@@ -2536,9 +2619,19 @@ mod tests {
         assert_eq!(g.stall_deadline(), Some(t1 + FLOW_AUTO_RESUME));
         let unacked = g.unacked();
         g.forgive();
-        assert_eq!(g.unacked(), unacked, "acked stays truthful: the window is not reopened");
-        assert!(g.held.is_empty() && g.skipped, "held output becomes one owed snapshot");
-        assert!(g.stall_deadline().is_none(), "not re-armed while nothing moves");
+        assert_eq!(
+            g.unacked(),
+            unacked,
+            "acked stays truthful: the window is not reopened"
+        );
+        assert!(
+            g.held.is_empty() && g.skipped,
+            "held output becomes one owed snapshot"
+        );
+        assert!(
+            g.stall_deadline().is_none(),
+            "not re-armed while nothing moves"
+        );
         // More output while stalled: nothing is sent or buffered.
         for _ in 0..50 {
             assert_eq!(g.push(vec![3; 4096], t1), CreditStep::Idle);
@@ -2565,13 +2658,20 @@ mod tests {
                 if let CreditStep::Send(b) = g.push(vec![b'x'; 16 * 1024], now) {
                     client_backlog += b.len() as u64;
                 }
-                assert!(g.unacked() <= g.window, "cycle {cycle}: unacked {} > window", g.unacked());
+                assert!(
+                    g.unacked() <= g.window,
+                    "cycle {cycle}: unacked {} > window",
+                    g.unacked()
+                );
             }
             if let Some(at) = g.stall_deadline() {
                 now = at;
                 g.forgive();
             }
-            assert!(client_backlog <= g.window, "cycle {cycle}: client holds {client_backlog}");
+            assert!(
+                client_backlog <= g.window,
+                "cycle {cycle}: client holds {client_backlog}"
+            );
             // Every other cycle the client drains everything it holds.
             if cycle % 2 == 1 {
                 consumed += client_backlog;

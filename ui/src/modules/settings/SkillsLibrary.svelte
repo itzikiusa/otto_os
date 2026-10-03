@@ -200,8 +200,21 @@
       const resp = await contextApi.installAllBundled(category);
       const n = resp.installed.length;
       const b = resp.backed_up.length;
-      if (n === 0) {
-        toasts.info('Nothing to install', `All ${category} skills are already up to date.`);
+      const failed = resp.failed ?? [];
+      const skipped = resp.skipped?.length ?? 0;
+      if (failed.length > 0) {
+        // Name every failure: the rest of the batch still installed.
+        toasts.error(
+          `${failed.length} ${category} skill${failed.length === 1 ? '' : 's'} failed to install`,
+          failed.map((f) => `${f.name}: ${f.error}`).join('\n') + (n > 0 ? `\nInstalled ${n} other${n === 1 ? '' : 's'}.` : ''),
+        );
+      } else if (n === 0) {
+        toasts.info(
+          'Nothing to install',
+          skipped > 0
+            ? `All ${category} skills are up to date, or have local edits that Install all leaves alone.`
+            : `All ${category} skills are already up to date.`,
+        );
       } else if (b > 0) {
         toasts.success(
           `Installed ${n} ${category} skill${n === 1 ? '' : 's'}`,

@@ -236,7 +236,7 @@ async fn note_wire_metadata_reports_index_limit_without_truncating_source() {
         assert_eq!(result["meta"]["content_index_status"], expected);
         assert_eq!(
             result["meta"]["hash"],
-            format!("{:x}", Sha256::digest(body.as_bytes()))
+            hex::encode(Sha256::digest(body.as_bytes()))
         );
         if expected == "size_limited" {
             assert_eq!(result["meta"]["tags"], json!([]));

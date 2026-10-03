@@ -272,9 +272,6 @@
     display: inline-flex;
     color: var(--text-dim);
   }
-  :global([dir='rtl']) .arrow {
-    transform: scaleX(-1);
-  }
   .more {
     align-self: flex-end;
   }

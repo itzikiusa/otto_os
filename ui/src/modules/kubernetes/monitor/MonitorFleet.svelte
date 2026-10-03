@@ -679,7 +679,7 @@
           <span class="dim">Per-route drill-down needs <em>Keep request path labels</em> in a cluster's Monitor settings (it multiplies request rows per pod by the number of routes — enable it where you need it).</span>
           <span class="links">
             {#each reqs.disabled_on as c (c.id)}
-              <button class="btn small ghost" onclick={() => router.go(`kubernetes/monitor/${encodeURIComponent(c.id)}/settings`)}>{c.name} settings</button>
+              <button class="btn small ghost" onclick={() => router.go(`kubernetes/${encodeURIComponent(c.id)}/monitor/settings`)}>{c.name} settings</button>
             {/each}
           </span>
         </div>

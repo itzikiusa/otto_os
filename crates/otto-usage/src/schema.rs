@@ -89,10 +89,66 @@ ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS origin        LowCardinality(S
 
 /// `ALTER TABLE ... MODIFY TTL` for both tables — applies a new retention
 /// window to existing tables without recreating them.
+///
+/// `materialize_ttl_after_modify=0`: by default every `MODIFY TTL` queues a
+/// `MATERIALIZE TTL` mutation that rewrites every part (the live usage part
+/// had reached mutation version 218 from one alter per boot). Background TTL
+/// merges apply the new window anyway, so skip the rewrite. Callers also skip
+/// the alter entirely when the window is unchanged ([`parse_ttl_days`]).
 pub fn alter_ttl_sql(retention_days: u32) -> String {
     let ttl = retention_days.max(1);
     format!(
-        "ALTER TABLE usage_events MODIFY TTL event_date + INTERVAL {ttl} DAY;
-ALTER TABLE system_metrics MODIFY TTL metric_date + INTERVAL {ttl} DAY;"
+        "ALTER TABLE usage_events MODIFY TTL event_date + INTERVAL {ttl} DAY \
+SETTINGS materialize_ttl_after_modify = 0;
+ALTER TABLE system_metrics MODIFY TTL metric_date + INTERVAL {ttl} DAY \
+SETTINGS materialize_ttl_after_modify = 0;"
     )
+}
+
+/// `SELECT name, engine_full FROM system.tables` for the two usage tables —
+/// read before an alter to learn the TTL each table already has.
+pub const TABLE_TTLS_SQL: &str = "SELECT name, engine_full FROM system.tables \
+WHERE database = currentDatabase() AND name IN ('usage_events', 'system_metrics')";
+
+/// The day count of a table's `TTL <col> + toIntervalDay(N)` clause, from its
+/// `system.tables.engine_full`. `None` when there is no (day-interval) TTL.
+pub fn parse_ttl_days(engine_full: &str) -> Option<u32> {
+    let ttl = &engine_full[engine_full.find("TTL ")?..];
+    let rest = &ttl[ttl.find("toIntervalDay(")? + "toIntervalDay(".len()..];
+    rest[..rest.find(')')?].trim().parse().ok()
+}
+
+/// Short `old_parts_lifetime` for both tables, so outdated parts left behind
+/// by merges are deleted after a minute instead of eight (they were 135 MB of
+/// a 141 MB store). Idempotent; run at startup.
+pub fn parts_lifetime_sql() -> &'static str {
+    "ALTER TABLE usage_events MODIFY SETTING old_parts_lifetime = 60;
+ALTER TABLE system_metrics MODIFY SETTING old_parts_lifetime = 60;"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alter_ttl_skips_the_materialize_rewrite() {
+        let sql = alter_ttl_sql(90);
+        assert_eq!(sql.matches("materialize_ttl_after_modify = 0").count(), 2);
+        assert!(sql.contains("event_date + INTERVAL 90 DAY"));
+        assert!(sql.contains("metric_date + INTERVAL 90 DAY"));
+        assert!(alter_ttl_sql(0).contains("INTERVAL 1 DAY"), "floored at 1");
+    }
+
+    #[test]
+    fn parse_ttl_days_reads_engine_full() {
+        let ef = "MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, provider, \
+session_id, ts) TTL event_date + toIntervalDay(180) SETTINGS index_granularity = 8192";
+        assert_eq!(parse_ttl_days(ef), Some(180));
+        assert_eq!(parse_ttl_days("MergeTree ORDER BY ts"), None);
+        assert_eq!(
+            parse_ttl_days("MergeTree PARTITION BY toYYYYMM(toIntervalDay(3)) ORDER BY ts"),
+            None,
+            "an interval outside the TTL clause is ignored"
+        );
+    }
 }

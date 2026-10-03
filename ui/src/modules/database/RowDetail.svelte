@@ -150,6 +150,11 @@
     border-bottom: 1px solid var(--border);
     color: var(--text-dim);
   }
+  /* Full-width bar, so the focus cue is an accent underline, not a ring. */
+  .rd-search:focus-within {
+    border-bottom-color: var(--accent-text);
+    box-shadow: inset 0 -1px 0 var(--accent-text);
+  }
   .rd-search-input {
     flex: 1;
     min-width: 0;

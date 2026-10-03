@@ -144,6 +144,20 @@
         ? raw.elements
         : [];
     if (!els.length) return [];
+    // Mixed: an Ask AI turn rewrites the shapes in the simplified form while the
+    // daemon merges the elements it set aside (images, freehand, lines, frames)
+    // back in their FULL form — build the former, restore the latter.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const isFull = (e: any) => e && (e.versionNonce != null || e.seed != null);
+    const full = els.filter(isFull);
+    if (full.length && full.length < els.length) {
+      try {
+        return safeRestore([...routeArrows(full), ...buildExcalidrawElements(els.filter((e) => !isFull(e)))]);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[canvas] mixed scene build failed:', err);
+      }
+    }
     if (isSimplified(els)) {
       try {
         return safeRestore(buildExcalidrawElements(els));
@@ -169,6 +183,10 @@
     const elements = normalizeScene(raw);
     suppressSave = true;
     try {
+      // Re-register the scene's image files (kept across an Ask AI turn) so
+      // image elements never render as broken placeholders.
+      const files = raw?.files && typeof raw.files === 'object' ? Object.values(raw.files) : [];
+      if (files.length) ex.addFiles?.(files);
       ex.updateScene({ elements });
       if (elements.length) ex.scrollToContent(elements, { fitToContent: true, animate: false });
     } finally {

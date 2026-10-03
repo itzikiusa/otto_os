@@ -422,6 +422,5 @@
     .rooms { flex-direction: column; }
     .list { width: 100%; flex: 1; }
     .detail-head :global(.icon-btn:first-child) { flex: none; }
-    :global([dir="rtl"]) .detail-head :global(.icon-btn:first-child svg) { transform: scaleX(-1); }
   }
 </style>

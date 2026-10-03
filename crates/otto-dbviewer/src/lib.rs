@@ -15,6 +15,7 @@ pub mod complete;
 pub mod config;
 pub mod driver;
 pub mod drivers;
+pub mod errors;
 pub mod export;
 pub mod http;
 pub mod import;

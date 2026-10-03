@@ -22,6 +22,7 @@
     effectiveViewMode,
     viewModeReason,
     ROW_LIMIT_ALL,
+    TAB_HISTORY_PREFIX,
     type QueryTab,
   } from '../../lib/stores/database.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -29,6 +30,10 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { clipHistory } from '../../lib/stores/clipHistory.svelte';
+  import { unpersistEditorState } from '../../lib/editor-history';
+  import { parkedEditCount } from './grid-tab-state';
+  import { confirmer } from '../../lib/confirm.svelte';
   import type { DbCompletionKind } from '../../lib/api/types';
   import {
     statementAtCursor,
@@ -88,8 +93,47 @@
   // string or comment (MySQL `\'` escapes and `#` comments), which gates
   // completion inside literals and scopes the completion span to a statement.
   const sqlDialect = $derived(sqlDialectForKind(database.selectedConn?.kind));
-  // Re-key the editor on tab id + engine so it rebuilds cleanly per query tab.
-  const editorPath = $derived(`query-${tab.id}.${lang}`);
+  // Re-key the editor on the tab's STABLE uid + engine so it rebuilds cleanly
+  // per query tab — and so its undo history (lib/editor-history.ts) keys on an
+  // identity that survives remounts and reloads (`tab.id` is renumbered).
+  const editorPath = $derived(`query-${tab.uid}.${lang}`);
+  /** Shared-store history key for an editor path: `dbtab:<uid>`; masked tabs
+   *  keep history in memory only (it holds every pasted string). */
+  function historyKeyFor(p: string): { key: string; persist: boolean } | null {
+    const m = /^query-(.+)\.[a-z]+$/.exec(p);
+    if (!m) return null;
+    const t = database.tabByUid(m[1]);
+    if (!t) return null; // closed tab — nothing to keep
+    return { key: TAB_HISTORY_PREFIX + t.uid, persist: !t.mask };
+  }
+  let codeEditor: ReturnType<typeof CodeEditor> | undefined = $state();
+  let editHostEl: HTMLDivElement | undefined = $state();
+  /** ⌥⌘V / toolbar: pick a copy made in Otto and insert it at the cursor. */
+  async function openClipPicker(anchor?: Element | null): Promise<void> {
+    await clipHistory.load();
+    const entries = clipHistory.entries;
+    const oneLine = (t: string): string => {
+      const flat = t.replace(/\s+/g, ' ').trim();
+      return flat.length > 80 ? `${flat.slice(0, 79)}…` : flat;
+    };
+    ctxMenu.showAt(
+      anchor ?? editHostEl,
+      entries.length === 0
+        ? [{ label: clipHistory.enabled ? 'Nothing copied in Otto yet' : 'Clipboard history is off (Settings → Appearance)', disabled: true }]
+        : [
+            ...entries.map((e) => ({
+              label: oneLine(e.text),
+              icon: e.pinned ? 'pin' : 'copy',
+              hint: e.source,
+              title: e.text.length > 400 ? `${e.text.slice(0, 400)}…` : e.text,
+              action: () => codeEditor?.insertText(e.text),
+            })),
+            { separator: true, pinned: true },
+            { label: 'Clear unpinned', icon: 'trash', pinned: true, action: () => clipHistory.clear() },
+          ],
+      { filter: entries.length > 0, filterPlaceholder: 'Filter copies made in Otto…', maxVisible: 30 },
+    );
+  }
   // Statement separator: redis is one command per line; others use `;`.
   const splitMode = $derived<SplitMode>(database.queryLanguage === 'redis' ? 'line' : 'sql');
   // Live selection + cursor (from CodeEditor) → run only the selected/current
@@ -255,19 +299,45 @@
       }));
     if (worth.length) closedTabs = [...closedTabs, ...worth].slice(-MAX_CLOSED);
   }
-  function closeTabAt(i: number): void {
+  /** Un-applied grid edits a closing tab would lose: the live grid's for the
+   *  active tab, the parked ones (grid-tab-state) for the others. */
+  function unappliedEdits(closing: QueryTab[]): number {
+    const active = database.tab;
+    return closing.reduce(
+      (n, t) => n + (t === active ? database.livePendingEdits : parkedEditCount(t.uid)),
+      0,
+    );
+  }
+  /** Ask before a close throws away un-applied cell edits. */
+  async function okToDiscard(closing: QueryTab[]): Promise<boolean> {
+    const n = unappliedEdits(closing);
+    if (n === 0) return true;
+    return confirmer.ask(
+      `${n} un-applied change${n === 1 ? '' : 's'} in the results ${n === 1 ? 'is' : 'are'} not saved to the database and will be lost.`,
+      { title: `Discard ${n} change${n === 1 ? '' : 's'}?`, confirmLabel: 'Discard', danger: true },
+    );
+  }
+  async function closeTabAt(i: number): Promise<void> {
     const t = database.tabs[i];
+    if (t && !t.pinned && !(await okToDiscard([t]))) return;
+    if (database.tabs[i] !== t) return; // the strip changed while asking
     // A pinned tab doesn't close (the store toasts "Unpin to close") — so it
     // must not land on the reopen stack as if it had.
     if (t && !t.pinned) rememberClosed([t]);
     database.closeTab(i);
   }
   // Bulk closes from the tab strip menu: pinned tabs always survive.
-  function closeOthersAt(i: number): void {
-    rememberClosed(database.tabs.filter((x, idx) => idx !== i && !x.pinned));
-    database.closeOtherTabs(i);
+  async function closeOthersAt(i: number): Promise<void> {
+    const keep = database.tabs[i];
+    const closing = database.tabs.filter((x, idx) => idx !== i && !x.pinned);
+    if (!(await okToDiscard(closing))) return;
+    const at = database.tabs.indexOf(keep);
+    if (at < 0) return;
+    rememberClosed(database.tabs.filter((x, idx) => idx !== at && !x.pinned));
+    database.closeOtherTabs(at);
   }
-  function closeAll(): void {
+  async function closeAll(): Promise<void> {
+    if (!(await okToDiscard(database.tabs.filter((x) => !x.pinned)))) return;
     rememberClosed(database.tabs.filter((x) => !x.pinned));
     database.closeAllTabs();
   }
@@ -310,8 +380,8 @@
           ]
         : []),
       { separator: true },
-      { label: `Close others${keeps}`, disabled: others === 0, action: () => closeOthersAt(i) },
-      { label: `Close all${keeps}`, action: () => closeAll() },
+      { label: `Close others${keeps}`, disabled: others === 0, action: () => void closeOthersAt(i) },
+      { label: `Close all${keeps}`, action: () => void closeAll() },
     ]);
   }
 
@@ -760,6 +830,7 @@
     { keys: '⌥⌘T', label: 'New query tab' },
     { keys: '⌥⌘W', label: 'Close query tab' },
     { keys: '⇧⌥⌘W', label: 'Reopen closed tab' },
+    { keys: '⌥⌘V', label: 'Paste from Otto clipboard history' },
   ];
 
   function switchRelative(dir: 1 | -1): void {
@@ -831,6 +902,12 @@
       database.cycleViewMode(viewMode);
       return;
     }
+    // ⌥⌘V — paste from the clipboard ring (copies made in Otto) at the cursor.
+    if (cmd && e.altKey && !e.shiftKey && e.code === 'KeyV') {
+      e.preventDefault();
+      void openClipPicker();
+      return;
+    }
     // ⌥⌘T new query tab / ⌥⌘W close query tab (⌘T/⌘W stay session actions).
     if (e.metaKey && e.altKey && e.code === 'KeyT') {
       e.preventDefault();
@@ -839,7 +916,7 @@
     }
     if (e.metaKey && e.altKey && !e.shiftKey && e.code === 'KeyW') {
       e.preventDefault();
-      if (database.tabs.length > 1) closeTabAt(database.activeTab);
+      if (database.tabs.length > 1) void closeTabAt(database.activeTab);
       return;
     }
     // ⇧⌥⌘W — reopen the most recently closed query tab.
@@ -971,7 +1048,7 @@
               aria-label="Close tab"
               onclick={(e) => {
                 e.stopPropagation();
-                closeTabAt(i);
+                void closeTabAt(i);
               }}
             >
               <Icon name="x" size={10} />
@@ -1177,7 +1254,12 @@
         type="checkbox"
         class="sr-only"
         checked={tab.mask}
-        onchange={(e) => { database.tab.mask = (e.currentTarget as HTMLInputElement).checked; }}
+        onchange={(e) => {
+          const on = (e.currentTarget as HTMLInputElement).checked;
+          database.tab.mask = on;
+          // A masked tab's undo history (every pasted string) must not stay on disk.
+          if (on) unpersistEditorState(TAB_HISTORY_PREFIX + database.tab.uid);
+        }}
       />
       <Icon name="lock" size={12} />
       {#if tab.mask}<span class="qe-masked-badge">Masked</span>{:else}<span>Mask</span>{/if}
@@ -1198,6 +1280,16 @@
       <Icon name="text" size={12} />
       <span>Wrap</span>
     </label>
+    <button
+      class="qe-mask qe-clip"
+      type="button"
+      onclick={(e) => void openClipPicker(e.currentTarget)}
+      aria-label="Paste from clipboard history"
+      title="Paste from clipboard history — copies made in Otto (⌥⌘V)"
+      data-testid="qe-clip-history"
+    >
+      <Icon name="copy" size={12} />
+    </button>
     <span class="qe-lang mono" title="Query language">{database.queryLanguage}</span>
     </div>
   </div>
@@ -1310,7 +1402,7 @@
       <span class="qe-acc-title">Editor</span>
     </button>
   {/if}
-  <div class="qe-edit" class:qe-collapsed={viewport.isPhone && !editorOpen} style="height: {editorH}px">
+  <div class="qe-edit" class:qe-collapsed={viewport.isPhone && !editorOpen} style="height: {editorH}px" bind:this={editHostEl}>
     <CodeEditor
       path={editorPath}
       content={tab.statement}
@@ -1321,6 +1413,11 @@
       findOwner={true}
       wrap={wrapLines}
       keepStates={true}
+      historyKey={historyKeyFor}
+      oncopy={(text) => {
+        if (!tab.mask) clipHistory.record(text, 'Editor');
+      }}
+      bind:this={codeEditor}
       {sqlDialect}
       placeholder={lang === 'redis' ? 'Write a command — ⌘↵ to run' : 'Write a query — ⌘↵ to run'}
       completionSource={database.selectedConnId ? completionSource : null}
@@ -1368,6 +1465,8 @@
       connectionId={database.selectedConnId}
       ranNode={tab.ran_node}
       running={tab.running}
+      startedAt={tab.pending?.startedAt ?? null}
+      tabKey={tab.uid}
       offset={tab.offset}
       {viewMode}
       {viewReason}
@@ -1801,6 +1900,10 @@
     width: 72px;
   }
   /* Mask PII/prod toggle — styled like a small button, highlights when active. */
+  .qe-clip {
+    background: transparent;
+    font: inherit;
+  }
   .qe-mask {
     display: inline-flex;
     align-items: center;

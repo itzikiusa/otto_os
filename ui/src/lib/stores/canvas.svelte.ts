@@ -20,6 +20,7 @@ import type {
   CanvasFormat,
   CanvasScene,
   CanvasSceneSummary,
+  CanvasSceneVersion,
   Scene,
 } from '../../modules/canvas/types';
 
@@ -299,6 +300,31 @@ class CanvasStore {
     if (!d || typeof d.source !== 'string' || this.dirty) return false;
     this.ingestDoc(d);
     return true;
+  }
+
+  /** A scene's version history, newest first (C5; no documents). */
+  async listVersions(id: string): Promise<CanvasSceneVersion[]> {
+    return api.get<CanvasSceneVersion[]>(`/canvas/scenes/${id}/versions`);
+  }
+
+  /** Restore a version. Pending saves land first (so they can't overwrite the
+   *  restore afterwards); unsaved local edits are dropped — the server keeps
+   *  the replaced doc as a `restore` version, so this is undoable. */
+  async restoreVersion(id: string, versionId: string): Promise<void> {
+    await this.#writes.get(id)?.catch(() => {});
+    const row = await api.post<CanvasScene>(`/canvas/scenes/${id}/versions/${versionId}/restore`, {});
+    this.#drafts.delete(id);
+    delete this.docSaveErrors[id];
+    if (this.currentId !== id) return;
+    let doc: CanvasDoc | null = null;
+    try {
+      doc = JSON.parse(row.doc_json) as CanvasDoc;
+    } catch {
+      doc = null;
+    }
+    this.dirty = false;
+    if (doc) this.ingestDoc(doc);
+    this.savedAt = Date.parse(row.updated_at) || Date.now();
   }
 
   /** Append a turn to the inline conversation (of `sceneId` when given — a

@@ -87,12 +87,20 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 fn local_url(url: &tauri::Url) -> bool {
-    policy::local_document(url.scheme(),url.host_str(),url.path(),url.fragment())
-        && url.port().is_none() && url.username().is_empty() && url.password().is_none()
+    policy::local_document(url.scheme(), url.host_str(), url.path(), url.fragment())
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
 }
 fn local(view: &Webview) -> Result<(), String> {
-    let url = view.url().map_err(|_| "Cannot validate pane caller".to_string())?;
-    if local_url(&url) { Ok(()) } else { Err("Panes require an Otto local document".into()) }
+    let url = view
+        .url()
+        .map_err(|_| "Cannot validate pane caller".to_string())?;
+    if local_url(&url) {
+        Ok(())
+    } else {
+        Err("Panes require an Otto local document".into())
+    }
 }
 
 fn pair_for(view: &Webview) -> Result<Pair, String> {
@@ -151,20 +159,24 @@ fn emit(app: &AppHandle, pair: &Pair) -> PaneState {
     value
 }
 fn put(pair: &Pair) {
-    pairs()
-        .insert(pair.host.clone(), pair.clone());
+    pairs().insert(pair.host.clone(), pair.clone());
 }
 /// On macOS Tauri 2.11 reports the first webview's bounds as inner_size
 /// after reparent into a Window built without children. Recover the actual
 /// decorated content rectangle from native inner/outer positions instead.
 fn content_size(win: &Window) -> Result<PhysicalSize<u32>, String> {
-    if !win.label().starts_with(PREFIX) { return win.inner_size().map_err(err); }
-    let outer=win.outer_size().map_err(err)?;
-    let origin=win.outer_position().map_err(err)?;
-    let content=win.inner_position().map_err(err)?;
-    let border=(content.x-origin.x).max(0) as u32;
-    let top=(content.y-origin.y).max(0) as u32;
-    Ok(PhysicalSize::new(outer.width.saturating_sub(border*2).max(1),outer.height.saturating_sub(top+border).max(1)))
+    if !win.label().starts_with(PREFIX) {
+        return win.inner_size().map_err(err);
+    }
+    let outer = win.outer_size().map_err(err)?;
+    let origin = win.outer_position().map_err(err)?;
+    let content = win.inner_position().map_err(err)?;
+    let border = (content.x - origin.x).max(0) as u32;
+    let top = (content.y - origin.y).max(0) as u32;
+    Ok(PhysicalSize::new(
+        outer.width.saturating_sub(border * 2).max(1),
+        outer.height.saturating_sub(top + border).max(1),
+    ))
 }
 fn layout_child(app: &AppHandle, pair: &Pair) -> Result<(), String> {
     let child = child_view(app, pair)?;
@@ -186,9 +198,7 @@ fn layout_child(app: &AppHandle, pair: &Pair) -> Result<(), String> {
         child
             .set_position(LogicalPosition::new(0.0, 0.0))
             .map_err(err)?;
-        child
-            .set_size(content_size(&win)?)
-            .map_err(err)?;
+        child.set_size(content_size(&win)?).map_err(err)?;
         child.show().map_err(err)?;
     }
     Ok(())
@@ -240,6 +250,7 @@ pub async fn pane_open(
     )
     .initialization_script(init)
     .disable_drag_drop_handler()
+    .background_throttling(crate::NO_THROTTLE)
     .on_navigation(local_url)
     .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
     #[cfg(debug_assertions)]
@@ -288,10 +299,7 @@ pub async fn pane_layout(
 #[tauri::command]
 pub async fn pane_state(app: AppHandle, webview: Webview) -> Result<Option<PaneState>, String> {
     local(&webview)?;
-    if !policy::host_label(webview.label())
-        && !pairs()
-            .values()
-            .any(|p| p.child == webview.label())
+    if !policy::host_label(webview.label()) && !pairs().values().any(|p| p.child == webview.label())
     {
         return Err("Not a pane owner".into());
     }
@@ -780,8 +788,17 @@ mod tests {
     use super::*;
     #[test]
     fn local_urls_reject_remote_ports_credentials_and_guest_routes() {
-        assert!(local_url(&"tauri://localhost/index.html?embed=1#/agents".parse().unwrap()));
-        for url in ["https://tauri.localhost:4443/", "tauri://user@localhost/", "tauri://localhost/#/room/guest", "https://example.com/"] {
+        assert!(local_url(
+            &"tauri://localhost/index.html?embed=1#/agents"
+                .parse()
+                .unwrap()
+        ));
+        for url in [
+            "https://tauri.localhost:4443/",
+            "tauri://user@localhost/",
+            "tauri://localhost/#/room/guest",
+            "https://example.com/",
+        ] {
             assert!(!local_url(&url.parse().unwrap()), "{url}");
         }
     }

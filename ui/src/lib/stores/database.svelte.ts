@@ -29,6 +29,7 @@ import type {
   DbSavedQuery,
   DbSchemaGraph,
   DbTestResult,
+  DbQueryStatus,
   DbViz,
   DbWidget,
   DbWidgetMapping,
@@ -54,7 +55,12 @@ import {
   type VarSpec,
 } from '../../modules/database/sql-util';
 import { bsonScalar } from '../../modules/database/bson';
+import { normalizeDbError } from '../../modules/database/error-normalize';
 import { copyTextOrThrow } from '../clipboard';
+import { mapLimit, pollWhileVisible, type Poller } from '../poll';
+import { forgetEditorState, forgetEditorStates, hydrateEditorHistory } from '../editor-history';
+import { dropGridState } from '../../modules/database/grid-tab-state';
+import { clipHistory } from './clipHistory.svelte';
 
 /** Connection kinds the explorer can browse (the DB engines). */
 export const DB_KINDS = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'] as const;
@@ -98,6 +104,15 @@ function loadRowLimit(): number {
   const v = Number(localStorage.getItem(ROW_LIMIT_KEY));
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_ROW_LIMIT;
 }
+
+/** "Connect on click only" for restored tabs (see `warmRestored`). */
+const WARM_ON_CLICK_KEY = 'otto_db_warm_on_click';
+/** "Keep open connections alive" (see `keepAlive`). */
+const KEEP_ALIVE_KEY = 'otto_db_keep_alive';
+/** Restored tabs warmed at once (matches the bg lane's 3 app-wide sockets). */
+const WARM_CONCURRENCY = 3;
+/** Keep-alive period: under the daemon's 5-minute pool idle timeout. */
+const KEEP_ALIVE_MS = 4 * 60_000;
 
 /** Read a sticky boolean preference; missing/unreadable falls back to `def`. */
 function loadFlag(key: string, def: boolean): boolean {
@@ -545,6 +560,12 @@ export interface QueryTab {
    * Persisted with the tab; absent = a tab the person opened.
    */
   agent?: QueryTabAgent | null;
+  /**
+   * Stable identity of this tab across reloads (`id` is renumbered on every
+   * restore). Keys the editor's per-tab undo history (lib/editor-history.ts)
+   * so ⌘Z survives a remount and a reload. Persisted with the tab.
+   */
+  uid: string;
 }
 
 /**
@@ -559,6 +580,13 @@ export interface PendingRun {
   connId: Id;
   sql?: string;
   node?: string | null;
+  /**
+   * When the run started (epoch ms). Drives the running timer, so it keeps
+   * counting across tab / connection / view switches and reloads instead of
+   * restarting at 0s. Absent on older markers until the daemon's
+   * `query-status` reports `elapsed_ms` (reattach backfills it).
+   */
+  startedAt?: number;
 }
 
 /** Hard cap on each side of a completion request's cursor context. */
@@ -608,10 +636,32 @@ function normalizeVars(raw: unknown): Record<string, VarSpec> {
   return out;
 }
 
+/** Key prefix of a query tab's undo history in lib/editor-history.ts. */
+export const TAB_HISTORY_PREFIX = 'dbtab:';
+/** Drop a closed tab's undo history and parked grid state. */
+function forgetTabHistory(t: QueryTab): void {
+  forgetEditorState(TAB_HISTORY_PREFIX + t.uid);
+  dropGridState(t.uid);
+}
+
 let nextTabId = 1;
+/** A fresh stable tab uid (see {@link QueryTab.uid}). */
+export function newTabUid(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    /* insecure context — fall through */
+  }
+  // getRandomValues works in insecure contexts too (randomUUID doesn't).
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return `t${Date.now().toString(36)}${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+}
 function blankTab(statement = ''): QueryTab {
   return {
     id: nextTabId++,
+    uid: newTabUid(),
     name: 'Query',
     statement,
     result: null,
@@ -702,7 +752,12 @@ interface ConnSnapshot {
   connView: ViewMode | null;
 }
 
-export type ConnPhase = 'connecting' | 'ready' | 'error';
+/**
+ * `idle` = restored as a tab but not connected yet (background warm-up pending,
+ * or "connect on click only"); `stale` is folded into `idle` after a daemon
+ * restart (the old pool/tunnel is gone; it re-warms).
+ */
+export type ConnPhase = 'idle' | 'connecting' | 'ready' | 'error';
 export interface ConnStatus {
   phase: ConnPhase;
   /** Failure reason (set only when phase === 'error'). */
@@ -1219,6 +1274,9 @@ class DatabaseStore {
     this.objectSearching = false;
     this.assistOpen = false;
     if (change.type === 'reset' && change.identity) {
+      // Another person's undo history (every string they typed) must not be
+      // reachable from this identity.
+      forgetEditorStates(TAB_HISTORY_PREFIX);
       this.connections = [];
       this.otherConnections = [];
       this.openConnIds = [];
@@ -1287,7 +1345,10 @@ class DatabaseStore {
       toasts.info('Unpin to close');
       return;
     }
-    if (closing) this.abortQuery(closing.id);
+    if (closing) {
+      this.abortQuery(closing.id);
+      forgetTabHistory(closing);
+    }
     if (this.tabs.length === 1) {
       this.tabs = [blankTab()];
       this.activeTab = 0;
@@ -1316,8 +1377,10 @@ class DatabaseStore {
     const active = keepActive === null ? null : this.tabs[keepActive] ?? null;
     const survivors: QueryTab[] = [];
     for (const [idx, t] of this.tabs.entries()) {
-      if (shouldClose(t, idx)) this.abortQuery(t.id);
-      else survivors.push(t);
+      if (shouldClose(t, idx)) {
+        this.abortQuery(t.id);
+        forgetTabHistory(t);
+      } else survivors.push(t);
     }
     this.tabs = survivors.length ? survivors : [blankTab()];
     // Keep the caller's tab focused when it survived; else the first survivor
@@ -1337,6 +1400,18 @@ class DatabaseStore {
     this.tabs = ordered.tabs;
     this.activeTab = ordered.activeTab;
     this.persistTabs();
+  }
+
+  /** A query tab by its stable uid, across the live set and every parked
+   *  connection snapshot (the editor's history store asks per path). */
+  tabByUid(uid: string): QueryTab | null {
+    const live = this.tabs.find((t) => t.uid === uid);
+    if (live) return live;
+    for (const snap of this.snapshots.values()) {
+      const t = snap.tabs.find((x) => x.uid === uid);
+      if (t) return t;
+    }
+    return null;
   }
 
   // ── Agent UI control (lib/uiCommands/database.ts) ─────────────────────────
@@ -1542,6 +1617,7 @@ class DatabaseStore {
     try {
       json = JSON.stringify({
           tabs: state.tabs.map((t) => ({
+            uid: t.uid,
             name: t.name,
             statement: t.statement,
             vars: t.vars,
@@ -1552,6 +1628,7 @@ class DatabaseStore {
               ? {
                   queryId: t.pending.queryId,
                   connId: t.pending.connId,
+                  ...(t.pending.startedAt ? { startedAt: t.pending.startedAt } : {}),
                   ...(t.pending.sql !== undefined && t.pending.sql.length <= PENDING_SQL_MAX
                     ? { sql: t.pending.sql, node: t.pending.node ?? null }
                     : {}),
@@ -1627,11 +1704,18 @@ class DatabaseStore {
     try {
       const p = JSON.parse(raw) as {
         tabs?: {
+          uid?: unknown;
           name?: string;
           statement?: string;
           vars?: unknown;
           savedQueryId?: string;
-          pending?: { queryId?: string; connId?: string; sql?: unknown; node?: unknown } | null;
+          pending?: {
+            queryId?: string;
+            connId?: string;
+            sql?: unknown;
+            node?: unknown;
+            startedAt?: unknown;
+          } | null;
           timeout_ms?: number;
           mask?: boolean;
           viewMode?: unknown;
@@ -1641,8 +1725,14 @@ class DatabaseStore {
         activeTab?: number;
         activeDb?: string | null;
       };
+      const seenUids = new Set<string>();
       const tabs = (p.tabs ?? []).map((t) => ({
         ...blankTab(t.statement ?? ''),
+        // Keep the persisted uid (its undo history is keyed on it); a missing
+        // or duplicated one (older payload, copied tab) gets a fresh uid.
+        ...(typeof t.uid === 'string' && t.uid && !seenUids.has(t.uid)
+          ? (seenUids.add(t.uid), { uid: t.uid })
+          : {}),
         name: t.name || 'Query',
         vars: normalizeVars(t.vars),
         savedQueryId: t.savedQueryId,
@@ -1655,6 +1745,9 @@ class DatabaseStore {
             ? {
                 queryId: t.pending.queryId,
                 connId: t.pending.connId,
+                ...(typeof t.pending.startedAt === 'number' && t.pending.startedAt > 0
+                  ? { startedAt: t.pending.startedAt }
+                  : {}),
                 ...(typeof t.pending.sql === 'string'
                   ? {
                       sql: t.pending.sql,
@@ -1820,25 +1913,37 @@ class DatabaseStore {
     // Only re-open connections that still exist in the library.
     const open = (parsed.open ?? []).filter((id) => this.connections.some((c) => c.id === id));
     if (open.length === 0) return;
+    // Bring persisted undo histories into memory before the editors mount
+    // (IndexedDB, a few ms) so ⌘Z reaches past the reload.
+    await hydrateEditorHistory();
+    if (this.openConnIds.length > 0) return; // something opened meanwhile
 
+    // Every tab chip appears at once; only the ACTIVE tab connects in the
+    // foreground. The rest show "Not connected yet" and warm in the background
+    // (3 at a time, bg lane) unless the user chose "connect on click only".
+    // The old loop awaited `openConnection` per id — serial (N × dial) and it
+    // moved the selection to each id in turn, overriding a click mid-restore.
+    const selected = parsed.selected && open.includes(parsed.selected) ? parsed.selected : open[0];
     this.restoring = true;
     this.restoreTombstones.clear();
+    let others: Id[] = [];
     try {
-      for (const id of open) {
-        // A tab the user closed while this restore was running stays closed.
-        if (this.restoreTombstones.has(id)) continue;
-        await this.openConnection(id);
-      }
-      // Focus the persisted selection when still open, else the first — never a
-      // tombstoned tab (re-opening it would resurrect the close).
-      const alive = open.filter((id) => !this.restoreTombstones.has(id));
-      const selected =
-        parsed.selected && alive.includes(parsed.selected) ? parsed.selected : alive[0];
-      if (selected) await this.openConnection(selected);
+      this.openConnIds = open;
+      const cs = new Map(this.connStatus);
+      for (const id of open) if (id !== selected) cs.set(id, { phase: 'idle' });
+      this.connStatus = cs;
+      others = open.filter((id) => id !== selected);
+      // The active tab's dial is issued FIRST (interactive/long lane); the
+      // background warm-up starts right behind it on the separate bg lane, so a
+      // slow active connection doesn't hold the others back.
+      const active = this.openConnection(selected);
+      if (this.warmRestored === 'background') void this.warmMany(others);
+      await active;
     } finally {
       this.restoring = false;
       this.restoreTombstones.clear();
     }
+    this.ensureKeepAlive();
     // Persist once, now that the full set is open (converges the storage).
     this.persistWorkbench();
     // Nothing survived the restore (or nothing was open) — land the sidebar on
@@ -2005,6 +2110,7 @@ class DatabaseStore {
     // the same connection was already selected behind a Kafka/SSH pane.
     this.activePane = null;
     if (id === this.selectedConnId) return;
+    this.ensureKeepAlive();
     this.captureSnapshot();
     if (!this.openConnIds.includes(id)) {
       this.openConnIds = [...this.openConnIds, id];
@@ -2041,11 +2147,15 @@ class DatabaseStore {
     // tabs are the live set when active, else the parked snapshot's. Cancels
     // server-side + clears `pending` so the reattach loops stop polling.
     const closingTabs = wasActive ? this.tabs : this.snapshots.get(id)?.tabs ?? [];
+    // (Undo histories are kept: the connection's tabs are persisted and come
+    // back with the same uids when it is reopened.)
     for (const t of closingTabs) this.abortRunForTab(t);
     this.openConnIds = this.openConnIds.filter((x) => x !== id);
     // Invalidate every in-flight loader for this connection (schema, caps,
     // health probe, children…) — a close must be terminal, not cosmetic.
     this.connEpoch.set(id, this.epochOf(id) + 1);
+    this.warming.get(id)?.ctl.abort();
+    this.warming.delete(id);
     // A close during `restoreWorkbench` must survive the restore loop (which
     // would otherwise re-open it) AND reach localStorage past the guard.
     if (this.restoring) this.restoreTombstones.add(id);
@@ -2100,6 +2210,233 @@ class DatabaseStore {
     const neighbor = this.openConnIds[Math.max(0, idx - 1)];
     this.selectedConnId = null;
     void this.openConnection(neighbor);
+  }
+
+  // ── Background warm-up (restore) + keep-alive ───────────────────────────────
+
+  /** In-flight background warm-ups, one per connection (dedupe + cancel). */
+  private warming = new Map<Id, { promise: Promise<void>; ctl: AbortController }>();
+
+  /** Un-applied cell edits in the results grid of the ACTIVE query tab
+   *  (written by ResultsGrid) — a tab close asks before discarding them. */
+  livePendingEdits = $state(0);
+
+  /** Whether `id` is being connected in the background right now. */
+  isWarming(id: Id): boolean {
+    return this.warming.has(id);
+  }
+
+  /**
+   * Restored tabs other than the active one: `background` (default) connects
+   * them 3 at a time behind the active tab; `on-click` leaves them "Not
+   * connected yet" until the user opens one. Persisted.
+   */
+  warmRestored: 'background' | 'on-click' = $state(
+    loadFlag(WARM_ON_CLICK_KEY, false) ? 'on-click' : 'background',
+  );
+  setWarmRestored(mode: 'background' | 'on-click'): void {
+    this.warmRestored = mode;
+    saveFlag(WARM_ON_CLICK_KEY, mode === 'on-click');
+  }
+
+  /** Ping open, ready connections every 4 min so pools/tunnels don't idle out
+   *  and a dropped one turns red BEFORE the next query. Persisted, default on. */
+  keepAlive = $state(loadFlag(KEEP_ALIVE_KEY, true));
+  setKeepAlive(on: boolean): void {
+    this.keepAlive = on;
+    saveFlag(KEEP_ALIVE_KEY, on);
+    if (on) this.ensureKeepAlive();
+    else this.stopKeepAlive();
+  }
+
+  /** Warm `ids` in the background, at most 3 at a time (the app-wide bg lane
+   *  holds 3 sockets). Skips closed ids and ids that already have a snapshot. */
+  async warmMany(ids: readonly Id[]): Promise<void> {
+    await mapLimit(ids, WARM_CONCURRENCY, (id) => this.warm(id));
+  }
+
+  /**
+   * Connect one open, non-selected connection in the background: caps + schema
+   * root on the bg lane, then park the result as its snapshot so a click
+   * restores it instantly. Never touches the selected connection's singletons
+   * and never moves focus. A click on the tab while this runs just loads it
+   * fresh — the daemon's per-key init slot makes that request wait for this
+   * dial instead of dialling twice — and this result is then dropped.
+   */
+  warm(id: Id): Promise<void> {
+    const inflight = this.warming.get(id);
+    if (inflight) return inflight.promise;
+    // A parked snapshot with a tree needs nothing; one emptied by a daemon
+    // restart (onDaemonRestart) gets its caps + tree refilled in place.
+    const parked = this.snapshots.get(id);
+    if (
+      !this.openConnIds.includes(id) ||
+      (parked && parked.schemaRoot.length > 0) ||
+      this.selectedConnId === id
+    ) {
+      return Promise.resolve();
+    }
+    const ctl = new AbortController();
+    const epoch = this.epochOf(id);
+    const run = async (): Promise<void> => {
+      this.mergeConnStatus(id, { phase: 'connecting', error: undefined });
+      const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      try {
+        const [caps, root] = await Promise.all([
+          api.bg.get<DbCapabilities>(`${this.connBase(id)}/capabilities`, ctl.signal),
+          api.bg.get<SchemaNode[]>(`${this.connBase(id)}/schema`, ctl.signal),
+        ]);
+        if (!this.connLive(id, epoch) || ctl.signal.aborted) return;
+        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        if (this.selectedConnId !== id) {
+          const snap = this.snapshots.get(id);
+          if (!snap) this.snapshots.set(id, this.freshSnapshot(id, caps, root));
+          else if (snap.schemaRoot.length === 0) {
+            // Keep the parked tabs/results; only the connection-side data refills.
+            this.snapshots.set(id, { ...snap, capabilities: caps, schemaRoot: root });
+          }
+        }
+        this.mergeConnStatus(id, {
+          phase: 'ready',
+          error: undefined,
+          latencyMs: Math.round(now - started),
+        });
+      } catch (e) {
+        if (!this.connLive(id, epoch)) return;
+        if (ctl.signal.aborted) {
+          // "Stop connecting": back to not-connected, no error dot.
+          this.setConnStatus(id, { phase: 'idle' });
+          return;
+        }
+        // The tab gets a red dot; SchemaTree's Retry handles it on open. No toast.
+        this.setConnStatus(id, { phase: 'error', error: errMsg(e) });
+      }
+    };
+    const promise = run().finally(() => {
+      if (this.warming.get(id)?.ctl === ctl) this.warming.delete(id);
+    });
+    this.warming.set(id, { promise, ctl });
+    return promise;
+  }
+
+  /** "Stop connecting" (tab menu): abort a background warm-up. The tab stays
+   *  open, "Not connected yet"; opening it connects normally. */
+  stopConnecting(id: Id): void {
+    const w = this.warming.get(id);
+    if (!w) return;
+    w.ctl.abort();
+    this.warming.delete(id);
+    if (this.openConnIds.includes(id)) this.setConnStatus(id, { phase: 'idle' });
+  }
+
+  /**
+   * A connection's working set as `loadConnectionFresh` would build it, but as
+   * a parked snapshot (no singleton writes) — persisted tabs/view/active DB plus
+   * the fetched caps + schema root.
+   */
+  private freshSnapshot(id: Id, caps: DbCapabilities, root: SchemaNode[]): ConnSnapshot {
+    const restored = this.restoreTabs(id);
+    const view = this.restoreView(id);
+    let activeDb = restored?.activeDb ?? null;
+    // Redis: default the active keyspace to the first DB (as loadSchemaRoot).
+    if (!activeDb) activeDb = root.find((n) => n.kind === 'keyspace')?.id ?? null;
+    let mainTab: DbMainTab = view?.main ?? 'query';
+    if (mainTab === 'builder' && !caps.joins) mainTab = 'query';
+    return {
+      capabilities: caps,
+      testResult: null,
+      activeDb,
+      schemaRoot: root,
+      childrenCache: new Map(),
+      expanded: new Set(),
+      loadingNodes: new Set(),
+      schemaLoading: false,
+      selectedObjectPath: null,
+      objectDetail: null,
+      objectError: null,
+      objectSearchQuery: '',
+      objectSearchHits: null,
+      objectSearchTruncated: false,
+      objectSearchScanned: 0,
+      builderTablesCache: new Map(),
+      tabs: restored?.tabs ?? [blankTab()],
+      activeTab: restored?.activeTab ?? 0,
+      savedQueries: this.savedQueries,
+      history: [],
+      mainTab,
+      sideTab: view?.side ?? 'schema',
+      connView: view?.view ?? null,
+    };
+  }
+
+  private keepAlivePoller: Poller | null = null;
+
+  /** Start the 4-minute keep-alive when enabled (paused while the app is
+   *  hidden — pollWhileVisible runs one tick on return). Idempotent. */
+  ensureKeepAlive(): void {
+    if (!this.keepAlive || this.keepAlivePoller !== null || typeof window === 'undefined') return;
+    this.keepAlivePoller = pollWhileVisible(() => this.keepAliveTick(), {
+      ms: KEEP_ALIVE_MS,
+      immediate: false,
+    });
+  }
+  private stopKeepAlive(): void {
+    this.keepAlivePoller?.stop();
+    this.keepAlivePoller = null;
+  }
+
+  /** One keep-alive round: `db/test` (acquires from the cached pool and
+   *  refreshes the tunnel's last-used) for each ready connection, 2 at a time.
+   *  A failed ping turns the dot red before the user's next query. */
+  async keepAliveTick(): Promise<void> {
+    if (!this.keepAlive || this.openConnIds.length === 0) return;
+    const ids = this.openConnIds.filter((id) => this.connStatus.get(id)?.phase === 'ready');
+    await mapLimit(ids, 2, async (id) => {
+      const epoch = this.epochOf(id);
+      try {
+        const res = await api.bg.post<DbTestResult>(`${this.connBase(id)}/test`, {});
+        if (!this.connLive(id, epoch)) return;
+        if (!res.ok) {
+          this.setConnStatus(id, { phase: 'error', error: res.message || 'Connection lost' });
+        } else if (res.latency_ms != null) {
+          this.mergeConnStatus(id, { latencyMs: res.latency_ms });
+        }
+      } catch (e) {
+        if (!this.connLive(id, epoch)) return;
+        // Daemon unreachable is the events client's banner, not a red dot on
+        // every connection; only a real API answer marks the connection.
+        if (e instanceof ApiError) this.setConnStatus(id, { phase: 'error', error: errMsg(e) });
+      }
+    });
+  }
+
+  /**
+   * The daemon restarted (new boot id): every pool and tunnel it held is gone,
+   * so the "ready" chips are stale. Background connections drop to "Not
+   * connected yet" (their parked snapshot keeps the tabs, the tree re-fetches)
+   * and re-warm; the selected one re-loads its schema in place, first.
+   */
+  onDaemonRestart(): void {
+    if (this.openConnIds.length === 0) return;
+    for (const w of this.warming.values()) w.ctl.abort();
+    this.warming.clear();
+    const sel = this.selectedConnId;
+    const cs = new Map(this.connStatus);
+    const others: Id[] = [];
+    for (const id of this.openConnIds) {
+      if (id === sel) continue;
+      cs.set(id, { phase: 'idle' });
+      // Drop the stale tree but keep the parked tabs: an empty root makes
+      // restoreSnapshot re-fetch caps + schema on open.
+      const snap = this.snapshots.get(id);
+      if (snap) {
+        this.snapshots.set(id, { ...snap, schemaRoot: [], childrenCache: new Map(), expanded: new Set() });
+      }
+      others.push(id);
+    }
+    this.connStatus = cs;
+    if (sel && this.openConnIds.includes(sel)) void this.retryConnection(sel);
+    if (this.warmRestored === 'background') void this.warmMany(others);
   }
 
   // ── Non-DB workbench panes (Kafka clusters, SSH/custom terminals) ───────────
@@ -2730,6 +3067,9 @@ class DatabaseStore {
     // the query-status endpoint re-attach to a run whose HTTP wait was lost.
     const queryId = newQueryId();
     const accessEpoch=this.accessEpoch;
+    // The engine this run belongs to — a failure may land after the person has
+    // switched connection, and its background toast must read it as THIS engine.
+    const runEngine = this.capabilities?.engine ?? null;
     this.runControllers.set(t.id, { controller, queryId, connId: id });
     // Scope to the active database (so unqualified tables resolve) unless a
     // node was passed — `null` included, which means "no scope".
@@ -2737,7 +3077,7 @@ class DatabaseStore {
     t.running = true;
     t.error = null;
     t.err_statement = null;
-    t.pending = { queryId, connId: id, sql, node: scopeNode };
+    t.pending = { queryId, connId: id, sql, node: scopeNode, startedAt: Date.now() };
     this.persistTabs();
     try {
       // Honor an explicit LIMIT in the SQL; otherwise apply the configured
@@ -2847,7 +3187,11 @@ class DatabaseStore {
         t.err_statement = sql;
         // The tab's inline ErrorPanel already says this when it's on screen —
         // only toast when the failing tab is NOT the one the person is looking at.
-        if (!this.isVisibleTab(id, t)) toasts.error('Query failed', errMsg(e));
+        // Headline only (the normalised title) — the full error, cause and
+        // hint wait in the tab's ErrorPanel.
+        if (!this.isVisibleTab(id, t)) {
+          toasts.error('Query failed', normalizeDbError(runEngine, errMsg(e), sql).title);
+        }
         return null;
       }
       // The HTTP wait was lost (page teardown / network blip) but the server
@@ -3181,12 +3525,11 @@ class DatabaseStore {
     // Re-entrancy / staleness guard: stop when the tab moved on to a different
     // run (a new runQuery replaces `pending`) or the marker was cleared.
     while (t.pending && t.pending.queryId === pending.queryId) {
-      let st: { status: string; result?: QueryResult; error?: string };
+      let st: DbQueryStatus;
       try {
-        st = await api.post<{ status: string; result?: QueryResult; error?: string }>(
-          `${this.connBase(pending.connId)}/query-status`,
-          { query_id: pending.queryId },
-        );
+        st = await api.post<DbQueryStatus>(`${this.connBase(pending.connId)}/query-status`, {
+          query_id: pending.queryId,
+        });
         failures = 0;
       } catch {
         // Daemon unreachable (sleep/restart in progress): retry a few times,
@@ -3199,6 +3542,16 @@ class DatabaseStore {
         continue;
       }
       if (st.status === 'running') {
+        // A run this page didn't start (agent, other window, an old marker):
+        // backfill its real start so the timer doesn't count from 0.
+        if (
+          st.elapsed_ms != null &&
+          t.pending?.queryId === pending.queryId &&
+          !t.pending.startedAt
+        ) {
+          t.pending = { ...t.pending, startedAt: Date.now() - st.elapsed_ms };
+          this.persistTabs();
+        }
         await new Promise((r) => setTimeout(r, 1500));
         continue;
       }
@@ -3928,6 +4281,8 @@ function isQuotaError(e: unknown): boolean {
 }
 
 export const database = new DatabaseStore();
+// Copies made while a masked tab is active never reach the clipboard ring.
+clipHistory.setGuard(() => database.tab?.mask === true);
 if (typeof window !== 'undefined') {
   // The tab-draft write is debounced 300 ms — flush it when the page goes away
   // (reload / quit) or is hidden (app switch), so the last edits survive.

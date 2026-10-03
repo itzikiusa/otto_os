@@ -178,7 +178,7 @@ impl TranscriptIndexRepo {
             let marks = vec!["?"; chunk.len()].join(",");
             let sql =
                 format!("SELECT * FROM transcript_index WHERE provider_session_id IN ({marks})");
-            let mut q = sqlx::query(&sql);
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
             for id in chunk {
                 q = q.bind(id);
             }

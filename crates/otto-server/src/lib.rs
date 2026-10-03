@@ -34,10 +34,10 @@ pub mod feature_guard;
 pub mod finding_agent;
 pub mod finding_context;
 pub mod goal_loop;
-pub mod goal_loop_parse;
-mod goal_loop_roles;
-mod goal_loop_policy;
 mod goal_loop_commands;
+pub mod goal_loop_parse;
+mod goal_loop_policy;
+mod goal_loop_roles;
 pub mod goal_loop_workspace;
 pub mod history_index;
 pub mod improve_channels;
@@ -56,8 +56,12 @@ pub mod model_catalog;
 pub mod modules;
 pub mod monitor;
 pub mod offload;
-pub mod personal_agents_engine;
 mod personal_agent_documents;
+// Personal agents: tool-layer permission policy + live activity (batch 2026-10-03).
+pub mod personal_agent_activity;
+pub mod personal_agent_memory;
+pub mod personal_agent_policy;
+pub mod personal_agents_engine;
 pub mod personal_agents_scheduler;
 pub mod plugins;
 pub mod policy;
@@ -74,19 +78,20 @@ pub mod resource_sessions;
 pub mod review_fallback;
 pub mod review_session;
 mod review_summarizer;
-pub mod routes;
 pub mod rooms;
+pub mod routes;
 pub mod run_callback;
 pub mod run_channels;
 pub mod run_context;
 pub mod run_engine;
+pub mod run_notices;
 pub mod run_scheduler;
 pub mod run_service;
 pub mod run_sources;
 pub mod run_workspace;
-mod self_call;
 pub mod scheduled_tasks_engine;
 pub mod scheduled_tasks_scheduler;
+mod self_call;
 pub mod skill_eval;
 pub mod skill_review;
 pub mod spa;
@@ -100,8 +105,8 @@ pub mod swarm_scheduler;
 pub mod swarm_verify;
 pub mod swarm_workspace;
 pub mod transcript_cache;
-pub mod transport;
 pub mod transcript_tail;
+pub mod transport;
 pub mod turn_oracle;
 pub mod ui_bridge;
 pub mod ui_commands;
@@ -186,7 +191,9 @@ pub fn build_router_with_assets(
             auth::auth_middleware,
         ));
 
-    let api = routes::public_routes().merge(rooms::public_routes()).merge(protected);
+    let api = routes::public_routes()
+        .merge(rooms::public_routes())
+        .merge(protected);
     let events_tx = ctx.events.clone();
 
     let mut app = Router::new()

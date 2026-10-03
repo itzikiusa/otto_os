@@ -30,17 +30,13 @@ use otto_state::{GitStore, IntegrationsRepo, IssuesRepo, WorkspacesRepo};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::auth::{CurrentUser, CurrentAuthContext};
+use crate::auth::{CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
 /// Reload identity and workspace authority at the actual input boundary. A
 /// session owner still needs Editor membership to type into that workspace.
-async fn input_user(
-    pool: &otto_state::DbPool,
-    user_id: &Id,
-    session: &Session,
-) -> Result<User> {
+async fn input_user(pool: &otto_state::DbPool, user_id: &Id, session: &Session) -> Result<User> {
     let user = otto_state::UsersRepo::new(pool.clone())
         .get(user_id)
         .await?;
@@ -73,9 +69,11 @@ async fn input_session(ctx: &ServerCtx, user_id: &Id, id: &Id) -> Result<Session
 /// Send both the paste and its delayed submit through current authorization.
 async fn submit_session_text(ctx: &ServerCtx, user_id: &Id, id: &Id, text: &str) -> Result<()> {
     input_session(ctx, user_id, id).await?;
-    ctx.manager.human_submit_text_checked(id, user_id, false, text, || async {
-        input_session(ctx, user_id, id).await.map(|_| ())
-    }).await?;
+    ctx.manager
+        .human_submit_text_checked(id, user_id, false, text, || async {
+            input_session(ctx, user_id, id).await.map(|_| ())
+        })
+        .await?;
     ctx.manager.record_user_message(id, text).await;
     Ok(())
 }
@@ -138,7 +136,13 @@ fn delay_session_input(
             }
             input_session(&ctx, &user_id, &session_id).await?;
             ctx.manager
-                .human_input(&session_id, &user_id, false, true, format!("{text}\n").as_bytes())
+                .human_input(
+                    &session_id,
+                    &user_id,
+                    false,
+                    true,
+                    format!("{text}\n").as_bytes(),
+                )
                 .await
         }
         .await;
@@ -695,7 +699,13 @@ impl Spawner for PtySpawner {
                         let current = manager.get(&session_id).await?;
                         input_user(&pool, &user_id, &current).await?;
                         manager
-                            .human_input(&session_id, &user_id, false, true, format!("{cmd}\n").as_bytes())
+                            .human_input(
+                                &session_id,
+                                &user_id,
+                                false,
+                                true,
+                                format!("{cmd}\n").as_bytes(),
+                            )
                             .await
                     }
                     .await;
@@ -2071,7 +2081,8 @@ fn reviewer_slots() -> Arc<tokio::sync::Semaphore> {
     static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     SLOTS
         .get_or_init(|| {
-            let n = reviewer_concurrency(std::env::var("OTTO_REVIEWER_CONCURRENCY").ok().as_deref());
+            let n =
+                reviewer_concurrency(std::env::var("OTTO_REVIEWER_CONCURRENCY").ok().as_deref());
             Arc::new(tokio::sync::Semaphore::new(n))
         })
         .clone()
@@ -2541,7 +2552,9 @@ async fn run_review(
     mode_override: Option<otto_core::domain::ReviewMode>,
 ) {
     let attempt_cancel = ctx.review_cancels.lock().ok().map(|mut map| {
-        map.entry(review_id.clone()).or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false))).clone()
+        map.entry(review_id.clone())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone()
     });
     let result = run_review_core(
         &ctx,
@@ -2558,8 +2571,13 @@ async fn run_review(
         mode_override,
     )
     .await;
-    if attempt_cancel.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
-        || review_is_cancelled(&ctx, &review_id).await { return; }
+    if attempt_cancel
+        .as_ref()
+        .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+        || review_is_cancelled(&ctx, &review_id).await
+    {
+        return;
+    }
     match result {
         Ok(()) => {
             tracing::info!(review = %review_id, "review complete");
@@ -3087,11 +3105,18 @@ fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComment>
 /// Flags stop work immediately; the durable status covers daemon/retry paths
 /// that do not have a registered flag.
 async fn review_is_cancelled(ctx: &ServerCtx, review_id: &Id) -> bool {
-    let flagged = ctx.review_cancels.lock().ok()
+    let flagged = ctx
+        .review_cancels
+        .lock()
+        .ok()
         .and_then(|m| m.get(review_id.as_str()).cloned())
         .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst));
-    flagged || ctx.reviews_store.get_review(review_id).await
-        .is_ok_and(|r| r.status == ReviewStatus::Cancelled)
+    flagged
+        || ctx
+            .reviews_store
+            .get_review(review_id)
+            .await
+            .is_ok_and(|r| r.status == ReviewStatus::Cancelled)
 }
 
 /// Run the summarizer over the reviewers' findings and persist the result:
@@ -3123,18 +3148,26 @@ async fn summarize_and_persist(
 ) -> Result<()> {
     // Reclaim the live states (updated by the reviewer tasks) and mark the
     // summarizer (always the LAST row) running.
-    if review_is_cancelled(ctx, review_id).await { return Ok(()); }
+    if review_is_cancelled(ctx, review_id).await {
+        return Ok(());
+    }
     // Hold THIS attempt's flag. A retry may replace the registry entry while
     // a cancelled attempt is still unwinding; it must stay cancelled.
     let cancel_flag = ctx.review_cancels.lock().ok().map(|mut map| {
-        map.entry(review_id.clone()).or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false))).clone()
+        map.entry(review_id.clone())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone()
     });
     let is_cancelled = || async {
-        cancel_flag.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+        cancel_flag
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
             || review_is_cancelled(ctx, review_id).await
     };
     let mut agent_states = ctx.reviews_store.get_review(review_id).await?.agents;
-    let summarizer_idx = agent_states.len().checked_sub(1)
+    let summarizer_idx = agent_states
+        .len()
+        .checked_sub(1)
         .ok_or_else(|| Error::Invalid("review has no summarizer row".into()))?;
     agent_states[summarizer_idx].status = "running".to_string();
     agent_states[summarizer_idx].session_id = None;
@@ -3142,7 +3175,9 @@ async fn summarize_and_persist(
     agent_states[summarizer_idx].note = "Starting summarizer".into();
     agent_states[summarizer_idx].provider = if summarizer_cfg.provider.trim().is_empty() {
         "claude".into()
-    } else { summarizer_cfg.provider.trim().into() };
+    } else {
+        summarizer_cfg.provider.trim().into()
+    };
     agent_states[summarizer_idx].model = summarizer_cfg.model.trim().into();
     ctx.reviews_store
         .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
@@ -3200,47 +3235,74 @@ async fn summarize_and_persist(
     // directory, so retries cannot observe an earlier attempt's completion.
     let run_text = async {
         let mut attempt = crate::review_summarizer::Attempt::new(
-            &summarizer_cfg.provider, &summarizer_cfg.model,
+            &summarizer_cfg.provider,
+            &summarizer_cfg.model,
         )?;
         attempt.meta["review_id"] = serde_json::json!(review_id);
         let prompt = attempt.prompt(&summarizer_prompt);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let turn = crate::agent_session::run_session_turn_with(
-            ctx, workspace, user, None, "Review summarizer", repo_path,
-            &attempt.provider, attempt.meta.clone(), &prompt, summarizer_timeout,
+            ctx,
+            workspace,
+            user,
+            None,
+            "Review summarizer",
+            repo_path,
+            &attempt.provider,
+            attempt.meta.clone(),
+            &prompt,
+            summarizer_timeout,
             crate::agent_session::TurnOpts {
                 done_file: Some(attempt.result_path()),
                 done_file_validator: Some(crate::review_summarizer::valid_result),
                 ..Default::default()
             },
-            |id| { let _ = ready_tx.send(id.clone()); },
+            |id| {
+                let _ = ready_tx.send(id.clone());
+            },
         );
         let cancelled = async {
             loop {
-                if is_cancelled().await { break; }
+                if is_cancelled().await {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         };
         crate::review_summarizer::drive(
-            async { turn.await.map(|(text, _)| text).map_err(|e| e.0.to_string()) },
-            ready_rx, summarizer_timeout, cancelled,
+            async {
+                turn.await
+                    .map(|(text, _)| text)
+                    .map_err(|e| e.0.to_string())
+            },
+            ready_rx,
+            summarizer_timeout,
+            cancelled,
             |sid| async {
                 agent_states[summarizer_idx].session_id = Some(sid.clone());
-                ctx.reviews_store.set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
-                    .await.map_err(|e| e.to_string())?;
+                ctx.reviews_store
+                    .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let _ = ctx.events.send(Event::ReviewChanged {
-                    workspace_id: workspace.id.clone(), session_id: Some(sid),
-                    review_id: review_id.clone(), status: "running".into(),
+                    workspace_id: workspace.id.clone(),
+                    session_id: Some(sid),
+                    review_id: review_id.clone(),
+                    status: "running".into(),
                 });
                 Ok(())
             },
             |sid| async move {
                 crate::review_session::stop_review_sessions(&ctx.manager, &[sid]).await;
             },
-        ).await
-    }.await;
+        )
+        .await
+    }
+    .await;
     // A cancellation is terminal, not a provider failure eligible for fallback.
-    if is_cancelled().await { return Ok(()); }
+    if is_cancelled().await {
+        return Ok(());
+    }
     let summary_text = match run_text {
         Ok(t) => t,
         Err(e) => {
@@ -3318,7 +3380,9 @@ async fn summarize_and_persist(
     let mut anchor_files: std::collections::HashMap<String, Option<Vec<String>>> =
         std::collections::HashMap::new();
     for c in parsed {
-        if is_cancelled().await { return Ok(()); }
+        if is_cancelled().await {
+            return Ok(());
+        }
         let sev = CommentSeverity::parse(&c.severity).unwrap_or(CommentSeverity::Info);
         // A summarizer RE-RUN (retry_summarizer) replaces only the drafts; a
         // comment the user already approved/declined (or that is on the PR)
@@ -3362,7 +3426,8 @@ async fn summarize_and_persist(
             (Some(p), Some(l)) => anchored_line_text(repo_path, p, l, &mut anchor_files).await,
             _ => None,
         };
-        let anchor = otto_state::review_findings::finding_anchor(line_text.as_deref(), &title, &c.body);
+        let anchor =
+            otto_state::review_findings::finding_anchor(line_text.as_deref(), &title, &c.body);
         let mut fp = otto_state::review_findings::compute_finding_fingerprint(
             repo_id,
             pr_number,
@@ -3408,7 +3473,11 @@ async fn summarize_and_persist(
             fingerprint: &fp,
             run_id: review_id,
         };
-        match ctx.findings_store.upsert_tracked(&nf, Some(&legacy_fp)).await {
+        match ctx
+            .findings_store
+            .upsert_tracked(&nf, Some(&legacy_fp))
+            .await
+        {
             Ok((f, created)) => {
                 if created {
                     // Anchor the audit trail + link the originating comment id.
@@ -3443,7 +3512,9 @@ async fn summarize_and_persist(
     //   in files its diff touched — one branch's review used to resolve every
     //   open local finding in the repo (3128/3804 rows);
     // - a PR run keeps the whole-PR scope (every run reviews the same change).
-    if is_cancelled().await { return Ok(()); }
+    if is_cancelled().await {
+        return Ok(());
+    }
     let seen_refs: Vec<&str> = seen_fingerprints.iter().map(|s| s.as_str()).collect();
     let complete = review_run_complete(&agent_states[..summarizer_idx], summary_fallback);
     let local_scope: Option<Vec<String>> = if pr_number == 0 {
@@ -3635,8 +3706,14 @@ mod reviewer_slot_tests {
         assert_eq!(reviewer_concurrency(None), DEFAULT_REVIEWER_CONCURRENCY);
         assert_eq!(reviewer_concurrency(Some("2")), 2);
         assert_eq!(reviewer_concurrency(Some(" 7 ")), 7);
-        assert_eq!(reviewer_concurrency(Some("0")), DEFAULT_REVIEWER_CONCURRENCY);
-        assert_eq!(reviewer_concurrency(Some("lots")), DEFAULT_REVIEWER_CONCURRENCY);
+        assert_eq!(
+            reviewer_concurrency(Some("0")),
+            DEFAULT_REVIEWER_CONCURRENCY
+        );
+        assert_eq!(
+            reviewer_concurrency(Some("lots")),
+            DEFAULT_REVIEWER_CONCURRENCY
+        );
     }
 
     /// The fan-out pattern (permit taken inside the spawned task) never runs
@@ -3659,7 +3736,10 @@ mod reviewer_slot_tests {
         }
         while set.join_next().await.is_some() {}
         assert_eq!(peak.load(Ordering::SeqCst), 3);
-        assert!(reviewer_slots().available_permits() >= 1, "the daemon pool exists and is non-empty");
+        assert!(
+            reviewer_slots().available_permits() >= 1,
+            "the daemon pool exists and is non-empty"
+        );
     }
 }
 
@@ -3724,13 +3804,25 @@ mod review_scope_tests {
         use super::same_draft_comment;
         let k = kept(Some("a.rs"), Some(10), "Unchecked unwrap");
         // Re-worded on the same line → the same comment.
-        assert!(same_draft_comment(&k, &draft(Some("a.rs"), Some(10), "unwrap may panic")));
+        assert!(same_draft_comment(
+            &k,
+            &draft(Some("a.rs"), Some(10), "unwrap may panic")
+        ));
         // Another line / file → a different comment.
-        assert!(!same_draft_comment(&k, &draft(Some("a.rs"), Some(11), "unwrap may panic")));
-        assert!(!same_draft_comment(&k, &draft(Some("b.rs"), Some(10), "Unchecked unwrap")));
+        assert!(!same_draft_comment(
+            &k,
+            &draft(Some("a.rs"), Some(11), "unwrap may panic")
+        ));
+        assert!(!same_draft_comment(
+            &k,
+            &draft(Some("b.rs"), Some(10), "Unchecked unwrap")
+        ));
         // A general comment matches on its text.
         let g = kept(None, None, "Overall:  add tests");
-        assert!(same_draft_comment(&g, &draft(None, None, "Overall: add tests")));
+        assert!(same_draft_comment(
+            &g,
+            &draft(None, None, "Overall: add tests")
+        ));
     }
 
     #[test]
@@ -3740,10 +3832,16 @@ mod review_scope_tests {
         assert!(inline_anchor_rejected(&Error::Conflict(
             "github 422: pull_request_review_thread.line must be part of the diff".into()
         )));
-        assert!(inline_anchor_rejected(&Error::Upstream("gitlab 400: position is invalid".into())));
+        assert!(inline_anchor_rejected(&Error::Upstream(
+            "gitlab 400: position is invalid".into()
+        )));
         // Auth / 5xx are not anchor problems — never re-post on those.
-        assert!(!inline_anchor_rejected(&Error::Forbidden("github 403: bad token".into())));
-        assert!(!inline_anchor_rejected(&Error::Upstream("github 502: bad gateway".into())));
+        assert!(!inline_anchor_rejected(&Error::Forbidden(
+            "github 403: bad token".into()
+        )));
+        assert!(!inline_anchor_rejected(&Error::Upstream(
+            "github 502: bad gateway".into()
+        )));
         assert_eq!(
             general_comment_body(&kept(Some("a.rs"), Some(3), "x")),
             "**`a.rs:3`**\n\nx"
@@ -3754,7 +3852,10 @@ mod review_scope_tests {
     fn only_clean_runs_are_complete() {
         let ok = [agent("done", "3 findings"), agent("skipped", "skipped — x")];
         assert!(review_run_complete(&ok, false));
-        assert!(!review_run_complete(&ok, true), "fallback summarizer = partial");
+        assert!(
+            !review_run_complete(&ok, true),
+            "fallback summarizer = partial"
+        );
         assert!(!review_run_complete(&[agent("error", "timed out")], false));
         assert!(!review_run_complete(
             &[agent("done", "partial — 1 lens still running")],
@@ -5999,7 +6100,10 @@ async fn retry_summarizer(
         )
         .await;
         if attempt_cancel.load(std::sync::atomic::Ordering::SeqCst)
-            || review_is_cancelled(&ctx_bg, &review_id_bg).await { return; }
+            || review_is_cancelled(&ctx_bg, &review_id_bg).await
+        {
+            return;
+        }
         let status = match result {
             Ok(()) => {
                 tracing::info!(review = %review_id_bg, "summarizer retry complete");
@@ -6295,14 +6399,21 @@ async fn cancel_review(
     }
 
     cancel_running_review(&ctx, &review, &repo.workspace_id).await;
-    Ok(Json(ctx.reviews_store.get_review(&review_id).await.map_err(ApiError)?))
+    Ok(Json(
+        ctx.reviews_store
+            .get_review(&review_id)
+            .await
+            .map_err(ApiError)?,
+    ))
 }
 
 /// Shared cancellation for the review endpoint and workflows that own reviews.
 /// Signal the review itself before killing PTYs: a killed summarizer is otherwise
 /// indistinguishable from a provider failure eligible for deterministic fallback.
 pub(crate) async fn cancel_running_review(ctx: &ServerCtx, review: &Review, workspace_id: &Id) {
-    if review.status != ReviewStatus::Running { return; }
+    if review.status != ReviewStatus::Running {
+        return;
+    }
     let review_id = review.id.clone();
     // 1. Signal the cancel flags so each agent's recovery loop short-circuits and
     //    run_review_core skips the summarizer / finding persistence. The review-
@@ -6355,14 +6466,23 @@ pub(crate) async fn cancel_running_review(ctx: &ServerCtx, review: &Review, work
         review_id: review_id.to_string(),
         status: ReviewStatus::Cancelled.as_str().to_string(),
     });
-
- }
+}
 
 async fn get_review_by_id(
-    Path(review_id): Path<Id>, State(ctx): State<ServerCtx>, CurrentUser(user): CurrentUser,
+    Path(review_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
 ) -> crate::error::ApiResult<Json<Review>> {
-    let review = ctx.reviews_store.get_review(&review_id).await.map_err(crate::error::ApiError)?;
-    let repo = ctx.git_store.get_repo(&review.repo_id).await.map_err(crate::error::ApiError)?;
+    let review = ctx
+        .reviews_store
+        .get_review(&review_id)
+        .await
+        .map_err(crate::error::ApiError)?;
+    let repo = ctx
+        .git_store
+        .get_repo(&review.repo_id)
+        .await
+        .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Viewer).await?;
     Ok(Json(review))
 }
@@ -6408,7 +6528,10 @@ fn queue_review_learning(ctx: &ServerCtx, workspace_id: &Id, comment: &ReviewCom
              evidence-supported lesson, or propose no change.",
             comment.review_id, comment.id, comment.path.as_deref().unwrap_or("general"),
             comment.line.unwrap_or(0), comment.body);
-        if let Err(e) = engine.learn_review_feedback(&wid, &comment.id, disposition, &narrative).await {
+        if let Err(e) = engine
+            .learn_review_feedback(&wid, &comment.id, disposition, &narrative)
+            .await
+        {
             tracing::warn!(comment = %comment.id, "review feedback learning failed: {e}");
         }
     });
@@ -6501,6 +6624,9 @@ async fn post_review_comment(
         path: comment.path.clone(),
         line: comment.line,
         in_reply_to: None,
+        side: None,
+        old_line: None,
+        commit_id: None,
     };
     let err = match provider.comment(&remote, pr_number, &req).await {
         Ok(_) => return true,
@@ -6517,6 +6643,9 @@ async fn post_review_comment(
         path: None,
         line: None,
         in_reply_to: None,
+        side: None,
+        old_line: None,
+        commit_id: None,
     };
     match provider.comment(&remote, pr_number, &general).await {
         Ok(_) => true,
@@ -7403,12 +7532,24 @@ async fn send_input(
     } else if req.submit.unwrap_or(true) {
         // Shells / connections / bridges: a plain line + newline runs it.
         ctx.manager
-            .human_input(&session_id, &user.id, auth.scope.is_some(), true, format!("{}\n", req.text).as_bytes())
+            .human_input(
+                &session_id,
+                &user.id,
+                auth.scope.is_some(),
+                true,
+                format!("{}\n", req.text).as_bytes(),
+            )
             .await
             .map_err(ApiError)?;
     } else {
         ctx.manager
-            .human_input(&session_id, &user.id, auth.scope.is_some(), true, req.text.as_bytes())
+            .human_input(
+                &session_id,
+                &user.id,
+                auth.scope.is_some(),
+                true,
+                req.text.as_bytes(),
+            )
             .await
             .map_err(ApiError)?;
     }
@@ -8038,11 +8179,13 @@ mod terminal_input_access_tests {
 
     #[tokio::test]
     async fn alternate_input_checks_current_resource_page_owner_and_workspace() {
-        let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap());
+        let pool = otto_state::DbPool::from(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await

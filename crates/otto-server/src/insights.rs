@@ -217,7 +217,8 @@ fn requested_period(kind: Kind, offset: i64, today: NaiveDate) -> Option<(NaiveD
             Some((day, day))
         }
         Kind::Week => {
-            let monday = today.checked_sub_days(Days::new(today.weekday().num_days_from_monday().into()))?;
+            let monday =
+                today.checked_sub_days(Days::new(today.weekday().num_days_from_monday().into()))?;
             let start = monday.checked_sub_days(Days::new(offset.checked_mul(7)?))?;
             Some((start, start.checked_add_days(Days::new(6))?))
         }
@@ -415,7 +416,13 @@ pub enum RunMode {
 }
 
 /// Build the headless prompt that drives the `insights` skill for one period.
-pub fn build_run_prompt(kind: Kind, offset: i64, as_of: NaiveDate, collector: &Path, mode: RunMode) -> String {
+pub fn build_run_prompt(
+    kind: Kind,
+    offset: i64,
+    as_of: NaiveDate,
+    collector: &Path,
+    mode: RunMode,
+) -> String {
     format!(
         "Run the `insights` skill to generate the usage report for the {period} \
          period at --offset {offset} (the previous {period} when offset is 1). \
@@ -431,7 +438,11 @@ pub fn build_run_prompt(kind: Kind, offset: i64, as_of: NaiveDate, collector: &P
         period = kind.period(),
         offset = offset,
         as_of = as_of,
-        force = if mode == RunMode::Manual { " --force" } else { "" },
+        force = if mode == RunMode::Manual {
+            " --force"
+        } else {
+            ""
+        },
         existing = if mode == RunMode::Manual {
             "The user explicitly requested generation: replace this period's report even if it already exists. Retain --force for every collection step."
         } else {
@@ -447,17 +458,28 @@ fn materialize_collector(dir: &Path) -> std::io::Result<PathBuf> {
     use sha2::{Digest, Sha256};
     use std::io::Write;
     let source = otto_skills::bundled_file(INSIGHTS_SKILL, "scripts/collect_insights.py")
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "bundled insights collector missing"))?;
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "bundled insights collector missing",
+            )
+        })?;
     let collectors = dir.join("collectors");
     std::fs::create_dir_all(&collectors)?;
-    let path = collectors.join(format!("{:x}.py", Sha256::digest(source.as_bytes())));
+    let path = collectors.join(format!(
+        "{}.py",
+        hex::encode(Sha256::digest(source.as_bytes()))
+    ));
     let mut pending = tempfile::NamedTempFile::new_in(&collectors)?;
     pending.write_all(source.as_bytes())?;
     match pending.persist_noclobber(&path) {
         Ok(_) => {}
         Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
             if std::fs::read_to_string(&path)? != source {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "pinned insights collector changed"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "pinned insights collector changed",
+                ));
             }
         }
         Err(e) => return Err(e.error),
@@ -656,7 +678,11 @@ async fn get_reports(State(ctx): State<ServerCtx>) -> ApiResult<Json<Vec<ReportV
     // (the Insights page polls this every 3 s during a run — backlog B6 / SE-17).
     let reports = tokio::task::spawn_blocking(move || list_reports(&dir))
         .await
-        .map_err(|e| ApiError(otto_core::Error::Internal(format!("list insights reports: {e}"))))?;
+        .map_err(|e| {
+            ApiError(otto_core::Error::Internal(format!(
+                "list insights reports: {e}"
+            )))
+        })?;
     Ok(Json(reports))
 }
 
@@ -701,8 +727,11 @@ async fn post_run(
     })?;
     let offset = req.offset.max(0);
     let as_of = chrono::Local::now().date_naive();
-    let (start, end) = requested_period(kind, offset, as_of)
-        .ok_or_else(|| ApiError(otto_core::Error::Invalid("report offset is out of range".into())))?;
+    let (start, end) = requested_period(kind, offset, as_of).ok_or_else(|| {
+        ApiError(otto_core::Error::Invalid(
+            "report offset is out of range".into(),
+        ))
+    })?;
 
     match run_insights(&ctx, kind, offset, as_of, RunMode::Manual).await {
         Ok(Some(id)) => Ok(Json(RunResp {
@@ -831,17 +860,18 @@ impl InsightsScheduler {
             let word = kind.word();
             info!(kind = word, "insights: scheduled catch-up run is due");
             tokio::spawn(async move {
-                let session_id = match run_insights(&ctx, kind, 1, now.date_naive(), RunMode::Scheduled).await {
-                    Ok(Some(id)) => Some(id),
-                    Ok(None) => {
-                        // Skill not installed / no host — already logged inside.
-                        None
-                    }
-                    Err(e) => {
-                        warn!(kind = word, "insights: scheduled run failed: {e}");
-                        None
-                    }
-                };
+                let session_id =
+                    match run_insights(&ctx, kind, 1, now.date_naive(), RunMode::Scheduled).await {
+                        Ok(Some(id)) => Some(id),
+                        Ok(None) => {
+                            // Skill not installed / no host — already logged inside.
+                            None
+                        }
+                        Err(e) => {
+                            warn!(kind = word, "insights: scheduled run failed: {e}");
+                            None
+                        }
+                    };
                 // The session runs headlessly; release the in-flight slot after a
                 // grace window so we don't re-trigger the same period mid-run
                 // (idempotency would catch it once artifacts land, but this avoids
@@ -883,17 +913,40 @@ mod tests {
         let installed = root.path().join("library/skills/insights");
         std::fs::create_dir_all(installed.join("scripts")).unwrap();
         std::fs::write(installed.join("SKILL.md"), "version: 2\nCustom narrative").unwrap();
-        std::fs::write(installed.join("scripts/collect_insights.py"), "# legacy custom collector").unwrap();
+        std::fs::write(
+            installed.join("scripts/collect_insights.py"),
+            "# legacy custom collector",
+        )
+        .unwrap();
         let dir = root.path().join("insights");
         let paths = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..4).map(|_| scope.spawn(|| materialize_collector(&dir).unwrap())).collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+            let handles: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| materialize_collector(&dir).unwrap()))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
         });
         assert!(paths.iter().all(|p| p == &paths[0]));
-        assert!(std::fs::read_to_string(&paths[0]).unwrap().contains("--as-of"));
-        assert_eq!(std::fs::read_to_string(installed.join("scripts/collect_insights.py")).unwrap(), "# legacy custom collector");
-        assert_eq!(std::fs::read_to_string(installed.join("SKILL.md")).unwrap(), "version: 2\nCustom narrative");
-        let prompt = build_run_prompt(Kind::Month, 1, NaiveDate::from_ymd_opt(2026, 9, 30).unwrap(), &paths[0], RunMode::Scheduled);
+        assert!(std::fs::read_to_string(&paths[0])
+            .unwrap()
+            .contains("--as-of"));
+        assert_eq!(
+            std::fs::read_to_string(installed.join("scripts/collect_insights.py")).unwrap(),
+            "# legacy custom collector"
+        );
+        assert_eq!(
+            std::fs::read_to_string(installed.join("SKILL.md")).unwrap(),
+            "version: 2\nCustom narrative"
+        );
+        let prompt = build_run_prompt(
+            Kind::Month,
+            1,
+            NaiveDate::from_ymd_opt(2026, 9, 30).unwrap(),
+            &paths[0],
+            RunMode::Scheduled,
+        );
         assert!(prompt.contains("--period month --offset 1 --as-of 2026-09-30"));
         assert!(prompt.contains(paths[0].to_str().unwrap()));
         std::fs::write(&paths[0], "modified").unwrap();
@@ -927,7 +980,10 @@ mod tests {
         assert_eq!(key(Kind::Day, 0), "daily:20260101_20260101");
         let leap = NaiveDate::from_ymd_opt(2024, 3, 31).unwrap();
         let (start, end) = requested_period(Kind::Month, 1, leap).unwrap();
-        assert_eq!(period_key(Kind::Month, start, end), "monthly:20240201_20240229");
+        assert_eq!(
+            period_key(Kind::Month, start, end),
+            "monthly:20240201_20240229"
+        );
         assert!(requested_period(Kind::Week, i64::MAX, today).is_none());
         assert!(requested_period(Kind::Day, -1, today).is_none());
     }

@@ -11,6 +11,7 @@ import type {
   AwsStatus,
   AthenaExecution,
   BranchInfo,
+  BlameLine,
   CommitInfo,
   Connection,
   DiffResp,
@@ -400,19 +401,11 @@ const defaultRemotes = [
 const gitRemotes: Record<Id, { name: string; fetch_url: string; push_url: string }[]> = {};
 
 /** Five blamed lines over two commits, with one run longer than a line. */
-function mockBlame(repo: string): {
-  sha: string;
-  short_sha: string;
-  author: string;
-  at: string;
-  orig_line: number;
-  line_start: number;
-  count: number;
-  summary: string;
-}[] {
+function mockBlame(repo: string): BlameLine[] {
   const rows = logs[repo] ?? mkLog('aotto');
   const [first, second] = [rows[0], rows[1] ?? rows[0]];
-  const run = (c: CommitInfo, orig: number, start: number, count: number) => ({
+  const SRC = ['import { start } from "./boot";', '', 'export function main(): void {', '  start();', '}', ''];
+  const run = (c: CommitInfo, orig: number, start: number, count: number): BlameLine => ({
     sha: c.sha,
     short_sha: c.short_sha,
     author: c.author,
@@ -421,6 +414,8 @@ function mockBlame(repo: string): {
     line_start: start,
     count,
     summary: c.subject,
+    text: SRC.slice(start - 1, start - 1 + count),
+    previous: c === second ? { sha: first.sha, path: 'src/app.ts' } : null,
   });
   return [run(first, 1, 1, 2), run(second, 1, 3, 1), run(first, 4, 4, 2)];
 }

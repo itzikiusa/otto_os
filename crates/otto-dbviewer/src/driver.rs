@@ -188,6 +188,18 @@ pub trait Driver: Send + Sync {
     /// e.g. Redis, keep nothing to clear).
     async fn invalidate_completion_cache(&self, _cfg: &ResolvedConfig) {}
 
+    /// The completion snapshot ALREADY cached for `(connection, scope)` — no
+    /// network, no build. Feeds "did you mean" suggestions on an unknown
+    /// column/table error ([`crate::errors::suggest_from_snapshot`]). `None`
+    /// (the default) when the engine keeps no snapshot or nothing is cached.
+    fn cached_completion_snapshot(
+        &self,
+        _cfg: &ResolvedConfig,
+        _scope: &str,
+    ) -> Option<std::sync::Arc<crate::complete::SchemaSnapshot>> {
+        None
+    }
+
     /// Rank completion items from a snapshot the SERVICE built — the
     /// access-enforced path, which may only introspect what the caller is
     /// authorized to browse (`schema_graph`) and so can't use the driver's own

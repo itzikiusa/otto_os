@@ -225,8 +225,8 @@ impl SearchFilter {
 
     fn bind_extra<'q>(
         &'q self,
-        mut q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
-    ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+        mut q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
+    ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
         for k in &self.kinds {
             q = q.bind(k);
         }
@@ -319,7 +319,7 @@ impl MemoriesRepo {
             .to_lowercase();
         let mut h = Sha256::new();
         h.update(norm.as_bytes());
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     }
 
     pub async fn create(&self, ws: &str, by: &str, nm: NewMemory) -> Result<Memory> {
@@ -390,7 +390,7 @@ impl MemoriesRepo {
             sql.push_str(" AND (visibility = 'shared' OR created_by = ?)");
         }
         sql.push_str(" ORDER BY updated_at DESC LIMIT ?");
-        let mut q = sqlx::query(&sql).bind(ws);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(ws);
         if let Some(c) = &f.collection {
             q = q.bind(c);
         }
@@ -459,7 +459,7 @@ impl MemoriesRepo {
             // the page (was a flat 2 000 rows / ~3 MB decoded per miss).
             sql.push_str(&format!(" LIMIT {}", (lim * 10).clamp(100, 1000)));
         }
-        let mut q = sqlx::query(&sql).bind(ws);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(ws);
         if let Some(c) = &f.collection {
             q = q.bind(c);
         }
@@ -644,7 +644,7 @@ impl MemoriesRepo {
             sql.push_str(" AND collection = ?");
         }
         sql.push_str(" LIMIT 5000");
-        let mut q = sqlx::query(&sql).bind(ws);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(ws);
         if let Some(c) = collection {
             q = q.bind(c);
         }
@@ -1146,7 +1146,9 @@ impl MemoriesRepo {
         }
         sql.push_str(&f.extra_sql("m."));
         sql.push_str(" ORDER BY rank ASC LIMIT ?");
-        let mut q = sqlx::query(&sql).bind(&mq).bind(ws);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(&mq)
+            .bind(ws);
         if let Some(c) = &f.collection {
             q = q.bind(c);
         }

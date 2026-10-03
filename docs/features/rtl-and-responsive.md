@@ -62,7 +62,11 @@ el.dir = this.direction;        // ← RTL support: flips <html dir>
 ```
 
 `applyTheme()` is invoked once at boot from `App.svelte` (`ui.applyTheme()` at
-module top), and again on every theme/scheme/direction/accent change. The hint
+module top), and again on every theme/scheme/direction/accent change. Before
+any of that, `ui/public/theme-boot.js` (a render-blocking classic script in
+`index.html`'s `<head>`) applies the saved theme, resolved scheme and `dir`, so
+the first paint is already light/RTL when it should be — keep its keys in sync
+with `ui.svelte.ts`. The hint
 under the control reads: *"Right-to-left mirrors the layout for RTL languages
 (Hebrew, Arabic)."*
 

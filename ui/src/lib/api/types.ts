@@ -90,6 +90,29 @@ export interface WsTermResyncFrame {
   lines: number;
 }
 
+/** Client → server `/ws/term` latency probe (docs/contracts/ws.md §1
+ *  "Latency probe"): answered at once with a `probe_ack` echoing `id`. */
+export interface WsTermProbeFrame {
+  type: 'probe';
+  id: number;
+}
+
+/** PTY keystroke-echo clock: input reaching the PTY → the child's first
+ *  output after it, since spawn (`avg_ms` is an EWMA, α = 1/8). */
+export interface TermEchoStats {
+  last_ms: number;
+  avg_ms: number;
+  max_ms: number;
+  samples: number;
+}
+
+/** Server → client reply to `probe`; `echo` is null with no live PTY. */
+export interface WsTermProbeAckFrame {
+  type: 'probe_ack';
+  id: number;
+  echo: TermEchoStats | null;
+}
+
 export interface Session {
   id: Id;
   workspace_id: Id;
@@ -488,6 +511,8 @@ export interface McpApproval {
   status: McpApprovalStatus;
   requested_by: string | null;
   requested_by_kind: string | null;
+  /** The agent session that raised the request, when known. */
+  requested_by_session_id?: string | null;
   decided_by: string | null;
   decision_note: string | null;
   created_at: string;
@@ -525,6 +550,8 @@ export interface McpCallLogRow {
   bytes: number | null;
   rows: number | null;
   approval_id: string | null;
+  /** The agent session that made the call (Otto-minted session credentials only). */
+  caller_session_id?: string | null;
   created_at: string;
 }
 
@@ -1390,6 +1417,15 @@ export type OttoEvent =
       status: string;
     }
   | {
+      /** A personal agent's live activity changed (tool call allowed/blocked/
+       *  needing approval, or an approval it waits on) — the Activity tab
+       *  re-fetches `GET /personal-agents/{id}/activity`. */
+      type: 'personal_agent_activity';
+      workspace_id: Id;
+      agent_id: Id;
+      kind: string;
+    }
+  | {
       /** A message was appended to an agent room (agent via the room MCP tools,
        *  or the user over REST). Ids only — clients re-fetch the room's messages
        *  after their cursor. */
@@ -1775,7 +1811,12 @@ export type NoticeAction =
   | { type: 'open_url'; url: string }
   | { type: 'open_session'; session_id: Id }
   /** `target` e.g. "claude" | "codex" | "git:<id>" | "issue:<id>". */
-  | { type: 'reauth'; target: string };
+  | { type: 'reauth'; target: string }
+  /** In-app route (hash path without `#/`) — automation notices:
+   *  `workflows/<wf>/runs/<run>`, `scheduled-tasks/<task>/runs/<run>`,
+   *  `loops/<loop>`, `personal-agents/<agent>/runs`. `workspace_id` is the
+   *  workspace the target lives in (the UI switches to it first). */
+  | { type: 'open_route'; route: string; workspace_id?: Id };
 
 /** A persisted notification shown in the notification center. */
 export interface Notice {
@@ -1794,6 +1835,9 @@ export interface NotificationSettings {
   expiry_threshold_days: number;
   native_enabled: boolean;
   session_events: boolean;
+  /** Native banner for "Session awaiting input" when you are not watching
+   *  that session (default true; older daemons omit it → treat as true). */
+  native_on_waiting?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -2881,6 +2925,12 @@ export interface BlameLine {
   line_start: number;
   count: number;
   summary: string;
+  /** The run's source lines (`count` of them, each capped at 1000 chars). */
+  text: string[];
+  /** Porcelain `previous`: the parent commit + the file's path there —
+   *  "Blame before this change" re-blames `previous.path` at `previous.sha`.
+   *  Absent for a root commit. */
+  previous?: { sha: string; path: string } | null;
 }
 
 export interface BlameResp {
@@ -3220,7 +3270,16 @@ export interface PrComment {
   /** Id for the resolve/unresolve endpoint (thread heads only) — Bitbucket
    *  comment id, GitLab discussion id, GitHub GraphQL reviewThread node id. */
   thread_id?: string | null;
+  /** Diff side `line` counts on: `old` = a deleted line (old number); absent
+   *  or `new` = the head side. The UI renders the comment under one row. */
+  side?: PrCommentSide | null;
+  /** The forge no longer maps the comment onto the current diff; `line` is
+   *  the original line. Rendered under "File comments" with a chip. */
+  outdated?: boolean;
 }
+
+/** Side of a unified diff an inline PR comment anchors to. */
+export type PrCommentSide = 'old' | 'new';
 
 /** A PR reviewer with approval state; avatar/timestamp are best-effort. */
 export interface PrReviewer {
@@ -3285,6 +3344,15 @@ export interface NewPrCommentReq {
   path?: string | null;
   line?: number | null;
   in_reply_to?: string | null;
+  /** Diff side `line` counts on (default `new`); a deleted line sends `old`
+   *  with its OLD number. */
+  side?: PrCommentSide | null;
+  /** The anchored row's old number when it has one (GitLab needs both
+   *  numbers for an unchanged context line). */
+  old_line?: number | null;
+  /** Head sha of the diff the reviewer saw (anchors the comment; GitHub
+   *  skips a PR round-trip). */
+  commit_id?: string | null;
 }
 
 /** Body for POST /repos/{id}/prs/{number}/comments/{cid}/resolve — `{cid}` is
@@ -4444,6 +4512,10 @@ export interface InstallBundledResp {
 export interface InstallAllBundledResp {
   installed: string[];
   backed_up: string[];
+  /** Already at the bundled version, or ahead of it (local edits) without `force` — untouched. */
+  skipped: string[];
+  /** Skills that failed to install; the rest of the batch still ran. */
+  failed: { name: string; error: string }[];
 }
 
 export interface GlobalSoulReq {
@@ -4904,15 +4976,21 @@ export interface ParsedCurl {
 }
 
 export interface ApiAssertion {
-  kind: 'status' | 'json_path' | 'duration_ms';
-  /** JSON path into the response body, for kind='json_path'. */
+  kind: 'status' | 'json_path' | 'header' | 'body_text' | 'duration_ms';
+  /** JSON path into the response body (kind='json_path'), or the header name
+   *  (kind='header', case-insensitive). */
   path?: string;
-  op: 'eq' | 'ne' | 'contains' | 'lt' | 'gt';
+  /** A missing target (absent field/header, no response) fails every op
+   *  except `not_exists`. `matches` is a regex (≤1000 chars). */
+  op: 'eq' | 'ne' | 'contains' | 'lt' | 'gt' | 'lte' | 'gte' | 'exists' | 'not_exists' | 'matches';
+  /** Ignored for `exists` / `not_exists`. */
   value: string;
 }
 
 export interface ApiExtract {
-  /** JSON path into the response body. */
+  /** JSON path into the response body, `header:<name>` for a response
+   *  header, or `status`. A miss fails the step ("Save {{var}} from …: not
+   *  found"). */
   path: string;
   /** Environment variable to set from the extracted value (used by later steps). */
   var: string;
@@ -4943,7 +5021,10 @@ export interface ApiRunStepResult {
   status: number | null;
   duration_ms: number;
   ok: boolean;
-  assertions: { desc: string; passed: boolean }[];
+  /** `desc` is worded with the actual value ("Status code is less than 400:
+   *  got 500"); `actual` is that value (null when missing). Extraction misses
+   *  and script tests appear here too. */
+  assertions: { desc: string; passed: boolean; actual?: unknown }[];
   error: string | null;
 }
 
@@ -5559,6 +5640,9 @@ export interface WorkflowTrigger {
   spec: Record<string, unknown>;
   enabled: boolean;
   created_at: string;
+  /** When the schedule was last (re)armed — created, resumed, or re-timed.
+   *  Runs missed before it are never caught up. Null on pre-0151 rows. */
+  armed_at?: string | null;
 }
 
 export interface CreateTriggerReq {
@@ -6581,6 +6665,9 @@ export interface VaultRevisionDetail extends VaultRevision {
 export interface VaultStatus {
   /** Opaque change token; unchanged scans keep it stable. */
   generation?: string | null;
+  /** Graph-shape token: moves only when links/titles/tags/types or the note
+   *  set change (a body-only save keeps it) — graph views refetch on it. */
+  graph_generation?: string | null;
   id: number;
   scan_state: string;
   last_scan_at: string | null;
@@ -6667,6 +6754,8 @@ export interface VaultRenameResult {
   from: string;
   to: string;
   links_updated: number;
+  /** Sources whose links could not be rewritten (the move still succeeded). */
+  links_failed?: string[];
 }
 
 export interface VaultSearchReq {
@@ -8002,6 +8091,8 @@ export interface PersonalAgentSchedule {
   next_run_at?: string | null;
   /** When the schedule (or its agent) was last (re)armed — see `ScheduledTask.armed_at`. */
   armed_at?: string | null;
+  /** The schedule's own permission set: `read_only` runs can't change anything. */
+  permission?: PersonalAgentPermission;
   created_at: string;
   updated_at: string;
 }
@@ -8014,7 +8105,7 @@ export interface PersonalAgentRun {
   workspace_id: Id;
   /** `canceled`: stopped from Otto (`POST …/runs/{run_id}/cancel`). */
   status: 'running' | 'ok' | 'error' | 'canceled';
-  trigger: 'schedule' | 'manual';
+  trigger: 'schedule' | 'manual' | 'proactive';
   started_at: string;
   finished_at?: string | null;
   summary: string;
@@ -8029,7 +8120,118 @@ export interface PersonalAgentRun {
   attempts: number;
   /** Delivery was suppressed because the report didn't meaningfully change. */
   skipped_delivery: boolean;
+  /** The permission mode the run executed under. */
+  mode?: PersonalAgentRunMode;
+  /** True when the run's session was confined read-only. */
+  read_only?: boolean;
+  /** The standing goal a proactive run worked on. */
+  goal_id?: string | null;
   created_at: string;
+}
+
+// ---- Personal agent autonomy (batch 2026-10-03) — docs/contracts/api.md
+// "Personal agent autonomy".
+
+/** A schedule's permission set. */
+export type PersonalAgentPermission = 'read_only' | 'directed';
+/** The mode a run executed under. */
+export type PersonalAgentRunMode = 'proactive' | 'directed' | 'scheduled';
+
+export interface PersonalAgentProactive {
+  enabled: boolean;
+  /** Proactive runs in any rolling 24 h (1..24). */
+  runs_per_day: number;
+  /** Wall-clock cap per proactive run, minutes (1..60). */
+  max_minutes: number;
+}
+
+export interface PersonalAgentGoal {
+  id: string;
+  text: string;
+  enabled: boolean;
+  /** Server-maintained. */
+  last_run_at: string | null;
+}
+
+export interface PersonalAgentRule {
+  id: string;
+  text: string;
+  /** Server-derived from the text; null = instructions only. */
+  enforce: { kind: 'approval' | 'deny'; terms: string[] } | null;
+}
+
+export interface PersonalAgentAutonomy {
+  proactive: PersonalAgentProactive;
+  goals: PersonalAgentGoal[];
+  rules: PersonalAgentRule[];
+  /** The workspace's primary assistant ("your agent"). */
+  primary: boolean;
+}
+
+/** `PUT /personal-agents/{id}/autonomy` — partial; omitted sections are kept. */
+export interface SavePersonalAgentAutonomyReq {
+  proactive?: PersonalAgentProactive;
+  goals?: { id?: string; text: string; enabled?: boolean }[];
+  rules?: { id?: string; text: string }[];
+  primary?: boolean;
+}
+
+export type PersonalAgentActivityKind =
+  | 'tool_call'
+  | 'blocked'
+  | 'approval_required'
+  | 'approval_waiting';
+
+export interface PersonalAgentActivityItem {
+  seq: number;
+  at: string;
+  kind: PersonalAgentActivityKind;
+  tool: string;
+  detail: string;
+  session_id: string | null;
+  approval_id: string | null;
+}
+
+export interface PersonalAgentActivityApproval {
+  approval_id: string;
+  tool: string;
+  at: string;
+  status: string;
+  title: string;
+  detail: string | null;
+  risk_label: string | null;
+}
+
+export interface PersonalAgentActivity {
+  now: { run: PersonalAgentRun | null; session_status: string | null };
+  items: PersonalAgentActivityItem[];
+  approvals: PersonalAgentActivityApproval[];
+  runs: PersonalAgentRun[];
+}
+
+export type PersonalAgentMemorySource =
+  | 'chat'
+  | 'slack'
+  | 'telegram'
+  | 'vault'
+  | 'run'
+  | 'user'
+  | 'notes';
+
+export interface PersonalAgentMemoryItem {
+  line: number;
+  text: string;
+  source: PersonalAgentMemorySource;
+  section: string;
+  /** The stored line — quote it back on edit/forget. */
+  raw: string;
+}
+
+export interface PersonalAgentMemories {
+  version: string;
+  exists: boolean;
+  path: string | null;
+  items: PersonalAgentMemoryItem[];
 }
 
 /** An agent room — the ONLY agent-to-agent transport, always user-visible. */
@@ -8164,10 +8366,21 @@ export interface AwsAccount {
   color?: string | null;
   identity?: AwsIdentity | null;
   permissions?: AwsPermissions | null;
+  /** When the sign-in ends (profile accounts only) — warn before it lapses. */
+  session?: AwsSessionInfo | null;
   created_by: Id;
   created_at: string;
   updated_at: string;
   last_used_at?: string | null;
+}
+
+/** `AwsAccount.session` — the SSO token / exported temporary credentials. */
+export interface AwsSessionInfo {
+  expires_at: string;
+  /** `sso` = the IAM Identity Center token; `credentials` = exported role creds. */
+  source: 'sso' | 'credentials';
+  /** The CLI renews it silently (refresh token / re-export) — no warning needed. */
+  refreshable: boolean;
 }
 
 /** `POST /aws/accounts` body; every field optional on `PATCH` (secrets omitted = keep). */
@@ -8236,6 +8449,82 @@ export interface S3PreviewResp {
   truncated?: boolean;
   content_type?: string | null;
   binary?: boolean;
+  /** `text` → `text`; `image`/`pdf` → fetch `download?inline=true` (≤ 25 MB); `binary` → download only. */
+  kind?: 'text' | 'image' | 'pdf' | 'binary';
+  size?: number | null;
+}
+
+/** `POST …/s3/buckets/{bucket}/presign`. */
+export interface S3PresignResp {
+  url: string;
+  expires_at: string;
+  /** Temporary credentials end before `expires_at` — the link dies with them. */
+  warning?: string | null;
+}
+
+/** `PUT …/s3/buckets/{bucket}/object?key=` (raw body) → 201. */
+export interface S3UploadResp {
+  key: string;
+  size: number;
+}
+
+/** One region that failed in an `?region=all` fan-out (EC2 / EKS / RDS lists). */
+export interface AwsRegionError {
+  region: string;
+  message: string;
+}
+
+// --- CloudWatch Logs (`/aws/accounts/{id}/logs/*`) ---
+export interface AwsLogGroup {
+  name: string;
+  arn?: string | null;
+  created_ms?: number | null;
+  retention_days?: number | null;
+  stored_bytes?: number | null;
+  class?: string | null;
+}
+export interface AwsLogStream {
+  name: string;
+  created_ms?: number | null;
+  first_event_ms?: number | null;
+  last_event_ms?: number | null;
+  stored_bytes?: number | null;
+}
+export interface AwsLogEvent {
+  /** Unique per event — tail polls dedupe on it. */
+  id: string;
+  stream: string;
+  timestamp: number;
+  ingestion_time?: number | null;
+  message: string;
+}
+export interface AwsLogEventsQuery {
+  group: string;
+  streams?: string[];
+  pattern?: string;
+  /** Epoch ms. */
+  start?: number;
+  end?: number;
+  token?: string | null;
+  max?: number;
+  region?: string;
+}
+export interface AwsLogsInsightsReq {
+  groups: string[];
+  query: string;
+  /** Epoch ms. */
+  start: number;
+  end: number;
+  limit?: number;
+}
+/** `GET …/logs/insights/{qid}` — `result` is the DB Explorer `QueryResult` shape. */
+export interface AwsLogsInsightsResults {
+  status: 'Scheduled' | 'Running' | 'Complete' | 'Failed' | 'Cancelled' | 'Timeout' | 'Unknown';
+  done: boolean;
+  result: QueryResult;
+  records_matched?: number | null;
+  records_scanned?: number | null;
+  bytes_scanned?: number | null;
 }
 
 /** `POST …/s3/buckets/{bucket}/download-to` / `GET …/s3/download-jobs/{job}` —
@@ -8310,6 +8599,8 @@ export type Ec2State =
 
 export interface Ec2Instance {
   instance_id: string;
+  /** Set on `?region=all` rows. */
+  region?: string;
   name?: string | null;
   state: Ec2State;
   type: string;
@@ -8386,6 +8677,8 @@ export interface AthenaQueryStatus {
 
 export interface EksClusterSummary {
   name: string;
+  /** Set on `?region=all` rows. */
+  region?: string;
   status: string;
   version?: string | null;
   endpoint?: string | null;
@@ -8426,6 +8719,8 @@ export interface EksImportResp {
 
 export interface RdsInstance {
   identifier: string;
+  /** Set on `?region=all` rows. */
+  region?: string;
   engine?: string | null;
   engine_version?: string | null;
   class?: string | null;
@@ -10792,6 +11087,10 @@ export interface UiHelloAckFrame {
   conn_id: string;
   /** This daemon process's boot id (changes on every daemon restart). */
   boot_id?: string;
+  /** What this daemon's boot restore did to sessions (A4): re-adopted from
+   *  their PTY holders (`kept_running`) vs live sessions that lost their
+   *  process with the previous daemon (`suspended`). Null until restored. */
+  boot_restore?: { kept_running: number; suspended: number } | null;
 }
 
 /** Server → this connection: run one UI command. */
@@ -10844,6 +11143,121 @@ export interface UiControlGrant {
   granted_by?: Id;
 }
 
+// ---------------------------------------------------------------------------
+// Per-session tokens + cost (review A5) — GET /sessions/{id}/usage and
+// GET /workspaces/{wid}/sessions/usage
+// ---------------------------------------------------------------------------
+
+/** One session's usage sums (otto-usage `SessionTotals`). */
+export interface SessionTotals {
+  session_id: Id;
+  workspace_id: Id;
+  provider: string;
+  events: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+}
+
+/** `GET /workspaces/{wid}/sessions/usage?days=` — sessions without usage are absent. */
+export interface WorkspaceSessionsUsage {
+  /** False when the usage engine is unavailable: hide tokens/cost UI. */
+  available: boolean;
+  days: number;
+  sessions: SessionTotals[];
+}
+
 export type * from './room-types';
 export type * from './room-recap-types';
 export type * from './db-multirun-types';
+
+// ── DB Explorer: re-attach probe (POST /connections/{id}/db/query-status) ──
+/** `QueryStatus` (otto-dbviewer types.rs). `elapsed_ms` only while running. */
+export interface DbQueryStatus {
+  status: 'running' | 'done' | 'unknown';
+  result?: QueryResult;
+  error?: string;
+  elapsed_ms?: number;
+}
+
+// --- Kubernetes pod HTTP actions (K-3; docs/contracts/api.md "Pod HTTP actions") ---
+
+export type K8sPodHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+/** `POST /k8s/clusters/{id}/pod-http` — exactly one of `pod` / `workload`. */
+export interface K8sPodHttpReq {
+  namespace: string;
+  pod?: string;
+  /** kind: deployment | statefulset | daemonset | replicaset | job. */
+  workload?: { kind: string; name: string };
+  port: number;
+  method: K8sPodHttpMethod;
+  /** Starts with `/`; no `..`, no `://`, no whitespace. */
+  path: string;
+  headers?: Record<string, string>;
+  body?: string | null;
+  /** Default 10000, max 30000. */
+  timeout_ms?: number;
+  /** Default 4, max 8. */
+  max_concurrency?: number;
+  /** Prod / read-only clusters: a mutating call must echo the target name. */
+  confirm_name?: string;
+}
+
+export interface K8sPodHttpResult {
+  pod: string;
+  /** null when the request never got an HTTP response (`error` says why). */
+  status: number | null;
+  duration_ms: number;
+  /** Authorization / Cookie / Set-Cookie are redacted. */
+  headers: Record<string, string>;
+  /** Capped at 256 KB; base64 when the body isn't UTF-8. */
+  body: string;
+  body_base64: boolean;
+  truncated: boolean;
+  error: string | null;
+  via: 'proxy' | 'port_forward';
+}
+
+export interface K8sPodHttpResp {
+  results: K8sPodHttpResult[];
+  target_name: string;
+  mutating: boolean;
+}
+
+/** A saved per-workload pod HTTP action (`/k8s/clusters/{id}/pod-actions`).
+ *  `{{var}}` placeholders in path / body are filled in by the client. */
+export interface K8sPodAction {
+  id: string;
+  cluster_id: string;
+  namespace: string;
+  /** Plural wire kind, e.g. "deployments" (inputs accept singular aliases). */
+  workload_kind: string;
+  workload: string;
+  name: string;
+  method: K8sPodHttpMethod;
+  port: number;
+  path: string;
+  headers: Record<string, string>;
+  body_template: string | null;
+  created_by: string | null;
+  updated_at: string;
+}
+
+export interface K8sPodActionInput {
+  id?: string;
+  namespace: string;
+  workload_kind: string;
+  workload: string;
+  name: string;
+  method: K8sPodHttpMethod;
+  port: number;
+  path: string;
+  headers?: Record<string, string>;
+  body_template?: string | null;
+}
+
+export type * from './maintenance-types';

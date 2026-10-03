@@ -114,7 +114,7 @@
       </select>
     </label>
     {#if mockupAssist.busy}<span class="ma-working">working…</span>{/if}
-    <button class="ma-close" onclick={onclose} aria-label="Close design agent">
+    <button class="ma-close" onclick={onclose} aria-label="Close design agent" title="Close design agent">
       <Icon name="x" size={15} />
     </button>
   </header>
@@ -162,7 +162,7 @@
           class="ma-send"
           onclick={send}
           disabled={mockupAssist.busy || !draft.trim()}
-          aria-label="Send"
+          aria-label="Send" title="Send"
         >
           <Icon name="arrowUp" size={16} />
         </button>

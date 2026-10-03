@@ -13,6 +13,18 @@
 //! | `k8s_pods_1h` | AggregatingMergeTree | 1 h per pod (row count, last seen) | `retention_days` |
 //! | `k8s_events` | MergeTree | one row per event | `retention_days` |
 //!
+//! | `k8s_pod_cycle` | Null | one wide row per pod per cycle (collector) | — |
+//! | `k8s_wl_{1m,5m,1h}` | AggregatingMergeTree | 1 min / 5 min / 1 h per workload | 2 d / 14 d / `retention_days` |
+//! | `k8s_pod_{1m,5m,1h}` | AggregatingMergeTree | 1 min / 5 min / 1 h per pod | 2 d / 14 d / `retention_days` |
+//!
+//! The **wide** tiers are what the dashboards read: the collector writes
+//! counters as reset-aware increments (`wide`), so every column is additive
+//! and the pod / label dimensions fold away — a workload-hour is ONE row.
+//! They need no backfill (their source only exists from the upgrade on), so
+//! [`ensure`] creates their tables and views idempotently on every start.
+//! The per-series tiers below stay for the generic per-metric chart and the
+//! per-path requests view.
+//!
 //! A series is `(cluster, namespace, workload, metric, pod, labels)` —
 //! exactly the identity the raw counter math groups by — so every rollup
 //! keeps `min / max / sum / count / last` per series per bucket and stays
@@ -95,6 +107,94 @@ pub const ROLLUP_1H: Rollup = Rollup {
 };
 /// Finest first.
 pub const ROLLUPS: [Rollup; 3] = [ROLLUP_1M, ROLLUP_5M, ROLLUP_1H];
+
+/// The collector's one-row-per-pod-per-cycle insert target (`ENGINE =
+/// Null`: nothing is stored, the wide views below fold every insert).
+pub const POD_CYCLE_TABLE: &str = "k8s_pod_cycle";
+
+/// One wide tier: a workload-level and a pod-level table at the same grain,
+/// both fed from [`POD_CYCLE_TABLE`]. Counters arrive as reset-aware
+/// increments, so everything but memory last/max is a plain `sum` and the
+/// pod dimension folds away inside ClickHouse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideTier {
+    pub grain: i64,
+    pub keep_days: u32,
+    pub wl_table: &'static str,
+    wl_view: &'static str,
+    pub pod_table: &'static str,
+    pod_view: &'static str,
+    partition: &'static str,
+    /// Coarse time prefix of the sort key: per-workload filters prune
+    /// inside each prefix group instead of scanning every bucket.
+    prefix: &'static str,
+}
+
+pub const WIDE_1M: WideTier = WideTier {
+    grain: 60,
+    keep_days: 2,
+    wl_table: "k8s_wl_1m",
+    wl_view: "k8s_wl_1m_mv",
+    pod_table: "k8s_pod_1m",
+    pod_view: "k8s_pod_1m_mv",
+    partition: "toDate(t)",
+    prefix: "toStartOfHour(t)",
+};
+pub const WIDE_5M: WideTier = WideTier {
+    grain: 300,
+    keep_days: 14,
+    wl_table: "k8s_wl_5m",
+    wl_view: "k8s_wl_5m_mv",
+    pod_table: "k8s_pod_5m",
+    pod_view: "k8s_pod_5m_mv",
+    partition: "toMonday(t)",
+    prefix: "toStartOfDay(t)",
+};
+pub const WIDE_1H: WideTier = WideTier {
+    grain: 3600,
+    keep_days: 90,
+    wl_table: "k8s_wl_1h",
+    wl_view: "k8s_wl_1h_mv",
+    pod_table: "k8s_pod_1h",
+    pod_view: "k8s_pod_1h_mv",
+    partition: "toYYYYMM(t)",
+    prefix: "toMonday(t)",
+};
+/// Finest first.
+pub const WIDE_TIERS: [WideTier; 3] = [WIDE_1M, WIDE_5M, WIDE_1H];
+/// Granule-level time pruning for the wide tiers. The coarse `toStartOf…(t)`
+/// sort-key prefix does NOT prune a `t >= …` filter (measured: a 5-minute
+/// edge read the whole day partition); a minmax index on `t` does.
+const T_INDEX_NAME: &str = "t_minmax";
+const T_INDEX: &str = "INDEX t_minmax t TYPE minmax GRANULARITY 1";
+
+/// Wide tables that already have the time index (`name` column).
+pub fn wide_t_index_present_sql() -> String {
+    let names = wide_tables()
+        .iter()
+        .map(|t| sql_str(t))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT table AS name FROM system.data_skipping_indices
+         WHERE database = currentDatabase() AND name = {} AND table IN ({names})",
+        sql_str(T_INDEX_NAME)
+    )
+}
+
+/// Add + build the time index on a wide table created before it existed
+/// (idempotent `ADD`; the `MATERIALIZE` mutation runs once, only for a
+/// table that lacked it).
+pub fn wide_t_index_add_sql(table: &str) -> String {
+    format!(
+        "ALTER TABLE {table} ADD INDEX IF NOT EXISTS {T_INDEX_NAME} t TYPE minmax GRANULARITY 1;
+ALTER TABLE {table} MATERIALIZE INDEX {T_INDEX_NAME}"
+    )
+}
+
+/// Small granules: a workload-tier read is a few hundred rows, and the
+/// default 8192-row granule would set the floor of every read.
+const WIDE_GRANULARITY: u32 = 1024;
 
 pub const LATEST_TABLE: &str = "k8s_latest";
 const LATEST_VIEW: &str = "k8s_latest_mv";
@@ -234,6 +334,143 @@ TTL t + INTERVAL {ttl} DAY;",
         latest = LATEST_KEEP_DAYS,
     ));
     s
+}
+
+/// The wide pod-cycle table + every wide tier (`CREATE … IF NOT EXISTS`,
+/// idempotent; no backfill — the views start folding with the next cycle).
+pub fn wide_schema_sql(retention_days: u32) -> String {
+    let ttl = retention_days.clamp(1, 90);
+    let mut s = format!(
+        "CREATE TABLE IF NOT EXISTS {POD_CYCLE_TABLE} (
+    ts          DateTime,
+    cluster_id  LowCardinality(String),
+    namespace   LowCardinality(String),
+    workload    LowCardinality(String),
+    pod         String,
+    mem         Float64,
+    has_mem     UInt8,
+    req         Float64,
+    err         Float64,
+    lat_sum     Float64,
+    lat_cnt     Float64,
+    hist        Map(String, Float64)
+) ENGINE = Null"
+    );
+    const AGG: &str = "
+    mem_n       SimpleAggregateFunction(sum, UInt64),
+    mem_sum     SimpleAggregateFunction(sum, Float64),
+    mem_max     SimpleAggregateFunction(max, Float64),
+    mem_last    SimpleAggregateFunction(max, Tuple(DateTime, Float64)),
+    req         SimpleAggregateFunction(sum, Float64),
+    err         SimpleAggregateFunction(sum, Float64),
+    lat_sum     SimpleAggregateFunction(sum, Float64),
+    lat_cnt     SimpleAggregateFunction(sum, Float64),
+    hist        SimpleAggregateFunction(sumMap, Map(String, Float64))";
+    for w in WIDE_TIERS {
+        let keep = keep_days(w.keep_days, ttl);
+        let drop_parts = if w.grain <= 60 {
+            ", ttl_only_drop_parts = 1"
+        } else {
+            ""
+        };
+        let settings = format!("SETTINGS index_granularity = {WIDE_GRANULARITY}{drop_parts}");
+        s.push_str(&format!(
+            ";
+
+CREATE TABLE IF NOT EXISTS {wl} (
+    t           DateTime,
+    cluster_id  LowCardinality(String),
+    namespace   LowCardinality(String),
+    workload    LowCardinality(String),
+    n           SimpleAggregateFunction(sum, UInt64),
+    pods_max    SimpleAggregateFunction(max, UInt64),{AGG},
+    {T_INDEX}
+) ENGINE = AggregatingMergeTree
+PARTITION BY (cluster_id, {part})
+ORDER BY (cluster_id, {prefix}, namespace, workload, t)
+TTL t + INTERVAL {keep} DAY
+{settings};
+
+CREATE TABLE IF NOT EXISTS {pod} (
+    t           DateTime,
+    cluster_id  LowCardinality(String),
+    namespace   LowCardinality(String),
+    workload    LowCardinality(String),
+    pod         String,
+    n           SimpleAggregateFunction(sum, UInt64),{AGG},
+    {T_INDEX}
+) ENGINE = AggregatingMergeTree
+PARTITION BY (cluster_id, {part})
+ORDER BY (cluster_id, {prefix}, namespace, workload, pod, t)
+TTL t + INTERVAL {keep} DAY
+{settings}",
+            wl = w.wl_table,
+            pod = w.pod_table,
+            part = w.partition,
+            prefix = w.prefix,
+        ));
+    }
+    s
+}
+
+/// Workload view: per cycle first (pods, totals, the cycle's memory total),
+/// then per bucket — exact whatever cycles one insert block carries.
+fn wide_wl_select(w: &WideTier) -> String {
+    format!(
+        "SELECT {t} AS t, cluster_id, namespace, workload,
+       count() AS n, max(pods) AS pods_max, sum(mn) AS mem_n, sum(ms) AS mem_sum, max(mx) AS mem_max,
+       max(if(mn > 0, (ts, ms), (toDateTime(0), toFloat64(0)))) AS mem_last,
+       sum(rq) AS req, sum(er) AS err, sum(ls) AS lat_sum, sum(lc) AS lat_cnt, sumMap(h) AS hist
+FROM (
+  SELECT ts, cluster_id, namespace, workload, count() AS pods, countIf(has_mem = 1) AS mn,
+         sumIf(mem, has_mem = 1) AS ms, maxIf(mem, has_mem = 1) AS mx,
+         sum(req) AS rq, sum(err) AS er, sum(lat_sum) AS ls, sum(lat_cnt) AS lc, sumMap(hist) AS h
+  FROM {POD_CYCLE_TABLE}
+  GROUP BY ts, cluster_id, namespace, workload
+)
+GROUP BY t, cluster_id, namespace, workload",
+        t = bucket_expr("ts", w.grain),
+    )
+}
+
+fn wide_pod_select(w: &WideTier) -> String {
+    format!(
+        "SELECT {t} AS t, cluster_id, namespace, workload, pod,
+       count() AS n, countIf(has_mem = 1) AS mem_n, sumIf(mem, has_mem = 1) AS mem_sum, maxIf(mem, has_mem = 1) AS mem_max,
+       max(if(has_mem = 1, (ts, mem), (toDateTime(0), toFloat64(0)))) AS mem_last,
+       sum(req) AS req, sum(err) AS err, sum(lat_sum) AS lat_sum, sum(lat_cnt) AS lat_cnt, sumMap(hist) AS hist
+FROM {POD_CYCLE_TABLE}
+GROUP BY t, cluster_id, namespace, workload, pod",
+        t = bucket_expr("ts", w.grain),
+    )
+}
+
+/// `CREATE MATERIALIZED VIEW IF NOT EXISTS` for every wide tier.
+pub fn wide_views_sql() -> String {
+    let mut out = Vec::new();
+    for w in WIDE_TIERS {
+        out.push(format!(
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS {} TO {} AS\n{}",
+            w.wl_view,
+            w.wl_table,
+            wide_wl_select(&w)
+        ));
+        out.push(format!(
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS {} TO {} AS\n{}",
+            w.pod_view,
+            w.pod_table,
+            wide_pod_select(&w)
+        ));
+    }
+    out.join(";\n\n")
+}
+
+/// Every wide target table (TTL alters, purges).
+pub fn wide_tables() -> Vec<&'static str> {
+    WIDE_TIERS
+        .iter()
+        .flat_map(|w| [w.wl_table, w.pod_table])
+        .collect()
 }
 
 /// The `SELECT` that folds raw rows into one tier (shared by the view and
@@ -383,6 +620,23 @@ static ENSURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub async fn ensure(sink: &dyn MonitorSink, retention_days: u32) -> Result<()> {
     let _guard = ENSURE_LOCK.lock().await;
     sink.exec(&schema_sql(retention_days)).await?;
+    // Wide tiers: tables, then views (no history to back-fill — the source
+    // is a Null table only the collector writes, after this returns).
+    sink.exec(&wide_schema_sql(retention_days)).await?;
+    sink.exec(&wide_views_sql()).await?;
+    if let Ok(rows) = sink.query_rows(&wide_t_index_present_sql()).await {
+        let have: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.get("name").and_then(|v| v.as_str()))
+            .collect();
+        for t in wide_tables() {
+            if !have.contains(&t) {
+                if let Err(e) = sink.exec(&wide_t_index_add_sql(t)).await {
+                    tracing::debug!("k8s monitor: time index on {t}: {e}");
+                }
+            }
+        }
+    }
     let present = sink
         .query_rows(&views_present_sql())
         .await?
@@ -459,6 +713,14 @@ pub fn alter_ttl_sql(retention_days: u32) -> String {
     v.push(format!(
         "ALTER TABLE {PODS_TABLE} MODIFY TTL t + INTERVAL {ttl} DAY{NO_REWRITE}"
     ));
+    for w in WIDE_TIERS {
+        for table in [w.wl_table, w.pod_table] {
+            v.push(format!(
+                "ALTER TABLE {table} MODIFY TTL t + INTERVAL {} DAY{NO_REWRITE}",
+                keep_days(w.keep_days, ttl)
+            ));
+        }
+    }
     v.join(";\n")
 }
 
@@ -483,6 +745,9 @@ pub fn purge_cluster_sql(cluster_id: &str, before_date: Option<&str>) -> Vec<Str
     }
     v.push(mk(PODS_TABLE, "toDate(t)"));
     v.push(mk(LATEST_TABLE, "toDate(last_ts)"));
+    for t in wide_tables() {
+        v.push(mk(t, "toDate(t)"));
+    }
     v
 }
 
@@ -530,6 +795,52 @@ mod tests {
     }
 
     #[test]
+    fn wide_tiers_are_small_granule_and_fed_from_the_cycle_table() {
+        let s = wide_schema_sql(30);
+        assert!(s.contains("CREATE TABLE IF NOT EXISTS k8s_pod_cycle ("));
+        assert!(s.contains(") ENGINE = Null"));
+        for t in wide_tables() {
+            assert!(
+                s.contains(&format!("CREATE TABLE IF NOT EXISTS {t} (")),
+                "{t}"
+            );
+        }
+        assert_eq!(s.matches("index_granularity = 1024").count(), 6);
+        assert_eq!(
+            s.matches("INDEX t_minmax t TYPE minmax GRANULARITY 1")
+                .count(),
+            6
+        );
+        let add = wide_t_index_add_sql("k8s_wl_1m");
+        assert!(add.contains("ADD INDEX IF NOT EXISTS t_minmax t TYPE minmax"));
+        assert!(add.contains("MATERIALIZE INDEX t_minmax"));
+        assert!(wide_t_index_present_sql().contains("'k8s_pod_1h'"));
+        assert!(s.contains("ORDER BY (cluster_id, toMonday(t), namespace, workload, t)"));
+        assert!(s.contains("ORDER BY (cluster_id, toStartOfHour(t), namespace, workload, pod, t)"));
+        assert!(s.contains("hist        SimpleAggregateFunction(sumMap, Map(String, Float64))"));
+        // 1m keeps 2 d, 5m 14 d, 1h the retention.
+        assert_eq!(s.matches("TTL t + INTERVAL 30 DAY").count(), 2);
+        for stmt in s.split(';') {
+            assert!(!stmt.contains('\''), "no string literals in DDL: {stmt}");
+        }
+        let v = wide_views_sql();
+        assert_eq!(
+            v.matches("CREATE MATERIALIZED VIEW IF NOT EXISTS").count(),
+            6
+        );
+        assert!(v.contains("k8s_wl_1h_mv TO k8s_wl_1h"));
+        assert!(
+            v.contains("GROUP BY ts, cluster_id, namespace, workload"),
+            "per cycle first"
+        );
+        assert_eq!(v.matches("FROM k8s_pod_cycle").count(), 6);
+        assert!(
+            !views().contains(&"k8s_wl_1m_mv"),
+            "wide views never trigger the backfill"
+        );
+    }
+
+    #[test]
     fn views_feed_every_tier_from_raw() {
         let v = views_sql();
         assert_eq!(
@@ -574,7 +885,7 @@ mod tests {
     #[test]
     fn purge_targets_one_cluster_only() {
         let v = purge_cluster_sql("c'1", Some("2026-09-01"));
-        assert_eq!(v.len(), 7);
+        assert_eq!(v.len(), 13, "7 per-series + 6 wide tables");
         assert!(v.iter().all(|q| q.contains("cluster_id = 'c\\'1'")));
         assert!(v[0].contains("sample_date < '2026-09-01'"));
         assert!(v[2].contains("toDate(t) < '2026-09-01'"));
@@ -590,7 +901,7 @@ mod tests {
         assert_eq!(
             a.matches("SETTINGS materialize_ttl_after_modify = 0")
                 .count(),
-            6
+            12
         );
         let b = alter_ttl_sql(30);
         assert!(b.contains("k8s_samples MODIFY TTL sample_date + INTERVAL 2 DAY"));

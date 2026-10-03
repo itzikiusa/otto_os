@@ -129,6 +129,7 @@ install (one real `otto.db` reached 514 MB). The daemon prunes them **hourly**
 | `mcp_tool_calls` (first-party MCP tool ledger) | **90 days** |
 | `mcp_call_log` (MCP control-plane call log) | **90 days** |
 | `audit_log` (security audit trail) | **90 days** |
+| `review_agent_prompts` + `review_diffs` (per-agent review retry data) | **14 days** after the artifact was written, and only for a finished review (`done` / `error` / `cancelled`, or the review row is gone). A running review keeps them. Past the window, retrying a review agent falls back to "prompt unavailable" |
 
 Rows younger than their window are never touched. The policy lives in the
 `data_retention` setting (a partial object merges over the defaults) and is
@@ -136,16 +137,40 @@ re-read every pass; set it with `POST /settings/import`:
 
 ```json
 {"data_retention": {"enabled": true, "work_events_days": 30, "work_events_keep_per_item": 500,
-                    "work_events_idle_days": 90, "mcp_audit_days": 90, "audit_log_days": 90}}
+                    "work_events_idle_days": 90, "mcp_audit_days": 90, "audit_log_days": 90,
+                    "review_retry_days": 14}}
 ```
 
 `enabled: false` turns the job off. Floors a setting can't go below: 7 days
-(30 for `audit_log`), 50 events per item, and `work_events_idle_days` never
+(30 for `audit_log`, 3 for `review_retry_days`), 50 events per item, and `work_events_idle_days` never
 below `work_events_days`. Deletes run in 1 000-row batches, each a bounded
 range on an index, with a 25 ms pause between batches so the SQLite writer is
 never held for long; the candidate items are found by reads on the read-only
 pool (index `idx_work_events_ts`, migration `0144`). Freed pages are reused,
-so the file stops growing but only shrinks after a manual `VACUUM`.
+so the file stops growing; it only shrinks after a compaction (below).
+
+Other retention passes:
+
+- **Expired sign-ins** (hourly): login, API and impersonation credentials
+  more than 7 days past `expires_at` are deleted (share links keep their own
+  window). The auth cache drops each deleted token.
+- **Workflow runs** (daily, first pass at startup): per workflow, the newest
+  200 finished runs and every run younger than 30 days are kept. A run that is
+  pending, running or waiting for approval, or that a Proof Pack or a
+  scheduled-task run references, is never deleted. Each pruned run's
+  checkpoints and `workflow-context/<run_id>/` folder go with it. Deletes run
+  in 100-row transactions.
+
+### Database maintenance
+
+Every hour the daemon runs `PRAGMA optimize` (planner statistics) and a
+`wal_checkpoint(TRUNCATE)` (PASSIVE when a reader still needs the log); the
+WAL is capped at 64 MiB (`journal_size_limit`). **Settings → Backup & restore
+→ Database storage** (root) shows the file size and reclaimable free space,
+and **Compact database…** runs the one-time conversion to
+`auto_vacuum=INCREMENTAL` plus a `VACUUM`. The rewrite blocks database writes
+while it runs, so it asks first; nothing is deleted. After it, the hourly pass
+returns up to 4 000 free pages per hour (`incremental_vacuum`).
 
 The per-session activity trail (`agent_trail`, newest 1 000 rows per session)
 is pruned by a separate hourly pass. After the first pass at startup it only

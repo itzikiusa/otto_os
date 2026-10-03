@@ -19,8 +19,8 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { designBus } from '../../lib/events.svelte';
-  import { updateProject } from '../../lib/api/design';
-  import type { DesignArtifact, DesignStudio } from '../../lib/api/types';
+  import { search, updateProject, type DesignListFilter } from '../../lib/api/design';
+  import type { DesignArtifact, DesignSearchHit, DesignStudio } from '../../lib/api/types';
   import ArtifactCard from './ArtifactCard.svelte';
   import StudioBadge from './StudioBadge.svelte';
   import { STUDIOS, studioInfo } from './model';
@@ -51,16 +51,74 @@
   const story = $derived(scope.kind === 'story' ? library.stories[scope.id] : undefined);
   const studio = $derived(scope.kind === 'studio' ? studioInfo(scope.id) : null);
 
-  const items = $derived.by((): DesignArtifact[] => {
-    const live = library.hits.filter((h) => h.artifact.status !== 'archived');
-    const pick =
-      scope.kind === 'project'
-        ? live.filter((h) => h.artifact.project_id === scope.id)
-        : scope.kind === 'studio'
-          ? live.filter((h) => h.artifact.studio === scope.id)
-          : live.filter((h) => h.story_ids.includes(scope.id));
-    return pick.map((h) => h.artifact).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  // DH1: the slice is loaded from the SERVER, scoped + paged — filtering the
+  // shared library (the 500 newest overall) silently dropped older designs.
+  // The library still supplies projects/stories metadata for the header.
+  const PAGE = 120;
+  let hits = $state.raw<DesignSearchHit[]>([]);
+  let sLoading = $state(false);
+  let sLoaded = $state(false);
+  let sError = $state<string | null>(null);
+  let hasMore = $state(false);
+  let sSeq = 0;
+  let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  const filter = (): DesignListFilter =>
+    scope.kind === 'project'
+      ? { project_id: scope.id }
+      : scope.kind === 'studio'
+        ? { studio: scope.id }
+        : { story_id: scope.id };
+
+  /** `append` fetches the next page; otherwise reload everything shown so far
+   *  (at least one page) so a live refresh never collapses "Load more". */
+  async function loadScoped(append = false): Promise<void> {
+    const my = ++sSeq;
+    sLoading = true;
+    const offset = append ? hits.length : 0;
+    const limit = append ? PAGE : Math.max(PAGE, hits.length);
+    try {
+      const page = await search('', { ...filter(), limit, offset });
+      if (my !== sSeq) return;
+      hits = append ? [...hits, ...page.filter((h) => !hits.some((x) => x.artifact.id === h.artifact.id))] : page;
+      hasMore = page.length === limit;
+      sError = null;
+      sLoaded = true;
+    } catch (e) {
+      if (my !== sSeq) return;
+      sError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (my === sSeq) sLoading = false;
+    }
+  }
+  $effect(() => {
+    void scope.kind;
+    void scope.id;
+    untrack(() => {
+      hits = [];
+      sLoaded = false;
+      void loadScoped();
+    });
   });
+  $effect(() => {
+    void designBus.resyncTick;
+    void designBus.seq;
+    untrack(() => {
+      if (!sLoaded) return;
+      clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => void loadScoped(), 600); // coalesce bursts
+    });
+    return () => clearTimeout(reloadTimer);
+  });
+  const hitById = $derived(new Map(hits.map((h) => [h.artifact.id, h])));
+  const storyKeysOf = (id: string): string[] =>
+    (hitById.get(id)?.story_ids ?? []).map((sid) => library.stories[sid]?.source_key).filter((k): k is string => !!k);
+
+  const items = $derived.by((): DesignArtifact[] =>
+    hits
+      .filter((h) => h.artifact.status !== 'archived')
+      .map((h) => h.artifact)
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
+  );
   const groups = $derived(
     STUDIOS.map((s) => ({ s, list: items.filter((a) => a.studio === s.id) })).filter((g) => g.list.length),
   );
@@ -85,7 +143,7 @@
         : 'Designs that implement this story',
   );
   const canNew = $derived(scope.kind !== 'studio' || (studio?.formats.length ?? 0) > 0);
-  const notFound = $derived(library.loaded && scope.kind === 'project' && !project);
+  const notFound = $derived(library.loaded && sLoaded && scope.kind === 'project' && !project && items.length === 0);
 
   function newHere(): void {
     if (scope.kind === 'project') onnew({ projectId: scope.id, storyId: project?.epic_story_id ?? null });
@@ -162,12 +220,12 @@
   {#if studio}
     <p class="note" data-testid="design-studio-note"><Icon name="info" size={14} /> {studio.note}</p>
   {/if}
-  {#if library.loading && !library.loaded}
+  {#if !sLoaded && !sError}
     <Skeleton rows={3} height={180} />
-  {:else if library.error && !library.loaded}
+  {:else if sError && !sLoaded}
     <div class="err" role="alert">
-      <Icon name="warning" size={14} /> Couldn’t load the design library. <span class="dim">{library.error}</span>
-      <button class="btn small" onclick={() => void library.load()}>Retry</button>
+      <Icon name="warning" size={14} /> Couldn’t load these designs. <span class="dim">{sError}</span>
+      <button class="btn small" onclick={() => { void library.load(); void loadScoped(); }}>Retry</button>
     </div>
   {:else if notFound}
     <EmptyState variant="page" icon="designHall" title="This project isn’t available" body="It was archived or deleted, or it belongs to a workspace you can’t view."
@@ -199,13 +257,25 @@
     {/if}
     <div class="cards">
       {#each shown as a, i (a.id)}
-        <ArtifactCard artifact={a} stories={library.storyKeys(a.id)} referenceCount={library.hitOf(a.id)?.reference_count ?? 0} live={i < 16} />
+        <ArtifactCard artifact={a} stories={storyKeysOf(a.id)} referenceCount={hitById.get(a.id)?.reference_count ?? 0} live={i < 16} />
       {/each}
     </div>
+    {#if hasMore}
+      <div class="more">
+        <button class="btn small" disabled={sLoading} onclick={() => void loadScoped(true)} data-testid="design-collection-more">
+          {sLoading ? 'Loading…' : 'Load more'}
+        </button>
+      </div>
+    {/if}
   {/if}
 </PageBody>
 
 <style>
+  .more {
+    display: flex;
+    justify-content: center;
+    margin-block: 16px 4px;
+  }
   .badge-row {
     display: inline-flex;
     align-items: center;

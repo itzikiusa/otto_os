@@ -13,6 +13,8 @@
   } from '../../lib/stores/ui.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { AUTO_VERTICAL_ENGINES } from '../../lib/db-view-prefs';
+  import { database } from '../../lib/stores/database.svelte';
+  import { clipHistory } from '../../lib/stores/clipHistory.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { AMBIENT_MODES, ambientImage, type AmbientMode } from '../../lib/ambient';
@@ -393,6 +395,27 @@
     A view you pick on a tab (the Grid / Vertical / JSON switch or ⇧⌘V) always wins. Saved per
     device.
   </p>
+  <SettingToggle
+    label="Connect restored tabs on click only"
+    hint="After a reload only the active connection connects; the other tabs wait, marked “Not connected yet”, until you open one. Off: they connect in the background, three at a time."
+    checked={database.warmRestored === 'on-click'}
+    onchange={(on) => database.setWarmRestored(on ? 'on-click' : 'background')}
+    testid="db-warm-on-click"
+  />
+  <SettingToggle
+    label="Keep open connections alive"
+    hint="Pings each open, connected database every 4 minutes so its pool and SSH tunnel don't close from inactivity, and a dropped one shows red before your next query."
+    checked={database.keepAlive}
+    onchange={(on) => database.setKeepAlive(on)}
+    testid="db-keep-alive"
+  />
+  <SettingToggle
+    label="Clipboard history"
+    hint="Remember the last 50 copies made in Otto (result cells, the query editor) so ⌥⌘V in the query editor can paste them again. Only copies made inside Otto, never from masked tabs. Off clears it."
+    checked={clipHistory.enabled}
+    onchange={(on) => clipHistory.setEnabled(on)}
+    testid="clip-history-enabled"
+  />
 
   <div class="section-title">Sidebar</div>
   <p class="hint-line">

@@ -36,7 +36,7 @@
     >
       <Icon name="grid" size={12} />{rawMode ? 'Tree' : 'Raw JSON'}
     </button>
-    <button class="plan-close" onclick={onclose} aria-label="Close plan"><Icon name="x" size={13} /></button>
+    <button class="plan-close" onclick={onclose} aria-label="Close plan" title="Close plan"><Icon name="x" size={13} /></button>
   </div>
   {#if rawMode}
     <pre class="plan-raw mono">{JSON.stringify(plan.raw, null, 2)}</pre>
@@ -52,7 +52,7 @@
   {@const open = !collapsed.has(id)}
   <div class="plan-row" style="padding-inline-start: {depth * 16 + 6}px">
     {#if kids.length > 0}
-      <button class="plan-caret" onclick={() => toggle(id)} aria-label="Toggle node">
+      <button class="plan-caret" onclick={() => toggle(id)} aria-label={open ? 'Collapse node' : 'Expand node'} title={open ? 'Collapse node' : 'Expand node'}>
         <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
     {:else}

@@ -18,13 +18,17 @@ use crate::clickhouse::ClickHouse;
 use crate::metrics::{Metric, MetricsSampler};
 use crate::schema;
 use crate::types::{
-    AttributionDimension, AttributionRow, DailyUsage, FeatureUsage, ForecastReq, ForecastResp,
-    MetricPoint, ProviderUsage, SessionTotals, SessionUsage, UsageConfig, UsageEvent, UsageStatus,
-    UsageSummary,
+    AttributionDimension, AttributionRow, DailyModelUsage, DailyUsage, FeatureUsage, ForecastReq,
+    ForecastResp, MetricPoint, ModelUsage, MonthlyUsage, ProviderUsage, SessionTotals,
+    SessionUsage, TokenTotals, UsageConfig, UsageEvent, UsageReport, UsageStatus, UsageSummary,
 };
 
-/// Flush the usage buffer at least this often.
-const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
+/// Flush the usage buffer at least this often. Every non-empty flush is one
+/// INSERT = one new MergeTree part + a merge, so 2 s meant a part every 2 s and
+/// an active part re-merged ~10k times. 15 s (plus server-side async inserts)
+/// keeps parts few; the live dashboard lags by up to this much. Shutdown still
+/// flushes when the channel closes.
+const FLUSH_INTERVAL: Duration = Duration::from_secs(15);
 /// …or sooner once this many events are buffered.
 const FLUSH_BATCH: usize = 200;
 /// Default cap on the session leaderboard.
@@ -32,6 +36,8 @@ const SESSION_LIMIT: u32 = 50;
 /// How often the self-heal watcher checks whether an insert path flagged the
 /// server as dead (see [`Inner::heal`]).
 const HEAL_POLL: Duration = Duration::from_secs(5);
+/// How long a measured on-disk size is reused by [`UsageEngine::status`].
+const DISK_SIZE_TTL: Duration = Duration::from_secs(300);
 /// Cap on events retained across failed flushes while the server is down —
 /// beyond this the OLDEST buffered events are dropped (bounded memory beats a
 /// perfect record during an outage; the tailer re-derives transcript rows).
@@ -58,6 +64,38 @@ pub struct UsageEngine {
     /// [`Self::start`]) drains it and restarts the server via [`Self::reinit`],
     /// so usage tracking recovers without a daemon restart.
     heal: Arc<AtomicBool>,
+    /// Last measured ClickHouse on-disk size + when (see [`DISK_SIZE_TTL`]).
+    disk_cache: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
+}
+
+/// Which sessions a read covers: every recorded session (root), or only the
+/// listed session ids (a non-root caller's own sessions).
+#[derive(Debug, Clone, Copy, Default)]
+pub enum UsageScope<'a> {
+    #[default]
+    All,
+    Sessions(&'a [String]),
+}
+
+impl UsageScope<'_> {
+    /// SQL fragment narrowing an aggregation to the scope (`AND …` or empty).
+    fn filter(&self) -> String {
+        match self {
+            Self::All => String::new(),
+            Self::Sessions([]) => "AND 0".to_string(),
+            Self::Sessions(ids) => {
+                let list: Vec<String> = ids.iter().map(|i| format!("'{}'", ch_string(i))).collect();
+                format!("AND session_id IN ({})", list.join(","))
+            }
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Sessions(_) => "own",
+        }
+    }
 }
 
 impl UsageEngine {
@@ -74,6 +112,7 @@ impl UsageEngine {
             data_dir,
             reinit_lock: tokio::sync::Mutex::new(()),
             heal: Arc::new(AtomicBool::new(false)),
+            disk_cache: std::sync::Mutex::new(None),
         });
         let bg = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -135,10 +174,16 @@ impl UsageEngine {
                                         "usage: add workref columns failed (non-fatal): {e}"
                                     );
                                 }
-                                if let Err(e) =
-                                    ch.exec(&schema::alter_ttl_sql(config.retention_days)).await
-                                {
+                                // Only alter when the window changed: each MODIFY
+                                // TTL used to queue a part-rewriting mutation on
+                                // every boot and self-heal.
+                                if let Err(e) = ensure_ttl(&ch, config.retention_days).await {
                                     tracing::warn!("usage: modify ttl failed (non-fatal): {e}");
+                                }
+                                if let Err(e) = ch.exec(schema::parts_lifetime_sql()).await {
+                                    tracing::warn!(
+                                        "usage: old_parts_lifetime setting failed (non-fatal): {e}"
+                                    );
                                 }
                                 let (tx, rx) = mpsc::unbounded_channel();
                                 spawn_writer(Arc::clone(&ch), rx, Arc::clone(&self.heal));
@@ -352,7 +397,7 @@ impl UsageEngine {
             c.retention_days = retention_days.max(1);
         }
         if let Some(ch) = self.ch() {
-            ch.exec(&schema::alter_ttl_sql(retention_days)).await?;
+            ensure_ttl(&ch, retention_days).await?;
         }
         Ok(())
     }
@@ -782,22 +827,32 @@ impl UsageEngine {
     /// Full dashboard payload for the window. `otto_only` excludes externally
     /// recorded (non-Otto) sessions.
     ///
-    /// The three ClickHouse queries (provider, daily, session) are sent as a
-    /// single `clickhouse local` process via [`ClickHouse::query_batch`] —
-    /// one spawn, one lock acquisition, one table scan per query — then the
-    /// result sets are split client-side on sentinel rows. Output values are
-    /// identical to the previous three-process path (each query is unchanged;
-    /// only how they're dispatched differs).
+    /// The five rollups (provider, daily, session, model, day×model) run as one
+    /// all-or-nothing [`ClickHouse::query_batch`] against the persistent
+    /// server; any failure is returned as an error.
     pub async fn summary(&self, days: u32, otto_only: bool) -> Result<UsageSummary> {
+        self.summary_scoped(days, otto_only, UsageScope::All).await
+    }
+
+    /// [`Self::summary`] narrowed to `scope`. A ClickHouse failure is an
+    /// `Err` (the route turns it into an error with Retry) — only a missing
+    /// engine ("not installed") yields the empty summary.
+    pub async fn summary_scoped(
+        &self,
+        days: u32,
+        otto_only: bool,
+        scope: UsageScope<'_>,
+    ) -> Result<UsageSummary> {
         let Some(ch) = self.ch() else {
             return Ok(UsageSummary {
                 days,
                 by_kind: Vec::new(),
+                scope: scope.label().to_string(),
                 ..Default::default()
             });
         };
 
-        let ws = ws_filter(otto_only);
+        let ws = format!("{} {}", ws_filter(otto_only), scope.filter());
         let since = since(days);
         let limit = SESSION_LIMIT.max(1);
 
@@ -849,14 +904,17 @@ impl UsageEngine {
              LIMIT {limit}"
         );
 
-        // Single process: one spawn, one lock, three result sets.
+        let q_models = models_sql(&format!("event_date >= today() - {since} {ws}"));
+        let q_daily_models = daily_models_sql(&format!("event_date >= today() - {since} {ws}"));
+
+        // All-or-nothing: a failed read is an error, never zero totals (U1).
         let mut batches = ch
-            .query_batch(&[q_provider, q_daily, q_sessions])
+            .query_batch(&[q_provider, q_daily, q_sessions, q_models, q_daily_models])
             .await
-            .unwrap_or_else(|e| {
+            .map_err(|e| {
                 tracing::warn!("usage: summary batch failed: {e}");
-                vec![Vec::new(), Vec::new(), Vec::new()]
-            });
+                e
+            })?;
 
         // Deserialize each result set into its typed Vec (same decoding as `rows()`).
         fn decode<T: serde::de::DeserializeOwned>(raw: Vec<serde_json::Value>) -> Vec<T> {
@@ -871,6 +929,8 @@ impl UsageEngine {
                 .collect()
         }
 
+        let daily_models: Vec<DailyModelUsage> = decode(batches.pop().unwrap_or_default());
+        let models: Vec<ModelUsage> = decode(batches.pop().unwrap_or_default());
         let sessions: Vec<SessionUsage> = decode(batches.pop().unwrap_or_default());
         let daily: Vec<DailyUsage> = decode(batches.pop().unwrap_or_default());
         let providers: Vec<ProviderUsage> = decode(batches.pop().unwrap_or_default());
@@ -898,7 +958,161 @@ impl UsageEngine {
             // Per-feature rollup needs SQLite session metadata to classify, so
             // the server fills this in (via `feature_usage`) after `summary`.
             by_kind: Vec::new(),
+            models,
+            daily_models,
+            scope: scope.label().to_string(),
         })
+    }
+
+    /// The ccusage-style report over the window: daily, monthly, per-model,
+    /// per-(day, model) and per-session tables. Errors propagate (no zeros).
+    /// Sessions are raw; the server enriches titles/kinds like the summary's.
+    pub async fn report(
+        &self,
+        days: u32,
+        otto_only: bool,
+        scope: UsageScope<'_>,
+    ) -> Result<UsageReport> {
+        let generated_at = chrono::Utc::now().to_rfc3339();
+        let mut report = UsageReport {
+            days,
+            generated_at,
+            priced_as_of: crate::PRICED_AS_OF.to_string(),
+            scope: scope.label().to_string(),
+            otto_only,
+            ..Default::default()
+        };
+        let Some(ch) = self.ch() else {
+            return Ok(report);
+        };
+        let since = since(days);
+        let cond = format!(
+            "event_date >= today() - {since} {} {}",
+            ws_filter(otto_only),
+            scope.filter()
+        );
+        let buckets = "count() AS events,
+                    sum(input_tokens) AS input_tokens,
+                    sum(output_tokens) AS output_tokens,
+                    sum(cache_read_tokens) AS cache_read_tokens,
+                    sum(cache_write_tokens) AS cache_write_tokens,
+                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                    round(sum(cost_usd), 6) AS cost_usd";
+        let q_daily = format!(
+            "SELECT toString(event_date) AS day, {buckets}
+             FROM usage_events WHERE {cond}
+             GROUP BY event_date ORDER BY event_date"
+        );
+        let q_monthly = format!(
+            "SELECT formatDateTime(event_date, '%Y-%m') AS month, {buckets}
+             FROM usage_events WHERE {cond}
+             GROUP BY month ORDER BY month"
+        );
+        let limit = crate::REPORT_SESSION_LIMIT;
+        let q_sessions = format!(
+            "SELECT session_id,
+                    any(workspace_id) AS workspace_id,
+                    any(provider) AS provider,
+                    topK(1)(model)[1] AS model,
+                    {buckets},
+                    toString(max(ts)) AS last_active
+             FROM usage_events WHERE {cond}
+             GROUP BY session_id
+             ORDER BY total_tokens DESC, events DESC
+             LIMIT {limit}"
+        );
+        let batches = ch
+            .query_batch(&[
+                q_daily,
+                q_monthly,
+                models_sql(&cond),
+                daily_models_sql(&cond),
+                q_sessions,
+            ])
+            .await?;
+        let mut it = batches.into_iter();
+        let mut next = || it.next().unwrap_or_default();
+        report.daily = decode_rows(next())?;
+        report.monthly = decode_rows::<MonthlyUsage>(next())?;
+        report.models = decode_rows(next())?;
+        report.daily_models = decode_rows(next())?;
+        report.sessions = decode_rows(next())?;
+        for d in &report.daily {
+            report.totals.add(&TokenTotals {
+                input_tokens: d.input_tokens,
+                output_tokens: d.output_tokens,
+                cache_read_tokens: d.cache_read_tokens,
+                cache_write_tokens: d.cache_write_tokens,
+                total_tokens: d.total_tokens,
+                cost_usd: d.cost_usd,
+            });
+        }
+        Ok(report)
+    }
+
+    /// `POST /usage/ccusage-check`: run ccusage over the last `days` (local
+    /// dates, today inclusive) and compare it with our rows for the same days.
+    /// Never fails — problems come back as `ran=false` + `error`.
+    pub async fn ccusage_check(&self, days: u32) -> crate::types::CcusageCheck {
+        use crate::ccusage;
+        let days = days.clamp(1, 90);
+        let today = chrono::Local::now().date_naive();
+        let since = (today - chrono::Duration::days(i64::from(days) - 1)).to_string();
+        let until = today.to_string();
+        let args = ccusage::args(&since, &until);
+        let mut out = crate::types::CcusageCheck {
+            command: format!("npx {}", args.join(" ")),
+            since: since.clone(),
+            until: until.clone(),
+            ..Default::default()
+        };
+        let ours = match self.daily_model_range(&since, &until).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                out.error = Some(format!("could not read Otto's usage: {e}"));
+                return out;
+            }
+        };
+        let Some(npx) = ccusage::find_npx() else {
+            out.error = Some("npx was not found (install Node.js to run ccusage)".into());
+            return out;
+        };
+        let started = std::time::Instant::now();
+        let result = ccusage::run(&npx, &args).await;
+        out.duration_ms = started.elapsed().as_millis() as u64;
+        let theirs = match result {
+            Ok(v) => ccusage::parse_daily(&v),
+            Err(e) => {
+                out.error = Some(e);
+                return out;
+            }
+        };
+        let d = ccusage::diff(&ours, &theirs);
+        out.ran = true;
+        out.rows = d.rows;
+        out.daily = d.daily;
+        out.totals_ours = d.totals_ours;
+        out.totals_theirs = d.totals_theirs;
+        out
+    }
+
+    /// Token totals per (day, provider, model) between two inclusive
+    /// `YYYY-MM-DD` dates, every session included (external too) — the
+    /// "ours" side of the ccusage cross-check.
+    pub async fn daily_model_range(
+        &self,
+        since: &str,
+        until: &str,
+    ) -> Result<Vec<DailyModelUsage>> {
+        let Some(ch) = self.ch() else {
+            return Err(otto_core::Error::Upstream("usage engine offline".into()));
+        };
+        let cond = format!(
+            "event_date BETWEEN toDate('{}') AND toDate('{}')",
+            ch_string(since),
+            ch_string(until)
+        );
+        decode_rows(ch.query_rows(&daily_models_sql(&cond)).await?)
     }
 
     /// System-metrics time series for the last `minutes`.
@@ -926,8 +1140,25 @@ impl UsageEngine {
 
         if let Some(ch) = ch {
             let version = ch.version().await.ok().filter(|s| !s.is_empty());
-            let usage_rows = self.scalar("SELECT count() FROM usage_events").await;
-            let metric_rows = self.scalar("SELECT count() FROM system_metrics").await;
+            // One round-trip for both counts (was two).
+            let counts = ch
+                .query_rows(
+                    "SELECT (SELECT count() FROM usage_events) AS u, \
+                            (SELECT count() FROM system_metrics) AS m",
+                )
+                .await
+                .ok()
+                .and_then(|r| r.into_iter().next());
+            let count_of = |k: &str| {
+                counts
+                    .as_ref()
+                    .and_then(|v| v.get(k))
+                    .and_then(json_u64)
+                    .unwrap_or(0)
+            };
+            let usage_rows = count_of("u");
+            let metric_rows = count_of("m");
+            let disk_bytes = self.disk_bytes(&ch).await;
             UsageStatus {
                 available: true,
                 enabled: cfg.enabled,
@@ -938,7 +1169,7 @@ impl UsageEngine {
                 metrics_interval_secs: cfg.metrics_interval_secs,
                 usage_rows,
                 metric_rows,
-                disk_bytes: dir_size(ch.data_dir()),
+                disk_bytes,
                 priced_as_of: crate::PRICED_AS_OF.to_string(),
             }
         } else {
@@ -960,6 +1191,37 @@ impl UsageEngine {
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
+    /// On-disk size of the store, cached for [`DISK_SIZE_TTL`] (U2). Read from
+    /// `system.parts` (active + outdated parts); the recursive directory walk
+    /// is only the fallback and runs on a blocking thread, never on a tokio
+    /// worker (the dir once held tens of thousands of parts).
+    async fn disk_bytes(&self, ch: &ClickHouse) -> u64 {
+        if let Some((at, bytes)) = *self.disk_cache.lock().expect("disk cache lock") {
+            if at.elapsed() < DISK_SIZE_TTL {
+                return bytes;
+            }
+        }
+        let from_parts = ch
+            .query_rows("SELECT sum(bytes_on_disk) AS n FROM system.parts")
+            .await
+            .ok()
+            .and_then(|r| r.into_iter().next())
+            .and_then(|v| v.get("n").and_then(json_u64))
+            .filter(|n| *n > 0);
+        let bytes = match from_parts {
+            Some(n) => n,
+            None => {
+                let dir = ch.data_dir().to_path_buf();
+                tokio::task::spawn_blocking(move || dir_size(&dir))
+                    .await
+                    .unwrap_or(0)
+            }
+        };
+        *self.disk_cache.lock().expect("disk cache lock") =
+            Some((std::time::Instant::now(), bytes));
+        bytes
+    }
+
     /// Run a query and deserialize each row into `T`.
     async fn rows<T: serde::de::DeserializeOwned>(&self, sql: &str) -> Result<Vec<T>> {
         let Some(ch) = self.ch() else {
@@ -974,20 +1236,6 @@ impl UsageEngine {
             );
         }
         Ok(out)
-    }
-
-    /// Run a single-`count()` query, returning 0 on any error.
-    async fn scalar(&self, sql: &str) -> u64 {
-        let Some(ch) = self.ch() else { return 0 };
-        let rows = match ch.query_rows(sql).await {
-            Ok(r) => r,
-            Err(_) => return 0,
-        };
-        rows.first()
-            .and_then(|r| r.as_object())
-            .and_then(|o| o.values().next())
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0)
     }
 }
 
@@ -1057,6 +1305,79 @@ fn ndjson(events: &[UsageEvent]) -> String {
         }
     }
     s
+}
+
+/// ClickHouse's JSON output quotes 64-bit integers by default
+/// (`output_format_json_quote_64bit_integers`); accept both shapes.
+fn json_u64(v: &serde_json::Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// Decode a row set; a malformed row is an error (same as [`UsageEngine::rows`]).
+fn decode_rows<T: serde::de::DeserializeOwned>(raw: Vec<serde_json::Value>) -> Result<Vec<T>> {
+    raw.into_iter()
+        .map(|v| {
+            serde_json::from_value(v)
+                .map_err(|e| otto_core::Error::Internal(format!("decode usage row: {e}")))
+        })
+        .collect()
+}
+
+/// Per-(provider, model) token rollup under `cond` (a WHERE body).
+fn models_sql(cond: &str) -> String {
+    format!(
+        "SELECT provider, model,
+                count() AS events,
+                sum(input_tokens) AS input_tokens,
+                sum(output_tokens) AS output_tokens,
+                sum(cache_read_tokens) AS cache_read_tokens,
+                sum(cache_write_tokens) AS cache_write_tokens,
+                sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                round(sum(cost_usd), 6) AS cost_usd
+         FROM usage_events
+         WHERE {cond}
+         GROUP BY provider, model
+         ORDER BY total_tokens DESC, events DESC"
+    )
+}
+
+/// Per-(day, provider, model) token rollup under `cond` (a WHERE body).
+fn daily_models_sql(cond: &str) -> String {
+    format!(
+        "SELECT toString(event_date) AS day, provider, model,
+                sum(input_tokens) AS input_tokens,
+                sum(output_tokens) AS output_tokens,
+                sum(cache_read_tokens) AS cache_read_tokens,
+                sum(cache_write_tokens) AS cache_write_tokens,
+                sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                round(sum(cost_usd), 6) AS cost_usd
+         FROM usage_events
+         WHERE {cond}
+         GROUP BY event_date, provider, model
+         ORDER BY event_date, total_tokens DESC"
+    )
+}
+
+/// Apply the retention window to both tables, but only where it differs from
+/// the TTL the table already has (P5): an unchanged window issues no ALTER.
+async fn ensure_ttl(ch: &ClickHouse, retention_days: u32) -> Result<()> {
+    let want = retention_days.max(1);
+    let current = ch
+        .query_rows(schema::TABLE_TTLS_SQL)
+        .await
+        .unwrap_or_default();
+    let all_match = current.len() == 2
+        && current.iter().all(|row| {
+            row.get("engine_full")
+                .and_then(serde_json::Value::as_str)
+                .and_then(schema::parse_ttl_days)
+                == Some(want)
+        });
+    if all_match {
+        return Ok(());
+    }
+    ch.exec(&schema::alter_ttl_sql(want)).await
 }
 
 /// Convert "last N days" into the ClickHouse `today() - X` offset (inclusive of
@@ -1169,5 +1490,67 @@ mod ch_string_tests {
         // A trailing backslash can no longer escape the closing quote.
         assert_eq!(ch_string("x\\"), "x\\\\");
         assert_eq!(ch_string("a\\' OR 1=1 --"), "a\\\\\\' OR 1=1 --");
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn scope_filter_narrows_to_listed_sessions() {
+        assert_eq!(UsageScope::All.filter(), "");
+        assert_eq!(
+            UsageScope::Sessions(&[]).filter(),
+            "AND 0",
+            "no sessions → no rows"
+        );
+        let ids = vec!["s1".to_string(), "o'x".to_string()];
+        assert_eq!(
+            UsageScope::Sessions(&ids).filter(),
+            "AND session_id IN ('s1','o\\'x')"
+        );
+        assert_eq!(UsageScope::All.label(), "all");
+        assert_eq!(UsageScope::Sessions(&ids).label(), "own");
+    }
+
+    #[test]
+    fn model_rollups_group_by_model() {
+        let sql = models_sql("event_date >= today() - 6");
+        assert!(sql.contains("GROUP BY provider, model"));
+        let sql = daily_models_sql("1");
+        assert!(sql.contains("GROUP BY event_date, provider, model"));
+    }
+
+    #[test]
+    fn json_u64_accepts_quoted_integers() {
+        assert_eq!(json_u64(&serde_json::json!(7)), Some(7));
+        assert_eq!(json_u64(&serde_json::json!("12")), Some(12));
+        assert_eq!(json_u64(&serde_json::json!(null)), None);
+    }
+
+    #[tokio::test]
+    async fn summary_without_engine_is_empty_not_error() {
+        // No ClickHouse ("not installed") is the one case that may return an
+        // empty summary; a failing ClickHouse propagates (see summary_scoped).
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = UsageConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let engine = UsageEngine::start(cfg, dir.path().to_path_buf()).await;
+        let s = engine.summary(7, true).await.unwrap();
+        assert_eq!(s.total_tokens, 0);
+        assert_eq!(s.scope, "all");
+        let ids = vec!["x".to_string()];
+        let r = engine
+            .report(7, true, UsageScope::Sessions(&ids))
+            .await
+            .unwrap();
+        assert_eq!(r.scope, "own");
+        assert!(engine
+            .daily_model_range("2026-01-01", "2026-01-02")
+            .await
+            .is_err());
     }
 }

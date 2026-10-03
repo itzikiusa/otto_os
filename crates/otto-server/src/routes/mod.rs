@@ -11,6 +11,7 @@ pub mod api_client;
 pub(crate) mod api_oauth;
 pub(crate) mod api_response_cache;
 pub mod api_stream;
+pub mod assistant;
 pub mod audit;
 pub mod auth_routes;
 pub mod backup;
@@ -35,16 +36,15 @@ pub mod mcp_servers;
 pub mod meta;
 pub mod mission;
 pub mod name_themes;
+pub mod network_profiles;
 pub mod notifications;
 pub mod onboarding;
 pub mod personal_agents;
-pub mod assistant;
-pub mod provider_accounts;
 pub mod product_memory;
-pub mod proof;
 pub mod projects;
-pub mod network_profiles;
+pub mod proof;
 pub mod proof_pack;
+pub mod provider_accounts;
 pub mod repo_rules;
 pub mod runs;
 pub mod scheduled_tasks;
@@ -260,6 +260,9 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(workspaces::members).put(workspaces::set_members),
         )
         .route("/settings", get(settings::get_all).put(settings::put_all))
+        // Database maintenance (14-daemon-perf P3; root only).
+        .route("/admin/db/stats", get(settings::db_stats))
+        .route("/admin/db/compact", post(settings::db_compact))
         // --- Dynamic model catalog (discovered per-provider model ids) ----
         .route("/providers/models", get(crate::model_catalog::list))
         // --- Walkthrough video redirect resolver (WebKit can't follow a
@@ -298,7 +301,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/git/repos/directory",
             get(crate::repo_directory::repo_directory),
         )
-        .route("/git/repos/resolve", get(crate::repo_directory::repo_resolve))
+        .route(
+            "/git/repos/resolve",
+            get(crate::repo_directory::repo_resolve),
+        )
         // --- The same discovery for every OTHER id an agent tool takes
         //     (workflows, connections, issue accounts, clusters, …):
         //     cross-workspace directory + friendly-reference resolution. -----
@@ -389,6 +395,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route("/usage/status", get(usage::status))
         .route("/usage/summary", get(usage::summary))
         .route("/usage/by-kind", get(usage::by_kind))
+        .route("/usage/report", get(usage::report))
+        .route("/usage/ccusage-check", post(usage::ccusage_check))
         .route("/usage/metrics", get(usage::metrics))
         .route("/usage/config", put(usage::put_config))
         .route("/usage/install", post(usage::install))
@@ -400,6 +408,12 @@ pub fn protected_routes() -> Router<ServerCtx> {
         // Work-graph attribution drilldown + pre-launch cost forecast (B1).
         .route("/usage/attribution", get(usage::attribution))
         .route("/usage/forecast", post(usage::forecast))
+        // Per-session tokens + cost for the Agents page (review A5).
+        .route("/sessions/{id}/usage", get(usage::session_usage))
+        .route(
+            "/workspaces/{wid}/sessions/usage",
+            get(usage::workspace_sessions_usage),
+        )
         .route(
             "/notifications",
             get(notifications::list).delete(notifications::clear),

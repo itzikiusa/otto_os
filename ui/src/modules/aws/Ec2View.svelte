@@ -19,6 +19,9 @@
   import ViewToolbar from './ViewToolbar.svelte';
   import AwsDrawer from './AwsDrawer.svelte';
   import MetricsPanel from './MetricsPanel.svelte';
+  import RegionPicker from './RegionPicker.svelte';
+  import RegionErrors from './RegionErrors.svelte';
+  import { ALL_REGIONS } from '../../lib/api/aws';
   import { fmtAgo, fmtDate, awsErrorText } from './util';
   import type { AwsAccount, Ec2Action, Ec2Instance, Ec2InstanceDetail } from '../../lib/api/types';
 
@@ -45,6 +48,10 @@
   let loading = $state(false);
   let error = $state('');
   const instances = $derived(aws.ec2[`${account.id}:${region}`] ?? null);
+  const allRegions = $derived(region === ALL_REGIONS);
+  const regionErrors = $derived(aws.regionErrors[`${account.id}:${region}`] ?? []);
+  /** The region a row lives in (rows of an "All regions" list carry it). */
+  const rowRegion = (i: Ec2Instance): string => i.region ?? region;
 
   const shown = $derived.by(() => {
     const q = filter.trim().toLowerCase();
@@ -87,11 +94,11 @@
     if (!resourceAccess.can('aws_account', account.id, `ec2_${action}`, 'aws_ec2', 'edit')) return;
     const label = i.name ? `${i.name} (${i.instance_id})` : i.instance_id;
     if (action === 'start') {
-      const ok = await confirmer.ask(`Start ${label} in ${account.name} · ${region}?`, { title: 'Start instance', confirmLabel: 'Start', danger: false });
+      const ok = await confirmer.ask(`Start ${label} in ${account.name} · ${rowRegion(i)}?`, { title: 'Start instance', confirmLabel: 'Start', danger: false });
       if (!ok) return;
     } else {
       const typed = await confirmer.promptText(
-        `${action === 'stop' ? 'Stop' : 'Reboot'} ${label} in ${account.name} · ${region}${account.environment === 'prod' ? ' — this is PRODUCTION' : ''}? Type the instance id to confirm.`,
+        `${action === 'stop' ? 'Stop' : 'Reboot'} ${label} in ${account.name} · ${rowRegion(i)}${account.environment === 'prod' ? ' — this is PRODUCTION' : ''}? Type the instance id to confirm.`,
         { title: `${action === 'stop' ? 'Stop' : 'Reboot'} instance`, confirmLabel: action === 'stop' ? 'Stop' : 'Reboot', placeholder: i.instance_id, danger: true },
       );
       if (typed === null) return;
@@ -102,7 +109,7 @@
     }
     busy = { ...busy, [i.instance_id]: true };
     try {
-      const r = await awsApi.ec2Action(account.id, i.instance_id, action, region);
+      const r = await awsApi.ec2Action(account.id, i.instance_id, action, rowRegion(i));
       toasts.success(`${action} sent`, `${i.instance_id}: ${r.previous_state} → ${r.current_state}`);
       await load();
     } catch (e) {
@@ -145,7 +152,7 @@
     if (detail?.inst.instance_id !== i.instance_id) drawerTab = 'overview';
     detail = { inst: i, full: null, error: '' };
     try {
-      const d = await awsApi.ec2Instance(account.id, i.instance_id, region);
+      const d = await awsApi.ec2Instance(account.id, i.instance_id, rowRegion(i));
       if (detail?.inst.instance_id === i.instance_id) detail = { inst: i, full: d, error: '' };
     } catch (e) {
       if (detail?.inst.instance_id === i.instance_id)
@@ -198,16 +205,7 @@
   bind:auto
   onrefresh={() => void load()}
 >
-  <label class="sel">
-    <span class="lbl">Region</span>
-    {#if aws.regions.length}
-      <select bind:value={region} aria-label="Region">
-        {#each aws.regions as r (r.code)}<option value={r.code}>{r.code}</option>{/each}
-      </select>
-    {:else}
-      <input class="mono" bind:value={region} aria-label="Region" size={12} />
-    {/if}
-  </label>
+  <RegionPicker {account} service="ec2" bind:region allowAll />
   <label class="sel">
     <span class="lbl">State</span>
     <select bind:value={stateFilter} aria-label="State filter">
@@ -219,22 +217,23 @@
 
 <div class="body">
 <div class="tbl-wrap">
+  <RegionErrors errors={regionErrors} />
   {#if loading && !instances}
     <div class="pad" role="status"><p class="load-note">Loading EC2 instances…</p><Skeleton rows={8} /></div>
   {:else if error}
     <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
-    <EmptyState icon="box" title={filter || stateFilter ? 'No matching instances' : `No instances in ${region}`} />
+    <EmptyState icon="box" title={filter || stateFilter ? 'No matching instances' : allRegions ? 'No instances in any enabled region' : `No instances in ${region}`} />
   {:else}
     <table class="tbl">
       <thead>
         <tr>
-          <th>State</th><th>Name</th><th>Instance</th><th class="hide-sm">Type</th><th class="hide-sm">AZ</th>
+          <th>State</th><th>Name</th><th>Instance</th>{#if allRegions}<th>Region</th>{/if}<th class="hide-sm">Type</th><th class="hide-sm">AZ</th>
           <th class="hide-md">Private IP</th><th class="hide-md">Public IP</th><th class="hide-md">Launched</th><th class="act"></th>
         </tr>
       </thead>
       <tbody>
-        {#each shown as i (i.instance_id)}
+        {#each shown as i (`${i.region ?? ''}/${i.instance_id}`)}
           <tr
             class="trow"
             class:sel={detail?.inst.instance_id === i.instance_id}
@@ -246,6 +245,7 @@
             <td><span class="pill {i.state}">{i.state}</span></td>
             <td class="strong" title={i.name ?? ''}>{i.name ?? '—'}</td>
             <td class="mono">{i.instance_id}</td>
+            {#if allRegions}<td class="mono">{i.region ?? '—'}</td>{/if}
             <td class="mono hide-sm">{i.type}</td>
             <td class="mono hide-sm">{i.az ?? '—'}</td>
             <td class="mono hide-md">{i.private_ip ?? '—'}</td>
@@ -309,8 +309,8 @@
         {/if}
       </div>
     {:else if drawerTab === 'metrics'}
-      {#key `${account.id}/${region}/${inst.instance_id}`}
-        <MetricsPanel accountId={account.id} namespace="AWS/EC2" dimValue={inst.instance_id} {region} instanceType={inst.type} {onsignin} />
+      {#key `${account.id}/${rowRegion(inst)}/${inst.instance_id}`}
+        <MetricsPanel accountId={account.id} namespace="AWS/EC2" dimValue={inst.instance_id} region={rowRegion(inst)} instanceType={inst.type} {onsignin} />
       {/key}
     {:else}
       <div class="dt">
@@ -335,26 +335,6 @@
   }
   .pad {
     padding: 12px;
-  }
-  .sel {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-s);
-  }
-  .lbl {
-    color: var(--text-dim);
-  }
-  .sel select,
-  .sel input {
-    height: 26px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--bg);
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    padding: 0 4px;
   }
   .body {
     flex: 1;

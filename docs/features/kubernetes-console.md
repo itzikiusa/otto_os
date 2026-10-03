@@ -145,6 +145,18 @@ large clusters); a denied verb simply comes back as a `403`.
 
 ## 3. The cluster workspace
 
+One workspace per cluster with a **Resources | Monitor** switch in the header
+(`#/kubernetes/<id>/<kind>[/<ns>/<name>]` and `#/kubernetes/<id>/monitor[/<tab>]`;
+see [Kubernetes Monitoring](./kubernetes-monitoring.md)). Leaving for the
+Monitor, the clusters overview or another module never deselects the cluster:
+the last four (cluster, kind, namespace) row sets stay cached, so coming back
+paints at once and refreshes quietly. The text filter (per kind), the drawer
+tab and the table's scroll position are remembered per cluster in
+`localStorage` (`otto_k8s_ui:<user>:<cluster>`), and the sidebar resumes the
+exact route last shown (see [Multi-window](./multi-window.md#how-it-works)),
+so a pod drawer with its filter survives a module switch and a reload. Click
+the active Kubernetes entry in the sidebar again for the clusters overview.
+
 ### Namespaces, nodes, resource kinds
 
 The top bar has a namespace filter (**All namespaces** ⇒ kubectl `-A`,
@@ -221,6 +233,12 @@ fallback when the row is gone):
   Shell buttons open it straight on those tabs. The row menu offers the same
   as **Pods** and **Logs (all pods)**.
 - **Logs** — one stream across every matching pod (next section).
+
+Every drawer has a **Refresh** button in its header, and re-reads its detail
+quietly about 1.5 s after an action on the object (restart, scale, sync, …).
+Pod and workload drawers also have a **Monitor** button (opens the workload
+in the Monitor, row expanded) and an **HTTP** tab (next section, *Pod HTTP
+actions*); the pod Metrics tab ends with a **History (Monitor)** section.
 
 ### Logs
 
@@ -309,6 +327,46 @@ resource name; the UI collects it with `confirmer.promptText`, and the
 
 Row actions live in the right-click `ctxMenu` and the drawer's toolbar; the
 Argo CD sync dialog collects revision + prune.
+
+### Pod HTTP actions (actuator loggers & co.)
+
+`POST /k8s/clusters/{id}/pod-http` sends one HTTP request to a pod's port — or
+fans it out to every running pod of a deployment / statefulset / daemonset /
+replicaset / job (≤ 50 pods, ≤ 8 at a time) — and returns one result per pod
+(status, ms, headers, body ≤ 256 KiB). Typical use is Spring Boot actuator:
+`GET /actuator/loggers`, `POST /actuator/loggers/<logger>` with
+`{"configuredLevel":"DEBUG"}`, `GET /actuator/health|info|env|threaddump`,
+`POST /actuator/refresh`.
+
+- **Transport.** The API server's pod proxy through a pooled per-cluster
+  `kubectl proxy` (private Unix socket, pod-proxy paths only; the monitor's own
+  proxies stay GET-only). If it cannot start, fails at transport level, or the
+  API server refuses `pods/proxy` (common under Rancher RBAC), Otto falls back
+  to `kubectl port-forward pod/<pod> 0:<port>` + a loopback request. Each result
+  says which (`via`).
+- **Access.** A `GET` needs the `workloads_view` cluster op; any other method
+  needs `exec` (Edit). On a **prod** cluster a non-GET call is refused with
+  `409 confirm_required` unless `confirm_name` equals the pod / workload name
+  (the UI asks for it typed).
+- **Saved actions.** `GET/PUT/DELETE /k8s/clusters/{id}/pod-actions` keep
+  per-workload requests (migration `0149_k8s_pod_actions.sql`); `{{logger}}` /
+  `{{level}}` variables in the path / body template are filled at run time.
+  Credential headers are never stored.
+- **Audit.** `k8s.pod_http` records cluster, namespace, pods, method, path,
+  redacted headers, per-pod status codes and the body's sha256 — never the body.
+- **In the UI.** The drawer's **HTTP** tab (pods and the workload kinds
+  above): saved actions for the workload and built-in actuator presets on the
+  left (Loggers, Get logger, **Set log level** with a TRACE…OFF / RESET
+  picker — RESET sends `configuredLevel: null` — Health, Info, Environment,
+  Metrics, Refresh config, Thread dump); method, port (guessed from the
+  container ports: management/actuator/admin, then http*, else 8080), path,
+  `{{variable}}` inputs, headers and body on the right; **This pod / All pods
+  of <workload>** for a pod whose owner is known; one result row per pod
+  (status, ms, port-forward marker) expanding to the pretty-printed body with
+  Copy. Mutating methods need Edit; on prod the target name must be typed.
+- **MCP.** `k8s_pod_http` is approval-gated for every method and sits in the
+  irreversible tier (no category auto-approve rule covers it);
+  `k8s_pod_actions_list` is a read.
 
 ---
 
@@ -437,6 +495,7 @@ none for streams), and never goes through a shell.
 | First-run panel says `kubectl not installed` although you have it | The daemon's `PATH` does not include it. It searches `which`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `<data_dir>/bin` — symlink your binary into one of those, or click **Install** (a second copy in `<data_dir>/bin` is harmless). |
 | Install job `failed` with a brew error | Read the log tail; brew failures (e.g. an outdated Xcode CLT) fall through to the direct download automatically — retry if the download step also failed (network / GitHub rate limit). |
 | `Test` says `connected` but pods list is `403 cluster RBAC: …` | Your context's identity may reach the API but not that namespace/resource. Pick another namespace or ask for RBAC; Otto shows kubectl's exact reason. |
+| `credentials rejected — re-authenticate (e.g. aws sso login), then Refresh` | The API server rejected the credentials. For EKS / exec-plugin clusters Otto already dropped its cached token and retried once with a fresh one, so the source credentials themselves are stale: sign in again (AWS account card → **Sign in**, or `aws sso login`), then **Refresh**. No daemon restart needed. |
 | EKS cluster: `error: You must be logged in to the server (Unauthorized)` or `login required` | The linked AWS account's SSO session expired — use **Sign in** on the AWS account card, then retry. For key-based accounts check the account's region and that the IAM identity is mapped in the cluster's `aws-auth` / access entries. |
 | Discovery shows no contexts | `~/.kube/config` missing/unreadable or `$KUBECONFIG` points elsewhere for the daemon process (launchd environment ≠ your shell). Paste the kubeconfig or set `kubeconfig_path` explicitly. |
 | Argo Rollouts / ArgoCD not shown in the rail | Capabilities cache is stale or the CRDs are not visible to your identity — hit **Refresh capabilities** (`?refresh=true`) and check `kubectl api-resources --api-group=argoproj.io`. |

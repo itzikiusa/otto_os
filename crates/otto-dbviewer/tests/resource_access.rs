@@ -544,7 +544,7 @@ async fn governed_root_reads_cannot_call_a_mutating_builtin_overload() {
     .unwrap();
     // Fixture-only schema keeps this malicious overload away from other tests.
     let schema = format!("readonly_{}", otto_core::new_id().to_ascii_lowercase());
-    sqlx::raw_sql(&format!("CREATE SCHEMA {schema}; CREATE TABLE {schema}.effects (n integer); CREATE FUNCTION {schema}.lower(integer) RETURNS integer LANGUAGE plpgsql AS $$ BEGIN INSERT INTO {schema}.effects VALUES ($1); RETURN $1; END $$; REVOKE ALL ON FUNCTION {schema}.lower(integer) FROM PUBLIC;")).execute(&native).await.unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}; CREATE TABLE {schema}.effects (n integer); CREATE FUNCTION {schema}.lower(integer) RETURNS integer LANGUAGE plpgsql AS $$ BEGIN INSERT INTO {schema}.effects VALUES ($1); RETURN $1; END $$; REVOKE ALL ON FUNCTION {schema}.lower(integer) FROM PUBLIC;"))).execute(&native).await.unwrap();
     sqlx::query("UPDATE connections SET environment='prod',params_json=json_set(params_json,'$.__read_only_execution',0) WHERE id=?").bind(&f.conn).execute(&f.pool).await.unwrap();
     for statement in ["SELECT lower(1)", "SELECT 1; SELECT lower(1)"] {
         let req = QueryRequest {
@@ -581,10 +581,12 @@ async fn governed_root_reads_cannot_call_a_mutating_builtin_overload() {
         export_error.contains("read-only transaction"),
         "export must reach native readonly gate, got: {export_error}"
     );
-    let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {schema}.effects"))
-        .fetch_one(&native)
-        .await
-        .unwrap();
+    let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {schema}.effects"
+    )))
+    .fetch_one(&native)
+    .await
+    .unwrap();
     assert_eq!(count, 0);
     // Failed read-only execution returns a clean connection for another read.
     let result = f
@@ -601,7 +603,7 @@ async fn governed_root_reads_cannot_call_a_mutating_builtin_overload() {
         .await
         .unwrap();
     assert_eq!(result.rows[0][0], serde_json::json!(1));
-    sqlx::raw_sql(&format!("DROP SCHEMA {schema} CASCADE"))
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&native)
         .await
         .unwrap();

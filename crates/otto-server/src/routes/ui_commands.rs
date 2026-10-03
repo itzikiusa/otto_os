@@ -129,7 +129,8 @@ pub async fn set_ui_control(
     if req.enabled {
         if session.created_by != user.id {
             return Err(ApiError(Error::Forbidden(
-                "only the session's owner can allow UI control — it drives their Otto window".into(),
+                "only the session's owner can allow UI control — it drives their Otto window"
+                    .into(),
             )));
         }
         if auth.real_user.id != user.id {
@@ -151,7 +152,10 @@ pub async fn set_ui_control(
         ctx.ui_bridge.cancel_session(
             &id,
             "revoked",
-            UiError::new("cancelled_by_user", "the user stopped UI control for this session"),
+            UiError::new(
+                "cancelled_by_user",
+                "the user stopped UI control for this session",
+            ),
         );
     }
     ctx.ui_bridge.grant_changed();

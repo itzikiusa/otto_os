@@ -43,10 +43,9 @@ impl DbViewerService {
             "credential_id": profile.id, "credential_params": profile.params,
             "credential_secret": secret, "node": node,
         });
-        Ok(format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&value).map_err(|e| Error::Internal(e.to_string()))?)
-        ))
+        Ok(hex::encode(Sha256::digest(
+            serde_json::to_vec(&value).map_err(|e| Error::Internal(e.to_string()))?,
+        )))
     }
 
     async fn approved_attempt(

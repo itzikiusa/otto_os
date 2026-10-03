@@ -21,11 +21,16 @@
 //    (`--knob: 8px;`) — that counts as a definition. Properties owned by
 //    third-party libraries are listed in EXTERNAL_PREFIXES.
 //
+// 3. Icon-only buttons are labelled. A <button> whose only content is
+//    <Icon …/> needs BOTH aria-label (screen readers) and title (hover
+//    tooltip) — name the action, e.g. "Delete credential", not "Delete".
+//    (Ratcheted until the tree hit zero on 2026-10-03, then promoted.)
+//
 // RATCHETED rules — the tree predates them, so today's debt is recorded per
 // file in scripts/ui-guards-baseline.json and only an INCREASE fails (a file
 // gaining an occurrence, or a new file having any). They scan the <style>
 // blocks of .svelte files and the .css files under src/ (not lib/tokens.css,
-// which is where literal values belong), plus button markup for the last:
+// which is where literal values belong):
 //
 //   color-literal     #hex / rgb() / hsl() / named white|black in a component
 //                     style → a token (lib/tokens.css). rgba(0,0,0,x) —
@@ -44,8 +49,20 @@
 //                     the shared one via :global() on purpose.
 //   accent-text       `color: var(--accent)` → var(--accent-text) (the fill
 //                     colour fails contrast as text).
-//   icon-button-label a <button> whose only content is <Icon …/> without
-//                     BOTH aria-label and title.
+//   accent-fill       a rule set with `background(-color): var(--accent)` AND
+//                     a `color:` declaration — i.e. text on the raw accent,
+//                     which is ~3.6:1 under white (fails AA) and ignores the
+//                     Warm-dark `--accent-contrast`. Fill with
+//                     var(--accent-solid) + color: var(--accent-contrast)
+//                     (as `.btn.primary` does). Text-less dots/bars (no
+//                     `color:` in the rule set) stay on --accent.
+//   outline-removed   `outline: none|0` in a rule set that (a) has no :focus
+//                     in its selector (:focus/-visible/-within), (b) sets no
+//                     border-color / box-shadow itself, in a file that (c) has
+//                     no :focus-within rule and no :focus/:focus-visible rule
+//                     setting border-color / box-shadow / outline. That is the
+//                     "bare input, nothing lights up" case → use `.input` or
+//                     `.input-group` (app.css), or add a :focus-within ring.
 //
 // Two more ratcheted rules scan SCRIPT code (.ts/.js files and the non-style
 // part of .svelte files, comments blanked) — perf patterns (GAPS §0 G):
@@ -172,7 +189,8 @@ const RULES = {
   'physical-prop': 'physical left/right property — use the logical one (…-inline-start/-end, text-align: start/end)',
   'global-class': 'local style on a global app.css class — prefix the class name, or wrap it in :global() on purpose',
   'accent-text': 'color: var(--accent) as text — use var(--accent-text)',
-  'icon-button-label': 'icon-only <button> needs both aria-label and title',
+  'accent-fill': 'text on background: var(--accent) — fill with var(--accent-solid) and set color: var(--accent-contrast)',
+  'outline-removed': 'outline: none with no replacement focus indicator — add a :focus-visible / :focus-within border-color + box-shadow ring (app.css .input / .input-group)',
   'raw-set-interval': 'raw setInterval — use pollWhileVisible / liveQuery (lib/poll.ts, lib/live.ts); clocks go on INTERVAL_ALLOW',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
 };
@@ -275,7 +293,39 @@ for (const f of files) {
   }
 }
 
-// icon-only buttons: scan markup (script/style/comments blanked).
+// rule-set rules (accent-fill, outline-removed): scan LEAF rule sets
+// (`selector { decls }` with no nested braces — @media/@container bodies
+// are reached through their leaf rules). Simple on purpose: no cascade, no
+// cross-file knowledge.
+const LEAF = /(?<=^|[{};])([^{};]*)\{([^{}]*)\}/g;
+const declsOf = (body) => [...body.matchAll(/(^|;)\s*([a-zA-Z-]+)\s*:([^;]*)/g)].map((d) => ({ prop: d[2].toLowerCase(), value: d[3].trim(), at: d.index + d[1].length }));
+for (const f of files) {
+  const blocks = styleBlocks(f).map(({ css, offset }) => ({ css: css.replace(/\/\*[\s\S]*?\*\//g, blank), offset }));
+  const sets = [];
+  for (const { css, offset } of blocks) {
+    for (const m of css.matchAll(LEAF)) {
+      const sel = m[1].trim();
+      if (!sel || sel.startsWith('@')) continue;
+      const bodyAt = offset + m.index + m[0].indexOf('{') + 1;
+      sets.push({ sel, decls: declsOf(m[2]).map((d) => ({ ...d, at: bodyAt + d.at })) });
+    }
+  }
+  const sets_ = (re) => sets.filter((s) => re.test(s.sel));
+  const sets2 = (s, props) => s.decls.some((d) => props.includes(d.prop) && !/^(none|0)\b/.test(d.value));
+  const fileHasFocusRing =
+    sets_(/:focus-within/).length > 0 ||
+    sets_(/:focus(?!-within)/).some((s) => sets2(s, ['border-color', 'box-shadow', 'outline', 'outline-color']));
+  for (const s of sets) {
+    const bg = s.decls.find((d) => (d.prop === 'background' || d.prop === 'background-color') && /^var\(\s*--accent\s*\)/.test(d.value));
+    if (bg && s.decls.some((d) => d.prop === 'color')) hit('accent-fill', f, bg.at, `"${s.sel}" — ${bg.prop}: var(--accent) under text`);
+    const ol = s.decls.find((d) => d.prop === 'outline' && /^(none|0)\b/.test(d.value));
+    if (ol && !/:focus/.test(s.sel) && !sets2(s, ['border-color', 'box-shadow']) && !fileHasFocusRing) {
+      hit('outline-removed', f, ol.at, `"${s.sel}" — outline: ${ol.value} with no focus replacement`);
+    }
+  }
+}
+
+// ---------- rule 3 (HARD): icon-only buttons — scan markup (script/style/comments blanked) ----------
 function tagEnd(text, i) {
   // From just after `<button`, find the closing `>` of the start tag,
   // skipping quoted strings and {…} expressions (which may contain `>`).
@@ -312,7 +362,8 @@ for (const f of files) {
     const hasTitle = /(^|\s)title\s*=|\{title\}/.test(attrs);
     if (hasAria && hasTitle) continue;
     const missing = [!hasAria && 'aria-label', !hasTitle && 'title'].filter(Boolean).join(' + ');
-    hit('icon-button-label', f, m.index, `icon-only <button> missing ${missing}`);
+    if (allowed(f.text, m.index)) continue;
+    problems.push(`${f.rel}:${lineOf(f.text, m.index)}  icon-only <button> missing ${missing} — add both (name the action)`);
   }
 }
 

@@ -207,6 +207,23 @@ struct InFlightQuery {
     /// stops Otto's side: a mongosh child is killed (`kill_on_drop`) and no
     /// further statement of a batch is sent.
     abort: Option<tokio::task::AbortHandle>,
+    /// When the query was registered. `query_status` reports it as
+    /// `elapsed_ms`, so a client that did not start the run itself (an agent's
+    /// UI-control run, another window, a reload with an old marker) still shows
+    /// the real running time instead of counting from 0.
+    started: Instant,
+}
+
+impl InFlightQuery {
+    /// The `running` status of this in-flight query, with its elapsed time.
+    fn running_status(&self) -> QueryStatus {
+        QueryStatus {
+            status: "running",
+            result: None,
+            error: None,
+            elapsed_ms: Some(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+        }
+    }
 }
 
 /// How long a cancel waits for an execution to end on its own after an
@@ -1126,15 +1143,12 @@ impl DbViewerService {
         use sha2::{Digest, Sha256};
         self.reap_idle().await;
         let prefix = format!("{conn_id}\0");
-        let fingerprint = format!(
-            "{:x}",
-            Sha256::digest(format!(
-                "{ssh:?}|{}|{}|{}",
-                engine.as_str(),
-                config.host,
-                config.port
-            ))
-        );
+        let fingerprint = hex::encode(Sha256::digest(format!(
+            "{ssh:?}|{}|{}|{}",
+            engine.as_str(),
+            config.host,
+            config.port
+        )));
         let key = format!("{prefix}{fingerprint}");
         // Fingerprint changes retire pending old setup; held query leases remain alive.
         {
@@ -1805,6 +1819,7 @@ impl DbViewerService {
                     resolved: Some(r.clone()),
                     token: token.clone(),
                     abort: None,
+                    started: Instant::now(),
                 },
             );
         }
@@ -1905,12 +1920,14 @@ impl DbViewerService {
         // Multi-statement batches carry later result sets in `more_results`, so
         // mask those too (never leak an unmasked cell just because it was the 2nd
         // statement).
-        let result = result.map(|mut res| {
-            if req.mask == Some(true) {
-                mask_result(&mut res);
-            }
-            res
-        });
+        let result = result
+            .map(|mut res| {
+                if req.mask == Some(true) {
+                    mask_result(&mut res);
+                }
+                res
+            })
+            .map_err(|e| self.with_name_suggestions(&r, conn_id, user_id, req, e));
 
         match &result {
             _ if !record => {}
@@ -1946,6 +1963,59 @@ impl DbViewerService {
         result
     }
 
+    /// On an unknown column/table error, append `SUGGEST: a, b` — the nearest
+    /// names from the completion snapshot ALREADY cached for this connection
+    /// (the driver's own, or the enforced path's access-scoped one). No network
+    /// and no build: a cold cache just means no suggestions.
+    fn with_name_suggestions(
+        &self,
+        r: &Resolved,
+        conn_id: &Id,
+        user_id: &Id,
+        req: &QueryRequest,
+        e: Error,
+    ) -> Error {
+        let Error::Upstream(msg) = &e else {
+            return e;
+        };
+        let Some(unknown) = crate::errors::unknown_name(r.config.engine, msg) else {
+            return e;
+        };
+        // The scope a completion snapshot is keyed on: the editor's active
+        // db/schema, else the profile default; Postgres defaults to `public`.
+        let mut scopes: Vec<String> = Vec::new();
+        for s in [
+            req.node.clone(),
+            r.config.database.clone(),
+            Some("public".to_string()),
+            Some(String::new()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !scopes.contains(&s) {
+                scopes.push(s);
+            }
+        }
+        let snap = scopes.iter().find_map(|scope| {
+            r.driver
+                .cached_completion_snapshot(&r.config, scope)
+                .or_else(|| {
+                    self.enforced_completions
+                        .get_snapshot(conn_id.as_str(), &format!("{user_id}\u{0}{scope}"))
+                })
+                .filter(|snap| !snap.objects.is_empty())
+        });
+        let Some(snap) = snap else {
+            return e;
+        };
+        let names = crate::errors::suggest_from_snapshot(&unknown, &snap, &req.statement);
+        if names.is_empty() {
+            return e;
+        }
+        Error::Upstream(crate::errors::with_suggestions(msg.clone(), &names))
+    }
+
     /// Re-attach probe for a query previously submitted with `query_id`:
     /// `"running"` while its detached task executes, `"done"` (+ result/error)
     /// while its parked outcome is retained, `"unknown"` otherwise (never seen,
@@ -1960,31 +2030,29 @@ impl DbViewerService {
         self.authorize(conn_id, user_id, None, "discover").await?;
         if self.is_enforced(conn_id).await? {
             let key = format!("{user_id}:{query_id}");
-            let running = self
-                .in_flight
-                .lock()
-                .is_ok_and(|m| m.get(&key).is_some_and(|q| &q.conn_id == conn_id));
-            return Ok(QueryStatus {
-                status: if running { "running" } else { "unknown" },
+            let running = self.in_flight.lock().ok().and_then(|m| {
+                m.get(&key)
+                    .filter(|q| &q.conn_id == conn_id)
+                    .map(InFlightQuery::running_status)
+            });
+            return Ok(running.unwrap_or(QueryStatus {
+                status: "unknown",
                 result: None,
                 error: None,
-            });
+                elapsed_ms: None,
+            }));
         }
         Ok(self.legacy_query_status(conn_id, query_id))
     }
 
     fn legacy_query_status(&self, conn_id: &Id, query_id: &str) -> QueryStatus {
-        let running = self
-            .in_flight
-            .lock()
-            .map(|m| m.get(query_id).is_some_and(|q| &q.conn_id == conn_id))
-            .unwrap_or(false);
-        if running {
-            return QueryStatus {
-                status: "running",
-                result: None,
-                error: None,
-            };
+        let running = self.in_flight.lock().ok().and_then(|m| {
+            m.get(query_id)
+                .filter(|q| &q.conn_id == conn_id)
+                .map(InFlightQuery::running_status)
+        });
+        if let Some(st) = running {
+            return st;
         }
         if let Ok(mut store) = self.finished.lock() {
             if let Some(f) = store.get(query_id, conn_id, Instant::now()) {
@@ -1993,11 +2061,13 @@ impl DbViewerService {
                         status: "done",
                         result: Some(res.clone()),
                         error: None,
+                        elapsed_ms: None,
                     },
                     Err(e) => QueryStatus {
                         status: "done",
                         result: None,
                         error: Some(e.clone()),
+                        elapsed_ms: None,
                     },
                 };
             }
@@ -2006,6 +2076,7 @@ impl DbViewerService {
             status: "unknown",
             result: None,
             error: None,
+            elapsed_ms: None,
         }
     }
 
@@ -3048,7 +3119,23 @@ mod tests {
             resolved: None,
             token,
             abort: None,
+            started: Instant::now(),
         }
+    }
+
+    #[test]
+    fn running_status_reports_elapsed_time() {
+        let mut q = entry("c1", None);
+        q.started = Instant::now()
+            .checked_sub(Duration::from_millis(3_200))
+            .expect("monotonic clock past 3.2 s");
+        let st = q.running_status();
+        assert_eq!(st.status, "running");
+        let ms = st.elapsed_ms.expect("a running query reports elapsed_ms");
+        assert!((3_200..60_000).contains(&ms), "elapsed_ms = {ms}");
+        let json = serde_json::to_value(&st).unwrap();
+        assert!(json.get("result").is_none() && json.get("error").is_none());
+        assert!(json["elapsed_ms"].as_u64().is_some());
     }
 
     // --- ensure_read_only: the MCP read-only policy gate (no DB needed) --------

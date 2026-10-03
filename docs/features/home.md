@@ -6,7 +6,7 @@
 Home is a **general dashboard** that fronts the rest of the app: up to **4 views**,
 each a **12-column grid of up to 8 live boxes** (Agents, Mission Control, a DB
 dashboard, Kubernetes, Insights, Usage). Views **slide** — arrows, dots, `←`/`→`,
-swipe — and **auto-rotate every 30 seconds**; every box can be **resized** in
+swipe — and can **auto-rotate every 30 seconds** (opt-in); every box can be **resized** in
 grid units and **zoomed** to fill the page. The layout is a per-device preference
 (localStorage), not workspace data: nothing about Home goes through the daemon.
 
@@ -27,7 +27,7 @@ the "Add box" picker only offers kinds the user can view.
 | Switch view | `‹` / `›` arrows, the dots, `←` / `→` (when no input is focused), a horizontal swipe, or ⌘K → *Home: show "…"* |
 | Add a view (max 4) | the dashed `+` next to the dots, or the view-name menu → *Add view* |
 | Rename / delete a view | click the view name (or right-click) → *Rename view…* / *Delete view* |
-| Auto-rotation | the **30s / Paused** toggle (appears with ≥2 views). Default **on**; the thin progress bar under the toolbar shows the countdown. Persisted. ⌘K → *Home: pause/resume auto-rotation* |
+| Auto-rotation | the **30s / Paused** toggle (appears with ≥2 views). Default **off** (moving content is opt-in, WCAG 2.2.2); the thin progress bar under the toolbar shows the countdown, and cycling pauses while the pointer or focus is inside the widgets. Persisted. ⌘K → *Home: pause/resume auto-rotation* |
 
 Rotation is **suspended** while a box is zoomed, a sheet is open, or the user is
 mid-gesture (resizing / dragging), and while the tab is hidden — a view is never
@@ -79,6 +79,12 @@ modules (`/workspaces/{ws}/workgraph/summary|items`, `/workspaces/{ws}/db/dashbo
   users. A malformed / stale persisted layout is sanitized on load (unknown kinds
   dropped, sizes clamped) rather than crashing the page.
 - **Auto-rotation is fixed at 30 s** (`ROTATE_MS`).
+- **Every space stays mounted.** Switching spaces only toggles `hidden` +
+  `inert`; boxes in an off-screen space (or under a zoomed box) get
+  `active={false}`, stop polling and keep their data, and resume without an
+  immediate fetch while that data is within their cadence. A DB-dashboard
+  widget set to **manual only** runs once per widget, never again because its
+  space came back on screen.
 - The DB-dashboard box renders the same `WidgetCard` as the Dashboards tab, so an
   **editor can delete a widget from Home** (with the usual confirm). Editing a
   widget still happens in the Database Explorer.

@@ -274,7 +274,10 @@ async fn list_all_sessions<S: SessionsCtx>(
             .list_all()
             .await?
             .into_iter()
-            .map(|w| otto_state::SessionScope { workspace_id: w.id, owner: None })
+            .map(|w| otto_state::SessionScope {
+                workspace_id: w.id,
+                owner: None,
+            })
             .collect()
     } else {
         let mut scopes: Vec<otto_state::SessionScope> = ctx
@@ -303,7 +306,11 @@ async fn list_all_sessions<S: SessionsCtx>(
 
 /// Drop rows whose bound resource the caller may no longer reach, and attach
 /// the live PTY state.
-async fn visible_out<S: SessionsCtx>(ctx: &S, user: &User, sessions: Vec<Session>) -> Vec<SessionOut> {
+async fn visible_out<S: SessionsCtx>(
+    ctx: &S,
+    user: &User,
+    sessions: Vec<Session>,
+) -> Vec<SessionOut> {
     let mut out = Vec::with_capacity(sessions.len());
     for session in sessions {
         if ctx.check_resource(user, &session).await.is_ok() {
@@ -398,7 +405,8 @@ async fn patch_session<S: SessionsCtx>(
             .any(|key| meta.get(*key).is_some() && meta.get(*key) != session.meta.get(*key))
         {
             return Err(ApiErr(Error::Forbidden(
-                "ui_control / client_id are server-owned; use POST /sessions/{id}/ui-control".into(),
+                "ui_control / client_id are server-owned; use POST /sessions/{id}/ui-control"
+                    .into(),
             )));
         }
     }

@@ -4,7 +4,7 @@
   // Three tabs: Summary | Files | Review (AI agents).
   import { onDestroy, untrack } from 'svelte';
   import { api, isAbortError } from '../../lib/api/client';
-  import type { DiffResp, PrComment, PrCommit, PrDetail } from '../../lib/api/types';
+  import type { DiffResp, NewPrCommentReq, PrComment, PrCommit, PrDetail } from '../../lib/api/types';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -130,8 +130,8 @@
     }
   });
 
-  async function load(rid: string, num: number): Promise<void> {
-    loading = true;
+  async function load(rid: string, num: number, quiet = false): Promise<void> {
+    if (!quiet) loading = true;
     try {
       const next = await api.get<PrDetail>(`/repos/${rid}/prs/${num}`);
       if (disposed || rid !== repoId || num !== number) return; // switched PRs mid-flight
@@ -254,14 +254,54 @@
     }
   }
 
-  async function postComment(body: string, path?: string, line?: number, inReplyTo?: string): Promise<void> {
-    await api.post<PrComment>(`/repos/${repoId}/prs/${number}/comments`, {
+  async function postComment(
+    body: string,
+    path?: string,
+    line?: number,
+    inReplyTo?: string,
+    anchor?: { side: 'old' | 'new'; oldLine: number | null },
+  ): Promise<void> {
+    const rid = repoId;
+    const num = number;
+    const req: NewPrCommentReq = {
       body,
       path: path ?? null,
       line: line ?? null,
       in_reply_to: inReplyTo ?? null,
-    });
-    if (!disposed) await load(repoId, number);
+    };
+    if (path && line != null) {
+      req.side = anchor?.side ?? 'new';
+      req.old_line = anchor?.oldLine ?? null;
+      // Anchor to the diff the reviewer is looking at; also spares the daemon
+      // a PR round-trip for the head sha.
+      if (diffHead) req.commit_id = diffHead;
+    }
+    const posted = await api.post<PrComment>(`/repos/${rid}/prs/${num}/comments`, req);
+    if (disposed || rid !== repoId || num !== number) return;
+    // Show it now (the full PR reload is 1–2 s of forge calls), then
+    // reconcile quietly in the background.
+    // Only a well-formed comment is merged; anything else waits for the reload.
+    if (pr && typeof posted?.id === 'string' && posted.id !== '') {
+      pr = { ...pr, comments: withComment(pr.comments, { ...posted, replies: posted.replies ?? [] }, inReplyTo) };
+    }
+    void load(rid, num, true);
+  }
+
+  /** `comments` with `c` appended — as a reply under the thread whose head
+   *  (or one of whose replies) is `parent`, else as a new top-level entry. */
+  function withComment(comments: PrComment[], c: PrComment, parent?: string): PrComment[] {
+    if (parent) {
+      const i = comments.findIndex(
+        (h) => h.id === parent || h.thread_id === parent || (h.replies ?? []).some((r) => r.id === parent),
+      );
+      if (i >= 0) {
+        const head = comments[i];
+        const next = comments.slice();
+        next[i] = { ...head, replies: [...(head.replies ?? []), c] };
+        return next;
+      }
+    }
+    return [...comments, c];
   }
 
   /** Resolve or reopen a review thread on the provider, then refresh statuses. */
@@ -627,7 +667,7 @@
             prMode={true}
             showNav={true}
             comments={inlineComments}
-            onAddComment={(path, line, body) => postComment(body, path, line)}
+            onAddComment={(path, line, body, anchor) => postComment(body, path, line, undefined, anchor)}
             onReplyComment={(parentId, body) => postComment(body, undefined, undefined, parentId)}
             onResolveComment={resolveThread}
             loadFile={loadPrFile}
@@ -803,7 +843,7 @@
     height: 22px;
     flex: none;
     border-radius: 50%;
-    background: var(--accent);
+    background: var(--accent-solid);
     color: var(--accent-contrast);
     display: inline-flex;
     align-items: center;

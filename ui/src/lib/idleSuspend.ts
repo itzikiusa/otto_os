@@ -67,9 +67,16 @@ export interface SuspendHint {
   title: string;
 }
 
+/** The countdown only shows inside this window before the suspend. Further
+ *  out it is noise — and false for any pane someone is looking at, which the
+ *  sweep never suspends (`is_watched` in manager.rs). */
+export const COUNTDOWN_WINDOW_MS = 2 * 60 * 60 * 1000;
+
 /**
- * "4m idle · suspends in 26m" for an idle agent pane, or null when the sweep
- * would never suspend it (a user-started session with the manual grace off).
+ * "4m idle · suspends in 26m" for an idle agent pane — the countdown only when
+ * the suspend is under {@link COUNTDOWN_WINDOW_MS} away, plain "4h idle"
+ * before that (the full rule stays in `title`) — or null when the sweep would
+ * never suspend it (a user-started session with the manual grace off).
  * `userStarted` mirrors `is_user_started` in manager.rs.
  */
 export function suspendHint(idleMs: number, userStarted: boolean, policy: IdleSuspendPolicy): SuspendHint | null {
@@ -81,7 +88,12 @@ export function suspendHint(idleMs: number, userStarted: boolean, policy: IdleSu
   const idleLabel =
     idleMin >= 90 ? `${Math.floor(idleMin / 60)}h idle` : idleMin > 0 ? `${idleMin}m idle` : `${idleSec}s idle`;
   const leftMs = graceSecs * 1000 - idleMs;
-  const label = leftMs <= 0 ? `${idleLabel} · suspending…` : `${idleLabel} · suspends in ${formatLeft(leftMs)}`;
+  const label =
+    leftMs <= 0
+      ? `${idleLabel} · suspending…`
+      : leftMs < COUNTDOWN_WINDOW_MS
+        ? `${idleLabel} · suspends in ${formatLeft(leftMs)}`
+        : idleLabel;
   const cap = policy.maxLiveAgentSessions;
   const title =
     `Session is idle. Once nobody is watching it, auto-suspend frees its RAM after ${formatGrace(graceSecs)} of quiet ` +

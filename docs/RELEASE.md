@@ -172,4 +172,8 @@ packaging/publish-walkthroughs.sh   # 720p re-encode → gh release upload --clo
 
 **Background daemon (optional, for a standalone install):**
 `packaging/com.otto.daemon.plist` is the `launchd` template that runs `ottod`
-on port `7700`.
+on port `7700`. Both it and the plist the app's supervisor installs set
+`ProcessType=Interactive`: launchd's default (and `Background`) throttles CPU
+and I/O for the daemon and every PTY child it spawns, which shows up as
+keystroke-echo lag. Verify with
+`launchctl print gui/$UID/com.otto.daemon | grep -i 'process type'`.

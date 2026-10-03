@@ -25,15 +25,15 @@ hex = { workspace = true }
 rdkafka = { workspace = true }
 apache-avro = { workspace = true }
 # SSH-tunnel Kafka proxy: SOCKS5 dial to brokers + broker-side TLS termination.
-tokio-socks = "0.5"
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
-rustls-pki-types = "1"
-webpki-roots = "1"
+tokio-socks = "0.5.3"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "tls12", "std"] }
+rustls-pki-types = "1.15.1"
+webpki-roots = "1.0.9"
 futures-util = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 sqlx = { workspace = true }
-tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
+tower = { version = "0.5.3", features = ["util"] }
+http-body-util = "0.1.5"

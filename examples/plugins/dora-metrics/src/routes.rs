@@ -24,25 +24,27 @@ fn data_dir() -> PathBuf {
 
 fn host_get(path: &str) -> Result<Value, String> {
     ureq::get(&format!("{}{}", env("OTTO_HOST_API"), path))
-        .set(
+        .header(
             "Authorization",
             &format!("Bearer {}", env("OTTO_PLUGIN_TOKEN")),
         )
         .call()
         .map_err(|e| e.to_string())?
-        .into_json::<Value>()
+        .body_mut()
+        .read_json::<Value>()
         .map_err(|e| e.to_string())
 }
 
 fn host_post(path: &str, body: Value) -> Result<Value, String> {
     ureq::post(&format!("{}{}", env("OTTO_HOST_API"), path))
-        .set(
+        .header(
             "Authorization",
             &format!("Bearer {}", env("OTTO_PLUGIN_TOKEN")),
         )
         .send_json(body)
         .map_err(|e| e.to_string())?
-        .into_json::<Value>()
+        .body_mut()
+        .read_json::<Value>()
         .map_err(|e| e.to_string())
 }
 

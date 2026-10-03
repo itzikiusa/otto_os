@@ -551,7 +551,7 @@ A workflow runs **manually by default**. You can attach triggers in the
 
 ```ts
 type TriggerKind = 'schedule' | 'webhook' | 'event' | 'chat';
-interface WorkflowTrigger { id; workflow_id; kind; spec: object; enabled; created_at }
+interface WorkflowTrigger { id; workflow_id; kind; spec: object; enabled; created_at; armed_at? }
 ```
 
 | Kind | Spec | Fires when… | Run input | Wired & firing in the daemon? |
@@ -569,6 +569,16 @@ expose canonical event names and a JSON object filter. Chat bindings expose the
 channel, chat, thread and mention setting. Result destinations support Slack or
 Telegram chat/thread and an HTTP(S) webhook. Editing retains server tokens,
 cursors and extension fields; clearing a destination removes it from use.
+
+**Arming (`armed_at`, migration 0151).** A schedule trigger is armed when it is
+created, re-enabled after a pause, or given a different `cadence` / `every_min` /
+`at` / `weekday` / `expr` / `timezone` / `run_at`; editing only the prompt or the
+destinations doesn't re-arm. The scheduler never looks before
+`max(last_run, armed_at)`, so re-enabling a trigger after a week does **not**
+fire the run it missed (with its worktrees and chat delivery) within a minute,
+and a daily 09:00 trigger enabled at 15:00 waits for tomorrow 09:00. Rows
+created before 0151 have `armed_at = null` and keep the old behaviour until
+their next resume or re-time.
 
 **Preview / validate** validates the draft without saving or firing anything.
 For schedules it displays the next five fire times using the scheduler's cadence
@@ -868,6 +878,14 @@ maps directly onto the `{channel, chat, thread?, mention_only?}` spec.
 ## 7. Running & monitoring
 
 ### Run
+- **Run…** opens the run panel with an **empty** run input: the annotated
+  template (repos, story, `msg`, goals, `result_channel`/`result_chat`) is only
+  the textarea's placeholder. **Suggest** inserts just the keys this graph needs
+  as `<…>` slots. A value that is still a placeholder (`<…>`, `PROJ-0000`,
+  `~/path/to/repo`) is refused inline ("Replace the placeholder in
+  `result_chat`…"), and when the input names a `result_chat` (+ channel) or
+  `result_webhook` the panel says **"Results will be posted to Slack chat …"**
+  above Run.
 - **Run** (top bar) → `POST /workflows/{id}/run` with `{}` → runs the whole graph.
   The top bar follows the **viewed** run: while it is active its *Cancel run…*
   replaces *Run…*; other workflows (and finished runs) can be started meanwhile —

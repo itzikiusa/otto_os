@@ -906,7 +906,7 @@
                         {idxDirOf(f) === 1 ? '↑ 1' : '↓ -1'}
                       </button>
                     {/if}
-                    <button class="ib-x" aria-label="Remove {f}" onclick={() => toggleIdxCol(f)}>
+                    <button class="ib-x" aria-label="Remove {f}" title="Remove {f}" onclick={() => toggleIdxCol(f)}>
                       <Icon name="x" size={10} />
                     </button>
                   </div>
@@ -971,7 +971,7 @@
                     {/if}
                     <button
                       class="idx-act danger"
-                      aria-label="Remove condition {ci + 1}"
+                      aria-label="Remove condition {ci + 1}" title="Remove condition {ci + 1}"
                       onclick={() => removeIdxCond(ci)}
                     >
                       <Icon name="trash" size={12} />
@@ -1280,7 +1280,8 @@
   }
   .ib-search:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   /* A real list, not a tag cloud: a Mongo collection routinely samples 60+ dotted
      paths, and wrapped chips make those unscannable. Selected fields pin to the
@@ -1433,7 +1434,8 @@
   .ib-cond select:focus,
   .ib-cond input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .ib-cond-hint {
     font-size: var(--fs-xs);
@@ -1474,7 +1476,8 @@
   }
   .ib-name input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .ib-editing {
     font-size: var(--fs-s);

@@ -47,7 +47,63 @@ pub const WATERMARK_WORKERS: usize = 16;
 pub const MAX_CONSUME_BYTES: usize = 16 * 1024 * 1024;
 
 fn kerr(e: KafkaError) -> Error {
-    Error::Upstream(format!("kafka: {e}"))
+    // `rdkafka_error_code()` is None for admin operations, which carry their
+    // code directly — and are exactly the topic/config toasts this is for.
+    let code = match &e {
+        KafkaError::AdminOp(code) => Some(*code),
+        other => other.rdkafka_error_code(),
+    };
+    match code.and_then(kafka_headline) {
+        Some(headline) => Error::Upstream(format!("kafka: {headline}")),
+        None => Error::Upstream(format!("kafka: {e}")),
+    }
+}
+
+/// A short, actionable sentence for the librdkafka codes people actually hit
+/// (unreachable brokers, ACL/auth denials, timeouts, rejected topic changes) —
+/// what a toast shows instead of Rust `Debug` output such as
+/// `KafkaError(AdminOp(BrokerTransportFailure))`. `None` = no fixed headline;
+/// the caller keeps librdkafka's own description.
+fn kafka_headline(code: RDKafkaErrorCode) -> Option<&'static str> {
+    use RDKafkaErrorCode as C;
+    Some(match code {
+        C::BrokerTransportFailure | C::AllBrokersDown | C::Resolve => {
+            "can't reach the brokers — check the bootstrap servers, and that the SSH tunnel for this profile is open"
+        }
+        C::OperationTimedOut | C::RequestTimedOut => {
+            "the brokers didn't answer in time — check the network or tunnel, then retry"
+        }
+        C::Authentication | C::SaslAuthenticationFailed => {
+            "sign-in to the brokers failed — check the profile's SASL user, password and mechanism"
+        }
+        C::TopicAuthorizationFailed => {
+            "the broker's ACLs deny this principal access to the topic"
+        }
+        C::ClusterAuthorizationFailed => {
+            "the broker's ACLs deny this principal the cluster operation"
+        }
+        C::PolicyViolation => "the broker's topic policy rejected this change",
+        C::InvalidPartitions => "invalid partition count for this topic",
+        C::InvalidReplicationFactor => {
+            "invalid replication factor — it can't exceed the number of brokers"
+        }
+        C::InvalidConfig => "the broker rejected a config value as invalid",
+        _ => return None,
+    })
+}
+
+/// [`kafka_headline`] or librdkafka's own description (`Display`, never `Debug`).
+/// librdkafka's `Display` is `InvalidMessage (Broker: Invalid message)` — keep
+/// only the human description in the parentheses.
+fn kafka_code_text(code: RDKafkaErrorCode) -> String {
+    if let Some(h) = kafka_headline(code) {
+        return h.to_string();
+    }
+    let text = code.to_string();
+    match text.find(" (") {
+        Some(i) if text.ends_with(')') => text[i + 2..text.len() - 1].to_string(),
+        _ => text,
+    }
 }
 
 /// Returned as `Error::Forbidden` when the broker's ACLs deny this principal
@@ -1154,7 +1210,9 @@ impl KafkaClient {
             .map_err(kerr)?;
         let mut out = Vec::new();
         for r in res {
-            let cr = r.map_err(|e| Error::Upstream(format!("describe configs: {e:?}")))?;
+            let cr = r.map_err(|e| {
+                Error::Upstream(format!("describe configs: {}", kafka_code_text(e)))
+            })?;
             for e in &cr.entries {
                 out.push(TopicConfigEntry {
                     name: e.name.clone(),
@@ -1239,7 +1297,9 @@ impl KafkaClient {
             .await
             .map_err(kerr)?;
         for r in res {
-            r.map_err(|(_, code)| Error::Upstream(format!("alter config: {code:?}")))?;
+            r.map_err(|(_, code)| {
+                Error::Upstream(format!("alter config: {}", kafka_code_text(code)))
+            })?;
         }
         Ok(())
     }
@@ -1295,7 +1355,7 @@ fn topic_op_err(op: &str, name: &str, code: rdkafka::error::RDKafkaErrorCode) ->
         C::UnknownTopicOrPartition | C::UnknownTopic => {
             Error::NotFound(format!("topic {name} not found"))
         }
-        other => Error::Upstream(format!("{op} topic {name}: {other:?}")),
+        other => Error::Upstream(format!("{op} topic {name}: {}", kafka_code_text(other))),
     }
 }
 
@@ -1375,6 +1435,25 @@ impl<'a> ByteReader<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kafka_errors_read_as_sentences_not_debug() {
+        use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
+        let e = super::kerr(KafkaError::AdminOp(C::BrokerTransportFailure));
+        let text = e.to_string();
+        assert!(text.contains("can't reach the brokers"), "{text}");
+        assert!(!text.contains("AdminOp") && !text.contains("BrokerTransportFailure"));
+        let e = super::topic_op_err("create", "orders", C::PolicyViolation);
+        assert_eq!(
+            e.to_string(),
+            "upstream: create topic orders: the broker's topic policy rejected this change"
+        );
+        // No fixed headline → librdkafka's description, still not Debug.
+        assert_eq!(
+            super::kafka_code_text(C::InvalidMessage),
+            "Broker: Invalid message"
+        );
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;

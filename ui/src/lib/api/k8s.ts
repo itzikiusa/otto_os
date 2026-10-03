@@ -34,6 +34,10 @@ import type {
   K8sMonitorWorkloadsResp,
   K8sNamespace,
   K8sNode,
+  K8sPodAction,
+  K8sPodActionInput,
+  K8sPodHttpReq,
+  K8sPodHttpResp,
   K8sResourceDetail,
   K8sResourceKind,
   K8sResourcesResp,
@@ -167,6 +171,19 @@ export const k8sApi = {
       ? `/k8s/clusters/${enc(id)}/pods/${enc(ns)}/${enc(t.pod)}/logs${qs(common)}`
       : `/k8s/clusters/${enc(id)}/logs${qs({ ns, selector: t.selector, ...common })}`;
   },
+
+  // --- pod HTTP actions (K-3; contract "Pod HTTP actions") ---
+  // One pod or every pod of a workload, through the kubectl-proxy gateway
+  // (port-forward fallback). Mutating methods need Edit; on prod they also
+  // need `confirm_name` = the target name (409 `confirm_required` otherwise).
+  podHttp: (id: string, body: K8sPodHttpReq) =>
+    api.post<K8sPodHttpResp>(`/k8s/clusters/${enc(id)}/pod-http`, body),
+  podActions: (id: string, p: { namespace?: string; workload_kind?: string; workload?: string } = {}) =>
+    api.get<{ actions: K8sPodAction[] }>(`/k8s/clusters/${enc(id)}/pod-actions${qs(p)}`),
+  savePodAction: (id: string, body: K8sPodActionInput) =>
+    api.put<K8sPodAction>(`/k8s/clusters/${enc(id)}/pod-actions`, body),
+  deletePodAction: (id: string, actionId: string) =>
+    api.del<void>(`/k8s/clusters/${enc(id)}/pod-actions/${enc(actionId)}`),
 };
 
 /**

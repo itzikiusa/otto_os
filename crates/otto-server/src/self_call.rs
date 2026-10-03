@@ -170,8 +170,7 @@ pub(crate) async fn lease(
             if old.in_flight == 0 {
                 revoke_now.push(old.token);
             } else {
-                t.retiring
-                    .insert(old.token, (old.in_flight, pool.clone()));
+                t.retiring.insert(old.token, (old.in_flight, pool.clone()));
             }
         }
     }
@@ -195,13 +194,11 @@ async fn sweep_leftovers(pool: &DbPool) {
             return;
         }
     }
-    let _ = sqlx::query(
-        "DELETE FROM auth_sessions WHERE kind = 'api' AND label IN (?, ?)",
-    )
-    .bind(LABELS[0])
-    .bind(LABELS[1])
-    .execute(pool)
-    .await;
+    let _ = sqlx::query("DELETE FROM auth_sessions WHERE kind = 'api' AND label IN (?, ?)")
+        .bind(LABELS[0])
+        .bind(LABELS[1])
+        .execute(pool)
+        .await;
 }
 
 #[cfg(test)]
@@ -240,7 +237,10 @@ mod tests {
         }
         assert_eq!(api_tokens(&pool, &user).await, 1);
         let l = lease(&pool, base, &user, LABEL_EXEC).await.unwrap();
-        let ctx = AuthRepo::new(pool.clone()).authenticate(l.token()).await.unwrap();
+        let ctx = AuthRepo::new(pool.clone())
+            .authenticate(l.token())
+            .await
+            .unwrap();
         assert_eq!(ctx.effective_user.id, user);
         // A different purpose gets its own credential.
         let r = lease(&pool, base, &user, LABEL_REFS).await.unwrap();
@@ -268,13 +268,23 @@ mod tests {
         drop(held);
         // …and is revoked (spawned) once released.
         for _ in 0..50 {
-            if AuthRepo::new(pool.clone()).authenticate(&old).await.is_err() {
+            if AuthRepo::new(pool.clone())
+                .authenticate(&old)
+                .await
+                .is_err()
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(AuthRepo::new(pool.clone()).authenticate(&old).await.is_err());
-        assert!(AuthRepo::new(pool.clone()).authenticate(next.token()).await.is_ok());
+        assert!(AuthRepo::new(pool.clone())
+            .authenticate(&old)
+            .await
+            .is_err());
+        assert!(AuthRepo::new(pool.clone())
+            .authenticate(next.token())
+            .await
+            .is_ok());
     }
 
     /// A crashed daemon's leftover self-call tokens are swept on first use;
@@ -284,10 +294,18 @@ mod tests {
         let (pool, user) = db().await;
         let repo = AuthRepo::new(pool.clone());
         let (stale, _) = repo.issue_api_token(&user, Some(LABEL_EXEC)).await.unwrap();
-        let (mine, _) = repo.issue_api_token(&user, Some("my laptop")).await.unwrap();
-        let l = lease(&pool, "http://127.0.0.1:3", &user, LABEL_EXEC).await.unwrap();
+        let (mine, _) = repo
+            .issue_api_token(&user, Some("my laptop"))
+            .await
+            .unwrap();
+        let l = lease(&pool, "http://127.0.0.1:3", &user, LABEL_EXEC)
+            .await
+            .unwrap();
         assert!(repo.authenticate(&stale).await.is_err(), "leftover swept");
-        assert!(repo.authenticate(&mine).await.is_ok(), "user's own token kept");
+        assert!(
+            repo.authenticate(&mine).await.is_ok(),
+            "user's own token kept"
+        );
         assert!(repo.authenticate(l.token()).await.is_ok());
     }
 }

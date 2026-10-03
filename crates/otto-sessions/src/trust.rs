@@ -346,10 +346,15 @@ mod tests {
     #[test]
     fn claude_new_folder_gets_trust_and_keeps_other_state() {
         let current = r#"{"oauthAccount":{"x":1},"projects":{"/other":{"a":2}}}"#;
-        let next = claude_with_trust(current, &v(&["/w"])).unwrap().expect("write");
+        let next = claude_with_trust(current, &v(&["/w"]))
+            .unwrap()
+            .expect("write");
         let root: serde_json::Value = serde_json::from_str(&next).unwrap();
         assert_eq!(root["projects"]["/w"]["hasTrustDialogAccepted"], true);
-        assert_eq!(root["projects"]["/w"]["hasCompletedProjectOnboarding"], true);
+        assert_eq!(
+            root["projects"]["/w"]["hasCompletedProjectOnboarding"],
+            true
+        );
         assert_eq!(root["projects"]["/other"]["a"], 2);
         assert_eq!(root["oauthAccount"]["x"], 1);
         // …and the merged result is itself a fixed point.

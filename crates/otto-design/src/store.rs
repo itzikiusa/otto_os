@@ -560,11 +560,13 @@ impl Store {
     }
 
     pub async fn get_project(&self, id: &str) -> Result<Option<DesignProject>> {
-        let row = sqlx::query(&format!("{PROJECT_SELECT} WHERE p.id = ?"))
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(dberr("design.project.get"))?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{PROJECT_SELECT} WHERE p.id = ?"
+        )))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("design.project.get"))?;
         row.as_ref().map(row_project).transpose()
     }
 
@@ -589,7 +591,7 @@ impl Store {
             sql.push_str(" AND p.archived = 0");
         }
         sql.push_str(" ORDER BY p.updated_at DESC");
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         for a in &args {
             q = match a {
                 Arg::S(s) => q.bind(s.as_str()),
@@ -717,7 +719,7 @@ impl Store {
     }
 
     pub async fn get_artifact(&self, id: &str) -> Result<Option<DesignArtifact>> {
-        let row = sqlx::query(&format!("{ART_SELECT} WHERE a.id = ?"))
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!("{ART_SELECT} WHERE a.id = ?")))
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -732,9 +734,9 @@ impl Store {
     }
 
     pub async fn find_by_source(&self, kind: &str, id: &str) -> Result<Option<DesignArtifact>> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
             "{ART_SELECT} WHERE a.source_kind = ? AND a.source_id = ?"
-        ))
+        )))
         .bind(kind)
         .bind(id)
         .fetch_optional(&self.pool)
@@ -746,10 +748,12 @@ impl Store {
     /// Every imported artifact keyed by `(source_kind, source_id)` — one query
     /// so the startup import stays cheap on a big library.
     pub async fn source_index(&self) -> Result<HashMap<(String, String), DesignArtifact>> {
-        let rows = sqlx::query(&format!("{ART_SELECT} WHERE a.source_kind IS NOT NULL"))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("design.artifact.source_index"))?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{ART_SELECT} WHERE a.source_kind IS NOT NULL"
+        )))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("design.artifact.source_index"))?;
         let mut out = HashMap::new();
         for r in &rows {
             let a = row_artifact(r)?;
@@ -778,7 +782,7 @@ impl Store {
         sql.push_str(" ORDER BY a.updated_at DESC, a.id DESC LIMIT ? OFFSET ?");
         args.push(Arg::I(limit));
         args.push(Arg::I(offset));
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         for a in &args {
             q = match a {
                 Arg::S(s) => q.bind(s.as_str()),
@@ -806,7 +810,7 @@ impl Store {
             return Ok(vec![]);
         }
         let sql = format!("{ART_SELECT} WHERE a.id IN ({})", placeholders(ids.len()));
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         for id in ids {
             q = q.bind(id.as_str());
         }
@@ -1038,7 +1042,7 @@ impl Store {
     }
 
     pub async fn get_version(&self, id: &str) -> Result<Option<DesignVersion>> {
-        let row = sqlx::query(&format!("{VER_SELECT} WHERE id = ?"))
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!("{VER_SELECT} WHERE id = ?")))
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -1051,12 +1055,14 @@ impl Store {
         artifact_id: &str,
         seq: i64,
     ) -> Result<Option<DesignVersion>> {
-        let row = sqlx::query(&format!("{VER_SELECT} WHERE artifact_id = ? AND seq = ?"))
-            .bind(artifact_id)
-            .bind(seq)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(dberr("design.version.by_seq"))?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{VER_SELECT} WHERE artifact_id = ? AND seq = ?"
+        )))
+        .bind(artifact_id)
+        .bind(seq)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("design.version.by_seq"))?;
         row.as_ref().map(row_version).transpose()
     }
 
@@ -1069,10 +1075,10 @@ impl Store {
         offset: i64,
     ) -> Result<Vec<DesignVersion>> {
         let limit = if limit > 0 { limit.min(1_000) } else { 200 };
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "{VER_SELECT} WHERE artifact_id = ? AND (? IS NULL OR kind = ?)
              ORDER BY seq DESC LIMIT ? OFFSET ?"
-        ))
+        )))
         .bind(artifact_id)
         .bind(kind)
         .bind(kind)
@@ -1187,11 +1193,11 @@ impl Store {
         artifact_id: &str,
         prefix: &str,
     ) -> Result<Vec<DesignVersion>> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "{VER_SELECT}
              WHERE artifact_id = ?1 AND substr(branch, 1, length(?2)) = ?2
              ORDER BY seq LIMIT 1000"
-        ))
+        )))
         .bind(artifact_id)
         .bind(prefix)
         .fetch_all(&self.pool)
@@ -1268,7 +1274,7 @@ impl Store {
         }
         let ph = placeholders(ids.len());
         let sql = format!("SELECT DISTINCT blob_sha256 FROM design_versions WHERE id IN ({ph})");
-        let mut q = sqlx::query_scalar::<_, String>(&sql);
+        let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql.as_str()));
         for id in ids {
             q = q.bind(id.as_str());
         }
@@ -1277,7 +1283,7 @@ impl Store {
             .await
             .map_err(dberr("design.version.prune.blobs"))?;
         let sql = format!("DELETE FROM design_versions WHERE id IN ({ph})");
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         for id in ids {
             q = q.bind(id.as_str());
         }
@@ -1474,7 +1480,7 @@ impl Store {
             "SELECT * FROM design_links WHERE {} ORDER BY src_artifact_id, rel, created_at LIMIT {MAX_BULK_LINKS}",
             conds.join(" OR ")
         );
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         for _ in 0..conds.len() {
             for id in ids {
                 q = q.bind(id.as_str());
@@ -1513,7 +1519,7 @@ impl Store {
                  WHERE dst_kind = 'artifact' AND rel IN ({rels}) AND src_artifact_id IN ({})",
                 placeholders(frontier.len())
             );
-            let mut q = sqlx::query(&sql);
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
             for r in RENDER_RELS {
                 q = q.bind(*r);
             }
@@ -1575,7 +1581,7 @@ impl Store {
                  WHERE dst_kind = 'artifact' AND dst_id IN ({marks}) \
                    AND src_artifact_id != dst_id GROUP BY dst_id"
             );
-            let mut q = sqlx::query_as::<_, (String, i64)>(&sql);
+            let mut q = sqlx::query_as::<_, (String, i64)>(sqlx::AssertSqlSafe(sql.as_str()));
             for id in chunk {
                 q = q.bind(*id);
             }
@@ -1692,7 +1698,7 @@ impl Store {
         }
         sql.push_str(" ORDER BY created_at DESC LIMIT ?");
         args.push(Arg::I(if limit > 0 { limit.min(1_000) } else { 200 }));
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         for a in &args {
             q = match a {
                 Arg::S(s) => q.bind(s.as_str()),
@@ -2009,7 +2015,7 @@ impl Store {
         };
         args.push(Arg::I(limit));
         args.push(Arg::I(offset));
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         for a in &args {
             q = match a {
                 Arg::S(s) => q.bind(s.as_str()),

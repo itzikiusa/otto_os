@@ -159,9 +159,6 @@
   .srow:focus-visible .go {
     opacity: 1;
   }
-  :global([dir='rtl']) .go {
-    transform: scaleX(-1);
-  }
   .foot {
     flex: none;
     align-self: flex-start;
@@ -178,9 +175,6 @@
   }
   .foot:hover {
     text-decoration: underline;
-  }
-  :global([dir='rtl']) .foot :global(svg) {
-    transform: scaleX(-1);
   }
   .title {
     flex: 1;

@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 import { captureRoomInvite, roomInvite, forgetRoom } from '../src/modules/rooms/room-access.ts';
+import { activeNavId } from '../src/lib/sidebar.ts';
 
 const flush = async () => {
   for (let i = 0; i < 20; i++) await Promise.resolve();
@@ -43,6 +44,7 @@ function fixture(initialHash = '#/home') {
       './storage': { lsGet: () => null, lsSet: () => {} },
       './desktop': { isEmbedded: false },
       '../modules/rooms/room-access': { captureRoomInvite },
+      './sidebar': { activeNavId },
     },
     { window, history },
   );
@@ -124,4 +126,28 @@ test('room invitation is captured only in memory and removed before route histor
   await flush();
   assert.equal(f.location.hash, '#/room/unit-room', 'back navigation cannot restore the capability in the URL');
   forgetRoom('unit-room');
+});
+
+test('openModule resumes a module where it was left; the active module goes home', async () => {
+  const f = fixture('#/home');
+  f.router.go('kubernetes/c1/pods/default/api');
+  await flush();
+  f.router.go('database/conn-1');
+  await flush();
+  // Back to Kubernetes from elsewhere → the exact route it was left on.
+  f.router.openModule('kubernetes');
+  await flush();
+  assert.equal(f.location.hash, '#/kubernetes/c1/pods/default/api');
+  // Clicking the module that is already active → its main page.
+  f.router.openModule('kubernetes');
+  await flush();
+  assert.equal(f.location.hash, '#/kubernetes');
+  // database/brokers resume under the Connections nav id.
+  f.router.openModule('connections');
+  await flush();
+  assert.equal(f.location.hash, '#/database/conn-1');
+  // A module never visited opens at its root.
+  f.router.openModule('git');
+  await flush();
+  assert.equal(f.location.hash, '#/git');
 });

@@ -108,7 +108,7 @@ use otto_core::domain::{Capability, Feature, WorkspaceRole};
 use otto_rbac::resource_access::ResourceAccess;
 use otto_state::resource_access::ResourceAccessRepo;
 use otto_state::{
-    AwsAccountsRepo, ConnectionsRepo, GrantsRepo, K8sClustersRepo, McpRegistryRepo, DbPool,
+    AwsAccountsRepo, ConnectionsRepo, DbPool, GrantsRepo, K8sClustersRepo, McpRegistryRepo,
     UsersRepo, WorkspacesRepo,
 };
 use serde::{Deserialize, Serialize};
@@ -632,13 +632,9 @@ async fn build_preview<S: AccessCtx>(
         }
         changes.push(json!({"user_id":user.id,"display_name":user.display_name,"before":before.operations,"after":after.operations,"children":child_changes}));
     }
-    let token = format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&(old, new, &changes))
-                .map_err(|e| Error::Internal(e.to_string()))?
-        )
-    );
+    let token = hex::encode(Sha256::digest(
+        serde_json::to_vec(&(old, new, &changes)).map_err(|e| Error::Internal(e.to_string()))?,
+    ));
     Ok(AccessPreview {
         token,
         revision: old.revision,

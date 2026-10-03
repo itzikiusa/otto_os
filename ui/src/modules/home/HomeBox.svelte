@@ -28,8 +28,11 @@
     /** Drag-reorder plumbing (grid only). */
     ondragbox?: (id: string) => void;
     ondropon?: (id: string) => void;
+    /** False while the box's space is not the one on screen (every space
+     *  stays mounted): the body pauses its poller and keeps its data. */
+    active?: boolean;
   }
-  let { box, viewId, zoomed = false, index = 0, count = 1, ondragbox, ondropon }: Props = $props();
+  let { box, viewId, zoomed = false, index = 0, count = 1, ondragbox, ondropon, active = true }: Props = $props();
 
   const def = $derived(kindDef(box.kind));
   // Bumped by the header's refresh button; each box body re-fetches on change.
@@ -164,15 +167,15 @@
     {#if box.kind === 'sessions'}
       <SessionsBox {box} {zoomed} {tick} />
     {:else if box.kind === 'mission-control'}
-      <MissionControlBox {box} {zoomed} {tick} />
+      <MissionControlBox {box} {zoomed} {tick} {active} />
     {:else if box.kind === 'db-dashboard'}
-      <DbDashboardBox {box} {viewId} {zoomed} {tick} />
+      <DbDashboardBox {box} {viewId} {zoomed} {tick} {active} />
     {:else if box.kind === 'k8s'}
-      <K8sBox {box} {viewId} {zoomed} {tick} />
+      <K8sBox {box} {viewId} {zoomed} {tick} {active} />
     {:else if box.kind === 'insights'}
-      <InsightsBox {box} {zoomed} {tick} />
+      <InsightsBox {box} {zoomed} {tick} {active} />
     {:else if box.kind === 'usage'}
-      <UsageBox {box} {viewId} {zoomed} {tick} />
+      <UsageBox {box} {viewId} {zoomed} {tick} {active} />
     {/if}
   </div>
   {#if !zoomed && !viewport.isPhone}

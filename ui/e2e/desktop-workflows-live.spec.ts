@@ -176,7 +176,16 @@ test('viewing another run is not stomped by an in-flight run started from the pa
   // Start a NEW run from the page with the failing input (this is the path that
   // owns the in-page run driver).
   await page.getByRole('button', { name: 'Run…' }).click();
+  // W2: the run input opens EMPTY (the template is only its placeholder), a
+  // placeholder value is refused inline, and a result_chat names where the
+  // results go before anything is sent.
+  await expect(page.locator('.ri-text')).toHaveValue('');
+  await page.locator('.ri-text').fill('{ "result_channel": "slack", "result_chat": "<channel id — optional>" }');
+  await expect(page.getByTestId('run-result-destination')).toContainText('Slack chat <channel id');
+  await page.locator('.ri-actions').getByRole('button', { name: 'Run' }).click();
+  await expect(page.locator('#wf-run-input-err')).toContainText('result_chat');
   await page.locator('.ri-text').fill('{ "fail": true }');
+  await expect(page.getByTestId('run-result-destination')).toHaveCount(0);
   await page.locator('.ri-actions').getByRole('button', { name: 'Run' }).click();
   const label = page.locator('.insp-bar .tl-label');
   await expect(label).toContainText('Running', { timeout: 10_000 });

@@ -113,7 +113,7 @@ connection library unusable for every non-root account.)
 | 50 | GET /api/v1/repos/{id}/prs/{number} | ws viewer | — | PrDetail |
 | 51 | GET /api/v1/repos/{id}/prs/{number}/diff?summary=&path=&old_path=&full=&rev= | ws viewer | — | DiffResp — same `summary`, `path`/`old_path`, `full`, per-file cap, response budget and `truncated` semantics as #40, computed from the provider's diff. The provider diff is fetched once and memoized per (repo, remote, PR number, git account, `rev`) for 60 s (identical concurrent fetches coalesce); `rev` is an opaque revision token — clients pass the PR's `head_sha`, so a push lands on a new key instead of serving the pre-push diff for up to a minute, so the file list, the Review tab and each lazy per-file request share ONE download; access (role + the caller's provider credential) is checked on every request before the memo. GitHub refuses the `.diff` media type past 300 files / 20k lines (406): the diff is then rebuilt from `GET /pulls/{n}/files` (paginated, ≤ 2,000 files) — every file with counts and status, hunks from its `patch`, and files GitHub sends without a patch come back `too_large: true`. **Narrow reads (Bitbucket):** unless the whole diff is already memoized, `summary=true` is answered from `GET …/pullrequests/{n}/diffstat` (paged, ≤ 20,000 files, beyond that `truncated: true`; counts are Bitbucket's `lines_added`/`lines_removed`, `is_binary` is always false) and `path=` from `GET …/pullrequests/{n}/diff?path=<path>[&path=<old_path>]` — each memoized under its own key with the same TTL — so summary-first review never downloads the whole unified diff. GitLab has no patch-free MR stat API: `/changes` is used as before, and its `overflow: true` (GitLab's own file/line limits cut the list) now sets `truncated: true`. Other provider failures surface as the usual Problem JSON (502 `upstream`). |
 | 52 | PATCH /api/v1/repos/{id}/prs/{number} | ws editor | UpdatePrReq | 204 |
-| 53 | POST /api/v1/repos/{id}/prs/{number}/comments | ws editor | NewPrCommentReq | PrComment (carries `resolved: bool` + `thread_id?: string` on thread heads — Bitbucket comment id, GitLab discussion id, GitHub GraphQL reviewThread node id) |
+| 53 | POST /api/v1/repos/{id}/prs/{number}/comments | ws editor | NewPrCommentReq `{body, path?, line?, in_reply_to?, side?: "old"\|"new" (default new; a deleted line sends "old" with its OLD number), old_line? (the row's old number — GitLab needs both for a context line), commit_id? (head sha the reviewer saw; GitHub skips the PR lookup)}` | PrComment (carries `resolved: bool` + `thread_id?: string` on thread heads — Bitbucket comment id, GitLab discussion id, GitHub GraphQL reviewThread node id; inline comments add `side?: "old"\|"new"` and `outdated: bool` — outdated = the forge no longer maps it onto the diff, `line` is then the original line) |
 | 53b | POST /api/v1/repos/{id}/prs/{number}/comments/{cid}/resolve | ws editor | ResolvePrThreadReq `{"resolved": bool}` — `{cid}` is `PrComment.thread_id`; `false` reopens | 204 |
 | 54 | POST /api/v1/repos/{id}/prs/{number}/approve | ws editor | — | 204 |
 | 55 | POST /api/v1/repos/{id}/prs/{number}/merge | ws editor | MergePrReq `{strategy, delete_source_branch?}` | 204 — `delete_source_branch:true` also drops the source branch (GitHub: a follow-up ref delete after the merge only for a verified same-repository head; fork/missing-head-repository cleanup is skipped; GitLab: `should_remove_source_branch`; Bitbucket: `close_source_branch`). GitHub's follow-up delete is best-effort — a refused delete (protected branch, missing scope) is logged and never fails a merge that landed |
@@ -123,11 +123,36 @@ connection library unusable for every non-root account.)
 | 57 | GET /api/v1/settings | root | — | `{ "<key>": <value_json>, ... }` |
 | 58 | PUT /api/v1/settings | root | same shape | same shape |
 
-Usage & metrics (embedded ClickHouse, all root-only; types in `crates/otto-usage`):
-- GET /usage/status → UsageStatus (engine + ClickHouse health).
+Usage & metrics (embedded ClickHouse; types in `crates/otto-usage`). Reads need
+`Usage:View`: **root sees every session (`scope:"all"`); a non-root caller sees only the
+sessions they created (`scope:"own"`, external sessions excluded)**. Config, install,
+budget writes, `/usage/metrics` and `/usage/ccusage-check` stay root-only. A ClickHouse
+failure on a read returns an error (500) — never a 200 with zero totals.
+- GET /usage/status → UsageStatus (engine + ClickHouse health). For non-root callers
+  `binary`/`version` are null, `data_dir` is `""` and `disk_bytes`/row counts are 0.
+  `disk_bytes` comes from `system.parts` (cached 5 min; the directory walk is the fallback
+  and runs off the async runtime).
 - GET /usage/summary?days=N&otto_only=B → UsageSummary. `days` 1–3650 (default 30),
   `otto_only` (default true) excludes externally-recorded sessions. Carries provider,
-  daily, session, and **`by_kind`** (per-feature) rollups.
+  daily, session, **`by_kind`** (per-feature), **`models: ModelUsage[]`**
+  (`{provider, model, events, input_tokens, output_tokens, cache_read_tokens,
+  cache_write_tokens, total_tokens, cost_usd}`, biggest first) and **`daily_models:
+  DailyModelUsage[]`** (`{day, provider, model, …tokens, cost_usd}`) rollups, plus
+  `scope` (`"all"`|`"own"`).
+- GET /usage/report?days=N&otto_only=B → UsageReport `{days, generated_at, priced_as_of,
+  scope, otto_only, totals: TokenTotals, daily: DailyUsage[], monthly: MonthlyUsage[]
+  {month:"YYYY-MM", events, …tokens, cost_usd}, models: ModelUsage[], daily_models:
+  DailyModelUsage[], sessions: SessionUsage[]}` — the ccusage-style report (≤1000 sessions,
+  enriched like the summary's). The UI renders it as a page and as a downloadable
+  self-contained HTML file. `TokenTotals{input_tokens, output_tokens, cache_read_tokens,
+  cache_write_tokens, total_tokens, cost_usd}`.
+- POST /usage/ccusage-check `{days?}` (root) → CcusageCheck `{ran, command, duration_ms,
+  error?, since, until, totals_ours, totals_theirs, rows: {provider, model, ours, theirs}[],
+  daily: {day, ours, theirs}[]}`. Opt-in: runs `npx --yes ccusage@latest daily --json
+  --breakdown --since … --until …` (no Otto dependency; 120 s timeout, `days` 1–90,
+  default 7) and compares it with Otto's rows over the same dates **with external
+  sessions included** (ccusage reads every local transcript). `ran:false` + `error` when
+  npx is missing, ccusage fails/times out, or its JSON doesn't parse.
 - GET /usage/by-kind?days=N&otto_only=B → `FeatureUsage[]` — the same per-feature rollup
   on its own. `FeatureUsage{feature, events, input_tokens, output_tokens,
   cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, sessions}`. `feature` is
@@ -273,7 +298,7 @@ workspace from the row.
 | 73 | DELETE /api/v1/swarm/projects/{pid} | ws editor | — | 204 |
 | 74 | POST /api/v1/workspaces/{id}/swarm/projects/{pid}/plan | ws editor | PlanReq | `SwarmTask[]` |
 | 74b | POST /api/v1/swarm/projects/{pid}/clear | ws editor | — | `{ok, runs_stopped, tasks_deleted, messages_deleted}` — stops the project's in-flight runs, deletes ALL its tasks + project-scoped feed messages (runs/spend history kept), emits `swarm_project_cleared` |
-| 74c | GET /api/v1/swarm/swarms/{sid}/utilization | ws viewer | — | `{parallel_cap, active_runs, ready_tasks, tasks_by_status, agents:[{id,name,title,status,active_run}]}` — board-utilization snapshot (drives the 5-min manager utilization watchdog + the `swarm_utilization` MCP tool) |
+| 74c | GET /api/v1/swarm/swarms/{sid}/utilization | ws viewer | — | `{parallel_cap, active_runs, ready_tasks, tasks_by_status, agents:[{id,name,title,status,active_run}], waiting: {<task_id>: {code, detail, since}}}` — board-utilization snapshot (drives the 5-min manager utilization watchdog + the `swarm_utilization` MCP tool). `waiting` = why each ready task did not start on the last coordinator tick (in memory, rebuilt every tick; empty when the swarm isn't active): `code` ∈ `no_agent_fit` \| `agent_busy` \| `verifying` \| `capacity` \| `run_budget`, `detail` = board text, `since` = when it started waiting for that code. The Kanban board shows it on To-do cards |
 | 75 | GET /api/v1/swarm/projects/{pid}/tasks | ws viewer | — | `SwarmTask[]` |
 | 76 | POST /api/v1/swarm/projects/{pid}/tasks | ws editor | CreateTaskReq | SwarmTask |
 | 77 | PATCH /api/v1/swarm/tasks/{tid} | ws editor | UpdateTaskReq | SwarmTask |
@@ -815,12 +840,12 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/schema/children | ws viewer | `{node, filter?, counts?}` | child schema nodes (lazy expand). `counts:true` fills each node's `detail` with an engine-native ROW ESTIMATE (`information_schema.table_rows` / `reltuples` / `system.parts` / `estimatedDocumentCount` — never `COUNT(*)`); opt-in because collecting it is the slow part of expanding a database on a large server. MySQL databases expose `Tables`/`Views` folders always, plus `Procedures`/`Functions`/`Triggers` folders (with a count) when the database has any; routine leaves carry `kind:"procedure"`/`"function"`, trigger leaves `kind:"trigger"` |
 | POST /connections/{id}/db/object | ws viewer | `{ref}` | object detail (columns/DDL/etc.). For a procedure/function: `columns` are its parameters and `ddl` is the `SHOW CREATE` body. For a trigger (MySQL): `ddl` is `SHOW CREATE TRIGGER` and `extra` = `{timing, event, table}`. `indexes[].definition` carries the full engine-native index definition when available (Mongo: raw `listIndexes` doc incl. `partialFilterExpression`; Postgres: `pg_get_indexdef` string). For a Mongo **collection** `columns` is empty and the field list lives in `extra`: `sampled_fields` = `{topLevelField: bsonType}`, `sampled_paths` = dotted paths incl. embedded ones (`meta.brand_id`, depth ≤ 3, capped at 400), and `sampled_path_types` = `{path: bsonType}` for those same paths; plus `sample` (one whole document) and `stats` |
 | POST /connections/{id}/db/schema-graph | ws viewer | `{schema, max_tables?}` | DbSchemaGraph — read-only ERD: tables (+PK/FK-flagged columns) and FK edges, walked from the schema tree; `max_tables` default 60, clamped 1..200; engines without FK metadata (Redis/Mongo) return `relationships:false` |
-| POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count |
+| POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count. An engine failure is a `502 upstream` whose message is the cleaned engine text plus optional tagged trailer lines (`DETAIL:`, `HINT:`, `SQLSTATE:`, `POSITION:`, `ERRNO:`, `CODE:`, `STREAMED_ROWS:`, `SUGGEST:`) — see database-explorer.md §11 "Engine error text". |
 | POST /connections/{id}/db/query-plan | ws **viewer** | `{statement, node?}` | `DbQueryPlan` — a normalized query plan from the engine's native EXPLAIN (MySQL `EXPLAIN FORMAT=JSON`, Postgres `EXPLAIN (FORMAT JSON)`, ClickHouse `EXPLAIN json=1` w/ plain-text fallback, Mongo `explain` queryPlanner). The statement is **EXPLAIN-wrapped, never executed raw** — read-only by construction, hence `viewer`. Redis → 400 (no plan surface). |
 | POST /connections/{id}/db/cancel | ws editor | `{query_id}` | `DbCancelOutcome` `{status}` — what the Stop achieved: `cancelled` (engine-native cancel issued and the run ended), `aborted` (Otto dropped the run: a mongosh child is killed and no further statement is sent, but a statement already on the server may still complete), `not_running` (unknown / already finished), `not_stoppable` (no native cancel and nothing Otto can drop — it runs until it ends or times out) |
 | POST /connections/{id}/db/close | ws viewer | — | `{"closed": true}` — tear down all server-side state for the connection: cancels its in-flight queries (engine-native, best-effort), evicts and closes the driver's cached connection pool, and drops the cached SSH tunnel (killing the ssh child). Idempotent — closing an already-closed/never-opened connection succeeds. Fired by the UI when a connection tab is closed. |
 | POST /connections/{id}/db/mcp-query | ws viewer | `{statement, max_rows?, node?}` | Read-only DB query for agents over MCP: writes/DDL are refused server-side **before any driver call** (403, `mcp_read_only:` prefix) independent of the write-guard — statements are split with the engine's own lexer and, on MySQL/PostgreSQL, a `SELECT`/`WITH`/`EXPLAIN`/`DESCRIBE` must parse as a provable read (unparseable = refused). What passes then **executes in the engine's native read-only mode** (MySQL `START TRANSACTION READ ONLY`, PostgreSQL `BEGIN READ ONLY`, ClickHouse HTTP `readonly=2`); MongoDB and Redis run only allow-listed read operations. Rows hard-capped at 200; PII masking forced on. Response: QueryResult. |
-| POST /connections/{id}/db/query-status | ws editor | `{query_id}` | `QueryStatus` — re-attach probe for a run whose HTTP wait was lost (queries with a `query_id` execute detached from their request): `{status:"running"}` while it executes, `{status:"done", result?/error?}` while the parked outcome is retained (TTL 10m, capped), `{status:"unknown"}` otherwise. Scoped to the connection — never serves another connection's outcome. |
+| POST /connections/{id}/db/query-status | ws editor | `{query_id}` | `QueryStatus` — re-attach probe for a run whose HTTP wait was lost (queries with a `query_id` execute detached from their request): `{status:"running", elapsed_ms}` while it executes (`elapsed_ms` = time since the run started, so a client that did not start it — an agent, another window, a reload — shows the real running time), `{status:"done", result?/error?}` while the parked outcome is retained (TTL 10m, capped), `{status:"unknown"}` otherwise. Scoped to the connection — never serves another connection's outcome. |
 | POST /connections/{id}/db/completion | ws viewer | `{prefix, suffix?, database?, node?}` | Context-aware completion items (`{items:[DbCompletionItem]}`). The daemon parses `prefix` (text before the cursor) + `suffix` (text after, to resolve a `FROM` that follows the cursor) to decide intent — tables after `FROM`/`JOIN`, columns after `WHERE`/`AND`/`alias.`, Mongo collections/methods/field-keys (incl. embedded `x.a`). Each item carries a `score` (→ CodeMirror `boost`) so **index columns/fields rank first**, then the rest of the schema. Items that can't match the identifier being typed at the end of `prefix` (an in-order, case-insensitive subsequence test — a superset of the editor's fuzzy match) are dropped, and at most **1,500** items are returned (best score first); when that cap clips the list the response carries `truncated: true` (omitted otherwise) and the editor must re-ask on the next keystroke instead of filtering the clipped list. Access-enforced connections get the same context-aware, ranked items, built from the caller's authorized schema graph (cached ~60 s per user + schema). Backed by a per-connection schema snapshot **cached until refresh** (see below; ~5-min TTL safety net). |
 | POST /connections/{id}/db/completion/refresh | ws viewer | `{}` | 204 — drop the connection's cached completion snapshot so the next completion re-introspects. Wired to the UI "Refresh schema" action. No-op for engines without a snapshot cache (Redis). |
 | GET /connections/{id}/db/history | ws viewer | `?limit=` (1–1000, default 100) | recent query history (`DbHistoryEntry[]`, newest first; non-root callers see only their own rows). `statement` is a **preview clipped to 16 KiB**; a clipped row also carries `statement_len` (the full length, chars) — fetch the whole text by id. Rows are never pruned by this. A file import records **one summary row** (`import N row(s) in B batch(es) → <table>`), not one per INSERT batch. |
@@ -1191,7 +1216,7 @@ run keeps its status and counts but `result_dropped: true`.
 | GET /repos/{id}/remotes | ws viewer | — | `RemoteInfo[] {name, fetch_url, push_url}` (`git remote -v`); any `user:password@` userinfo is stripped from the URLs before they leave the daemon. |
 | POST /repos/{id}/remotes | ws editor | `{op: "add"\|"set_url"\|"remove", name, url?}` | `RemoteInfo[]` (the list after the change). `name` must match `[A-Za-z0-9][A-Za-z0-9._/-]*`; `url` is required for `add`/`set_url` and must be `https\|http\|ssh\|git://…` or scp-like `user@host:path` — neither value may begin with `-` (400 otherwise). Push/checkout still use `origin` explicitly. |
 | GET /repos/{id}/commit-config | ws viewer | — | `{gpgsign, format, signing_key}` — the repo's signing configuration (`commit.gpgsign`, `gpg.format` limited to `openpgp\|ssh\|x509`, `user.signingkey`); unset keys are `null`. Drives the WIP composer's sign toggle. |
-| GET /repos/{id}/blame?path=&rev=HEAD | ws viewer | — | `BlameResp {path, rev, lines: BlameLine[]}` — `git blame --porcelain <rev> -- <path>` grouped into RUNS: one `BlameLine {sha, short_sha, author, at, orig_line, line_start, count, summary}` per consecutive run of lines from the same commit. `rev` is `guard_ref`'d, `path` rides after `--` (a leading `-` is a legal filename). |
+| GET /repos/{id}/blame?path=&rev=HEAD | ws viewer | — | `BlameResp {path, rev, lines: BlameLine[]}` — `git blame --porcelain <rev> -- <path>` grouped into RUNS: one `BlameLine {sha, short_sha, author, at, orig_line, line_start, count, summary, text: string[], previous?: {sha, path}}` per consecutive run of lines from the same commit. `text` = the run's source lines (each capped at 1000 chars); `previous` = porcelain `previous` (parent sha + the path there, following renames; absent on a root commit) — blaming it is "blame before this change". `rev` is `guard_ref`'d, `path` rides after `--` (a leading `-` is a legal filename). |
 | GET /repos/{id}/conflict | ws viewer | — | conflict listing |
 | POST /repos/{id}/conflict/resolve | ws editor | ResolveConflictReq (`content`, or `side:"ours"\|"theirs"` to take a whole side via `git checkout --ours/--theirs` + stage) | RepoStatusResp — `content` is written ONLY to a path that is conflicted right now (exact index match; else 409) and only inside the working tree: 400 for `.git` components (any case), `..`, absolute paths, a symlink as the final component, or a parent that resolves (symlinks followed) outside the tree or into the git dir. `GET /conflict` never reads through such a path (it reports `is_binary:true`; resolve by taking a side). |
 | POST /repos/{id}/cherry-pick | ws editor | `{sha}` | RepoStatusResp — a CONFLICTING pick is a normal 200: CHERRY_PICK_HEAD is left in place and the status carries `op_in_progress:"cherry_pick"` + the conflicted paths (finish via merge/commit, abort via merge/abort) |
@@ -1893,7 +1918,7 @@ choices. The UI surfaces this distinction in the preview.
 | GET /library/bundled | root | — | bundled skill catalog |
 | GET /library/bundled/{name} | root | — | BundledSkillContent (SKILL.md body + file list; view without installing) |
 | POST /library/bundled/{name}/install | root | — | install/update one bundled skill |
-| POST /library/bundled/install-all | root | `?category=&backup=` | install all bundled skills (optionally one category) |
+| POST /library/bundled/install-all | root | `?category=&backup=&force=` | install all bundled skills (optionally one category) → `{installed, backed_up, skipped, failed: [{name, error}]}`. Skips skills already up to date, and ones whose installed copy is ahead of the bundled version unless `force=true`; a failing skill is reported in `failed` and the rest still install. Runs off the async workers; keeps the newest 3 `skills-backup/<name>-<secs>` per skill |
 
 Each catalog entry carries `{name, category, version, description, installed_version,
 state, update_available}`. `state` is `not_installed | up_to_date | update_available
@@ -2326,11 +2351,15 @@ to the workspace (workspace-scoped or global); it must carry `host`+`user` in
 its params (auth flows through the system `ssh` client). The SSRF guard stays in
 force — the target host is still resolved/classified locally — so this is for
 **public, IP-restricted** upstreams, not for reaching private hosts. A
-resolution or tunnel failure is reported as a `502` and recorded in history.
+resolution or tunnel failure is reported as a `502` and recorded in history. A tunnel the
+client can't be built for (a proxy URL reqwest rejects) fails the send the same
+way — it never falls back to a direct, unguarded egress.
 
 **Automation execution.** `StartApiAutomationRunReq = {environment_id?:Id, stop_on_failure?:bool=false, dataset?:object[]=[]}`. The chosen environment (or active at start), automation steps and saved request definitions are pinned. Each dataset row starts from the same environment and overlays its own variables; extraction chains only within a row. Empty automations, datasets over 1 MiB, and runs over 1000 total step executions return 400. Missing/foreign requests or environments reject start. Non-HTTP steps fail explicitly.
 
 `ApiAutomationRun = {id,workspace_id,automation_id,environment_id,created_by,status,created_at,finished_at,stop_on_failure,dataset_rows,snapshot,report:{automation_id,steps,passed},result_rows,result_ids,error}`. Status is `running|passed|failed|cancelled|interrupted`; `result_rows` parallels `report.steps` with zero-based dataset row indices; `result_ids` supplies stable step execution IDs in the same order. Snapshot contains ordered redacted request ids/names/method/URL/updated_at/assertions/extract metadata. Dataset values and credentials are not persisted. Each result is saved before the next request starts, with a correlated history row (`request.source="automation_run"`, `automation_run_id`, `automation_id`, `request_id`, `dataset_row`). Cancel drops the in-flight wait and skips remaining steps; already-sent requests may have reached the upstream. Startup marks unfinished runs interrupted without replaying them.
+
+**Automation checks and extracts.** Step `assertions[]` are `{kind, op, value, path?}` with `kind = status|json_path|header|body_text|duration_ms` (`path` = JSON path for `json_path`, header name for `header`) and `op = eq|ne|contains|lt|gt|lte|gte|exists|not_exists|matches` (`matches` = regex ≤1000 chars, compiled-size capped; `value` ignored for `exists`/`not_exists`). A missing target (absent field/header, no response) fails every op except `not_exists`. Report lines are `{desc, passed, actual}` — `desc` is worded with the actual value ("Status code is less than 400: got 500", "$.id equals 7: field missing"), `actual` is that value (`null` when missing). Step `extract[]` paths are a JSON path, `header:<name>` or `status`; a miss appends a failed line ("Save {{token}} from $.data.token: not found") and fails the step. A step whose URL, enabled query/headers, body or auth still contains an undefined `{{var}}` is not sent: it fails with `error = "Not sent: no value for {{var}} …"`.
 
 **Browser OAuth.** Saved auth accepts `grant:"authorization_code"`, `authorization_url`, `token_url`, `client_id`, optional `client_secret`/`scope`, and existing token members. Start returns a generated authorization URL with single-use random state and S256 PKCE; reserved provider query keys are replaced. Register `redirect_uri` exactly (daemon loopback `/api/v1/api-client/oauth2/callback`). Callback rechecks the current user, workspace and feature access before exchange and persistence. Both provider endpoints require HTTPS except loopback HTTP development endpoints; token DNS is pinned to checked addresses and redirects are disabled. A changed request revision/auth/secret fingerprint rejects completion. The callback task continues if the browser disconnects. Access/refresh tokens use the saved request's Keychain reference; status never returns token values. Invalid/expired/replayed callbacks do not exchange tokens. Pending flows are memory-only and expire after 600s or daemon restart.
 
@@ -2346,7 +2375,7 @@ resolution or tunnel failure is reported as a `502` and recorded in history.
 |---|---|---|---|
 | GET /notifications | member | — | `Notice[]` — global/system notices + the caller's own (root sees all) |
 | DELETE /notifications | member | — | clears the caller's own notices (root clears all; global/system notices remain for non-root) |
-| GET /notifications/settings | member | — | notification settings |
+| GET /notifications/settings | member | — | `NotificationSettings {expiry_threshold_days, native_enabled, session_events, native_on_waiting}` — `native_on_waiting` (default `true`; absent in older rows → `true`): the UI also raises a native banner for the info "Session awaiting input" (`…:waiting`) notice when the user is not watching that session |
 | PUT /notifications/settings | member | NotificationSettings | settings |
 | POST /notifications/read-all | member | — | marks the caller's own notices read (root marks all) |
 | POST /notifications/{id}/read | member | — | mark one read (own only for non-root; global notices are read-only to them) |
@@ -2490,17 +2519,38 @@ the UI restores the admin's own token.
 
 The audit log is an **append-only** ledger written best-effort by the daemon at security-relevant sites — it is never updated or deleted, and an audit-insert failure never fails the audited request. `AuditEntry` = `{id, ts, user_id?, action, target?, detail?, ip?}` where `action` is a stable snake_case verb. Wired actions today: `login.success`, `login.failure`, `login.lockout` (`user_id` null — the actor is unauthenticated; `target` = attempted username; `ip` = real socket peer), `token.mint` / `token.revoke` (`target` = token id), `settings.change` (`target` = changed key list; `detail.keys`; secret values are NOT captured), `network_listener.toggle` (`target` = `on`/`off`; `detail` = the new listener config), `db.write_confirmed` (a confirmed write on a guarded production/read-only connection; `target` = connection name; `detail.environment` + truncated `detail.statement`), `grant.changed` (`target` = the user whose grants changed; `detail.old`/`detail.new` grant lists), `session.terminated` (an admin force-terminated a session via `POST /admin/sessions/{id}/terminate`; `target` = session id; `detail.owner_id` + `detail.workspace_id`), and `impersonate.start` / `impersonate.stop` (an admin began / ended acting-as another user; `user_id` = the real admin, `target` = the effective/impersonated user, `detail.real_user_id` + `detail.effective_user_id`). The posture summary derives entirely from existing settings + the auth store (no new state): the network listener key drives `network_listener` / `network_listener_port` / `loopback_only`, and `active_api_tokens` counts unexpired API tokens instance-wide.
 
+## Database maintenance
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /admin/db/stats | root | — | `DbStatsResp {size_bytes, free_bytes, auto_vacuum: 0\|1\|2, compacting}` |
+| POST /admin/db/compact | root | `{confirm: true}` | `DbCompactReport {before_bytes, after_bytes, freed_bytes, duration_ms, auto_vacuum}` · 400 without `confirm` · 409 while one is running |
+
+- `compact` is the one-time `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;` rewrite
+  of `otto.db`. It holds the SQLite write lock for the whole rewrite (tens of
+  seconds on a large DB), so it never runs automatically: the UI sends it only
+  after a confirm dialog that says writes stall meanwhile. Audited as
+  `db.compact` (`detail` = the report). Once `auto_vacuum = 2`, the daemon's
+  hourly maintenance runs `PRAGMA incremental_vacuum(4000)`.
+- Hourly maintenance (no endpoint): `PRAGMA optimize`, then
+  `wal_checkpoint(TRUNCATE)` (PASSIVE when a reader pins the WAL). The writer
+  sets `journal_size_limit = 64 MiB`.
+
 ## Usage tracking & system metrics (embedded ClickHouse)
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /usage/status | root | — | engine status (installed/available) |
-| GET /usage/summary | root | — | token/cost breakdown (input/output + cache read/write) |
+| GET /usage/status | Usage:View (paths redacted for non-root) | — | engine status (installed/available) |
+| GET /usage/summary | Usage:View (non-root: own sessions) | — | token-first breakdown (input/output + cache read/write, per provider/day/session/model) |
+| GET /usage/report | Usage:View (non-root: own sessions) | — | UsageReport (daily/monthly/model/session tables) |
+| POST /usage/ccusage-check | root | `{days?}` | CcusageCheck (opt-in `npx ccusage` cross-check) |
 | GET /usage/metrics | root | — | system CPU/RAM metrics |
 | PUT /usage/config | root | UsageConfig | config |
 | POST /usage/install | root | — | install the embedded ClickHouse binary |
 | GET /usage/budgets | root | — | UsageBudgetStatus (caps + live spend; enforcement opt-in, default off) |
 | PUT /usage/budgets | root | UsageBudgetConfig | UsageBudgetStatus (replace + persist budget config) |
+| GET /sessions/{id}/usage | Usage:View + ws viewer + session owner-or-admin | — | `SessionTotals \| null` — this session's token + cost totals over its whole recorded history (`{session_id, workspace_id, provider, events, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost_usd}`). `null` = nothing recorded, or usage tracking unavailable — never a misleading 0. The Agents pane's details chip shows it as "2.1M tokens · $1.24" (tokens first) |
+| GET /workspaces/{wid}/sessions/usage?days=30 | Usage:View + ws viewer | `days` 1–365 (default 30) | `{available, days, sessions: SessionTotals[]}` — one row per session of the workspace that the caller may see (workspace admin / root: all; otherwise their own) with usage in the window; sessions without usage are absent. `available: false` (and `sessions: []`) when the usage engine is unavailable — the UI then hides the tokens sort. Backed by one daemon-wide `session_totals(days)` rollup cached for 60 s (every rollup is a ClickHouse query) |
 
 ## Insights (scheduled usage reports)
 
@@ -2748,16 +2798,16 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | PATCH /workspaces/{ws}/vault/vaults/{id} | ws editor | `{name?, okf?}` | `Vault` |
 | DELETE /workspaces/{ws}/vault/vaults/{id} | ws editor | — | 204 — unregister ONLY (files on disk untouched) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rescan | ws editor | — | `VaultStatus` — full incremental rescan (awaited) |
-| GET /workspaces/{ws}/vault/vaults/{id}/status | ws viewer | — | `VaultStatus{scan_state, last_scan_at, generation, notes, links, unresolved, tags, attachments}`; stale (>5s) probes kick a background incremental scan |
+| GET /workspaces/{ws}/vault/vaults/{id}/status | ws viewer | — | `VaultStatus{scan_state, last_scan_at, generation, graph_generation, notes, links, unresolved, tags, attachments}`; stale (>5s) probes kick a background incremental scan |
 | GET /workspaces/{ws}/vault/vaults/{id}/dir | ws viewer | `?path=` | `VaultDirListing` — one level: dirs (with child counts), notes, attachments |
 | GET /workspaces/{ws}/vault/vaults/{id}/note | ws viewer | `?path=` | `VaultNote{meta, raw, outgoing}` |
 | PUT /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `{path, content, if_hash?}` | `VaultNoteMeta` — create/update; parent folders auto-created; `if_hash` mismatch → 409 (optimistic concurrency; `""` = must-not-exist) |
 | PUT /workspaces/{ws}/vault/vaults/{id}/file | ws editor | `{path, content, if_hash?}` | `{path,size,hash}` — create/update a guarded UTF-8 documentation artifact (`.yaml/.yml/.json/.d2/.mmd/.txt/.csv`, max 4 MiB); parent folders auto-created; same optimistic-concurrency, traversal, hidden-segment, and symlink-escape guards as note writes. Markdown stays on `/note`; binary files are rejected. |
 | DELETE /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `?path=` | 204 — soft delete → `<vault>/.trash/` (never destroys files) |
-| POST /workspaces/{ws}/vault/vaults/{id}/rename | ws editor | `{from, to}` | `VaultRenameResult{links_updated}` — file OR folder move; rewrites every referencing wikilink/markdown link across the vault on disk (style-preserving); case-only renames use a two-step move |
+| POST /workspaces/{ws}/vault/vaults/{id}/rename | ws editor | `{from, to}` | `VaultRenameResult{from, to, links_updated, links_failed}` — file OR folder move; rewrites every referencing wikilink/markdown link across the vault on disk (style-preserving); case-only renames use a two-step move. All index reads run before the move; once the move succeeds the call never fails halfway — a source whose links could not be rewritten is listed in `links_failed` (left untouched), and the index is always refreshed to the new path |
 | POST /workspaces/{ws}/vault/vaults/{id}/folder | ws editor | `{path}` | 204 |
 | GET /workspaces/{ws}/vault/vaults/{id}/backlinks | ws viewer | `?path=` | `VaultBacklink[]` (linked mentions with a context snippet; the snippet is cached per source note's indexed hash, so only changed sources are re-read) |
-| POST /workspaces/{ws}/vault/vaults/{id}/search | ws viewer | `{query, tag?, path_prefix?, okf_type?, limit?}` | `VaultSearchHit[]` — FTS5 bm25 + snippets; `tag:`/`path:`/`type:` operators inside `query` |
+| POST /workspaces/{ws}/vault/vaults/{id}/search | ws viewer | `{query, tag?, path_prefix?, okf_type?, limit?}` | `VaultSearchHit[]` — FTS5 bm25 + snippets; `tag:`/`path:`/`type:` operators inside `query`. Filters are applied in SQL before the limit (`tag:x` also matches nested `x/…`; `path:` is a case-sensitive prefix; `type:` is case-insensitive), so a filtered match ranked below the first page is still returned |
 | GET /workspaces/{ws}/vault/vaults/{id}/switcher | ws viewer | `?q=` | `VaultSwitchHit[]` — server-side fuzzy over title/aliases/path (quick switcher + `[[` completion) |
 | GET /workspaces/{ws}/vault/vaults/{id}/tags | ws viewer | — | `VaultTagCount[]` |
 | GET /workspaces/{ws}/vault/vaults/{id}/graph | ws viewer | `?mode=full\|local&path=&depth=&tags=&orphans=&reserved=&ghosts=&edge_budget=` | `VaultGraphPayload` — compact parallel arrays (`paths,titles,types,type_labels,services,service_labels,tag_off,tag_ids,tag_labels,flags,edges`) with a flat `[src,dst,…]` edge index list; `flags` bits: 1=ghost, 2=tag, 4=reserved; `types`/`services` are label-table indices per node (types are case-folded, so `Flow`/`flow` share one bucket; `untyped`/`unresolved`/`tag` are synthetic buckets), tags are CSR-encoded (`tag_ids[tag_off[i]..tag_off[i+1]]`, `tag_off` has `n+1` entries) and load regardless of `tags`, which only controls whether tag NODES are drawn. The client filters, rolls up and colors on these attributes without refetching. Full mode enforces a degree-prioritized edge budget (default 2M) with `truncated` |
@@ -2789,6 +2839,14 @@ Recovery and freshness details:
   scans keep it stable. `last_scan_at` uses nanosecond-precision RFC3339.
   Clients should compare tokens, not parse or order them. Clean open notes
   refresh on changes; dirty drafts keep their base hash and show conflicts.
+- `graph_generation` is a second opaque token that changes only when the
+  graph's shape can change: a note added/removed, or a note's links, title,
+  tags, OKF type or reserved flag changing, or a link re-resolving. A
+  body-only save keeps it, so graph views key their refetch on it. The daemon
+  caches built graph payloads per vault for one graph generation (keyed by the
+  query options), and `mode=local` without `ghosts`/`tags` walks the focus
+  neighbourhood over the indexed link columns instead of building the whole
+  graph.
 - Note reads derive raw/hash/parsed metadata/outgoing links from the same bytes.
   Markdown and text-artifact writes share a per-vault mutation gate with
   rename/delete/restore; writes atomically replace files and eagerly rescan.
@@ -3043,7 +3101,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `{run_id}` (token validated against workflow_triggers) |
 | GET /workflows/{id}/triggers | ws viewer (Workflows:View) | — | `WorkflowTrigger[]` |
 | POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
-| PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` |
+| PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` — resuming it (`enabled` false→true) or a really different schedule key (`cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`/`run_at`) re-arms it: `armed_at` = now, and the scheduler never looks before `max(last_run, armed_at)`, so a run missed while paused is not caught up. Created triggers are armed at creation. `armed_at` is null on rows predating migration 0151 |
 | DELETE /workflow-triggers/{id} | ws editor (Workflows:Edit) | — | 204 |
 | POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id, approved}` | resumed run status. `409` when the run is not `running` (canceled/failed runs can't be approved) or was decided concurrently; `400` when it is not waiting at `node_id` |
 
@@ -3104,7 +3162,7 @@ audited tools — `otto_db_schema`, `otto_git_pr_review`, `otto_product_story` (
 broker_topic deferred), the per-feature reads (see `docs/features/mcp-control-plane.md` §9), and the
 AWS / Kubernetes console tools that wrap `/aws/*` and `/k8s/*` — reads `aws_list_accounts`,
 `aws_s3_list_buckets` / `aws_s3_list_objects` / `aws_s3_preview`, `aws_sqs_list_queues` / `aws_sqs_peek`,
-`aws_ec2_list_instances`, `aws_athena_list_tables` / `aws_athena_get_query`, `aws_eks_list_clusters`,
+`aws_ec2_list_instances`, `aws_athena_list_tables` / `aws_athena_get_query`, `aws_eks_list_clusters`, `aws_logs_list_groups` / `aws_logs_filter` / `aws_logs_insights` / `aws_logs_get_insights`,
 `k8s_list_clusters`, `k8s_get_resources`, `k8s_describe`, `k8s_logs` (text tail), `k8s_top`; and the
 three Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `k8s_action` (same set, `otto.`-prefixed,
 on the outward server with the writers in `DANGEROUS`). The outward `otto.run_workflow` tool takes
@@ -3215,6 +3273,9 @@ linked to a product story. CRUD lives in the `otto-canvas` crate; the
 agent-assist endpoints (prompt → diagram blocks) live in `otto-server` because
 they need the orchestrator. Gated by `Feature::Canvas` (read=View, write=Edit).
 Item routes resolve the workspace from the scene row.
+Scene create (#103) and update (#105) accept bodies up to **25 MiB** (an
+Excalidraw board inlines pasted images as base64 in `doc.source`); every other
+canvas route keeps axum's 2 MB default.
 
 Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The rich
 `Scene` schema (nodes/edges/slides) is owned by the UI (`ui/src/modules/canvas/types.ts`).
@@ -3226,7 +3287,9 @@ Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The ric
 | 104 | GET /api/v1/canvas/scenes/{id} | ws viewer | — | CanvasScene (full `doc_json`) |
 | 105 | PUT /api/v1/canvas/scenes/{id}[?summary=true] | ws editor | `{title?, doc?, thumbnail?, provider?, section?, story_id?}` | CanvasScene (partial; omitted fields unchanged, COALESCE). `?summary=true` answers with the `CanvasSceneSummary` row instead of echoing the whole document (the Canvas editor uses it). Summary `format` is a trigger-maintained column (migration 0143), no longer parsed out of `doc_json` per listed row |
 | 106 | DELETE /api/v1/canvas/scenes/{id} | ws editor | — | 204 |
-| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview) |
+| 106a | GET /api/v1/canvas/scenes/{id}/versions | ws viewer | — | `CanvasSceneVersion[]` newest first `{id, scene_id, origin: 'agent'\|'user'\|'restore', created_by?, format?, size, created_at}` — no documents. Each entry is the doc as it was JUST BEFORE a change: before every Ask AI commit, before a restore, and at most once per 10 min across user saves (#105 with `doc`); deduped against the newest entry; newest 30 kept (migration 0152) |
+| 106b | POST /api/v1/canvas/scenes/{id}/versions/{vid}/restore | ws editor | — | CanvasScene — snapshots the current doc (origin `restore`, so a restore is undoable) then writes the version's doc. 404 when `vid` isn't a version of THIS scene |
+| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview). On an Excalidraw board the agent sees only shapes/arrows/text in the simplified form; images, freedraw, lines, frames, free arrows (and anything bound to them) plus top-level `files`/`appState` are set aside and merged back into the committed scene, which may therefore mix simplified and full elements. The committed doc keeps the prior doc's extra keys (`sketch`, `positions`, …) and the pre-turn doc is recorded in #106a |
 | 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas") |
 | 145 | GET /api/v1/sessions/{sid}/canvas-refs | ws viewer | — | `CanvasSceneSummary[]` — scenes referenced by this session |
 | 146 | POST /api/v1/sessions/{sid}/canvas-refs | ws editor | `{scene_id}` | 204 (idempotent; 404 if the scene isn't in the session's workspace) |
@@ -3708,10 +3771,10 @@ enforce the entity's workspace role.
 | CP17 | GET /api/v1/mcp/policies/export | mcp:view | — | `{version, policies}` (policy-as-code doc) |
 | CP18 | POST /api/v1/mcp/policies/import | mcp:admin | `{policies, replace?}` | `{imported, replaced}` |
 | CP19 | POST /api/v1/mcp/policies/evaluate | mcp:view | `{server_id, tool, workspace_id?}` | decision preview |
-| CP20 | GET /api/v1/mcp/approvals | mcp:view (ws-filtered) | `?status=` | `McpApproval[]` |
+| CP20 | GET /api/v1/mcp/approvals | mcp:view (ws-filtered) | `?status=` | `McpApproval[]` — additive `requested_by_session_id?` (the agent session that raised it). A retried governed call reuses its still-pending approval (same tool + args hash + workspace + requester) instead of filing a duplicate |
 | CP21 | POST /api/v1/mcp/approvals/{id}/decide | mcp:admin + human credential (`403` for an agent session's / MCP / share token); approver≠requester, except agent-raised requests, which their human owner may decide | `{approved, note?}` | McpApproval |
-| CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters | `McpCallLogRow[]` |
-| CP23 | GET /api/v1/mcp/stats | mcp:view (ws-filtered) | — | `McpToolStats[]` |
+| CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters | `McpCallLogRow[]` — additive `caller_session_id?`; `otto.*` rows carry the resolved (else calling session's) `workspace_id`; for non-root callers a workspace-less `otto.*` row is listed only when `caller_user_id` is the caller |
+| CP23 | GET /api/v1/mcp/stats | mcp:view (ws-filtered) | — | `McpToolStats[]` (same row scoping as CP22) |
 
 ### Otto as an MCP server (outward) + live-agent gateway
 
@@ -3738,7 +3801,7 @@ enforce the entity's workspace role.
 | CP42 | PATCH /api/v1/mcp/auto-approve/{id} | mcp:admin + human credential | `{name?, enabled?, allow_irreversible?, note?}` | McpAutoApproveRule |
 | CP43 | DELETE /api/v1/mcp/auto-approve/{id} | mcp:admin + human credential | — | `204` (`404` unknown id) |
 
-**Auto-approve rules (CP40–CP43; CP24/CP25).** A mutating (`DANGEROUS`) `otto.*` tool asks a human before each call by default. An **auto-approve rule** (`mcp_auto_approve_rules`, migration 0146) is the explicit, opt-in exception: `target_kind` `tool` (`target` = bare or `otto.`-prefixed mutating tool, stored bare) or `category` (`target` = a catalog category with ≥1 mutating tool, e.g. `Git`; covers tools added to it later), in `scope` `global` (no ids), `workspace` (`workspace_id` — matched against the call's resolved `workspace_id`, e.g. the repo's workspace for git tools, else the calling session's workspace) or `session` (`session_id` — matched against the calling credential's bound agent session; `ON DELETE CASCADE` with the session). `McpAutoApproveRule = {id, name, enabled, scope, workspace_id, session_id, target_kind, target, allow_irreversible, note, created_by, created_at, updated_at}`; GET/POST/PATCH responses add display labels `workspace_name?`, `session_title?` and `irreversible`. `McpAutoApproveRef = {id, name, scope, workspace_id, session_id, target_kind, target}`. `name` defaults to `"<target> — <scope>"`. **Guardrail:** the irreversible tier (`merge_pr`, `k8s_action`, `produce_broker_message`, `aws_sqs_send`, `api_execute`, `api_run_automation`, `delete_scheduled_task`, `assistant_forget`) is never covered by a category rule (`allow_irreversible:true` on a category is a `400`), and a per-tool rule for one is a `400` unless `allow_irreversible:true` (the second explicit toggle; the flag is stored `false` for reversible tools). At call time (CP26/CP32), after the per-token scope, enable, reference resolution and pin gates, a call that would ask (DANGEROUS, no trusted token write grant, `mcp_require_approval_dangerous` on) is auto-approved when an enabled rule covers it — the most specific is recorded (session > workspace > global; tool > category). It executes with **no approval enqueued**, is audited in `mcp_call_log` with `decision:"auto_approved"` and `decision_reason:"auto-approved by policy '<name>' (<scope>, <target>[, irreversible allowed]) [rule <id>]"`, and the envelope adds `auto_approved_by: McpAutoApproveRef`. A rule lookup failure keeps the call gated. Every create/update/delete is recorded in the audit log (`mcp.auto_approve.create|update|delete`, detail = the rule). Writes (CP41–CP43, and CP25 with `approval_exempt_tools`) need a **person's own credential**: an agent session's managed token, an internal/outward MCP token or a share token gets `403` — an agent can never auto-approve its own calls.
+**Auto-approve rules (CP40–CP43; CP24/CP25).** A mutating (`DANGEROUS`) `otto.*` tool asks a human before each call by default. An **auto-approve rule** (`mcp_auto_approve_rules`, migration 0146) is the explicit, opt-in exception: `target_kind` `tool` (`target` = bare or `otto.`-prefixed mutating tool, stored bare) or `category` (`target` = a catalog category with ≥1 mutating tool, e.g. `Git`; covers tools added to it later), in `scope` `global` (no ids), `workspace` (`workspace_id` — matched against the call's resolved `workspace_id`, e.g. the repo's workspace for git tools, else the calling session's workspace) or `session` (`session_id` — matched against the calling credential's bound agent session; `ON DELETE CASCADE` with the session). `McpAutoApproveRule = {id, name, enabled, scope, workspace_id, session_id, target_kind, target, allow_irreversible, note, created_by, created_at, updated_at}`; GET/POST/PATCH responses add display labels `workspace_name?`, `session_title?` and `irreversible`. `McpAutoApproveRef = {id, name, scope, workspace_id, session_id, target_kind, target}`. `name` defaults to `"<target> — <scope>"`. **Guardrail:** the irreversible tier (`merge_pr`, `k8s_action`, `k8s_pod_http`, `produce_broker_message`, `aws_sqs_send`, `api_execute`, `api_run_automation`, `delete_scheduled_task`, `assistant_forget`) is never covered by a category rule (`allow_irreversible:true` on a category is a `400`), and a per-tool rule for one is a `400` unless `allow_irreversible:true` (the second explicit toggle; the flag is stored `false` for reversible tools). At call time (CP26/CP32), after the per-token scope, enable, reference resolution and pin gates, a call that would ask (DANGEROUS, no trusted token write grant, `mcp_require_approval_dangerous` on) is auto-approved when an enabled rule covers it — the most specific is recorded (session > workspace > global; tool > category). It executes with **no approval enqueued**, is audited in `mcp_call_log` with `decision:"auto_approved"` and `decision_reason:"auto-approved by policy '<name>' (<scope>, <target>[, irreversible allowed]) [rule <id>]"`, and the envelope adds `auto_approved_by: McpAutoApproveRef`. A rule lookup failure keeps the call gated. Every create/update/delete is recorded in the audit log (`mcp.auto_approve.create|update|delete`, detail = the rule). Writes (CP41–CP43, and CP25 with `approval_exempt_tools`) need a **person's own credential**: an agent session's managed token, an internal/outward MCP token or a share token gets `403` — an agent can never auto-approve its own calls.
 
 CP24's per-tool `approval_exempt` (and top-level `approval_exempt_tools`) = the tool has an enabled, effective **global per-tool** rule (the catalog's "Auto-approve everywhere" switch); `irreversible` marks the guardrail tier; `auto_approved_by` lists every enabled rule (any scope) that covers the tool. CP25's `approval_exempt_tools` is a compatibility shim over those global per-tool rules: the list (bare or `otto.`-prefixed; a non-mutating or unknown name is a `400`, validated before anything is written) replaces them — missing ones are created, listed-but-disabled ones re-enabled, enabled ones not listed deleted — and an irreversible tool not already auto-approved is a `400` (the shim cannot carry the second toggle). Whenever CP25 changes `tools` or `approval_exempt_tools`, every per-tool rule (any scope) of a tool that is no longer enabled is deleted, so re-enabling it starts gated again (category rules stay); the change is audited (`mcp.otto_server.approval_exempt`, `{from, to}`). Migration 0146 imported the legacy `mcp_approval_exempt_tools` setting into global per-tool rules (keeping irreversible ones — `allow_irreversible = 1`); the setting is no longer read. `require_approval_dangerous` echoes the global `mcp_require_approval_dangerous` switch (read-only here): when false, nothing asks regardless (calls are audited `allowed`). `mcp_policies` and per-tool `require_approval` (CP10) govern registered external servers only and never apply to `otto.*` tools; auto-approve rules never apply to external servers' tools.
 
@@ -3976,14 +4039,99 @@ writes) + the workspace-role axis on the agent's workspace.
 | PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | any subset of the create body | PersonalAgent |
 | DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | GET /api/v1/personal-agents/{id}/schedules | scheduled_tasks view + ws viewer | — | `PersonalAgentSchedule[]` |
-| POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?}` (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
-| PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
+| POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?, permission?}` — `permission` = `read_only` \| `directed` (default): the schedule's own permission set (see "Personal agent autonomy") (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
+| PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?, permission?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent — manual, delegated or scheduled — is already in progress (one run per agent at a time: its runs share a folder and memory; a due schedule waits, cursor untouched) |
 | POST /api/v1/personal-agents/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run (its session is killed, no retry); it settles `canceled`. `409` when the run isn't running |
 | GET /api/v1/personal-agents/{id}/runs | scheduled_tasks view + ws viewer | — | `PersonalAgentRun[]` |
 | GET /api/v1/personal-agents/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report; served by run id, path-canonicalized) |
 | POST /api/v1/personal-agents/{id}/chat-session | scheduled_tasks edit + ws editor | — | `{session_id}` — returns (creating if absent) the agent's single interactive chat session, pinned to its provider/model/persona cwd |
+
+### Personal agent autonomy (permission modes, goals, rules, activity, memory inspector)
+
+Every run executes under a **permission mode**, recorded on the run
+(`PersonalAgentRun.mode` + `read_only` + `goal_id`):
+
+- **`proactive`** — the scheduler works the agent's standing goals in the
+  background (round-robin, oldest-worked first) at most `runs_per_day` times in
+  any rolling 24 h, spaced `24h / runs_per_day` apart, each capped at
+  `max_minutes`. ALWAYS read-only; the report lands in the run feed and is
+  never delivered.
+- **`directed`** — Run now, Assistant delegation, the chat session: normal
+  approval + auto-approve rules.
+- **`scheduled`** — a schedule's run under that schedule's own `permission`
+  (`read_only` | `directed`).
+
+**Read-only is enforced by the daemon, not the prompt.** The run's session
+carries `meta.read_only = true` and: (1) every governed `otto.*` call that is
+mutating, plus `room_post` / `ask_human_approval` / `assistant_remember` /
+`assistant_forget`, is denied (audited `denied`; auto-approve rules and token
+write grants do not apply); (2) every non-GET request made with the session's
+own token is `403` unless it is a listed read route (searches, schema/object
+introspection, the read-only DB query, SQS peek, browser summarize, the
+governed invoke); (3) claude sessions start with `--disallowed-tools "Bash
+NotebookEdit Task"`; (4) the session is always Seatbelt-confined (writes only
+in its folder + temp), whatever the `process_sandbox` setting says; (5) browser
+automation (Playwright MCP) is off.
+
+**Sensitive-action gate (every caller).** A MUTATING governed call that touches
+accounts, credentials or sharing — `test_integration`; `create_/update_scheduled_task`
+with a non-`none` `destination`; any argument key such as `password`, `secret`,
+`*_token`, `api_key`, `credentials`, `share`, `visibility`, `permissions`,
+`grant`, `invite`, `collaborators`, `acl`; or a URL/path value under
+`/password`, `/credentials`, `/share`, `/permissions`, `/collaborators`,
+`/invitations`, `/tokens`, `/oauth`, `/members`, `/grants`, `/api-keys` —
+ALWAYS files a human approval (`risk_label: "sensitive"`), even when an
+auto-approve rule or a token write grant covers the tool.
+
+**Custom rules.** Each rule is plain language, injected into the agent's
+persona file. When a rule both asks first / forbids ("ask before…", "get my
+approval…", "never…", "don't…") AND names a target (a quoted string, a
+`#channel`, or a known word: prod/production, staging, main, master, billing,
+payment, customer, finance, secret, slack, telegram, email, jira, confluence,
+k8s/kubernetes, database, merge, deploy, delete), the server derives `enforce =
+{kind: "approval"|"deny", terms}`: the agent's MUTATING calls whose tool name or
+arguments mention a term (word-boundary match) are denied, or file an approval
+(`risk_label: "agent_rule"`) that no auto-approve rule skips. `enforce` is
+server-derived; a client never sets it.
+
+| Method & path | Role | Body | Response |
+|---|---|---|---|
+| GET /api/v1/personal-agents/{id}/autonomy | scheduled_tasks view + ws viewer | — | `PersonalAgentAutonomy` (defaults when never saved) |
+| PUT /api/v1/personal-agents/{id}/autonomy | scheduled_tasks edit + ws editor | `{proactive?: {enabled, runs_per_day (1..24), max_minutes (1..60)}, goals?: [{id?, text, enabled?}], rules?: [{id?, text}], primary?}` — partial; omitted sections kept; ≤20 goals, ≤30 rules, ≤500 chars each; a goal keeps its `last_run_at` by id; making an agent `primary` clears it on every other agent of the workspace | `PersonalAgentAutonomy` |
+| POST /api/v1/personal-agents/{id}/goals/{goal_id}/run | scheduled_tasks edit + ws editor | — | `PersonalAgentRun` (`mode: "proactive"`, read-only) — work the goal now; 409 while a run is in progress; counts against the daily budget |
+| GET /api/v1/personal-agents/{id}/activity | scheduled_tasks view + ws viewer | — | `PersonalAgentActivity` |
+| GET /api/v1/personal-agents/{id}/memories | scheduled_tasks view + ws viewer | — | `PersonalAgentMemories` |
+| POST /api/v1/personal-agents/{id}/memories/edit | scheduled_tasks edit + ws editor | `{version, line, raw, text: string \| null}` — `text: null` forgets the item; `raw` must equal the line as listed | `PersonalAgentMemories`; 409 when the file or that line changed since it was listed |
+| POST /api/v1/personal-agents/{id}/reset | scheduled_tasks edit + ws editor | `{confirm}` — must equal the agent's name | `{ok:true}` — re-seeds `memory/notes.md`, stops + unpins the chat session, deletes schedules and run history (+ report files), clears goal cursors and live activity; keeps persona, rules, goals, model, delivery. 409 while a run is in progress |
+
+```ts
+PersonalAgentAutonomy = {
+  proactive: {enabled: boolean, runs_per_day: number, max_minutes: number}, // default off, 4, 15
+  goals: {id, text, enabled: boolean, last_run_at: string | null}[],
+  rules: {id, text, enforce: {kind: 'approval' | 'deny', terms: string[]} | null}[],
+  primary: boolean,
+}
+PersonalAgentActivity = {
+  now: {run: PersonalAgentRun | null, session_status: SessionStatus | null},
+  items: {seq, at, kind: 'tool_call' | 'blocked' | 'approval_required' | 'approval_waiting',
+          tool, detail, session_id: string | null, approval_id: string | null}[], // newest first, ≤100
+  approvals: {approval_id, tool, at, status, title, detail, risk_label}[],
+  runs: PersonalAgentRun[], // newest 20
+}
+PersonalAgentMemories = {version, exists, path, items: {line, text, source, section, raw}[]}
+// source: chat | slack | telegram | vault | run | user | notes (untagged)
+```
+
+`items` is an in-memory live view (newest 200 per agent; cleared on restart);
+`mcp_call_log` stays the durable audit. Memory items are the top-level bullets
+of `memory/notes.md`; agents are told to start each with its source tag
+(`- [run] …`, `- [chat] …`, `- [slack] …`, `- [telegram] …`, `- [vault] …`).
+
+**Primary assistant.** The `primary` agent ("your agent") gets a persona
+section listing the workspace's other enabled agents and is told to route
+specialist work to them through a shared room.
 
 ### Personal Agent Memory and Context
 
@@ -4048,7 +4196,7 @@ cursor they read the room's **tail** (`tail=true`), not its first messages.
 | POST /api/v1/agent-rooms/{id}/members | scheduled_tasks edit + ws editor | `{agent_id}` | `{ok:true}` |
 | DELETE /api/v1/agent-rooms/{id}/members/{agent_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | GET /api/v1/agent-rooms/{id}/messages | scheduled_tasks view + ws viewer | query `after?`, `before?`, `tail?`, `limit?` (≤ 500), `session_id?` | `AgentRoomMessage[]` oldest first (agent reads via `session_id` are membership-checked). `after`: messages after that id (a cursor is looked up in THIS room; an unknown one reads from the start). Additive backwards paging (ignored when `after` is set): `before=<id>` → the `limit` messages before it; `tail=true` with no cursor → the room's newest `limit` |
-| POST /api/v1/agent-rooms/{id}/messages | scheduled_tasks edit + ws editor | `{text, session_id?}` | AgentRoomMessage |
+| POST /api/v1/agent-rooms/{id}/messages | scheduled_tasks edit + ws editor | `{text, session_id?}` | AgentRoomMessage. An agent-session credential (managed or per-session MCP token) is bound to its own session on both room routes: `session_id` defaults to it (never a user post / unchecked read), and naming another session is `403` |
 
 ## Otto Assistant (`/assistant/*`)
 
@@ -4706,15 +4854,33 @@ VPC interface endpoints, S3-compatible stores).
 started_at?, finished_at?, error? }`. `DiscoveredProfile { name, region?,
 sso_start_url?, sso_session?, role_arn?, source: "config"|"credentials" }`.
 
-### S3 (read-only — every route is `AwsS3:View`)
+`AwsAccount.session?: { expires_at, source: "sso"|"credentials", refreshable }`
+(profile accounts, `GET /aws/accounts[/{id}]`): when the sign-in ends. A
+non-refreshable SSO token (legacy `sso_start_url` profile) is the hard
+deadline; with an `sso-session` refresh token it reports the exported
+credentials' expiry with `refreshable: true`. The UI warns ~15 min ahead.
+**Credential cache (A-5):** for profile accounts the daemon runs `aws configure
+export-credentials --profile P --format process` once and passes the result as
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` (alongside
+`AWS_PROFILE`, so the profile's other settings still apply) to every child
+until 5 min before `Expiration` (15 min for long-lived keys). An expired
+sign-in fails fast with `login required: the sign-in for AWS profile 'P' has
+expired — press Sign in …`; a CLI without `export-credentials` falls back to
+per-call resolution (re-tried after 10 min). Sign-in, edit and delete evict
+the cache.
+
+### S3 (reads are `AwsS3:View`; object upload/delete and `download-to` are `AwsS3:Edit`)
 
 | Method & path | Request | Response |
 |---|---|---|
 | GET /aws/accounts/{id}/s3/buckets | `?region=` | `{ buckets: { name, creation_date, region? }[] }` (`s3api list-buckets`) |
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/objects | `?prefix=&token=&max=&region=` (`max` 1..1000, default 500) | `{ prefixes: string[], objects: { key, size, last_modified, storage_class, etag }[], next_token?, is_truncated }` — `list-objects-v2 --delimiter /`; the prefix marker object is dropped; `token` is the CLI paginator's `NextToken` |
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/object | `?key=&region=` | `{ key, size, content_type, last_modified, etag, metadata, storage_class }` (`head-object`) |
-| GET /aws/accounts/{id}/s3/buckets/{bucket}/preview | `?key=&max_bytes=&region=` (default 64 KiB, cap 1 MiB) | `{ text?, truncated, content_type, binary? }` — ranged `get-object`; non-text types (anything but `text/*`, JSON/NDJSON/XML/YAML/CSV/JS/SQL, or an `octet-stream` with a text-looking extension) and NUL-bearing bodies return `{ binary: true }` without text |
-| GET /aws/accounts/{id}/s3/buckets/{bucket}/download | `?key=&region=` | streamed body (`aws s3 cp s3://… -` stdout), `Content-Disposition: attachment; filename="<basename>"`, `Content-Length` from the head; objects over **2 GiB** are refused with 413. The child is killed when the client disconnects. |
+| GET /aws/accounts/{id}/s3/buckets/{bucket}/preview | `?key=&max_bytes=&region=` (default 64 KiB, cap 1 MiB) | `{ text?, truncated, content_type, binary?, kind, size? }` — ranged `get-object`; non-text types (anything but `text/*`, JSON/NDJSON/XML/YAML/CSV/JS/SQL, or an `octet-stream` with a text-looking extension) and NUL-bearing bodies return `{ binary: true }` without text. `kind`: `text` (in `text`) · `image` (`image/*`, or an octet-stream key ending png/jpg/jpeg/gif/webp/svg/bmp/ico/avif) · `pdf` · `binary`; image/pdf bodies are fetched through `download?inline=true` |
+| PUT /aws/accounts/{id}/s3/buckets/{bucket}/object | **AwsS3:Edit** + `s3_write` on the bucket. `?key=&overwrite=&region=`, raw request body (≤ 5 GiB, spooled to `<data_dir>/tmp/<ulid>` and removed afterwards), `Content-Type` header becomes the object's type | 201 `{ key, size }` — `aws s3 cp <spool> s3://bucket/key` (1 h budget). An existing key → **409** "already exists — confirm to replace it" unless `overwrite=true`; a key ending in `/` → 400; over 5 GiB → 413. Audited `aws.s3.upload` (target `s3://bucket/key`, bytes, overwrite) |
+| DELETE /aws/accounts/{id}/s3/buckets/{bucket}/object | **AwsS3:Edit** + `s3_delete` on the bucket. `?key=&confirm=&region=` | 204 — `s3api delete-object`. On a **prod** account `confirm` must equal `key` → else 400 naming the fix. Audited `aws.s3.delete` |
+| POST /aws/accounts/{id}/s3/buckets/{bucket}/presign | AwsS3:View + `s3_read` on the bucket. `{ key, expires_in? }` (seconds, default 3600, clamped 1..604800) (`?region=`) | `{ url, expires_at, warning? }` — `aws s3 presign`. `warning` is set when the account signs with temporary credentials (SSO / exported) that end before `expires_at` (the link dies with them). Audited `aws.s3.presign` |
+| GET /aws/accounts/{id}/s3/buckets/{bucket}/download | `?key=&region=&inline=` | streamed body (`aws s3 cp s3://… -` stdout), `Content-Disposition: attachment; filename="<basename>"`, `Content-Length` from the head; objects over **2 GiB** are refused with 413. The child is killed when the client disconnects. `inline=true` (in-app image/PDF preview): `Content-Disposition: inline`, a specific MIME type derived from the extension when the stored one is generic, `Content-Security-Policy: sandbox; default-src 'none'…` (an SVG/PDF never runs script), and objects over **25 MB** → 413 "use Download instead". |
 | POST /aws/accounts/{id}/s3/buckets/{bucket}/download-to | `{key, local_dir, region?}` | `S3DownloadJob {id, bucket, key, local_path, state (running\|completed\|failed\|cancelled), bytes, total, error?}`. The daemon pipes `aws s3 cp s3://… -` into `<local_dir>/<basename>.otto-part` and renames it on success — never overwriting (` (n)` suffix). `local_dir` must be an existing absolute directory on the daemon host (`~/` expanded) → else 400; after canonicalizing, it must be inside the daemon user's home (not `~/Library`, not any dot-directory) or on an external volume (`/Volumes/<name>/…`) → else 403. The file name is the key's basename with leading dots replaced by `_` (a `.zshenv` key lands as `_zshenv`); the part file is created exclusively and moved into place with a no-overwrite link, so an existing file is never replaced. No 2 GiB cap (disk-bound). The UI uses it for objects over 100 MB instead of buffering them in the webview. **AwsS3:Edit** (it writes to the daemon host) plus `s3_read` on the bucket. |
 | GET /aws/accounts/{id}/s3/download-jobs/{job} | — | `S3DownloadJob` (live `bytes`). Jobs are in memory; finished ones are kept 15 min. 404 for another account's job. |
 | POST /aws/accounts/{id}/s3/download-jobs/{job}/cancel | — | `S3DownloadJob` (`cancelled`; the part file is removed). A finished job is returned unchanged. AwsS3:Edit. |
@@ -4735,7 +4901,7 @@ sso_start_url?, sso_session?, role_arn?, source: "config"|"credentials" }`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /aws/accounts/{id}/ec2/instances | AwsEc2:View | `?region=&state=&q=` (`state` ∈ pending/running/shutting-down/terminated/stopping/stopped; `q` filters id/name/ips/type client-side) | `{ instances: Ec2Instance[] }` |
+| GET /aws/accounts/{id}/ec2/instances | AwsEc2:View | `?region=&state=&q=` (`state` ∈ pending/running/shutting-down/terminated/stopping/stopped; `q` filters id/name/ips/type client-side; `region=all` ⇒ every enabled region) | `{ instances: Ec2Instance[], region_errors? }` (rows carry `region` on `region=all`) |
 | GET /aws/accounts/{id}/ec2/instances/{instance_id} | AwsEc2:View | `?region=` | `Ec2Instance & { raw }` |
 | POST /aws/accounts/{id}/ec2/instances/{instance_id}/start | AwsEc2:Edit | `{ confirm_id? }` (`?region=`) | `{ previous_state, current_state }` — audited `aws.ec2.start` |
 | POST /aws/accounts/{id}/ec2/instances/{instance_id}/stop | AwsEc2:Edit | `{ confirm_id }` (must equal the instance id) | `{ previous_state, current_state }` — audited `aws.ec2.stop` |
@@ -4760,7 +4926,7 @@ public_ip, launch_time, platform, vpc_id, subnet_id, tags: Record<string,string>
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /aws/accounts/{id}/eks/clusters | AwsEks:View | `?region=` | `{ clusters: { name, status, version, endpoint, arn, created_at }[] }` (`list-clusters` + `describe-cluster` fan-out, first 20) |
+| GET /aws/accounts/{id}/eks/clusters | AwsEks:View | `?region=` (`all` ⇒ every enabled region, rows carry `region`, plus `region_errors?`) | `{ clusters: { name, status, version, endpoint, arn, created_at }[] }` (`list-clusters` + `describe-cluster` fan-out, first 20) |
 | GET /aws/accounts/{id}/eks/clusters/{name} | AwsEks:View | `?region=` | `{ cluster: Value, nodegroups: { name, status, desired, min, max, instance_types, ami_type }[] }` |
 | POST /aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig | AwsEks:Edit **and** `kubernetes:Admin` (checked in the handler) | `{ cluster_name_override?, default_namespace? }` (`?region=`) | 201 `K8sCluster` — `aws eks update-kubeconfig --kubeconfig <data_dir>/kube/<new_id>.yaml --alias <name>` (file 0600), then a `k8s_clusters` row `source: "eks"`, `aws_account_id: id`; emits `k8s_cluster_updated`; audited `aws.eks.import_kubeconfig` |
 
@@ -4768,13 +4934,38 @@ public_ip, launch_time, platform, vpc_id, subnet_id, tags: Record<string,string>
 
 | Method & path | Request | Response |
 |---|---|---|
-| GET /aws/accounts/{id}/rds/instances | `?region=&q=` (`q` filters identifier/engine/class/endpoint/db name client-side) | `{ instances: RdsInstance[] }` (`rds describe-db-instances`) |
+| GET /aws/accounts/{id}/rds/instances | `?region=&q=` (`q` filters identifier/engine/class/endpoint/db name client-side; `region=all` fans out — see "All enabled regions") | `{ instances: RdsInstance[], region_errors? }` (`rds describe-db-instances`) |
 | GET /aws/accounts/{id}/rds/instances/{identifier} | `?region=` | `RdsInstance & { raw }` — 400 unless `identifier` is 1–63 letters/digits/hyphens starting with a letter |
 
 `RdsInstance { identifier, engine, engine_version, class, status, az,
 multi_az, storage_gb, storage_type, endpoint (host), port, db_name,
 master_username, publicly_accessible, created, tags: Record<string,string> }`.
 There are no start/stop/reboot routes for RDS by design.
+
+### All enabled regions (EC2 / EKS / RDS lists)
+
+`GET …/ec2/instances`, `GET …/eks/clusters` and `GET …/rds/instances` accept
+`?region=all`: the daemon resolves the account's enabled regions once
+(`ec2 describe-regions`, cached per account for 1 h; falls back to the account
+region when that call is denied) and runs the per-region list with at most
+**6** CLI children in flight. Every row carries `region`; regions that failed
+come back as `region_errors: { region, message }[]` (omitted when empty) while
+the other rows still render. Only when **every** region fails with
+`login required:` is that error returned as-is (400).
+
+### CloudWatch Logs (read-only — `Aws:View`, account operation `metrics`)
+
+| Method & path | Request | Response |
+|---|---|---|
+| GET /aws/accounts/{id}/logs/groups | `?prefix=&token=&max=&region=` (`max` 1..1000, default 200) | `{ groups: { name, arn?, created_ms?, retention_days?, stored_bytes?, class? }[], next_token? }` (`logs describe-log-groups`) |
+| GET /aws/accounts/{id}/logs/streams | `?group=&prefix=&token=&max=&region=` | `{ streams: { name, created_ms?, first_event_ms?, last_event_ms?, stored_bytes? }[], next_token? }` — newest first (`--order-by LastEventTime --descending`) unless `prefix` is set (the API refuses both) |
+| GET /aws/accounts/{id}/logs/events | `?group=&streams=a,b&pattern=&start=&end=&token=&max=&region=` (`start`/`end` epoch **ms**; ≤ 100 streams) | `{ events: { id, stream, timestamp, ingestion_time?, message }[], next_token? }` (`logs filter-log-events`, ascending). Live tail = poll with `start` = the newest timestamp seen and dedupe on `id` |
+| POST /aws/accounts/{id}/logs/insights | `{ groups: string[] (1..50), query, start, end (epoch ms, ≤ 31 days), limit? (≤ 10000, default 1000) }` (`?region=`) | `{ query_id }` (`logs start-query`; billed per GB scanned, never writes) |
+| GET /aws/accounts/{id}/logs/insights/{qid} | `?region=` | `{ status: Scheduled\|Running\|Complete\|Failed\|Cancelled\|Timeout\|Unknown, done, result: QueryResult, records_matched?, records_scanned?, bytes_scanned? }` — `result` is the DB Explorer shape; columns are the union of returned fields minus `@ptr` |
+| POST /aws/accounts/{id}/logs/insights/{qid}/stop | `?region=` | 204 (`logs stop-query`) |
+
+Invalid group names / stream lists / ranges answer 400 with what to fix
+("pick at least one log group…", "capped at 31 days — narrow it").
 
 ### CloudWatch metrics
 
@@ -4842,6 +5033,19 @@ Admin = cluster registry + installs (see `crates/otto-server/src/policy.rs`).
 | POST /k8s/clusters/{id}/exec | kubernetes:Edit | `{ workspace_id, ns, pod, container?, command?: string[] }` | 201 `Session` — PTY via `Spawner::spawn_command(provider="k8s")`: `kubectl [--kubeconfig ..] --context .. -n <ns> exec -it <pod> [-c <c>] -- sh -c 'command -v bash >/dev/null && exec bash \|\| exec sh'` (or `command`); title `"<pod> · <ns>"`, meta `{ k8s: { cluster_id, cluster_name, ns, pod, container, mode: "exec" } }`; audited as `k8s.exec` |
 | POST /k8s/clusters/{id}/k9s | kubernetes:Edit | `{ workspace_id, ns? }` | 201 `Session` — `k9s [--kubeconfig ..] --context .. [-n <ns \| default_namespace>]`; 400 `k9s not installed …` when missing; audited as `k8s.k9s` |
 | POST /k8s/clusters/{id}/actions | kubernetes:Edit | `K8sActionReq { action, kind, ns, name, params? }` | `{ ok, message, output? }` — see the action table below; audited as `k8s.action.<action>` (success AND failure, with `params`); `rollout_status` returns `ok:false` + output when the rollout has not finished within 5 s instead of failing |
+
+**Pod HTTP actions (K-3).** One HTTP request to a pod's container port, or to every running pod of a workload, through the API-server pod proxy (`pods/{pod}:{port}/proxy{path}` via a pooled per-cluster `kubectl proxy` on a private Unix socket that admits pod-proxy paths only) with a `kubectl port-forward` fallback when the proxy cannot start, fails at transport level or the API server refuses `pods/proxy`. Auth: a `GET` is graded like a read (cluster op `workloads_view`); any other method needs the `exec` op (Edit). Audited `k8s.pod_http` (success, failure and confirm refusals): cluster, context, environment, ns, pod/workload, method, port, path, redacted headers, `body_sha256` (never the body), per-pod status codes and transport.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /k8s/clusters/{id}/pod-http | kubernetes:View (GET) · Edit (`exec`) otherwise | `PodHttpReq { namespace, pod? \| workload?: { kind: "deployment"\|"statefulset"\|"daemonset"\|"replicaset"\|"job", name }, port (1–65535), method: "GET"\|"POST"\|"PUT"\|"PATCH"\|"DELETE", path, headers?: Record<string,string>, body?: string\|null, timeout_ms? (default 10000, clamped 500–30000), max_concurrency? (default 4, ≤ 8), confirm_name? }` — exactly one of `pod`/`workload`; `path` starts with `/`, no `..` / encoded slash, no scheme, whitespace, `#` or unfilled `{{var}}`; header names are RFC 7230 tokens, `Host`/`Content-Length`/hop-by-hop refused; a GET carries no body; request body ≤ 1 MiB (413) | `PodHttpResp { results: PodHttpResult[], target_name, mutating }` with `PodHttpResult { pod, status: number\|null, duration_ms, headers: Record<string,string>, body, body_base64, truncated, error: string\|null, via: "proxy"\|"port_forward" }` — one row per pod (name-sorted; a workload resolves its `spec.selector.matchLabels` to Running, non-terminating pods, ≤ 50 else 400, none ⇒ 404); response body capped at 256 KiB (`truncated`), UTF-8 else base64; `Authorization`/`Proxy-Authorization`/`Cookie`/`Set-Cookie`/`X-Api-Key` values returned as `[redacted]`. A per-pod failure is a row with `error`, not a request failure. **Prod guard:** a non-GET method on an `environment: "prod"` cluster without `confirm_name` equal to the pod / workload name ⇒ `409 { code: "confirm_required", message }` |
+| GET /k8s/clusters/{id}/pod-actions?namespace=&workload_kind=&workload= | kubernetes:View | — | `{ actions: PodAction[] }` — saved per-workload actions (filters optional; rows in namespaces the caller may not view are hidden). `PodAction { id, cluster_id, namespace, workload_kind (plural wire kind, e.g. "deployments"), workload, name, method, port, path, headers: Record<string,string>, body_template: string\|null, created_by: string\|null, updated_at }` |
+| PUT /k8s/clusters/{id}/pod-actions | kubernetes:Edit (`exec` on the namespace) | `{ id?, namespace, workload_kind, workload, name (≤ 120), method, port, path, headers?, body_template?: string\|null }` | `PodAction` — upsert (`id` absent ⇒ new). `path` / `body_template` may hold `{{logger}}` / `{{level}}` variables: stored raw, filled by the client before `pod-http`. Credential headers cannot be saved (400). Audited `k8s.pod_action.save`. Rows are deleted with their cluster (migration 0149) |
+| DELETE /k8s/clusters/{id}/pod-actions/{action_id} | kubernetes:Edit (`exec` on the row's namespace) | — | 204; 404 when absent. Audited `k8s.pod_action.delete` |
+
+MCP: `k8s_pod_http` (DANGEROUS and in the irreversible tier — no category auto-approve rule covers it) and `k8s_pod_actions_list` (read), both bound to `cluster_id → k8s_cluster`.
+
+**Stale exec token (KS-2).** EKS / exec-plugin clusters reuse a cached token overlay until it expires. When kubectl reports `Unauthorized` / `You must be logged in` while the cached overlay was used, the daemon drops the cached token and retries the call once with a freshly minted one; a call that still fails returns `400 invalid` starting `credentials rejected — re-authenticate (e.g. aws sso login), then Refresh`.
 
 `ToolStatus { installed, version?, path? }` · `InstallJob { tool: "kubectl"|"k9s",
 state: "idle"|"running"|"done"|"failed", log_tail, started_at?, finished_at?, error? }` ·
@@ -4936,7 +5140,7 @@ is View on GET, Edit on PUT/POST. Enabling requires the usage engine
 | POST /k8s/clusters/{id}/monitor/run | Edit | — | `MonitorStatus` — runs one cycle inline (schema ensured first) |
 | GET /k8s/monitor/overview?window=24h | View | — | `OverviewRow[]`, one per registered cluster (disabled clusters carry `enabled:false`, `health:"off"`) |
 | GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, namespaces: string[] /* all, unfiltered */, workloads: WorkloadRow[] }` |
-| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates; `step_secs` is rounded up to whole minutes / 5 minutes / hours (and ≥ 60 s for windows ≥ 24 min) so the chart reads a rollup |
+| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates; `step_secs` is rounded up to whole minutes / 5 minutes / hours (≥ 60 s for windows ≥ 24 min, whole hours for windows ≥ 24 h) so the chart reads a rollup |
 | GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
 | GET /k8s/clusters/{id}/monitor/health?window=1h | View + per-cluster `discover` grant | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
 
@@ -4963,15 +5167,15 @@ for windows ≥ 24 h); rates divide by the seconds actually covered.
 |---|---|---|
 | GET /k8s/monitor/fleet/filters | selection | `{ window, clusters: [{ id, name, environment, color, rows }] /* every registered cluster + any id with rows; rows = sample+event rows in the window (samples counted per hour bucket) */, namespaces: [{ cluster_id, namespace }], workloads: [{ cluster_id, namespace, workload }], pods: [{ cluster_id, namespace, workload, pod }] /* only for a narrowed selection (workload / pod, or one cluster + ns); ≤ 2000, newest first */ }` |
 | GET /k8s/monitor/fleet/table?group=workload\|pod&sort=restarts&dir=desc&limit=200&offset=0 | selection + grouping/order | `{ window, group, sort, dir, total, offset, rows: FleetRow[] }` — sorted server-side; `sort` ∈ `cluster\|namespace\|workload\|pod\|pods\|restarts\|oom\|crash\|probe\|churn\|mem_last\|mem_avg\|mem_max\|rps\|err_pct\|latency_ms` (400 otherwise); `limit` ≤ 2000 |
-| GET /k8s/monitor/fleet/series?metric=restarts&by=cluster&step= | selection + `metric` ∈ `restarts\|mem\|rps\|err\|latency`, `by` ∈ `cluster\|namespace\|workload\|pod` | `{ window, metric, unit: 'count'\|'bytes'\|'rate'\|'percent'\|'ms', by, step_secs, series: [{ key, label, points: [{ t, v }] }] }` — `restarts` is always one series per class (`by: "class"`); `step` defaults to ~60 buckets, floor 60 s, rounded up to whole minutes / 5 minutes / hours |
+| GET /k8s/monitor/fleet/series?metric=restarts&by=cluster&step= | selection + `metric` ∈ `restarts\|mem\|rps\|err\|latency`, `by` ∈ `cluster\|namespace\|workload\|pod` | `{ window, metric, unit: 'count'\|'bytes'\|'rate'\|'percent'\|'ms', by, step_secs, series: [{ key, label, points: [{ t, v }] }] }` — `restarts` is always one series per class (`by: "class"`); `step` defaults to ~60 buckets, floor 60 s, rounded up to whole minutes / 5 minutes / hours, and to whole hours (≥ 3600) for windows ≥ 24 h |
 | GET /k8s/monitor/fleet/events?class=&sort=ts&dir=desc&limit=200&offset=0 | selection + `class` (as the per-cluster events route, plus `churn` = churn only) | `{ window, sort, dir, total, offset, rows: (MonitorEvent & { cluster_id, cluster })[] }`; `sort` ∈ `ts\|cluster\|namespace\|workload\|pod\|kind\|class\|reason` |
 | GET /k8s/monitor/fleet/requests | selection | `{ window, enabled_on: [{ id, name }], disabled_on: [{ id, name }], rows: [{ path, method, rps, err_pct, avg_ms }] }` (≤ 500, by rps) — rows exist only for clusters with `request_labels` on |
 
 ```ts
 FleetRow { cluster: { id, name, environment, color }; cluster_id; namespace; workload; pod /* '' in workload grouping */;
-           pods /* distinct pods seen in the window */;
+           pods /* workload: most pods in one cycle (or pods with events, if more); pod: 1 */;
            restarts: { oom, crash, probe, unknown }; churn /* planned replacements */;
-           mem_last /* latest sample summed over pods */; mem_avg /* sum of per-pod averages */; mem_max /* hungriest pod sample */;
+           mem_last /* latest cycle's total over pods */; mem_avg /* workload: mean total per cycle; pod: the pod's mean */; mem_max /* hungriest pod sample */;
            rps; err_pct; latency_kind: 'p95'|'avg'|''; latency_ms }
 ```
 
@@ -5017,7 +5221,8 @@ WorkloadRow { namespace; workload; kind; pods; ready;
               mem_trend_pct?;
               restarts: { oom, crash, probe, unknown }; churn_planned; churn_unknown;
               rps; err_pct; err_pct_baseline; rps_baseline; latency_kind: 'p95'|'avg'|''; latency_ms; latency_baseline_ms;
-              versions: string[]; crashloop; spark: { mem: number[]; rps: number[] } }
+              versions: string[] /* from the pod snapshot */; crashloop;
+              spark: { mem: number[] /* mean workload total per cycle */; rps: number[] } /* per (namespace, workload) */ }
 MonitorEvent { ts; namespace; workload; pod; container; kind: 'restart'|'churn'|'version'|'k8s_event';
                class; reason; exit_code; detail: object; actor }
                // kind 'version' = the workload's dominant build version changed; reason "<from> → <to>",

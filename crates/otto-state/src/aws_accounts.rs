@@ -204,12 +204,14 @@ impl AwsAccountsRepo {
     /// Column-name whitelist lives in the callers above; never pass user input
     /// as `col`.
     async fn set_col(&self, id: &Id, col: &str, v: String) -> Result<()> {
-        sqlx::query(&format!("UPDATE aws_accounts SET {col} = ? WHERE id = ?"))
-            .bind(v)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("update aws account"))?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE aws_accounts SET {col} = ? WHERE id = ?"
+        )))
+        .bind(v)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update aws account"))?;
         Ok(())
     }
 

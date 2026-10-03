@@ -26,6 +26,7 @@ use super::parse::{self, Parsed, Sample};
 use super::probes::{self, is_excluded, MonitorConfig, PodRef, ProbeFormat, Transport};
 use super::schema;
 use super::scrape::{self, ScrapeTarget, TransportUsed};
+use super::wide;
 use crate::cli::Kubectl;
 use crate::clusters::{kubectl_for, Clusters};
 use crate::resources::{self, arr, s};
@@ -224,6 +225,24 @@ pub fn status_samples(p: &PodSnap, now: DateTime<Utc>) -> Vec<Sample> {
     ]
 }
 
+/// metrics-server's per-container `(cpu millicores, memory bytes)` as ONE
+/// pod-total sample pair.
+pub fn metrics_server_samples(containers: impl Iterator<Item = (i64, i64)>) -> Vec<Sample> {
+    let (cpu, mem) = containers.fold((0i64, 0i64), |(c, m), (cc, mm)| (c + cc, m + mm));
+    vec![
+        Sample {
+            metric: "cpu_millis".into(),
+            labels: BTreeMap::new(),
+            value: cpu as f64,
+        },
+        Sample {
+            metric: "mem_working_set_bytes".into(),
+            labels: BTreeMap::new(),
+            value: mem as f64,
+        },
+    ]
+}
+
 /// `kubectl get events -o json` → hints newer than `since`.
 pub fn parse_event_hints(list: &Value, since: Option<DateTime<Utc>>) -> Vec<EventHint> {
     arr(list, "/items")
@@ -308,6 +327,18 @@ async fn action_hints<S: K8sCtx>(ctx: &S, cluster_id: &Id, now: DateTime<Utc>) -
         .collect()
 }
 
+/// What one pod's scrape produced.
+struct Scraped {
+    ok: bool,
+    parse_errors: u32,
+    capped: u32,
+    ndjson: String,
+    version: String,
+    /// Every sample with its labels merged exactly as written to raw (the
+    /// wide row's input).
+    samples: Vec<Sample>,
+}
+
 /// Scrape one pod: every probe on every port, parsed into NDJSON.
 async fn scrape_pod(
     k: &Kubectl,
@@ -317,7 +348,7 @@ async fn scrape_pod(
     cfg: &MonitorConfig,
     pod: &PodSnap,
     now: DateTime<Utc>,
-) -> (bool, u32, u32, String, String) {
+) -> Scraped {
     let (by_port, unresolved) = scrape::group_by_port(&cfg.probes, pod.first_port);
     let mut any_ok = false;
     let mut parse_errors = unresolved.len() as u32;
@@ -399,7 +430,24 @@ async fn scrape_pod(
         ));
     }
     let version = pod_labels.get("version").cloned().unwrap_or_default();
-    (any_ok, parse_errors, capped, ndjson, version)
+    let samples = per_probe
+        .into_iter()
+        .flat_map(|(_, parsed)| parsed.samples)
+        .map(|mut smp| {
+            let mut labels = pod_labels.clone();
+            labels.append(&mut smp.labels);
+            smp.labels = labels;
+            smp
+        })
+        .collect();
+    Scraped {
+        ok: any_ok,
+        parse_errors,
+        capped,
+        ndjson,
+        version,
+        samples,
+    }
 }
 
 /// Run one full cycle (spec steps 1–10). Never panics on cluster errors: an
@@ -549,6 +597,8 @@ pub async fn run_cycle_with<S: K8sCtx>(
         "disabled".to_string()
     };
     let ms_namespaces: &[String] = if cfg.metrics_server { &namespaces } else { &[] };
+    // Per pod (snap key): the samples the wide row is built from.
+    let mut wide_samples: std::collections::HashMap<String, Vec<Sample>> = Default::default();
     for ns in ms_namespaces {
         match resources::pod_metrics(&k, Some(ns)).await {
             Ok(pods) => {
@@ -557,28 +607,20 @@ pub async fn run_cycle_with<S: K8sCtx>(
                     let Some(p) = cur.get(&classify::snap_key(&pm.namespace, &pm.name)) else {
                         continue;
                     };
-                    for c in &pm.containers {
-                        let smp = vec![
-                            Sample {
-                                metric: "cpu_millis".into(),
-                                labels: BTreeMap::new(),
-                                value: c.cpu_millicores as f64,
-                            },
-                            Sample {
-                                metric: "mem_working_set_bytes".into(),
-                                labels: BTreeMap::new(),
-                                value: c.mem_bytes as f64,
-                            },
-                        ];
-                        samples_nd.push_str(&samples_ndjson(
-                            &cid,
-                            now,
-                            p,
-                            &c.name,
-                            &smp,
-                            &BTreeMap::new(),
-                        ));
-                    }
+                    // metrics-server reports per CONTAINER; the series
+                    // identity has no container, so write the pod total
+                    // (container "") — a sidecar no longer turns the pod's
+                    // memory into an average of its containers.
+                    let smp = metrics_server_samples(
+                        pm.containers
+                            .iter()
+                            .map(|c| (c.cpu_millicores, c.mem_bytes)),
+                    );
+                    samples_nd.push_str(&samples_ndjson(&cid, now, p, "", &smp, &BTreeMap::new()));
+                    wide_samples
+                        .entry(classify::snap_key(&p.namespace, &p.name))
+                        .or_default()
+                        .extend(smp);
                 }
             }
             Err(Error::Forbidden(m)) => {
@@ -648,18 +690,21 @@ pub async fn run_cycle_with<S: K8sCtx>(
                 .iter()
                 .map(|p| classify::snap_key(&p.namespace, &p.name))
                 .collect();
-            let results: Vec<(bool, u32, u32, String, String)> =
-                stream::iter(futs).buffered(concurrency).collect().await;
-            for (key, (ok, pe, cp, nd, version)) in keys.into_iter().zip(results) {
-                if ok {
+            let results: Vec<Scraped> = stream::iter(futs).buffered(concurrency).collect().await;
+            for (key, r) in keys.into_iter().zip(results) {
+                if r.ok {
                     status.pods_scraped += 1;
                 } else {
                     status.pods_failed += 1;
                 }
-                parse_errors += pe;
-                capped += cp;
-                samples_nd.push_str(&nd);
-                scraped_versions.push((key, version));
+                parse_errors += r.parse_errors;
+                capped += r.capped;
+                samples_nd.push_str(&r.ndjson);
+                wide_samples
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(r.samples);
+                scraped_versions.push((key, r.version));
             }
         }
     }
@@ -684,13 +729,30 @@ pub async fn run_cycle_with<S: K8sCtx>(
     classified.extend(classify::version_changes(prev, &cur, now));
     let events_nd = events_ndjson(&cid, now, &classified, &events, &cur);
 
-    // 8. Write.
+    // 8. Write. The wide row first needs the counter state: seeded once per
+    // cluster from `k8s_latest` after a daemon restart.
+    if !wide::with_counters(&cid, |c| c.seeded) {
+        let rows = sink
+            .query_rows(&wide::seed_sql(&cid))
+            .await
+            .unwrap_or_default();
+        wide::with_counters(&cid, |c| {
+            wide::seed_from_rows(c, &rows);
+            c.seeded = true;
+        });
+    }
+    let wide_nd = wide::cycle_ndjson(&cid, now, &cur, &wide_samples);
     let samples_written = samples_nd.lines().count();
     let events_written = events_nd.lines().count();
     let mut write_err = None;
     if samples_written > 0 {
         if let Err(e) = sink.insert_ndjson("k8s_samples", &samples_nd).await {
             write_err = Some(format!("write samples: {e}"));
+        }
+    }
+    if !wide_nd.is_empty() {
+        if let Err(e) = sink.insert_ndjson(schema::POD_CYCLE_TABLE, &wide_nd).await {
+            write_err = Some(format!("write pod rows: {e}"));
         }
     }
     if events_written > 0 {
@@ -992,6 +1054,17 @@ mod tests {
         assert_eq!(row["metric"], "mem_sys_bytes");
         assert_eq!(row["cluster_id"], "c1");
         assert!(row["ts"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn metrics_server_containers_sum_into_one_pod_sample() {
+        let s = metrics_server_samples([(100, 300), (20, 50)].into_iter());
+        assert_eq!(s.len(), 2);
+        assert_eq!((s[0].metric.as_str(), s[0].value), ("cpu_millis", 120.0));
+        assert_eq!(
+            (s[1].metric.as_str(), s[1].value),
+            ("mem_working_set_bytes", 350.0)
+        );
     }
 
     #[test]

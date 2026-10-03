@@ -293,7 +293,9 @@ pub fn avro_to_json(schema_json: &str, body: &[u8]) -> anyhow::Result<Value> {
 /// parsed schemas per registry id — parsing per message was the hot cost).
 pub fn avro_to_json_with(schema: &apache_avro::Schema, body: &[u8]) -> anyhow::Result<Value> {
     let mut cursor = std::io::Cursor::new(body);
-    let value = apache_avro::from_avro_datum(schema, &mut cursor, None)?;
+    let value = apache_avro::reader::datum::GenericDatumReader::builder(schema)
+        .build()?
+        .read_value(&mut cursor)?;
     Ok(avro_value_to_json(value))
 }
 
@@ -427,12 +429,17 @@ mod tests {
             {"name":"id","type":"long"},{"name":"name","type":"string"}]}"#;
         // Encode with apache-avro to get bytes, then decode back.
         use apache_avro::types::Record;
-        use apache_avro::{to_avro_datum, Schema};
+        use apache_avro::writer::datum::GenericDatumWriter;
+        use apache_avro::Schema;
         let s = Schema::parse_str(schema).unwrap();
         let mut rec = Record::new(&s).unwrap();
         rec.put("id", 42i64);
         rec.put("name", "neo");
-        let body = to_avro_datum(&s, rec).unwrap();
+        let body = GenericDatumWriter::builder(&s)
+            .build()
+            .unwrap()
+            .write_value_to_vec(rec)
+            .unwrap();
         let v = avro_to_json(schema, &body).unwrap();
         assert_eq!(v["id"], json!(42));
         assert_eq!(v["name"], json!("neo"));

@@ -1440,6 +1440,7 @@ mod tests {
             spec,
             enabled: true,
             created_at: chrono::Utc::now(),
+            armed_at: None,
         }
     }
 

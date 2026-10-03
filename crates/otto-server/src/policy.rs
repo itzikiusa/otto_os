@@ -77,11 +77,24 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     //    it precedes the feature families below).
     // ----------------------------------------------------------------------
 
-    if p == "/room-join" { return Exempt; }
-    if p == "/room-recap-settings" { return Require(Settings, Admin); }
-    if p == "/room-recap-capabilities" || p.starts_with("/room-recaps") || p == "/rooms/{id}/recaps" { return Require(Agents, Edit); }
-    if p == "/room-settings" { return Require(Settings, Admin); }
-    if p == "/rooms" || p == "/rooms/{id}" || p == "/rooms/{id}/invites" || p == "/sessions/{id}/room" {
+    if p == "/room-join" {
+        return Exempt;
+    }
+    if p == "/room-recap-settings" {
+        return Require(Settings, Admin);
+    }
+    if p == "/room-recap-capabilities" || p.starts_with("/room-recaps") || p == "/rooms/{id}/recaps"
+    {
+        return Require(Agents, Edit);
+    }
+    if p == "/room-settings" {
+        return Require(Settings, Admin);
+    }
+    if p == "/rooms"
+        || p == "/rooms/{id}"
+        || p == "/rooms/{id}/invites"
+        || p == "/sessions/{id}/room"
+    {
         return Require(Agents, Edit);
     }
 
@@ -538,6 +551,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/providers/models/refresh" {
         return Require(Agents, Edit);
     }
+    // Per-session tokens + cost (review A5): a usage read. The handlers add
+    // the session-viewer / workspace-viewer gate.
+    if p == "/sessions/{id}/usage" || p == "/workspaces/{wid}/sessions/usage" {
+        return Require(Usage, View);
+    }
     if p == "/sessions/{id}" {
         // GET inspect = View; PATCH/DELETE = Edit.
         return Require(Agents, if get { View } else { Edit });
@@ -932,6 +950,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p.starts_with("/state/git/") {
         return Require(Settings, Admin);
     }
+    // SQLite storage stats + the confirmed Compact database action — daemon
+    // maintenance, same tier as the diagnostics above (handlers require root).
+    if matches!(p, "/admin/db/stats" | "/admin/db/compact") {
+        return Require(Settings, Admin);
+    }
     if matches!(
         p,
         "/state/connections/export" | "/state/connections/export/formats"
@@ -1098,6 +1121,25 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/personal-agents/{id}" || p == "/agent-rooms/{id}" {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }
+    // Autonomy (permission modes, standing goals, rules, primary), the live
+    // activity feed and the memory inspector — same posture; reset and a
+    // goal's "work on it now" are writes.
+    if matches!(
+        p,
+        "/personal-agents/{id}/autonomy"
+            | "/personal-agents/{id}/activity"
+            | "/personal-agents/{id}/memories"
+    ) {
+        return Require(ScheduledTasks, if get { View } else { Edit });
+    }
+    if matches!(
+        p,
+        "/personal-agents/{id}/memories/edit"
+            | "/personal-agents/{id}/reset"
+            | "/personal-agents/{id}/goals/{goal_id}/run"
+    ) {
+        return Require(ScheduledTasks, Edit);
+    }
     if p == "/personal-agents/{id}/memory" || p == "/personal-agents/{id}/context" {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }
@@ -1246,7 +1288,18 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
             let host_write = !get
                 && (rest.ends_with("/download-to")
                     || (rest.starts_with("s3/download-jobs/") && rest.ends_with("/cancel")));
-            return Require(AwsS3, if host_write { Edit } else { View });
+            // Object writes: upload (PUT) and delete (DELETE) on `…/object`.
+            // `presign` (POST) stays View: the link carries only the read the
+            // caller already has (the handler audits it).
+            let object_write = method == Method::PUT || method == Method::DELETE;
+            return Require(
+                AwsS3,
+                if host_write || object_write {
+                    Edit
+                } else {
+                    View
+                },
+            );
         }
         if rest.starts_with("sqs/") {
             let read = get || rest.ends_with("/peek");
@@ -1266,6 +1319,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
             return Require(AwsRds, View);
         }
         if rest == "metrics" {
+            return Require(Aws, View);
+        }
+        // CloudWatch Logs: every route reads (Insights start/stop POSTs run
+        // or cancel a read-only query), same key as metrics.
+        if rest.starts_with("logs/") {
             return Require(Aws, View);
         }
         // Account-level probes: `test` (sts get-caller-identity), `permissions`
@@ -1363,7 +1421,10 @@ mod tests {
             ),
             Require(AwsS3, Edit)
         );
-        assert!(Capability::View < Capability::Edit, "a View grant never meets Edit");
+        assert!(
+            Capability::View < Capability::Edit,
+            "a View grant never meets Edit"
+        );
         // Reads stay View: listing, the streamed browser download, job status.
         for path in [
             "/api/v1/aws/accounts/{id}/s3/buckets",
@@ -1372,6 +1433,32 @@ mod tests {
             "/api/v1/aws/accounts/{id}/s3/download-jobs/{job}",
         ] {
             assert_eq!(pol(Method::GET, path), Require(AwsS3, View), "{path}");
+        }
+    }
+
+    #[test]
+    fn s3_object_writes_need_edit_and_presign_and_logs_stay_view() {
+        let obj = "/api/v1/aws/accounts/{id}/s3/buckets/{bucket}/object";
+        assert_eq!(pol(Method::PUT, obj), Require(AwsS3, Edit));
+        assert_eq!(pol(Method::DELETE, obj), Require(AwsS3, Edit));
+        assert_eq!(pol(Method::GET, obj), Require(AwsS3, View));
+        assert_eq!(
+            pol(
+                Method::POST,
+                "/api/v1/aws/accounts/{id}/s3/buckets/{bucket}/presign"
+            ),
+            Require(AwsS3, View)
+        );
+        for (m, path) in [
+            (Method::GET, "/api/v1/aws/accounts/{id}/logs/groups"),
+            (Method::GET, "/api/v1/aws/accounts/{id}/logs/events"),
+            (Method::POST, "/api/v1/aws/accounts/{id}/logs/insights"),
+            (
+                Method::POST,
+                "/api/v1/aws/accounts/{id}/logs/insights/{qid}/stop",
+            ),
+        ] {
+            assert_eq!(pol(m, path), Require(Aws, View), "{path}");
         }
     }
 
@@ -1969,7 +2056,10 @@ mod tests {
         // Agent UI control: catalog + a window's own result / progress reports.
         assert_eq!(pol(Method::GET, "/api/v1/ui/commands/catalog"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/ui/commands/{id}/result"), Exempt);
-        assert_eq!(pol(Method::POST, "/api/v1/ui/commands/{id}/progress"), Exempt);
+        assert_eq!(
+            pol(Method::POST, "/api/v1/ui/commands/{id}/progress"),
+            Exempt
+        );
         // …but nothing else under /ui/ is.
         assert_eq!(pol(Method::POST, "/api/v1/ui/commands/{id}"), Deny);
         // The grant is a session-control write.
@@ -2257,6 +2347,18 @@ mod tests {
     }
 
     #[test]
+    fn per_session_usage_is_a_usage_read() {
+        assert_eq!(
+            pol(Method::GET, "/api/v1/sessions/{id}/usage"),
+            Require(Usage, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{wid}/sessions/usage"),
+            Require(Usage, View)
+        );
+    }
+
+    #[test]
     fn usage_insights_settings_admin_or_view() {
         assert_eq!(
             pol(Method::GET, "/api/v1/usage/summary"),
@@ -2366,7 +2468,10 @@ mod tests {
             Require(Agents, View)
         );
         assert_eq!(
-            pol(Method::GET, "/api/v1/sessions/{id}/transcript/tool/{tool_id}"),
+            pol(
+                Method::GET,
+                "/api/v1/sessions/{id}/transcript/tool/{tool_id}"
+            ),
             Require(Agents, View)
         );
         assert_eq!(

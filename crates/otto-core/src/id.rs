@@ -5,5 +5,5 @@ pub type Id = String;
 
 /// Generate a new ULID identifier.
 pub fn new_id() -> Id {
-    ulid::Ulid::new().to_string()
+    ulid::Ulid::generate().to_string()
 }

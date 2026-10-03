@@ -9,7 +9,7 @@ summary: Browse and operate S3, SQS, EC2, Athena, EKS and RDS for each saved AWS
 
 The AWS page lets you work with AWS from inside Otto without switching to the web console. You save one entry per **account**. Otto then runs the official `aws` CLI v2 for you, so anything that works in your terminal also works here: SSO (IAM Identity Center), assume-role chains, MFA and `credential_process`.
 
-Each account can open six services: **S3** (read-only browsing and downloads), **SQS**, **EC2**, **Athena**, **EKS** and **RDS** (read-only). EC2, SQS and RDS also show CloudWatch metrics.
+Each account can open seven services: **S3**, **SQS**, **EC2**, **Athena**, **EKS**, **RDS** (read-only) and **CloudWatch Logs** (read-only). EC2, SQS and RDS also show CloudWatch metrics.
 
 ## Getting started
 
@@ -36,16 +36,24 @@ Each account can open six services: **S3** (read-only browsing and downloads), *
 - **Filter accounts…** appears in the header once you have more than 3 accounts.
 
 **Every service view**
-- A region switcher, a filter box, **Refresh** and a 10-second auto-refresh toggle.
+- A region switcher (it remembers your last pick per account), a filter box, **Refresh** and a 10-second auto-refresh toggle. EC2, EKS and RDS also offer **All enabled regions**, which adds a Region column; regions that could not be listed are named in a note above the table.
+- If an SSO sign-in is about to end, the account rail says **Sign-in ends in N min** with **Sign in again**, so it does not fail halfway through an action.
 - Right-click (or the ⋯ button) on a row for copy actions and row operations.
 - A details drawer with tabs. On phones it opens as a sheet.
 
-**S3 (read-only)**
+**S3**
 - Browse buckets, then prefixes as folders (folders first), with breadcrumbs. The current bucket and prefix are in the URL, so you can bookmark or share the link.
-- **Preview** text objects (up to the first 64 KiB): text, pretty-printed JSON, or CSV as a table.
+- The filter searches the whole bucket by name prefix when the folder has more pages (case-sensitive, from the start of the name).
+- **Preview** text objects (up to the first 64 KiB): text, pretty-printed JSON, or CSV as a table. Images (PNG, JPEG, GIF, WebP, SVG) and PDFs up to 25 MB preview inline.
 - **Download** streams the object with a progress bar and **Cancel**. One download runs at a time, and objects over 2 GiB are refused.
-- **Copy key** and **Copy S3 URI**.
-- There is no upload, delete or presigned URL.
+- **Copy key**, **Copy S3 URI** and **Copy presigned link…** (1 hour to 7 days; audited).
+- **Upload** (button or drag files onto the list) and **Delete…** need S3 Edit access. Both ask first; on production accounts you confirm the destination, and type the key to delete. Replacing an existing object asks separately.
+
+**CloudWatch Logs (read-only)**
+- Log groups with a prefix filter, a stream picker (newest first), time presets and a filter pattern.
+- **Live tail** refreshes every 2 seconds while the window is visible.
+- **Insights** runs a Logs Insights query, shows the rows in a grid and exports CSV. Insights is billed per GB scanned.
+- The EKS cluster sheet and the RDS drawer link straight to their log groups.
 
 **SQS**
 - Queue list with approximate available, in-flight and delayed counts, plus FIFO and dead-letter-queue badges.
@@ -81,7 +89,7 @@ Each account can open six services: **S3** (read-only browsing and downloads), *
 - Grouped cards, such as queue depth, age of oldest message, CPU, network, disk, IOPS, latency, connections and free storage. Each card shows current, min, max and sum or average.
 
 **Agents (Otto MCP tools)**
-- Agents can call `aws_list_accounts`, `aws_s3_list_buckets`, `aws_s3_list_objects`, `aws_s3_preview`, `aws_sqs_list_queues`, `aws_sqs_peek`, `aws_ec2_list_instances`, `aws_athena_list_tables`, `aws_athena_get_query` and `aws_eks_list_clusters`. All of these are read-only.
+- Agents can call `aws_list_accounts`, `aws_s3_list_buckets`, `aws_s3_list_objects`, `aws_s3_preview`, `aws_sqs_list_queues`, `aws_sqs_peek`, `aws_ec2_list_instances`, `aws_athena_list_tables`, `aws_athena_get_query`, `aws_eks_list_clusters`, `aws_logs_list_groups`, `aws_logs_filter`, `aws_logs_insights` and `aws_logs_get_insights`. All of these are read-only.
 - `aws_sqs_send` and `aws_athena_query` change state or cost money, so they need approval. Agents can't start, stop or reboot EC2 instances.
 
 ## Keyboard shortcuts

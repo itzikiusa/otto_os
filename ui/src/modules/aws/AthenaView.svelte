@@ -19,6 +19,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ResultsGrid from '../database/ResultsGrid.svelte';
+  import RegionPicker from './RegionPicker.svelte';
   import { athenaCostUsd, fmtAgo, fmtBytes, fmtMs, awsErrorText, serviceTabKey } from './util';
   import type {
     AthenaExecution,
@@ -36,7 +37,12 @@
 
   $effect(() => { void resourceAccess.load('aws_account', account.id); });
   const canRun = $derived(resourceAccess.can('aws_account', account.id, 'athena_query', 'aws_athena', 'edit'));
-  const catalog = $derived(aws.athena[account.id] ?? null);
+  // A-1: workgroups, catalogs and history are per region.
+  // svelte-ignore state_referenced_locally
+  let region = $state(account.region);
+  /** `''` = the account default region, else the override sent as `?region=`. */
+  const rq = $derived(region === account.region ? '' : region);
+  const catalog = $derived(aws.athena[`${account.id}:${rq}`] ?? null);
   let catLoading = $state(false);
   let catError = $state('');
   let treeFilter = $state('');
@@ -59,6 +65,8 @@
 
   // Execution state.
   let qid = $state<string | null>(null);
+  /** Region the running query was started in (status/cancel must follow it). */
+  let qRegion = '';
   let qstate = $state<AthenaQueryState | null>(null);
   let qreason = $state('');
   let scanned = $state(0);
@@ -79,8 +87,11 @@
   async function loadCatalog(): Promise<void> {
     catLoading = true;
     try {
-      const c = await aws.loadAthenaCatalog(account.id);
+      const c = await aws.loadAthenaCatalog(account.id, rq);
       catError = '';
+      // A workgroup / database remembered from another region does not exist here.
+      if (workgroup && !c.workgroups.some((w) => w.name === workgroup)) workgroup = '';
+      if (database && !c.databases.includes(database)) database = '';
       if (!workgroup && c.workgroups.length) workgroup = c.workgroups.find((w) => w.name === 'primary')?.name ?? c.workgroups[0].name;
       if (!database && c.databases.length) database = c.databases[0];
     } catch (e) {
@@ -96,7 +107,7 @@
     if (open && !catalog?.tables[db] && !tablesLoading[db]) {
       tablesLoading = { ...tablesLoading, [db]: true };
       try {
-        await aws.loadAthenaTables(account.id, db);
+        await aws.loadAthenaTables(account.id, db, rq);
       } catch (e) {
         toasts.error(`Couldn't list tables in ${db}`, e instanceof Error ? e.message : String(e));
       } finally {
@@ -106,6 +117,7 @@
   }
 
   $effect(() => {
+    void rq;
     untrack(() => {
       if (!catalog) void loadCatalog();
       else {
@@ -205,11 +217,13 @@
     ranSql = text;
     tab = 'results';
     try {
+      const started = rq;
       const r = await awsApi.athenaQuery(account.id, {
         sql: text,
         database: database || undefined,
         workgroup: workgroup || undefined,
-      });
+      }, started || undefined);
+      qRegion = started;
       qid = r.query_execution_id;
       qstate = 'QUEUED';
       pollN = 0;
@@ -241,7 +255,7 @@
     if (!qid) return;
     const id = qid;
     try {
-      const s = await awsApi.athenaStatus(account.id, id);
+      const s = await awsApi.athenaStatus(account.id, id, undefined, undefined, qRegion || undefined);
       if (qid !== id) return; // a newer query superseded this one
       qstate = s.state;
       scanned = s.stats?.data_scanned_bytes ?? 0;
@@ -267,7 +281,7 @@
   async function cancel(): Promise<void> {
     if (!qid) return;
     try {
-      await awsApi.athenaCancel(account.id, qid);
+      await awsApi.athenaCancel(account.id, qid, qRegion || undefined);
       toasts.info('Cancel requested');
     } catch (e) {
       toasts.error('Cancel failed', e instanceof Error ? e.message : String(e));
@@ -277,7 +291,7 @@
   async function loadHistory(): Promise<void> {
     historyLoading = true;
     try {
-      history = (await awsApi.athenaHistory(account.id, workgroup || undefined, 50)).executions;
+      history = (await awsApi.athenaHistory(account.id, workgroup || undefined, 50, rq || undefined)).executions;
       historyError = '';
     } catch (e) {
       historyError = e instanceof Error ? e.message : String(e);
@@ -411,6 +425,7 @@
       {#if viewport.isMobile && !treeOpen}
         <button class="icon-btn" onclick={() => (treeOpen = true)} aria-label="Show catalog" title="Catalog"><Icon name="sidebar" size={13} /></button>
       {/if}
+      <RegionPicker {account} service="athena" bind:region />
       <label class="sel"><span class="lbl">Workgroup</span>
         <select bind:value={workgroup} aria-label="Workgroup">
           {#each catalog?.workgroups ?? [] as w (w.name)}<option value={w.name} disabled={w.state !== 'ENABLED'}>{w.name}{w.output_location ? '' : ' (no output location)'}</option>{/each}
@@ -555,6 +570,10 @@
     border-radius: var(--radius-m);
     background: var(--bg);
     color: var(--text-dim);
+  }
+  .tf:focus-within {
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .tf input {
     flex: 1;

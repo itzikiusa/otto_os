@@ -22,7 +22,7 @@ tree-sitter-go = { workspace = true }
 ignore = { workspace = true }
 # Skill-package import: extract a uploaded skill .zip into the library. Minimal
 # feature set (stored + deflate) — no bzip2/zstd/aes/time pulls.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

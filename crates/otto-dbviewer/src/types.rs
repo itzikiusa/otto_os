@@ -220,9 +220,9 @@ impl ResolvedConfig {
             params = serde_json::to_string(&cache_params).unwrap_or_default(),
         );
         format!(
-            "{}|{:x}",
+            "{}|{}",
             self.engine.as_str(),
-            Sha256::digest(raw.as_bytes())
+            hex::encode(Sha256::digest(raw.as_bytes()))
         )
     }
 }
@@ -806,6 +806,11 @@ pub struct QueryStatus {
     /// The failure message, when `status == "done"` and the query errored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Milliseconds since the query started, when `status == "running"` — so a
+    /// client that did not start the run (an agent, another window, a reload)
+    /// shows the real running time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1168,9 +1173,11 @@ pub fn unimplemented(engine: Engine, op: &str) -> Error {
 }
 
 /// Convenience: turn any driver-level error into [`otto_core::Error::Upstream`]
-/// (a 502 — the failure is the database's, not the request's).
-pub fn upstream<E: std::fmt::Display>(e: E) -> Error {
-    Error::Upstream(e.to_string())
+/// (a 502 — the failure is the database's, not the request's). Engine errors
+/// this crate knows (sqlx, Mongo, klickhouse) keep their structure as tagged
+/// trailer lines instead of a lossy `Display` — see [`crate::errors`].
+pub fn upstream<E: std::fmt::Display + 'static>(e: E) -> Error {
+    crate::errors::upstream_any(e)
 }
 
 /// Convenience: an invalid-request error (400).

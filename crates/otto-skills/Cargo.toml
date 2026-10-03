@@ -10,7 +10,8 @@ otto-core = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-include_dir = "0.7"
+include_dir = "0.7.4"
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

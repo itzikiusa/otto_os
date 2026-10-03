@@ -7,6 +7,11 @@ import { auth } from './stores/auth.svelte';
 import { appLive, type LiveEvent } from './live';
 import type { EventsResyncFrame, NodeRunState, OttoEvent, UiHelloAckFrame } from './api/types';
 import { ws } from './stores/workspace.svelte';
+import { toasts } from './toast.svelte';
+import { restartSummaryText } from './status';
+
+/** localStorage key holding the boot id the restart toast was shown for. */
+const RESTART_TOAST_KEY = 'otto_restart_toast_boot';
 import { notifications } from './stores/notifications.svelte';
 import { activity } from './stores/activity.svelte';
 import { swarm } from './stores/swarm.svelte';
@@ -527,11 +532,26 @@ class EventsClient {
    *  means it restarted — re-read /meta so the alias host (and the rest of
    *  `auth.meta`) reflects the NEW daemon (r3-04-01 / r3-10-09). */
   private bootId: string | null = null;
-  private noteBoot(boot: string | undefined): void {
+  private noteBoot(boot: string | undefined, restore?: UiHelloAckFrame['boot_restore']): void {
     if (!boot) return;
     const changed = this.bootId !== null && this.bootId !== boot;
     this.bootId = boot;
-    if (changed) void auth.refreshMeta();
+    if (!changed) return;
+    void auth.refreshMeta();
+    // Every DB pool/tunnel died with the old daemon: mark open connections
+    // stale and re-warm them (selected first) instead of showing "ready".
+    database.onDaemonRestart();
+    // "Otto restarted — N kept running · M suspended" (A4), once per boot id
+    // across every window (the key is shared; storage may be unavailable).
+    const text = restartSummaryText(restore);
+    if (!text) return;
+    try {
+      if (localStorage.getItem(RESTART_TOAST_KEY) === boot) return;
+      localStorage.setItem(RESTART_TOAST_KEY, boot);
+    } catch {
+      /* storage blocked: this window still says it once */
+    }
+    toasts.info('Otto restarted', text);
   }
 
   private scheduleLagResync(): void {
@@ -583,7 +603,7 @@ class EventsClient {
           return;
         }
         if ((data as Partial<UiHelloAckFrame> | null)?.type === 'hello_ack') {
-          this.noteBoot((data as UiHelloAckFrame).boot_id);
+          this.noteBoot((data as UiHelloAckFrame).boot_id, (data as UiHelloAckFrame).boot_restore);
         }
         // Per-connection UI-control frames (hello_ack / ui_command /
         // ui_command_cancel) never reach the event stores.

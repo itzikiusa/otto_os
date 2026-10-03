@@ -639,9 +639,40 @@ def collect_claude(start, end, extra_facets_dir=None):
     return sessions
 
 
+def _accumulate_claude_usage(obj, start, end, responses):
+    """Fold one assistant line's usage into `responses` (key -> 4 buckets),
+    keeping each bucket's max per message.id:requestId (the final usage)."""
+    msg = obj.get("message", {})
+    if not isinstance(msg, dict):
+        return
+    usage = msg.get("usage")
+    ts = obj.get("timestamp", "")
+    if not isinstance(usage, dict) or not ts:
+        return
+    try:
+        if not in_window(parse_date(ts), start, end):
+            return
+    except (ValueError, TypeError):
+        return
+    key = "%s:%s" % (msg.get("id") or id(obj), obj.get("requestId") or "")
+    prev = responses.setdefault(key, [0, 0, 0, 0])
+    for i, field in enumerate((
+        "input_tokens", "output_tokens",
+        "cache_read_input_tokens", "cache_creation_input_tokens",
+    )):
+        val = usage.get(field) or 0
+        if isinstance(val, (int, float)) and val > prev[i]:
+            prev[i] = int(val)
+
+
 def _parse_claude_jsonl(path, project_dir, start, end):
     real_ts = []
     tool_counts = defaultdict(int)
+    # Token usage per API response, keyed like Otto's usage tailer
+    # (message.id:requestId). A streamed response is written as several
+    # lines and only the LAST carries the final output_tokens, so keep the
+    # per-bucket max instead of the first line (which under-counts ~3x).
+    responses = {}
     try:
         with open(path) as fh:
             for line in fh:
@@ -673,6 +704,7 @@ def _parse_claude_jsonl(path, project_dir, start, end):
                 elif mt == "assistant":
                     msg = obj.get("message", {})
                     if isinstance(msg, dict):
+                        _accumulate_claude_usage(obj, start, end, responses)
                         for block in msg.get("content", []) or []:
                             if isinstance(block, dict) and block.get("type") == "tool_use":
                                 name = block.get("name", "unknown")
@@ -681,6 +713,24 @@ def _parse_claude_jsonl(path, project_dir, start, end):
                                 tool_counts[name] += 1
     except (IOError, OSError):
         return None
+
+    # Subagent transcripts (<sid>/subagents/*.jsonl) bill to this session —
+    # they are most of the streamed (partial-output) responses.
+    sub_dir = os.path.join(os.path.dirname(path), os.path.basename(path)[:-len(".jsonl")], "subagents")
+    for sub in glob.glob(os.path.join(sub_dir, "*.jsonl")):
+        try:
+            with open(sub) as fh:
+                for line in fh:
+                    if '"assistant"' not in line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if obj.get("type") == "assistant":
+                        _accumulate_claude_usage(obj, start, end, responses)
+        except (IOError, OSError):
+            continue
 
     in_window_ts = []
     for ts in real_ts:
@@ -703,6 +753,10 @@ def _parse_claude_jsonl(path, project_dir, start, end):
         "project_path": project_dir,
         "tool_counts": dict(tool_counts),
         "transcript_path": path,
+        "input_tokens": sum(r[0] for r in responses.values()),
+        "output_tokens": sum(r[1] for r in responses.values()),
+        "cache_read_tokens": sum(r[2] for r in responses.values()),
+        "cache_write_tokens": sum(r[3] for r in responses.values()),
         "_source": "jsonl",
     }
 

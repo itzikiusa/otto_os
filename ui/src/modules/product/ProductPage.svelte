@@ -535,7 +535,7 @@
     oncontextmenu={(e) => storyMenu(e, s, node)}
   >
     {#if node?.isEpic}
-      <button class="tree-toggle" onclick={() => toggleEpic(s.id)} aria-label={collapsedEpics[s.id] ? 'Expand epic' : 'Collapse epic'} aria-expanded={!collapsedEpics[s.id]}>
+      <button class="tree-toggle" onclick={() => toggleEpic(s.id)} aria-label={collapsedEpics[s.id] ? 'Expand epic' : 'Collapse epic'} title={collapsedEpics[s.id] ? 'Expand epic' : 'Collapse epic'} aria-expanded={!collapsedEpics[s.id]}>
         <Icon name={collapsedEpics[s.id] ? 'chevronRight' : 'chevronDown'} size={12} />
       </button>
     {/if}

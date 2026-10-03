@@ -165,14 +165,27 @@
   export function asIcon(v: string | null | undefined, fallback: IconName = 'dot'): IconName {
     return v && isIconName(v) ? v : fallback;
   }
+  /** Glyphs that point along the reading direction: they mirror under
+   *  `[dir='rtl']` (accessibility.md §6). Pass `noflip` where the glyph must
+   *  stay physical, e.g. a disclosure chevron its wrapper rotates on open. */
+  export const DIRECTIONAL: ReadonlySet<IconName> = new Set<IconName>([
+    'chevronLeft',
+    'chevronRight',
+    'arrow',
+    'send',
+    'undo',
+    'logout',
+  ]);
 </script>
 
 <script lang="ts">
   interface Props {
     name: IconName;
     size?: number;
+    /** Keep a directional glyph unmirrored in RTL (see DIRECTIONAL). */
+    noflip?: boolean;
   }
-  let { name, size = 16 }: Props = $props();
+  let { name, size = 16, noflip = false }: Props = $props();
 </script>
 
 <svg
@@ -185,6 +198,7 @@
   stroke-linecap="round"
   stroke-linejoin="round"
   aria-hidden="true"
+  class:flip={DIRECTIONAL.has(name) && !noflip}
 >
   <path d={paths[name] ?? paths.dot} />
 </svg>
@@ -193,5 +207,14 @@
   /* An icon is never squashed by a flex parent (e.g. a padded icon button). */
   svg {
     flex-shrink: 0;
+  }
+  /* The ONE place directional icons mirror in RTL — don't add per-module
+     `[dir='rtl'] … scaleX(-1)` overrides on an Icon, or it flips twice. */
+  :global([dir='rtl']) svg.flip {
+    transform: scaleX(-1);
+  }
+  /* …except inside an LTR-pinned island (code, paths, terminals). */
+  :global([dir='rtl'] [dir='ltr']) svg.flip {
+    transform: none;
   }
 </style>

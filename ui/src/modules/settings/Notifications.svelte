@@ -138,6 +138,14 @@
       onchange={(v) => save({ native_enabled: v })}
     />
     <SettingToggle
+      label="Banner when a session is waiting on you"
+      hint="A native notification when an agent finishes its turn and waits for input — only for sessions you are not looking at."
+      checked={notifications.settings.native_on_waiting !== false}
+      disabled={!notifications.settings.native_enabled}
+      title={notifications.settings.native_enabled ? undefined : 'Turn on native macOS notifications first'}
+      onchange={(v) => save({ native_on_waiting: v })}
+    />
+    <SettingToggle
       label="Notify on session events"
       hint="A heads-up when a session finishes or is waiting for your input."
       checked={notifications.settings.session_events}

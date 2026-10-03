@@ -157,7 +157,11 @@ vaults stay cheap). Row click opens a note; context menu:
   reports "N links updated". Rename refuses to overwrite an existing target;
   case-only renames use a two-step move (APFS is case-insensitive); after a
   rename the whole vault re-resolves, so a basename that just became ambiguous
-  surfaces as unresolved rather than silently re-pointing.
+  surfaces as unresolved rather than silently re-pointing. A rename never
+  fails halfway: every index read happens before the move, and once the move
+  succeeds a source whose links couldn't be rewritten is skipped (left
+  untouched), listed in `links_failed`, and named in a warning toast — the
+  index is always refreshed to the new path.
 - **Delete (→ .trash)** — a **soft delete**: the note moves to
   `<vault>/.trash/…` inside the vault. Nothing is ever destroyed.
 
@@ -212,6 +216,46 @@ iframes, or event handlers survive), with the Obsidian constructs:
   renders — agents often omit the language tag. Parse errors keep the source
   visible with the error message above it.
 
+### 4.2a Structured view for typed notes
+
+A note whose frontmatter `type` is a recognised OKF concept — **Service**,
+**API Endpoint**, **Runbook**, **Repository**, **Decision**, **Metric**,
+**Data Asset** (incl. Database Table / Collection / Redis Key) or **Flow** —
+opens in the reading view with a structured panel above the unchanged
+markdown body (`ui/src/modules/vault/StructuredNote.svelte`, model in
+`structuredNote.ts`). Plain notes, reserved files (`index.md`, `log.md`) and
+the editor are untouched. The panel holds:
+
+- **Metadata header** — the type, `status`, `owner`/`owners`/`team`,
+  `resource` (an API endpoint's `METHOD /path` is shown as the operation) and
+  tag chips (click = tag search).
+- **Key-field cards** — endpoints, environments, dependencies, data stores,
+  SLOs, errors / options / safe actions / dimensions (by kind). Each card reads
+  the frontmatter key first (`endpoints`, `environments`, `depends_on`,
+  `databases`, …) and otherwise the bullets / first table column of the
+  matching body section. An item that is a resolved wikilink navigates.
+- **Expected sections** — the kind's required content from the
+  `okf-authoring` concept patterns, with the missing ones flagged.
+- **Links to / Linked from** — outgoing links and backlinks as chips, each
+  with a hover (and keyboard-focus) preview of the target's title, type and
+  description or first lines. Inline wikilinks in the reading view (typed
+  or plain notes) show the same preview.
+- **Live context** — the note's entity hints matched against the rest of
+  Otto through the modules' existing read APIs: K8s Monitor workloads on
+  monitored clusters (ready pods, memory, rps/error rate; links to the
+  workload and the cluster's Monitor tab), registered repos (branch,
+  ahead/behind, changed files, open PRs; links to the repo and its PRs), DB
+  connections and DB dashboards, and API-client collections. Hints come from
+  `service`/`workload`/`k8s: {cluster, namespace, workload}`, `repository` /
+  a path `resource`, `connections`/`databases`, `api_collection`,
+  `dashboards`, plus a Service/Repository note's own title and file name.
+  Names match after normalisation (`Orders-API` ≡ `orders_api`); hints under
+  three characters never match. Sources the user can't access are simply
+  absent; other failures show inline with Retry. Reads are cached for 60 s.
+
+The layout button in the note header hides/shows the panels (a per-device
+preference).
+
 ### 4.2b Non-markdown file viewers
 
 Clicking a non-`.md` file in the tree opens it in a matching viewer (same
@@ -254,6 +298,10 @@ deploy tag:runbook          # full-text AND tag filter
 path:services/ kafka        # restrict to a subtree
 type:Decision retention     # OKF type filter
 ```
+
+Filters run inside the SQL query, before the result limit: `foo tag:x` finds
+every tagged match (also nested `x/…` tags), however low it ranks overall, and a
+search never reads the whole notes or tags table.
 
 **Tags** mode lists every tag with its count (frontmatter + inline, nested
 `a/b` tags included); clicking a tag jumps to a `tag:` search. Notes **>4 MiB**
@@ -314,6 +362,11 @@ The graph toolbar button switches the center pane to a **Canvas2D graph of the
 whole vault** — engineered so scale is a rendering problem, not a feature
 limit (design budget: **100k nodes / 1–2M edges on an M-series laptop**):
 
+- **Refetch only on shape changes** — the view refetches when the vault's
+  `graph_generation` moves (a note added/removed, or links/titles/tags/types
+  changed), not on every body-only autosave. The daemon caches built payloads
+  per vault for one graph generation, and the right panel's local graph walks
+  only the open note's neighbourhood over the indexed link table.
 - **Wire format** — one compact JSON payload of parallel arrays
   (`paths/titles/groups/flags` + a flat `[src,dst,…]` edge index list); ~1M
   edges is 8–14 MB of local JSON, no per-object overhead.
@@ -389,7 +442,7 @@ Authoritative contract: `docs/contracts/api.md` → **Vault v3 — the docs home
 | Area | Routes |
 |---|---|
 | Vaults | `GET/POST /vault/vaults`, `PATCH/DELETE /vault/vaults/{id}`, `POST …/rescan`, `GET …/status` |
-| Files | `GET …/dir?path=`, `GET/PUT/DELETE …/note`, `POST …/rename` (→ `{links_updated}`), `POST …/folder`, `GET …/asset?path=` |
+| Files | `GET …/dir?path=`, `GET/PUT/DELETE …/note`, `POST …/rename` (→ `{links_updated, links_failed}`), `POST …/folder`, `GET …/asset?path=` |
 | Knowledge | `GET …/backlinks?path=`, `POST …/search`, `GET …/switcher?q=`, `GET …/tags`, `GET …/graph?mode=full\|local&…` |
 | OKF | `POST …/okf/validate`, `POST …/okf/indexes` |
 

@@ -216,11 +216,20 @@ explicit keep-old-vs-sync choice; the bundle is never silently pushed over your 
 ### Install all in a category
 
 The section header's **"Install all in category"** runs `POST /library/bundled/install-all?category=<cat>`
-(`contextApi.installAllBundled(category)`). It iterates every bundled skill in that
-category, backing up + installing each (still `backup=true` by default), and returns
-`InstallAllResult { installed: string[], backed_up: string[] }`. The toast reports
-how many were installed and how many existing copies were backed up; if nothing
-changed it says *"All `<cat>` skills are already up to date."*
+(`contextApi.installAllBundled(category)`). It runs on a blocking worker thread (the
+recursive copies never stall the daemon's async workers) and iterates every bundled
+skill in that category:
+
+- skills already at the bundled version are **skipped** (no reinstall, no backup);
+- skills whose installed copy is **ahead** of the bundle (local edits) are skipped too,
+  unless the request carries `force=true` — use the per-skill Update for those;
+- everything else is backed up (still `backup=true` by default) and installed;
+- a skill that fails is reported and the rest still install.
+
+It returns `InstallAllResult { installed, backed_up, skipped, failed: [{name, error}] }`.
+The toast names every failure; otherwise it reports how many were installed and backed
+up, or that nothing needed installing. Each backup prunes `skills-backup/` to the newest
+**3** copies of that skill.
 
 ### Versioning & drift model
 
@@ -383,7 +392,7 @@ contract: `docs/contracts/api.md`, "Bundled skills"):
 |---|---|---|---|
 | `GET /library/bundled` | root | — | `BundledView[]` — the catalog + per-skill drift state |
 | `POST /library/bundled/{name}/install` | root | `?backup=<bool>` (default `true`) | `InstallResult` |
-| `POST /library/bundled/install-all` | root | `?category=<cat>&backup=<bool>` | `InstallAllResult` |
+| `POST /library/bundled/install-all` | root | `?category=<cat>&backup=<bool>&force=<bool>` | `InstallAllResult` |
 
 Library CRUD used by the catalog UI (Remove) and the Context Library
 (`docs/contracts/api.md`, "Context library"):

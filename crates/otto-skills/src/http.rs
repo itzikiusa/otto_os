@@ -108,6 +108,18 @@ pub struct InstallResult {
 pub struct InstallAllResult {
     pub installed: Vec<String>,
     pub backed_up: Vec<String>,
+    /// Already at the bundled version (or ahead of it without `force`) — left
+    /// untouched, no backup made.
+    pub skipped: Vec<String>,
+    /// Skills whose install failed; the rest of the batch still ran.
+    pub failed: Vec<InstallFailure>,
+}
+
+/// One skill a bulk install could not install.
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallFailure {
+    pub name: String,
+    pub error: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,7 +135,15 @@ struct InstallAllQuery {
     category: Option<String>,
     #[serde(default = "default_true")]
     backup: bool,
+    /// Also reinstall skills whose installed copy is AHEAD of the bundled
+    /// version (local edits); default `false` leaves them alone.
+    #[serde(default)]
+    force: bool,
 }
+
+/// Backups kept per skill in `<library>/skills-backup/`; older ones are pruned
+/// after each new backup.
+const BACKUPS_KEPT: usize = 3;
 
 fn default_true() -> bool {
     true
@@ -228,9 +248,14 @@ async fn install_bundled_skill<C: ContextCtx>(
     Query(q): Query<InstallQuery>,
 ) -> ApiResult<Json<InstallResult>> {
     require_root(&user)?;
-    let library = s.library();
-    let result = install_one(library, &name, q.backup)?;
+    let library = s.library().clone();
+    // Recursive copies + the provider-dir mirror are blocking fs work: keep
+    // them off the async workers.
+    let result = tokio::task::spawn_blocking(move || install_one(&library, &name, q.backup))
+        .await
+        .map_err(|e| Error::Internal(format!("install task: {e}")))??;
     if !result.installed {
+        let name = result.name;
         return Err(Error::NotFound(format!("bundled skill '{name}'")).into());
     }
     Ok(Json(result))
@@ -242,28 +267,61 @@ async fn install_all<C: ContextCtx>(
     Query(q): Query<InstallAllQuery>,
 ) -> ApiResult<Json<InstallAllResult>> {
     require_root(&user)?;
-    let library = s.library();
+    let library = s.library().clone();
+    let result = tokio::task::spawn_blocking(move || {
+        install_many(&library, q.category.as_deref(), q.backup, q.force)
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("install task: {e}")))?;
+    Ok(Json(result))
+}
 
-    let mut installed = Vec::new();
-    let mut backed_up = Vec::new();
+/// The bulk install (12-mcp S1): skips skills already at the bundled version
+/// (and, unless `force`, ones whose installed copy is ahead — local edits),
+/// and keeps going past a failing skill, reporting it in `failed`.
+fn install_many(
+    library: &Library,
+    category: Option<&str>,
+    backup: bool,
+    force: bool,
+) -> InstallAllResult {
+    let mut out = InstallAllResult {
+        installed: Vec::new(),
+        backed_up: Vec::new(),
+        skipped: Vec::new(),
+        failed: Vec::new(),
+    };
     for b in list_bundled() {
-        if let Some(cat) = &q.category {
-            if &b.category != cat {
+        if category.is_some_and(|c| b.category != c) {
+            continue;
+        }
+        match install_state(library, &b.name) {
+            Some(InstallState::UpToDate) => {
+                out.skipped.push(b.name);
                 continue;
             }
+            Some(InstallState::Ahead { .. }) if !force => {
+                out.skipped.push(b.name);
+                continue;
+            }
+            _ => {}
         }
-        let r = install_one(library, &b.name, q.backup)?;
-        if r.installed {
-            installed.push(r.name.clone());
-        }
-        if r.backed_up {
-            backed_up.push(r.name);
+        match install_one(library, &b.name, backup) {
+            Ok(r) => {
+                if r.installed {
+                    out.installed.push(r.name.clone());
+                }
+                if r.backed_up {
+                    out.backed_up.push(r.name);
+                }
+            }
+            Err(ApiErr(e)) => out.failed.push(InstallFailure {
+                name: b.name,
+                error: e.to_string(),
+            }),
         }
     }
-    Ok(Json(InstallAllResult {
-        installed,
-        backed_up,
-    }))
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +355,7 @@ fn install_one(library: &Library, name: &str, backup: bool) -> Result<InstallRes
         copy_tree(&installed_dir, &dest)
             .map_err(|e| Error::Internal(format!("back up skill '{name}': {e}")))?;
         backup_path = Some(dest.to_string_lossy().into_owned());
+        prune_backups(&library.root, name, BACKUPS_KEPT);
     }
 
     let installed = install_into(library, name)
@@ -329,6 +388,27 @@ fn backup_dir(root: &FsPath, name: &str) -> std::path::PathBuf {
     root.join("skills-backup").join(format!("{name}-{secs}"))
 }
 
+/// Keep only the newest `keep` `skills-backup/<name>-<secs>` dirs for `name`
+/// (best effort: a failed removal is left for the next backup).
+fn prune_backups(root: &FsPath, name: &str, keep: usize) {
+    let Ok(rd) = std::fs::read_dir(root.join("skills-backup")) else {
+        return;
+    };
+    let prefix = format!("{name}-");
+    let mut dirs: Vec<(u64, std::path::PathBuf)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let file = e.file_name();
+            let secs = file.to_str()?.strip_prefix(&prefix)?.parse::<u64>().ok()?;
+            e.file_type().ok()?.is_dir().then(|| (secs, e.path()))
+        })
+        .collect();
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
+    for (_, d) in dirs.into_iter().skip(keep) {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
 /// Recursively copy a directory tree from `src` to `dest`.
 fn copy_tree(src: &FsPath, dest: &FsPath) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
@@ -343,4 +423,51 @@ fn copy_tree(src: &FsPath, dest: &FsPath) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_backups_keeps_newest_n_for_that_skill_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = dir.path().join("skills-backup");
+        for d in [
+            "grill-1",
+            "grill-5",
+            "grill-3",
+            "grill-9",
+            "grill-x-2",
+            "other-1",
+        ] {
+            std::fs::create_dir_all(b.join(d)).unwrap();
+        }
+        prune_backups(dir.path(), "grill", 2);
+        let mut left: Vec<String> = std::fs::read_dir(&b)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        // `grill-x-2` isn't a `grill-<secs>` backup; `other-1` is another skill.
+        assert_eq!(left, vec!["grill-5", "grill-9", "grill-x-2", "other-1"]);
+    }
+
+    #[test]
+    fn install_many_skips_up_to_date_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::new(dir.path());
+        let first = list_bundled().into_iter().next().expect("a bundled skill");
+        let cat = first.category.clone();
+        // Seed every skill of the category into the Library only, so the bulk
+        // install has nothing to do — it must never reach the provider-dir
+        // mirror (~/.claude/skills …) from a test.
+        for b in list_bundled().into_iter().filter(|b| b.category == cat) {
+            assert!(install_into(&lib, &b.name).unwrap());
+        }
+        let r = install_many(&lib, Some(&cat), true, false);
+        assert!(r.skipped.contains(&first.name), "{r:?}");
+        assert!(r.installed.is_empty() && r.backed_up.is_empty() && r.failed.is_empty());
+    }
 }

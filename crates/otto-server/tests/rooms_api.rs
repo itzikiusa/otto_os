@@ -7,9 +7,8 @@ use otto_rbac::RbacRoleChecker;
 use otto_server::ServerCtx;
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
-    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, GitStore, IntegrationsRepo,
-    IssuesRepo, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, DbPool, SwarmRepo,
-    WorkspacesRepo,
+    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool, GitStore, IntegrationsRepo,
+    IssuesRepo, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SwarmRepo, WorkspacesRepo,
 };
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -224,7 +223,10 @@ async fn connect(
         .map_err(Box::new)
 }
 async fn send(socket: &mut Socket, value: Value) {
-    socket.send(Message::Text(value.to_string())).await.unwrap();
+    socket
+        .send(Message::Text(value.to_string().into()))
+        .await
+        .unwrap();
 }
 async fn event(socket: &mut Socket) -> Value {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -450,82 +452,166 @@ async fn room_http_auth_admission_driver_and_terminal_process_are_isolated() {
     let mut terminal = connect(&origin, &term_path, &guest.token).await.unwrap();
     until(&mut terminal, |v| v["type"] == "scrollback").await;
     // A viewer may pause its own output without acquiring terminal control.
-    let authority = ctx.manager.room_authority_snapshot(&session.id).await.unwrap();
+    let authority = ctx
+        .manager
+        .room_authority_snapshot(&session.id)
+        .await
+        .unwrap();
     send(&mut terminal, json!({"type":"pause"})).await;
     // The ordered snapshot response proves the pause was handled first.
     send(&mut terminal, json!({"type":"snapshot"})).await;
-    let ack = until(&mut terminal, |v| v["type"] == "scrollback" || v["type"] == "error").await;
-    assert_eq!(ack["type"], "scrollback", "viewer flow frames must be accepted");
-    ctx.manager.human_input(&session.id, &owner.id, false, true, b"PAUSED-ROOM-OUTPUT\n").await.unwrap();
+    let ack = until(&mut terminal, |v| {
+        v["type"] == "scrollback" || v["type"] == "error"
+    })
+    .await;
+    assert_eq!(
+        ack["type"], "scrollback",
+        "viewer flow frames must be accepted"
+    );
+    ctx.manager
+        .human_input(&session.id, &owner.id, false, true, b"PAUSED-ROOM-OUTPUT\n")
+        .await
+        .unwrap();
     let handle = ctx.manager.live_handle(&session.id).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !String::from_utf8_lossy(&handle.snapshot_with_history(100)).contains("PAUSED-ROOM-OUTPUT") {
+        while !String::from_utf8_lossy(&handle.snapshot_with_history(100))
+            .contains("PAUSED-ROOM-OUTPUT")
+        {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-    }).await.unwrap();
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(100), terminal.next()).await.is_err(), "paused viewers must not receive live output");
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), terminal.next())
+            .await
+            .is_err(),
+        "paused viewers must not receive live output"
+    );
     // The renderer discarded its backlog: resync must answer even though a
     // trailing resume clears the old pause in the same WebSocket batch.
     send(&mut terminal, json!({"type":"resync","lines":1000})).await;
     send(&mut terminal, json!({"type":"resume"})).await;
     let resync = until(&mut terminal, |v| v["type"] == "scrollback").await;
-    assert!(String::from_utf8_lossy(&STANDARD.decode(resync["data"].as_str().unwrap()).unwrap()).contains("PAUSED-ROOM-OUTPUT"));
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(100), terminal.next()).await.is_err(), "trailing resume must not duplicate the recovery snapshot");
+    assert!(
+        String::from_utf8_lossy(&STANDARD.decode(resync["data"].as_str().unwrap()).unwrap())
+            .contains("PAUSED-ROOM-OUTPUT")
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), terminal.next())
+            .await
+            .is_err(),
+        "trailing resume must not duplicate the recovery snapshot"
+    );
     // Nothing new was produced. Recovery still answers, with a burst retained
     // as one pending snapshot instead of rejected by the history rate limiter.
     for _ in 0..3 {
         send(&mut terminal, json!({"type":"resync","lines":1000})).await;
     }
-    let idle = until(&mut terminal, |v| v["type"] == "scrollback" || v["type"] == "error").await;
-    assert_eq!(idle["type"], "scrollback", "idle recovery must not be rate-rejected");
-    assert!(String::from_utf8_lossy(&STANDARD.decode(idle["data"].as_str().unwrap()).unwrap()).contains("PAUSED-ROOM-OUTPUT"));
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(100), terminal.next()).await.is_err(), "coalesced recovery must answer once");
-    ctx.manager.human_input(&session.id, &owner.id, false, true, b"AFTER-ROOM-RESYNC\n").await.unwrap();
+    let idle = until(&mut terminal, |v| {
+        v["type"] == "scrollback" || v["type"] == "error"
+    })
+    .await;
+    assert_eq!(
+        idle["type"], "scrollback",
+        "idle recovery must not be rate-rejected"
+    );
+    assert!(
+        String::from_utf8_lossy(&STANDARD.decode(idle["data"].as_str().unwrap()).unwrap())
+            .contains("PAUSED-ROOM-OUTPUT")
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), terminal.next())
+            .await
+            .is_err(),
+        "coalesced recovery must answer once"
+    );
+    ctx.manager
+        .human_input(&session.id, &owner.id, false, true, b"AFTER-ROOM-RESYNC\n")
+        .await
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let mut bytes = vec![];
         loop {
             match terminal.next().await.unwrap().unwrap() {
                 Message::Binary(chunk) => {
                     bytes.extend_from_slice(&chunk);
-                    if String::from_utf8_lossy(&bytes).contains("AFTER-ROOM-RESYNC") { break; }
+                    if String::from_utf8_lossy(&bytes).contains("AFTER-ROOM-RESYNC") {
+                        break;
+                    }
                 }
                 other => panic!("expected ordered live output after recovery, got {other:?}"),
             }
         }
-    }).await.unwrap();
-    assert_eq!(ctx.manager.room_authority_snapshot(&session.id).await.unwrap(), authority);
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        ctx.manager
+            .room_authority_snapshot(&session.id)
+            .await
+            .unwrap(),
+        authority
+    );
     // Credit flow control (r3-10-06): a viewer opts in without a driver grant,
     // gets the clamped window back, and live output keeps flowing under it;
     // acks are accepted (they have their own rate budget).
     send(&mut terminal, json!({"type":"credit","window":65536})).await;
-    let grant = until(&mut terminal, |v| v["type"] == "credit" || v["type"] == "error").await;
-    assert_eq!(grant["type"], "credit", "viewer credit frames must be accepted");
+    let grant = until(&mut terminal, |v| {
+        v["type"] == "credit" || v["type"] == "error"
+    })
+    .await;
+    assert_eq!(
+        grant["type"], "credit",
+        "viewer credit frames must be accepted"
+    );
     assert_eq!(grant["window"], 65536);
-    ctx.manager.human_input(&session.id, &owner.id, false, true, b"CREDITED-ROOM-OUTPUT\n").await.unwrap();
+    ctx.manager
+        .human_input(
+            &session.id,
+            &owner.id,
+            false,
+            true,
+            b"CREDITED-ROOM-OUTPUT\n",
+        )
+        .await
+        .unwrap();
     let credited = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let mut bytes = vec![];
         loop {
             match terminal.next().await.unwrap().unwrap() {
                 Message::Binary(chunk) => {
                     bytes.extend_from_slice(&chunk);
-                    if String::from_utf8_lossy(&bytes).contains("CREDITED-ROOM-OUTPUT") { break bytes.len(); }
+                    if String::from_utf8_lossy(&bytes).contains("CREDITED-ROOM-OUTPUT") {
+                        break bytes.len();
+                    }
                 }
                 other => panic!("expected credited live output, got {other:?}"),
             }
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     for _ in 0..200 {
         send(&mut terminal, json!({"type":"ack","bytes":credited})).await;
     }
     // Beyond the general 60/s frame limit, yet the socket stays up and
     // answers no ack with an error (trailing live output may still arrive).
-    while let Ok(next) = tokio::time::timeout(std::time::Duration::from_millis(150), terminal.next()).await {
+    while let Ok(next) =
+        tokio::time::timeout(std::time::Duration::from_millis(150), terminal.next()).await
+    {
         match next.unwrap().unwrap() {
             Message::Binary(_) => {}
             other => panic!("an ack burst must be neither rejected nor answered, got {other:?}"),
         }
     }
-    assert_eq!(ctx.manager.room_authority_snapshot(&session.id).await.unwrap(), authority);
+    assert_eq!(
+        ctx.manager
+            .room_authority_snapshot(&session.id)
+            .await
+            .unwrap(),
+        authority
+    );
     send(&mut terminal,json!({"type":"input","data":STANDARD.encode(b"VIEWER-MUST-NOT-WRITE\n"),"grant_epoch":admitted["room"]["grant_epoch"]})).await;
     until(&mut terminal, |v| v["type"] == "error").await;
     send(

@@ -24,7 +24,7 @@ pub use lightpanda::Lightpanda;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use scraper::{Html, Selector};
@@ -32,6 +32,13 @@ use scraper::{Html, Selector};
 /// Consecutive engine failures for a host before we stop trying it and go
 /// straight to the fallback engine.
 const DENYLIST_THRESHOLD: u32 = 3;
+
+/// How long a denylisted host skips the primary engine. Once this has passed
+/// since its last failure the host gets one primary-engine probe again — a
+/// success clears it, a failure re-arms the window. Without the window a host
+/// stayed denylisted until the daemon restarted, because the only thing that
+/// cleared it (`clear_failures` after a primary success) could no longer run.
+const DENYLIST_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 /// One transient `Unavailable` (typically the CDP socket of a sidecar that
 /// only just started accepting TCP) is retried once after this pause before
@@ -259,11 +266,14 @@ pub(crate) fn extract_title(html: &str) -> String {
 /// Fronts a primary [`BrowserEngine`] with the plain-fetch [`FallbackEngine`].
 /// Falls back immediately on `EngineError::Unavailable`, and after
 /// [`DENYLIST_THRESHOLD`] consecutive `Unavailable` failures for a host,
-/// skips the primary engine entirely for that host until it succeeds again.
+/// skips the primary engine for that host for [`DENYLIST_WINDOW`] after its
+/// last failure, then probes it once more.
 pub struct BrowserService {
     engine: Arc<dyn BrowserEngine>,
     fallback: FallbackEngine,
-    denylist: Mutex<HashMap<String, u32>>,
+    /// host → (consecutive failures, time of the last one).
+    denylist: Mutex<HashMap<String, (u32, Instant)>>,
+    denylist_window: Duration,
 }
 
 impl BrowserService {
@@ -272,6 +282,7 @@ impl BrowserService {
             engine,
             fallback,
             denylist: Mutex::new(HashMap::new()),
+            denylist_window: DENYLIST_WINDOW,
         }
     }
 
@@ -403,12 +414,23 @@ impl BrowserService {
 
     fn is_denylisted(&self, host: &str) -> bool {
         let denylist = self.denylist.lock().expect("denylist mutex poisoned");
-        denylist.get(host).copied().unwrap_or(0) >= DENYLIST_THRESHOLD
+        match denylist.get(host) {
+            // Past the window the host is probed again; a failed probe bumps
+            // the count and re-arms `last` (see `record_failure`).
+            Some(&(count, last)) => {
+                count >= DENYLIST_THRESHOLD && last.elapsed() < self.denylist_window
+            }
+            None => false,
+        }
     }
 
     fn record_failure(&self, host: &str) {
         let mut denylist = self.denylist.lock().expect("denylist mutex poisoned");
-        *denylist.entry(host.to_string()).or_insert(0) += 1;
+        let entry = denylist
+            .entry(host.to_string())
+            .or_insert((0, Instant::now()));
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 = Instant::now();
     }
 
     fn clear_failures(&self, host: &str) {
@@ -951,6 +973,32 @@ mod tests {
         // Still resolves fine — straight to fallback, no engine call needed.
         let page = svc.page("https://flaky.example.com").await.unwrap();
         assert_eq!(page.engine, "fallback");
+    }
+
+    /// A denylisted host is retried once the window since its last failure
+    /// has passed — it must not stay denylisted until the daemon restarts.
+    #[tokio::test]
+    async fn denylisted_host_is_retried_after_the_window() {
+        let mut svc = BrowserService::with_engines(
+            Arc::new(Down),
+            FallbackEngine::from_static("<h1>Hi</h1>"),
+        );
+        svc.denylist_window = Duration::from_millis(30);
+        for _ in 0..DENYLIST_THRESHOLD {
+            svc.page("https://flaky3.example.com").await.unwrap();
+        }
+        assert!(svc.is_denylisted("flaky3.example.com"));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            !svc.is_denylisted("flaky3.example.com"),
+            "window elapsed — the host gets a probe again"
+        );
+        // The probe fails again (engine still Down) → the window re-arms.
+        svc.page("https://flaky3.example.com").await.unwrap();
+        assert!(svc.is_denylisted("flaky3.example.com"));
+        // A success after the window clears the entry outright.
+        svc.clear_failures("flaky3.example.com");
+        assert!(!svc.is_denylisted("flaky3.example.com"));
     }
 
     /// A hostile `<title>` with embedded newlines is collapsed to a single

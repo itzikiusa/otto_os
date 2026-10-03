@@ -116,8 +116,9 @@ class HomeStore {
   set activeIndex(n: number) {
     spaces.select(n);
   }
-  /** Auto-slide between views every ROTATE_MS. Default ON (the ask). */
-  autoRotate = $state(lsGet(LS.rotate) !== '0');
+  /** Auto-slide between views every ROTATE_MS. Default OFF: moving content
+   *  must be opt-in (WCAG 2.2.2), and every slide used to re-fetch every box. */
+  autoRotate = $state(lsGet(LS.rotate) === '1');
   /** Box currently zoomed to fill the page (null = normal grid). */
   zoomedId: string | null = $state(null);
   /** Rotation is suspended while the user is mid-gesture (resize/drag) or a

@@ -93,6 +93,8 @@ function notificationsModule() {
     '../external': { openExternal: async () => {} },
     './workspace.svelte': { ws: { sessions: [] } },
     '../desktop': { isEmbedded: false },
+    '../router.svelte': { router: { go() {} } },
+    '../noticeRoute': { parseNoticeRoute: () => null },
   });
 }
 

@@ -18,8 +18,18 @@
     refreshSecs?: number | null;
     /** Open the edit dialog for this widget (owned by the dashboard view). */
     onedit?: (w: DbWidget) => void;
+    /** False while the card is off screen (an inactive Home space, review 06
+     *  F3): no runs and no auto-refresh; the last result stays. A manual-only
+     *  card (refreshSecs 0) runs ONCE per widget — never again on its own,
+     *  however often it is shown again. */
+    active?: boolean;
   }
-  let { widget, refreshSecs = null, onedit }: Props = $props();
+  let { widget, refreshSecs = null, onedit, active = true }: Props = $props();
+  /** The widget id + query whose result is on screen (manual-only cards run
+   *  once per that key), and when it last succeeded (auto-refresh resumes
+   *  without an immediate re-run while that result is within its cadence). */
+  let ranKey = '';
+  let okAt = 0;
 
   let result = $state<QueryResult | null>(null);
   let loading = $state(false);
@@ -61,21 +71,39 @@
   // ABORTED on unmount, ±15 % jitter so 20 tiles don't fire together, and a
   // ×2-per-failure backoff (capped ×16) so a dead connection isn't hammered.
   $effect(() => {
-    const id = widget.id;
+    const key = `${widget.id}\u0000${widget.connection_id}\u0000${widget.statement}`; // a swapped/edited widget re-runs
     const secs = refreshSecs ?? 0;
-    void id; // track id so a swapped widget re-runs
+    if (!active) return;
+    const fresh = key === ranKey && okAt > 0;
     if (secs <= 0) {
+      if (fresh) return; // manual only: shown again ≠ asked again
       const ctl = new AbortController();
-      void run(false, ctl.signal);
+      void run(false, ctl.signal).then((ok) => {
+        if (ok) {
+          ranKey = key;
+          okAt = Date.now();
+        }
+      });
       return () => ctl.abort();
     }
-    const poller = pollWhileVisible((signal) => run(false, signal), {
-      ms: secs * 1000,
-      floorMs: 5000,
-      jitter: 0.15,
-      maxBackoff: 16,
-      lane: 'bg',
-    });
+    const poller = pollWhileVisible(
+      async (signal) => {
+        const ok = await run(false, signal);
+        if (ok) {
+          ranKey = key;
+          okAt = Date.now();
+        }
+        return ok;
+      },
+      {
+        ms: secs * 1000,
+        floorMs: 5000,
+        jitter: 0.15,
+        maxBackoff: 16,
+        lane: 'bg',
+        immediate: !(fresh && Date.now() - okAt < secs * 1000),
+      },
+    );
     return () => poller.stop();
   });
 

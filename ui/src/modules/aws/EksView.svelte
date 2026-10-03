@@ -19,6 +19,9 @@
   import Icon from '../../lib/components/Icon.svelte';
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
+  import RegionPicker from './RegionPicker.svelte';
+  import RegionErrors from './RegionErrors.svelte';
+  import { ALL_REGIONS } from '../../lib/api/aws';
   import { fmtAgo, fmtDate, awsErrorText } from './util';
   import type { AwsAccount, EksClusterDetail, EksClusterSummary } from '../../lib/api/types';
 
@@ -39,6 +42,10 @@
   let loading = $state(false);
   let error = $state('');
   const clusters = $derived(aws.eks[`${account.id}:${region}`] ?? null);
+  const allRegions = $derived(region === ALL_REGIONS);
+  const regionErrors = $derived(aws.regionErrors[`${account.id}:${region}`] ?? []);
+  /** The region a cluster lives in (rows of an "All regions" list carry it). */
+  const rowRegion = (c: EksClusterSummary): string => c.region ?? region;
   const shown = $derived.by(() => {
     const q = filter.trim().toLowerCase();
     const list = clusters ?? [];
@@ -69,7 +76,7 @@
   async function openDetail(c: EksClusterSummary): Promise<void> {
     detail = { c, d: null, error: '' };
     try {
-      const d = await awsApi.eksCluster(account.id, c.name, region);
+      const d = await awsApi.eksCluster(account.id, c.name, rowRegion(c));
       if (detail?.c.name === c.name) detail = { c, d, error: '' };
     } catch (e) {
       if (detail?.c.name === c.name) detail = { c, d: null, error: e instanceof Error ? e.message : String(e) };
@@ -86,7 +93,7 @@
     if (!ok) return;
     importing = c.name;
     try {
-      const k = await awsApi.eksImport(account.id, c.name, {}, region);
+      const k = await awsApi.eksImport(account.id, c.name, {}, rowRegion(c));
       toasts.success('Cluster imported', k.name);
       router.go(`kubernetes/${k.id}`);
     } catch (e) {
@@ -126,32 +133,25 @@
   bind:auto
   onrefresh={() => void load()}
 >
-  <label class="sel">
-    <span class="lbl">Region</span>
-    {#if aws.regions.length}
-      <select bind:value={region} aria-label="Region">
-        {#each aws.regions as r (r.code)}<option value={r.code}>{r.code}</option>{/each}
-      </select>
-    {:else}
-      <input class="mono" bind:value={region} aria-label="Region" size={12} />
-    {/if}
-  </label>
+  <RegionPicker {account} service="eks" bind:region allowAll />
 </ViewToolbar>
 
 <div class="tbl-wrap">
+  <RegionErrors errors={regionErrors} />
   {#if loading && !clusters}
     <div class="pad" role="status"><p class="load-note">Loading EKS clusters…</p><Skeleton rows={5} /></div>
   {:else if error}
     <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list clusters" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
-    <EmptyState icon="helm" title={filter ? 'No matching clusters' : `No EKS clusters in ${region}`} />
+    <EmptyState icon="helm" title={filter ? 'No matching clusters' : allRegions ? 'No EKS clusters in any enabled region' : `No EKS clusters in ${region}`} />
   {:else}
     <table class="tbl">
-      <thead><tr><th>Cluster</th><th>Status</th><th>Version</th><th class="hide-sm">Endpoint</th><th class="hide-sm">Created</th><th class="act"></th></tr></thead>
+      <thead><tr><th>Cluster</th>{#if allRegions}<th>Region</th>{/if}<th>Status</th><th>Version</th><th class="hide-sm">Endpoint</th><th class="hide-sm">Created</th><th class="act"></th></tr></thead>
       <tbody>
-        {#each shown as c (c.name)}
+        {#each shown as c (`${c.region ?? ''}/${c.name}`)}
           <tr class="trow" tabindex="0" onclick={() => void openDetail(c)} onkeydown={(e) => { if (e.key === 'Enter') void openDetail(c); }} oncontextmenu={(e) => menu(e, c)}>
             <td class="strong"><Icon name="helm" size={13} /> {c.name}</td>
+            {#if allRegions}<td class="mono">{c.region ?? '—'}</td>{/if}
             <td><span class="pill" class:ok={c.status === 'ACTIVE'} class:warn={c.status !== 'ACTIVE'}>{c.status}</span></td>
             <td class="mono">{c.version ?? '—'}</td>
             <td class="mono dim hide-sm" title={c.endpoint ?? ''}>{c.endpoint ?? '—'}</td>
@@ -178,6 +178,7 @@
         <span class="pill" class:ok={d.c.status === 'ACTIVE'} class:warn={d.c.status !== 'ACTIVE'}>{d.c.status}</span>
         <span class="mono">v{d.c.version ?? '?'}</span>
         <span class="mono dim ell" title={d.c.arn ?? ''}>{d.c.arn ?? ''}</span>
+        <button class="btn small" onclick={() => router.go(`aws/${account.id}/logs/${encodeURIComponent(`/aws/eks/${d.c.name}/cluster`)}/${encodeURIComponent(rowRegion(d.c))}`)} title="Open the control-plane log group in CloudWatch Logs (needs control-plane logging enabled on the cluster)"><Icon name="text" size={12} /> Control-plane logs</button>
         {#if canImport}
           <span class="spacer"></span>
           <button class="btn primary small" onclick={() => void openInK8s(d.c)} disabled={importing === d.c.name}><Icon name="helm" size={12} /> Open in Kubernetes</button>
@@ -224,25 +225,6 @@
   }
   .pad {
     padding: 12px;
-  }
-  .sel {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-s);
-  }
-  .lbl {
-    color: var(--text-dim);
-  }
-  .sel select,
-  .sel input {
-    height: 26px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--bg);
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
   }
   .tbl-wrap {
     flex: 1;

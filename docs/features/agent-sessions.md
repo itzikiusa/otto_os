@@ -119,6 +119,16 @@ modal (`NewSession.svelte`) offers:
   true`; wires an MCP browser server into the workspace `.mcp.json`.
 - **Preview context** — for `claude` / `codex`, expands to show exactly what
   Otto would inject (skills/soul/context) before spawning.
+- **First message (optional)** — shown when the batch has an agent provider.
+  When filled, each agent session is created through
+  `POST /workspaces/{wid}/sessions/open` with `prompt`: the daemon waits for the
+  CLI to be ready (cold start, trust dialog), pastes the message, verifies the
+  echo and presses Enter — no client-side timer racing the spawn. The sheet
+  always sends `meta.work = {origin: "manual"}` (the route otherwise stamps
+  `delegation`, which would make it engine-owned with the 5-minute idle grace).
+  A batch sends the message to every agent; `shell` cards in the batch start
+  normally. `⌘↩` still creates. The first-run coach's **Start first session**
+  uses the same path for its starter prompt.
 
 Press **Start Session**. A session can also pin a model: when `meta.model` is
 set, the daemon appends `--model <name>` for `claude` / `codex` (silently
@@ -323,6 +333,15 @@ the PTY and persists the grid to `meta.pty_cols` / `meta.pty_rows` so a future
 respawn frames its first snapshot correctly. The client only sends a resize on
 an *actual* dimension change (not on every `fit()`), to avoid SIGWINCH flicker
 on `claude`/`codex` repaints.
+
+Agent panes go one step further: while the pane's box is still settling (a tab
+switch, a split animation, a window restore) they only *measure*, and resize
+the local xterm once the same grid has measured twice (≈350 ms). A passing size
+never reflows the TUI's screen. If the local grid did change and came back to
+the size the PTY already has (no SIGWINCH, so no repaint), the pane asks for a
+fresh snapshot instead. A pane parked by a tab switch is put back to the PTY's
+grid first. If a pane still looks garbled, **⋯ → Redraw terminal** (or ⌘K
+"Redraw terminal") rebuilds the screen from the session without reconnecting.
 
 ### Watching, splitting, tiling
 
@@ -534,7 +553,15 @@ How it works (`crates/otto-pty/src/holder.rs`, `held.rs`):
   is marked `running` (trail: *Reattached after a daemon restart (process kept
   running)*). Clients re-attach to it like after any dropped socket and rebuild
   from the snapshot (new `epoch`). The boot credential sweep spares these
-  sessions. A pending codex/agy id capture is re-armed.
+  sessions. A pending codex/agy id capture is re-armed. **A restart is not
+  activity:** re-adoption writes the status without touching `last_active_at`,
+  and the adopted handle's last-output clock is back-dated to the holder's
+  `last_output_unix_ms` (protocol 1.1, `HolderInfo`), so frequent deploys no
+  longer reset the idle-suspend clock of kept sessions.
+- **Restart summary.** `restore_all` returns how many sessions were kept
+  running and how many lost their process (now dormant); `hello_ack` carries it
+  as `boot_restore` and the UI toasts *"Otto restarted — 5 sessions kept
+  running · 2 suspended — they resume when you open them"* once per boot id.
 - **Cleanup — nothing leaks.** Closing, archiving, deleting, suspending,
   restarting or killing a held session kills its child through the holder and
   releases it; the holder exits once the child is gone and removes its socket.
@@ -574,7 +601,12 @@ For every session that was **not** kept running (above), on daemon boot,
 `SessionManager::restore_all` deliberately does **not** respawn
 any agent processes (keeping every historical session resident would cost
 ~200 MB each). Instead every restorable session is marked `reconnectable` and
-resumed **lazily** the moment a client opens it: `ensure_live` sees a
+resumed **lazily** the moment a client opens it. The boot pass is one
+set-based UPDATE (`SessionsRepo::mark_dormant_except`): rows that are already
+`reconnectable` are not touched, `last_active_at` is never stamped (a restart is
+not activity — migration `0148` repaired rows earlier boots had stamped, from
+the agent trail), and only the changed rows are broadcast. Sessions that were
+live get `meta.suspended = {reason: "restart", at}`. Then `ensure_live` sees a
 non-live but resumable session and calls `restart`, which spawns the provider
 with its **resume args**. Claude keeps the full conversation in its on-disk
 JSONL transcript, so `--resume <provider_session_id>` restores it completely.
@@ -741,10 +773,16 @@ agent CLI's own idle TUI redraws accrue CPU forever.
 
 On suspend the daemon kills and drops the live PTY (freeing memory), **keeps the
 row** with its `provider_session_id` intact, sets status `reconnectable`, and
-records a lifecycle trail entry. Reopening auto-resumes (above). The session pane
-shows a live countdown for an idle, non-pinned agent: *"Nm idle · suspends in
-Mm"*, with the tooltip *"Session is idle. Auto-suspend frees its RAM while
-keeping it resumable."*
+records a lifecycle trail entry. Reopening auto-resumes (above). Every suspend
+stamps **why and when** as `meta.suspended = {reason, at}` — `idle` (the sweep),
+`cap` (the live-session cap), `restart` (the boot restore), `released` (an
+explicit suspend by an engine/API) — and a resume clears it. A suspended pane
+shows it in its details and the *Suspended* note's tooltip: *"Suspended 3h ago
+· idle too long"*. The session pane shows the idle time for an idle, non-pinned
+agent (*"4h idle"*) and adds the countdown (*"· suspends in 30m"*) only when the
+suspend is under **2 hours** away — further out it is noise, and false for any
+pane you are watching (a watched session is never suspended). The label updates
+once a minute (once a second only during the first minute).
 
 **Pin to keep alive:** the ⋯ menu offers *"Pin (keep alive)"* / *"Unpin (allow
 auto-suspend)"* (agent sessions only), toggling `meta.keep_alive`. A pinned
@@ -922,6 +960,16 @@ shows a task progress bar (`done/total`), source-filter tabs (All / Agent / You
 session…"* input. The session pane shows a compact `done/total` task chip and a
 *"now: <in-progress task>"* hint. A session waiting on you (input or permission)
 shows a **"Needs you"** amber badge.
+
+**Finding out while you are elsewhere.** In the desktop app the **dock badge**
+counts the current workspace's sessions that need you (`ws.needsYouCount`,
+debounced 250 ms, written through the shell's `set_badge_count`; cleared on
+sign-out). The info *"Session awaiting input"* notice (`…:waiting` — every
+provider, not only Claude's permission hook) also raises a **native macOS
+banner** when you are not watching that session (window hidden or unfocused,
+or another session active). Toggle: Settings → Notifications → *Banner when a
+session is waiting on you* (`native_on_waiting`, default on; needs native
+notifications on).
 
 ### The right panel's other tabs
 
@@ -1200,6 +1248,23 @@ devices' sessions stay hidden here (they still run on the daemon)."* This is a
   processes (`pgrep -fl pty-holder`), one per kept session.
 - **Custom provider not appearing.** Confirm it's in the `providers` settings
   JSON and that `cmd` is on `PATH` (`GET /meta.tools` reports detected tools).
+- **A TUI pane is garbled after switching tabs** (blank rows, fragments on the
+  wrong rows, stray characters at the right edge). Use **⋯ → Redraw terminal**
+  (⌘K "Redraw terminal"). To see which layout step produced the stray grid,
+  turn on the latency flag below: every local xterm resize is logged to the
+  webview console as `local resize A → B (reason, pty C)`.
+- **Typing or scrolling lags but the CPU is idle.** Turn on the latency HUD:
+  run `localStorage.setItem('otto.debug.termLatency','1')` in the webview
+  console (Develop menu) and reopen the pane. A corner overlay shows `rtt`
+  (websocket + daemon loop), `echo` (the CLI answering a keystroke, measured in
+  the daemon), `wire`/`parse`/`paint` (the keystroke's trip through the
+  webview), timer `drift`, the `rAF` interval, page visibility and the
+  renderer. High `echo` means the CLI itself: a long claude session re-renders
+  its whole UI on every key, so `/compact` or a new session helps. Low `rtt`
+  with high `parse`/`paint`/`drift` means the webview is throttled or busy.
+  High `rtt` means the daemon. `render: dom` on a pane that should use the GPU
+  recovers on window focus or when the pane is focused. Remove the key to turn
+  it off.
 
 ---
 

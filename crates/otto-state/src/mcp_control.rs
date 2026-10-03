@@ -181,6 +181,9 @@ pub struct McpCallLogRow {
     pub bytes: Option<i64>,
     pub rows: Option<i64>,
     pub approval_id: Option<String>,
+    /// The agent session that made the call (governed `otto.*` calls from an
+    /// Otto-minted session credential); `None` for humans / external clients.
+    pub caller_session_id: Option<String>,
     pub created_at: String,
 }
 
@@ -206,12 +209,18 @@ pub struct NewCallLog {
     pub bytes: Option<i64>,
     pub rows: Option<i64>,
     pub approval_id: Option<String>,
+    pub caller_session_id: Option<String>,
 }
 
 /// Filters for the audit list.
 #[derive(Debug, Clone, Default)]
 pub struct CallLogQuery {
     pub workspace_ids: Option<Vec<String>>, // None = all (root); Some = restrict
+    /// With `workspace_ids` set (a non-root caller): the caller's user id. A
+    /// workspace-less `otto.*` row (`server_id IS NULL`) is then only visible
+    /// to the user who made the call — another user's outward calls never
+    /// leak through the NULL-workspace branch.
+    pub caller_user_id: Option<String>,
     pub server_id: Option<String>,
     pub tool: Option<String>,
     pub decision: Option<String>,
@@ -250,6 +259,8 @@ pub struct McpApproval {
     pub status: String,
     pub requested_by: Option<String>,
     pub requested_by_kind: Option<String>,
+    /// The agent session that raised the request, when known.
+    pub requested_by_session_id: Option<String>,
     pub decided_by: Option<String>,
     pub decision_note: Option<String>,
     pub created_at: String,
@@ -293,6 +304,7 @@ pub struct NewApproval {
     pub risk_label: Option<String>,
     pub requested_by: Option<String>,
     pub requested_by_kind: Option<String>,
+    pub requested_by_session_id: Option<String>,
     pub expires_at: Option<String>,
 }
 
@@ -1017,6 +1029,7 @@ fn row_to_call_log(r: &sqlx::sqlite::SqliteRow) -> McpCallLogRow {
         bytes: r.get("bytes"),
         rows: r.get("rows"),
         approval_id: r.get("approval_id"),
+        caller_session_id: r.get("caller_session_id"),
         created_at: r.get("created_at"),
     }
 }
@@ -1036,8 +1049,8 @@ impl McpCallLogRepo {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
-            "INSERT INTO mcp_call_log (id, workspace_id, server_id, server_name, tool, direction, caller_user_id, caller_kind, args_redacted_json, decision, decision_reason, risk_label, injection_risk, dry_run, ok, error, latency_ms, bytes, rows, approval_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO mcp_call_log (id, workspace_id, server_id, server_name, tool, direction, caller_user_id, caller_kind, args_redacted_json, decision, decision_reason, risk_label, injection_risk, dry_run, ok, error, latency_ms, bytes, rows, approval_id, caller_session_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id).bind(&e.workspace_id).bind(&e.server_id).bind(&e.server_name)
         .bind(&e.tool).bind(&e.direction).bind(&e.caller_user_id).bind(&e.caller_kind)
@@ -1046,7 +1059,7 @@ impl McpCallLogRepo {
         .bind(crate::mcp_audit::cap_args_json(&e.args_redacted_json)).bind(&e.decision).bind(&e.decision_reason)
         .bind(&e.risk_label).bind(&e.injection_risk).bind(e.dry_run as i64).bind(e.ok as i64)
         .bind(&e.error).bind(e.latency_ms).bind(e.bytes).bind(e.rows).bind(&e.approval_id)
-        .bind(&now)
+        .bind(&e.caller_session_id).bind(&now)
         .execute(&self.pool).await.map_err(dberr("insert call log"))?;
         Ok(id)
     }
@@ -1089,7 +1102,8 @@ impl McpCallLogRepo {
             }
             let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             sql.push_str(&format!(
-                " AND (workspace_id IN ({placeholders}) OR workspace_id IS NULL)"
+                " AND (workspace_id IN ({placeholders}) OR {})",
+                null_ws_clause(q.caller_user_id.is_some())
             ));
         }
         if q.server_id.is_some() {
@@ -1102,10 +1116,13 @@ impl McpCallLogRepo {
             sql.push_str(" AND decision = ?");
         }
         sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(ids) = &q.workspace_ids {
             for id in ids {
                 query = query.bind(id);
+            }
+            if let Some(me) = &q.caller_user_id {
+                query = query.bind(me);
             }
         }
         if let Some(v) = &q.server_id {
@@ -1126,8 +1143,15 @@ impl McpCallLogRepo {
         Ok(rows.iter().map(row_to_call_log).collect())
     }
 
-    /// Per-tool aggregates over the executed (non-denied) calls.
-    pub async fn stats(&self, workspace_ids: Option<&[String]>) -> Result<Vec<McpToolStats>> {
+    /// Per-tool aggregates over the executed (non-denied) calls. With
+    /// `workspace_ids` (a non-root caller), `caller_user_id` scopes the
+    /// workspace-less `otto.*` rows to that user's own calls (see
+    /// [`CallLogQuery::caller_user_id`]).
+    pub async fn stats(
+        &self,
+        workspace_ids: Option<&[String]>,
+        caller_user_id: Option<&str>,
+    ) -> Result<Vec<McpToolStats>> {
         let mut sql = String::from(
             "SELECT server_id, server_name, tool,
                     COUNT(*) AS calls,
@@ -1146,14 +1170,18 @@ impl McpCallLogRepo {
             }
             let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             sql.push_str(&format!(
-                " AND (workspace_id IN ({ph}) OR workspace_id IS NULL)"
+                " AND (workspace_id IN ({ph}) OR {})",
+                null_ws_clause(caller_user_id.is_some())
             ));
         }
         sql.push_str(" GROUP BY server_id, tool ORDER BY calls DESC");
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(ids) = workspace_ids {
             for id in ids {
                 query = query.bind(id);
+            }
+            if let Some(me) = caller_user_id {
+                query = query.bind(me);
             }
         }
         let rows = query
@@ -1187,6 +1215,18 @@ impl McpCallLogRepo {
     }
 }
 
+/// The NULL-workspace branch of a non-root audit/stats filter. Rows of a
+/// managed server (`server_id` set) stay visible here — the handler checks the
+/// server's own ACL per row; a workspace-less `otto.*` row (`server_id IS
+/// NULL`) is the caller's own only (one `?` bound to the caller's user id).
+fn null_ws_clause(scoped_to_caller: bool) -> &'static str {
+    if scoped_to_caller {
+        "(workspace_id IS NULL AND (server_id IS NOT NULL OR caller_user_id = ?))"
+    } else {
+        "workspace_id IS NULL"
+    }
+}
+
 // ===========================================================================
 // Approval queue repo
 // ===========================================================================
@@ -1206,6 +1246,7 @@ fn row_to_approval(r: &sqlx::sqlite::SqliteRow) -> McpApproval {
         status: r.get("status"),
         requested_by: r.get("requested_by"),
         requested_by_kind: r.get("requested_by_kind"),
+        requested_by_session_id: r.get("requested_by_session_id"),
         decided_by: r.get("decided_by"),
         decision_note: r.get("decision_note"),
         created_at: r.get("created_at"),
@@ -1261,12 +1302,13 @@ impl McpApprovalRepo {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
-            "INSERT INTO mcp_approvals (id, workspace_id, kind, server_id, server_name, tool, title, detail, args_redacted_json, args_hash, risk_label, status, requested_by, requested_by_kind, created_at, expires_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+            "INSERT INTO mcp_approvals (id, workspace_id, kind, server_id, server_name, tool, title, detail, args_redacted_json, args_hash, risk_label, status, requested_by, requested_by_kind, requested_by_session_id, created_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
         )
         .bind(&id).bind(&n.workspace_id).bind(&n.kind).bind(&n.server_id).bind(&n.server_name)
         .bind(&n.tool).bind(&n.title).bind(&n.detail).bind(&n.args_redacted_json).bind(&n.args_hash)
-        .bind(&n.risk_label).bind(&n.requested_by).bind(&n.requested_by_kind).bind(&now)
+        .bind(&n.risk_label).bind(&n.requested_by).bind(&n.requested_by_kind)
+        .bind(&n.requested_by_session_id).bind(&now)
         .bind(&n.expires_at)
         .execute(&self.pool).await.map_err(dberr("create approval"))?;
         let row = self.get(&id).await?;
@@ -1303,7 +1345,7 @@ impl McpApprovalRepo {
             sql.push_str(" AND status = ?");
         }
         sql.push_str(" ORDER BY created_at DESC LIMIT ?");
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(ids) = workspace_ids {
             for id in ids {
                 query = query.bind(id);
@@ -1384,6 +1426,43 @@ impl McpApprovalRepo {
         .fetch_optional(&self.pool)
         .await
         .map_err(dberr("find approval"))?;
+        Ok(r.map(|row| row.get::<String, _>("id")))
+    }
+
+    /// Find a still-PENDING, unexpired approval for exactly this call — same
+    /// (server, tool, workspace, args hash) raised by the same requester. The
+    /// invoke gate reuses it instead of filing a duplicate card every time a
+    /// waiting agent retries (the `pending_approval` envelope tells it to
+    /// resubmit), so one call is one card however often it is polled.
+    pub async fn find_pending(
+        &self,
+        workspace_id: Option<&str>,
+        server_id: Option<&str>,
+        tool: &str,
+        args_hash: &str,
+        requested_by: &str,
+    ) -> Result<Option<String>> {
+        let now = fmt(Utc::now());
+        let r = sqlx::query(
+            "SELECT id FROM mcp_approvals
+             WHERE status = 'pending'
+               AND tool = ? AND args_hash = ? AND requested_by = ?
+               AND (server_id IS ? OR server_id = ?)
+               AND (workspace_id IS ? OR workspace_id = ?)
+               AND (expires_at IS NULL OR expires_at > ?)
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(tool)
+        .bind(args_hash)
+        .bind(requested_by)
+        .bind(server_id)
+        .bind(server_id)
+        .bind(workspace_id)
+        .bind(workspace_id)
+        .bind(&now)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("find pending approval"))?;
         Ok(r.map(|row| row.get::<String, _>("id")))
     }
 
@@ -1551,6 +1630,7 @@ mod tests {
             risk_label: Some("dangerous".into()),
             requested_by: Some("owner".into()),
             requested_by_kind: Some(kind.into()),
+            requested_by_session_id: None,
             expires_at: None,
         };
         // Every agent-originated kind: the owning user is the intended approver.
@@ -1610,6 +1690,7 @@ mod tests {
             risk_label: None,
             requested_by: Some("requester".into()),
             requested_by_kind: Some("ui".into()),
+            requested_by_session_id: None,
             expires_at,
         };
         let a = repo.create(mk(None)).await.unwrap();
@@ -1672,6 +1753,7 @@ mod tests {
                 risk_label: Some("dangerous".into()),
                 requested_by: Some("requester".into()),
                 requested_by_kind: Some("ui".into()),
+                requested_by_session_id: None,
                 expires_at: None,
             })
             .await
@@ -1708,5 +1790,110 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_retried_call_reuses_its_pending_approval() {
+        let pool = mem_pool().await;
+        let (ws, _user) = seed(&pool).await;
+        let repo = McpApprovalRepo::new(pool.clone());
+        let mk = |by: &str| NewApproval {
+            workspace_id: Some(ws.clone()),
+            kind: "tool_call".into(),
+            server_id: None,
+            server_name: Some("otto".into()),
+            tool: Some("otto.create_pr".into()),
+            title: "create_pr".into(),
+            detail: None,
+            args_redacted_json: "{}".into(),
+            args_hash: Some("HASH_P".into()),
+            risk_label: Some("dangerous".into()),
+            requested_by: Some(by.into()),
+            requested_by_kind: Some("mcp_server".into()),
+            requested_by_session_id: Some("sess-1".into()),
+            expires_at: None,
+        };
+        let find = |by: &'static str, hash: &'static str| {
+            let repo = repo.clone();
+            let ws = ws.clone();
+            async move {
+                repo.find_pending(Some(&ws), None, "otto.create_pr", hash, by)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert!(find("owner", "HASH_P").await.is_none());
+        let a = repo.create(mk("owner")).await.unwrap();
+        assert_eq!(a.requested_by_session_id.as_deref(), Some("sess-1"));
+        // The same call by the same requester finds the same card…
+        assert_eq!(
+            find("owner", "HASH_P").await.as_deref(),
+            Some(a.id.as_str())
+        );
+        // …different arguments or a different requester do not.
+        assert!(find("owner", "HASH_Q").await.is_none());
+        assert!(find("someone", "HASH_P").await.is_none());
+        // Once decided it is no longer pending.
+        repo.decide(&a.id, false, "owner", None).await.unwrap();
+        assert!(find("owner", "HASH_P").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn workspace_less_otto_rows_are_only_the_callers_own() {
+        let pool = mem_pool().await;
+        let (ws, _user) = seed(&pool).await;
+        let log = McpCallLogRepo::new(pool.clone());
+        let row = |ws: Option<&str>, server: Option<&str>, by: &str, tool: &str| NewCallLog {
+            workspace_id: ws.map(str::to_string),
+            server_id: server.map(str::to_string),
+            tool: tool.into(),
+            direction: "inbound".into(),
+            caller_user_id: Some(by.into()),
+            caller_session_id: Some(format!("{by}-session")),
+            args_redacted_json: "{}".into(),
+            decision: "allowed".into(),
+            ok: true,
+            ..Default::default()
+        };
+        log.insert(row(None, None, "me", "otto.mine"))
+            .await
+            .unwrap();
+        log.insert(row(None, None, "other", "otto.theirs"))
+            .await
+            .unwrap();
+        log.insert(row(Some(&ws), None, "other", "otto.shared"))
+            .await
+            .unwrap();
+        log.insert(row(None, Some("srv"), "other", "managed"))
+            .await
+            .unwrap();
+        let q = CallLogQuery {
+            workspace_ids: Some(vec![ws.clone()]),
+            caller_user_id: Some("me".into()),
+            ..Default::default()
+        };
+        let mut tools: Vec<String> = log
+            .list(&q)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.tool)
+            .collect();
+        tools.sort();
+        assert_eq!(tools, ["managed", "otto.mine", "otto.shared"]);
+        let mine = log.list(&q).await.unwrap();
+        let mine = mine.iter().find(|r| r.tool == "otto.mine").unwrap();
+        assert_eq!(mine.caller_session_id.as_deref(), Some("me-session"));
+        let mut stats: Vec<String> = log
+            .stats(Some(std::slice::from_ref(&ws)), Some("me"))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.tool)
+            .collect();
+        stats.sort();
+        assert_eq!(stats, ["managed", "otto.mine", "otto.shared"]);
+        // Root (no restriction) sees everything.
+        assert_eq!(log.stats(None, None).await.unwrap().len(), 4);
     }
 }

@@ -1,8 +1,11 @@
 <script lang="ts">
   import PathField from '../../lib/components/PathField.svelte';
-  // Usage dashboard (root-only): provider/day/session token rollups, system
-  // CPU/RAM metrics, and the embedded-ClickHouse install/retention controls.
-  // All data comes from the daemon's /usage/* endpoints (otto-usage engine).
+  // Usage dashboard: tokens first (provider/day/model/session rollups; cost is
+  // the secondary figure), the ccusage-style Report tab, and — for root only —
+  // system CPU/RAM metrics, the ccusage cross-check and the embedded-ClickHouse
+  // install/retention/budget controls. A non-root user holding Usage:View sees
+  // their own sessions (`summary.scope === 'own'`). All data comes from the
+  // daemon's /usage/* endpoints (otto-usage engine).
   import { onMount } from 'svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import Icon from '../../lib/components/Icon.svelte';
@@ -21,6 +24,15 @@
   // Work-graph attribution drilldown + cost forecast (B1).
   import AttributionDrilldown from './AttributionDrilldown.svelte';
   import CostForecastChip from './CostForecastChip.svelte';
+  import ModelBreakdown from './ModelBreakdown.svelte';
+  import UsageReportView from './UsageReportView.svelte';
+
+  /** Root sees everything and owns the engine/budget controls; anyone else
+   *  with Usage:View gets a read-only view of their own sessions. */
+  const admin = $derived(auth.isRoot);
+  const canView = $derived(auth.isRoot || auth.can('usage', 'view'));
+  /** Overview dashboard vs the ccusage-style report tables. */
+  let view = $state<'overview' | 'report'>('overview');
 
   // Navigate to a session from the top-sessions table (click-through drill-down).
   function openSession(sessionId: string): void {
@@ -120,11 +132,15 @@
   }
   function exportDaily(): void {
     usage.exportDailyCsv();
-    exported('daily cost as CSV', `otto-usage-daily-${usage.days}d.csv`);
+    exported('daily tokens as CSV', `otto-usage-daily-${usage.days}d.csv`);
   }
   function exportSessions(): void {
     usage.exportSessionsCsv();
     exported('sessions as CSV', `otto-usage-sessions-${usage.days}d.csv`);
+  }
+  function exportModels(): void {
+    usage.exportModelsCsv();
+    exported('models as CSV', `otto-usage-models-${usage.days}d.csv`);
   }
   function exportSummary(): void {
     usage.exportSummaryJson();
@@ -139,7 +155,8 @@
   }
 
   onMount(() => {
-    if (auth.isRoot) void usage.loadAll();
+    usage.admin = admin;
+    if (canView) void usage.loadAll();
     // Live metric ticks refetch the sparkline only while this page is mounted.
     const unwatch = usage.watchMetrics();
     return () => {
@@ -147,6 +164,12 @@
       // Tear down auto-refresh on unmount so we don't poll in the background.
       usage.setAutoRefresh(false);
     };
+  });
+
+  // Keep the store's root flag in step (it decides whether /usage/metrics,
+  // a root-only endpoint, is requested at all).
+  $effect(() => {
+    usage.admin = admin;
   });
 
   // Mirror server status into the editable fields whenever it refreshes.
@@ -242,11 +265,11 @@
     return `${mon} ${parseInt(m[3], 10)}, ${m[4]}`;
   }
 
-  // ── Daily cost SVG chart ──────────────────────────────────────────────────
-  // The chart is hand-rolled SVG (no dependencies). It renders cost on the
-  // y-axis (labeled ticks), days on the x-axis (thinned for 30d/90d), gridlines
-  // at each y-tick, and a per-point tooltip via <title> (shown on hover by the
-  // browser). Works at 7d/30d/90d windows.
+  // ── Daily tokens SVG chart ────────────────────────────────────────────────
+  // The chart is hand-rolled SVG (no dependencies). It renders TOKENS on the
+  // y-axis (labeled ticks; cost is in each bar's tooltip), days on the x-axis
+  // (thinned for 30d/90d), gridlines at each y-tick, and a per-point tooltip
+  // via <title>. Works at 7d/30d/90d windows.
 
   // Chart viewport (inner drawing area, inside the axis labels).
   const SVG_W = 500;
@@ -254,26 +277,25 @@
   const AXIS_L = 52;  // left margin for y-axis labels
   const AXIS_B = 22;  // bottom margin for x-axis labels
 
-  const dailyCosts = $derived((usage.summary?.daily ?? []).map((d) => d.cost_usd));
-  const dailyMaxCost = $derived(Math.max(...dailyCosts, 0));
+  const dailyTokens = $derived((usage.summary?.daily ?? []).map((d) => d.total_tokens));
+  const dailyMaxTokens = $derived(Math.max(...dailyTokens, 0));
   const dailyDays = $derived(usage.summary?.daily ?? []);
 
-  // Y-axis: 4 ticks from 0 to ceiling. Round the top tick to a "nice" value.
-  // The step never drops below one cent: sub-cent steps all format as
-  // "<$0.01", so a near-zero window used to print the same label three times.
+  // Y-axis: 4 ticks from 0 to ceiling. Round the top tick to a "nice" value
+  // (never below one token, so a near-empty window can't repeat a label).
   const yTicks = $derived.by(() => {
-    const top = dailyMaxCost;
-    const raw = Math.max(top / 3, 0.01);
+    const top = dailyMaxTokens;
+    const raw = Math.max(top / 3, 1);
     // Pick a magnitude step that gives readable labels.
     const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
     const nice = Math.ceil(raw / mag) * mag;
     return [0, nice, nice * 2, nice * 3];
   });
 
-  function svgY(cost: number): number {
+  function svgY(tokens: number): number {
     const plotH = SVG_H - AXIS_B;
     const max = yTicks[yTicks.length - 1] || 1;
-    return plotH - (cost / max) * plotH;
+    return plotH - (tokens / max) * plotH;
   }
   // Bars sit at the CENTRE of equal bands: pinning the first/last bar to the
   // plot edges put half of the first bar over the y-axis labels and half of
@@ -367,10 +389,15 @@
 <div class="usage">
   <PageHeader
     title="Usage"
-    subtitle="Tokens, estimated cost and system load"
+    subtitle={admin ? 'Tokens by provider, model and session, with estimated cost and system load' : 'Tokens used by your sessions, with estimated cost'}
   >
     {#snippet tabs()}
       {#if usage.status?.available}
+        <div class="segmented" role="group" aria-label="Usage view">
+          <button aria-pressed={view === 'overview'} class:active={view === 'overview'} onclick={() => (view = 'overview')}>Overview</button>
+          <button aria-pressed={view === 'report'} class:active={view === 'report'} onclick={() => (view = 'report')} data-testid="usage-view-report">Report</button>
+        </div>
+        {#if admin}
         <div
           class="segmented"
           role="group"
@@ -384,6 +411,7 @@
             All
           </button>
         </div>
+        {/if}
         <div class="segmented" role="group" aria-label="Time window">
           {#each WINDOWS as w (w.days)}
             <button
@@ -434,6 +462,7 @@
         >
           <Icon name="download" size={12} /> Export
         </button>
+        {#if admin}
         <button
           class="icon-btn"
           class:on={configOpen}
@@ -446,6 +475,7 @@
         >
           <Icon name="gear" size={14} />
         </button>
+        {/if}
       {/if}
     {/snippet}
   </PageHeader>
@@ -471,12 +501,12 @@
       </div>
     {/if}
 
-    {#if !auth.isRoot}
+    {#if !canView}
       <EmptyState
         variant="page"
         icon="chart"
-        title="Usage is root-only"
-        body="Token, cost and system-load history is visible to the root account. Ask whoever set up this Otto for access."
+        title="You don't have access to usage"
+        body="Token and cost history is visible to people granted Usage. Ask whoever set up this Otto for access."
       />
     {:else if !usage.status}
       <!-- Status unknown (loading, or /usage/status failed): never fall through to
@@ -489,6 +519,13 @@
         error={usage.statusError}
         empty
         onretry={() => void usage.loadAll()}
+      />
+    {:else if !usage.status.available && !admin}
+      <EmptyState
+        variant="page"
+        icon="chart"
+        title="Usage tracking isn't set up"
+        body="Otto records token usage once the root account sets up usage tracking."
       />
     {:else if !usage.status.available}
       <!-- Engine not installed: the page's one CTA installs it; pointing at an
@@ -534,9 +571,12 @@
       </EmptyState>
     {:else}
       <div class="body">
+        {#if usage.summary?.scope === 'own'}
+          <p class="scope-note" role="note"><Icon name="info" size={12} /> Showing your sessions only.</p>
+        {/if}
         <!-- Engine config (opened from the header gear). Rendered first so
              opening it never lands off-screen below the sessions table. -->
-        {#if configOpen}
+        {#if configOpen && admin}
           <section class="panel card" bind:this={settingsEl} aria-labelledby="usage-cfg-title">
             <div class="panel-head">
               <h3 id="usage-cfg-title">Storage and retention</h3>
@@ -589,6 +629,9 @@
           </section>
         {/if}
 
+        {#if view === 'report'}
+          <UsageReportView {admin} />
+        {:else}
         {#if usage.summaryError}
           <!-- Summary failed: inline error (no data yet) or a stale-data bar.
                The budgets card below still renders on its own. -->
@@ -614,12 +657,8 @@
                   {#if s.pct > 0}<div style="width: {s.pct}%; background: {s.color}"></div>{/if}
                 {/each}
               </div>
-            </div>
-            <div class="stat card">
-              <span class="stat-label">Estimated cost</span>
-              <span class="stat-value">{fmtCost(usage.summary.total_cost_usd)}</span>
-              <span class="stat-sub">
-                in the last {usage.summary.days} days
+              <span class="stat-sub" title="Estimated at published list prices">
+                ≈ {fmtCost(usage.summary.total_cost_usd)} in the last {usage.summary.days} days
                 <!-- Projected cost of the next agent run on the most-used
                      provider (hidden when there's no history to base it on). -->
                 {#if usage.summary.providers.length > 0}
@@ -631,14 +670,22 @@
               </span>
             </div>
             <div class="stat card">
-              <span class="stat-label">Activity</span>
-              <span class="stat-value">{fmtNum(usage.summary.total_events)}</span>
-              <span class="stat-sub">{usage.summary.total_events === 1 ? 'event' : 'events'} recorded</span>
+              <span class="stat-label">Output tokens</span>
+              <span class="stat-value" title={usage.summary.total_output_tokens.toLocaleString()}>{fmtNum(usage.summary.total_output_tokens)}</span>
+              <span class="stat-sub" title={usage.summary.total_input_tokens.toLocaleString()}>{fmtNum(usage.summary.total_input_tokens)} uncached input</span>
             </div>
             <div class="stat card">
-              <span class="stat-label">Providers</span>
-              <span class="stat-value">{usage.summary.providers.length}</span>
-              <span class="stat-sub">across {plural(usage.summary.sessions.length, 'session')}</span>
+              <span class="stat-label">Cache read</span>
+              <span class="stat-value" title={usage.summary.total_cache_read_tokens.toLocaleString()}>{fmtNum(usage.summary.total_cache_read_tokens)}</span>
+              <span class="stat-sub" title={usage.summary.total_cache_write_tokens.toLocaleString()}>{fmtNum(usage.summary.total_cache_write_tokens)} cache write</span>
+            </div>
+            <div class="stat card">
+              <span class="stat-label">Activity</span>
+              <span class="stat-value">{fmtNum(usage.summary.total_events)}</span>
+              <span class="stat-sub">
+                {usage.summary.total_events === 1 ? 'event' : 'events'} · {plural(usage.summary.providers.length, 'provider')} ·
+                {plural(usage.summary.sessions.length, 'session')}
+              </span>
             </div>
           </div>
         {/if}
@@ -708,27 +755,27 @@
               {/if}
             </section>
 
-            <!-- Daily cost (SVG chart with y-axis labels, gridlines, x-axis ticks,
+            <!-- Daily tokens (SVG chart with y-axis labels, gridlines, x-axis ticks,
                  and per-point hover tooltip via <title>).
                  Uses the same stacked-token colour scheme as the bar chart. -->
             <section class="panel card" aria-labelledby="usage-daily-title">
               <div class="panel-head">
-                <h3 id="usage-daily-title">Daily cost</h3>
+                <h3 id="usage-daily-title">Daily tokens</h3>
                 {#if usage.summary.daily.length > 0}
-                  <button class="btn small ghost" onclick={exportDaily} title="Download daily cost as CSV" aria-label="Download daily cost as CSV">
+                  <button class="btn small ghost" onclick={exportDaily} title="Download daily tokens as CSV" aria-label="Download daily tokens as CSV">
                     <Icon name="download" size={12} /> CSV
                   </button>
                 {/if}
               </div>
-              {#if usage.summary.daily.length > 0 && dailyMaxCost === 0}
-                <p class="dim small" data-testid="daily-cost-empty">No spend recorded in this window.</p>
+              {#if usage.summary.daily.length > 0 && dailyMaxTokens === 0}
+                <p class="dim small" data-testid="daily-cost-empty">No tokens recorded in this window.</p>
               {:else if usage.summary.daily.length > 0}
                 {@const days = dailyDays}
                 {@const n = days.length}
                 <svg
                   class="daily-svg"
                   viewBox="0 0 {SVG_W} {SVG_H}"
-                  aria-label="Daily cost over the last {usage.summary.days} days, peak {fmtCost(dailyMaxCost)}"
+                  aria-label="Daily tokens over the last {usage.summary.days} days, peak {fmtNum(dailyMaxTokens)}"
                   role="img"
                 >
                   <!-- Gridlines + y-axis labels -->
@@ -736,7 +783,7 @@
                     {@const y = svgY(tick)}
                     <line class="grid-line" x1={AXIS_L} y1={y} x2={SVG_W} y2={y} />
                     <text class="axis-label y-label" x={AXIS_L - 4} y={y + 4} text-anchor="end">
-                      {fmtCost(tick)}
+                      {fmtNum(tick)}
                     </text>
                   {/each}
 
@@ -744,7 +791,7 @@
                   {#each days as d, i (d.day)}
                     {@const x = svgX(i, n)}
                     {@const barW = Math.max(2, Math.min(40, ((SVG_W - AXIS_L) / Math.max(1, n)) * 0.7))}
-                    {@const barH = (d.cost_usd / (yTicks[yTicks.length - 1] || 1)) * (SVG_H - AXIS_B)}
+                    {@const barH = (d.total_tokens / (yTicks[yTicks.length - 1] || 1)) * (SVG_H - AXIS_B)}
                     {@const barY = SVG_H - AXIS_B - barH}
                     {@const segs = tokenSegs(d)}
                     <!-- stacked colour segments (bottom = input, then cache-write, cache-read, output) -->
@@ -773,7 +820,7 @@
                       width={barW}
                       height={SVG_H - AXIS_B}
                     >
-                      <title>{shortDay(d.day)} · {fmtCost(d.cost_usd)} · {breakdownTitle(d)}</title>
+                      <title>{shortDay(d.day)} · {d.total_tokens.toLocaleString()} tokens (≈ {fmtCost(d.cost_usd)}) · {breakdownTitle(d)}</title>
                     </rect>
 
                     <!-- x-axis label (thinned) -->
@@ -796,12 +843,20 @@
             </section>
           </div>
 
+          <!-- By model: tokens per (provider, model) + per-day stacked chart. -->
+          <ModelBreakdown
+            models={usage.summary.models ?? []}
+            dailyModels={usage.summary.daily_models ?? []}
+            days={usage.summary.days}
+            onexport={exportModels}
+          />
+
           <!-- By feature (by-kind): review / product / channel / agent / … -->
           <section class="panel card" aria-labelledby="usage-feat-title">
             <div class="panel-head">
               <h3 id="usage-feat-title">By feature</h3>
               {#if usage.summary.by_kind.length > 0}
-                <span class="dim small">Tokens and cost by kind of work</span>
+                <span class="dim small">Tokens by kind of work (cost in grey)</span>
               {/if}
             </div>
             {#if usage.summary.by_kind.length > 0}
@@ -839,6 +894,7 @@
         <section class="panel card" aria-labelledby="usage-budget-title">
           <div class="panel-head">
             <h3 id="usage-budget-title">Budgets</h3>
+            {#if admin}
             <button
               class="btn small"
               aria-expanded={budgetsOpen}
@@ -848,6 +904,7 @@
             >
               {#if budgetsOpen}{budgetsDirty ? 'Discard changes' : 'Close editor'}{:else}<Icon name="edit" size={12} /> Edit budgets{/if}
             </button>
+            {/if}
           </div>
           <p class="dim small intro">
             Spend caps per workspace or provider. They only warn until you turn on enforcement.
@@ -915,11 +972,11 @@
           {:else if !usage.budgets}
             <LoadState what="budgets" variant="compact" loading empty />
           {:else if !budgetsOpen}
-            <p class="dim small">No budgets yet. Use Edit budgets to set a cap and track spend against it.</p>
+            <p class="dim small">{admin ? 'No budgets yet. Use Edit budgets to set a cap and track spend against it.' : 'No budgets set.'}</p>
           {/if}
 
           <!-- Editor -->
-          {#if budgetsOpen}
+          {#if budgetsOpen && admin}
             <div class="budget-editor" id="usage-budget-editor">
               <label class="checkbox-row">
                 <input type="checkbox" bind:checked={budgetCfg.enforce} onchange={() => (budgetsDirty = true)} />
@@ -1040,8 +1097,8 @@
           {/if}
         </section>
 
-        {#if usage.summary}
-          <!-- System metrics -->
+        {#if usage.summary && admin}
+          <!-- System metrics (root-only: host CPU/RAM) -->
           <section class="panel card" aria-labelledby="usage-sys-title">
             <div class="panel-head">
               <h3 id="usage-sys-title">System load</h3>
@@ -1073,7 +1130,9 @@
               <p class="dim small">Collecting samples… one every {usage.status.metrics_interval_secs} s.</p>
             {/if}
           </section>
+        {/if}
 
+        {#if usage.summary}
           <!-- Sessions leaderboard — rows are virtualized so raising SESSION_LIMIT
                (currently 50) stays DOM-bounded. The header stays fixed above the
                virtual list; rows use a CSS-grid div layout. -->
@@ -1164,6 +1223,7 @@
             {/if}
           </section>
         {/if}
+        {/if}
       </div>
     {/if}
   </PageBody>
@@ -1183,6 +1243,14 @@
     background: var(--accent-soft);
   }
 
+  .scope-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .body {
     display: flex;
     flex-direction: column;

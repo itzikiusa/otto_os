@@ -2,20 +2,65 @@
   // Drawer "Metrics" tab: per-container CPU / memory bars for one pod from
   // `GET …/metrics?ns=` (metrics-server via `kubectl top`). Bars are relative
   // to the pod total (requests/limits aren't in the payload); refreshed every
-  // 10 s while the tab is open.
+  // 10 s while the tab is open. Below the snapshot, "History (Monitor)" reads
+  // this pod's memory / request-rate series from the Monitor (K-2) and links
+  // to the workload's row there.
   import { untrack } from 'svelte';
+  import { router } from '../../lib/router.svelte';
+  import { k8s } from '../../lib/stores/k8s.svelte';
+  import Sparkline from './monitor/Sparkline.svelte';
+  import { monitorPath } from './viewState';
   import { pollWhileVisible } from '../../lib/poll';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { k8sApi } from '../../lib/api/k8s';
-  import type { K8sPodMetrics } from '../../lib/api/types';
+  import type { K8sMonitorSeries, K8sPodMetrics } from '../../lib/api/types';
   import { formatBytes, formatMillicores } from './k8s-util';
 
   interface Props {
     clusterId: string;
     ns: string;
     pod: string;
+    /** The pod's owning workload (from its ownerReferences), when known. */
+    workload?: string;
   }
-  let { clusterId, ns, pod }: Props = $props();
+  let { clusterId, ns, pod, workload = '' }: Props = $props();
+
+  // --- History (Monitor) ------------------------------------------------------
+  let history = $state<{ mem: K8sMonitorSeries | null; rps: K8sMonitorSeries | null } | null>(null);
+  let historyError = $state('');
+  let historyLoading = $state(true);
+  let historySeq = 0;
+  async function loadHistory(): Promise<void> {
+    const seq = ++historySeq;
+    historyLoading = true;
+    try {
+      const [ws, sys, rps] = await Promise.all([
+        k8sApi.monitorSeries(clusterId, { metric: 'mem_working_set_bytes', pod, window: '1h' }),
+        k8sApi.monitorSeries(clusterId, { metric: 'mem_sys_bytes', pod, window: '1h' }),
+        k8sApi.monitorSeries(clusterId, { metric: 'http_requests_total', pod, window: '1h' }),
+      ]);
+      if (seq !== historySeq) return;
+      history = { mem: ws.points.length ? ws : sys.points.length ? sys : null, rps: rps.points.length ? rps : null };
+      historyError = '';
+    } catch (e) {
+      if (seq !== historySeq) return;
+      historyError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (seq === historySeq) historyLoading = false;
+    }
+  }
+  $effect(() => {
+    void clusterId;
+    void pod;
+    untrack(() => void loadHistory());
+    return () => {
+      historySeq++;
+    };
+  });
+  function openInMonitor(): void {
+    if (workload) k8s.saveMonitorUi(clusterId, { expanded: `${ns}/${workload}`, filter: workload });
+    router.go(monitorPath(clusterId));
+  }
 
   let metrics = $state<K8sPodMetrics | null>(null);
   let available = $state(true);
@@ -87,6 +132,27 @@
     </div>
     <div class="dim small">Bars are relative to the busiest container in this pod. Refreshes every 10 s.</div>
   {/if}
+
+  <section class="history" aria-label="History from the Monitor" data-testid="k8s-metrics-history">
+    <div class="hist-head">
+      <span class="hist-title">History (Monitor) · last hour</span>
+      <button class="btn small ghost" onclick={openInMonitor} title={workload ? `Open ${workload} in the Monitor` : 'Open the Monitor for this cluster'} data-testid="k8s-metrics-open-monitor">Open in Monitor</button>
+    </div>
+    {#if historyLoading && !history}
+      <Skeleton rows={2} height={30} />
+    {:else if historyError}
+      <div class="dim">The Monitor has no history for this cluster ({historyError}). <button class="btn small" onclick={() => void loadHistory()}>Retry</button></div>
+    {:else if !history?.mem && !history?.rps}
+      <div class="dim">No Monitor samples for this pod in the last hour. Enable monitoring for this cluster (Monitor › Settings) to keep history.</div>
+    {:else}
+      {#if history?.mem}
+        <div class="hist-row"><span class="lbl">mem</span><Sparkline points={history.mem.points.map((p) => p.v)} width={260} height={36} label="memory history" /><span class="val mono">{formatBytes(history.mem.points[history.mem.points.length - 1]?.v ?? 0)}</span></div>
+      {/if}
+      {#if history?.rps}
+        <div class="hist-row"><span class="lbl">req/s</span><Sparkline points={history.rps.points.map((p) => p.v)} width={260} height={36} stroke="var(--status-working)" label="request-rate history" /><span class="val mono">{(history.rps.points[history.rps.points.length - 1]?.v ?? 0).toFixed(2)}</span></div>
+      {/if}
+    {/if}
+  </section>
 </div>
 
 <style>
@@ -163,6 +229,29 @@
   }
   .err {
     color: var(--status-exited);
+  }
+  .history {
+    border-block-start: 1px solid var(--border);
+    padding-block-start: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .hist-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .hist-title {
+    font-size: var(--fs-s);
+    font-weight: 600;
+  }
+  .hist-row {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) 90px;
+    gap: 8px;
+    align-items: center;
   }
   .mono {
     font-family: var(--font-mono);

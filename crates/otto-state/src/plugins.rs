@@ -101,19 +101,23 @@ impl PluginsRepo {
     }
 
     pub async fn get(&self, slug: &str) -> Result<Option<PluginRecord>> {
-        let row = sqlx::query(&format!("SELECT {COLS} FROM plugins WHERE slug = ?"))
-            .bind(slug)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| Error::Internal(format!("plugin get: {e}")))?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {COLS} FROM plugins WHERE slug = ?"
+        )))
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("plugin get: {e}")))?;
         row.as_ref().map(row_to_record).transpose()
     }
 
     pub async fn list(&self) -> Result<Vec<PluginRecord>> {
-        let rows = sqlx::query(&format!("SELECT {COLS} FROM plugins ORDER BY name"))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| Error::Internal(format!("plugin list: {e}")))?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {COLS} FROM plugins ORDER BY name"
+        )))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("plugin list: {e}")))?;
         rows.iter().map(row_to_record).collect()
     }
 
@@ -156,9 +160,9 @@ impl PluginsRepo {
 
     /// Resolve an enabled plugin by its host-API token (sidecar authentication).
     pub async fn find_enabled_by_token(&self, token: &str) -> Result<Option<PluginRecord>> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {COLS} FROM plugins WHERE token = ? AND enabled = 1"
-        ))
+        )))
         .bind(token)
         .fetch_optional(&self.pool)
         .await

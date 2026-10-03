@@ -133,6 +133,12 @@ fn install_daemon() -> Result<String, String> {
     </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
+    <!-- Without a ProcessType launchd applies "light resource limits"
+         (CPU/I-O throttling), inherited by every PTY child — the reader
+         thread, the WS loop and the CLI echoing keystrokes all run throttled
+         under contention. Interactive = app-level QoS, like a foreground
+         app. The re-bootstrap below applies it on the next app update. -->
+    <key>ProcessType</key><string>Interactive</string>
 </dict>
 </plist>
 "#,

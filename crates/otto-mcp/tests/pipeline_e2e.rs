@@ -304,7 +304,7 @@ async fn full_governance_flow() {
     assert!(log.iter().any(|r| r.decision == "dry_run"));
 
     // Stats (req 12) aggregate the executed calls.
-    let stats = svc.call_log().stats(None).await.unwrap();
+    let stats = svc.call_log().stats(None, None).await.unwrap();
     assert!(stats.iter().any(|s| s.tool == "list_items" && s.calls >= 1));
 }
 

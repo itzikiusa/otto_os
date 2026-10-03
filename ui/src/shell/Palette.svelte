@@ -26,6 +26,15 @@
   import { applyClose } from '../lib/orchestrate';
   import Icon, { type IconName } from '../lib/components/Icon.svelte';
   import { lsGet, lsSet } from '../lib/storage';
+  import { copyText } from '../lib/clipboard';
+  import { router } from '../lib/router.svelte';
+  import { hitActions, hitContext, hitRoute, type HitAction } from '../lib/floatingBar';
+
+  const HIT_ACTION_LABEL: Record<HitAction, string> = {
+    open: 'Open',
+    'copy-context': 'Copy context',
+    'send-to-agent': 'Send to agent',
+  };
 
   let mode: 'commands' | 'english' = $state('commands');
   let query = $state('');
@@ -105,18 +114,24 @@
     }
   }
 
-  /** Emit an event/action for a search hit action button. */
-  function hitAction(hit: SearchHit, action: string): void {
-    // "open" navigates to the appropriate module view. Other actions dispatch
-    // a custom event that module-level listeners can pick up.
+  /** Run a search hit's action. `open` navigates the way the floating bar
+   *  does (`hitRoute`); copy-context copies the hit's description; send-to-
+   *  agent hands it to the plain-English box as a draft. */
+  async function hitAction(hit: SearchHit, action: HitAction): Promise<void> {
+    if (action === 'send-to-agent') {
+      englishText = `${hitContext(hit)}\n\n`;
+      mode = 'english';
+      plan = null;
+      optimizedText = null;
+      return;
+    }
     close();
     if (action === 'open') {
-      // Navigation: emit a global custom event that App.svelte routes on.
-      window.dispatchEvent(new CustomEvent('otto:open-hit', { detail: hit }));
+      router.go(hitRoute(hit));
+    } else if (await copyText(hitContext(hit))) {
+      toasts.success('Copied', hit.title);
     } else {
-      // Contextual actions (send-to-agent, copy-context, rerun, review, …)
-      // are emitted as a distinct event so they don't require nav awareness here.
-      window.dispatchEvent(new CustomEvent('otto:hit-action', { detail: { hit, action } }));
+      toasts.error('Copy failed', 'The clipboard is not available here.');
     }
   }
 
@@ -214,8 +229,8 @@
 
   /** The default action for a hit on Enter: open it when it can be opened. */
   function hitDefault(hit: SearchHit): void {
-    const a = hit.actions.includes('open') ? 'open' : hit.actions[0];
-    if (a) hitAction(hit, a);
+    const a = hitActions(hit)[0];
+    if (a) void hitAction(hit, a);
   }
 
   function askOtto(): void {
@@ -516,9 +531,9 @@
                 <span class="pal-group pal-hit-kind">{hit.kind.replace('_', ' ')}</span>
               </div>
               <div class="pal-hit-actions">
-                {#each hit.actions as action}
-                  <button class="pal-hit-btn" tabindex="-1" onclick={() => hitAction(hit, action)}>
-                    {action.charAt(0).toUpperCase() + action.slice(1).replace(/_/g, ' ')}
+                {#each hitActions(hit) as action (action)}
+                  <button class="pal-hit-btn" tabindex="-1" onclick={() => void hitAction(hit, action)}>
+                    {HIT_ACTION_LABEL[action]}
                   </button>
                 {/each}
               </div>

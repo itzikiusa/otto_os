@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedShellSession } from './seed';
-import { openPage, expectNoHorizontalOverflow, expectContentHasHeight } from './helpers';
+import { openPage, expectNoHorizontalOverflow, expectContentHasHeight, expectFullyInViewport } from './helpers';
 
 // End-to-end coverage for Mission Control / the work graph.
 //
@@ -146,6 +146,27 @@ test.describe('mission-control UI', () => {
     const detail = page.locator('.mc-detail');
     await expect(detail).toBeVisible({ timeout: 15_000 });
     await expect(detail.getByRole('heading', { name: /timeline/i })).toBeVisible();
+  });
+
+  // Phone/tablet: the detail is a full-screen sheet on the Modal layer, so the
+  // BottomNav (--z-mobile-nav) must not cover its bottom edge — it used to sit
+  // at z 40 and lose its last 56 px under the nav.
+  test('phone/tablet detail sheet sits above the BottomNav', async ({ page }) => {
+    const vp = page.viewportSize()!;
+    test.skip(vp.width > 1024, 'the detail is a side pane (not a sheet) on desktop');
+    await openPage(page, 'mission-control');
+    const row = page.locator('.wi-row').first();
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await row.click();
+    const detail = page.locator('.mc-detail');
+    await expect(detail).toBeVisible({ timeout: 15_000 });
+    await expectFullyInViewport(page, detail, 'Mission Control detail sheet');
+    // The topmost element near the bottom edge belongs to the sheet, not the nav.
+    const hitsSheet = await page.evaluate(
+      ({ x, y }) => !!document.elementFromPoint(x, y)?.closest('.mc-detail'),
+      { x: Math.round(vp.width / 2), y: vp.height - 12 },
+    );
+    expect(hitsSheet, 'the bottom of the detail sheet is not covered by the BottomNav').toBe(true);
   });
 
   test('switches to the graph view', async ({ page }) => {

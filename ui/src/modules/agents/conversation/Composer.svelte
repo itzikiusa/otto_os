@@ -472,9 +472,6 @@
   textarea::placeholder {
     color: var(--text-dim);
   }
-  :global([dir='rtl']) .send {
-    transform: scaleX(-1);
-  }
   /* Completion popup: anchored above the box, clamped to the pane, scrolls. */
   .cmd-pop {
     position: absolute;

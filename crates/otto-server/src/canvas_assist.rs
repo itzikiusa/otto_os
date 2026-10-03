@@ -130,7 +130,17 @@ pub async fn assist_scene(
         ))));
     }
     let file_path = dir.join(file_name(&format));
-    let _ = tokio::fs::write(&file_path, &current).await;
+    // On an Excalidraw board the agent only sees (and rewrites) what it can
+    // express — shapes, id-routed arrows, text. Images, freehand, lines, frames
+    // and the base64 `files` map are set aside and merged back into whatever
+    // it writes (C2), so an Ask AI turn can no longer erase them — and the
+    // prompt no longer carries megabytes of inlined image data.
+    let (agent_view, keep) = if format == "excalidraw" {
+        split_excalidraw(&current)
+    } else {
+        (current.clone(), ExcalidrawKeep::default())
+    };
+    let _ = tokio::fs::write(&file_path, &agent_view).await;
     let dir_str = dir.to_string_lossy().to_string();
     // The agent gets Edit/Write tools in this cwd; trust it so the PTY doesn't
     // stall on a first-run trust prompt (same as the orchestrate path). Trust the
@@ -138,9 +148,9 @@ pub async fn assist_scene(
     otto_sessions::trust::ensure_trusted(&scene.provider, &dir_str);
 
     // Live preview: broadcast each file change while the turn runs.
-    let poll = spawn_file_poll(&ctx, &scene, &file_path, &format, &current);
+    let poll = spawn_file_poll(&ctx, &scene, &doc, &file_path, &format, &agent_view, &keep);
 
-    let prompt = build_assist_prompt(&req.prompt, &format, file_name(&format), &current);
+    let prompt = build_assist_prompt(&req.prompt, &format, file_name(&format), &agent_view);
     let meta = serde_json::json!({ "source": "canvas_assist", "scene_id": scene.id });
     // Surface the agent session the MOMENT it exists (turn start) so the Canvas
     // Assistant panel can attach the live shell immediately, not after the turn.
@@ -176,7 +186,14 @@ pub async fn assist_scene(
 
     // The committed source = the edited file, or the reply's block as a fallback.
     let parsed = parse_assist(&raw);
-    let new_source = resolve_source(&file_path, &current, &format, &parsed).await;
+    let resolved = resolve_source(&file_path, &agent_view, &format, &parsed).await;
+    // Untouched view → keep the ORIGINAL source (full elements + files);
+    // otherwise fold the set-aside elements back into the agent's scene.
+    let new_source = if resolved.trim() == agent_view.trim() {
+        current.clone()
+    } else {
+        merge_excalidraw(&resolved, &keep)
+    };
 
     // Commit it as the scene's document + broadcast the final result.
     // Guarded by the PRE-TURN `updated_at`: an agent turn can run for minutes,
@@ -184,8 +201,16 @@ pub async fn assist_scene(
     // it ran. On conflict, overwrite only when the user's save left the source
     // identical to the pre-turn snapshot (title/section-only edit); otherwise
     // KEEP the user's version and say so instead of losing their work.
-    let mut committed_doc = build_doc(&format, &new_source);
+    let mut committed_doc = build_doc(&doc, &format, &new_source);
     let mut note = parsed.note;
+    // Version history (C5): keep the board as it was before this turn so a bad
+    // turn is one "Restore" away. Best-effort — never blocks the commit.
+    if new_source != current {
+        let _ = ctx
+            .canvas_repo
+            .snapshot(&scene.id, "agent", Some(&user.id), None)
+            .await;
+    }
     let commit = ctx
         .canvas_repo
         .update(
@@ -345,14 +370,315 @@ fn file_name(format: &str) -> &'static str {
     }
 }
 
-/// Build the opaque canvas document the UI + agent share.
-fn build_doc(format: &str, source: &str) -> Value {
-    serde_json::json!({
-        "type": "otto-canvas",
-        "version": 1,
-        "format": format,
-        "source": source,
-    })
+/// Build the opaque canvas document the UI + agent share. Starts from the
+/// scene's EXISTING doc and overwrites only `format`/`source` (C8), so
+/// per-format extras — D2 `sketch`, Mermaid `positions`, the title — survive an
+/// agent turn instead of being reset.
+fn build_doc(base: &Value, format: &str, source: &str) -> Value {
+    let mut doc = match base {
+        Value::Object(m) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    doc.entry("type")
+        .or_insert_with(|| Value::from("otto-canvas"));
+    doc.entry("version").or_insert_with(|| Value::from(1));
+    doc.insert("format".into(), Value::from(format));
+    doc.insert("source".into(), Value::from(source));
+    Value::Object(doc)
+}
+
+// ---------------------------------------------------------------------------
+// Excalidraw split / merge (C2) — unit-tested
+// ---------------------------------------------------------------------------
+
+/// Element types the agent's simplified form can express.
+const AGENT_TYPES: &[&str] = &["rectangle", "ellipse", "diamond", "arrow", "text"];
+/// Shape types (carry an inline `label` in the simplified form).
+const SHAPE_TYPES: &[&str] = &["rectangle", "ellipse", "diamond"];
+/// Above this size the prompt points at the file instead of inlining it.
+const INLINE_SOURCE_MAX: usize = 12_000;
+
+/// What an Excalidraw turn sets aside: the full elements the agent can't
+/// express (or that are bound to such elements), plus every top-level key of
+/// the scene except `elements` (`files`, `appState`, …).
+#[derive(Debug, Clone, Default)]
+struct ExcalidrawKeep {
+    elements: Vec<Value>,
+    extras: serde_json::Map<String, Value>,
+}
+
+impl ExcalidrawKeep {
+    fn is_empty(&self) -> bool {
+        self.elements.is_empty() && self.extras.is_empty()
+    }
+}
+
+fn el_id(e: &Value) -> Option<&str> {
+    e.get("id").and_then(|v| v.as_str())
+}
+
+fn el_type(e: &Value) -> &str {
+    e.get("type").and_then(|v| v.as_str()).unwrap_or("")
+}
+
+/// An arrow's bound endpoint ids (simplified `start.id` or full
+/// `startBinding.elementId`).
+fn arrow_ends(e: &Value) -> (Option<&str>, Option<&str>) {
+    let end = |simple: &str, full: &str| {
+        e.get(simple)
+            .and_then(|v| v.get("id"))
+            .or_else(|| e.get(full).and_then(|v| v.get("elementId")))
+            .and_then(|v| v.as_str())
+    };
+    (end("start", "startBinding"), end("end", "endBinding"))
+}
+
+/// Copy the listed keys (when present) from `src` into a fresh object.
+fn pick(src: &Value, keys: &[&str]) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    for k in keys {
+        if let Some(v) = src.get(*k) {
+            if !v.is_null() {
+                m.insert((*k).to_string(), v.clone());
+            }
+        }
+    }
+    m
+}
+
+/// Split a stored Excalidraw scene into (the agent's simplified view, what to
+/// set aside). Unparseable / non-object sources pass through untouched with
+/// nothing kept — the turn then behaves exactly as before.
+fn split_excalidraw(source: &str) -> (String, ExcalidrawKeep) {
+    let Ok(Value::Object(mut root)) = serde_json::from_str::<Value>(source) else {
+        return (source.to_string(), ExcalidrawKeep::default());
+    };
+    let Some(Value::Array(all)) = root.remove("elements") else {
+        return (source.to_string(), ExcalidrawKeep::default());
+    };
+    let live: Vec<Value> = all
+        .into_iter()
+        .filter(|e| {
+            !e.get("isDeleted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .collect();
+
+    // 1. Decide which elements are set aside. Unknown types, free (unbound)
+    //    arrows (their geometry can't be id-routed), and — to a fixed point —
+    //    arrows bound to a kept element and texts contained in one.
+    let mut kept_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut kept_idx: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (i, e) in live.iter().enumerate() {
+        let t = el_type(e);
+        let unbound_arrow = t == "arrow" && arrow_ends(e) == (None, None);
+        if !AGENT_TYPES.contains(&t) || unbound_arrow {
+            kept_idx.insert(i);
+            if let Some(id) = el_id(e) {
+                kept_ids.insert(id.to_string());
+            }
+        }
+    }
+    loop {
+        let mut grew = false;
+        for (i, e) in live.iter().enumerate() {
+            if kept_idx.contains(&i) {
+                continue;
+            }
+            let bound_to_kept = match el_type(e) {
+                "arrow" => {
+                    let (a, b) = arrow_ends(e);
+                    [a, b].into_iter().flatten().any(|id| kept_ids.contains(id))
+                }
+                "text" => e
+                    .get("containerId")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| kept_ids.contains(id)),
+                _ => false,
+            };
+            if bound_to_kept {
+                kept_idx.insert(i);
+                if let Some(id) = el_id(e) {
+                    kept_ids.insert(id.to_string());
+                }
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    // 2. Bound labels of the elements the agent DOES see fold into their
+    //    container's simplified `label`.
+    let mut labels: std::collections::HashMap<&str, &Value> = std::collections::HashMap::new();
+    for (i, e) in live.iter().enumerate() {
+        if kept_idx.contains(&i) || el_type(e) != "text" {
+            continue;
+        }
+        if let Some(cid) = e.get("containerId").and_then(|v| v.as_str()) {
+            labels.insert(cid, e);
+        }
+    }
+    let label_of = |e: &Value| -> Option<Value> {
+        if let Some(l) = e.get("label").filter(|l| l.is_object()) {
+            return Some(l.clone());
+        }
+        let t = labels.get(el_id(e)?)?;
+        let text = t
+            .get("originalText")
+            .or_else(|| t.get("text"))
+            .and_then(|v| v.as_str())?;
+        let mut l = serde_json::Map::new();
+        l.insert("text".into(), Value::from(text));
+        for k in ["fontSize", "fontFamily"] {
+            if let Some(v) = t.get(k) {
+                l.insert(k.into(), v.clone());
+            }
+        }
+        Some(Value::Object(l))
+    };
+
+    // 3. The simplified view.
+    let mut view = Vec::new();
+    for (i, e) in live.iter().enumerate() {
+        if kept_idx.contains(&i) {
+            continue;
+        }
+        let t = el_type(e);
+        let mut out = match t {
+            _ if SHAPE_TYPES.contains(&t) => pick(
+                e,
+                &[
+                    "type",
+                    "id",
+                    "x",
+                    "y",
+                    "width",
+                    "height",
+                    "backgroundColor",
+                    "strokeColor",
+                    "fillStyle",
+                    "roundness",
+                ],
+            ),
+            "arrow" => {
+                let mut m = pick(e, &["type", "id", "strokeColor"]);
+                let (a, b) = arrow_ends(e);
+                if let Some(a) = a {
+                    m.insert("start".into(), serde_json::json!({ "id": a }));
+                }
+                if let Some(b) = b {
+                    m.insert("end".into(), serde_json::json!({ "id": b }));
+                }
+                m
+            }
+            _ => {
+                // text: a container's label was folded above.
+                if e.get("containerId")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|c| !c.is_empty())
+                {
+                    continue;
+                }
+                let mut m = pick(
+                    e,
+                    &[
+                        "type",
+                        "id",
+                        "x",
+                        "y",
+                        "fontSize",
+                        "fontFamily",
+                        "strokeColor",
+                    ],
+                );
+                let text = e
+                    .get("originalText")
+                    .or_else(|| e.get("text"))
+                    .cloned()
+                    .unwrap_or_else(|| Value::from(""));
+                m.insert("text".into(), text);
+                m
+            }
+        };
+        if t != "text" {
+            if let Some(l) = label_of(e) {
+                out.insert("label".into(), l);
+            }
+        }
+        view.push(Value::Object(out));
+    }
+
+    let keep = ExcalidrawKeep {
+        elements: live
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| kept_idx.contains(i))
+            .map(|(_, e)| e)
+            .collect(),
+        extras: root,
+    };
+    let view_doc = serde_json::json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "otto",
+        "elements": view,
+    });
+    let view_src = serde_json::to_string_pretty(&view_doc).unwrap_or_else(|_| view_doc.to_string());
+    (view_src, keep)
+}
+
+/// Fold the set-aside elements + top-level keys back into the agent's scene.
+/// Kept elements win over an agent element echoing the same id (it can't have
+/// expressed them faithfully); `files` entries are unioned. An unparseable
+/// agent scene is returned as-is (nothing to merge into).
+fn merge_excalidraw(agent_src: &str, keep: &ExcalidrawKeep) -> String {
+    if keep.is_empty() {
+        return agent_src.to_string();
+    }
+    let Ok(Value::Object(mut root)) = serde_json::from_str::<Value>(agent_src) else {
+        return agent_src.to_string();
+    };
+    let kept_ids: std::collections::HashSet<&str> =
+        keep.elements.iter().filter_map(el_id).collect();
+    let mut elements: Vec<Value> = match root.remove("elements") {
+        Some(Value::Array(a)) => a
+            .into_iter()
+            .filter(|e| el_id(e).is_none_or(|id| !kept_ids.contains(id)))
+            .collect(),
+        _ => Vec::new(),
+    };
+    elements.extend(keep.elements.iter().cloned());
+    root.insert("elements".into(), Value::Array(elements));
+    for (k, v) in &keep.extras {
+        match (root.get_mut(k), v) {
+            (Some(Value::Object(mine)), Value::Object(theirs)) if k == "files" => {
+                for (fk, fv) in theirs {
+                    mine.entry(fk.clone()).or_insert_with(|| fv.clone());
+                }
+            }
+            (Some(_), _) => {}
+            (None, _) => {
+                root.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Value::Object(root).to_string()
+}
+
+/// The file content quoted into the prompt — or, when it's large, a pointer
+/// to read it (the agent has the file in its cwd either way).
+fn inline_source(current: &str) -> String {
+    if current.len() <= INLINE_SOURCE_MAX {
+        current.to_string()
+    } else {
+        format!(
+            "(large — {} bytes; READ the file before editing it)",
+            current.len()
+        )
+    }
 }
 
 /// Decide the committed source: prefer the agent's in-place file edit; fall back
@@ -406,10 +732,14 @@ fn result_for(format: &str, source: &str, note: String) -> AssistResult {
 fn spawn_file_poll(
     ctx: &ServerCtx,
     scene: &otto_state::CanvasScene,
+    doc: &Value,
     file_path: &std::path::Path,
     format: &str,
     base: &str,
+    keep: &ExcalidrawKeep,
 ) -> tokio::task::JoinHandle<()> {
+    let doc = doc.clone();
+    let keep = keep.clone();
     let events = ctx.events.clone();
     let workspace_id = scene.workspace_id.clone();
     let scene_id = scene.id.clone();
@@ -425,7 +755,10 @@ fn spawn_file_poll(
                     let _ = events.send(Event::CanvasUpdated {
                         workspace_id: workspace_id.clone(),
                         scene_id: scene_id.clone(),
-                        doc: build_doc(&format, &content),
+                        // Merge the set-aside elements back in so the live
+                        // preview (which the editor may autosave) never shows
+                        // the board without its images/freehand.
+                        doc: build_doc(&doc, &format, &merge_excalidraw(&content, &keep)),
                     });
                 }
             }
@@ -440,6 +773,7 @@ fn spawn_file_poll(
 /// Build the file-edit prompt. The `OTTO_TASK: canvas_assist` sentinel routes the
 /// deterministic E2E stub; the rest instructs the real agent to edit the file.
 fn build_assist_prompt(user_prompt: &str, format: &str, file: &str, current: &str) -> String {
+    let shown = inline_source(current);
     if format == "excalidraw" {
         return format!(
             "OTTO_TASK: canvas_assist\n\
@@ -447,7 +781,9 @@ fn build_assist_prompt(user_prompt: &str, format: &str, file: &str, current: &st
              directory. WRITE THE COMPLETE diagram each time as \
              `{{\"type\":\"excalidraw\",\"elements\":[ ... ]}}` using ONLY the SIMPLIFIED element \
              form below — the app expands it into a real Excalidraw scene (binds labels, ROUTES \
-             arrows). Re-express any existing elements in this simplified form + apply the change.\n\n\
+             arrows). Re-express any existing elements in this simplified form + apply the change. \
+             Images, freehand strokes, lines and frames on the board are NOT in the file — the app \
+             keeps them automatically; never try to recreate them.\n\n\
              CRITICAL — write EVERY element simplified. NEVER include `seed`, `versionNonce`, \
              `version`, `index`, `updated`, `boundElements`, `containerId`, or arrow `points`/\
              `x`/`y`. Put a shape's text in its own `label`; put an arrow's text in the ARROW's \
@@ -469,7 +805,7 @@ fn build_assist_prompt(user_prompt: &str, format: &str, file: &str, current: &st
              apart, NO overlaps, unique id per node, size boxes to their text (width ~= 28 + \
              9*chars, height ~= 28 + 22*lines), colour-code by role (start green, process indigo, \
              decision amber DIAMOND, error red), prefix labels with a fitting emoji.\n\n\
-             The file currently contains:\n{current}\n\n\
+             The file currently contains:\n{shown}\n\n\
              Reply with ONE short sentence describing what you changed.\n\n\
              Request: {user_prompt}\n"
         );
@@ -498,7 +834,7 @@ fn build_assist_prompt(user_prompt: &str, format: &str, file: &str, current: &st
              - Layout hints: `near: top-right` pins a shape; `grid-rows`/`grid-columns` on a \
              container lay its children in a grid.\n\n\
              Be accurate but keep labels short. Valid D2 only.\n\n\
-             The file currently contains:\n{current}\n\n\
+             The file currently contains:\n{shown}\n\n\
              Reply with ONE short sentence describing what you changed.\n\n\
              Request: {user_prompt}\n"
         );
@@ -525,7 +861,7 @@ fn build_assist_prompt(user_prompt: &str, format: &str, file: &str, current: &st
          `classDef error fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;`\n\
          then assign with `class A,B start;`.\n\
          - Be accurate but keep node text short. Valid Mermaid only.\n\n\
-         The file currently contains:\n{current}\n\n\
+         The file currently contains:\n{shown}\n\n\
          Reply with ONE short sentence describing what you changed.\n\n\
          Request: {user_prompt}\n"
     )
@@ -744,6 +1080,125 @@ mod tests {
         assert!(r.mermaid.is_none());
         assert!(r.nodes.is_empty());
         assert_eq!(r.note, raw);
+    }
+
+    fn board() -> String {
+        serde_json::json!({
+            "type": "excalidraw",
+            "version": 2,
+            "appState": { "viewBackgroundColor": "#fafafa" },
+            "files": { "f1": { "id": "f1", "dataURL": "data:image/png;base64,AAAA" } },
+            "elements": [
+                { "type": "rectangle", "id": "r1", "x": 10, "y": 20, "width": 100, "height": 50,
+                  "seed": 7, "versionNonce": 9, "boundElements": [{ "id": "t1", "type": "text" }],
+                  "backgroundColor": "#eef2ff", "strokeColor": "#6366f1" },
+                { "type": "text", "id": "t1", "containerId": "r1", "text": "API", "originalText": "API",
+                  "fontSize": 16, "seed": 1 },
+                { "type": "ellipse", "id": "r2", "x": 300, "y": 20, "width": 80, "height": 80, "seed": 2 },
+                { "type": "arrow", "id": "a1", "startBinding": { "elementId": "r1" },
+                  "endBinding": { "elementId": "r2" }, "points": [[0,0],[100,0]], "seed": 3 },
+                { "type": "image", "id": "img", "fileId": "f1", "x": 0, "y": 200, "seed": 4 },
+                { "type": "arrow", "id": "a2", "startBinding": { "elementId": "r1" },
+                  "endBinding": { "elementId": "img" }, "seed": 5 },
+                { "type": "freedraw", "id": "fd", "points": [[0,0],[1,1]], "seed": 6 },
+                { "type": "line", "id": "ln", "points": [[0,0],[5,5]], "seed": 8 },
+                { "type": "arrow", "id": "free", "points": [[0,0],[9,9]], "seed": 10 },
+                { "type": "rectangle", "id": "gone", "isDeleted": true, "seed": 11 }
+            ]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn split_hides_inexpressible_elements_and_files() {
+        let (view, keep) = split_excalidraw(&board());
+        assert!(!view.contains("base64"), "no image data in the agent view");
+        assert!(!view.contains("seed"), "view is the simplified form");
+        let v: Value = serde_json::from_str(&view).unwrap();
+        let ids: Vec<&str> = v["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(el_id)
+            .collect();
+        assert_eq!(ids, vec!["r1", "r2", "a1"]);
+        // bound label folded into the container; arrow id-routed
+        assert_eq!(v["elements"][0]["label"]["text"], "API");
+        assert_eq!(v["elements"][2]["start"]["id"], "r1");
+        assert_eq!(v["elements"][2]["end"]["id"], "r2");
+        assert!(v["elements"][2].get("points").is_none());
+
+        let kept: Vec<&str> = keep.elements.iter().filter_map(el_id).collect();
+        // image, arrow bound to the image, freedraw, line, free arrow; the
+        // deleted element is dropped entirely.
+        assert_eq!(kept, vec!["img", "a2", "fd", "ln", "free"]);
+        assert!(keep.extras.contains_key("files"));
+        assert!(keep.extras.contains_key("appState"));
+    }
+
+    #[test]
+    fn merge_restores_kept_elements_without_duplicates() {
+        let (_, keep) = split_excalidraw(&board());
+        // The agent rewrote the board and (wrongly) echoed the image id.
+        let agent = serde_json::json!({
+            "type": "excalidraw",
+            "elements": [
+                { "type": "rectangle", "id": "r1", "x": 0, "y": 0, "label": { "text": "API v2" } },
+                { "type": "rectangle", "id": "img", "x": 1, "y": 1 },
+                { "type": "rectangle", "id": "new", "x": 5, "y": 5 }
+            ]
+        })
+        .to_string();
+        let merged: Value = serde_json::from_str(&merge_excalidraw(&agent, &keep)).unwrap();
+        let els = merged["elements"].as_array().unwrap();
+        let ids: Vec<&str> = els.iter().filter_map(el_id).collect();
+        assert_eq!(ids, vec!["r1", "new", "img", "a2", "fd", "ln", "free"]);
+        let img = els.iter().find(|e| el_id(e) == Some("img")).unwrap();
+        assert_eq!(img["type"], "image", "kept element wins over an echoed id");
+        assert_eq!(
+            merged["files"]["f1"]["dataURL"],
+            "data:image/png;base64,AAAA"
+        );
+        assert_eq!(merged["appState"]["viewBackgroundColor"], "#fafafa");
+    }
+
+    #[test]
+    fn split_merge_passthrough_for_plain_or_invalid_sources() {
+        // Unparseable → untouched, nothing kept.
+        let (view, keep) = split_excalidraw("not json");
+        assert_eq!(view, "not json");
+        assert!(keep.is_empty());
+        assert_eq!(merge_excalidraw("whatever", &keep), "whatever");
+        // A board with only agent-expressible elements keeps just the header keys.
+        let (_, keep) = split_excalidraw(&base_source("excalidraw"));
+        assert!(keep.elements.is_empty());
+        // Agent output that isn't JSON can't be merged into → returned as-is.
+        let (_, keep) = split_excalidraw(&board());
+        assert_eq!(merge_excalidraw("oops", &keep), "oops");
+    }
+
+    #[test]
+    fn build_doc_keeps_existing_extras() {
+        let base = serde_json::json!({
+            "type": "otto-canvas", "version": 1, "format": "d2", "source": "a",
+            "sketch": true, "title": "T"
+        });
+        let d = build_doc(&base, "d2", "a -> b");
+        assert_eq!(d["sketch"], true);
+        assert_eq!(d["title"], "T");
+        assert_eq!(d["source"], "a -> b");
+        let fresh = build_doc(&Value::Null, "mermaid", "flowchart TD");
+        assert_eq!(fresh["type"], "otto-canvas");
+        assert_eq!(fresh["format"], "mermaid");
+    }
+
+    #[test]
+    fn large_source_is_not_inlined_in_prompt() {
+        let big = "x".repeat(INLINE_SOURCE_MAX + 1);
+        let p = build_assist_prompt("go", "excalidraw", "canvas.json", &big);
+        assert!(!p.contains(&big));
+        assert!(p.contains("READ the file"));
+        assert!(p.contains("keeps them automatically"));
     }
 
     #[tokio::test]

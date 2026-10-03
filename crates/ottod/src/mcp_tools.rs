@@ -511,9 +511,8 @@ impl Ctx {
 
     /// Wait (bounded) for in-flight audit inserts — called when stdin closes.
     async fn drain_audit(&self) {
-        let mut tasks = std::mem::take(
-            &mut *self.audit_tasks.lock().unwrap_or_else(|p| p.into_inner()),
-        );
+        let mut tasks =
+            std::mem::take(&mut *self.audit_tasks.lock().unwrap_or_else(|p| p.into_inner()));
         let _ = tokio::time::timeout(std::time::Duration::from_secs(6), async {
             while tasks.join_next().await.is_some() {}
         })
@@ -1378,6 +1377,28 @@ fn base_tool_catalog() -> Value {
                 "description": "Read-only: list the EKS clusters of an account/region — name, status, version, endpoint, arn, created_at (list + describe, max 20). To inspect workloads inside one, the user must import it into the Kubernetes module first (`k8s_list_clusters` shows imported clusters with `source: eks`).",
                 "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string" }, "region": { "type": "string" } }, "required": ["account_id"] }
             },
+            // CloudWatch Logs (read-only; `aws` View on the account's CloudWatch
+            // read). Times are epoch MILLISECONDS.
+            {
+                "name": "aws_logs_list_groups",
+                "description": "Read-only: list CloudWatch Logs log groups of an account/region — name, retention_days, stored_bytes, created_ms. Optional `prefix` (log-group-name prefix, e.g. `/aws/eks/` or `/aws/lambda/my-fn`); page with `token` = the previous `next_token`. EKS control-plane logs live in `/aws/eks/<cluster>/cluster`, RDS exports in `/aws/rds/instance/<id>/<log>`.",
+                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string" }, "prefix": { "type": "string" }, "token": { "type": "string" }, "max": { "type": "integer" }, "region": { "type": "string" } }, "required": ["account_id"] }
+            },
+            {
+                "name": "aws_logs_filter",
+                "description": "Read-only: read log events from one CloudWatch log `group` (oldest first inside the window) — id, stream, timestamp (epoch ms), message. Narrow with `pattern` (CloudWatch filter pattern: `ERROR`, `\"timed out\"`, `{ $.level = \"error\" }`), `streams` (comma-separated names), `start`/`end` (epoch ms; ALWAYS pass a window — e.g. the last 15 min — or the scan covers the whole retention), `max` (default 200, cap 1000); page with `token` = the previous `next_token`.",
+                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string" }, "group": { "type": "string" }, "pattern": { "type": "string" }, "streams": { "type": "string" }, "start": { "type": "integer" }, "end": { "type": "integer" }, "token": { "type": "string" }, "max": { "type": "integer" }, "region": { "type": "string" } }, "required": ["account_id", "group"] }
+            },
+            {
+                "name": "aws_logs_insights",
+                "description": "Read-only (but Logs Insights bills per GB scanned — keep the window tight): START a CloudWatch Logs Insights `query` over `groups` (array, ≤ 50) between `start` and `end` (epoch ms, ≤ 31 days) and return `{query_id}` immediately; poll aws_logs_get_insights until `done`. Example query: `fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 50`.",
+                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string" }, "groups": { "type": "array", "items": { "type": "string" } }, "query": { "type": "string" }, "start": { "type": "integer" }, "end": { "type": "integer" }, "limit": { "type": "integer" }, "region": { "type": "string" } }, "required": ["account_id", "groups", "query", "start", "end"] }
+            },
+            {
+                "name": "aws_logs_get_insights",
+                "description": "Read-only: status + rows of a Logs Insights query started with aws_logs_insights — `status` (Scheduled|Running|Complete|Failed|Cancelled|Timeout), `done`, `result` {columns, rows} (the `@ptr` field dropped), records_matched/scanned, bytes_scanned. Poll every 1–2 s until `done`. Pass the same `region` you started it in.",
+                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string" }, "query_id": { "type": "string" }, "region": { "type": "string" } }, "required": ["account_id", "query_id"] }
+            },
             // ---- Kubernetes console (§6). Everything runs `kubectl` with the
             // cluster's own kubeconfig/context server-side; the caller needs the
             // `kubernetes` feature (View for reads, Edit for `k8s_action`).
@@ -1415,6 +1436,16 @@ fn base_tool_catalog() -> Value {
                 "name": "k8s_action",
                 "description": "MUTATING (kubernetes Edit): run ONE operational action on a resource via kubectl and return `{ok, message, output}`. `action` ∈ restart (deployments/statefulsets/daemonsets/rollouts) · scale (params.replicas) · delete_pod (pods; params.grace) · rollout_status · rollout_undo (params.to_revision) · rollout_pause / rollout_resume · rollout_promote (rollouts; params.full) · rollout_abort · rollout_retry · argocd_sync (applications; params.revision, params.prune) · argocd_refresh (params.hard) · argocd_terminate_op · argocd_app_restart (params.resource_kind) · cronjob_trigger · cronjob_suspend / cronjob_resume. DESTRUCTIVE actions (delete_pod, scale to 0, rollout_undo, argocd_sync with prune) are refused unless `params.confirm_name` equals `name` — set it only after the user explicitly confirmed. Cluster RBAC denials surface as 403.",
                 "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string" }, "action": { "type": "string" }, "kind": { "type": "string" }, "namespace": { "type": "string" }, "name": { "type": "string" }, "params": { "type": "object" } }, "required": ["cluster_id", "action", "kind", "namespace", "name"] }
+            },
+            {
+                "name": "k8s_pod_actions_list",
+                "description": "Read-only: the saved pod HTTP actions of a cluster as `{actions: [{id, namespace, workload_kind, workload, name, method, port, path, headers, body_template}]}` — `path`/`body_template` may carry `{{logger}}` / `{{level}}` variables to fill before calling k8s_pod_http. Optional `namespace`, `workload_kind`, `workload` filters.",
+                "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string" }, "namespace": { "type": "string" }, "workload_kind": { "type": "string" }, "workload": { "type": "string" } }, "required": ["cluster_id"] }
+            },
+            {
+                "name": "k8s_pod_http",
+                "description": "MUTATING (kubernetes Edit for non-GET): send ONE HTTP request to a pod's container `port` through the API-server pod proxy (port-forward fallback) and return `{results: [{pod, status, duration_ms, headers, body, body_base64, truncated, error, via}], target_name, mutating}`. Target exactly one of `pod` or `workload` {kind: deployment|statefulset|daemonset|replicaset|job, name} (every running pod, ≤50, `max_concurrency` ≤8). Spring Boot actuator examples: GET /actuator/loggers · GET /actuator/loggers/<logger> · POST /actuator/loggers/<logger> with body {\"configuredLevel\":\"DEBUG\"} and header Content-Type: application/json · GET /actuator/health|info|env · POST /actuator/refresh · GET /actuator/threaddump. `timeout_ms` ≤30000; bodies are capped at 256 KiB. A non-GET method on a PROD cluster is refused (409 confirm_required) unless `confirm_name` equals the pod/workload name — set it only after the user explicitly confirmed.",
+                "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string" }, "namespace": { "type": "string" }, "pod": { "type": "string" }, "workload": { "type": "object", "properties": { "kind": { "type": "string" }, "name": { "type": "string" } } }, "port": { "type": "integer" }, "method": { "type": "string" }, "path": { "type": "string" }, "headers": { "type": "object" }, "body": { "type": "string" }, "timeout_ms": { "type": "integer" }, "max_concurrency": { "type": "integer" }, "confirm_name": { "type": "string" } }, "required": ["cluster_id", "namespace", "port", "method", "path"] }
             }
         ]
     })
@@ -1525,6 +1556,10 @@ const GOVERNED_ALIASED_BY_NATIVE: &[(&str, &str)] = &[
     ("aws_athena_query", "aws_athena_query"),
     ("aws_athena_get_query", "aws_athena_get_query"),
     ("aws_eks_list_clusters", "aws_eks_list_clusters"),
+    ("aws_logs_list_groups", "aws_logs_list_groups"),
+    ("aws_logs_filter", "aws_logs_filter"),
+    ("aws_logs_insights", "aws_logs_insights"),
+    ("aws_logs_get_insights", "aws_logs_get_insights"),
     ("k8s_list_clusters", "k8s_list_clusters"),
     ("k8s_get_resources", "k8s_get_resources"),
     ("k8s_describe", "k8s_describe"),
@@ -1532,6 +1567,8 @@ const GOVERNED_ALIASED_BY_NATIVE: &[(&str, &str)] = &[
     ("k8s_top", "k8s_top"),
     ("k8s_health", "k8s_health"),
     ("k8s_action", "k8s_action"),
+    ("k8s_pod_http", "k8s_pod_http"),
+    ("k8s_pod_actions_list", "k8s_pod_actions_list"),
 ];
 
 /// How long a governed call waits for a human decision before returning
@@ -1711,12 +1748,17 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "aws_athena_list_tables",
     "aws_athena_get_query",
     "aws_eks_list_clusters",
+    "aws_logs_list_groups",
+    "aws_logs_filter",
+    "aws_logs_insights",
+    "aws_logs_get_insights",
     // Kubernetes console reads (`k8s_logs` is text/plain and has its own arm).
     "k8s_list_clusters",
     "k8s_get_resources",
     "k8s_describe",
     "k8s_top",
     "k8s_health",
+    "k8s_pod_actions_list",
 ];
 
 /// Native list tools served by the daemon's cross-workspace directory
@@ -1779,12 +1821,18 @@ const NATIVE_REF_ARGS: &[(&str, &str, &str)] = &[
     ("aws_athena_query", "account_id", "aws_account"),
     ("aws_athena_get_query", "account_id", "aws_account"),
     ("aws_eks_list_clusters", "account_id", "aws_account"),
+    ("aws_logs_list_groups", "account_id", "aws_account"),
+    ("aws_logs_filter", "account_id", "aws_account"),
+    ("aws_logs_insights", "account_id", "aws_account"),
+    ("aws_logs_get_insights", "account_id", "aws_account"),
     ("k8s_get_resources", "cluster_id", "k8s_cluster"),
     ("k8s_describe", "cluster_id", "k8s_cluster"),
     ("k8s_logs", "cluster_id", "k8s_cluster"),
     ("k8s_top", "cluster_id", "k8s_cluster"),
     ("k8s_health", "cluster_id", "k8s_cluster"),
     ("k8s_action", "cluster_id", "k8s_cluster"),
+    ("k8s_pod_http", "cluster_id", "k8s_cluster"),
+    ("k8s_pod_actions_list", "cluster_id", "k8s_cluster"),
 ];
 
 /// Messages an agent's `otto_room_read` returns when it names no `limit`.
@@ -2420,6 +2468,64 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             seg(&arg_str(args, "account_id")?),
             opt_query(args, &[("region", "region")]).trim_start_matches('&')
         )),
+        "aws_logs_list_groups" => ReadCall::get(format!(
+            "/aws/accounts/{}/logs/groups?{}",
+            seg(&arg_str(args, "account_id")?),
+            opt_query(
+                args,
+                &[
+                    ("prefix", "prefix"),
+                    ("token", "token"),
+                    ("max", "max"),
+                    ("region", "region")
+                ]
+            )
+            .trim_start_matches('&')
+        )),
+        "aws_logs_filter" => ReadCall::get(format!(
+            "/aws/accounts/{}/logs/events?group={}{}",
+            seg(&arg_str(args, "account_id")?),
+            seg(&arg_str(args, "group")?),
+            opt_query(
+                args,
+                &[
+                    ("pattern", "pattern"),
+                    ("streams", "streams"),
+                    ("start", "start"),
+                    ("end", "end"),
+                    ("token", "token"),
+                    ("max", "max"),
+                    ("region", "region")
+                ]
+            )
+        )),
+        "aws_logs_insights" => {
+            // Read-only POST: `logs start-query` reads (bills per GB scanned);
+            // the policy table grades every `/logs/*` route Aws:View.
+            let mut body = json!({
+                "groups": args.get("groups").cloned().unwrap_or(json!([])),
+                "query": arg_str(args, "query")?,
+                "start": args.get("start").and_then(|v| v.as_i64()).unwrap_or(0),
+                "end": args.get("end").and_then(|v| v.as_i64()).unwrap_or(0),
+            });
+            if let Some(limit) = args.get("limit").and_then(u64_lenient) {
+                body["limit"] = json!(limit);
+            }
+            ReadCall::post(
+                format!(
+                    "/aws/accounts/{}/logs/insights?{}",
+                    seg(&arg_str(args, "account_id")?),
+                    opt_query(args, &[("region", "region")]).trim_start_matches('&')
+                ),
+                body,
+            )
+        }
+        "aws_logs_get_insights" => ReadCall::get(format!(
+            "/aws/accounts/{}/logs/insights/{}?{}",
+            seg(&arg_str(args, "account_id")?),
+            seg(&arg_str(args, "query_id")?),
+            opt_query(args, &[("region", "region")]).trim_start_matches('&')
+        )),
         // ---- Kubernetes console (§3). `namespace` → `ns` query param; omitted
         // ⇒ the route's all-namespaces default (`-A`).
         "k8s_list_clusters" => ReadCall::get("/k8s/clusters".to_string()),
@@ -2441,6 +2547,19 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             "/k8s/clusters/{}/monitor/health?{}",
             seg(&arg_str(args, "cluster_id")?),
             opt_query(args, &[("window", "window")]).trim_start_matches('&')
+        )),
+        "k8s_pod_actions_list" => ReadCall::get(format!(
+            "/k8s/clusters/{}/pod-actions?{}",
+            seg(&arg_str(args, "cluster_id")?),
+            opt_query(
+                args,
+                &[
+                    ("namespace", "namespace"),
+                    ("workload_kind", "workload_kind"),
+                    ("workload", "workload")
+                ]
+            )
+            .trim_start_matches('&')
         )),
         "k8s_top" => ReadCall::get(format!(
             "/k8s/clusters/{}/metrics?{}",
@@ -2914,7 +3033,11 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
         // session binding wins) and refuses non-assistant sessions.
         name if assistant_segment(name).is_some() => {
             let seg_name = assistant_segment(name).unwrap_or_default();
-            let mut body = if args.is_object() { args.clone() } else { json!({}) };
+            let mut body = if args.is_object() {
+                args.clone()
+            } else {
+                json!({})
+            };
             if let Some(sid) = ctx.session_id.clone() {
                 body["session_id"] = json!(sid);
             }
@@ -3630,6 +3753,38 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             });
             let raw = ctx
                 .post_json(&format!("/k8s/clusters/{}/actions", seg(&cluster)), &body)
+                .await?;
+            Ok(finalize(raw))
+        }
+        "k8s_pod_http" => {
+            let cluster = arg_str(args, "cluster_id")?;
+            let port = args
+                .get("port")
+                .and_then(u64_lenient)
+                .ok_or("missing argument 'port'")?;
+            let mut body = json!({
+                "namespace": arg_str(args, "namespace")?,
+                "port": port,
+                "method": arg_str(args, "method")?,
+                "path": arg_str(args, "path")?,
+            });
+            // Forwarded verbatim: the route owns validation and the prod
+            // confirm_name guard.
+            for k in [
+                "pod",
+                "workload",
+                "headers",
+                "body",
+                "timeout_ms",
+                "max_concurrency",
+                "confirm_name",
+            ] {
+                if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
+                    body[k] = v.clone();
+                }
+            }
+            let raw = ctx
+                .post_json(&format!("/k8s/clusters/{}/pod-http", seg(&cluster)), &body)
                 .await?;
             Ok(finalize(raw))
         }
@@ -5555,6 +5710,10 @@ mod tests {
             "aws_athena_query",
             "aws_athena_get_query",
             "aws_eks_list_clusters",
+            "aws_logs_list_groups",
+            "aws_logs_filter",
+            "aws_logs_insights",
+            "aws_logs_get_insights",
         ] {
             let tool = tools
                 .iter()
@@ -5603,6 +5762,8 @@ mod tests {
             "k8s_logs",
             "k8s_top",
             "k8s_action",
+            "k8s_pod_http",
+            "k8s_pod_actions_list",
         ] {
             let tool = tools
                 .iter()
@@ -5734,6 +5895,38 @@ mod tests {
             .unwrap()
             .path,
             "/aws/accounts/a1/eks/clusters?region=eu-west-1"
+        );
+        assert_eq!(
+            read_route(
+                "aws_logs_filter",
+                &json!({"account_id":"a1","group":"/aws/eks/prod/cluster","pattern":"ERROR","start":1000}),
+                None
+            )
+            .unwrap()
+            .path,
+            "/aws/accounts/a1/logs/events?group=%2Faws%2Feks%2Fprod%2Fcluster&pattern=ERROR&start=1000"
+        );
+        let insights = read_route(
+            "aws_logs_insights",
+            &json!({"account_id":"a1","groups":["/g"],"query":"fields @message","start":1,"end":2,"region":"eu-west-1"}),
+            None,
+        )
+        .unwrap();
+        assert!(insights.post);
+        assert_eq!(
+            insights.path,
+            "/aws/accounts/a1/logs/insights?region=eu-west-1"
+        );
+        assert_eq!(insights.body.unwrap()["groups"], json!(["/g"]));
+        assert_eq!(
+            read_route(
+                "aws_logs_get_insights",
+                &json!({"account_id":"a1","query_id":"q-1"}),
+                None
+            )
+            .unwrap()
+            .path,
+            "/aws/accounts/a1/logs/insights/q-1?"
         );
         assert_eq!(
             read_route("k8s_list_clusters", &json!({}), None)
@@ -5898,7 +6091,10 @@ mod tests {
         };
         let assistant = names(Some("assistant"));
         for (tool, _) in ASSISTANT_TOOLS {
-            assert!(assistant.contains(&tool.to_string()), "assistant catalog missing {tool}");
+            assert!(
+                assistant.contains(&tool.to_string()),
+                "assistant catalog missing {tool}"
+            );
         }
         // Everyone else keeps the normal catalog without them.
         for source in [None, Some("personal_agent"), Some("vault-docs")] {
@@ -5930,7 +6126,10 @@ mod tests {
         // The governed otto.assistant_* catalog entries are covered natively,
         // so `otto_assistant_remember` is never advertised twice.
         for n in ["assistant_remember", "assistant_forget", "assistant_recall"] {
-            assert!(governed_tool_for_stdio_name(&format!("otto_{n}")).is_none(), "{n}");
+            assert!(
+                governed_tool_for_stdio_name(&format!("otto_{n}")).is_none(),
+                "{n}"
+            );
         }
         let enabled = vec!["otto.assistant_recall".to_string()];
         assert!(governed_tools_for(&enabled).is_empty());

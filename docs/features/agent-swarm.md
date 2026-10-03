@@ -373,6 +373,15 @@ project came from a Product story, a **From story** card (`StoryLinkCard.svelte`
 appears with the story title, its stage, and a **View story** button. Empty
 state: *"No project selected — Create a project to start a board."*
 
+**Why a To-do card isn't starting.** While the swarm is active, a ready To-do
+card that the coordinator skipped shows a dim **Waiting: …** line (hover for
+how long): *No available agent fits this task*, *&lt;agent&gt; is busy with
+another task*, *&lt;agent&gt;'s branch is being verified*, *All n/n parallel
+slots are busy*, or *Run budget reached*. The coordinator rebuilds these
+reasons every tick (in memory) and serves them as `waiting` on
+`GET /swarm/swarms/{sid}/utilization`; the board re-reads them when tasks
+change and every 15 s while the page is visible.
+
 **Runs (`RunsList.svelte`).** A filterable table of every run: columns Agent,
 Work (kind + summary), Status, Started, Tokens (`in/out`), Actions. Filter by
 assignee, project, and status chips (`all`, `queued`, `running`, `waiting`,

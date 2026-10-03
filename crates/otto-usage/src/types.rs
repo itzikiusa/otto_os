@@ -352,6 +352,154 @@ pub struct UsageSummary {
     /// (the engine itself returns it empty until the server fills it in).
     #[serde(default)]
     pub by_kind: Vec<FeatureUsage>,
+    /// Per-(provider, model) token rollup over the window, biggest first.
+    #[serde(default)]
+    pub models: Vec<ModelUsage>,
+    /// Per-(day, provider, model) token rollup — feeds the model chart.
+    #[serde(default)]
+    pub daily_models: Vec<DailyModelUsage>,
+    /// `"all"` (every recorded session — root) or `"own"` (only sessions the
+    /// caller created — a non-root user holding `Usage:View`).
+    #[serde(default = "scope_all")]
+    pub scope: String,
+}
+
+fn scope_all() -> String {
+    "all".to_string()
+}
+
+/// Token rollup for one (provider, model) pair.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ModelUsage {
+    pub provider: String,
+    pub model: String,
+    pub events: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+/// Token rollup for one (day, provider, model) triple.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DailyModelUsage {
+    pub day: String,
+    pub provider: String,
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+/// Token rollup for one calendar month (`YYYY-MM`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MonthlyUsage {
+    pub month: String,
+    pub events: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+/// `GET /usage/report` — the ccusage-style report: daily, monthly, per-model
+/// and per-session tables over the window (tokens first; cost secondary).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageReport {
+    pub days: u32,
+    /// RFC3339 time the report was generated.
+    pub generated_at: String,
+    pub priced_as_of: String,
+    pub scope: String,
+    pub otto_only: bool,
+    pub totals: TokenTotals,
+    pub daily: Vec<DailyUsage>,
+    pub monthly: Vec<MonthlyUsage>,
+    pub models: Vec<ModelUsage>,
+    pub daily_models: Vec<DailyModelUsage>,
+    /// Up to [`REPORT_SESSION_LIMIT`](crate::REPORT_SESSION_LIMIT) sessions,
+    /// biggest first, enriched like the summary's.
+    pub sessions: Vec<SessionUsage>,
+}
+
+/// Four token buckets + their sum + the estimated cost.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct TokenTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+impl TokenTotals {
+    pub fn add(&mut self, o: &TokenTotals) {
+        self.input_tokens += o.input_tokens;
+        self.output_tokens += o.output_tokens;
+        self.cache_read_tokens += o.cache_read_tokens;
+        self.cache_write_tokens += o.cache_write_tokens;
+        self.total_tokens += o.total_tokens;
+        self.cost_usd += o.cost_usd;
+    }
+}
+
+/// `POST /usage/ccusage-check` request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CcusageCheckReq {
+    /// Window in days ending today (default 7, clamped 1..=90).
+    #[serde(default)]
+    pub days: Option<u32>,
+}
+
+/// One (provider, model) row of the ccusage cross-check: our numbers vs
+/// ccusage's over the same dates, every external session included.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct CcusageDiffRow {
+    pub provider: String,
+    pub model: String,
+    pub ours: TokenTotals,
+    pub theirs: TokenTotals,
+}
+
+/// One day of the ccusage cross-check.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct CcusageDayRow {
+    pub day: String,
+    pub ours: TokenTotals,
+    pub theirs: TokenTotals,
+}
+
+/// `POST /usage/ccusage-check` response. `ran=false` + `error` when `npx`
+/// is missing, ccusage failed/timed out, or its output didn't parse.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CcusageCheck {
+    pub ran: bool,
+    /// The exact command line that was run (for the user to reproduce).
+    pub command: String,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Inclusive date range compared (`YYYY-MM-DD`).
+    pub since: String,
+    pub until: String,
+    pub totals_ours: TokenTotals,
+    pub totals_theirs: TokenTotals,
+    pub rows: Vec<CcusageDiffRow>,
+    pub daily: Vec<CcusageDayRow>,
 }
 
 /// Engine + ClickHouse health/status, for the settings panel and the wizard.

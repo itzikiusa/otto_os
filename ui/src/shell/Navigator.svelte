@@ -19,7 +19,10 @@
   import { ctxMenu, type MenuItem } from '../lib/contextmenu.svelte';
   import { sidePane, splitMenuItems, navClick, SPLIT_HINT } from '../lib/stores/sidePane.svelte';
   import { popoutItems } from '../lib/popoutMenu';
-  import { sessionOrder, applyOrder } from '../lib/stores/sessionOrder.svelte';
+  import { sessionOrder, applyOrder, applyTokenOrder } from '../lib/stores/sessionOrder.svelte';
+  import { sessionUsage } from '../lib/stores/sessionUsage.svelte';
+  import { pollWhileVisible } from '../lib/poll';
+  import { sessionUsageLabel } from '../lib/sessionUsage';
   import { viewport } from '../lib/stores/viewport.svelte';
   import { confirmer } from '../lib/confirm.svelte';
   import { toasts } from '../lib/toast.svelte';
@@ -65,12 +68,13 @@
   /** Session-row tooltip: a long title made one very wide native tooltip that
    *  WKWebView pinned against the window edge and clipped over the page. Keep
    *  it short and put the state + secondary signals on their own lines. */
-  function rowTip(title: string, st: SessionStateInfo, tasks: { done: number; total: number; in_progress?: string | null } | null): string {
+  function rowTip(title: string, st: SessionStateInfo, tasks: { done: number; total: number; in_progress?: string | null } | null, usage?: string | null): string {
     const t = title.length > 80 ? `${title.slice(0, 79).trimEnd()}…` : title;
     const lines = [t, st.hint ?? st.label];
     if (tasks && tasks.total > 0) {
       lines.push(tasks.in_progress ? `Now: ${tasks.in_progress} · ${tasks.done}/${tasks.total} tasks` : `${tasks.done}/${tasks.total} tasks done`);
     }
+    if (usage) lines.push(`${usage} (30 days)`);
     if (!st.resumable) lines.push('Double-click to rename');
     return lines.join('\n');
   }
@@ -166,8 +170,24 @@
   $effect(() => {
     sessionOrder.load(ws.currentId ?? SCRATCH_WORKSPACE_ID);
   });
+  // Per-session tokens (A5): the 30-day workspace rollup feeds the "Tokens"
+  // sort and the row tooltip. Read once a minute at most (store-throttled).
+  const canUsage = $derived(auth.can('usage', 'view'));
+  const usageWs = $derived(ws.currentId ?? SCRATCH_WORKSPACE_ID);
+  $effect(() => {
+    if (!canUsage) return;
+    const wid = usageWs;
+    const p = pollWhileVisible(() => sessionUsage.loadWorkspace(wid), { ms: 60_000 });
+    return () => p.stop();
+  });
+  const usageRows = $derived(canUsage ? (sessionUsage.byWorkspace[usageWs] ?? {}) : {});
+  const tokensSort = $derived(sessionOrder.mode === 'tokens' && canUsage && sessionUsage.available);
   const orderedAgents = $derived(
-    sessionOrder.mode === 'manual' ? applyOrder(ws.plainAgentSessions, sessionOrder.order) : ws.plainAgentSessions,
+    sessionOrder.mode === 'manual'
+      ? applyOrder(ws.plainAgentSessions, sessionOrder.order)
+      : tokensSort
+        ? applyTokenOrder(ws.plainAgentSessions, sessionUsage.tokensFor(usageWs))
+        : ws.plainAgentSessions,
   );
   const fAgents = $derived(orderedAgents.filter(matches));
   // Rows drag only in the flat Agents list: never while searching, selecting,
@@ -204,6 +224,9 @@
         checked: sessionOrder.mode === 'manual',
         action: () => sessionOrder.setMode('manual', fAgents.map((x) => x.id)),
       },
+      ...(canUsage && sessionUsage.available
+        ? [{ label: 'Sort: Tokens (most first, 30 days)', checked: sessionOrder.mode === 'tokens', action: () => sessionOrder.setMode('tokens') }]
+        : []),
       { separator: true },
       { label: 'Reset to recent', icon: 'refresh', disabled: sessionOrder.mode === 'recent', action: () => sessionOrder.reset() },
     ]);
@@ -644,7 +667,9 @@
     return items.length ? [...items, { separator: true }] : [];
   }
   function moduleMenu(e: MouseEvent, m: SidebarModule): void {
-    ctxMenu.show(e, [...splitItems(m), ...favoriteMenuItems(m), { separator: true }, customizeItem()]);
+    // Plain clicks resume the module where it was left; this is the way home.
+    const home: MenuItem = { label: `Open ${m.label} main page`, icon: 'home', action: () => router.go(m.id) };
+    ctxMenu.show(e, [home, { separator: true }, ...splitItems(m), ...favoriteMenuItems(m), { separator: true }, customizeItem()]);
   }
   function sectionMenu(e: MouseEvent, sec: SidebarSection): void {
     const id = sec.group.id;
@@ -691,7 +716,7 @@
       title="Back (⌘⇧←)"
       aria-label="Back"
     >
-      <Icon name="chevronRight" size={14} />
+      <Icon name="chevronLeft" size={14} />
     </button>
     <button
       class="icon-btn"
@@ -956,6 +981,7 @@
     <button
       class="nav-item"
       class:active={router.module === 'walkthroughs'}
+      aria-current={router.module === 'walkthroughs' ? 'page' : undefined}
       onclick={() => router.go('walkthroughs')}
     >
       <Icon name="info" size={14} />
@@ -964,6 +990,7 @@
     <button
       class="nav-item"
       class:active={router.module === 'settings'}
+      aria-current={router.module === 'settings' ? 'page' : undefined}
       onclick={() => router.go('settings/appearance')}
     >
       <Icon name="gear" size={14} />
@@ -1001,6 +1028,7 @@
   <button
     class="nav-item"
     class:active={isActive(m.id)}
+    aria-current={isActive(m.id) ? 'page' : undefined}
     class:drop-before={dragOverId === m.id && dropSide === 'before'}
     class:drop-after={dragOverId === m.id && dropSide === 'after'}
     class:dragging={dragId === m.id}
@@ -1104,6 +1132,7 @@
     <button
       class="nav-item"
       class:active={router.module === 'agents' || router.module === ''}
+      aria-current={router.module === 'agents' || router.module === '' ? 'page' : undefined}
       data-nav-id={m.id}
       title={sidePane.supported ? SPLIT_HINT : undefined}
       onclick={(e) => navClick(e, 'agents', m.label)}
@@ -1142,10 +1171,10 @@
     {#if fAgents.length > 1}
       <button
         class="icon-btn twisty sort-toggle"
-        class:on={sessionOrder.mode === 'manual'}
+        class:on={sessionOrder.mode === 'manual' || tokensSort}
         onclick={openSortMenu}
         onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openSortMenu(e)}
-        title={sessionOrder.mode === 'manual' ? 'Manual order — click to change' : 'Sort sessions'}
+        title={sessionOrder.mode === 'manual' ? 'Manual order — click to change' : tokensSort ? 'Sorted by tokens — click to change' : 'Sort sessions'}
         aria-label="Sort sessions"
         data-testid="agents-sort-toggle"
       >
@@ -1463,7 +1492,7 @@
           { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
           { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
         ])}
-        title={rowTip(s.title, st, sum)}
+        title={rowTip(s.title, st, sum, sessionUsageLabel(usageRows[s.id]))}
         data-state={st.key}
       >
         <!-- Row = state dot · title · (needs-you bell) · provider. Task and
@@ -1565,9 +1594,6 @@
     border-radius: 5px;
     display: block;
     flex-shrink: 0;
-  }
-  .nav-back :global(svg) {
-    transform: scaleX(-1);
   }
   .nav-head :global(.icon-btn:disabled) {
     opacity: 0.3;

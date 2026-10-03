@@ -57,6 +57,29 @@ pub struct CanvasSceneSummary {
     pub updated_at: DateTime<Utc>,
 }
 
+/// One entry of a scene's version history (migration 0152) — the document as
+/// it was just before a change. List rows omit the document itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanvasSceneVersion {
+    pub id: Id,
+    pub scene_id: Id,
+    /// `agent` (before an Ask AI commit) | `user` (throttled save snapshot) |
+    /// `restore` (the state a restore replaced).
+    pub origin: String,
+    pub created_by: Option<Id>,
+    /// The snapshot's source format, when its doc carries one.
+    pub format: Option<String>,
+    /// Byte length of the snapshotted document.
+    pub size: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+/// User saves snapshot at most once per this many seconds (10 minutes).
+pub const USER_SNAPSHOT_EVERY_SECS: i64 = 600;
+
+/// How many versions a scene keeps (oldest pruned first).
+pub const SCENE_VERSIONS_KEPT: i64 = 30;
+
 // ---------------------------------------------------------------------------
 // Input structs
 // ---------------------------------------------------------------------------
@@ -370,6 +393,11 @@ impl CanvasRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("delete canvas scene refs"))?;
+        sqlx::query("DELETE FROM canvas_scene_versions WHERE scene_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete canvas scene versions"))?;
         let result = sqlx::query("DELETE FROM canvas_scenes WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
@@ -379,6 +407,112 @@ impl CanvasRepo {
             return Err(Error::NotFound(format!("canvas scene {id}")));
         }
         Ok(())
+    }
+
+    /// Snapshot the scene's CURRENT document into its version history (C5). The
+    /// copy happens inside SQLite (the doc never travels through Rust). Skipped
+    /// — returning `None` — when the newest version already holds this exact
+    /// document, or when `throttle_secs` is set and a snapshot of the same `origin`
+    /// is younger than it (user saves: at most one per window). Prunes to the
+    /// newest [`SCENE_VERSIONS_KEPT`].
+    pub async fn snapshot(
+        &self,
+        scene_id: &Id,
+        origin: &str,
+        created_by: Option<&Id>,
+        throttle_secs: Option<i64>,
+    ) -> Result<Option<Id>> {
+        if let Some(window) = throttle_secs {
+            let cutoff = fmt(Utc::now() - chrono::Duration::seconds(window));
+            let recent: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM canvas_scene_versions
+                 WHERE scene_id = ? AND origin = ? AND created_at > ? LIMIT 1",
+            )
+            .bind(scene_id)
+            .bind(origin)
+            .bind(&cutoff)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("canvas version throttle"))?;
+            if recent.is_some() {
+                return Ok(None);
+            }
+        }
+        let vid = new_id();
+        let result = sqlx::query(
+            "INSERT INTO canvas_scene_versions (id, scene_id, doc_json, origin, created_by, created_at)
+             SELECT ?, s.id, s.doc_json, ?, ?, ?
+             FROM canvas_scenes s
+             WHERE s.id = ?
+               AND s.doc_json IS NOT (
+                   SELECT v.doc_json FROM canvas_scene_versions v
+                   WHERE v.scene_id = s.id ORDER BY v.rowid DESC LIMIT 1)",
+        )
+        .bind(&vid)
+        .bind(origin)
+        .bind(created_by)
+        .bind(fmt(Utc::now()))
+        .bind(scene_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("snapshot canvas scene"))?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        sqlx::query(
+            "DELETE FROM canvas_scene_versions
+             WHERE scene_id = ? AND rowid NOT IN (
+                 SELECT rowid FROM canvas_scene_versions WHERE scene_id = ?
+                 ORDER BY rowid DESC LIMIT ?)",
+        )
+        .bind(scene_id)
+        .bind(scene_id)
+        .bind(SCENE_VERSIONS_KEPT)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("prune canvas scene versions"))?;
+        Ok(Some(vid))
+    }
+
+    /// A scene's version history, newest first (no documents).
+    pub async fn list_versions(&self, scene_id: &Id) -> Result<Vec<CanvasSceneVersion>> {
+        let rows = sqlx::query(
+            "SELECT id, scene_id, origin, created_by, created_at,
+                    length(doc_json) AS size,
+                    CASE WHEN json_valid(doc_json) THEN json_extract(doc_json, '$.format') END AS format
+             FROM canvas_scene_versions WHERE scene_id = ?
+             ORDER BY rowid DESC",
+        )
+        .bind(scene_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list canvas scene versions"))?;
+        rows.iter()
+            .map(|r| {
+                Ok(CanvasSceneVersion {
+                    id: r.get("id"),
+                    scene_id: r.get("scene_id"),
+                    origin: r.get("origin"),
+                    created_by: r.get("created_by"),
+                    format: r.get("format"),
+                    size: r.get("size"),
+                    created_at: ts(&r.get::<String, _>("created_at"))?,
+                })
+            })
+            .collect()
+    }
+
+    /// One version's document (scoped to its scene so a version id can't be
+    /// replayed onto another scene).
+    pub async fn version_doc(&self, scene_id: &Id, version_id: &Id) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT doc_json FROM canvas_scene_versions WHERE scene_id = ? AND id = ?",
+        )
+        .bind(scene_id)
+        .bind(version_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("get canvas scene version"))
     }
 
     /// Link the managed session backing this scene's Ask-AI (set on first use).
@@ -418,6 +552,82 @@ mod tests {
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         pool.into()
+    }
+
+    #[tokio::test]
+    async fn versions_snapshot_dedupe_throttle_prune_and_cascade() {
+        let repo = CanvasRepo::new(mem_pool().await);
+        let scene = repo
+            .create(NewScene {
+                workspace_id: "w1".into(),
+                story_id: None,
+                title: "V".into(),
+                doc_json: r#"{"format":"d2","source":"a"}"#.into(),
+                provider: "claude".into(),
+                section: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+        let u = Id::from("u1".to_string());
+        let first = repo
+            .snapshot(&scene.id, "agent", Some(&u), None)
+            .await
+            .unwrap();
+        assert!(first.is_some());
+        // Same document again → deduped.
+        assert!(repo
+            .snapshot(&scene.id, "agent", None, None)
+            .await
+            .unwrap()
+            .is_none());
+
+        let set = |src: &str| SceneUpdate {
+            doc_json: Some(format!(r#"{{"format":"d2","source":"{src}"}}"#)),
+            ..Default::default()
+        };
+        repo.update(&scene.id, set("b")).await.unwrap();
+        let window = Some(600);
+        assert!(repo
+            .snapshot(&scene.id, "user", None, window)
+            .await
+            .unwrap()
+            .is_some());
+        repo.update(&scene.id, set("c")).await.unwrap();
+        // A user snapshot inside the window is throttled.
+        assert!(repo
+            .snapshot(&scene.id, "user", None, window)
+            .await
+            .unwrap()
+            .is_none());
+
+        let list = repo.list_versions(&scene.id).await.unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].origin, "user");
+        assert_eq!(list[0].format.as_deref(), Some("d2"));
+        let doc = repo
+            .version_doc(&scene.id, &list[1].id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(doc.contains(r#""source":"a""#));
+        // Scoped: a version id never resolves under another scene.
+        assert!(repo
+            .version_doc(&Id::from("other".to_string()), &list[1].id)
+            .await
+            .unwrap()
+            .is_none());
+
+        // Prune keeps the newest SCENE_VERSIONS_KEPT.
+        for i in 0..(SCENE_VERSIONS_KEPT + 5) {
+            repo.update(&scene.id, set(&format!("n{i}"))).await.unwrap();
+            repo.snapshot(&scene.id, "agent", None, None).await.unwrap();
+        }
+        let list = repo.list_versions(&scene.id).await.unwrap();
+        assert_eq!(list.len() as i64, SCENE_VERSIONS_KEPT);
+
+        repo.delete(&scene.id).await.unwrap();
+        assert!(repo.list_versions(&scene.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]

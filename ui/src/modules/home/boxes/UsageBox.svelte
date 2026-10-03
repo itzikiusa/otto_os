@@ -13,15 +13,18 @@
   import { router } from '../../../lib/router.svelte';
   import type { UsageStatus, UsageSummary } from '../../../lib/api/usage.svelte';
   import { home, type HomeBox } from '../home.svelte';
-  import { poll, type Poller } from './poll';
+  import { freshness, poll, type Poller } from './poll';
 
   interface Props {
     box: HomeBox;
     viewId: string;
     zoomed: boolean;
     tick: number;
+    /** False while this box's Home space is not on screen (or another box
+     *  is zoomed): the poller stops, the data stays (review 06 F3). */
+    active?: boolean;
   }
-  let { box, viewId, zoomed: _zoomed, tick }: Props = $props();
+  let { box, viewId, zoomed: _zoomed, tick, active = true }: Props = $props();
 
   const DAYS = [1, 7, 30] as const;
   const days = $derived(DAYS.includes(Number(box.config.days) as (typeof DAYS)[number]) ? Number(box.config.days) : 7);
@@ -59,10 +62,12 @@
   }
 
   let poller: Poller | null = null;
+  const fresh = freshness(load);
   $effect(() => {
-    void days;
+    const key = String(days);
+    if (!active) return;
     poller?.stop();
-    poller = poll(load, 60_000);
+    poller = poll(fresh.run, 60_000, fresh.start(key, 60_000));
     return () => poller?.stop();
   });
   $effect(() => {

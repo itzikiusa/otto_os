@@ -66,13 +66,13 @@ jobs:
     runs-on: macos-latest # Apple Silicon
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           # The desktop shell is a SEPARATE cargo workspace with its own target
           # dir — cache both.
@@ -80,9 +80,9 @@ jobs:
             . -> target
             apps/desktop/src-tauri -> apps/desktop/src-tauri/target
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7.0.0
         with:
-          node-version: 20
+          node-version: 26.10.0
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -190,7 +190,7 @@ jobs:
       # Keep a copy on the run itself too (survives even if the release upload
       # is edited away).
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: Otto-${{ steps.ver.outputs.display }}-macos-arm64-dmg
           path: |
@@ -202,7 +202,7 @@ jobs:
       # (The tag is cadence-neutral on purpose so download links survive
       # schedule changes — it was `weekly` until 2026-09.)
       - name: Publish rolling `latest` release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.3
         with:
           tag_name: latest
           name: Otto ${{ steps.ver.outputs.display }}

@@ -10,6 +10,8 @@ import type { Notice, NoticeAction, NoticeSeverity, NotificationSettings } from 
 import { toasts } from '../toast.svelte';
 import { openExternal } from '../external';
 import { ws } from './workspace.svelte';
+import { router } from '../router.svelte';
+import { parseNoticeRoute } from '../noticeRoute';
 import { isEmbedded } from '../desktop';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -153,6 +155,7 @@ const DEFAULT_SETTINGS: NotificationSettings = {
   expiry_threshold_days: 7,
   native_enabled: true,
   session_events: true,
+  native_on_waiting: true,
 };
 
 /** Client-side ceiling on held notices: the server list is capped at 200, but
@@ -296,12 +299,24 @@ class NotificationStore {
     if (known && known.created_at === notice.created_at) return;
     if (this.isChannelSessionNotice(notice)) return;
     this.notices = capNotices([notice, ...this.notices.filter((n) => n.id !== notice.id)]);
-    if (
-      this.settings.native_enabled &&
-      (notice.severity === 'warn' || notice.severity === 'error')
-    ) {
-      void this.fireNative(notice);
-    }
+    if (this.wantsNative(notice)) void this.fireNative(notice);
+  }
+
+  /** Whether `notice` earns a native banner: any warn/error, plus — behind
+   *  `native_on_waiting` (A2) — an info "Session awaiting input" (`:waiting`)
+   *  for a session the user is NOT watching (window hidden / unfocused, or
+   *  another session active). Codex, agy and custom providers only ever
+   *  produce that info notice, so without this they never banner. */
+  wantsNative(notice: Notice): boolean {
+    if (!this.settings.native_enabled) return false;
+    if (notice.severity === 'warn' || notice.severity === 'error') return true;
+    if (this.settings.native_on_waiting === false) return false;
+    if (!(notice.source_key ?? '').endsWith(':waiting')) return false;
+    const action = notice.action;
+    if (action?.type !== 'open_session') return false;
+    const doc = typeof document !== 'undefined' ? document : null;
+    const away = doc ? doc.hidden || !doc.hasFocus() : false;
+    return away || ws.activeSessionId !== action.session_id;
   }
 
   // ── Native OS notification (Tauri only) ───────────────────────────────────
@@ -420,6 +435,7 @@ class NotificationStore {
    * - open_url   → open in the system browser
    * - open_session → focus the session + jump to the Agents module
    * - reauth     → toast guidance (the actual re-auth happens in a terminal)
+   * - open_route → open the run / task / loop an automation notice is about
    */
   async runAction(notice: Notice): Promise<void> {
     void this.markRead(notice.id);
@@ -445,6 +461,52 @@ class NotificationStore {
       case 'reauth':
         this.guideReauth(action.target);
         break;
+      case 'open_route':
+        await this.openRoute(action.route, action.workspace_id ?? null);
+        break;
+    }
+  }
+
+  /** Automation notices (failed task / workflow run / goal loop, workflow
+   *  awaiting approval): switch to the item's workspace, then open the page
+   *  and the item itself through its page port. */
+  private async openRoute(route: string, workspaceId: string | null): Promise<void> {
+    try {
+      if (workspaceId && ws.currentId !== workspaceId) {
+        if (!ws.workspaces.some((w) => w.id === workspaceId)) {
+          toasts.warn('Workspace unavailable', 'It may have been removed, or you no longer have access.');
+          return;
+        }
+        await ws.select(workspaceId);
+      }
+      const target = parseNoticeRoute(route);
+      const signal = new AbortController().signal;
+      switch (target.kind) {
+        case 'workflow_run': {
+          const { workflowsPagePort } = await import('../uiCommands/workflows');
+          router.go('workflows');
+          const page = await workflowsPagePort.get(signal);
+          if (await page.open(target.workflowId)) await page.openRun(target.workflowId, target.runId);
+          break;
+        }
+        case 'scheduled_task': {
+          const { scheduledTasksPort } = await import('../uiCommands/scheduled');
+          router.go('scheduled-tasks');
+          (await scheduledTasksPort.get(signal)).expand(target.taskId);
+          break;
+        }
+        case 'goal_loop': {
+          const { loopsPagePort } = await import('../uiCommands/loops');
+          router.go('loops');
+          (await loopsPagePort.get(signal)).open(target.loopId);
+          break;
+        }
+        case 'route':
+          router.go(target.route);
+          break;
+      }
+    } catch (e) {
+      toasts.error('Couldn’t open it', e instanceof Error ? e.message : String(e));
     }
   }
 

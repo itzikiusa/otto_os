@@ -131,6 +131,10 @@ const DEFAULT_ENABLED: &[&str] = &[
     "aws_athena_list_tables",
     "aws_athena_get_query",
     "aws_eks_list_clusters",
+    "aws_logs_list_groups",
+    "aws_logs_filter",
+    "aws_logs_insights",
+    "aws_logs_get_insights",
     // Kubernetes console reads (`kubernetes`: View).
     "k8s_list_clusters",
     "k8s_get_resources",
@@ -138,6 +142,7 @@ const DEFAULT_ENABLED: &[&str] = &[
     "k8s_logs",
     "k8s_top",
     "k8s_health",
+    "k8s_pod_actions_list",
     // (Vault v2 structural reads removed — Vault feature disabled.)
 ];
 const DANGEROUS: &[&str] = &[
@@ -200,6 +205,9 @@ const DANGEROUS: &[&str] = &[
     "aws_athena_query",
     "aws_sqs_send",
     "k8s_action",
+    // An HTTP request to a pod's port (actuator loggers / refresh / env…) —
+    // approval-gated even for GET: an actuator GET can dump env/secrets.
+    "k8s_pod_http",
     // Otto Assistant memory writes: an outside agent writing / erasing the
     // user's personal memory is approval-gated (in-session assistant calls go
     // through the native stdio tools, which chip + Undo every write).
@@ -221,6 +229,7 @@ const DANGEROUS: &[&str] = &[
 const IRREVERSIBLE: &[&str] = &[
     "merge_pr",
     "k8s_action",
+    "k8s_pod_http",
     "produce_broker_message",
     "aws_sqs_send",
     "api_execute",
@@ -946,6 +955,27 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"List the EKS clusters of an account/region (name, status, version, endpoint, arn, created_at). Read-only.",
             "inputSchema":{"type":"object","required":["account_id"],"properties":{
                 "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"region":{"type":"string"}}}}),
+        // CloudWatch Logs (read-only; times are epoch milliseconds).
+        json!({"name":"otto.aws_logs_list_groups","mutating":false,"category":"AWS",
+            "description":"List CloudWatch Logs log groups (name, retention_days, stored_bytes); optional name `prefix` (e.g. `/aws/eks/`), page with `token`. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id"],"properties":{
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"prefix":{"type":"string"},
+                "token":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_logs_filter","mutating":false,"category":"AWS",
+            "description":"Read events from one log `group`: optional filter `pattern`, comma-separated `streams`, `start`/`end` (epoch ms — always pass a window), `max` (≤ 1000), `token` to page. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","group"],"properties":{
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"group":{"type":"string"},"pattern":{"type":"string"},
+                "streams":{"type":"string"},"start":{"type":"integer"},"end":{"type":"integer"},
+                "token":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_logs_insights","mutating":false,"category":"AWS",
+            "description":"START a Logs Insights `query` over `groups` (≤ 50) between `start` and `end` (epoch ms, ≤ 31 days); returns `{query_id}` — poll otto.aws_logs_get_insights. Read-only, but billed per GB scanned.",
+            "inputSchema":{"type":"object","required":["account_id","groups","query","start","end"],"properties":{
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"groups":{"type":"array","items":{"type":"string"}},
+                "query":{"type":"string"},"start":{"type":"integer"},"end":{"type":"integer"},"limit":{"type":"integer"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_logs_get_insights","mutating":false,"category":"AWS",
+            "description":"Status + rows of a Logs Insights query: `status`, `done`, `result` {columns, rows}, bytes_scanned. Poll until `done`. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","query_id"],"properties":{
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"query_id":{"type":"string"},"region":{"type":"string"}}}}),
         // ================= Kubernetes console =================
         // §3 routes; everything is `kubectl` with the cluster's own kubeconfig
         // server-side. `kubernetes` feature: View for reads, Edit for k8s_action.
@@ -980,6 +1010,19 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["cluster_id","action","kind","namespace","name"],"properties":{
                 "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"action":{"type":"string"},"kind":{"type":"string"},
                 "namespace":{"type":"string"},"name":{"type":"string"},"params":{"type":"object"}}}}),
+        json!({"name":"otto.k8s_pod_actions_list","mutating":false,"category":"Kubernetes",
+            "description":"List the saved pod HTTP actions of a cluster (per workload: name, method, port, path, headers, body_template with {{logger}}/{{level}} variables). Optional `namespace`, `workload_kind`, `workload` filters. Read-only.",
+            "inputSchema":{"type":"object","required":["cluster_id"],"properties":{
+                "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"namespace":{"type":"string"},
+                "workload_kind":{"type":"string"},"workload":{"type":"string"}}}}),
+        json!({"name":"otto.k8s_pod_http","mutating":true,"category":"Kubernetes",
+            "description":"Send ONE HTTP request to a pod's container port through the API-server pod proxy (port-forward fallback) — e.g. Spring Boot actuator: GET /actuator/loggers, POST /actuator/loggers/<logger> body {\"configuredLevel\":\"DEBUG\"}, GET /actuator/health|info|env|threaddump, POST /actuator/refresh. Target one `pod` OR every running pod of a `workload` {kind,name} (per-pod results: status, duration_ms, headers, body ≤256 KiB). A non-GET method on a prod cluster is refused unless `confirm_name` equals the pod/workload name — set it only after the user explicitly confirmed. DANGEROUS: can change a live app's runtime state — approval-gated.",
+            "inputSchema":{"type":"object","required":["cluster_id","namespace","port","method","path"],"properties":{
+                "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"namespace":{"type":"string"},
+                "pod":{"type":"string"},"workload":{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"}}},
+                "port":{"type":"integer"},"method":{"type":"string","description":"GET|POST|PUT|PATCH|DELETE"},
+                "path":{"type":"string"},"headers":{"type":"object"},"body":{"type":"string"},
+                "timeout_ms":{"type":"integer"},"max_concurrency":{"type":"integer"},"confirm_name":{"type":"string"}}}}),
     ];
     // Agent UI control: one governed tool per `docs/contracts/ui-commands.json`
     // entry (`otto.ui_*`, category "UI control") — see `crate::ui_commands`.
@@ -1015,7 +1058,11 @@ async fn enabled_tools(ctx: &ServerCtx) -> Vec<String> {
 /// without the per-session human grant — so a list saved before a UI command
 /// shipped must not silently switch the new command off. A UI tool the
 /// operator saw and unchecked stays off. Pure.
-fn merge_enabled(stored: Option<Vec<String>>, ui_known: &[String], ui_tools: &[String]) -> Vec<String> {
+fn merge_enabled(
+    stored: Option<Vec<String>>,
+    ui_known: &[String],
+    ui_tools: &[String],
+) -> Vec<String> {
     match stored {
         None => DEFAULT_ENABLED
             .iter()
@@ -1375,6 +1422,25 @@ fn dangerous_detail(tool: &str, args: &Value) -> String {
             args.get("url").and_then(Value::as_str).unwrap_or("?"),
             args.get("account_id").and_then(Value::as_str).unwrap_or("?")
         ),
+        "k8s_pod_http" => format!(
+            "HTTP {} {} on port {} of {} in namespace '{}' of cluster '{}'",
+            args.get("method").and_then(Value::as_str).unwrap_or("?"),
+            args.get("path").and_then(Value::as_str).unwrap_or("?"),
+            args.get("port")
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "?".into()),
+            match (args.get("pod").and_then(Value::as_str), args.get("workload")) {
+                (Some(p), _) => format!("pod {p}"),
+                (None, Some(w)) => format!(
+                    "every pod of {}/{}",
+                    w.get("kind").and_then(Value::as_str).unwrap_or("?"),
+                    w.get("name").and_then(Value::as_str).unwrap_or("?")
+                ),
+                _ => "?".into(),
+            },
+            args.get("namespace").and_then(Value::as_str).unwrap_or("?"),
+            args.get("cluster_id").and_then(Value::as_str).unwrap_or("?")
+        ),
         "k8s_action" => format!(
             "Kubernetes action '{}' on {}/{} in namespace '{}' of cluster '{}'",
             args.get("action").and_then(Value::as_str).unwrap_or("?"),
@@ -1491,8 +1557,25 @@ pub(crate) async fn governed_invoke(
         caller_user_id: Some(user.id.clone()),
         caller_kind: Some("mcp_server".into()),
         args_redacted_json: otto_core::redact::redact_json(arguments).value.to_string(),
+        // The agent session behind an Otto-minted credential, so the audit
+        // can be split per agent (and scoped to its workspace below).
+        caller_session_id: crate::ui_bridge::calling_session(auth).cloned(),
         ..Default::default()
     };
+    // The calling session's workspace: the audit row's workspace when the
+    // call itself names none, so the row is scoped to a workspace (and never
+    // falls into the NULL-workspace bucket every MCP viewer could read).
+    let session_ws = if audit.caller_session_id.is_some() {
+        crate::agent_refs::caller_session_ws(ctx, auth).await
+    } else {
+        None
+    };
+    audit.workspace_id = arguments
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .filter(|w| crate::agent_refs::looks_like_id(w))
+        .map(str::to_string)
+        .or_else(|| session_ws.clone());
 
     // PER-TOKEN SCOPE (multi-token access control). A `kind='mcp'` token carries an
     // [`McpScope`]; a NULL column resolved to the unrestricted scope, so legacy
@@ -1525,6 +1608,26 @@ pub(crate) async fn governed_invoke(
         };
         return Ok(deny_audit(ctx, &mut audit, reason).await);
     }
+
+    // PERSONAL-AGENT POLICY (crate::personal_agent_policy): a read-only agent
+    // session (proactive / read-only schedule) is refused every mutating tool
+    // and send; an agent's enforceable custom rules deny or force approval; and
+    // an account / credential / sharing action ALWAYS needs a human approval —
+    // no auto-approve rule or token write grant skips it. Right after the
+    // enable gate and BEFORE reference resolution (like the scope check, a
+    // refused call never resolves anything); rules and the sensitive check
+    // read the caller's own arguments (the names it typed, e.g. `prod-api`).
+    let (agent_gate, calling_agent) =
+        crate::personal_agent_policy::evaluate(ctx, auth, &short, arguments).await;
+    if let crate::personal_agent_policy::AgentGate::Deny(reason) = &agent_gate {
+        return Ok(deny_audit(ctx, &mut audit, reason).await);
+    }
+    let forced_approval = match &agent_gate {
+        crate::personal_agent_policy::AgentGate::ForceApproval { reason, risk } => {
+            Some((reason.clone(), *risk))
+        }
+        _ => None,
+    };
 
     // Git tools take a FRIENDLY repo reference (name / path / remote, or none
     // → the calling session's repo), resolved across every workspace the
@@ -1599,10 +1702,17 @@ pub(crate) async fn governed_invoke(
         .get("workspace_id")
         .and_then(Value::as_str)
         .map(str::to_string);
+    // The RESOLVED workspace (a named object / repo / artifact's own) wins.
+    if let Some(w) = ws.clone().or_else(|| session_ws.clone()) {
+        audit.workspace_id = Some(w);
+    }
     // The gate applies (before any opt-out rule) to a DANGEROUS tool without a
     // trusted token grant, under the global `mcp_require_approval_dangerous`.
     let gate_applies = approval_gated(dangerous, false, token_write_grant)
         && require_approval_dangerous(ctx).await;
+    // A forced approval (sensitive action / agent rule) is never covered by
+    // an auto-approve rule.
+    let gate_applies = gate_applies && forced_approval.is_none();
     // An operator who explicitly auto-approved this tool (or its category) for
     // this scope — global, the call's workspace, or the calling agent session —
     // has already made the decision: don't ask a second time. Opt-in, off by
@@ -1613,8 +1723,9 @@ pub(crate) async fn governed_invoke(
     } else {
         None
     };
-    let needs_approval =
-        approval_gated(dangerous, auto_rule.is_some(), token_write_grant) && gate_applies;
+    let needs_approval = (approval_gated(dangerous, auto_rule.is_some(), token_write_grant)
+        && gate_applies)
+        || forced_approval.is_some();
     if let Some(rule) = &auto_rule {
         // Recorded on every terminal row below (dry-run and execution alike).
         audit.decision_reason = Some(otto_mcp::auto_approve::audit_reason(rule));
@@ -1644,39 +1755,79 @@ pub(crate) async fn governed_invoke(
                 audit.approval_id = Some(appr_id);
             }
             None => {
-                let appr = ctx
+                // A retry of a call that is still waiting reuses its card
+                // (same tool + args + workspace + requester) instead of
+                // stacking a duplicate per poll.
+                let pending = ctx
                     .mcp
                     .approvals()
-                    .create(NewApproval {
-                        workspace_id: ws.clone(),
-                        kind: "tool_call".into(),
-                        server_id: None,
-                        server_name: Some("otto".into()),
-                        tool: Some(tool.to_string()),
-                        title: format!("otto MCP server → {tool}"),
-                        detail: Some(match &repo_label {
-                            // The resolved repo by name, so the approver isn't
-                            // judging an opaque id.
-                            Some(label) => {
-                                format!("{} — repo {label}", dangerous_detail(tool, arguments))
-                            }
-                            None => dangerous_detail(tool, arguments),
-                        }),
-                        args_redacted_json: audit.args_redacted_json.clone(),
-                        args_hash: Some(args_hash.clone()),
-                        risk_label: Some("dangerous".into()),
-                        requested_by: Some(user.id.clone()),
-                        requested_by_kind: Some("mcp_server".into()),
-                        expires_at: Some(
-                            (chrono::Utc::now() + chrono::Duration::minutes(120)).to_rfc3339(),
-                        ),
-                    })
+                    .find_pending(ws.as_deref(), None, tool, &args_hash, &user.id)
                     .await
                     .map_err(ApiError)?;
-                match wait_for_decision(ctx, &appr.id, wait_seconds).await {
+                let appr_id = match pending {
+                    Some(id) => id,
+                    None => {
+                        ctx.mcp
+                            .approvals()
+                            .create(NewApproval {
+                                workspace_id: ws.clone(),
+                                kind: "tool_call".into(),
+                                server_id: None,
+                                server_name: Some("otto".into()),
+                                tool: Some(tool.to_string()),
+                                title: format!("otto MCP server → {tool}"),
+                                detail: Some({
+                                    let base = match &repo_label {
+                                        // The resolved repo by name, so the approver isn't
+                                        // judging an opaque id.
+                                        Some(label) => {
+                                            format!(
+                                                "{} — repo {label}",
+                                                dangerous_detail(tool, arguments)
+                                            )
+                                        }
+                                        None => dangerous_detail(tool, arguments),
+                                    };
+                                    match &forced_approval {
+                                        Some((why, _)) => format!("{why}. {base}"),
+                                        None => base,
+                                    }
+                                }),
+                                args_redacted_json: audit.args_redacted_json.clone(),
+                                args_hash: Some(args_hash.clone()),
+                                risk_label: Some(
+                                    forced_approval
+                                        .as_ref()
+                                        .map_or("dangerous", |(_, risk)| *risk)
+                                        .into(),
+                                ),
+                                requested_by: Some(user.id.clone()),
+                                requested_by_kind: Some("mcp_server".into()),
+                                requested_by_session_id: audit.caller_session_id.clone(),
+                                expires_at: Some(
+                                    (chrono::Utc::now() + chrono::Duration::minutes(120))
+                                        .to_rfc3339(),
+                                ),
+                            })
+                            .await
+                            .map_err(ApiError)?
+                            .id
+                    }
+                };
+                if let Some(a) = &calling_agent {
+                    crate::personal_agent_activity::record_approval_waiting(
+                        ctx,
+                        &a.workspace_id,
+                        &a.agent_id,
+                        Some(&a.session_id),
+                        &short,
+                        &appr_id,
+                    );
+                }
+                match wait_for_decision(ctx, &appr_id, wait_seconds).await {
                     Some(true) => {
-                        let _ = ctx.mcp.approvals().consume(&appr.id).await;
-                        audit.approval_id = Some(appr.id.clone());
+                        let _ = ctx.mcp.approvals().consume(&appr_id).await;
+                        audit.approval_id = Some(appr_id.clone());
                     }
                     Some(false) => {
                         audit.decision = "denied".into();
@@ -1688,10 +1839,10 @@ pub(crate) async fn governed_invoke(
                     }
                     None => {
                         audit.decision = "pending_approval".into();
-                        audit.approval_id = Some(appr.id.clone());
+                        audit.approval_id = Some(appr_id.clone());
                         let _ = ctx.mcp.call_log().insert(audit).await;
                         return Ok(json!({"decision":"pending_approval","executed":false,
-                            "approval_id":appr.id,"reason":"awaiting human approval — resubmit after it is approved"}));
+                            "approval_id":appr_id,"reason":"awaiting human approval — resubmit after it is approved"}));
                     }
                 }
             }
@@ -1722,20 +1873,22 @@ pub(crate) async fn governed_invoke(
     let started = std::time::Instant::now();
     // An internal per-session MCP credential carries an immutable session
     // binding; for the room tools it OVERRIDES any client-supplied session_id
-    // so a bound token can only ever speak as its own session's agent.
-    let bound_session = auth.mcp_session_id.as_deref();
+    // so a bound token can only ever speak as its own session's agent. The
+    // room tools bind ANY agent-session credential (an Otto-issued API token
+    // carries only `managed_session_id`): without it such a session could
+    // omit `session_id` and post as the human, or read a room it is not a
+    // member of. The route then refuses a session that is not a room-member
+    // personal agent.
+    let bound_session = match short.as_str() {
+        "room_post" | "room_read" => crate::ui_bridge::calling_session(auth).map(String::as_str),
+        "assistant_remember" | "assistant_forget" | "assistant_recall" => {
+            auth.mcp_session_id.as_deref()
+        }
+        _ => None,
+    };
     let rebound;
     let arguments = match bound_session {
-        Some(sid)
-            if matches!(
-                short.as_str(),
-                "room_post"
-                    | "room_read"
-                    | "assistant_remember"
-                    | "assistant_forget"
-                    | "assistant_recall"
-            ) =>
-        {
+        Some(sid) => {
             let mut a = arguments.clone();
             if let Some(o) = a.as_object_mut() {
                 o.insert("session_id".into(), json!(sid));
@@ -1753,7 +1906,9 @@ pub(crate) async fn governed_invoke(
         let latency = started.elapsed().as_millis() as i64;
         return Ok(match r {
             Ok(value) => {
-                let bytes = serde_json::to_vec(&value).map(|v| v.len() as i64).unwrap_or(0);
+                let bytes = serde_json::to_vec(&value)
+                    .map(|v| v.len() as i64)
+                    .unwrap_or(0);
                 let _ = ctx
                     .mcp
                     .call_log()
@@ -1766,7 +1921,14 @@ pub(crate) async fn governed_invoke(
                 let _ = ctx
                     .mcp
                     .call_log()
-                    .finalize(&audit_id, false, Some(&format!("{}: {msg}", e.code)), Some(latency), None, None)
+                    .finalize(
+                        &audit_id,
+                        false,
+                        Some(&format!("{}: {msg}", e.code)),
+                        Some(latency),
+                        None,
+                        None,
+                    )
                     .await;
                 ui_error_envelope(&e.code, &msg)
             }
@@ -1780,8 +1942,8 @@ pub(crate) async fn governed_invoke(
                 .get("workspace_id")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty());
-            let current = crate::agent_refs::caller_session_ws(ctx, auth).await;
-            crate::agent_refs::directory_json(ctx, auth, kind, ws, current.as_deref().or(ws)).await
+            crate::agent_refs::directory_json(ctx, auth, kind, ws, session_ws.as_deref().or(ws))
+                .await
         }
         None => execute_otto_tool(ctx, user, &short, arguments).await,
     };
@@ -2061,12 +2223,18 @@ pub(crate) const REF_ARGS: &[(&str, &str, &str)] = &[
     ("aws_athena_query", "account_id", "aws_account"),
     ("aws_athena_get_query", "account_id", "aws_account"),
     ("aws_eks_list_clusters", "account_id", "aws_account"),
+    ("aws_logs_list_groups", "account_id", "aws_account"),
+    ("aws_logs_filter", "account_id", "aws_account"),
+    ("aws_logs_insights", "account_id", "aws_account"),
+    ("aws_logs_get_insights", "account_id", "aws_account"),
     ("k8s_get_resources", "cluster_id", "k8s_cluster"),
     ("k8s_describe", "cluster_id", "k8s_cluster"),
     ("k8s_logs", "cluster_id", "k8s_cluster"),
     ("k8s_top", "cluster_id", "k8s_cluster"),
     ("k8s_health", "cluster_id", "k8s_cluster"),
     ("k8s_action", "cluster_id", "k8s_cluster"),
+    ("k8s_pod_http", "cluster_id", "k8s_cluster"),
+    ("k8s_pod_actions_list", "cluster_id", "k8s_cluster"),
 ];
 
 /// Governed list tools served by the cross-workspace `agent_refs` directory:
@@ -2516,11 +2684,13 @@ fn match_transition(list: &Value, wanted: &str) -> Result<String, Error> {
         match hits.len() {
             0 => continue,
             1 => return Ok(id_of(hits[0])),
-            _ => return Err(Error::Conflict(format!(
+            _ => {
+                return Err(Error::Conflict(format!(
                 "transition '{wanted}' matches {} transitions — pass one id as transition_id:\n{}",
                 hits.len(),
                 listing()
-            ))),
+            )))
+            }
         }
     }
     Err(Error::NotFound(format!(
@@ -2668,6 +2838,8 @@ fn call_timeout(tool: &str, args: &Value) -> Duration {
         }
         "api_run_automation" => 180,
         "k8s_logs" | "k8s_action" | "aws_athena_query" | "aws_athena_get_query" => 75,
+        // ≤30 s per pod request + a pod list + proxy start-up.
+        "k8s_pod_http" => 90,
         "consume_broker_messages" | "run_workflow" | "start_pr_review" | "open_session" => 60,
         _ => 30,
     };
@@ -3148,7 +3320,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 ],
             );
             let base = format!("/api/v1/repos/{}/prs/{}/diff", seg(&repo), n);
-            SelfCall::get(if q.is_empty() { base } else { format!("{base}?{q}") })
+            SelfCall::get(if q.is_empty() {
+                base
+            } else {
+                format!("{base}?{q}")
+            })
         }
         "merge_pr" => {
             let repo = arg_str(args, "repo_id")?;
@@ -4267,6 +4443,68 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             seg(&arg_str(args, "account_id")?),
             opt_query(args, &[("region", "region")])
         )),
+        "aws_logs_list_groups" => SelfCall::get(format!(
+            "/api/v1/aws/accounts/{}/logs/groups?{}",
+            seg(&arg_str(args, "account_id")?),
+            opt_query(
+                args,
+                &[
+                    ("prefix", "prefix"),
+                    ("token", "token"),
+                    ("max", "max"),
+                    ("region", "region")
+                ]
+            )
+        )),
+        "aws_logs_filter" => {
+            let extra = opt_query(
+                args,
+                &[
+                    ("pattern", "pattern"),
+                    ("streams", "streams"),
+                    ("start", "start"),
+                    ("end", "end"),
+                    ("token", "token"),
+                    ("max", "max"),
+                    ("region", "region"),
+                ],
+            );
+            let mut path = format!(
+                "/api/v1/aws/accounts/{}/logs/events?group={}",
+                seg(&arg_str(args, "account_id")?),
+                seg(&arg_str(args, "group")?)
+            );
+            if !extra.is_empty() {
+                path.push('&');
+                path.push_str(&extra);
+            }
+            SelfCall::get(path)
+        }
+        "aws_logs_insights" => {
+            let mut body = json!({
+                "groups": args.get("groups").cloned().unwrap_or(json!([])),
+                "query": arg_str(args, "query")?,
+                "start": args.get("start").and_then(Value::as_i64).unwrap_or(0),
+                "end": args.get("end").and_then(Value::as_i64).unwrap_or(0),
+            });
+            if let Some(limit) = args.get("limit").and_then(Value::as_u64) {
+                body["limit"] = json!(limit);
+            }
+            SelfCall::post(
+                format!(
+                    "/api/v1/aws/accounts/{}/logs/insights?{}",
+                    seg(&arg_str(args, "account_id")?),
+                    opt_query(args, &[("region", "region")])
+                ),
+                body,
+            )
+        }
+        "aws_logs_get_insights" => SelfCall::get(format!(
+            "/api/v1/aws/accounts/{}/logs/insights/{}?{}",
+            seg(&arg_str(args, "account_id")?),
+            seg(&arg_str(args, "query_id")?),
+            opt_query(args, &[("region", "region")])
+        )),
         // ---- Kubernetes console (§3) — `namespace` → `ns`; omitted ⇒ all (-A) ----
         "k8s_list_clusters" => SelfCall::get("/api/v1/k8s/clusters".into()),
         "k8s_get_resources" => {
@@ -4341,6 +4579,51 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 "params": args.get("params").cloned().unwrap_or(json!({})),
             }),
         ),
+        "k8s_pod_actions_list" => SelfCall::get(format!(
+            "/api/v1/k8s/clusters/{}/pod-actions?{}",
+            seg(&arg_str(args, "cluster_id")?),
+            opt_query(
+                args,
+                &[
+                    ("namespace", "namespace"),
+                    ("workload_kind", "workload_kind"),
+                    ("workload", "workload")
+                ]
+            )
+        )),
+        "k8s_pod_http" => {
+            let mut body = json!({
+                "namespace": arg_str(args, "namespace")?,
+                "port": args
+                    .get("port")
+                    .and_then(u64_lenient)
+                    .ok_or_else(|| Error::Invalid("missing argument 'port'".into()))?,
+                "method": arg_str(args, "method")?,
+                "path": arg_str(args, "path")?,
+            });
+            // Forwarded verbatim: the route owns validation and the prod
+            // confirm_name guard.
+            for k in [
+                "pod",
+                "workload",
+                "headers",
+                "body",
+                "timeout_ms",
+                "max_concurrency",
+                "confirm_name",
+            ] {
+                if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
+                    body[k] = v.clone();
+                }
+            }
+            SelfCall::post(
+                format!(
+                    "/api/v1/k8s/clusters/{}/pod-http",
+                    seg(&arg_str(args, "cluster_id")?)
+                ),
+                body,
+            )
+        }
         other => return Err(Error::Invalid(format!("unknown otto tool '{other}'"))),
     })
 }
@@ -4549,6 +4832,7 @@ async fn ask_human_approval(
             risk_label: None,
             requested_by: Some(user.id.clone()),
             requested_by_kind: Some("mcp_server".into()),
+            requested_by_session_id: None,
             expires_at: Some((chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339()),
         })
         .await?;
@@ -5058,8 +5342,20 @@ mod tests {
 
     #[test]
     fn internal_reviewer_scope_does_not_depend_on_outward_server_toggle() {
-        assert!(mcp_tool_enabled_for_token(true, false, false, &[], "vault_read"));
-        assert!(!mcp_tool_enabled_for_token(false, false, false, &[], "vault_read"));
+        assert!(mcp_tool_enabled_for_token(
+            true,
+            false,
+            false,
+            &[],
+            "vault_read"
+        ));
+        assert!(!mcp_tool_enabled_for_token(
+            false,
+            false,
+            false,
+            &[],
+            "vault_read"
+        ));
         assert!(mcp_tool_enabled_for_token(
             false,
             false,
@@ -5074,11 +5370,35 @@ mod tests {
     #[test]
     fn ui_tools_from_a_session_skip_only_the_master_switch() {
         let on = vec!["ui_db_run_query".to_string()];
-        assert!(mcp_tool_enabled_for_token(false, true, false, &on, "ui_db_run_query"));
-        assert!(!mcp_tool_enabled_for_token(false, true, false, &[], "ui_db_run_query"));
+        assert!(mcp_tool_enabled_for_token(
+            false,
+            true,
+            false,
+            &on,
+            "ui_db_run_query"
+        ));
+        assert!(!mcp_tool_enabled_for_token(
+            false,
+            true,
+            false,
+            &[],
+            "ui_db_run_query"
+        ));
         // Not from a session → the master switch still applies.
-        assert!(!mcp_tool_enabled_for_token(false, false, false, &on, "ui_db_run_query"));
-        assert!(mcp_tool_enabled_for_token(false, false, true, &on, "ui_db_run_query"));
+        assert!(!mcp_tool_enabled_for_token(
+            false,
+            false,
+            false,
+            &on,
+            "ui_db_run_query"
+        ));
+        assert!(mcp_tool_enabled_for_token(
+            false,
+            false,
+            true,
+            &on,
+            "ui_db_run_query"
+        ));
     }
 
     #[test]
@@ -5105,12 +5425,23 @@ mod tests {
     fn ui_tools_are_classified() {
         for t in crate::ui_commands::catalog() {
             let bare = t.tool();
-            assert!(!DANGEROUS.contains(&bare.as_str()), "{bare} must not be DANGEROUS");
+            assert!(
+                !DANGEROUS.contains(&bare.as_str()),
+                "{bare} must not be DANGEROUS"
+            );
             assert_eq!(tool_is_mutating(&bare), t.risk.mutating(), "{bare}");
             assert!(pin_global(&bare), "{bare}: pin story");
             // A read-only token scope refuses the mutating ones.
-            let ro = McpScope { tools: None, allow_writes: false, workspace_id: None };
-            assert_eq!(ro.deny_reason(&bare, tool_is_mutating(&bare), None).is_some(), t.risk.mutating());
+            let ro = McpScope {
+                tools: None,
+                allow_writes: false,
+                workspace_id: None,
+            };
+            assert_eq!(
+                ro.deny_reason(&bare, tool_is_mutating(&bare), None)
+                    .is_some(),
+                t.risk.mutating()
+            );
         }
         assert!(tool_is_mutating("ui_db_export"));
         assert!(!tool_is_mutating("ui_db_run_query"));
@@ -5125,7 +5456,10 @@ mod tests {
         assert_eq!(v["code"], "pending_grant");
         assert_eq!(v["content"], json!({"error":"ask","code":"pending_grant"}));
         assert_eq!(ui_error_envelope("timeout", "slow")["executed"], true);
-        assert_eq!(ui_error_envelope("cancelled_by_user", "no")["executed"], true);
+        assert_eq!(
+            ui_error_envelope("cancelled_by_user", "no")["executed"],
+            true
+        );
     }
 
     #[test]
@@ -5794,6 +6128,10 @@ mod tests {
         "aws_athena_list_tables",
         "aws_athena_get_query",
         "aws_eks_list_clusters",
+        "aws_logs_list_groups",
+        "aws_logs_filter",
+        "aws_logs_insights",
+        "aws_logs_get_insights",
     ];
     const K8S_READS: &[&str] = &[
         "k8s_list_clusters",
@@ -5802,8 +6140,14 @@ mod tests {
         "k8s_logs",
         "k8s_top",
         "k8s_health",
+        "k8s_pod_actions_list",
     ];
-    const CONSOLE_WRITES: &[&str] = &["aws_athena_query", "aws_sqs_send", "k8s_action"];
+    const CONSOLE_WRITES: &[&str] = &[
+        "aws_athena_query",
+        "aws_sqs_send",
+        "k8s_action",
+        "k8s_pod_http",
+    ];
 
     #[test]
     fn aws_k8s_tools_present_and_classified() {
@@ -6056,6 +6400,17 @@ mod tests {
         let c = route_for("k8s_action", &json!({"cluster_id":"c1","action":"restart","kind":"deployments","namespace":"prod","name":"web"})).unwrap();
         assert_eq!(c.body.unwrap()["params"], json!({}));
         assert!(route_for("k8s_action", &json!({"cluster_id":"c1","action":"restart"})).is_err());
+        let c = route_for("k8s_pod_http", &json!({"cluster_id":"c1","namespace":"shop","port":8081,"method":"POST","path":"/actuator/loggers/com.acme","workload":{"kind":"deployment","name":"api"},"body":"{}","confirm_name":"api"})).unwrap();
+        assert!(c.path.ends_with("/k8s/clusters/c1/pod-http"), "{}", c.path);
+        let b = c.body.unwrap();
+        assert_eq!(b["workload"]["name"], "api");
+        assert_eq!(b["confirm_name"], "api");
+        assert!(b.get("pod").is_none());
+        assert!(route_for(
+            "k8s_pod_http",
+            &json!({"cluster_id":"c1","namespace":"shop"})
+        )
+        .is_err());
         assert!(route_for("k8s_describe", &json!({"cluster_id":"c1","kind":"pods"})).is_err());
     }
 
@@ -6140,9 +6495,14 @@ mod tests {
         let body = c.body.unwrap();
         assert_eq!(body["text"], "prefers aisle seats");
         assert_eq!(body["session_id"], "s1");
-        assert!(body.get("bogus").is_none(), "only declared args are forwarded");
+        assert!(
+            body.get("bogus").is_none(),
+            "only declared args are forwarded"
+        );
         assert_eq!(
-            route_for("assistant_forget", &json!({"query":"seats"})).unwrap().path,
+            route_for("assistant_forget", &json!({"query":"seats"}))
+                .unwrap()
+                .path,
             "/api/v1/assistant/agent/forget"
         );
         assert_eq!(
@@ -6151,8 +6511,10 @@ mod tests {
         );
         assert!(route_for("assistant_remember", &json!({})).is_err());
         assert!(route_for("assistant_forget", &json!({})).is_err());
-        assert!(dangerous_detail("otto.assistant_remember", &json!({"text":"likes tea"}))
-            .contains("likes tea"));
+        assert!(
+            dangerous_detail("otto.assistant_remember", &json!({"text":"likes tea"}))
+                .contains("likes tea")
+        );
     }
 
     #[test]

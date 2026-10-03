@@ -76,7 +76,9 @@
   summary:hover { color: var(--text); }
   .chev { display: inline-flex; flex-shrink: 0; transition: transform 120ms ease-out; }
   .chev.open { transform: rotate(90deg); }
-  :global([dir='rtl']) .chev:not(.open) { transform: scaleX(-1); }
+  /* Icon already mirrors chevronRight in RTL (points start-ward when closed);
+     open must turn the mirrored glyph the other way to point down. */
+  :global([dir='rtl']) .chev.open { transform: rotate(-90deg); }
   .sum-text { min-width: 0; overflow-wrap: anywhere; }
   .warn { color: var(--warning); }
   @media (prefers-reduced-motion: reduce) { .chev { transition: none; } }

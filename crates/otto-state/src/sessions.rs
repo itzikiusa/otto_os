@@ -1,16 +1,28 @@
 //! Sessions repository.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{Session, SessionKind, SessionStatus};
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 
 #[derive(Clone)]
 pub struct SessionsRepo {
     pool: DbPool,
+}
+
+/// What [`SessionsRepo::mark_dormant_except`] changed at boot.
+#[derive(Debug, Clone, Default)]
+pub struct DormantPass {
+    /// `(id, workspace_id, meta)` of the rows that were live and lost their
+    /// process with the previous daemon (now `reconnectable`, stamped
+    /// `meta.suspended.reason = "restart"`; `meta` is the updated object).
+    pub suspended: Vec<(Id, Id, serde_json::Value)>,
+    /// `(id, workspace_id)` of exited, resumable agent rows flipped to
+    /// `reconnectable`.
+    pub resumable: Vec<(Id, Id)>,
 }
 
 /// Minimal read-only projection used by the usage tailer to attribute on-disk
@@ -134,20 +146,36 @@ impl SessionsRepo {
         Self { pool }
     }
 
-    pub fn pool(&self) -> DbPool { self.pool.clone() }
+    pub fn pool(&self) -> DbPool {
+        self.pool.clone()
+    }
 
-    pub async fn network_profile(&self, workspace: &Id, meta: &serde_json::Value) -> Result<Option<otto_core::network_profiles::NetworkProfile>> {
-        crate::network_profiles::NetworkProfilesRepo::new(self.pool.clone()).selected(workspace, meta).await
+    pub async fn network_profile(
+        &self,
+        workspace: &Id,
+        meta: &serde_json::Value,
+    ) -> Result<Option<otto_core::network_profiles::NetworkProfile>> {
+        crate::network_profiles::NetworkProfilesRepo::new(self.pool.clone())
+            .selected(workspace, meta)
+            .await
     }
 
     pub async fn workspace(&self, workspace_id: &Id) -> Result<otto_core::domain::Workspace> {
-        crate::WorkspacesRepo::new(self.pool.clone()).get(workspace_id).await
+        crate::WorkspacesRepo::new(self.pool.clone())
+            .get(workspace_id)
+            .await
     }
 
     /// Resolve curated project context with workspace validation, regardless of
     /// session provider. The launch layer decides how its adapter consumes it.
-    pub async fn project_context(&self, workspace_id: &Id, meta: &serde_json::Value) -> Result<Option<String>> {
-        crate::projects::ProjectsRepo::new(self.pool.clone()).context(workspace_id, meta).await
+    pub async fn project_context(
+        &self,
+        workspace_id: &Id,
+        meta: &serde_json::Value,
+    ) -> Result<Option<String>> {
+        crate::projects::ProjectsRepo::new(self.pool.clone())
+            .context(workspace_id, meta)
+            .await
     }
 
     pub async fn create(&self, s: NewSession) -> Result<Session> {
@@ -241,7 +269,8 @@ impl SessionsRepo {
             if i > 0 {
                 q.push(" OR ");
             }
-            q.push("(workspace_id = ").push_bind(scope.workspace_id.clone());
+            q.push("(workspace_id = ")
+                .push_bind(scope.workspace_id.clone());
             if let Some(owner) = &scope.owner {
                 q.push(" AND created_by = ").push_bind(owner.clone());
             }
@@ -349,6 +378,85 @@ impl SessionsRepo {
             .await
             .map_err(dberr("update session status"))?;
         Ok(())
+    }
+
+    /// [`Self::update_status`] WITHOUT stamping `last_active_at`: for status
+    /// corrections that are not activity — re-adopting a held PTY after a
+    /// daemon restart must not reset the session's idle clock (review A14).
+    pub async fn update_status_keep_activity(&self, id: &Id, status: SessionStatus) -> Result<()> {
+        sqlx::query("UPDATE sessions SET status = ? WHERE id = ?")
+            .bind(status.as_str())
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("update session status"))?;
+        Ok(())
+    }
+
+    /// Daemon-boot dormant pass (review P1), set-based: every restorable,
+    /// non-archived session NOT in `keep` (the ones just re-adopted from their
+    /// PTY holders) becomes `reconnectable` in two statements instead of one
+    /// UPDATE per row. `last_active_at` is left alone — a restart is not
+    /// activity (stamping it broke auto-archive and recency ordering).
+    ///
+    /// - Rows that were live (`status` not `reconnectable`/`exited`) lost their
+    ///   process with the old daemon: they also get
+    ///   `meta.suspended = {reason: "restart", at}`.
+    /// - Exited agent rows with a `provider_session_id` are resumable with
+    ///   `--resume`, so they flip to `reconnectable` too (no stamp: their
+    ///   process ended on its own).
+    ///
+    /// Rows already `reconnectable` are not touched at all. Returns the rows
+    /// that changed, so the caller broadcasts only those.
+    pub async fn mark_dormant_except(&self, keep: &[Id], at: &str) -> Result<DormantPass> {
+        let keep_json = serde_json::to_string(keep).unwrap_or_else(|_| "[]".into());
+        let stamp = serde_json::json!({ "suspended": { "reason": "restart", "at": at } });
+        let live = sqlx::query(
+            "UPDATE sessions SET status = 'reconnectable',
+                 meta_json = json_patch(
+                     CASE WHEN meta_json IS NOT NULL AND json_valid(meta_json)
+                               AND json_type(meta_json) = 'object'
+                          THEN meta_json ELSE '{}' END,
+                     ?)
+             WHERE archived = 0
+               AND status NOT IN ('reconnectable', 'exited')
+               AND id NOT IN (SELECT value FROM json_each(?))
+             RETURNING id, workspace_id, meta_json",
+        )
+        .bind(stamp.to_string())
+        .bind(&keep_json)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("mark sessions dormant"))?;
+        let resumable = sqlx::query(
+            "UPDATE sessions SET status = 'reconnectable'
+             WHERE archived = 0 AND status = 'exited'
+               AND kind = 'agent' AND provider_session_id IS NOT NULL
+               AND id NOT IN (SELECT value FROM json_each(?))
+             RETURNING id, workspace_id",
+        )
+        .bind(&keep_json)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("mark exited sessions resumable"))?;
+        Ok(DormantPass {
+            suspended: live
+                .iter()
+                .map(|r| {
+                    let meta: Option<String> = r.get("meta_json");
+                    (
+                        r.get::<String, _>("id"),
+                        r.get::<String, _>("workspace_id"),
+                        meta.and_then(|m| serde_json::from_str(&m).ok())
+                            .unwrap_or(serde_json::Value::Null),
+                    )
+                })
+                .collect(),
+            resumable: resumable
+                .iter()
+                .map(|r| (r.get::<String, _>("id"), r.get::<String, _>("workspace_id")))
+                .collect(),
+        })
     }
 
     pub async fn set_provider_session(&self, id: &Id, provider_session_id: &str) -> Result<()> {
@@ -495,7 +603,10 @@ impl SessionsRepo {
     /// intermediate state. Both merge patches belong to one atomic UPDATE.
     pub async fn replace_meta_keys(&self, id: &Id, patch: &serde_json::Value) -> Result<()> {
         if patch.get("account_id").is_some() || patch.get("account_label").is_some() {
-            return Err(Error::Invalid("session account is immutable; create a new session to choose another account".into()));
+            return Err(Error::Invalid(
+                "session account is immutable; create a new session to choose another account"
+                    .into(),
+            ));
         }
         if patch.get("project_id").is_some() {
             let session = self.get(id).await?;
@@ -1100,7 +1211,11 @@ mod tests {
             .filter(|s| {
                 f.source.as_deref().is_none_or(|want| {
                     let src = s.meta.get("source").and_then(|v| v.as_str());
-                    if want == "none" { src.is_none() } else { src == Some(want) }
+                    if want == "none" {
+                        src.is_none()
+                    } else {
+                        src == Some(want)
+                    }
                 })
             })
             .filter(|s| f.status.as_deref().is_none_or(|st| s.status.as_str() == st))
@@ -1149,17 +1264,38 @@ mod tests {
                             ..Default::default()
                         };
                         // Full scope (admin) and owner scope (non-admin).
-                        let full = [SessionScope { workspace_id: ws.clone(), owner: None }];
-                        let got: Vec<String> = repo.list_filtered(&full, &f).await.unwrap().into_iter().map(|s| s.id).collect();
+                        let full = [SessionScope {
+                            workspace_id: ws.clone(),
+                            owner: None,
+                        }];
+                        let got: Vec<String> = repo
+                            .list_filtered(&full, &f)
+                            .await
+                            .unwrap()
+                            .into_iter()
+                            .map(|s| s.id)
+                            .collect();
                         let want = rust_filter(repo.list_by_workspace(&ws).await.unwrap(), &f);
                         let mut got_sorted = got.clone();
                         got_sorted.sort();
                         let mut want_sorted = want.clone();
                         want_sorted.sort();
                         assert_eq!(got_sorted, want_sorted, "admin scope, filter {f:?}");
-                        let mine = [SessionScope { workspace_id: ws.clone(), owner: Some(alice.clone()) }];
-                        let got: Vec<String> = repo.list_filtered(&mine, &f).await.unwrap().into_iter().map(|s| s.id).collect();
-                        let want = rust_filter(repo.list_by_workspace_for_user(&ws, &alice).await.unwrap(), &f);
+                        let mine = [SessionScope {
+                            workspace_id: ws.clone(),
+                            owner: Some(alice.clone()),
+                        }];
+                        let got: Vec<String> = repo
+                            .list_filtered(&mine, &f)
+                            .await
+                            .unwrap()
+                            .into_iter()
+                            .map(|s| s.id)
+                            .collect();
+                        let want = rust_filter(
+                            repo.list_by_workspace_for_user(&ws, &alice).await.unwrap(),
+                            &f,
+                        );
                         assert_eq!(got, want, "owner scope (same order), filter {f:?}");
                         checked += 1;
                     }
@@ -1175,12 +1311,14 @@ mod tests {
         let (alice, ws1) = seed_user_ws(&pool).await;
         let bob = seed_extra_user(&pool, "bob").await;
         let ws2 = new_id();
-        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w2', '/tmp', ?)")
-            .bind(&ws2)
-            .bind(fmt(Utc::now()))
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w2', '/tmp', ?)",
+        )
+        .bind(&ws2)
+        .bind(fmt(Utc::now()))
+        .execute(&pool)
+        .await
+        .unwrap();
         let repo = SessionsRepo::new(pool.clone());
         let mut ids = Vec::new();
         for i in 0..6 {
@@ -1190,27 +1328,72 @@ mod tests {
             ids.push(insert_row(&pool, ws, user, "agent", "idle", 0, "{}", &at).await);
         }
         // An archived row the live-only listing must never return.
-        insert_row(&pool, &ws1, &alice, "agent", "idle", 1, "{}", "2026-01-01T00:00:09+00:00").await;
+        insert_row(
+            &pool,
+            &ws1,
+            &alice,
+            "agent",
+            "idle",
+            1,
+            "{}",
+            "2026-01-01T00:00:09+00:00",
+        )
+        .await;
         let scopes = [
-            SessionScope { workspace_id: ws1.clone(), owner: None },
+            SessionScope {
+                workspace_id: ws1.clone(),
+                owner: None,
+            },
             // ws2 owner-scoped to alice: bob's row (i = 5) is hidden.
-            SessionScope { workspace_id: ws2.clone(), owner: Some(alice.clone()) },
+            SessionScope {
+                workspace_id: ws2.clone(),
+                owner: Some(alice.clone()),
+            },
         ];
-        let live = SessionListFilter { archived: Some(false), ..Default::default() };
-        let got: Vec<String> = repo.list_filtered(&scopes, &live).await.unwrap().into_iter().map(|s| s.id).collect();
-        assert_eq!(got, ids[..5].to_vec(), "both workspaces, oldest first, owner scope honoured");
+        let live = SessionListFilter {
+            archived: Some(false),
+            ..Default::default()
+        };
+        let got: Vec<String> = repo
+            .list_filtered(&scopes, &live)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            got,
+            ids[..5].to_vec(),
+            "both workspaces, oldest first, owner scope honoured"
+        );
 
         // Page 1: the newest 2 (still oldest-first); page 2 via `before`.
-        let page1 = SessionListFilter { archived: Some(false), limit: Some(2), ..Default::default() };
+        let page1 = SessionListFilter {
+            archived: Some(false),
+            limit: Some(2),
+            ..Default::default()
+        };
         let p1 = repo.list_filtered(&scopes, &page1).await.unwrap();
-        assert_eq!(p1.iter().map(|s| s.id.clone()).collect::<Vec<_>>(), ids[3..5].to_vec());
+        assert_eq!(
+            p1.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+            ids[3..5].to_vec()
+        );
         let page2 = SessionListFilter {
             before: Some(fmt(p1[0].created_at)),
             ..page1.clone()
         };
-        let p2: Vec<String> = repo.list_filtered(&scopes, &page2).await.unwrap().into_iter().map(|s| s.id).collect();
+        let p2: Vec<String> = repo
+            .list_filtered(&scopes, &page2)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
         assert_eq!(p2, ids[1..3].to_vec());
-        assert!(repo.list_filtered(&[], &live).await.unwrap().is_empty(), "no scope, no rows");
+        assert!(
+            repo.list_filtered(&[], &live).await.unwrap().is_empty(),
+            "no scope, no rows"
+        );
     }
 
     #[tokio::test]
@@ -1220,20 +1403,147 @@ mod tests {
         let repo = SessionsRepo::new(pool.clone());
         let ok = insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p1"), 0).await;
         let codex = insert_session_full(&pool, &ws, &user, "codex", "working", Some("p2"), 0).await;
-        let _archived = insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p3"), 1).await;
-        let _exited = insert_session_full(&pool, &ws, &user, "claude", "exited", Some("p4"), 0).await;
+        let _archived =
+            insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p3"), 1).await;
+        let _exited =
+            insert_session_full(&pool, &ws, &user, "claude", "exited", Some("p4"), 0).await;
         let _shell = insert_session_full(&pool, &ws, &user, "shell", "idle", Some("p5"), 0).await;
         let _no_psid = insert_session_full(&pool, &ws, &user, "claude", "idle", None, 0).await;
         let named = insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p6"), 0).await;
-        repo.merge_meta(&named, &serde_json::json!({"title_source": "user"})).await.unwrap();
+        repo.merge_meta(&named, &serde_json::json!({"title_source": "user"}))
+            .await
+            .unwrap();
         let auto = insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p7"), 0).await;
-        repo.merge_meta(&auto, &serde_json::json!({"title_source": "provider"})).await.unwrap();
+        repo.merge_meta(&auto, &serde_json::json!({"title_source": "provider"}))
+            .await
+            .unwrap();
         let other = insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p8"), 0).await;
-        repo.merge_meta(&other, &serde_json::json!({"title_source": "first_prompt"})).await.unwrap();
-        let mut got: Vec<String> = repo.list_title_candidates().await.unwrap().into_iter().map(|s| s.id).collect();
+        repo.merge_meta(&other, &serde_json::json!({"title_source": "first_prompt"}))
+            .await
+            .unwrap();
+        let mut got: Vec<String> = repo
+            .list_title_candidates()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
         got.sort();
         let mut want = vec![ok, codex, other];
         want.sort();
         assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn mark_dormant_except_keeps_last_active_and_skips_dormant_rows() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let old = "2026-07-22T10:00:00+00:00";
+        let set = |id: String, status: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query("UPDATE sessions SET status = ?, last_active_at = ? WHERE id = ?")
+                    .bind(status)
+                    .bind(old)
+                    .bind(&id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                id
+            }
+        };
+        let dormant = set(
+            insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p1"), 0).await,
+            "reconnectable",
+        )
+        .await;
+        let live = set(
+            insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p2"), 0).await,
+            "running",
+        )
+        .await;
+        let kept = set(
+            insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p3"), 0).await,
+            "running",
+        )
+        .await;
+        let exited = set(
+            insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p4"), 0).await,
+            "exited",
+        )
+        .await;
+        let exited_shell = set(
+            insert_session_full(&pool, &ws, &user, "claude", "idle", None, 0).await,
+            "exited",
+        )
+        .await;
+        let archived = set(
+            insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p5"), 1).await,
+            "running",
+        )
+        .await;
+
+        let at = "2026-10-03T09:00:00+00:00";
+        let pass = repo
+            .mark_dormant_except(std::slice::from_ref(&kept), at)
+            .await
+            .unwrap();
+        assert_eq!(pass.suspended.len(), 1);
+        assert_eq!(pass.suspended[0].0, live);
+        assert_eq!(pass.suspended[0].2["suspended"]["reason"], "restart");
+        assert_eq!(pass.suspended[0].2["suspended"]["at"], at);
+        assert_eq!(
+            pass.resumable
+                .iter()
+                .map(|r| r.0.clone())
+                .collect::<Vec<_>>(),
+            vec![exited.clone()]
+        );
+
+        for (id, status) in [
+            (&dormant, SessionStatus::Reconnectable),
+            (&live, SessionStatus::Reconnectable),
+            (&kept, SessionStatus::Running),
+            (&exited, SessionStatus::Reconnectable),
+            (&exited_shell, SessionStatus::Exited),
+            (&archived, SessionStatus::Running),
+        ] {
+            let s = repo.get(id).await.unwrap();
+            assert_eq!(s.status, status, "status of {id}");
+            // A restart is not activity: the idle clock is untouched.
+            assert_eq!(
+                fmt(s.last_active_at),
+                fmt(ts(old).unwrap()),
+                "last_active_at of {id}"
+            );
+        }
+        // The already-dormant row got no restart stamp.
+        assert!(repo
+            .get(&dormant)
+            .await
+            .unwrap()
+            .meta
+            .get("suspended")
+            .is_none());
+        // A second boot changes nothing.
+        let again = repo.mark_dormant_except(&[], at).await.unwrap();
+        assert!(again.suspended.len() == 1 && again.suspended[0].0 == kept);
+        assert!(again.resumable.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_status_keep_activity_leaves_last_active() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let old = "2026-07-22T10:00:00+00:00";
+        let id = insert_session(&pool, &ws, &user, old, "{}", 0).await;
+        repo.update_status_keep_activity(&id, SessionStatus::Running)
+            .await
+            .unwrap();
+        let s = repo.get(&id).await.unwrap();
+        assert_eq!(s.status, SessionStatus::Running);
+        assert_eq!(fmt(s.last_active_at), fmt(ts(old).unwrap()));
     }
 }

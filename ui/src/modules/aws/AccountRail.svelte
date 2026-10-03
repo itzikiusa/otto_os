@@ -9,6 +9,8 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
+  import { pollWhileVisible } from '../../lib/poll';
+  import { logsRoute } from './util';
   import type { AwsAccount, AwsService, Feature } from '../../lib/api/types';
 
   interface Props {
@@ -16,8 +18,34 @@
     activeService: AwsService | null;
     onedit: (a: AwsAccount) => void;
     ondelete: (a: AwsAccount) => void;
+    /** Opens the `aws sso login` sheet — offered ahead of a sign-in expiry. */
+    onsignin?: (a: AwsAccount) => void;
+    /** The CloudWatch Logs view is open for `activeId`. */
+    logsActive?: boolean;
   }
-  let { activeId, activeService, onedit, ondelete }: Props = $props();
+  let { activeId, activeService, onedit, ondelete, onsignin, logsActive = false }: Props = $props();
+
+  // A-5: warn BEFORE the sign-in lapses instead of failing mid-action. The
+  // expiry is absolute, so a 30 s client clock is enough (no polling).
+  const WARN_MS = 15 * 60_000;
+  let now = $state(Date.now());
+  $effect(() => {
+    const p = pollWhileVisible(() => { now = Date.now(); }, { ms: 30_000, immediate: false });
+    return () => p.stop();
+  });
+  function sessionNote(a: AwsAccount): { text: string; expired: boolean } | null {
+    const s = a.session;
+    if (!s) return null;
+    const left = Date.parse(s.expires_at) - now;
+    if (Number.isNaN(left)) return null;
+    // Refreshable sessions renew silently; only a lapsed one needs the user.
+    if (left <= 0 && !s.refreshable) return { text: 'Sign-in expired', expired: true };
+    if (!s.refreshable && left < WARN_MS) {
+      const min = Math.max(1, Math.round(left / 60_000));
+      return { text: `Sign-in ends in ${min} min`, expired: false };
+    }
+    return null;
+  }
 
   let collapsed: Record<string, boolean> = $state({});
 
@@ -59,6 +87,7 @@
   </div>
   {#each aws.accounts as a (a.id)}
     {@const open = !collapsed[a.id]}
+    {@const note = sessionNote(a)}
     <div class="acct" class:active={a.id === activeId}>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="acct-row" oncontextmenu={(e) => menu(e, a)}>
@@ -80,6 +109,15 @@
           title="Actions"
         ><Icon name="more" size={14} /></button>
       </div>
+      {#if note}
+        <div class="sess" class:expired={note.expired} role="status">
+          <Icon name="warning" size={12} />
+          <span>{note.text}</span>
+          {#if onsignin && a.auth_mode === 'profile'}
+            <button class="sess-btn" onclick={() => onsignin?.(a)} title={`Run aws sso login for ${a.name}`}>Sign in again</button>
+          {/if}
+        </div>
+      {/if}
       {#if open}
         <ul class="svcs">
           {#each services(a) as s (s.id)}
@@ -97,6 +135,15 @@
               </a>
             </li>
           {/each}
+          {#if resourceAccess.can('aws_account', a.id, 'metrics', 'aws', 'view')}
+            {@const on = a.id === activeId && logsActive}
+            <li>
+              <a href={`#/${logsRoute(a.id)}`} class:active={on} title="CloudWatch Logs" aria-current={on ? 'page' : undefined}>
+                <Icon name="text" size={13} />
+                <span>CloudWatch Logs</span>
+              </a>
+            </li>
+          {/if}
         </ul>
       {/if}
     </div>
@@ -106,6 +153,35 @@
 </nav>
 
 <style>
+  .sess {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 2px 10px 4px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: var(--warning-soft);
+    font-size: var(--fs-xs);
+  }
+  .sess.expired {
+    background: var(--danger-soft);
+  }
+  .sess :global(svg) {
+    color: var(--warning);
+    flex-shrink: 0;
+  }
+  .sess.expired :global(svg) {
+    color: var(--danger);
+  }
+  .sess-btn {
+    margin-inline-start: auto;
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--accent-text);
+    font: inherit;
+    cursor: pointer;
+  }
   .rail {
     display: flex;
     flex-direction: column;

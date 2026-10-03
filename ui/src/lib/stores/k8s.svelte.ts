@@ -15,6 +15,7 @@ import { ApiError } from '../api/client';
 import { formatBytes, formatMillicores } from '../../modules/kubernetes/k8s-util';
 import { k8sApi } from '../api/k8s';
 import { TickCoalescer, browserTickEnv } from '../../modules/kubernetes/monitor/tickCoalescer';
+import { parseClusterUi, type K8sClusterUi, type K8sDrawerTab, type K8sMonitorUi } from '../../modules/kubernetes/viewState';
 import type {
   ImportK8sClusterReq,
   K8sCapabilities,
@@ -30,15 +31,10 @@ import type {
   UpsertK8sClusterReq,
 } from '../api/types';
 
-export type K8sDrawerTab =
-  | 'overview'
-  | 'manifest'
-  | 'describe'
-  | 'events'
-  | 'logs'
-  | 'terminal'
-  | 'metrics'
-  | 'pods';
+export type { K8sDrawerTab, K8sMonitorUi, K8sClusterUi } from '../../modules/kubernetes/viewState';
+/** How many (cluster, kind, namespace) row sets stay cached so switching back
+ *  (another kind, the Monitor, another module) paints at once (K-2). */
+const ROWS_CACHE_MAX = 4;
 
 /** A row identity inside the current cluster+kind (the route's `<ns>/<name>`). */
 export interface K8sSelection {
@@ -54,6 +50,7 @@ const NS_KEY = (clusterId: string): string => `otto_k8s_ns:${auth.me?.id ?? 'ano
 const KNOWN_NS_KEY = (clusterId: string): string => `otto_k8s_known_ns:${auth.me?.id ?? 'anonymous'}:${clusterId}`;
 const CLUSTER_SCOPE_HINT =
   'This kubeconfig user can\'t list across all namespaces (cluster scope). Pick a namespace (press n) — e.g. the cluster\'s default one.';
+const UI_KEY = (clusterId: string): string => `otto_k8s_ui:${auth.me?.id ?? 'anonymous'}:${clusterId}`;
 const AUTO_KEY = 'otto_k8s_autorefresh';
 const AUTO_REFRESH_MS = 10_000;
 /** Monitor views re-read at most this often, however many clusters cycle:
@@ -143,6 +140,8 @@ class K8sStore {
     )
       return;
     this.accessRevision++;
+    this.rowsCache.clear();
+    this.uiCache.clear();
     this.rowsAbort?.abort();
     this.rows = [];
     this.rowsKey = '';
@@ -164,6 +163,7 @@ class K8sStore {
       try {
         localStorage.removeItem(NS_KEY(change.id));
         localStorage.removeItem(KNOWN_NS_KEY(change.id));
+        localStorage.removeItem(UI_KEY(change.id));
       } catch {
         /* optional preference */
       }
@@ -223,6 +223,13 @@ class K8sStore {
 
   private rowsAbort: AbortController | null = null;
   private refreshTimer: Poller | null = null;
+  /** LRU of recent row sets by `currentKey` (insertion order = recency).
+   *  Plain field — the table reads `rows`, never this. */
+  private rowsCache = new Map<string, { rows: K8sRow[]; hasMetrics: boolean; loadedAt: number }>();
+  /** Per-cluster view state (K-1), mirrored to localStorage. Plain field. */
+  private uiCache = new Map<string, K8sClusterUi>();
+  private uiSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private uiDirty = new Set<string>();
 
   readonly cluster = $derived(this.clusters.find((c) => c.id === this.clusterId) ?? null);
   readonly caps = $derived(
@@ -344,16 +351,23 @@ class K8sStore {
    *  and kick off the namespace list + capability probe. */
   selectCluster(id: string | null): void {
     if (id === this.clusterId) return;
+    this.rememberConsoleUi();
     this.clusterId = id;
     this.selected = null;
-    this.filter = '';
     this.rows = [];
     this.rowsKey = '';
     this.rowsError = '';
     this.namespaces = [];
     this.namespacesError = '';
     this.k9sSessionId = null;
-    if (!id) return;
+    if (!id) {
+      this.filter = '';
+      return;
+    }
+    // The cluster's own remembered view: per-kind filter + drawer tab.
+    const ui = this.clusterUi(id);
+    this.filter = ui.filters[this.kind] ?? '';
+    this.drawerTab = ui.drawerTab;
     const remembered = lsGet(NS_KEY(id));
     const row = this.clusters.find((c) => c.id === id);
     // Namespaces are lowercase DNS labels; normalize whatever was remembered
@@ -362,6 +376,7 @@ class K8sStore {
     if (row?.default_namespace) this.rememberKnownNamespace(row.default_namespace.trim().toLowerCase());
     void this.loadNamespaces();
     void this.loadCapabilities(id);
+    this.paintCached();
   }
 
   /** Switching kind also clears the text filter (k9s semantics: a filter
@@ -369,16 +384,130 @@ class K8sStore {
    *  every Service is worse than retyping). */
   setKind(kind: K8sResourceKind): void {
     if (kind === this.kind) return;
+    this.rememberConsoleUi();
     this.kind = kind;
     this.selected = null;
-    this.filter = '';
+    // Per-view memory: each kind gets back the filter last typed in it.
+    this.filter = this.clusterId ? (this.clusterUi(this.clusterId).filters[kind] ?? '') : '';
+    this.paintCached();
   }
 
   setNamespace(ns: string): void {
     ns = ns.trim().toLowerCase();
+    if (ns === this.namespace) return;
     this.namespace = ns;
     this.selected = null;
     if (this.clusterId) lsSet(NS_KEY(this.clusterId), ns);
+    this.paintCached();
+  }
+
+  /** Pre-set the filter a kind opens with (a cross-link such as Monitor
+   *  workload → its pods), before routing to it. */
+  presetFilter(clusterId: string, kind: K8sResourceKind, filter: string): void {
+    const ui = this.clusterUi(clusterId);
+    ui.filters[kind] = filter;
+    this.markUi(clusterId);
+    if (this.clusterId === clusterId && this.kind === kind) this.filter = filter;
+  }
+
+  // --- per-cluster view state (K-1) -----------------------------------------------------
+
+  private clusterUi(id: string): K8sClusterUi {
+    let ui = this.uiCache.get(id);
+    if (!ui) {
+      ui = parseClusterUi(lsGet(UI_KEY(id)));
+      this.uiCache.set(id, ui);
+    }
+    return ui;
+  }
+
+  /** Debounced localStorage write of the clusters whose view state moved. */
+  private markUi(id: string): void {
+    this.uiDirty.add(id);
+    if (this.uiSaveTimer) return;
+    this.uiSaveTimer = setTimeout(() => this.flushUi(), 300);
+  }
+
+  /** Write every pending per-cluster view state now. */
+  flushUi(): void {
+    if (this.uiSaveTimer) clearTimeout(this.uiSaveTimer);
+    this.uiSaveTimer = null;
+    for (const id of this.uiDirty) {
+      const ui = this.uiCache.get(id);
+      if (ui) lsSet(UI_KEY(id), JSON.stringify(ui));
+    }
+    this.uiDirty.clear();
+  }
+
+  /** Fold the live console filter + drawer tab into the current cluster's
+   *  remembered view (the workspace calls this as they change). */
+  rememberConsoleUi(): void {
+    const id = this.clusterId;
+    if (!id) return;
+    const ui = this.clusterUi(id);
+    const f = this.filter;
+    if ((ui.filters[this.kind] ?? '') === f && ui.drawerTab === this.drawerTab) return;
+    if (f) ui.filters[this.kind] = f;
+    else delete ui.filters[this.kind];
+    ui.drawerTab = this.drawerTab;
+    this.markUi(id);
+  }
+
+  /** The table's remembered scroll offset for a `currentKey`. */
+  scrollFor(key: string): number {
+    const id = key.split('|')[0];
+    return id ? (this.clusterUi(id).scroll[key] ?? 0) : 0;
+  }
+
+  saveScroll(key: string, top: number): void {
+    const id = key.split('|')[0];
+    if (!id) return;
+    const ui = this.clusterUi(id);
+    const t = Math.max(0, Math.round(top));
+    if ((ui.scroll[key] ?? 0) === t) return;
+    if (t) ui.scroll[key] = t;
+    else delete ui.scroll[key];
+    // Bounded: only the most recent dozen views keep an offset.
+    const keys = Object.keys(ui.scroll);
+    if (keys.length > 12) delete ui.scroll[keys[0]];
+    this.markUi(id);
+  }
+
+  /** A copy of a cluster's remembered Monitor view. */
+  monitorUi(clusterId: string): K8sMonitorUi {
+    return { ...this.clusterUi(clusterId).monitor };
+  }
+
+  saveMonitorUi(clusterId: string, patch: Partial<K8sMonitorUi>): void {
+    const ui = this.clusterUi(clusterId);
+    const next = { ...ui.monitor, ...patch };
+    if (JSON.stringify(next) === JSON.stringify(ui.monitor)) return;
+    ui.monitor = next;
+    this.markUi(clusterId);
+  }
+
+  /** Show the cached rows for the current selection at once (no skeleton);
+   *  the workspace's load effect then refreshes them quietly. */
+  private paintCached(): void {
+    const key = this.currentKey;
+    if (this.rowsKey === key) return;
+    const hit = this.rowsCache.get(key);
+    if (!hit) return;
+    this.rows = hit.rows;
+    this.hasMetrics = hit.hasMetrics;
+    this.rowsKey = key;
+    this.rowsError = '';
+    this.rowsLoadedAt = hit.loadedAt;
+  }
+
+  private cacheRows(key: string, rows: K8sRow[], hasMetrics: boolean, loadedAt: number): void {
+    this.rowsCache.delete(key);
+    this.rowsCache.set(key, { rows, hasMetrics, loadedAt });
+    while (this.rowsCache.size > ROWS_CACHE_MAX) {
+      const oldest = this.rowsCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.rowsCache.delete(oldest);
+    }
   }
 
   setAutoRefresh(on: boolean): void {
@@ -457,6 +586,10 @@ class K8sStore {
     this.rowsAbort?.abort();
     const ac = new AbortController();
     this.rowsAbort = ac;
+    const had = this.rowsKey === key;
+    this.paintCached();
+    // Just painted from the cache: refresh behind those rows, no skeleton.
+    if (!had && this.rowsKey === key) quiet = true;
     if (!quiet || this.rowsKey !== key) this.rowsLoading = true;
     try {
       let items: K8sRow[];
@@ -476,6 +609,7 @@ class K8sStore {
       this.rowsKey = key;
       this.rowsError = '';
       this.rowsLoadedAt = Date.now();
+      this.cacheRows(key, items, hasMetrics, this.rowsLoadedAt);
       if (ns) this.rememberKnownNamespace(ns);
     } catch (e) {
       if (ac.signal.aborted || this.currentKey !== key) return;
@@ -519,6 +653,8 @@ class K8sStore {
     this.stopAutoRefresh();
     this.rowsAbort?.abort();
     this.rowsAbort = null;
+    this.rememberConsoleUi();
+    this.flushUi();
   }
 
   // --- live events ----------------------------------------------------------------------

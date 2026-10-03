@@ -44,7 +44,7 @@
     <span class="count">{stats.length} tool{stats.length === 1 ? '' : 's'}</span>
     <span class="muted small">Cost in USD is not metered — bytes are the available proxy.</span>
     <span class="grow"></span>
-    <button class="btn small" onclick={() => void load()} title="Refresh"><Icon name="refresh" size={13} /></button>
+    <button class="btn small" onclick={() => void load()} title="Refresh" aria-label="Refresh"><Icon name="refresh" size={13} /></button>
   </div>
 
   {#if loadError && stats.length === 0}

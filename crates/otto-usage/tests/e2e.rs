@@ -126,8 +126,22 @@ async fn usage_engine_end_to_end() {
         300,
         0.01,
     ));
-    // The background writer flushes on a ~2s timer; give it room.
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    // The background writer flushes on a ~2s timer: wait for the buffered row
+    // to land (condition, not a fixed sleep — returns as soon as it flushes).
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while engine
+        .summary(30, false)
+        .await
+        .expect("summary")
+        .total_events
+        < 6
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "buffered event never flushed"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     // ── Provider rollup ─────────────────────────────────────────────────────
     let providers = engine

@@ -7,7 +7,6 @@
   // they slide (tabs, ←/→, swipe, ⌘K) and can cycle every 30 s. Any widget
   // zooms to fill the page. Layout is per device (see home.svelte.ts).
   import { untrack } from 'svelte';
-  import { fly } from 'svelte/transition';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -39,8 +38,10 @@
   // (store) which re-arms the countdown from zero. Paused while zoomed, mid-
   // gesture, or with a sheet open — those all read as "the user is busy here".
   let picking = $state(false);
+  let hovering = $state(false);
+  let focusInside = $state(false);
   $effect(() => {
-    const on = home.rotating && !picking;
+    const on = home.rotating && !picking && !hovering && !focusInside;
     void home.rotationEpoch;
     if (!on) return;
     const h = window.setTimeout(() => {
@@ -49,7 +50,7 @@
     }, ROTATE_MS);
     return () => clearTimeout(h);
   });
-  const rotating = $derived(home.rotating && !picking);
+  const rotating = $derived(home.rotating && !picking && !hovering && !focusInside);
 
   // ── Keyboard + swipe ─────────────────────────────────────────────────────
   function onKey(e: KeyboardEvent): void {
@@ -231,58 +232,74 @@
     {/key}
   {/if}
 
-  <div class="stage">
+  <!-- Hovering or focusing a widget pauses cycling (the user is reading). -->
+  <div
+    class="stage"
+    onpointerenter={() => (hovering = true)}
+    onpointerleave={() => (hovering = false)}
+    onfocusin={() => (focusInside = true)}
+    onfocusout={(e) => {
+      if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node | null)) focusInside = false;
+    }}
+  >
     {#if home.zoomed && home.active}
       <div class="zoom">
         <HomeBox box={home.zoomed} viewId={home.active.id} zoomed />
       </div>
-    {:else}
-      <div class="desk" class:phone={viewport.isPhone}>
-        <HomeToday />
-        {#if home.active}
-          {#key home.active.id}
-            <div
-              class="view"
-              class:phone={viewport.isPhone}
-              in:fly={{ x: 48 * home.slideDir, duration: 220 }}
-              style:--row="{ROW_PX}px"
-              style:--gap="{GAP_PX}px"
-              aria-label="Space {spaceNumber(home.activeIndex)} · {home.active.name}"
-            >
-              {#if home.active.boxes.length === 0}
-                <div class="empty">
-                  <EmptyState
-                    variant="page"
-                    icon="grid"
-                    title="This space is empty"
-                    body="Pin live widgets here: your agents, Mission Control, usage, clusters or a database dashboard. Resize from the corner, drag the grip to reorder."
-                    actionLabel="Add widget"
-                    actionIcon="plus"
-                    onaction={() => (picking = true)}
-                  >
-                    {#if kinds.length}
-                      <div class="quick" aria-label="Quick add">
-                        {#each kinds.slice(0, 4) as k (k.kind)}
-                          <button class="chip quick-chip" onclick={() => addBox(k.kind)}><Icon name={k.icon} size={12} />{k.label}</button>
-                        {/each}
-                      </div>
-                    {/if}
-                  </EmptyState>
-                </div>
-              {:else}
-                {#each home.active.boxes as b, i (b.id)}
-                  <HomeBox box={b} viewId={home.active.id} index={i} count={home.active.boxes.length} ondragbox={(id) => (dragId = id)} ondropon={dropOn} />
-                {/each}
-              {/if}
-            </div>
-          {/key}
-        {:else}
-          <div class="empty">
-            <EmptyState variant="page" icon="grid" title="No spaces yet" body="Create a space, then pin widgets to it." actionLabel="Add space" actionIcon="plus" onaction={addView} />
-          </div>
-        {/if}
-      </div>
     {/if}
+    <!-- Every space stays mounted (review 06 F3): switching only toggles
+         `hidden` + `inert`, and the off-screen boxes pause their pollers but
+         keep their data — a slide no longer remounts and re-fetches every
+         widget (or re-runs a "manual only" DB widget's SQL). While a widget
+         is zoomed the grid stays mounted underneath, paused. -->
+    <div class="desk" class:phone={viewport.isPhone} hidden={!!(home.zoomed && home.active)}>
+      <HomeToday />
+      {#if home.active}
+        {#each home.views as v, vi (v.id)}
+          {@const on = v.id === home.active.id}
+          <div
+            class="view"
+            class:phone={viewport.isPhone}
+            hidden={!on}
+            inert={!on}
+            style:--row="{ROW_PX}px"
+            style:--gap="{GAP_PX}px"
+            style:--slide-from="{48 * home.slideDir}px"
+            aria-label="Space {spaceNumber(vi)} · {v.name}"
+          >
+            {#if v.boxes.length === 0}
+              <div class="empty">
+                <EmptyState
+                  variant="page"
+                  icon="grid"
+                  title="This space is empty"
+                  body="Pin live widgets here: your agents, Mission Control, usage, clusters or a database dashboard. Resize from the corner, drag the grip to reorder."
+                  actionLabel="Add widget"
+                  actionIcon="plus"
+                  onaction={() => (picking = true)}
+                >
+                  {#if kinds.length}
+                    <div class="quick" aria-label="Quick add">
+                      {#each kinds.slice(0, 4) as k (k.kind)}
+                        <button class="chip quick-chip" onclick={() => addBox(k.kind)}><Icon name={k.icon} size={12} />{k.label}</button>
+                      {/each}
+                    </div>
+                  {/if}
+                </EmptyState>
+              </div>
+            {:else}
+              {#each v.boxes as b, i (b.id)}
+                <HomeBox box={b} viewId={v.id} index={i} count={v.boxes.length} active={on && !home.zoomedId} ondragbox={(id) => (dragId = id)} ondropon={dropOn} />
+              {/each}
+            {/if}
+          </div>
+        {/each}
+      {:else}
+        <div class="empty">
+          <EmptyState variant="page" icon="grid" title="No spaces yet" body="Create a space, then pin widgets to it." actionLabel="Add space" actionIcon="plus" onaction={addView} />
+        </div>
+      {/if}
+    </div>
   </div>
   </PageBody>
 </div>
@@ -419,6 +436,27 @@
   }
   .view.phone {
     grid-template-columns: minmax(0, 1fr);
+  }
+  /* `hidden` must win over the grid/flex display above. */
+  .desk[hidden],
+  .view[hidden] {
+    display: none;
+  }
+  /* The slide-in plays each time a space is shown: a CSS animation restarts
+     when its element leaves display:none (no remount needed). */
+  .view:not([hidden]) {
+    animation: view-in 220ms ease-out;
+  }
+  @keyframes view-in {
+    from {
+      opacity: 0;
+      transform: translateX(var(--slide-from, 48px));
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .view:not([hidden]) {
+      animation: none;
+    }
   }
   .zoom {
     position: absolute;

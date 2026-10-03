@@ -51,15 +51,60 @@ write ClickHouse → status row → WS k8s_monitor_cycle
 ```
 
 Each cycle is ONE insert per table (all pods' samples in a single NDJSON
-body, all events in another) — one part per cycle, so no `async_insert` is
-needed.
+body, the wide pod rows in another, all events in a third) — one part per
+cycle, so no `async_insert` is needed.
 
-### Storage: raw samples + rollups
+### Storage: wide pod rows, rollups and raw samples
 
-The dashboards never re-aggregate raw samples. ClickHouse materialized views
-fold every `k8s_samples` insert into pre-aggregated tiers, keyed by series
-(`cluster, namespace, workload, metric, pod, labels`) and storing
-`min / max / sum / count / last` per bucket:
+The dashboards never re-aggregate raw samples. Two families of
+pre-aggregated tables exist:
+
+**Wide tiers (what the dashboards read).** Each cycle the collector writes
+ONE `k8s_pod_cycle` row per pod: its memory, request and 5xx counts, latency
+sum and count, and the latency histogram as a `le → count` map. Counters are
+written as **increments** since the previous cycle, not as raw values. The
+collector keeps the last value of every counter series per cluster. A drop in
+value means the counter was reset, and then the new value is the increment
+(Prometheus `increase()` semantics). A series seen for the first time adds 0.
+After a daemon restart the last values are read back once from `k8s_latest`,
+so a restart doesn't lose an interval. Memory is the most authoritative gauge
+the pod has (`mem_working_set_bytes` → `mem_sys_bytes` →
+`jvm_memory_used_bytes`), **summed** over its series. metrics-server reports
+per container, and the collector writes the pod total (`container = ""`), so a
+sidecar no longer turns a pod's memory into the average of its containers.
+
+`k8s_pod_cycle` stores nothing (`ENGINE = Null`). Materialized views fold it
+into:
+
+| table | grain / row | kept |
+|---|---|---|
+| `k8s_wl_1m`, `k8s_wl_5m`, `k8s_wl_1h` | one row per workload per bucket: cycles, max pods, memory sum / max / last cycle's total, request / 5xx / latency totals, histogram (`sumMap`) | 2 d / 14 d / retention |
+| `k8s_pod_1m`, `k8s_pod_5m`, `k8s_pod_1h` | the same per pod (Fleet `group=pod`, a pod filter, per-pod lines) | 2 d / 14 d / retention |
+
+They use `index_granularity = 1024`, and each sort key has a coarse time
+prefix (hour, day or week), so a per-workload read touches about a thousand
+rows. The workloads tab, the health digest, the overview, the sparklines and
+the Fleet table and charts (memory, req/s, 5xx %, latency) read these tiers.
+Increments are additive, so a window **total** is stitched together. The whole
+5-minute buckets come from the 5-minute tier, and the ragged start and the
+open edge come from the minute tier. Over 1 h that is ≤ 5 + 12 + 5 rows per
+workload instead of 60. A span that ended before the tier's current bucket
+can't change any more, so its answer is cached until the next bucket boundary.
+As a result, the 24 h baselines are computed once an hour, not on every
+cycle. Workload memory in a chart or a Fleet row is the mean workload
+**total** per cycle. Summing per-pod means would double-count pods replaced
+during the window.
+
+Upgrading: the wide tables and views are created idempotently on the first
+collector start. They are not back-filled, because they fill from the next
+cycle. Until 24 h have passed, baselines cover only the hours collected since
+the upgrade.
+
+**Per-series tiers (generic charts).** Views fold every `k8s_samples` insert
+into tiers keyed by series (`cluster, namespace, workload, metric, pod,
+labels`) that store `min / max / sum / count / last` per bucket. The generic
+`/monitor/series?metric=<anything>` chart and Fleet → Requests (per path)
+read them:
 
 | table | what | kept |
 |---|---|---|
@@ -67,7 +112,7 @@ fold every `k8s_samples` insert into pre-aggregated tiers, keyed by series
 | `k8s_samples_1m` | 1-minute rollup | 2 days |
 | `k8s_samples_5m` | 5-minute rollup | 14 days |
 | `k8s_samples_1h` | 1-hour rollup | the retention (≤ 90 days) |
-| `k8s_latest` | last value per series (current memory, versions) | 1 day |
+| `k8s_latest` | last value per series (current memory, counter seeding) | 1 day |
 | `k8s_pods_1h` | hourly pod inventory (Fleet filters, pod lists) | the retention |
 | `k8s_events` | classified restarts / churn / k8s events | the retention |
 
@@ -75,24 +120,36 @@ Every read plans the **coarsest** tier that still gives the window 24
 buckets and divides the chart step: a 1 h window reads the minute tier, 6 h
 the 5-minute tier, 24 h and 7 d the hour tier; only windows under 24 minutes
 (or sub-minute chart steps) read raw rows. The window start snaps down to
-the tier's bucket and rates divide by the seconds actually covered, so a
-counter rate over a rollup equals the raw answer for the same range (the
-ClickHouse integration test checks every query on every tier against raw).
-Charts use steps aligned to the tiers (whole minutes, 5 minutes or hours),
-so `step_secs` in a response can be slightly larger than requested.
+the tier's bucket and rates divide by the seconds actually covered. Charts use
+steps aligned to the tiers (whole minutes, 5 minutes, and **whole hours from a
+24 h window up**, which keeps day charts on the hour tier), so `step_secs` in a
+response can be larger than requested. The per-series counter math is
+`max − min` per series, which under-counts a window with a counter reset. The
+wide tiers don't have that problem.
 
-The keeps above are capped by the cluster's `retention_days`; the hour tier,
-the pod inventory and events follow the largest retention among enabled
-clusters (the tables' TTL), and a cluster that keeps fewer days is trimmed
-with a `DELETE` at most once a day, not per cycle. Changing a TTL never
-rewrites existing parts.
+The ClickHouse integration test (`k8s_monitor_clickhouse.rs`) checks every
+query against raw rows. The per-series tiers are compared with raw
+`max − min`. The wide tiers are compared with a raw-increment reference that
+includes a counter reset, a two-container pod and the same workload name in
+two namespaces. The test also measures rows read per refresh (`EXPLAIN
+ESTIMATE`) before and after.
 
-**Upgrading an existing install** is automatic: on the first collector start
-the rollup tables are created and back-filled from the raw rows already there
-(one `(cluster, day)` partition per statement, two ClickHouse threads), the
-views are created only after that — every collector loop waits on the same
-lock, so nothing is counted twice and an interrupted backfill simply reruns —
-and raw days older than 2 days are dropped.
+Versions (drift, the per-pod `version`) come from the collector's pod
+snapshot, not from a ClickHouse scan.
+
+The keeps above are capped by the cluster's `retention_days`; the hour
+tiers, the pod inventory and events follow the largest retention among
+enabled clusters (the tables' TTL), and a cluster that keeps fewer days is
+trimmed with a `DELETE` at most once a day, not per cycle. Changing a TTL
+never rewrites existing parts.
+
+**Upgrading a raw-only install** (before the per-series rollups) is
+automatic: on the first collector start the rollup tables are created and
+back-filled from the raw rows already there (one `(cluster, day)` partition
+per statement, two ClickHouse threads), the views are created only after
+that — every collector loop waits on the same lock, so nothing is counted
+twice and an interrupted backfill simply reruns — and raw days older than 2
+days are dropped.
 
 Status series written from the sweep alone: `restarts_total`, `ready`,
 `phase_running`, `mem_limit_bytes`, `cpu_request_millis`, `pod_age_seconds`.
@@ -170,12 +227,32 @@ first event.
   (`healthy` / `degraded` / `incident`), pods, unplanned restarts by class,
   memory vs limits, requests/s and 5xx %, workloads running mixed versions,
   the collector line, and the metrics-server RBAC hint with a Copy button.
+- **Per-cluster Monitor** (`#/kubernetes/<id>/monitor[/<tab>]`): the Monitor
+  half of the cluster workspace. A **Resources | Monitor** switch in the
+  header moves between the console and the Monitor of the same cluster; the
+  cluster stays selected, the console's cached rows stay (switching back
+  paints at once and refreshes quietly), and picking a namespace in the
+  Monitor sets it in Resources too. The old
+  `#/kubernetes/monitor/<id>/<tab>` links redirect here.
+- **Remembered view**: namespace, filter, sort, the expanded workload row, the
+  Events class filter and the scroll position are kept per cluster in the
+  k8s store (persisted in `localStorage` under `otto_k8s_ui:<user>:<cluster>`),
+  so the Monitor comes back as it was after a module switch, Resources ↔
+  Monitor or a reload.
 - **Workloads**: sortable table (memory, restarts, churn, req/s, 5xx, p95 or
   avg latency, versions) with sparklines; click a row for the memory and
   request-rate series of the window. Latency is `p95` when the probe exports
-  histogram buckets, `avg` (`_sum/_count`) otherwise.
+  histogram buckets, `avg` (`_sum/_count`) otherwise. The expanded row lists
+  the pods behind the workload — click a pod to open its drawer (Metrics tab)
+  in Resources — and **Open pods in Resources** (also on the row's context
+  menu) opens the Pods table filtered to the workload.
 - **Events**: classified restarts / churn newest first, filterable by class;
-  `Raw cluster events` shows the kept Kubernetes events.
+  `Raw cluster events` shows the kept Kubernetes events. Click an event's pod
+  to open that pod's drawer on its Events tab.
+- **From the console**: a workload drawer (and a pod's, via its owner) has a
+  **Monitor** button that opens this view with that workload expanded, and
+  the pod Metrics tab shows a **History (Monitor)** section (last hour of the
+  pod's memory and request-rate series) with **Open in Monitor**.
 - **Insights**: the latest report of the workspace's **Kubernetes watchdog**
   agent (below) with run history, Run now, and the verdict badge.
 - **Settings**: everything in Setup, plus **Keep request path labels** (off by
@@ -248,8 +325,17 @@ routes `GET /k8s/monitor/fleet/{filters,table,series,events,requests}`, WS
   services, registering the default process/Go collectors in the shared web
   package adds `process_cpu_seconds_total` and `go_memstats_*` to
   `/actuator/prometheus`; add `process_*` to the probe's include list.
-- Counter rates are `max − min` over the window per (pod, labels); a counter
-  reset inside the window under-counts that pod rather than spiking negative.
+- Dashboard rates are sums of reset-aware increments: a counter reset is
+  counted correctly. A series' first cycle (a new pod, a new label set, a
+  version label change) adds 0. The generic per-metric chart and Fleet →
+  Requests still use per-series `max − min`, which under-counts a window
+  with a reset. Label collapse (only `code` / `status` / `status_code` / `le`
+  are kept) sums the dropped-label series into one counter, so the collapsed
+  counter jumps when a new dropped-label series appears. That was already
+  true before the wide tiers.
+- A Fleet workload row's `pods` is the most pods seen in one cycle (or the
+  number of pods with events, if larger), not every pod name seen during the
+  window.
 - Kubernetes keeps events for about an hour on EKS; a 60 s interval loses
   nothing, an interval above 1 h can miss the `Unhealthy`/`Killing` pair.
 - Port-forward transport spawns one `kubectl` per pod per cycle; on very large

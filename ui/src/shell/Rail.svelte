@@ -69,6 +69,9 @@
     const fav = ui.sidebarFavorites.includes(id);
     const split = splitMenuItems(id, label);
     const items: MenuItem[] = [
+      // Plain clicks resume the module where it was left; this is the way home.
+      { label: `Open ${label} main page`, icon: 'home', action: () => router.go(id) },
+      { separator: true },
       ...split,
       ...(split.length ? [{ separator: true }] : []),
       fav
@@ -133,6 +136,7 @@
         <button
           class="rail-btn"
           class:active={isActive(m.id)}
+          aria-current={isActive(m.id) ? 'page' : undefined}
           class:side={inSide}
           onclick={(e) => navClick(e, m.id, m.label)}
           oncontextmenu={(e) => moduleMenu(e, m.id, m.label)}
@@ -161,6 +165,7 @@
     <button
       class="rail-btn"
       class:active={router.module === 'settings'}
+      aria-current={router.module === 'settings' ? 'page' : undefined}
       onclick={() => router.go('settings/appearance')}
       title="Settings"
       aria-label="Settings"

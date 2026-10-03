@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{extract::State, Json};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use otto_core::{api::*, Error, Result};
 use sha1::Sha1;
 const SECRET_KEY: &str = "otto:rooms:turn-shared-secret";

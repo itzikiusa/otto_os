@@ -926,7 +926,10 @@ index 1111111..2222222
 ";
         let p = build_hunk_patch(raw, "run.sh", 0, "@@ -1,2 +1,2 @@", None).unwrap();
         assert!(!p.contains("old mode") && !p.contains("new mode"), "{p}");
-        assert!(p.starts_with("diff --git a/run.sh b/run.sh\nindex 1111111..2222222\n"), "{p}");
+        assert!(
+            p.starts_with("diff --git a/run.sh b/run.sh\nindex 1111111..2222222\n"),
+            "{p}"
+        );
         // `new file mode` is structural and stays.
         let p = build_hunk_patch(NEW_FILE, "n.txt", 0, "@@ -0,0 +1,3 @@", None).unwrap();
         assert!(p.contains("new file mode 100644\n"), "{p}");
@@ -943,18 +946,13 @@ index 1111111..2222222 100644\n\
 l1\n\
 -caf\xe9\n\
 +CAF\xc9\n";
-        let p = build_hunk_patch_bytes(raw, "l.txt", 0, "@@ -1,2 +1,2 @@ caf\u{fffd}()", None)
-            .unwrap();
+        let p =
+            build_hunk_patch_bytes(raw, "l.txt", 0, "@@ -1,2 +1,2 @@ caf\u{fffd}()", None).unwrap();
         assert_eq!(p, raw);
         // A partial selection converting the `-` to context keeps its bytes.
-        let p = build_hunk_patch_bytes(
-            raw,
-            "l.txt",
-            0,
-            "@@ -1,2 +1,2 @@ caf\u{fffd}()",
-            Some(&[2]),
-        )
-        .unwrap();
+        let p =
+            build_hunk_patch_bytes(raw, "l.txt", 0, "@@ -1,2 +1,2 @@ caf\u{fffd}()", Some(&[2]))
+                .unwrap();
         assert!(p.ends_with(b" l1\n caf\xe9\n+CAF\xc9\n"), "{p:?}");
     }
 
@@ -1254,7 +1252,9 @@ index 1111111..2222222 100644
             fingerprint: d.files[1].fingerprint.clone(), // the merged file's
             ..req("link", 0, &d.files[0].hunks[0].header, HunkOp::Stage)
         };
-        run_hunk_op(&git, &request).await.expect("stages the deletion half");
+        run_hunk_op(&git, &request)
+            .await
+            .expect("stages the deletion half");
         let staged = String::from_utf8(git_bytes(&dir, &["diff", "--cached"])).unwrap();
         assert!(staged.contains("deleted file mode 120000"), "{staged}");
     }
@@ -1444,7 +1444,10 @@ index 1111111..2222222 100644
         run_test_hunk_op(&git, &req("latin.txt", 0, &h0, HunkOp::Stage))
             .await
             .unwrap();
-        assert_eq!(git_bytes(&dir, &["show", ":latin.txt"]), b"l1\ncaf\xe9\nl3\n");
+        assert_eq!(
+            git_bytes(&dir, &["show", ":latin.txt"]),
+            b"l1\ncaf\xe9\nl3\n"
+        );
 
         // …and discarding it back writes the ORIGINAL bytes, not U+FFFD.
         let sh0 = header_of(&git, DiffTarget::Staged, "latin.txt", 0).await;
@@ -1455,7 +1458,10 @@ index 1111111..2222222 100644
         run_test_hunk_op(&git, &req("latin.txt", 0, &h0, HunkOp::Discard))
             .await
             .unwrap();
-        assert_eq!(std::fs::read(dir.join("latin.txt")).unwrap(), b"l1\nl2\nl3\n");
+        assert_eq!(
+            std::fs::read(dir.join("latin.txt")).unwrap(),
+            b"l1\nl2\nl3\n"
+        );
     }
 
     /// G-1: the path is a LITERAL name — a route folder like `app/[id]` must
@@ -1484,7 +1490,8 @@ index 1111111..2222222 100644
         run_test_hunk_op(&git, &req("app/[id]/page.tsx", 0, &h0, HunkOp::Stage))
             .await
             .unwrap();
-        let staged = String::from_utf8(git_bytes(&dir, &["diff", "--cached", "--name-only"])).unwrap();
+        let staged =
+            String::from_utf8(git_bytes(&dir, &["diff", "--cached", "--name-only"])).unwrap();
         assert_eq!(staged.trim(), "app/[id]/page.tsx");
     }
 

@@ -165,7 +165,82 @@ async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandl
     }
 }
 
+// --- Why a ready task isn't starting (12-mcp W1) ---------------------------
+//
+// `tick` used to `continue` silently past a ready task, so the board showed a
+// "To do" card that never started with no hint why. Each tick now records a
+// short reason per ready-but-unstarted task, in memory (it is derived state,
+// rebuilt every tick), served on `GET /swarm/swarms/{sid}/utilization` as
+// `waiting`.
+
+/// One waiting reason. `code` is stable (`no_agent_fit`, `agent_busy`,
+/// `verifying`, `capacity`, `run_budget`); `detail` is the board's text;
+/// `since` is when the task first waited for THIS code.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct WaitingReason {
+    pub code: &'static str,
+    pub detail: String,
+    pub since: chrono::DateTime<Utc>,
+}
+
+type WaitingMap = HashMap<Id, HashMap<Id, WaitingReason>>;
+
+fn waiting_registry() -> &'static Mutex<WaitingMap> {
+    static WAITING: OnceLock<Mutex<WaitingMap>> = OnceLock::new();
+    WAITING.get_or_init(Default::default)
+}
+
+/// Replace a swarm's waiting set with this tick's, keeping `since` for a task
+/// whose reason code didn't change.
+fn set_waiting(swarm_id: &Id, fresh: HashMap<Id, (&'static str, String)>) {
+    let mut reg = waiting_registry().lock().unwrap_or_else(|p| p.into_inner());
+    let now = Utc::now();
+    let prev = reg.remove(swarm_id).unwrap_or_default();
+    if fresh.is_empty() {
+        return;
+    }
+    let next = fresh
+        .into_iter()
+        .map(|(task, (code, detail))| {
+            let since = prev
+                .get(&task)
+                .filter(|p| p.code == code)
+                .map_or(now, |p| p.since);
+            (
+                task,
+                WaitingReason {
+                    code,
+                    detail,
+                    since,
+                },
+            )
+        })
+        .collect();
+    reg.insert(swarm_id.clone(), next);
+}
+
+/// The swarm's current waiting reasons, by task id.
+pub fn waiting_for(swarm_id: &Id) -> HashMap<Id, WaitingReason> {
+    waiting_registry()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(swarm_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
 async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
+    let mut waiting: HashMap<Id, (&'static str, String)> = HashMap::new();
+    let r = tick_inner(ctx, swarm_id, &mut waiting).await;
+    set_waiting(swarm_id, waiting);
+    r
+}
+
+async fn tick_inner(
+    ctx: &ServerCtx,
+    swarm_id: &Id,
+    waiting: &mut HashMap<Id, (&'static str, String)>,
+) -> otto_core::Result<()> {
     let repo = &ctx.swarm_repo;
     let swarm = repo.get_swarm(swarm_id).await?;
     if swarm.status != "active" {
@@ -188,7 +263,11 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
         .max(1);
     let active = repo.active_run_count(swarm_id).await?;
     let mut budget = (cap - active).max(0);
+    let capacity_reason = || format!("All {active}/{cap} parallel slots are busy");
     if budget <= 0 {
+        for t in repo.ready_tasks(swarm_id).await? {
+            waiting.insert(t.id, ("capacity", capacity_reason()));
+        }
         return Ok(());
     }
 
@@ -211,27 +290,56 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
     // The roster once per tick — `pick_agent`/`has_reports` used to re-list
     // every agent per ready task (backlog B6 / SE-10).
     let agents = repo.list_agents(&swarm.id).await.unwrap_or_default();
-    for task in ready {
+    let mut ready = ready.into_iter();
+    while let Some(task) = ready.next() {
         if budget <= 0 {
+            // This task and every one after it wait for a free slot.
+            let reason = format!("All {cap}/{cap} parallel slots are busy");
+            for t in std::iter::once(task).chain(ready.by_ref()) {
+                waiting.insert(t.id, ("capacity", reason.clone()));
+            }
             break;
         }
         // Stop scheduling once the projected run count would hit the budget, so
         // a single tick can't overshoot `max_total_runs`.
         if let (Some(max_runs), Some(projected)) = (swarm.max_total_runs, projected_total_runs) {
             if projected >= max_runs {
+                let reason = format!("Run budget reached ({max_runs} runs)");
+                for t in std::iter::once(task).chain(ready.by_ref()) {
+                    waiting.insert(t.id, ("run_budget", reason.clone()));
+                }
                 break;
             }
         }
         let Some(agent) = pick_agent_from(ctx, &agents, &task).await else {
+            waiting.insert(
+                task.id.clone(),
+                ("no_agent_fit", "No available agent fits this task".into()),
+            );
             continue;
         };
         if repo.agent_has_active_run(&agent.id).await.unwrap_or(false) {
-            continue; // one turn per agent at a time
+            // one turn per agent at a time
+            waiting.insert(
+                task.id.clone(),
+                (
+                    "agent_busy",
+                    format!("{} is busy with another task", agent.name),
+                ),
+            );
+            continue;
         }
         // Don't start another task for an agent whose branch is under verification —
         // a second turn on the same worktree would pollute the diff being verified
         // and the branch about to be merged (review B1).
         if crate::swarm_verify::agent_under_verification(&agent.id) {
+            waiting.insert(
+                task.id.clone(),
+                (
+                    "verifying",
+                    format!("{}'s branch is being verified", agent.name),
+                ),
+            );
             continue;
         }
         // Claim: move the task to in_progress so it isn't re-selected next tick
@@ -2068,6 +2176,8 @@ async fn utilization_h(
         "ready_tasks": ready,
         "tasks_by_status": by_status,
         "agents": agents_out,
+        // 12-mcp W1: why each ready task isn't starting (last coordinator tick).
+        "waiting": waiting_for(&sid),
     })))
 }
 
@@ -2617,4 +2727,35 @@ async fn plan(
     }
     let result = ctx.swarm_repo.list_tasks(&pid).await.map_err(ApiError)?;
     Ok(Json(result))
+}
+
+#[cfg(test)]
+mod waiting_tests {
+    use super::*;
+
+    #[test]
+    fn waiting_keeps_since_per_code_and_clears_started_tasks() {
+        let sid: Id = "swarm-waiting-test".into();
+        let mut fresh = HashMap::new();
+        fresh.insert("t1".to_string(), ("agent_busy", "Dev is busy".to_string()));
+        fresh.insert("t2".to_string(), ("capacity", "All 2/2".to_string()));
+        set_waiting(&sid, fresh);
+        let first = waiting_for(&sid);
+        assert_eq!(first.len(), 2);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // t1 still busy (same code → same `since`), t2 now waits for another
+        // reason (new `since`), t3 started (gone).
+        let mut fresh = HashMap::new();
+        fresh.insert("t1".to_string(), ("agent_busy", "Dev is busy".to_string()));
+        fresh.insert("t2".to_string(), ("run_budget", "Run budget".to_string()));
+        set_waiting(&sid, fresh);
+        let second = waiting_for(&sid);
+        assert_eq!(second["t1"].since, first["t1"].since);
+        assert!(second["t2"].since > first["t2"].since);
+        assert_eq!(second["t2"].code, "run_budget");
+
+        set_waiting(&sid, HashMap::new());
+        assert!(waiting_for(&sid).is_empty());
+    }
 }

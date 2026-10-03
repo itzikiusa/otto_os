@@ -77,6 +77,8 @@
   const networkWorkspace = $derived(scratchMode ? SCRATCH_WORKSPACE_ID : ws.current!.id);
   $effect(() => { void networkWorkspace; networkProfileId = ''; });
   let title = $state('');
+  /** Optional opening message (A6) — delivered by the daemon once the CLI is ready. */
+  let prompt = $state('');
   let cwd = $state('');
   let browser = $state(false);
   let busy = $state(false);
@@ -305,6 +307,7 @@
       const pending = dirDraft.trim();
       if (pending !== '' && !dirs.includes(pending)) dirs.push(pending);
       const base = title.trim();
+      const firstMessage = prompt.trim();
       // The daemon takes the cwd verbatim, so expand a leading `~` here (the
       // scratch default advertises it) when the daemon's home is known.
       let dir = cwd.trim();
@@ -325,20 +328,31 @@
         try {
           // Quiet creates throughout: routing to each session as it appears
           // would yank the user through the whole batch. We open them below.
-          const s = await ws.createSessionQuiet(
-            {
-              kind: 'agent',
-              provider: p,
-              // A typed title is a BASE name for a batch — numbered so the
-              // sessions stay tellable apart; alone it is used verbatim.
-              title: base === '' ? null : spawns.length > 1 ? `${base} ${i + 1}` : base,
-              cwd: dir === '' ? null : dir,
-              meta: Object.keys(meta).length > 0 ? meta : null,
-              // The pinned model only applies to a single-provider batch.
-              model: supportsModel && model.trim() !== '' ? model.trim() : null,
-            },
-            { scratch: scratchMode },
-          );
+          // A typed title is a BASE name for a batch — numbered so the
+          // sessions stay tellable apart; alone it is used verbatim.
+          const sessionTitle = base === '' ? null : spawns.length > 1 ? `${base} ${i + 1}` : base;
+          // The pinned model only applies to a single-provider batch.
+          const sessionModel = supportsModel && model.trim() !== '' ? model.trim() : null;
+          // An opening message goes through `/sessions/open`, which delivers
+          // it once the CLI is ready (agents only — a plain shell has no
+          // conversation to open). The store stamps origin=manual (A6).
+          const s =
+            firstMessage !== '' && p !== 'shell'
+              ? await ws.openSessionWithPrompt(
+                  { provider: p, title: sessionTitle, cwd: dir === '' ? null : dir, model: sessionModel, prompt: firstMessage, meta },
+                  { scratch: scratchMode },
+                )
+              : await ws.createSessionQuiet(
+                  {
+                    kind: 'agent',
+                    provider: p,
+                    title: sessionTitle,
+                    cwd: dir === '' ? null : dir,
+                    meta: Object.keys(meta).length > 0 ? meta : null,
+                    model: sessionModel,
+                  },
+                  { scratch: scratchMode },
+                );
           created.push(s.id);
         } catch (e) {
           failures.push(`${p}: ${e instanceof Error ? e.message : String(e)}`);
@@ -495,6 +509,22 @@
     {/if}
   </div>
 
+  {#if chosen.some((p) => p !== 'shell')}
+    <div class="field">
+      <label for="ns-prompt">First message <span class="dim">(optional)</span></label>
+      <textarea
+        id="ns-prompt"
+        class="input prompt-input"
+        rows="3"
+        bind:value={prompt}
+        placeholder="What should the agent start on? Sent once it is ready."
+      ></textarea>
+      <span class="hint">
+        {total > 1 ? 'Sent to every agent in this batch. ' : ''}⌘↩ creates the session{total > 1 ? 's' : ''}.
+      </span>
+    </div>
+  {/if}
+
   <div class="field">
     <label for="ns-cwd">Working directory</label>
     <div class="dir-add">
@@ -577,7 +607,7 @@
         onclick={() => (showPreview = !showPreview)}
         aria-expanded={showPreview}
       >
-        <span class="chevron" class:open={showPreview}><Icon name="chevronRight" size={11} /></span>
+        <span class="chevron" class:open={showPreview}><Icon name="chevronRight" noflip size={11} /></span>
         Preview context
         <span class="hint">— exactly what Otto would inject before spawning</span>
       </button>
@@ -617,6 +647,13 @@
 {/if}
 
 <style>
+  .prompt-input {
+    resize: vertical;
+    min-height: 64px;
+    font: inherit;
+    font-size: var(--fs-s);
+    line-height: 1.4;
+  }
   .provider-label {
     font-size: var(--fs-xs);
     font-weight: 500;

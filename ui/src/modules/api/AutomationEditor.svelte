@@ -53,6 +53,8 @@
   const KIND_LABEL: Record<ApiAssertion['kind'], string> = {
     status: 'Status code',
     json_path: 'JSON value at',
+    header: 'Response header',
+    body_text: 'Response body text',
     duration_ms: 'Response time (ms)',
   };
   const OP_LABEL: Record<ApiAssertion['op'], string> = {
@@ -61,7 +63,14 @@
     contains: 'contains',
     lt: 'is less than',
     gt: 'is greater than',
+    lte: 'is at most',
+    gte: 'is at least',
+    exists: 'exists',
+    not_exists: 'does not exist',
+    matches: 'matches regex',
   };
+  /** Operators that take no expected value. */
+  const NO_VALUE_OPS: ReadonlySet<ApiAssertion['op']> = new Set(['exists', 'not_exists']);
   const RUN_STATUS: Record<ApiAutomationRun['status'], string> = {
     running: 'running', passed: 'passed', failed: 'failed', cancelled: 'canceled', interrupted: 'interrupted',
   };
@@ -285,13 +294,19 @@
                 {#if as.kind === 'json_path'}
                   <input class="input mono k-path" aria-label="JSONPath" placeholder="$.data.id" value={as.path ?? ''} disabled={!canEdit}
                     oninput={(e) => updateAssertion(i, ai, { path: (e.currentTarget as HTMLInputElement).value })} />
+                {:else if as.kind === 'header'}
+                  <input class="input mono k-path" aria-label="Header name" placeholder="Content-Type" value={as.path ?? ''} disabled={!canEdit}
+                    oninput={(e) => updateAssertion(i, ai, { path: (e.currentTarget as HTMLInputElement).value })} />
                 {/if}
                 <select class="input k-op" aria-label="Comparison" value={as.op} disabled={!canEdit}
                   onchange={(e) => updateAssertion(i, ai, { op: (e.currentTarget as HTMLSelectElement).value as ApiAssertion['op'] })}>
                   {#each Object.entries(OP_LABEL) as [o, label] (o)}<option value={o}>{label}</option>{/each}
                 </select>
-                <input class="input mono k-val" aria-label="Expected value" placeholder="200" value={as.value} disabled={!canEdit}
-                  oninput={(e) => updateAssertion(i, ai, { value: (e.currentTarget as HTMLInputElement).value })} />
+                {#if !NO_VALUE_OPS.has(as.op)}
+                  <input class="input mono k-val" aria-label={as.op === 'matches' ? 'Regular expression' : 'Expected value'}
+                    placeholder={as.op === 'matches' ? '^ORD-\\d+' : '200'} value={as.value} disabled={!canEdit}
+                    oninput={(e) => updateAssertion(i, ai, { value: (e.currentTarget as HTMLInputElement).value })} />
+                {/if}
                 {#if canEdit}
                   <button class="icon-btn" title="Remove check" aria-label="Remove check" onclick={() => removeAssertion(i, ai)}><Icon name="x" size={12} /></button>
                 {/if}
@@ -305,7 +320,7 @@
             {#each step.extract as ex, ei (ei)}
               <div class="rule">
                 <span class="word">Take</span>
-                <input class="input mono k-path" aria-label="JSONPath to take" placeholder="$.access_token" value={ex.path} disabled={!canEdit}
+                <input class="input mono k-path" aria-label="JSONPath, header:Name or status to take" title="A JSONPath into the body ($.access_token), header:Name for a response header, or status" placeholder="$.access_token" value={ex.path} disabled={!canEdit}
                   oninput={(e) => updateExtract(i, ei, { path: (e.currentTarget as HTMLInputElement).value })} />
                 <span class="word">as</span>
                 <span class="var-in">

@@ -92,6 +92,16 @@
     if (pick) untrack(() => select(pick));
   });
 
+  // Tablet/phone: the detail is a full-screen sheet on the Modal layer —
+  // register it while it is up so the native browser webview hides under it
+  // (untracked: pushModal reads the counter it bumps). Desktop's side pane is
+  // not an overlay, so it never registers.
+  $effect(() => {
+    if (!selectedId || viewport.isDesktop) return;
+    untrack(() => ui.pushModal());
+    return () => untrack(() => ui.popModal());
+  });
+
   // filters
   let kindF = $state<WorkKind | ''>('');
   let statusF = $state<WorkStatus | ''>('');
@@ -111,6 +121,9 @@
   // Monotonic request token: a slower, OLDER response must never overwrite a
   // newer one (live ticks fire reloads back to back).
   let reqSeq = 0;
+  /** The graph is only fetched while it is shown; otherwise a reload marks it
+   *  stale and flipping to the Graph view loads it then. */
+  let graphStale = true;
 
   async function reload(id: string): Promise<void> {
     const seq = ++reqSeq;
@@ -123,16 +136,21 @@
       q: debouncedQ || undefined,
       limit: 300,
     };
+    const withGraph = untrack(() => view) === 'graph';
+    if (!withGraph) graphStale = true;
     try {
       const [s, its, g] = await Promise.all([
         missionControlApi.summary(id),
         missionControlApi.items(id, f),
-        missionControlApi.graph(id, f),
+        withGraph ? missionControlApi.graph(id, f) : Promise.resolve(null),
       ]);
       if (seq !== reqSeq) return;
       summary = s;
       items = its;
-      graph = g;
+      if (g) {
+        graph = g;
+        graphStale = false;
+      }
     } catch (e) {
       if (seq !== reqSeq) return;
       err = e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.';
@@ -147,6 +165,13 @@
     // establish dependencies so the effect re-runs when these change
     void [kindF, statusF, riskF, debouncedQ];
     if (id) void reload(id);
+  });
+
+  // Flipping to the Graph view loads a graph that went stale while hidden.
+  $effect(() => {
+    if (view !== 'graph') return;
+    const id = untrack(() => ws.currentId);
+    if (id && graphStale) void reload(id);
   });
 
   // Live work_graph_updated ticks: only THIS workspace's (or a reconnect
@@ -529,7 +554,9 @@
     .mc-detail {
       position: fixed;
       inset: 0;
-      z-index: 40;
+      /* The Modal layer: above BottomNav (--z-mobile-nav), which otherwise
+         covered the sheet's last 56 px. */
+      z-index: var(--z-modal);
       width: auto;
       flex: none;
       border: none;

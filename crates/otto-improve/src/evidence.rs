@@ -46,7 +46,7 @@ fn anchor(file: &mut std::fs::File, offset: u64) -> std::io::Result<String> {
     file.seek(SeekFrom::Start(start))?;
     let mut bytes = vec![0; (offset - start) as usize];
     file.read_exact(&mut bytes)?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 /// Read at most 2 MiB and only complete lines. A truncated/replaced source

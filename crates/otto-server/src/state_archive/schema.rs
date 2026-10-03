@@ -25,14 +25,20 @@ pub async fn schema(conn: &mut SqliteConnection) -> ApiResult<BTreeMap<String, T
     let names:Vec<String>=sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_sqlx_%' ORDER BY name").fetch_all(&mut *conn).await.map_err(super::db_error)?;
     let mut tables = BTreeMap::new();
     for name in names {
-        let columns = sqlx::query(&format!("PRAGMA table_info({})", quoted(&name)))
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(super::db_error)?;
-        let foreign = sqlx::query(&format!("PRAGMA foreign_key_list({})", quoted(&name)))
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(super::db_error)?;
+        let columns = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "PRAGMA table_info({})",
+            quoted(&name)
+        )))
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(super::db_error)?;
+        let foreign = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "PRAGMA foreign_key_list({})",
+            quoted(&name)
+        )))
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(super::db_error)?;
         let user_columns = foreign
             .iter()
             .filter(|r| r.get::<String, _>("table") == "users")
@@ -559,7 +565,7 @@ pub fn sanitize(
 }
 pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> ApiResult<Vec<ArchiveRow>> {
     let sql = format!("SELECT * FROM {}", quoted(table));
-    let mut rows = sqlx::query(&sql).fetch(conn);
+    let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).fetch(conn);
     let mut output = Vec::new();
     let mut size = 0;
     while let Some(row) = rows.try_next().await.map_err(super::db_error)? {

@@ -34,19 +34,24 @@ exact endpoints, columns, setting keys, on-disk paths, and UI labels.
 | **Retention** | A `MergeTree` `TTL`, default **180 days**, changeable live (no restart). |
 | **System metrics** | CPU %, memory, 1-min load, the `ottod` process's own RSS/CPU, and the live-session count — sampled every **60 s** by default. |
 | **Budgets** | Per-workspace / per-provider USD spend caps. **Opt-in** (`enforce` defaults off) — informational until you turn them on. |
-| **Where it lives** | The **Usage & Metrics** page (top-level nav). Root-only. |
-| **Daemon** | `ottod` on `127.0.0.1:7700`; routes under `/api/v1/usage/*` (all root-gated) plus the per-session `/api/v1/ingest/usage`. |
+| **Where it lives** | The **Usage & Metrics** page (top-level nav): tokens first (cost secondary), a per-model breakdown, a **Report** view with a downloadable self-contained HTML report, and (root) an opt-in **ccusage cross-check**. Needs `Usage:View`; root sees every session, everyone else their own. |
+| **Daemon** | `ottod` on `127.0.0.1:7700`; routes under `/api/v1/usage/*` (reads `Usage:View`, scoped; config/install/budget writes/metrics/ccusage root) plus the per-session `/api/v1/ingest/usage`. |
 | **WS events** | `usage_metrics_tick` (after each metrics sample) and `budget_exceeded` (on a cap crossing). |
 
 ---
 
 ## 2. Overview & where it lives
 
-The **Usage & Metrics** page is **root-only**. For any non-root user the page
-renders only the message *"Usage analytics are available to the root account."*
-The dashboard aggregates across **every** workspace, which is why the read/admin
-routes are gated `root` rather than per-workspace — it mirrors the daemon-wide
-Settings panels. (The one exception is the per-session ingest route; see §9.)
+The **Usage & Metrics** page needs **`Usage:View`**. Root sees every session
+(`scope: "all"`, with the *Otto only* filter); any other user holding the grant
+sees **only the sessions they created** (`scope: "own"`, external sessions never
+included) and none of the admin surfaces — engine config/install, budgets
+editor, system CPU/RAM metrics and the ccusage cross-check stay root-only, and
+`/usage/status` redacts paths, version, sizes and row counts for non-root.
+(The per-session ingest route is separate; see §9.)
+
+If a ClickHouse read fails, the summary/report endpoints return an **error**
+(the page shows it inline with Retry) — never a 200 with all-zero totals.
 
 Two storage layers cooperate:
 
@@ -140,9 +145,20 @@ re-counting itself — at two levels:
   `message.id` + `requestId`) appears on several lines, each repeating the same
   `usage` object — and resumed sessions replay old lines into the new session's
   file. Counting every line inflates real usage ~2.4×. The tailer counts a
-  response key **once**; already-seen keys are skipped. The seen-set is
-  persisted (`usage_tailer_seen.json`, same atomic write) and FIFO-capped at
-  100k keys (~two months of real history).
+  response key **once**. The seen-set is persisted (`usage_tailer_seen.json`,
+  same atomic write) and FIFO-capped at 100k keys (~two months of real history).
+- **Final usage per response.** While a response streams, Claude Code writes
+  its early lines with `stop_reason: null` and a **partial** `output_tokens`
+  (subagent transcripts: 5 → 141, 7 → 300); only the last line carries the
+  final count. Counting the first line under-counted output ~3× (279k vs 864k
+  in ccusage on 2026-10-03). The tailer now **holds** the newest response per
+  file (`ResponseFolder`, field-wise max over its lines) and counts it once
+  when a line with a `stop_reason` arrives, the next response starts, or the
+  file writes nothing for a whole scan. A line that still arrives after that
+  becomes a positive **correction** row (same key timestamp), so sums stay
+  exact (the row count can be one higher for such a response). The persisted
+  cursor never passes a held response, so a restart re-reads it instead of
+  losing it. Input / cache counts are identical on every line and unaffected.
 - **True-time stamping.** Claude events carry the transcript line's own
   `timestamp` into the `ts` column (`date_time_input_format=best_effort` on
   insert), so late ingestion — catch-up after downtime, or the rebuild below —
@@ -154,10 +170,14 @@ re-counting itself — at two levels:
 
 #### One-time dedup rebuild (upgrade path)
 
-Stores fed by the pre-dedup tailer are inflated. On the first start where
-`~/Library/Application Support/Otto/usage_tailer_dedup_rebuild.done` is absent,
+Stores fed by older tailers are wrong (pre-dedup: inflated; first-line dedup:
+output under-counted; pre-2026-09-25 pricing: Opus 5.5 at the Opus 4.x card).
+On the first start where
+`~/Library/Application Support/Otto/usage_tailer_dedup_rebuild_v2.done` is absent
+(`_v2` re-runs it once for installs that already ran the first rebuild),
 the tailer re-derives Claude usage from scratch: it parses every claude
-transcript from byte 0 (deduped, true-time-stamped — this also *back-fills*
+transcript from byte 0 (deduped keeping each response's FINAL usage,
+true-time-stamped, re-priced with the current rate card — this also *back-fills*
 history the old tailer skipped at seed time), **purges** its own old rows
 (exactly the `provider='claude' AND kind='completion'` rows with *no*
 work-graph dims, bounded by the oldest rebuilt date), inserts the rebuilt
@@ -266,6 +286,14 @@ Retention is a per-table `MergeTree` `TTL` on the partition date column; old dat
 dropped automatically during background merges. The window is **configurable, default
 180 days** (`UsageConfig.retention_days`, clamped 1..=3650 at the route). Changing it
 runs `ALTER TABLE … MODIFY TTL` **live** (`set_retention`) — no recreate, no restart.
+The alter is skipped when the table's TTL (read from `system.tables.engine_full`)
+already matches, and carries `materialize_ttl_after_modify = 0`, so neither boot nor a
+self-heal queues a part-rewriting mutation; background TTL merges apply the window.
+
+**Write path.** The writer flushes buffered events every **15 s** (or at 200 events,
+and on shutdown), with server-side `async_insert=1&wait_for_async_insert=1`, and both
+tables use `old_parts_lifetime = 60`. The live dashboard therefore lags by up to ~15 s;
+in exchange ClickHouse no longer creates (and re-merges) a part every 2 s.
 
 ---
 
@@ -290,12 +318,13 @@ UI colors them (`TOKEN_CATS` in `UsagePage.svelte`):
 
 When a recorder doesn't supply an explicit `cost_usd`, the engine estimates it from
 the model id and token counts. Rates are **per 1M tokens** and track published list
-prices as of **`PRICED_AS_OF` = `2026-06-19`** (surfaced in the UI as
+prices as of **`PRICED_AS_OF` = `2026-09-25`** (surfaced in the UI as
 *"Priced as of …"*). The four classes are priced independently:
 
 - **input** — model base input rate.
 - **output** — model output rate.
-- **cache read** — `0.1 ×` the base input rate.
+- **cache read** — `0.1 ×` the base input rate, except where the model lists its
+  own: Opus 5.5 **$0.20** (0.05×), Fable/Mythos 5.1 **$0.25** (0.025×).
 - **cache write** — `1.25 ×` the base input rate (the 5-minute-TTL cache rate the
   CLIs use; the transcripts report a single un-typed `cache_creation` count, so the
   common case is priced).
@@ -304,10 +333,16 @@ Rate card (per 1M, input / output), matched **case-insensitively, most-specific-
 
 | Model family (substring) | Input | Output |
 |---|---|---|
+| `fable-5-1` / `mythos-5-1` | $10 | $50 (cache read $0.25) |
 | `fable` / `mythos` | $10 | $50 |
-| `haiku` | $1 | $5 |
-| `opus` | $5 | $25 |
-| `sonnet` | $3 | $15 |
+| `3-5-haiku` | $0.80 | $4 |
+| `3-haiku` | $0.25 | $1.25 |
+| `haiku` (4.5) | $1 | $5 |
+| `opus-5-5` | $4 | $20 (cache read $0.20) |
+| legacy Opus (`opus-4`, `opus-4-0`, `opus-4-1`, `3-opus`) | $15 | $75 |
+| `opus` (5, 4.5–4.8) | $5 | $25 |
+| `sonnet-5` (5, 5.5) | $2 | $10 |
+| `sonnet` (4.x) | $3 | $15 |
 | `gpt-4o-mini` / `o4-mini` / `-mini` | $0.15 | $0.60 |
 | `gpt` / `codex` / `o3` / `o1` | $2.5 | $10 |
 
@@ -320,6 +355,24 @@ tooltip *"Estimated — model not in the rate table; priced at the Opus tier."*
 > Cost is always an **estimate** — there is no live billing integration. Treat
 > figures as directional. The UI never claims otherwise (it says "Est. cost" and
 > "priced as of <date>").
+
+---
+
+### 5.3 Usage Report and the ccusage cross-check
+
+- **Report** (`GET /usage/report`): daily, monthly, per-model and per-session
+  (≤1000) tables over the window, tokens first and cost secondary, scoped like
+  the summary. The page's **Download HTML** writes the same tables to one
+  self-contained file (inline CSS, light/dark) for sharing or archiving.
+- **Compare with ccusage** (root, opt-in, `POST /usage/ccusage-check {days}`):
+  the daemon runs `npx --yes ccusage daily --json --breakdown --since … --until …`
+  on demand (no Otto dependency; npx downloads/caches ccusage on first use;
+  120 s timeout; 1–90 days, default 7) and shows its numbers beside Otto's for
+  the same dates — **external sessions included** on Otto's side, because
+  ccusage reads every local transcript — with the difference per
+  provider/model and per day. Models only ccusage sees (e.g. Hermes'
+  `gpt-*`) are labelled `untracked`. Expect small cost differences: ccusage
+  prices from LiteLLM's table, Otto from §5.2.
 
 ---
 
@@ -619,3 +672,22 @@ history), so you lose forward attribution for those files, not duplicate it.
 - **Source:** `crates/otto-usage/`, `crates/ottod/src/usage_tailer.rs`,
   `crates/otto-server/src/routes/usage.rs`, `crates/otto-server/src/monitor.rs`,
   `ui/src/modules/usage/`.
+
+## Per-session tokens on the Agents page
+
+Each agent session's usage is visible where you work with it (review A5):
+
+- **Pane details chip** — a *Usage* row, tokens first and cost second:
+  *"2.1M tokens · $1.24"* (`GET /sessions/{id}/usage`, the session's whole
+  recorded history; `null` = nothing recorded, so the row is simply absent).
+  Loaded while the pane is focused, at most once a minute, and when the chip
+  opens.
+- **Sidebar** — *Sort: Tokens (most first, 30 days)* in the Agents sort menu,
+  and a tokens/cost line in each row's tooltip
+  (`GET /workspaces/{wid}/sessions/usage?days=30`; the daemon caches its
+  rollup for 60 s). Sessions without usage keep their recent order after the
+  rest.
+
+Both need `Usage:View`; the per-session route also requires seeing the session
+(owner or workspace admin), the workspace one returns only the sessions you
+may see. With usage tracking unavailable the sort option is hidden.

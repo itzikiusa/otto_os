@@ -6,6 +6,15 @@
 
 class Clock {
   ms = $state(Date.now());
+  /** Changes once a minute (A3): readers of minute-grain labels ("4h idle")
+   *  re-run 60× less often than on the 1-second tick. */
+  minuteMs = $state(Math.floor(Date.now() / 60_000) * 60_000);
+
+  private tick(): void {
+    this.ms = Date.now();
+    const m = Math.floor(this.ms / 60_000) * 60_000;
+    if (m !== this.minuteMs) this.minuteMs = m;
+  }
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -13,11 +22,11 @@ class Clock {
       // write (every reader's re-run) and catch up once on becoming visible.
       setInterval(() => {
         if (typeof document !== 'undefined' && document.hidden) return;
-        this.ms = Date.now();
+        this.tick();
       }, 1000);
       if (typeof document !== 'undefined') {
         document.addEventListener('visibilitychange', () => {
-          if (!document.hidden) this.ms = Date.now();
+          if (!document.hidden) this.tick();
         });
       }
     }
@@ -29,6 +38,13 @@ const clock = new Clock();
 /** Reactive current epoch-ms. Call inside a reactive context to tick every 1s. */
 export function now(): number {
   return clock.ms;
+}
+
+/** Reactive epoch-ms floored to the minute: re-evaluates once a minute. Use it
+ *  where a label only changes per minute, so a dozen panes don't recompute
+ *  every second. */
+export function nowMinute(): number {
+  return clock.minuteMs;
 }
 
 function toMs(ts: number | string | Date): number {

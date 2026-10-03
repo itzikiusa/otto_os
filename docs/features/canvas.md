@@ -187,7 +187,31 @@ turn:
    (`resolve_source`).
 5. Persist the new `doc_json` and broadcast a final `CanvasUpdated`. The HTTP
    response is an `AssistResult` so the UI can render immediately even before the
-   event arrives.
+   event arrives. The committed doc starts from the scene's existing doc, so
+   extras like D2 `sketch` survive the turn, and the pre-turn doc is recorded in
+   the scene's version history first (see **Version history** below).
+
+**Excalidraw boards keep what the agent can't draw.** The agent's simplified
+element form only covers rectangles, ellipses, diamonds, id-routed arrows and
+text. Before the turn the server splits the board: the agent's file holds only
+those (bound labels folded into `label`, arrows reduced to `start`/`end` ids),
+while images, freehand strokes, lines, frames, free (unbound) arrows, anything
+bound to them, and the top-level `files` (base64 images) / `appState` are set
+aside and merged back into whatever the agent writes — both in the live preview
+and in the committed scene. The merged scene mixes simplified and full elements;
+`ExcalidrawCanvas` builds the former and restores the latter, and re-registers
+`files` on load. Large sources aren't inlined into the prompt (the agent reads
+the file instead).
+
+### Version history
+
+Every scene keeps its last **30** versions (`canvas_scene_versions`, migration
+0152). A version is the document as it was **just before** a change: before each
+Ask AI commit, before a restore, and at most once per 10 minutes across manual
+saves. Identical consecutive snapshots are skipped. **Restore previous version…**
+in the Assistant panel lists them and restores the chosen one
+(`POST …/versions/{vid}/restore`); the current doc is snapshotted first, so a
+restore is itself undoable.
 
 `AssistResult` = `{ excalidraw?, mermaid?, d2?, format, nodes[], edges[], note }`.
 `note` is the agent's one-line description (or an error explanation when nothing
@@ -361,11 +385,17 @@ workspace from the scene row.
 | 104 | `GET /api/v1/canvas/scenes/{id}` | ws viewer | full scene incl. `doc_json`, `session_id`, `provider`, `section` |
 | 105 | `PUT /api/v1/canvas/scenes/{id}` | ws editor | partial update (`{title?, doc?, thumbnail?, provider?, section?, story_id?}`; omitted fields unchanged) |
 | 106 | `DELETE /api/v1/canvas/scenes/{id}` | ws editor | delete → 204 |
+| 106a | `GET /api/v1/canvas/scenes/{id}/versions` | ws viewer | version history, newest first (no documents) |
+| 106b | `POST /api/v1/canvas/scenes/{id}/versions/{vid}/restore` | ws editor | restore a version (current doc snapshotted first) → CanvasScene |
 | 107 | `POST /api/v1/canvas/scenes/{id}/assist` | ws editor | one file-backed agent turn → `AssistResult`; **commits** the scene + broadcasts `CanvasUpdated` |
 | 108 | `POST /api/v1/canvas/assist/preview` | Canvas Edit | scene-less draw (`{prompt, mode?, workspace_id}`); throwaway session → `AssistResult` |
 | 145 | `GET /api/v1/sessions/{sid}/canvas-refs` | ws viewer | scenes referenced by this session (§7a) |
 | 146 | `POST /api/v1/sessions/{sid}/canvas-refs` | ws editor | reference a scene (`{scene_id}`) → 204; idempotent; 404 if the scene isn't in the session's workspace |
 | 147 | `DELETE /api/v1/sessions/{sid}/canvas-refs/{scene_id}` | ws editor | detach a scene → 204 |
+
+Scene create (#103) and update (#105) accept bodies up to 25 MiB — an Excalidraw
+board inlines pasted images as base64 in its source, which used to exceed axum's
+2 MB default and fail every autosave with 413.
 
 `POST /api/v1/product/stories/{sid}/linked-canvases` is the related Product route
 that lists the Canvas scenes linked to a story.

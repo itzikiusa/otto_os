@@ -82,6 +82,7 @@ below). Clients need no change: keep sending, and treat a dropped socket or a
 {"type":"resync","lines":2000}                      // typed over a dropped local backlog: discard my queued output, send ONE snapshot (see below)
 {"type":"credit","window":1048576}                  // credit flow control: send me at most `window` unacknowledged binary bytes (see below)
 {"type":"ack","bytes":4194304}                      // credit: cumulative binary bytes consumed (parsed or dropped) since the grant
+{"type":"probe","id":7}                             // latency probe: answered at once with `probe_ack` (see below); read-only safe
 ```
 
 **Credit flow control (`credit` / `ack`) — preferred.** `pause`/`resume`
@@ -230,7 +231,20 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
                                                     // are still delivered in order). Sent once per failing stretch.
 {"type":"search_result","query":"foo","matches":[{"line":42,"text":"foo bar baz"},...]}  // up to 200 matches; always valid JSON
                                                     // (text is ANSI-stripped but may contain tabs/C0 bytes, JSON-escaped)
+{"type":"probe_ack","id":7,"echo":{"last_ms":3.2,"avg_ms":4.1,"max_ms":48.0,"samples":120}}  // reply to `probe`; `echo` null with no live PTY
 ```
+
+#### Latency probe (`probe` / `probe_ack`)
+
+Diagnostics for the terminal latency HUD (opt-in in the UI:
+`localStorage['otto.debug.termLatency']='1'`). The connection loop answers a
+`probe` immediately with `probe_ack` carrying the same `id` (default 0), so the
+client's round trip is websocket + daemon loop with no child process in the
+path. `echo` is the PTY's keystroke-echo clock since spawn: the time from an
+input write reaching the PTY to the child's first output after it (`last_ms`,
+`avg_ms` — an EWMA with α = 1/8 —, `max_ms`, `samples`). It measures "first
+output after input", so a spinner frame landing in between under-reads a
+sample. `null` when the viewer has no live PTY. Viewers (read-only) may probe.
 
 #### Server-side search (`{"type":"search"}`)
 
@@ -394,7 +408,7 @@ MCP token, a share link — are ignored, so such a socket is never a target):
 Server → that ONE connection:
 
 ```json
-{"type":"hello_ack","conn_id":"01J…","boot_id":"01J…"}
+{"type":"hello_ack","conn_id":"01J…","boot_id":"01J…","boot_restore":{"kept_running":5,"suspended":2}}
 {"type":"ui_command","id":"01J…","session_id":"…","agent":{"session_id":"…","title":"Fix the report","provider":"claude"},"command":"db_run_query","args":{"tab_id":"…"},"deadline_ms":45000}
 {"type":"ui_command_cancel","id":"01J…","reason":"timeout"}
 ```
@@ -403,6 +417,12 @@ Server → that ONE connection:
   back as `X-Otto-Ui-Conn` on `POST /ui/commands/{id}/result|progress`.
   `boot_id` (additive) is minted once per daemon process: a different value than
   the one seen before means the daemon restarted (every ephemeral id is gone).
+  `boot_restore` (additive; `null` until the boot restore ran) says what that
+  restart did to sessions: `kept_running` = re-adopted from their PTY holders
+  (same process), `suspended` = sessions that were live but lost their process
+  with the previous daemon (now `reconnectable`, stamped
+  `meta.suspended = {reason:"restart", at}`). The UI shows "Otto restarted —
+  N kept running · M suspended" once per boot id when either is non-zero.
 - `ui_command` — `command` is the bare catalog name (no `ui_` prefix); `args`
   are validated against the entry's schema, with `connection_id` already
   resolved to the canonical id; `deadline_ms` is the DURATION (ms) the daemon
@@ -537,6 +557,19 @@ Notices & notifications:
   claude's native Notification hook, and — for every AGENT provider — the daemon's
   Working→Idle turn-finish transition (`session:{id}:waiting`). Shell sessions keep the
   plain `session:{id}:idle` key and never raise the flag.
+  **Automation notices** (`kind: "system"`, `source_key` `automation:<kind>:<id>`): the
+  first failed run of a streak of a scheduled task (`scheduled_task`, incl. a failed
+  report delivery), personal agent (`personal_agent`) or workflow (`workflow`) posts one
+  `error` notice; further failures stay silent until a clean run ends the streak (the
+  streak set is in-memory, so after a daemon restart the next failure refreshes the same
+  row). A goal loop that becomes `exhausted`/`blocked`/`failed`/`succeeded` posts one per
+  episode (`goal_loop`; a running loop resets it), and a workflow run parked at a
+  human-approval step posts a `warn` notice once per gate
+  (`automation:workflow_approval:<run>:<node>`). Notices are scoped to the
+  task/agent/workflow/loop creator (`user_id`) and carry an `open_route` action
+  (`{type:"open_route", route, workspace_id?}`; routes: `workflows/<wf>/runs/<run>`,
+  `scheduled-tasks/<task>/runs/<run>`, `loops/<loop>`, `personal-agents/<agent>/runs`).
+  A user's cancel/stop is never notified.
 
 Activity trail & tasks (session-family — owner/admin/root, viewer-gated):
 
@@ -1008,6 +1041,24 @@ blind timer.
 - The Scheduled Tasks page re-fetches the task's run history on a matching tick
   instead of polling.
 - TypeScript type: `{ type: 'scheduled_task_run_updated'; workspace_id: Id; task_id: Id; run_id: Id; status: string }`.
+
+---
+
+### `personal_agent_activity`
+
+```json
+{ "type": "personal_agent_activity", "workspace_id": "<Id>", "agent_id": "<Id>",
+  "kind": "tool_call|blocked|approval_required|approval_waiting" }
+```
+
+- Emitted by `otto_server::personal_agent_activity` when one of a personal
+  agent's sessions makes a governed `otto.*` call (allowed, blocked by the
+  read-only / rule policy, or forced to approval) or files an approval it now
+  waits on.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- Ids only: the agent page's **Activity** tab re-fetches
+  `GET /personal-agents/{id}/activity` on a matching tick.
+- TypeScript type: `{ type: 'personal_agent_activity'; workspace_id: Id; agent_id: Id; kind: string }`.
 
 ---
 

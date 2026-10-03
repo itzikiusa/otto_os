@@ -28,14 +28,21 @@ pub fn emit_snip(app: &AppHandle) {
     let wins = app.windows();
     let target = wins
         .iter()
-        .find(|(l, w)| (crate::windows::is_app_window(l) || l.starts_with(crate::panes::PREFIX)) && w.is_focused().unwrap_or(false))
+        .find(|(l, w)| {
+            (crate::windows::is_app_window(l) || l.starts_with(crate::panes::PREFIX))
+                && w.is_focused().unwrap_or(false)
+        })
         .or_else(|| wins.get_key_value("main"))
         .or_else(|| wins.iter().find(|(l, _)| crate::windows::is_app_window(l)))
         .map(|(l, _)| l.clone());
     match target {
         Some(label) => {
             let host = crate::panes::menu_host(app, &label);
-            let _ = app.emit_to(tauri::EventTarget::webview(host), "otto://menu", "snip".to_string());
+            let _ = app.emit_to(
+                tauri::EventTarget::webview(host),
+                "otto://menu",
+                "snip".to_string(),
+            );
         }
         None => {
             // No local host is available. Never broadcast native actions.

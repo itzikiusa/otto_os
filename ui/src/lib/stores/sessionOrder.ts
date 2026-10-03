@@ -3,7 +3,7 @@
 // the store hands it over (no re-sort); "Manual" applies a persisted id order.
 import type { Id } from '../api/types';
 
-export type OrderMode = 'recent' | 'manual';
+export type OrderMode = 'recent' | 'manual' | 'tokens';
 export const LS_SESSION_ORDER = 'otto_session_order_'; // + ws key → { mode, order: Id[] }
 
 /** Manual order: ids NOT in `order` (new sessions) go on TOP, newest `last_active_at` first (string compare — ISO);
@@ -36,4 +36,13 @@ export function reorder(ids: Id[], fromId: Id, toId: Id): Id[] {
   next.splice(from, 1);
   next.splice(to, 0, fromId);
   return next;
+}
+
+/** Tokens order (A5): most tokens first; sessions with no recorded usage
+ *  keep their incoming (recent) order after them. Stable for ties. */
+export function applyTokenOrder<T extends { id: Id }>(sessions: T[], tokens: Record<Id, number>): T[] {
+  return sessions
+    .map((s, i) => ({ s, i, t: tokens[s.id] ?? -1 }))
+    .sort((a, b) => b.t - a.t || a.i - b.i)
+    .map((x) => x.s);
 }

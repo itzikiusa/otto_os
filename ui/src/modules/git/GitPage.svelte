@@ -736,7 +736,8 @@
     transition: border-color 130ms ease-out;
   }
   .repo-search:focus-within {
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .repo-search-input {
     flex: 1;

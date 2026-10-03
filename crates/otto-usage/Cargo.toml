@@ -14,7 +14,7 @@ chrono.workspace = true
 tracing.workspace = true
 dirs.workspace = true
 reqwest.workspace = true
-sysinfo = "0.33"
+sysinfo = "0.39.6"
 
 [dev-dependencies]
 tempfile.workspace = true

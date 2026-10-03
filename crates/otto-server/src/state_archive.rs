@@ -111,7 +111,7 @@ fn db_error(error: sqlx::Error) -> ApiError {
     ApiError(Error::Internal(format!("Archive database: {error}")))
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 fn archive_bytes(archive: &StateArchive) -> ApiResult<Vec<u8>> {
     let bytes = serde_json::to_vec(archive).map_err(|e| invalid(&e.to_string()))?;
@@ -513,7 +513,7 @@ async fn apply_rows(
         let names: BTreeSet<String> = broken.iter().map(|r| r.get::<String, _>("table")).collect();
         return Err(invalid(&format!("Restore would leave missing references in: {}. Include the related saved records or restore into a compatible profile.",names.into_iter().collect::<Vec<_>>().join(", "))));
     }
-    result.target_signature = format!("{:x}", signature.finalize());
+    result.target_signature = hex::encode(signature.finalize());
     Ok(result)
 }
 type PlannedFiles = (Vec<(String, usize)>, Vec<RestoreConflict>, String);
@@ -576,7 +576,7 @@ fn plan_files(
             pending.push((relative, index));
         }
     }
-    Ok((pending, conflicts, format!("{:x}", signature.finalize())))
+    Ok((pending, conflicts, hex::encode(signature.finalize())))
 }
 fn preview_token(
     archive: &StateArchive,
@@ -587,7 +587,7 @@ fn preview_token(
     let mut hash = Sha256::new();
     hash.update(archive_bytes(archive)?);
     hash.update(format!("{policy:?}:{rows}:{files}"));
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hex::encode(hash.finalize()))
 }
 
 pub async fn preview_restore(

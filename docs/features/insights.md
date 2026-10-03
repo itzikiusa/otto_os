@@ -378,6 +378,11 @@ to all enabled integrations.
   period).
 - Self-contained HTML reports, listed newest-first, openable in-app, in a new
   tab, or downloadable.
+- Token totals match the Usage page's corrected counting: for Claude sessions
+  without `session-meta`, the collector (skill v4) sums each API response
+  (`message.id:requestId`) ONCE with its **final** usage — the per-bucket max
+  over its streamed lines, not the first line's partial `output_tokens` — the
+  same rule as the usage tailer ([usage-and-cost.md §3.4](./usage-and-cost.md)).
 - A plain-text summary per report (no HTML needed to skim).
 - Cross-client push via the `insight_ready` WS event and optional Slack/Telegram
   relay.
