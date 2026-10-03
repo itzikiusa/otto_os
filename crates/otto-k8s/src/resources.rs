@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::cli::Kubectl;
+use crate::monitor::gateway::KubeProxy;
 
 /// Resource kinds the console lists (contract §3.2) plus the two cluster-scoped
 /// kinds the detail endpoint accepts (`nodes`, `namespaces`).
@@ -173,6 +174,17 @@ pub struct K8sRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restarts: Option<i64>,
     pub age_seconds: i64,
+    /// Unix seconds the age counts from (`creationTimestamp`; an event's
+    /// last-seen time) — the UI renders Age as `now - created_at`, so a 304
+    /// (same rows kept) never freezes the column (perf R1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
+    /// `metadata.uid` / `metadata.resourceVersion`: the list's content
+    /// version is built from these (never sent).
+    #[serde(skip)]
+    pub uid: String,
+    #[serde(skip)]
+    pub resource_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -286,6 +298,12 @@ pub(crate) fn string_map(v: Option<&Value>) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
+fn created_at(v: &Value, ptr: &str) -> Option<i64> {
+    s(v, ptr)
+        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.timestamp())
+}
+
 fn age_seconds(v: &Value, ptr: &str, now: DateTime<Utc>) -> i64 {
     s(v, ptr)
         .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
@@ -313,6 +331,11 @@ fn base_row(kind: Kind, item: &Value, now: DateTime<Utc>) -> K8sRow {
         ready: None,
         restarts: None,
         age_seconds: age_seconds(item, "/metadata/creationTimestamp", now),
+        created_at: created_at(item, "/metadata/creationTimestamp"),
+        uid: s(item, "/metadata/uid").unwrap_or("").to_string(),
+        resource_version: s(item, "/metadata/resourceVersion")
+            .unwrap_or("")
+            .to_string(),
         node: None,
         ip: None,
         cpu: None,
@@ -1104,6 +1127,7 @@ fn event(row: &mut K8sRow, item: &Value, now: DateTime<Utc>) {
         .or_else(|| s(item, "/metadata/creationTimestamp"));
     if let Some(t) = last.and_then(|t| DateTime::parse_from_rfc3339(t).ok()) {
         row.age_seconds = (now - t.with_timezone(&Utc)).num_seconds().max(0);
+        row.created_at = Some(t.timestamp());
     }
     row.status = ty.clone();
     row.health = Some(if ty == "Warning" {
@@ -1373,15 +1397,193 @@ fn ns_flags(kind: Kind, ns: Option<&str>) -> Vec<String> {
     }
 }
 
+/// The API collection path of a listable `kind` — cluster-wide, or in `ns`
+/// (a valid DNS label). `None` for kinds the console lists another way.
+pub fn api_collection_path(kind: Kind, ns: Option<&str>) -> Option<String> {
+    let (prefix, plural) = match kind {
+        Kind::Pods => ("/api/v1", "pods"),
+        Kind::Services => ("/api/v1", "services"),
+        Kind::Configmaps => ("/api/v1", "configmaps"),
+        Kind::Secrets => ("/api/v1", "secrets"),
+        Kind::Pvcs => ("/api/v1", "persistentvolumeclaims"),
+        Kind::Events => ("/api/v1", "events"),
+        Kind::Deployments => ("/apis/apps/v1", "deployments"),
+        Kind::Statefulsets => ("/apis/apps/v1", "statefulsets"),
+        Kind::Daemonsets => ("/apis/apps/v1", "daemonsets"),
+        Kind::Replicasets => ("/apis/apps/v1", "replicasets"),
+        Kind::Jobs => ("/apis/batch/v1", "jobs"),
+        Kind::Cronjobs => ("/apis/batch/v1", "cronjobs"),
+        Kind::Ingresses => ("/apis/networking.k8s.io/v1", "ingresses"),
+        Kind::Hpas => ("/apis/autoscaling/v2", "horizontalpodautoscalers"),
+        Kind::Rollouts => ("/apis/argoproj.io/v1alpha1", "rollouts"),
+        Kind::Applications => ("/apis/argoproj.io/v1alpha1", "applications"),
+        Kind::Nodes | Kind::Namespaces => return None,
+    };
+    match ns.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) if is_dns_name(n) => Some(format!("{prefix}/namespaces/{n}/{plural}")),
+        Some(_) => None,
+        None => Some(format!("{prefix}/{plural}")),
+    }
+}
+
+/// `[a-z0-9.-]`, 1–253 chars, no `..` — safe to put in an API path.
+fn is_dns_name(x: &str) -> bool {
+    !x.is_empty()
+        && x.len() <= 253
+        && x.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+        && !x.contains("..")
+}
+
+/// Page a collection straight off the API server through the console's
+/// list gateway (perf R3): `limit`/`continue` chunks, each parsed +
+/// normalised on the blocking pool. Any non-200 / truncated page is an
+/// error — the caller then uses kubectl, which maps errors exactly.
+async fn list_via_gateway(
+    gw: &KubeProxy,
+    path: &str,
+    kind: Kind,
+    label: Option<&str>,
+    q: Option<&str>,
+) -> Result<Vec<K8sRow>> {
+    use crate::list_gateway::{encode_query, MAX_PAGE_BYTES, PAGE, PAGE_TIMEOUT};
+    let mut rows: Vec<K8sRow> = Vec::new();
+    let mut cont = String::new();
+    loop {
+        let mut url = format!("{path}?limit={PAGE}");
+        if let Some(l) = label.map(str::trim).filter(|l| !l.is_empty()) {
+            url.push_str("&labelSelector=");
+            url.push_str(&encode_query(l));
+        }
+        if !cont.is_empty() {
+            url.push_str("&continue=");
+            url.push_str(&encode_query(&cont));
+        }
+        let r = gw
+            .request(
+                hyper::Method::GET,
+                &url,
+                &[("accept".into(), "application/json".into())],
+                None,
+                PAGE_TIMEOUT,
+                MAX_PAGE_BYTES,
+            )
+            .await?;
+        if r.status != 200 || r.truncated {
+            return Err(Error::Upstream(format!(
+                "list gateway: HTTP {}{}",
+                r.status,
+                if r.truncated { " (truncated)" } else { "" }
+            )));
+        }
+        let q_owned = q.map(str::to_string);
+        let body = r.body;
+        let (page, next) = tokio::task::spawn_blocking(move || -> Result<(Vec<K8sRow>, String)> {
+            let list: Value = serde_json::from_slice(&body)
+                .map_err(|e| Error::Upstream(format!("list gateway: bad JSON: {e}")))?;
+            let now = Utc::now();
+            let page = arr(&list, "/items")
+                .iter()
+                .map(|item| normalize(kind, item, now))
+                .filter(|r| q_owned.as_deref().is_none_or(|q| matches_query(r, q)))
+                .collect();
+            Ok((
+                page,
+                s(&list, "/metadata/continue").unwrap_or("").to_string(),
+            ))
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("k8s list task: {e}")))??;
+        rows.extend(page);
+        if next.is_empty() {
+            return Ok(rows);
+        }
+        cont = next;
+    }
+}
+
+/// metrics-server pod metrics through the list gateway, parsed off the
+/// runtime.
+async fn pod_metrics_via_gateway(gw: &KubeProxy, ns: Option<&str>) -> Result<Vec<PodMetrics>> {
+    let path = match ns.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) if is_dns_name(n) => format!("/apis/metrics.k8s.io/v1beta1/namespaces/{n}/pods"),
+        Some(_) => return Err(Error::Invalid("invalid namespace".into())),
+        None => "/apis/metrics.k8s.io/v1beta1/pods".to_string(),
+    };
+    let r = gw
+        .request(
+            hyper::Method::GET,
+            &path,
+            &[],
+            None,
+            crate::list_gateway::PAGE_TIMEOUT,
+            crate::list_gateway::MAX_PAGE_BYTES,
+        )
+        .await?;
+    if r.status != 200 || r.truncated {
+        return Err(Error::Upstream(format!(
+            "metrics gateway: HTTP {}",
+            r.status
+        )));
+    }
+    tokio::task::spawn_blocking(move || {
+        serde_json::from_slice::<Value>(&r.body)
+            .map(|v| parse_pod_metrics(&v))
+            .map_err(|e| Error::Upstream(format!("metrics gateway: bad JSON: {e}")))
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("k8s metrics task: {e}")))?
+}
+
 /// `GET /k8s/clusters/{id}/resources` — list + normalise + filter (+ metrics).
+/// With the console's list gateway (`gw`) the list is paged off the API
+/// server directly; without it, or when it fails, `kubectl get -o json`.
 pub async fn list(
     k: &Kubectl,
+    gw: Option<&KubeProxy>,
     kind: Kind,
     ns: Option<&str>,
     label: Option<&str>,
     q: Option<&str>,
     metrics_server: bool,
 ) -> Result<(Vec<K8sRow>, bool)> {
+    let mut via_gw = None;
+    if let (Some(gw), Some(path)) = (gw, api_collection_path(kind, ns)) {
+        match list_via_gateway(gw, &path, kind, label, q).await {
+            Ok(rows) => via_gw = Some(rows),
+            Err(e) => tracing::debug!("k8s list gateway failed, using kubectl: {e}"),
+        }
+    }
+    let gw_ok = via_gw.is_some();
+    let mut rows = match via_gw {
+        Some(rows) => rows,
+        None => list_via_kubectl(k, kind, ns, label, q).await?,
+    };
+    let mut has_metrics = false;
+    if kind == Kind::Pods && metrics_server && !rows.is_empty() {
+        // Best-effort: a metrics hiccup must not blank the pod table.
+        let m = match gw.filter(|_| gw_ok) {
+            Some(gw) => match pod_metrics_via_gateway(gw, ns).await {
+                Ok(m) => Ok(m),
+                Err(_) => pod_metrics(k, ns).await,
+            },
+            None => pod_metrics(k, ns).await,
+        };
+        if let Ok(m) = m {
+            merge_pod_metrics(&mut rows, &m);
+            has_metrics = true;
+        }
+    }
+    Ok((rows, has_metrics))
+}
+
+async fn list_via_kubectl(
+    k: &Kubectl,
+    kind: Kind,
+    ns: Option<&str>,
+    label: Option<&str>,
+    q: Option<&str>,
+) -> Result<Vec<K8sRow>> {
     let mut args: Vec<String> = vec![
         "get".into(),
         kind.kubectl_resource().into(),
@@ -1397,7 +1599,7 @@ pub async fn list(
     // ~120 ms into a `Value` (every 10 s with auto-refresh on).
     let out = k.run(args).await?;
     let q_owned = q.map(str::to_string);
-    let mut rows: Vec<K8sRow> = tokio::task::spawn_blocking(move || -> Result<Vec<K8sRow>> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<K8sRow>> {
         let list = crate::cli::parse_json(&out.stdout)?;
         let now = Utc::now();
         Ok(arr(&list, "/items")
@@ -1407,33 +1609,62 @@ pub async fn list(
             .collect())
     })
     .await
-    .map_err(|e| Error::Internal(format!("k8s list task: {e}")))??;
-    let mut has_metrics = false;
-    if kind == Kind::Pods && metrics_server && !rows.is_empty() {
-        // Best-effort: a metrics hiccup must not blank the pod table.
-        if let Ok(m) = pod_metrics(k, ns).await {
-            merge_pod_metrics(&mut rows, &m);
-            has_metrics = true;
-        }
-    }
-    Ok((rows, has_metrics))
+    .map_err(|e| Error::Internal(format!("k8s list task: {e}")))?
 }
 
-/// Raw metrics-server pod list for `ns` (or all).
+/// Raw metrics-server pod list for `ns` (or all). The JSON (an all-namespace
+/// list is MBs on a big cluster) is parsed on the blocking pool, not a
+/// runtime worker (perf R3).
 pub async fn pod_metrics(k: &Kubectl, ns: Option<&str>) -> Result<Vec<PodMetrics>> {
     let path = match ns.map(str::trim).filter(|n| !n.is_empty()) {
         Some(n) => format!("/apis/metrics.k8s.io/v1beta1/namespaces/{n}/pods"),
         None => "/apis/metrics.k8s.io/v1beta1/pods".to_string(),
     };
-    let v = k.json(["get", "--raw", &path]).await?;
-    Ok(parse_pod_metrics(&v))
+    let out = k.run(["get", "--raw", &path]).await?;
+    tokio::task::spawn_blocking(move || {
+        crate::cli::parse_json(&out.stdout).map(|v| parse_pod_metrics(&v))
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("k8s metrics task: {e}")))?
 }
 
-/// `GET /k8s/clusters/{id}/metrics` — pods + `available` flag.
-pub async fn metrics(k: &Kubectl, ns: Option<&str>) -> Result<(Vec<PodMetrics>, bool)> {
-    match pod_metrics(k, ns).await {
+/// ONE pod's metrics (`…/namespaces/{ns}/pods/{pod}`) — the drawer's Metrics
+/// tab, instead of the whole namespace every 10 s (perf R5). `Ok(None)` when
+/// metrics-server has no sample for it yet.
+pub async fn one_pod_metrics(k: &Kubectl, ns: &str, pod: &str) -> Result<Option<PodMetrics>> {
+    if !is_dns_name(ns) || !is_dns_name(pod) {
+        return Err(Error::Invalid("invalid namespace or pod name".into()));
+    }
+    let path = format!("/apis/metrics.k8s.io/v1beta1/namespaces/{ns}/pods/{pod}");
+    match k.json(["get", "--raw", &path]).await {
+        Ok(v) => Ok(parse_pod_metrics(&serde_json::json!({ "items": [v] }))
+            .into_iter()
+            .next()),
+        // The pod has no sample yet (metrics-server itself answered).
+        Err(Error::NotFound(m)) if m.contains("podmetrics") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// `GET /k8s/clusters/{id}/metrics` — pods + `available` flag; with `pod`
+/// (and `ns`) only that pod.
+pub async fn metrics(
+    k: &Kubectl,
+    ns: Option<&str>,
+    pod: Option<&str>,
+) -> Result<(Vec<PodMetrics>, bool)> {
+    let ns_s = ns.map(str::trim).filter(|n| !n.is_empty());
+    let res = match (ns_s, pod.map(str::trim).filter(|p| !p.is_empty())) {
+        (Some(n), Some(p)) => one_pod_metrics(k, n, p)
+            .await
+            .map(|m| m.into_iter().collect()),
+        (None, Some(_)) => return Err(Error::Invalid("pod needs ns".into())),
+        _ => pod_metrics(k, ns).await,
+    };
+    match res {
         Ok(p) => Ok((p, true)),
         Err(Error::Forbidden(m)) => Err(Error::Forbidden(m)),
+        Err(Error::Invalid(m)) => Err(Error::Invalid(m)),
         Err(e) => {
             tracing::debug!("metrics unavailable: {e}");
             Ok((vec![], false))

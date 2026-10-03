@@ -35,8 +35,8 @@ Contract: `docs/contracts/api.md` → "Monitoring". Design spec:
    runs every `interval_secs` (default 60).
 
 Enable on a staging cluster first. The collector is read-only, but it does
-keep one `kubectl port-forward` per pod open when the API server denies the
-pod proxy (see Transport).
+keep up to 32 `kubectl port-forward` processes open when the API server
+denies the pod proxy (see Transport).
 
 ## What a cycle does
 
@@ -208,9 +208,15 @@ transport/config change, or when every pod failed over it. If the proxy is
 denied — Rancher-managed clusters typically deny `pods/proxy` — the collector
 uses `kubectl port-forward pod/<pod> 0:<port>` with `concurrency` parallel
 pods (default 8, max 32) and a plain HTTP GET on loopback. Forwards are kept
-open across cycles (one per pod/port, closed when the pod leaves the target
-list or the forward breaks) with one shared HTTP client, so a steady cluster
-spawns no processes per cycle. If a port-forward cycle still exceeds the
+open across cycles in a **bounded pool** (one per pod/port, at most 32 alive;
+closed when the pod leaves the target list, the forward breaks, or nobody used
+it for two intervals) with one shared HTTP client, so a steady cluster of up
+to 32 scraped pods spawns no processes per cycle. Above the cap the pool keeps
+a stable resident set and the remaining pods get a one-shot forward (spawned,
+used, killed — never more than `concurrency` at once), and the status line
+says `port-forward: N pods rotate through a pool of 32`; each resident
+kubectl costs ~30 MB and one process against the per-user limit, which is
+why it is capped. If a port-forward cycle still exceeds the
 interval, the status line says so (`port-forward transport: cycle took …`);
 raise concurrency or the interval.
 

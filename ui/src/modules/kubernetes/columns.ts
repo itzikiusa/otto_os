@@ -4,7 +4,7 @@
 // are appended generically so nothing is silently dropped.
 
 import type { K8sResourceKind, K8sRow } from '../../lib/api/types';
-import { formatAge, formatBytes, formatMillicores } from './k8s-util';
+import { formatAge, formatBytes, formatMillicores, rowAge } from './k8s-util';
 
 export interface Column {
   key: string;
@@ -30,7 +30,7 @@ const CPU: Column = { key: 'cpu', label: 'CPU', width: '62px', num: true, mono: 
 const MEM: Column = { key: 'mem', label: 'MEM', width: '70px', num: true, mono: true, value: (r) => (r.mem == null ? '' : formatBytes(r.mem)) };
 const NODE: Column = { key: 'node', label: 'Node', width: 'minmax(96px, 1fr)', value: (r) => r.node ?? '' };
 const IP: Column = { key: 'ip', label: 'IP', width: '108px', mono: true, value: (r) => r.ip ?? '' };
-const AGE: Column = { key: 'age', label: 'Age', width: '52px', num: true, mono: true, value: (r) => formatAge(r.age_seconds) };
+const AGE: Column = { key: 'age', label: 'Age', width: '52px', num: true, mono: true, value: (r) => formatAge(rowAge(r)) };
 
 const ex = (key: string, label: string, width = 'minmax(90px, 1fr)', opts: Partial<Column> = {}): Column => ({
   key: `extra.${key}`,

@@ -324,21 +324,62 @@ pub async fn fetch_pooled(
 /// `(namespace, pod, port)` — one forward each.
 type ForwardKey = (String, String, u16);
 
+/// Most `kubectl port-forward` children the pool keeps alive at once (perf
+/// R2). Each is a resident kubectl (~30 MB RSS) and one process against the
+/// per-user limit (`kern.maxprocperuid`, 2666 on a stock Mac): unbounded, a
+/// 150-pod cluster held several GB and a ~2.6k-pod one broke process spawning
+/// for the whole login session. Pods past the cap get a one-shot forward
+/// (spawned, used, killed) — the pre-pool behaviour, bounded by the scrape
+/// concurrency.
+pub const FORWARD_POOL_MAX: usize = 32;
+
 struct Forward {
     child: tokio::process::Child,
     local: u16,
+    /// Last checkout (LRU eviction + idle reaping).
+    last_used: Instant,
+    /// The [`ForwardPool::begin_cycle`] epoch of the last checkout: an entry
+    /// already used THIS cycle is never evicted for another target, so a
+    /// cycle over more targets than the cap keeps a stable resident set
+    /// instead of thrashing (LRU over a cyclic scan always misses).
+    epoch: u64,
+    /// Checked out by a scrape right now — never evicted or reaped.
+    busy: bool,
+}
+
+#[derive(Default)]
+struct PoolState {
+    map: std::collections::HashMap<ForwardKey, Forward>,
+    /// Slots reserved by spawns in flight (counted against the cap).
+    pending: usize,
+    epoch: u64,
+}
+
+/// How a scrape reaches its pod's port.
+enum Slot {
+    /// A live pooled forward on this local port (checked out).
+    Pooled(u16),
+    /// A slot was reserved: spawn a forward and add it to the pool.
+    Spawn,
+    /// The pool is full of forwards in use this cycle: forward once.
+    Overflow,
 }
 
 /// Long-lived `kubectl port-forward`s keyed by `(ns, pod, port)`, kept across
 /// collector cycles (K1: a forward per pod per cycle was 40 s of a 60 s cycle
-/// at 150 pods), plus ONE shared HTTP client. A forward whose child exited or
-/// whose connection broke is dropped and re-spawned on the next use; the
-/// collector [`retain`](Self::retain)s only pods still being scraped. Every
+/// at 150 pods), plus ONE shared HTTP client. Bounded (R2): at most `cap`
+/// children, the least-recently-used idle one evicted for a new target, and
+/// one-shot forwards past the cap. A forward whose child exited or whose
+/// connection broke is dropped and re-spawned on the next use; the collector
+/// [`retain`](Self::retain)s only pods still being scraped and
+/// [`reap_idle`](Self::reap_idle)s forwards nobody used for a while. Every
 /// child is `kill_on_drop`, so dropping the pool ends them all.
 pub struct ForwardPool {
     client: reqwest::Client,
-    map: tokio::sync::Mutex<std::collections::HashMap<ForwardKey, Forward>>,
+    cap: usize,
+    state: tokio::sync::Mutex<PoolState>,
     spawned: std::sync::atomic::AtomicU64,
+    overflow: std::sync::atomic::AtomicU64,
 }
 
 impl Default for ForwardPool {
@@ -349,13 +390,20 @@ impl Default for ForwardPool {
 
 impl ForwardPool {
     pub fn new() -> Self {
+        Self::with_cap(FORWARD_POOL_MAX)
+    }
+
+    /// A pool holding at most `cap` (≥ 1) forwards.
+    pub fn with_cap(cap: usize) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .no_proxy()
                 .build()
                 .unwrap_or_default(),
-            map: Default::default(),
+            cap: cap.max(1),
+            state: Default::default(),
             spawned: Default::default(),
+            overflow: Default::default(),
         }
     }
 
@@ -363,51 +411,139 @@ impl ForwardPool {
         (t.namespace.clone(), t.pod.clone(), t.port)
     }
 
-    /// Forwards spawned over the pool's life (tests / diagnostics).
+    /// The most forwards this pool keeps alive.
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
+    /// Forwards spawned over the pool's life, pooled + one-shot (tests /
+    /// diagnostics).
     pub fn spawned(&self) -> u64 {
         self.spawned.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// One-shot forwards used because the pool was full.
+    pub fn overflowed(&self) -> u64 {
+        self.overflow.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Open forwards right now.
     pub async fn len(&self) -> usize {
-        self.map.lock().await.len()
+        self.state.lock().await.map.len()
     }
 
     pub async fn is_empty(&self) -> bool {
         self.len().await == 0
     }
 
+    /// Start a collector cycle: forwards checked out from now on are this
+    /// cycle's resident set (see [`Forward::epoch`]).
+    pub async fn begin_cycle(&self) {
+        self.state.lock().await.epoch += 1;
+    }
+
     /// Kill every forward whose target `keep` rejects.
     pub async fn retain(&self, keep: impl Fn(&str, &str, u16) -> bool) {
-        self.map
+        self.state
             .lock()
             .await
+            .map
             .retain(|(ns, pod, port), _| keep(ns, pod, *port));
     }
 
-    pub async fn clear(&self) {
-        self.map.lock().await.clear();
+    /// Kill every idle forward not used for `max_idle`; returns how many.
+    pub async fn reap_idle(&self, max_idle: Duration) -> usize {
+        let mut s = self.state.lock().await;
+        let before = s.map.len();
+        s.map
+            .retain(|_, f| f.busy || f.last_used.elapsed() < max_idle);
+        before - s.map.len()
     }
 
-    /// The local port of a live forward to `target`, spawning one if needed.
-    /// Each target is scraped by one task per cycle, so the lock is only held
-    /// for map lookups — never across the spawn.
-    async fn local_port(&self, k: &Kubectl, target: &ScrapeTarget) -> Result<u16> {
-        let key = Self::key(target);
-        {
-            let mut m = self.map.lock().await;
-            if let Some(f) = m.get_mut(&key) {
-                if matches!(f.child.try_wait(), Ok(None)) {
-                    return Ok(f.local);
-                }
-                m.remove(&key);
+    pub async fn clear(&self) {
+        self.state.lock().await.map.clear();
+    }
+
+    /// Check out a forward to `target`: a live pooled one, else a reserved
+    /// slot (evicting the LRU idle forward not used this cycle when full),
+    /// else overflow. The lock is only held for map work — never across a
+    /// spawn.
+    async fn checkout(&self, key: &ForwardKey) -> Slot {
+        let mut s = self.state.lock().await;
+        let epoch = s.epoch;
+        if let Some(f) = s.map.get_mut(key) {
+            if !f.busy && matches!(f.child.try_wait(), Ok(None)) {
+                f.busy = true;
+                f.last_used = Instant::now();
+                f.epoch = epoch;
+                return Slot::Pooled(f.local);
+            }
+            if !f.busy {
+                s.map.remove(key);
+            } else {
+                // The same target scraped twice at once (not the collector's
+                // pattern): don't share, don't grow.
+                return Slot::Overflow;
             }
         }
-        let (child, local) = spawn_forward(k, target).await?;
-        self.spawned
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.map.lock().await.insert(key, Forward { child, local });
-        Ok(local)
+        if s.map.len() + s.pending >= self.cap {
+            let victim = s
+                .map
+                .iter()
+                .filter(|(_, f)| !f.busy && f.epoch < epoch)
+                .min_by_key(|(_, f)| f.last_used)
+                .map(|(k, _)| k.clone());
+            match victim {
+                Some(v) => {
+                    s.map.remove(&v);
+                }
+                None => return Slot::Overflow,
+            }
+        }
+        s.pending += 1;
+        Slot::Spawn
+    }
+
+    /// The local port of a live forward to `target` (checked out), or `None`
+    /// when the pool is full and the caller should forward once.
+    async fn local_port(&self, k: &Kubectl, target: &ScrapeTarget) -> Result<Option<u16>> {
+        let key = Self::key(target);
+        match self.checkout(&key).await {
+            Slot::Pooled(local) => Ok(Some(local)),
+            Slot::Overflow => Ok(None),
+            Slot::Spawn => {
+                let spawned = spawn_forward(k, target).await;
+                let mut s = self.state.lock().await;
+                s.pending -= 1;
+                let (child, local) = spawned?;
+                self.spawned
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let epoch = s.epoch;
+                s.map.insert(
+                    key,
+                    Forward {
+                        child,
+                        local,
+                        last_used: Instant::now(),
+                        epoch,
+                        busy: true,
+                    },
+                );
+                Ok(Some(local))
+            }
+        }
+    }
+
+    /// Return a checked-out forward; a broken one is killed (the next use
+    /// starts a fresh one).
+    async fn release(&self, key: &ForwardKey, broken: bool) {
+        let mut s = self.state.lock().await;
+        if broken {
+            s.map.remove(key);
+        } else if let Some(f) = s.map.get_mut(key) {
+            f.busy = false;
+            f.last_used = Instant::now();
+        }
     }
 
     async fn fetch(
@@ -416,13 +552,17 @@ impl ForwardPool {
         target: &ScrapeTarget,
         probes: &[Probe],
     ) -> Result<Vec<Result<ProbeResult>>> {
-        let local = self.local_port(k, target).await?;
+        let Some(local) = self.local_port(k, target).await? else {
+            self.overflow
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.spawned
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return fetch_forward_with(&self.client, k, target, probes).await;
+        };
         let (out, broken) = get_probes(&self.client, local, probes).await;
-        if broken {
-            // The forward died under us (pod restarted, kubectl lost the
-            // stream): drop it so the next cycle starts a fresh one.
-            self.map.lock().await.remove(&Self::key(target));
-        }
+        // A broken forward died under us (pod restarted, kubectl lost the
+        // stream): drop it so the next cycle starts a fresh one.
+        self.release(&Self::key(target), broken).await;
         Ok(out)
     }
 }
@@ -622,12 +762,22 @@ async fn fetch_forward(
     target: &ScrapeTarget,
     probes: &[Probe],
 ) -> Result<Vec<Result<ProbeResult>>> {
-    let (mut child, local) = spawn_forward(k, target).await?;
     let client = reqwest::Client::builder()
         .no_proxy()
         .build()
         .map_err(|e| Error::Internal(format!("http client: {e}")))?;
-    let (out, _) = get_probes(&client, local, probes).await;
+    fetch_forward_with(&client, k, target, probes).await
+}
+
+/// One-shot forward: spawn, GET every probe, kill.
+async fn fetch_forward_with(
+    client: &reqwest::Client,
+    k: &Kubectl,
+    target: &ScrapeTarget,
+    probes: &[Probe],
+) -> Result<Vec<Result<ProbeResult>>> {
+    let (mut child, local) = spawn_forward(k, target).await?;
+    let (out, _) = get_probes(client, local, probes).await;
     let _ = child.kill().await;
     Ok(out)
 }
@@ -655,6 +805,95 @@ pub fn group_by_port(
 mod tests {
     use super::*;
     use crate::monitor::probes::ProbeFormat;
+
+    /// perf R2: a port-forward cycle over more targets than the cap keeps at
+    /// most `cap` children alive, holds a STABLE resident set (later cycles
+    /// spawn only `targets - cap` one-shots, not `targets`), and idle
+    /// forwards are reaped. The fake `kubectl port-forward` announces a local
+    /// port served by an in-test HTTP stub, then sleeps like the real one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn forward_pool_is_bounded_with_a_stable_resident_set() {
+        use futures_util::StreamExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        )
+                        .await;
+                });
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("kubectl");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"Forwarding from 127.0.0.1:{port} -> 9000\"\nexec sleep 300\n"
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let k = Kubectl {
+            program: script.display().to_string(),
+            base: vec![],
+            base_stream: vec![],
+            env: vec![],
+            reauth: None,
+        };
+        let probes: Vec<Probe> = vec![serde_json::from_value(serde_json::json!({
+            "name": "health", "port": 9000, "path": "/health", "format": "health"
+        }))
+        .unwrap()];
+        let targets: Vec<ScrapeTarget> = (0..40)
+            .map(|i| ScrapeTarget {
+                namespace: "shop".into(),
+                pod: format!("web-{i:03}"),
+                port: 9000,
+            })
+            .collect();
+        const CAP: usize = 8;
+        let pool = ForwardPool::with_cap(CAP);
+        for cycle in 0..3 {
+            pool.begin_cycle().await;
+            let before = pool.spawned();
+            let results: Vec<_> =
+                futures_util::stream::iter(targets.iter().map(|t| pool.fetch(&k, t, &probes)))
+                    .buffered(4)
+                    .collect()
+                    .await;
+            for r in &results {
+                let r = r.as_ref().expect("forward");
+                assert_eq!(r[0].as_ref().expect("probe").status, 200);
+            }
+            assert!(
+                pool.len().await <= CAP,
+                "cycle {cycle}: {} > {CAP}",
+                pool.len().await
+            );
+            let spawned = (pool.spawned() - before) as usize;
+            let want = if cycle == 0 {
+                targets.len()
+            } else {
+                targets.len() - CAP
+            };
+            assert_eq!(spawned, want, "cycle {cycle}");
+        }
+        assert_eq!(pool.overflowed() as usize, 3 * (targets.len() - CAP));
+        // Every forward idle past the reap age is killed.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(pool.reap_idle(Duration::from_millis(10)).await, CAP);
+        assert!(pool.is_empty().await);
+    }
 
     #[test]
     fn forward_port_parse() {

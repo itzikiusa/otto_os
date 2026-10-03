@@ -57,6 +57,8 @@ const AUTO_KEY = 'otto_k8s_autorefresh';
  *  every read is a ClickHouse aggregation and the dashboards' windows (≥ 1 h,
  *  read from minute-or-coarser rollups) do not move faster than this. */
 export const MONITOR_TICK_MIN_MS = 30_000;
+/** `k8s_cluster_updated` events inside this window share one cluster-list reload. */
+const CLUSTER_RELOAD_COALESCE_MS = 150;
 
 function lsGet(key: string): string | null {
   try {
@@ -709,6 +711,8 @@ class K8sStore {
     browserTickEnv,
   );
 
+  private clustersReloadTimer: ReturnType<typeof setTimeout> | null = null;
+
   /** Did `clusterId` cycle since the previous tick? */
   monitorTicked(clusterId: string): boolean {
     return this.monitorTickClusters.has(clusterId);
@@ -726,7 +730,14 @@ class K8sStore {
         this.clusters = this.clusters.filter((c) => c.id !== ev.cluster_id);
         if (this.clusterId === ev.cluster_id) this.clusterId = null;
       } else {
-        void this.loadClusters();
+        // perf K8s R5: a burst of updates (bulk import, a probe refresh per
+        // cluster) becomes ONE list reload, not one per event.
+        if (this.clustersReloadTimer === null) {
+          this.clustersReloadTimer = setTimeout(() => {
+            this.clustersReloadTimer = null;
+            void this.loadClusters();
+          }, CLUSTER_RELOAD_COALESCE_MS);
+        }
       }
     } else {
       // Installer state moved — refetch the status (carries the log tail).

@@ -107,6 +107,13 @@ pub struct NsQuery {
     pub ns: Option<String>,
 }
 
+/// `GET …/metrics?ns=&pod=` — `pod` (with `ns`) narrows to one pod.
+#[derive(Debug, Deserialize)]
+pub struct MetricsQuery {
+    pub ns: Option<String>,
+    pub pod: Option<String>,
+}
+
 /// REST routes; the server nests this under `/api/v1` and supplies the state.
 pub fn api_router<S: K8sCtx>() -> Router<S> {
     Router::new()
@@ -439,7 +446,7 @@ async fn list_resources<S: K8sCtx>(
     let caps = svc.cached_capabilities(&c).await;
     let with_metrics = caps.metrics_server
         && crate::access::allowed(&ctx.pool(), &user, &id, "metrics", q.ns.as_deref()).await?;
-    // 5 s cache + single-flight: concurrent viewers / agents share one
+    // 10 s cache + single-flight: concurrent viewers / agents share one
     // kubectl list (perf K2). Access was checked above, per caller.
     let ck = list_cache::key(
         id.as_str(),
@@ -461,8 +468,12 @@ async fn list_resources<S: K8sCtx>(
                 Some(l) => l,
                 None => {
                     let k = clusters::kubectl_for(&ctx, &c).await?;
+                    // The cluster's GET-only list gateway while a console
+                    // polls (perf R3); `None` ⇒ kubectl.
+                    let gw = crate::list_gateway::get(c.id.as_str(), &k).await;
                     let (items, has_metrics) = resources::list(
                         &k,
+                        gw.as_deref(),
                         kind,
                         q.ns.as_deref(),
                         q.label.as_deref(),
@@ -472,9 +483,7 @@ async fn list_resources<S: K8sCtx>(
                     .await?;
                     let kind_s = kind.as_str();
                     let l = tokio::task::spawn_blocking(move || {
-                        let items_json =
-                            serde_json::to_string(&items).unwrap_or_else(|_| "[]".into());
-                        list_cache::build(kind_s, &items_json, has_metrics)
+                        list_cache::build(kind_s, &items, has_metrics)
                     })
                     .await
                     .map(Arc::new)
@@ -615,12 +624,12 @@ async fn metrics<S: K8sCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
-    Query(q): Query<NsQuery>,
+    Query(q): Query<MetricsQuery>,
 ) -> ApiResult<Json<Value>> {
     crate::access::check(&ctx.pool(), &user, &id, "metrics", q.ns.as_deref()).await?;
     let c = Clusters::new(&ctx).get(&id).await?;
     let k = clusters::kubectl_for(&ctx, &c).await?;
-    let (pods, available) = resources::metrics(&k, q.ns.as_deref()).await?;
+    let (pods, available) = resources::metrics(&k, q.ns.as_deref(), q.pod.as_deref()).await?;
     Ok(Json(json!({ "pods": pods, "available": available })))
 }
 
@@ -695,6 +704,8 @@ async fn run_action<S: K8sCtx>(
         Ok(r) => (r.ok, None),
         Err(e) => (false, Some(e.to_string())),
     };
+    // The next list must show the action's effect, not a cached answer.
+    list_cache::forget_cluster(c.id.as_str());
     audit(
         &ctx,
         &user,

@@ -67,16 +67,24 @@
   let loading = $state(true);
   let error = $state('');
 
-  async function load(): Promise<void> {
+  // perf K8s R5: ask for THIS pod only (`?pod=`), abort with the poller and
+  // drop an answer that belongs to a pod the drawer has since left.
+  let metricsSeq = 0;
+  let poller: { now(): void } | null = null;
+  async function load(signal?: AbortSignal): Promise<void> {
+    const seq = ++metricsSeq;
+    const [c, n, p] = [clusterId, ns, pod];
     try {
-      const r = await k8sApi.metrics(clusterId, ns);
+      const r = await k8sApi.metrics(c, n, signal, p);
+      if (seq !== metricsSeq) return;
       available = r.available;
-      metrics = r.pods.find((p) => p.name === pod && p.namespace === ns) ?? null;
+      metrics = r.pods.find((m) => m.name === p && m.namespace === n) ?? null;
       error = '';
     } catch (e) {
+      if (seq !== metricsSeq || signal?.aborted) return;
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (seq === metricsSeq) loading = false;
     }
   }
 
@@ -86,9 +94,14 @@
     void ns;
     void pod;
     loading = true;
-    untrack(() => void load());
-    const t = pollWhileVisible(() => untrack(() => load()), { ms: 10_000, immediate: false });
-    return () => t.stop();
+    metrics = null;
+    const t = untrack(() => pollWhileVisible((signal) => load(signal), { ms: 10_000 }));
+    poller = t;
+    return () => {
+      t.stop();
+      metricsSeq++;
+      poller = null;
+    };
   });
 
   const maxCpu = $derived(Math.max(1, ...(metrics?.containers.map((c) => c.cpu_millicores) ?? [1])));
@@ -99,7 +112,7 @@
   {#if loading && !metrics}
     <Skeleton rows={3} height={40} />
   {:else if error}
-    <div class="err" role="alert">Couldn’t load metrics: {error} <button class="btn small" onclick={() => void load()}>Retry</button></div>
+    <div class="err" role="alert">Couldn’t load metrics: {error} <button class="btn small" onclick={() => (poller ? poller.now() : void load())}>Retry</button></div>
   {:else if !available}
     <div class="dim">metrics-server isn't installed in this cluster, so <span class="mono">kubectl top</span> has nothing to report.</div>
   {:else if !metrics}

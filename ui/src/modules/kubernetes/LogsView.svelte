@@ -6,6 +6,7 @@
   // pod can't grow the DOM or memory without bound.
   import { untrack, tick } from 'svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
+  import { appendCapped, appendFiltered } from './logRing';
   import Icon from '../../lib/components/Icon.svelte';
   import { downloadText } from '../../lib/components/exporters';
   import { followLogs } from '../../lib/api/k8s';
@@ -68,9 +69,13 @@
   let follow = $state(false);
   let timestamps = $state(false);
   let search = $state('');
-  // Raw ring buffers (replaced, never mutated): a deep proxy over 20k lines
-  // made every per-frame flush copy the buffer through the proxy.
+  // Raw ring buffers: a deep proxy over 20k lines made every per-frame flush
+  // copy the buffer through the proxy. perf K8s R5: flushes append IN PLACE
+  // (logRing.ts) and bump `ver` instead of concat-copying 20k lines per
+  // frame; a reset / filter change still assigns a new array.
   let lines = $state.raw<string[]>([]);
+  let ver = $state(0);
+  const lineCount = $derived((void ver, lines.length));
   /** `lines` narrowed by the pod filter + search — maintained incrementally
    *  per flush (only the new lines are tested); recomputed in full only when
    *  the filter itself changes. */
@@ -100,9 +105,8 @@
     if (!pending.length) return;
     const add = pending;
     pending = [];
-    const combined = lines.concat(add);
-    const overflow = Math.max(0, combined.length - MAX_LINES);
-    const next = overflow ? combined.slice(overflow) : combined;
+    const filtered = shown !== lines;
+    const trimmed = appendCapped(lines, add, MAX_LINES);
     if (multi) {
       let grew = false;
       for (const l of add) {
@@ -114,18 +118,13 @@
       }
       if (grew) pods = [...podSet].sort();
     }
-    const qq = q;
-    const pf = podFilter;
-    if (!qq && !(multi && pf)) {
-      shown = next;
-    } else {
+    if (filtered) {
       // Append the new matches; drop as many matches as the ring trimmed.
-      let drop = 0;
-      for (let i = 0; i < overflow; i++) if (matches(combined[i], qq, pf)) drop++;
-      const grown = shown.concat(add.filter((l) => matches(l, qq, pf)));
-      shown = drop ? grown.slice(drop) : grown;
+      const qq = q;
+      const pf = podFilter;
+      appendFiltered(shown, add, trimmed, (l) => matches(l, qq, pf));
     }
-    lines = next;
+    ver++;
   }
 
   function ingest(text: string): void {
@@ -140,7 +139,9 @@
     const ac = new AbortController();
     abort = ac;
     lines = [];
-    shown = [];
+    // Unfiltered, the view IS the ring (one array); filtered, its own.
+    shown = q || (multi && podFilter) ? [] : lines;
+    ver++;
     podSet.clear();
     pods = [];
     pending = [];
@@ -219,13 +220,15 @@
     const m = multi;
     untrack(() => {
       shown = qq || (m && pf) ? lines.filter((l) => matches(l, qq, pf)) : lines;
+      ver++;
     });
   });
-  const matchCount = $derived(q ? shown.length : 0);
+  const matchCount = $derived((void ver, q ? shown.length : 0));
 
   // Stick to the bottom while following (unless the user scrolled up).
   $effect(() => {
-    void shown.length;
+    void ver;
+    void shown;
     if (!autoScroll) return;
     void tick().then(() => {
       const sc = wrapEl?.querySelector<HTMLElement>('.vlist');
@@ -305,7 +308,7 @@
       {#if q}<span class="count mono">{matchCount}</span>{/if}
     </div>
     <button class="icon-btn" onclick={() => void start()} title="Reload" aria-label="Reload logs"><Icon name="refresh" size={13} /></button>
-    <button class="icon-btn" onclick={download} title="Download" aria-label="Download logs" disabled={!lines.length}><Icon name="arrowDown" size={13} /></button>
+    <button class="icon-btn" onclick={download} title="Download" aria-label="Download logs" disabled={!lineCount}><Icon name="arrowDown" size={13} /></button>
   </div>
 
   {#if error}
@@ -314,10 +317,10 @@
 
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="logs-body" dir="ltr" bind:this={wrapEl} onscrollcapture={onScroll}>
-    {#if !lines.length && !error}
+    {#if !lineCount && !error}
       <div class="dim pad">{streaming ? 'Waiting for output…' : 'No log lines.'}</div>
     {:else}
-      <VirtualList items={shown} estimateHeight={LINE_H} class="logs-vlist" findText={(line) => parse(line).text}>
+      <VirtualList items={shown} version={ver} estimateHeight={LINE_H} class="logs-vlist" findText={(line) => parse(line).text}>
         {#snippet row(line, i)}
           {@const pl = parse(line)}
           <div class="ln" style="height:{LINE_H}px" data-i={i}>{#if pl.pod}<button class="podtag" data-find-skip style="--h:{hue(pl.pod)}" title={`${pl.pod} · ${pl.ctr}\nClick: only this pod · ⌥-click: open pod`} onclick={(e) => { if (e.altKey) onopenpod?.(pl.pod); else podFilter = podFilter === pl.pod ? '' : pl.pod; }}>{pl.pod.length > 22 ? '…' + pl.pod.slice(-21) : pl.pod}{#if !container}<span class="ctr">/{pl.ctr}</span>{/if}</button>{/if}{#each segments(pl.text) as s, k (k)}{#if s.m}<mark>{s.t}</mark>{:else}{s.t}{/if}{/each}</div>
@@ -327,7 +330,7 @@
   </div>
 
   <div class="logs-foot">
-    <span class="dim">{lines.length}{lines.length >= MAX_LINES ? '+' : ''} lines{multi && pods.length ? ` · ${pods.length} pods` : ''}{podFilter ? ` · ${shown.length} from ${podFilter}` : ''}{q ? ` · ${matchCount} match` : ''}</span>
+    <span class="dim">{lineCount}{lineCount >= MAX_LINES ? '+' : ''} lines{multi && pods.length ? ` · ${pods.length} pods` : ''}{podFilter ? ` · ${(void ver, shown.length)} from ${podFilter}` : ''}{q ? ` · ${matchCount} match` : ''}</span>
     {#if streaming && follow}<span class="live"><span class="live-dot"></span> live</span>{/if}
     {#if !autoScroll && follow}
       <button class="btn small" onclick={() => { autoScroll = true; }}>Jump to bottom</button>

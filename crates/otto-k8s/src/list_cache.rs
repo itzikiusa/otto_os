@@ -20,8 +20,12 @@ use std::time::{Duration, Instant};
 use otto_core::Id;
 use otto_state::K8sClustersRepo;
 
-/// How long one kubectl list answers every identical request.
-pub const TTL: Duration = Duration::from_secs(5);
+use crate::resources::K8sRow;
+
+/// How long one kubectl list answers every identical request. At the UI's
+/// poll floor (10 s; big lists poll every ≥ 30 s), so even a single viewer's
+/// next poll can be served from here instead of a fresh kubectl list (R3).
+pub const TTL: Duration = Duration::from_secs(10);
 /// Entries kept at most (expired ones are dropped on every insert).
 const CAP: usize = 256;
 /// `last_used_at` is written at most this often per cluster.
@@ -78,19 +82,52 @@ pub fn put(key: String, v: Arc<Listed>) {
     }
 }
 
+/// Drop every cached list of `cluster` — after a write (an action changed
+/// what the next list would show, so a poll must not be served the old one).
+pub fn forget_cluster(cluster: &str) {
+    let prefix = format!("res:{cluster}\u{1f}");
+    if let Ok(mut m) = map().lock() {
+        m.retain(|k, _| !k.starts_with(&prefix));
+    }
+}
+
 /// Serialise a list answer and stamp its content version (blocking-pool
 /// work for a big list: call it inside `spawn_blocking`).
-pub fn build(kind: &str, items_json: &str, has_metrics: bool) -> Listed {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    kind.hash(&mut h);
-    has_metrics.hash(&mut h);
-    items_json.hash(&mut h);
-    let version = format!("{:016x}", h.finish());
+pub fn build(kind: &str, items: &[K8sRow], has_metrics: bool) -> Listed {
+    let items_json = serde_json::to_string(items).unwrap_or_else(|_| "[]".into());
+    let version = version_of(kind, items, has_metrics);
     let body = format!(
         r#"{{"kind":{},"version":"{version}","has_metrics":{has_metrics},"items":{items_json}}}"#,
         serde_json::Value::from(kind)
     );
     Listed { version, body }
+}
+
+/// The content version of a list (perf R1): what the API server says about
+/// each object — `uid` + `resourceVersion`, in list order — plus pod metrics
+/// QUANTISED (cpu to 10 m, memory to 1 MiB) so metrics-server jitter doesn't
+/// churn it. Never the rendered rows: those carry `age_seconds`, which made
+/// every rebuild a new version and the 304 path dead. A row without a
+/// `resourceVersion` (never from kubectl) falls back to its visible state.
+pub fn version_of(kind: &str, items: &[K8sRow], has_metrics: bool) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    kind.hash(&mut h);
+    has_metrics.hash(&mut h);
+    items.len().hash(&mut h);
+    for r in items {
+        if r.uid.is_empty() {
+            (&r.namespace, &r.name).hash(&mut h);
+        } else {
+            r.uid.hash(&mut h);
+        }
+        r.resource_version.hash(&mut h);
+        if r.resource_version.is_empty() {
+            (&r.status, &r.ready, r.restarts, &r.extra, r.created_at).hash(&mut h);
+        }
+        r.cpu.map(|c| (c + 5) / 10).hash(&mut h);
+        r.mem.map(|m| (m + (1 << 19)) >> 20).hash(&mut h);
+    }
+    format!("{:016x}", h.finish())
 }
 
 /// Does an `If-None-Match` header value name `version`? Accepts the quoted
@@ -126,19 +163,73 @@ pub async fn touch_throttled(repo: &K8sClustersRepo, id: &Id) {
 mod tests {
     use super::*;
 
+    fn row(name: &str, rv: &str) -> K8sRow {
+        let item = serde_json::json!({
+            "metadata": {
+                "name": name, "namespace": "shop", "uid": format!("uid-{name}"),
+                "resourceVersion": rv, "creationTimestamp": "2026-10-01T10:00:00Z"
+            },
+            "status": { "phase": "Running" }
+        });
+        crate::resources::normalize(crate::resources::Kind::Pods, &item, chrono::Utc::now())
+    }
+
     #[test]
     fn version_follows_content_and_body_is_valid_json() {
-        let a = build("pods", r#"[{"name":"a"}]"#, true);
-        let b = build("pods", r#"[{"name":"a"}]"#, true);
-        let c = build("pods", r#"[{"name":"b"}]"#, true);
+        let a = build("pods", &[row("a", "1")], true);
+        let b = build("pods", &[row("a", "1")], true);
+        let c = build("pods", &[row("a", "2")], true);
         assert_eq!(a.version, b.version);
-        assert_ne!(a.version, c.version);
-        assert_ne!(a.version, build("pods", r#"[{"name":"a"}]"#, false).version);
+        assert_ne!(a.version, c.version, "resourceVersion moves the version");
+        assert_ne!(a.version, build("pods", &[row("a", "1")], false).version);
+        assert_ne!(
+            a.version,
+            build("pods", &[row("a", "1"), row("b", "1")], true).version
+        );
         let v: serde_json::Value = serde_json::from_str(&a.body).unwrap();
         assert_eq!(v["kind"], "pods");
         assert_eq!(v["version"], a.version.as_str());
         assert_eq!(v["has_metrics"], true);
         assert_eq!(v["items"][0]["name"], "a");
+        assert!(
+            v["items"][0].get("uid").is_none(),
+            "identity stays server-side"
+        );
+        assert_eq!(v["items"][0]["created_at"], 1_790_848_800);
+    }
+
+    /// perf R1 — the live bug: rows normalised seconds apart differ in
+    /// `age_seconds`, so a content hash of the rendered rows never matched.
+    #[test]
+    fn version_is_stable_across_ages_and_quantises_metrics() {
+        let item = serde_json::json!({
+            "metadata": { "name": "a", "namespace": "shop", "uid": "u1", "resourceVersion": "7",
+                          "creationTimestamp": "2026-10-01T10:00:00Z" },
+            "status": { "phase": "Running" }
+        });
+        let now = chrono::Utc::now();
+        let kind = crate::resources::Kind::Pods;
+        let mut r1 = crate::resources::normalize(kind, &item, now);
+        let mut r2 = crate::resources::normalize(kind, &item, now + chrono::Duration::seconds(2));
+        assert_ne!(r1.age_seconds, r2.age_seconds);
+        assert_eq!(
+            build("pods", &[r1.clone()], false).version,
+            build("pods", &[r2.clone()], false).version
+        );
+        // Metrics jitter inside a quantum keeps the version; a real move doesn't.
+        r1.cpu = Some(121);
+        r1.mem = Some(100 << 20);
+        r2.cpu = Some(124);
+        r2.mem = Some((100 << 20) + 4096);
+        assert_eq!(
+            build("pods", &[r1.clone()], true).version,
+            build("pods", &[r2.clone()], true).version
+        );
+        r2.cpu = Some(180);
+        assert_ne!(
+            build("pods", &[r1], true).version,
+            build("pods", &[r2], true).version
+        );
     }
 
     #[test]
@@ -156,7 +247,7 @@ mod tests {
         let k1 = key("c", "pods", Some("a"), None, None, true);
         let k2 = key("c", "pods", Some("a"), None, None, false);
         assert_ne!(k1, k2, "metrics visibility is part of the key");
-        put(k1.clone(), Arc::new(build("pods", "[]", true)));
+        put(k1.clone(), Arc::new(build("pods", &[], true)));
         assert!(get(&k1).is_some());
         assert!(get(&k2).is_none());
     }

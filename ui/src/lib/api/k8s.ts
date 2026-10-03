@@ -127,8 +127,10 @@ export const k8sApi = {
       `/k8s/clusters/${enc(id)}/pods/${enc(ns)}/${enc(pod)}/containers`,
       signal,
     ),
-  metrics: (id: string, ns?: string, signal?: AbortSignal) =>
-    api.get<K8sMetricsResp>(`/k8s/clusters/${enc(id)}/metrics${qs({ ns: ns ?? '' })}`, signal),
+  /** `pod` (with `ns`) narrows the answer to that one pod — the drawer's
+   *  Metrics tab must not pull a whole namespace's metrics every 10 s. */
+  metrics: (id: string, ns?: string, signal?: AbortSignal, pod?: string) =>
+    api.get<K8sMetricsResp>(`/k8s/clusters/${enc(id)}/metrics${qs({ ns: ns ?? '', pod: pod || undefined })}`, signal),
 
   // --- monitoring (contract "Kubernetes monitoring") ---
   monitor: (id: string) => api.get<K8sMonitorResp>(`/k8s/clusters/${enc(id)}/monitor`),
@@ -141,10 +143,10 @@ export const k8sApi = {
     api.get<K8sMonitorOverviewRow[]>(`/k8s/monitor/overview${qs({ window })}`, signal),
   monitorWorkloads: (id: string, window: string, ns?: string, signal?: AbortSignal) =>
     api.get<K8sMonitorWorkloadsResp>(`/k8s/clusters/${enc(id)}/monitor/workloads${qs({ window, ns: ns || undefined })}`, signal),
-  monitorSeries: (id: string, p: { metric: string; workload?: string; pod?: string; window: string; step?: number }) =>
-    api.get<K8sMonitorSeries>(`/k8s/clusters/${enc(id)}/monitor/series${qs(p)}`),
-  monitorEvents: (id: string, p: { window: string; class?: string; workload?: string; limit?: number }) =>
-    api.get<K8sMonitorEvent[]>(`/k8s/clusters/${enc(id)}/monitor/events${qs(p)}`),
+  monitorSeries: (id: string, p: { metric: string; workload?: string; pod?: string; window: string; step?: number }, signal?: AbortSignal) =>
+    api.get<K8sMonitorSeries>(`/k8s/clusters/${enc(id)}/monitor/series${qs(p)}`, signal),
+  monitorEvents: (id: string, p: { window: string; class?: string; workload?: string; limit?: number }, signal?: AbortSignal) =>
+    api.get<K8sMonitorEvent[]>(`/k8s/clusters/${enc(id)}/monitor/events${qs(p)}`, signal),
   monitorHealth: (id: string, window = '1h') =>
     api.get<K8sHealthDigest>(`/k8s/clusters/${enc(id)}/monitor/health${qs({ window })}`),
 

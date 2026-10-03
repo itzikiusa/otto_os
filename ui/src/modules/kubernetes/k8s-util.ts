@@ -2,6 +2,7 @@
 // ages / bytes / millicores, and health → CSS class (the environment pill is the shared
 // <EnvBadge>).
 
+import { now } from '../../lib/stores/now.svelte';
 import type {
   K8sCapabilities,
   K8sCluster,
@@ -53,6 +54,14 @@ export function isKind(id: string | undefined): id is K8sResourceKind {
  *  the CRD-backed ones until the probe lands). */
 export function visibleKinds(caps: K8sCapabilities | null): KindDef[] {
   return KINDS.filter((k) => !k.requires || (caps?.[k.requires] ?? false));
+}
+
+/** A row's age in seconds, ticking: `now - created_at` against the shared
+ *  clock (reactive — a 304 keeps the same rows, so the frozen `age_seconds`
+ *  would stop the column), else the server's `age_seconds`. */
+export function rowAge(r: { age_seconds: number; created_at?: number | null }): number {
+  if (r.created_at == null) return r.age_seconds;
+  return Math.max(0, Math.floor(now() / 1000) - r.created_at);
 }
 
 /** `kubectl`-style compact age: 45s · 12m · 3h · 5d · 2y. */

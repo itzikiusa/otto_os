@@ -920,6 +920,7 @@ pub async fn run_cycle_with<S: K8sCtx>(
     let mut capped = 0u32;
     let mut scraped_versions: Vec<(String, String)> = Vec::new();
     let mut transport_used = None;
+    let target_count = targets.len();
     if !cfg.probes.is_empty() && !targets.is_empty() {
         let probe0 = &cfg.probes[0];
         // The gateway only serves the proxy transport when the config does
@@ -962,6 +963,9 @@ pub async fn run_cycle_with<S: K8sCtx>(
         // `'static` boundary tokio::spawn demands of the enclosing loop.
         let concurrency = cfg.concurrency.clamp(1, probes::MAX_CONCURRENCY) as usize;
         let pool = &state.forwards;
+        if transport == TransportUsed::PortForward {
+            pool.begin_cycle().await;
+        }
         let futs: Vec<_> = targets
             .iter()
             .map(|p| {
@@ -1007,6 +1011,9 @@ pub async fn run_cycle_with<S: K8sCtx>(
             .forwards
             .retain(|ns, pod, _| live.contains(&(ns, pod)))
             .await;
+        // A forward that missed two cycles is idle: kill it (R2).
+        let interval = Duration::from_secs(u64::from(cfg.interval_secs.max(probes::MIN_INTERVAL)));
+        state.forwards.reap_idle(interval * 2).await;
     } else {
         state.forwards.clear().await;
     }
@@ -1083,6 +1090,12 @@ pub async fn run_cycle_with<S: K8sCtx>(
                 notes.push(format!("series_capped on {capped} probe(s)"));
             }
             let interval_ms = i64::from(cfg.interval_secs.max(probes::MIN_INTERVAL)) * 1000;
+            let pool_cap = state.forwards.cap();
+            if transport_used == Some(TransportUsed::PortForward) && target_count > pool_cap {
+                notes.push(format!(
+                    "port-forward: {target_count} pods rotate through a pool of {pool_cap}"
+                ));
+            }
             if transport_used == Some(TransportUsed::PortForward) && status.cycle_ms > interval_ms {
                 notes.push(format!(
                     "port-forward transport: cycle took {} s, longer than the {} s interval",
