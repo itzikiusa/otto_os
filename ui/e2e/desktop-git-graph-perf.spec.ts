@@ -10,13 +10,16 @@ import { apiCtx, seedWorkspace } from './seed';
 // Chromium only). History is SYNTHESISED at the route layer (a real repo
 // backs the page; `/log?all=true` and `/refs` are answered from a generated
 // DAG) so the gate costs no fixture build. It locks down:
-//   • first paint of the first 10k-commit page < 1 s after the page arrives,
-//     and no main-thread task over 200 ms (first layout, scroll, load more,
-//     reload);
-//   • "load more" lays out ONLY the appended rows (resumable lane layout,
-//     probed via window.__ottoGraphLayoutRows);
-//   • a reload after a ref moved reads ONE page (limit ≤ PAGE) and splices it
-//     onto the held tail — never `max(PAGE, loaded)` (12k+) commits again.
+//   • first paint of the first 2k-commit page < 1 s after the page arrives,
+//     and no main-thread task over 200 ms (first layout, prefetch, scroll,
+//     load more, reload);
+//   • the next 10k page is prefetched right after the first paint, and it
+//     (like "load more") lays out ONLY the appended rows (resumable lane
+//     layout, probed via window.__ottoGraphLayoutRows);
+//   • a reload after a ref moved reads ONE first-size page and splices it
+//     onto the held tail — never `max(PAGE, loaded)` (12k+) commits again —
+//     and the layout converges with the previous pass a checkpoint below the
+//     page instead of re-laying all 12k rows.
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.use({ serviceWorkers: 'block' });
@@ -25,6 +28,7 @@ test.skip(({ isMobile, browserName }) => isMobile || browserName !== 'chromium',
 const TOTAL = 12_000;
 const LANES = 20;
 const PAGE = 10_000;
+const FIRST_PAGE = 2_000;
 
 let repoId = '';
 let workspaceId = '';
@@ -146,18 +150,23 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
   await page.waitForTimeout(300);
   console.log(`[perf] graph first paint ${paintMs} ms after the first page · max long task ${Math.round(await maxLongTask(page))} ms`);
   expect(paintMs, 'first page painted within 1 s of arriving').toBeLessThan(1000);
-  expect(await maxLongTask(page), 'first layout of 10k commits').toBeLessThan(200);
-  expect(logLimits[0]).toEqual({ limit: PAGE, skip: 0 });
-  expect(await layoutRows(page)).toBe(PAGE);
-  // Windowed: 10k commits never mount 10k rows.
+  expect(logLimits[0]).toEqual({ limit: FIRST_PAGE, skip: 0 });
+
+  // The next page is prefetched without any scroll; its layout resumes
+  // (10k appended rows laid out, not 12k).
+  await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+  expect(logLimits[1]).toEqual({ limit: PAGE, skip: FIRST_PAGE });
+  await expect.poll(() => layoutRows(page), { timeout: 15_000 }).toBe(TOTAL - FIRST_PAGE);
+  await page.waitForTimeout(300);
+  expect(await maxLongTask(page), 'first layout + 10k prefetch').toBeLessThan(200);
+  // Windowed: 12k commits never mount 12k rows.
   expect(await page.locator('.graph-row[data-sha]').count()).toBeLessThan(200);
 
-  // Load more: scroll to the bottom → page 2 (2k rows); the layout resumes.
+  // Load more: scroll to the bottom → one more request, which finds the root.
   await resetLongTasks(page);
   await page.locator('.graph-panel').evaluate((el) => (el.scrollTop = el.scrollHeight));
-  await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
-  expect(logLimits[1]).toEqual({ limit: PAGE, skip: PAGE });
-  await expect.poll(() => layoutRows(page), { timeout: 15_000 }).toBe(TOTAL - PAGE);
+  await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(3);
+  expect(logLimits[2]).toEqual({ limit: PAGE, skip: TOTAL });
   expect(await maxLongTask(page), 'load more + scroll').toBeLessThan(200);
 
   // A ref moves (one new commit on branch-0) → reload reads ONE page and
@@ -171,7 +180,10 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
   const reloads = logLimits.slice(before);
   console.log(`[perf] reload after ref move: ${JSON.stringify(reloads)}`);
   expect(reloads.length, 'one history request per reload').toBe(1);
-  expect(reloads[0].limit, 'reload reads at most one page').toBeLessThanOrEqual(PAGE);
+  expect(reloads[0].limit, 'reload reads one first-size page').toBe(FIRST_PAGE);
+  // The splice converges with the previous layout a checkpoint (≤ 1k rows)
+  // below the page — not a relayout of all 12k rows.
+  await expect.poll(() => layoutRows(page), { timeout: 10_000 }).toBeLessThanOrEqual(FIRST_PAGE + 1_001);
   await expect(page.locator('.mob-sec-count, .graph-row[data-sha]').first()).toBeVisible();
   expect(await maxLongTask(page), 'reload + relayout').toBeLessThan(200);
   // The new commit is on top, and the paged-in tail survived the splice.
