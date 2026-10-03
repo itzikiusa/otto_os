@@ -4012,9 +4012,11 @@ name = "otto-k8s"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.23.1",
  "chrono",
  "dirs 7.0.0",
  "futures-util",
+ "hex",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -4026,6 +4028,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "tempfile",
  "tokio",

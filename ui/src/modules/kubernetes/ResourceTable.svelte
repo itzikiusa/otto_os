@@ -2,6 +2,7 @@
   // k9s-style resource table: sticky header row + `VirtualList` body sharing
   // one CSS grid template, health-colored status pill, keyboard-navigable rows
   // (listbox/option semantics — the whole table is one selection widget).
+  import { untrack } from 'svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -25,8 +26,35 @@
     onopen: (row: K8sRow) => void;
     onmenu: (e: MouseEvent | KeyboardEvent, row: K8sRow) => void;
     onretry: () => void;
+    /** K-1: the view these rows belong to — the remembered scroll offset is
+     *  restored once per key when its rows first render. */
+    scrollKey?: string;
+    initialScroll?: (key: string) => number;
+    onscrolled?: (key: string, top: number) => void;
   }
-  let { kind, rows, total, hasMetrics, allNamespaces, loading, error, selected, onselect, onopen, onmenu, onretry }: Props = $props();
+  let { kind, rows, total, hasMetrics, allNamespaces, loading, error, selected, onselect, onopen, onmenu, onretry, scrollKey = '', initialScroll, onscrolled }: Props = $props();
+
+  let bodyEl = $state<HTMLDivElement | null>(null);
+  let restoredFor: string | null = null;
+  $effect(() => {
+    const key = scrollKey;
+    const el = bodyEl;
+    const n = rows.length;
+    if (!el || !n || restoredFor === key) return;
+    restoredFor = key;
+    const top = untrack(() => initialScroll?.(key) ?? 0);
+    const list = el.querySelector<HTMLElement>('.vlist');
+    if (list && top > 0) list.scrollTop = top;
+  });
+  let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+  function onBodyScroll(e: Event): void {
+    const t = e.target as HTMLElement | null;
+    if (!t?.classList.contains('vlist') || !onscrolled) return;
+    const key = scrollKey;
+    const top = t.scrollTop;
+    if (scrollTimer) clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => onscrolled(key, top), 200);
+  }
   const errSummary = $derived(kubectlErrorSummary(error));
 
   const ROW_H = 30;
@@ -82,7 +110,7 @@
       <EmptyState icon="box" title={total ? 'No rows match the filter' : `No ${kindDef(kind).label.toLowerCase()} here`} body={total ? `${total} hidden by the filter.` : 'Try another namespace, or "All namespaces".'} />
     </div>
   {:else}
-    <div class="rt-body" role="listbox" aria-label="{kindDef(kind).label} rows" aria-multiselectable="false">
+    <div class="rt-body" bind:this={bodyEl} onscrollcapture={onBodyScroll} role="listbox" aria-label="{kindDef(kind).label} rows" aria-multiselectable="false">
       <VirtualList items={rows} estimateHeight={ROW_H} class="rt-vlist">
         {#snippet row(r, i)}
           <div

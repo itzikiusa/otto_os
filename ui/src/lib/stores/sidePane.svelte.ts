@@ -559,5 +559,5 @@ export function navClick(e: MouseEvent, id: string, label: string): void {
     else sidePane.open(id, { label });
     return;
   }
-  router.go(id);
+  router.openModule(id);
 }

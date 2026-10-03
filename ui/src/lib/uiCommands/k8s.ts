@@ -20,6 +20,7 @@ import type { K8sAction, K8sCluster, K8sResourceKind, K8sRow } from '../api/type
 import type { K8sDrawerTab } from '../stores/k8s.svelte';
 import { ACTIONS, typedConfirm } from '../../modules/kubernetes/actions';
 import { clusterLabel, isKind, kindDef } from '../../modules/kubernetes/k8s-util';
+import { parseK8sRoute } from '../../modules/kubernetes/viewState';
 import {
   agentLabel,
   asUiError,
@@ -324,12 +325,19 @@ registerUiCommands('kubernetes', {
 });
 
 // `otto.ui_state` view: which cluster / kind / namespace / row is showing.
-registerUiState('kubernetes', () => ({
-  cluster: k8s.cluster ? { id: k8s.cluster.id, name: k8s.cluster.name, environment: k8s.cluster.environment } : null,
-  kind: k8s.clusterId ? k8s.kind : null,
-  namespace: k8s.clusterId ? k8s.namespace || null : null,
-  filter: k8s.filter || null,
-  selected: k8s.selected,
-  drawer_tab: k8s.selected ? k8s.drawerTab : null,
-  rows: k8s.rowsKey === k8s.currentKey ? k8s.rows.length : null,
-}));
+// The store keeps the last cluster selected while the overview shows (so
+// coming back is instant) — report it only while a cluster view is on screen.
+registerUiState('kubernetes', () => {
+  const view = router.module === 'kubernetes' ? parseK8sRoute(router.parts).view : null;
+  const inCluster = (view === 'resources' || view === 'monitor') && !!k8s.cluster;
+  return {
+    view,
+    cluster: inCluster && k8s.cluster ? { id: k8s.cluster.id, name: k8s.cluster.name, environment: k8s.cluster.environment } : null,
+    kind: inCluster ? k8s.kind : null,
+    namespace: inCluster ? k8s.namespace || null : null,
+    filter: inCluster ? k8s.filter || null : null,
+    selected: view === 'resources' ? k8s.selected : null,
+    drawer_tab: view === 'resources' && k8s.selected ? k8s.drawerTab : null,
+    rows: inCluster && k8s.rowsKey === k8s.currentKey ? k8s.rows.length : null,
+  };
+});

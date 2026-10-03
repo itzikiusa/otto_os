@@ -54,7 +54,7 @@
   let moreOpen = $state(false);
 
   function go(id: string): void {
-    router.go(id);
+    router.openModule(id);
     moreOpen = false;
   }
 

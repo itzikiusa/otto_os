@@ -129,10 +129,32 @@ pub fn not_installed_message(program: &str) -> String {
     }
 }
 
+/// Message prefix for an API server that rejected the credentials (KS-2) —
+/// typically a stale cached exec token after an SSO re-login / rotated keys.
+pub const CREDENTIALS_REJECTED_MSG: &str =
+    "credentials rejected — re-authenticate (e.g. aws sso login), then Refresh";
+
+/// Does this stderr say the API server rejected the credentials?
+pub fn is_unauthorized_stderr(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("(unauthorized)")
+        || lower.contains("you must be logged in")
+        || lower.contains("error: unauthorized")
+        || lower.contains("unauthorized:")
+}
+
+/// Is `e` the classified [`CREDENTIALS_REJECTED_MSG`] failure?
+pub fn is_credentials_rejected(e: &Error) -> bool {
+    matches!(e, Error::Invalid(m) if m.starts_with(CREDENTIALS_REJECTED_MSG))
+}
+
 /// Classify a non-zero kubectl exit from its stderr (contract §4.6).
 pub fn classify_failure(program: &str, stderr: &str) -> Error {
     let first = first_meaningful_line(stderr);
     let lower = first.to_ascii_lowercase();
+    if is_unauthorized_stderr(stderr) {
+        return Error::Invalid(format!("{CREDENTIALS_REJECTED_MSG}: {}", redact(&first)));
+    }
     if lower.contains("forbidden") {
         return Error::Forbidden(format!("cluster RBAC: {}", redact(&first)));
     }
@@ -217,6 +239,28 @@ pub struct Kubectl {
     /// Same flags without `--request-timeout`, for exec/logs -f/k9s streams.
     pub base_stream: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// KS-2: set when this handle uses a CACHED exec-token overlay. On a
+    /// credentials-rejected failure the runner calls it once — it drops the
+    /// cached token and builds a fresh handle — and retries the call.
+    pub reauth: Option<Reauth>,
+}
+
+/// Rebuild a handle after dropping a stale cached token (see [`Kubectl::reauth`]).
+#[derive(Clone)]
+pub struct Reauth(
+    pub std::sync::Arc<dyn Fn() -> crate::BoxFut<'static, Result<Kubectl>> + Send + Sync + 'static>,
+);
+
+impl std::fmt::Debug for Reauth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Reauth(..)")
+    }
+}
+
+/// Retry decision for KS-2: only a credentials-rejected failure on a handle
+/// that used a cached overlay is worth one retry with a fresh token.
+pub fn should_reauth(e: &Error, has_reauth: bool) -> bool {
+    has_reauth && is_credentials_rejected(e)
 }
 
 /// §4.1: `["--kubeconfig", path?, "--context", ctx, "--request-timeout", "20s"]`
@@ -259,7 +303,14 @@ impl Kubectl {
             base: base_args(cluster),
             base_stream: base_args_stream(cluster),
             env,
+            reauth: None,
         }
+    }
+
+    /// Attach the KS-2 re-auth hook (cached-overlay handles only).
+    pub fn with_reauth(mut self, reauth: Reauth) -> Self {
+        self.reauth = Some(reauth);
+        self
     }
 
     /// Full argv for a non-streaming call: base flags + `args`.
@@ -298,9 +349,18 @@ impl Kubectl {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let argv = self.argv(args);
+        let args: Vec<String> = args.into_iter().map(Into::into).collect();
+        let argv = self.argv(args.iter().cloned());
         tracing::debug!(program = %self.program, args = ?argv, "kubectl");
-        run(&self.program, &argv, &self.env, timeout, None).await
+        match run(&self.program, &argv, &self.env, timeout, None).await {
+            Err(e) if should_reauth(&e, self.reauth.is_some()) => {
+                tracing::info!("k8s: cached exec token rejected — dropping it and retrying once");
+                let fresh = (self.reauth.as_ref().expect("checked").0)().await?;
+                let argv = fresh.argv(args);
+                run(&fresh.program, &argv, &fresh.env, timeout, None).await
+            }
+            other => other,
+        }
     }
 
     /// Run and parse stdout as JSON (`-o json` must be part of `args`).
@@ -453,6 +513,31 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn unauthorized_is_classified_as_credentials_rejected() {
+        for stderr in [
+            "error: You must be logged in to the server (Unauthorized)",
+            "E1003 memcache.go:265] couldn't get current server API group list: the server has asked for the client to provide credentials\nerror: You must be logged in to the server (the server has asked for the client to provide credentials)",
+            "Error from server (Unauthorized): pods is forbidden",
+        ] {
+            let e = classify_failure("kubectl", stderr);
+            assert!(is_credentials_rejected(&e), "{stderr} => {e:?}");
+        }
+        assert!(!is_credentials_rejected(&classify_failure(
+            "kubectl",
+            "Error from server (NotFound): pods \"x\" not found"
+        )));
+    }
+
+    #[test]
+    fn reauth_only_for_rejected_credentials_with_a_hook() {
+        let rejected = classify_failure("kubectl", "error: Unauthorized");
+        assert!(should_reauth(&rejected, true));
+        assert!(!should_reauth(&rejected, false));
+        let other = classify_failure("kubectl", "error: boom");
+        assert!(!should_reauth(&other, true));
     }
 
     #[test]

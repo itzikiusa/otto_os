@@ -667,7 +667,9 @@
     return items.length ? [...items, { separator: true }] : [];
   }
   function moduleMenu(e: MouseEvent, m: SidebarModule): void {
-    ctxMenu.show(e, [...splitItems(m), ...favoriteMenuItems(m), { separator: true }, customizeItem()]);
+    // Plain clicks resume the module where it was left; this is the way home.
+    const home: MenuItem = { label: `Open ${m.label} main page`, icon: 'home', action: () => router.go(m.id) };
+    ctxMenu.show(e, [home, { separator: true }, ...splitItems(m), ...favoriteMenuItems(m), { separator: true }, customizeItem()]);
   }
   function sectionMenu(e: MouseEvent, sec: SidebarSection): void {
     const id = sec.group.id;

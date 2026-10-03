@@ -36,6 +36,8 @@
   import { actionsFor, runAction } from './actions';
   import { formatAge, kindDef, visibleKinds } from './k8s-util';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
+  import K8sViewSwitch from './K8sViewSwitch.svelte';
+  import { monitorPath } from './viewState';
 
   interface Props {
     cluster: K8sCluster;
@@ -169,6 +171,33 @@
     k8s.select(null);
     router.go(`${base}/${kind}`);
   }
+  /** Console → Monitor with this workload's row expanded (K-2). */
+  function openInMonitor(wlNs: string, workload: string): void {
+    k8s.saveMonitorUi(cluster.id, { expanded: `${wlNs}/${workload}`, filter: workload });
+    router.go(monitorPath(cluster.id));
+  }
+  // KS-4: after an action the drawer re-reads its detail once the change
+  // has had a moment to land (a restart / scale shows in the next read).
+  let drawerNonce = $state(0);
+  let drawerTimer: ReturnType<typeof setTimeout> | null = null;
+  function afterAction(): void {
+    void k8s.loadResources(true);
+    if (drawerTimer) clearTimeout(drawerTimer);
+    drawerTimer = setTimeout(() => {
+      drawerTimer = null;
+      drawerNonce += 1;
+    }, 1500);
+  }
+  $effect(() => () => {
+    if (drawerTimer) clearTimeout(drawerTimer);
+  });
+  // K-1: the filter + drawer tab are remembered per cluster (and per kind for
+  // the filter), so they survive a module switch, the Monitor and a reload.
+  $effect(() => {
+    void k8s.filter;
+    void k8s.drawerTab;
+    untrack(() => k8s.rememberConsoleUi());
+  });
   function switchCluster(id: string): void {
     if (id && id !== cluster.id) router.go(`kubernetes/${encodeURIComponent(id)}`);
   }
@@ -206,7 +235,7 @@
     }
     const resp = await runAction(cluster.id, kind, r, a);
     if (resp?.output && a.id === 'rollout_status') toasts.info('Rollout status', resp.output);
-    if (resp) void k8s.loadResources(true);
+    if (resp) afterAction();
   }
 
   function rowMenu(e: MouseEvent | KeyboardEvent, r: K8sRow): void {
@@ -381,6 +410,7 @@
   {/snippet}
   {#snippet badge()}
     <EnvBadge env={cluster.environment} />
+    <K8sViewSwitch clusterId={cluster.id} view="resources" />
     {#if k8s.caps?.server_version}<span class="ver mono" title="Server version">{k8s.caps.server_version}</span>{/if}
   {/snippet}
   {#snippet actions()}
@@ -396,9 +426,6 @@
     <button class="icon-btn" onclick={() => void k8s.loadResources()} title="Refresh (r)" aria-label="Refresh"><Icon name="refresh" size={14} /></button>
     <button class="pill-toggle" class:on={k8s.autoRefresh} onclick={() => k8s.setAutoRefresh(!k8s.autoRefresh)} aria-pressed={k8s.autoRefresh} title="Auto-refresh every 10 s">
       <Icon name="clock" size={12} /> Auto
-    </button>
-    <button class="btn small" onclick={() => router.go(`kubernetes/monitor/${encodeURIComponent(cluster.id)}/workloads`)} title="Monitoring dashboard for this cluster" data-testid="k8s-monitor-cluster-btn">
-      <Icon name="gauge" size={12} /> Monitor
     </button>
     {#if canK9s}
       <button class="btn small" onclick={() => void openK9s()} disabled={k9sOpening} title="Open k9s in a terminal" data-testid="k8s-k9s-btn">
@@ -459,6 +486,9 @@
           onopen={(r) => openRow(r)}
           onmenu={rowMenu}
           onretry={() => void k8s.loadResources()}
+          scrollKey={k8s.currentKey}
+          initialScroll={(key) => k8s.scrollFor(key)}
+          onscrolled={(key, top) => k8s.saveScroll(key, top)}
         />
       </div>
 
@@ -482,6 +512,8 @@
               onclose={closeDrawer}
               onopenpod={openPod}
               onaction={(a, r) => void doAction(a, r)}
+              reloadNonce={drawerNonce}
+              onmonitor={openInMonitor}
             />
           {/key}
         </div>
@@ -498,7 +530,7 @@
     onsubmit={(n) => {
       const f = scaleFor!;
       scaleFor = null;
-      void runAction(cluster.id, kind, f.row, f.def, { replicas: n }).then((r) => r && k8s.loadResources(true));
+      void runAction(cluster.id, kind, f.row, f.def, { replicas: n }).then((r) => r && afterAction());
     }}
   />
 {/if}
@@ -509,7 +541,7 @@
     onsubmit={(p) => {
       const f = syncFor!;
       syncFor = null;
-      void runAction(cluster.id, kind, f.row, f.def, p).then((r) => r && k8s.loadResources(true));
+      void runAction(cluster.id, kind, f.row, f.def, p).then((r) => r && afterAction());
     }}
   />
 {/if}

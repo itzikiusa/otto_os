@@ -2,10 +2,15 @@
   // Kubernetes console module. Routes: `#/kubernetes` (clusters overview),
   // `#/kubernetes/<clusterId>` (workspace, last kind), `#/kubernetes/<clusterId>/<kind>`
   // and `#/kubernetes/<clusterId>/<kind>/<ns>/<name>` (row selected → drawer;
-  // `-` stands in for an empty namespace on cluster-scoped kinds). The URL is
-  // the source of truth for cluster / kind / selected row; the store holds
-  // the namespace + filter + cache. A first-run InstallPanel replaces the
-  // module while kubectl is missing (contract §5).
+  // `-` stands in for an empty namespace on cluster-scoped kinds), and
+  // `#/kubernetes/<clusterId>/monitor[/<tab>]` — the same cluster workspace in
+  // its Monitor view (one workspace, a Resources | Monitor switch; the old
+  // `kubernetes/monitor/<id>` URL redirects). The URL is the source of truth
+  // for cluster / kind / selected row; the store holds the namespace + filter
+  // + row cache + per-cluster view state. Leaving for the overview or the
+  // Monitor never deselects the cluster, so coming back paints at once.
+  // A first-run InstallPanel replaces the module while kubectl is missing
+  // (contract §5).
   import { untrack } from 'svelte';
   import { router } from '../../lib/router.svelte';
   import { k8s } from '../../lib/stores/k8s.svelte';
@@ -19,20 +24,27 @@
   import MonitorCluster from './monitor/MonitorCluster.svelte';
   import MonitorFleet from './monitor/MonitorFleet.svelte';
   import { isKind } from './k8s-util';
+  import { monitorPath, parseK8sRoute } from './viewState';
 
-  // `#/kubernetes/monitor[/<clusterId>[/<tab>]]` is the Monitor dashboard; it
-  // never selects a cluster in the console store.
-  const isMonitor = $derived(router.parts[1] === 'monitor');
-  // `#/kubernetes/monitor/fleet[/<tab>]` is the cross-cluster ClickHouse
-  // dashboard — `fleet` is a reserved segment, never a cluster id.
-  const isFleet = $derived(isMonitor && router.parts[2] === 'fleet');
-  const fleetTab = $derived(router.parts[3] ?? 'overview');
-  const monitorClusterId = $derived(isMonitor && !isFleet ? (router.parts[2] ?? null) : null);
-  const monitorTab = $derived(router.parts[3] ?? 'workloads');
-  const routeClusterId = $derived(isMonitor ? null : (router.parts[1] ?? null));
-  const routeKind = $derived(router.parts[2] ?? '');
-  const routeNs = $derived(router.parts[3]);
-  const routeName = $derived(router.parts[4]);
+  const route = $derived(parseK8sRoute(router.parts));
+  // `#/kubernetes/monitor` (overview) and `#/kubernetes/monitor/fleet[/<tab>]`
+  // (the cross-cluster ClickHouse dashboard — `fleet` is a reserved segment,
+  // never a cluster id) are cluster-less Monitor pages.
+  const isMonitor = $derived(route.view === 'monitor' || route.view === 'monitor-overview' || route.view === 'fleet');
+  const isFleet = $derived(route.view === 'fleet');
+  const fleetTab = $derived(route.view === 'fleet' ? route.tab : 'overview');
+  const monitorClusterId = $derived(route.view === 'monitor' ? route.clusterId : null);
+  const monitorTab = $derived(route.view === 'monitor' ? route.tab : 'workloads');
+  const routeClusterId = $derived(route.view === 'resources' ? route.clusterId : null);
+  const routeKind = $derived(route.view === 'resources' ? route.kind : '');
+  const routeNs = $derived(route.view === 'resources' ? route.ns : undefined);
+  const routeName = $derived(route.view === 'resources' ? route.name : undefined);
+
+  // The old per-cluster Monitor URL canonicalises to the workspace form.
+  $effect(() => {
+    const r = route;
+    if (r.view === 'monitor' && r.legacy) untrack(() => router.replace(monitorPath(r.clusterId, r.tab)));
+  });
 
   /** Session-only "continue without installing" — lets a viewer who can't
    *  install (or someone with kubectl on a non-standard path) still reach the
@@ -51,12 +63,17 @@
   $effect(() => {
     void k8s.accessRevision;
     const id = routeClusterId;
+    const monitorId = monitorClusterId;
     const kind = routeKind;
     const ns = routeNs;
     const name = routeName;
     untrack(() => {
-      k8s.selectCluster(id);
+      // The Monitor view is the same cluster workspace: entering it selects
+      // the cluster (a no-op when it already is) and keeps the console cache.
+      if (monitorId) k8s.selectCluster(monitorId);
+      // The overview / Monitor overview / Fleet keep the last cluster's state.
       if (!id) return;
+      k8s.selectCluster(id);
       if (isKind(kind)) k8s.setKind(kind);
       if (name !== undefined && ns !== undefined) {
         const sel = { ns: ns === '-' ? '' : ns, name };
@@ -98,7 +115,7 @@
     <MonitorFleet tab={fleetTab} />
   {:else if isMonitor && monitorClusterId}
     {#if monitorCluster}
-      <MonitorCluster cluster={monitorCluster} tab={monitorTab} />
+      {#key monitorCluster.id}<MonitorCluster cluster={monitorCluster} tab={monitorTab} />{/key}
     {:else if k8s.clustersLoaded}
       <PageHeader title="Monitor" crumbs={[{ label: 'Kubernetes', onclick: () => router.go('kubernetes') }]} />
       <EmptyState

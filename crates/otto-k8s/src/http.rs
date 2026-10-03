@@ -141,6 +141,15 @@ pub fn api_router<S: K8sCtx>() -> Router<S> {
         .route("/k8s/clusters/{id}/exec", post(exec::<S>))
         .route("/k8s/clusters/{id}/k9s", post(k9s::<S>))
         .route("/k8s/clusters/{id}/actions", post(run_action::<S>))
+        .route("/k8s/clusters/{id}/pod-http", post(pod_http::<S>))
+        .route(
+            "/k8s/clusters/{id}/pod-actions",
+            get(list_pod_actions::<S>).put(save_pod_action::<S>),
+        )
+        .route(
+            "/k8s/clusters/{id}/pod-actions/{action_id}",
+            axum::routing::delete(delete_pod_action::<S>),
+        )
         .merge(crate::monitor::http::routes::<S>())
         .merge(crate::monitor::fleet::routes::<S>())
 }
@@ -645,4 +654,277 @@ async fn run_action<S: K8sCtx>(
     )
     .await;
     Ok(Json(result?))
+}
+
+// ---------------------------------------------------------------------------
+// Pod HTTP actions (K-3)
+// ---------------------------------------------------------------------------
+
+/// RBAC operation for a pod HTTP call: a GET reads (`workloads_view`); any
+/// mutating method can change the app's runtime state, so it needs the same
+/// Edit-level grant as running a command in the pod (`exec`).
+fn pod_http_operation(mutating: bool) -> &'static str {
+    if mutating {
+        "exec"
+    } else {
+        "workloads_view"
+    }
+}
+
+async fn pod_http<S: K8sCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<crate::pod_http::PodHttpReq>,
+) -> ApiResult<Response> {
+    use crate::pod_http;
+    let v = pod_http::validate(&req)?;
+    let mutating = v.mutating();
+    crate::access::check(
+        &ctx.pool(),
+        &user,
+        &id,
+        pod_http_operation(mutating),
+        Some(&v.namespace),
+    )
+    .await?;
+    let svc = Clusters::new(&ctx);
+    let c = svc.get(&id).await?;
+    let base_detail = json!({
+        "cluster": c.name, "context": c.context_name, "environment": c.environment,
+        "ns": v.namespace, "pod": req.pod, "workload": req.workload,
+        "method": v.method.as_str(), "port": v.port, "path": v.path,
+        "headers": pod_http::redact_headers(req.headers.iter().flatten()),
+        "body_sha256": pod_http::body_sha256(v.body.as_deref()),
+    });
+    if pod_http::needs_confirm(
+        c.environment,
+        mutating,
+        req.confirm_name.as_deref(),
+        v.target_name(),
+    ) {
+        let mut detail = base_detail;
+        detail["ok"] = json!(false);
+        detail["error"] = json!("confirm_required");
+        audit(&ctx, &user, "k8s.pod_http", &c.id, detail).await;
+        let problem = Problem {
+            code: "confirm_required".into(),
+            message: format!(
+                "confirmation required: {} {} on a prod cluster — set confirm_name to \"{}\"",
+                v.method,
+                v.path,
+                v.target_name()
+            ),
+        };
+        return Ok((StatusCode::CONFLICT, Json(problem)).into_response());
+    }
+    let k = clusters::kubectl_for(&ctx, &c).await?;
+    let result = pod_http::run(&k, c.id.as_str(), &v).await;
+    let _ = svc.repo().touch(&c.id).await;
+    let mut detail = base_detail;
+    match &result {
+        Ok(r) => {
+            detail["ok"] = json!(true);
+            detail["pods"] = json!(r.results.iter().map(|x| &x.pod).collect::<Vec<_>>());
+            detail["statuses"] = json!(r
+                .results
+                .iter()
+                .map(|x| json!({"pod": x.pod, "status": x.status, "via": x.via, "error": x.error}))
+                .collect::<Vec<_>>());
+        }
+        Err(e) => {
+            detail["ok"] = json!(false);
+            detail["error"] = json!(e.to_string());
+        }
+    }
+    audit(&ctx, &user, "k8s.pod_http", &c.id, detail).await;
+    Ok(Json(result?).into_response())
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PodActionsQuery {
+    pub namespace: Option<String>,
+    pub workload_kind: Option<String>,
+    pub workload: Option<String>,
+}
+
+/// `PUT …/pod-actions` body.
+#[derive(Debug, Deserialize)]
+pub struct SavePodActionReq {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub namespace: String,
+    pub workload_kind: String,
+    pub workload: String,
+    pub name: String,
+    pub method: String,
+    pub port: u32,
+    pub path: String,
+    #[serde(default)]
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    pub body_template: Option<String>,
+}
+
+fn opt_trim(s: Option<String>) -> Option<String> {
+    s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+async fn list_pod_actions<S: K8sCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<PodActionsQuery>,
+) -> ApiResult<Json<Value>> {
+    let namespace = opt_trim(q.namespace);
+    crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
+    let filter = otto_state::PodActionFilter {
+        namespace: namespace.clone(),
+        workload_kind: opt_trim(q.workload_kind)
+            .map(|k| crate::pod_http::workload_kind(&k).map(|k| k.as_str().to_string()))
+            .transpose()?,
+        workload: opt_trim(q.workload),
+    };
+    let rows = otto_state::K8sPodActionsRepo::new(ctx.pool())
+        .list(&id, &filter)
+        .await?;
+    // Namespace-scoped grants: only actions in namespaces the user may view.
+    let mut visible = Vec::with_capacity(rows.len());
+    let mut seen: std::collections::HashMap<String, bool> = Default::default();
+    for a in rows {
+        let ok = match seen.get(&a.namespace) {
+            Some(ok) => *ok,
+            None => {
+                let ok = crate::access::allowed(
+                    &ctx.pool(),
+                    &user,
+                    &id,
+                    "workloads_view",
+                    Some(&a.namespace),
+                )
+                .await?;
+                seen.insert(a.namespace.clone(), ok);
+                ok
+            }
+        };
+        if ok {
+            visible.push(a);
+        }
+    }
+    Ok(Json(json!({ "actions": visible })))
+}
+
+async fn save_pod_action<S: K8sCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<SavePodActionReq>,
+) -> ApiResult<Json<otto_state::PodAction>> {
+    use crate::pod_http;
+    let namespace = req.namespace.trim().to_string();
+    if crate::access::namespace(Some(namespace.as_str()))?.is_none() {
+        return Err(Error::Invalid("namespace is required".into()).into());
+    }
+    let kind = pod_http::workload_kind(&req.workload_kind)?;
+    let workload = req.workload.trim().to_string();
+    if workload.is_empty() || workload.len() > 253 {
+        return Err(Error::Invalid("workload is required".into()).into());
+    }
+    let name = req.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 120 {
+        return Err(Error::Invalid("name is required (at most 120 characters)".into()).into());
+    }
+    let method = pod_http::parse_method(&req.method)?;
+    let port = u16::try_from(req.port)
+        .ok()
+        .filter(|p| *p > 0)
+        .ok_or_else(|| Error::Invalid("port must be 1-65535".into()))?;
+    let path = req.path.trim().to_string();
+    // Templates are filled at run time: validate with the variables blanked.
+    pod_http::validate_path(&path.replace("{{", "").replace("}}", ""))?;
+    let headers = req.headers.unwrap_or_default();
+    pod_http::validate_headers(&headers)?;
+    if headers.keys().any(|k| pod_http::is_secret_header(k)) {
+        return Err(Error::Invalid(
+            "saved actions cannot store credential headers (Authorization, Cookie…)".into(),
+        )
+        .into());
+    }
+    if req
+        .body_template
+        .as_ref()
+        .is_some_and(|b| b.len() > pod_http::MAX_REQUEST_BODY)
+    {
+        return Err(Error::PayloadTooLarge("body template over 1 MiB".into()).into());
+    }
+    crate::access::check(&ctx.pool(), &user, &id, "exec", Some(&namespace)).await?;
+    let c = Clusters::new(&ctx).get(&id).await?;
+    let repo = otto_state::K8sPodActionsRepo::new(ctx.pool());
+    let action_id = opt_trim(req.id);
+    if let Some(aid) = &action_id {
+        // Updating: the existing row's namespace must be editable too.
+        if let Ok(existing) = repo.get(&c.id, aid).await {
+            crate::access::check(&ctx.pool(), &user, &id, "exec", Some(&existing.namespace))
+                .await?;
+        }
+    }
+    let saved = repo
+        .upsert(otto_state::UpsertPodAction {
+            id: action_id,
+            cluster_id: c.id.clone(),
+            namespace,
+            workload_kind: kind.as_str().to_string(),
+            workload,
+            name,
+            method: method.as_str().to_string(),
+            port,
+            path,
+            headers,
+            body_template: req.body_template.filter(|b| !b.is_empty()),
+            created_by: Some(user.id.clone()),
+        })
+        .await?;
+    audit(
+        &ctx,
+        &user,
+        "k8s.pod_action.save",
+        &c.id,
+        json!({"id": saved.id, "ns": saved.namespace, "workload": saved.workload,
+               "name": saved.name, "method": saved.method, "path": saved.path}),
+    )
+    .await;
+    Ok(Json(saved))
+}
+
+async fn delete_pod_action<S: K8sCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, action_id)): Path<(Id, String)>,
+) -> ApiResult<StatusCode> {
+    crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
+    let repo = otto_state::K8sPodActionsRepo::new(ctx.pool());
+    let existing = repo.get(&id, &action_id).await?;
+    crate::access::check(&ctx.pool(), &user, &id, "exec", Some(&existing.namespace)).await?;
+    repo.delete(&id, &action_id).await?;
+    audit(
+        &ctx,
+        &user,
+        "k8s.pod_action.delete",
+        &id,
+        json!({"id": action_id, "ns": existing.namespace, "workload": existing.workload,
+               "name": existing.name}),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod pod_http_route_tests {
+    use super::pod_http_operation;
+
+    #[test]
+    fn get_reads_and_mutations_need_exec() {
+        assert_eq!(pod_http_operation(false), "workloads_view");
+        assert_eq!(pod_http_operation(true), "exec");
+    }
 }

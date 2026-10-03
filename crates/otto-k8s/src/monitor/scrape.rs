@@ -220,7 +220,10 @@ async fn fetch_gateway(gw: &KubeProxy, target: &ScrapeTarget, p: &Probe) -> Resu
 
 /// Spawn `kubectl port-forward pod/<pod> 0:<port>` and return the child +
 /// the local port it bound.
-async fn spawn_forward(k: &Kubectl, target: &ScrapeTarget) -> Result<(tokio::process::Child, u16)> {
+pub(crate) async fn spawn_forward(
+    k: &Kubectl,
+    target: &ScrapeTarget,
+) -> Result<(tokio::process::Child, u16)> {
     let argv = k.argv_stream([
         "port-forward",
         "-n",

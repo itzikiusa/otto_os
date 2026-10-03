@@ -1414,6 +1414,16 @@ fn base_tool_catalog() -> Value {
                 "name": "k8s_action",
                 "description": "MUTATING (kubernetes Edit): run ONE operational action on a resource via kubectl and return `{ok, message, output}`. `action` ∈ restart (deployments/statefulsets/daemonsets/rollouts) · scale (params.replicas) · delete_pod (pods; params.grace) · rollout_status · rollout_undo (params.to_revision) · rollout_pause / rollout_resume · rollout_promote (rollouts; params.full) · rollout_abort · rollout_retry · argocd_sync (applications; params.revision, params.prune) · argocd_refresh (params.hard) · argocd_terminate_op · argocd_app_restart (params.resource_kind) · cronjob_trigger · cronjob_suspend / cronjob_resume. DESTRUCTIVE actions (delete_pod, scale to 0, rollout_undo, argocd_sync with prune) are refused unless `params.confirm_name` equals `name` — set it only after the user explicitly confirmed. Cluster RBAC denials surface as 403.",
                 "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string" }, "action": { "type": "string" }, "kind": { "type": "string" }, "namespace": { "type": "string" }, "name": { "type": "string" }, "params": { "type": "object" } }, "required": ["cluster_id", "action", "kind", "namespace", "name"] }
+            },
+            {
+                "name": "k8s_pod_actions_list",
+                "description": "Read-only: the saved pod HTTP actions of a cluster as `{actions: [{id, namespace, workload_kind, workload, name, method, port, path, headers, body_template}]}` — `path`/`body_template` may carry `{{logger}}` / `{{level}}` variables to fill before calling k8s_pod_http. Optional `namespace`, `workload_kind`, `workload` filters.",
+                "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string" }, "namespace": { "type": "string" }, "workload_kind": { "type": "string" }, "workload": { "type": "string" } }, "required": ["cluster_id"] }
+            },
+            {
+                "name": "k8s_pod_http",
+                "description": "MUTATING (kubernetes Edit for non-GET): send ONE HTTP request to a pod's container `port` through the API-server pod proxy (port-forward fallback) and return `{results: [{pod, status, duration_ms, headers, body, body_base64, truncated, error, via}], target_name, mutating}`. Target exactly one of `pod` or `workload` {kind: deployment|statefulset|daemonset|replicaset|job, name} (every running pod, ≤50, `max_concurrency` ≤8). Spring Boot actuator examples: GET /actuator/loggers · GET /actuator/loggers/<logger> · POST /actuator/loggers/<logger> with body {\"configuredLevel\":\"DEBUG\"} and header Content-Type: application/json · GET /actuator/health|info|env · POST /actuator/refresh · GET /actuator/threaddump. `timeout_ms` ≤30000; bodies are capped at 256 KiB. A non-GET method on a PROD cluster is refused (409 confirm_required) unless `confirm_name` equals the pod/workload name — set it only after the user explicitly confirmed.",
+                "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string" }, "namespace": { "type": "string" }, "pod": { "type": "string" }, "workload": { "type": "object", "properties": { "kind": { "type": "string" }, "name": { "type": "string" } } }, "port": { "type": "integer" }, "method": { "type": "string" }, "path": { "type": "string" }, "headers": { "type": "object" }, "body": { "type": "string" }, "timeout_ms": { "type": "integer" }, "max_concurrency": { "type": "integer" }, "confirm_name": { "type": "string" } }, "required": ["cluster_id", "namespace", "port", "method", "path"] }
             }
         ]
     })
@@ -1531,6 +1541,8 @@ const GOVERNED_ALIASED_BY_NATIVE: &[(&str, &str)] = &[
     ("k8s_top", "k8s_top"),
     ("k8s_health", "k8s_health"),
     ("k8s_action", "k8s_action"),
+    ("k8s_pod_http", "k8s_pod_http"),
+    ("k8s_pod_actions_list", "k8s_pod_actions_list"),
 ];
 
 /// How long a governed call waits for a human decision before returning
@@ -1716,6 +1728,7 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "k8s_describe",
     "k8s_top",
     "k8s_health",
+    "k8s_pod_actions_list",
 ];
 
 /// Native list tools served by the daemon's cross-workspace directory
@@ -1784,6 +1797,8 @@ const NATIVE_REF_ARGS: &[(&str, &str, &str)] = &[
     ("k8s_top", "cluster_id", "k8s_cluster"),
     ("k8s_health", "cluster_id", "k8s_cluster"),
     ("k8s_action", "cluster_id", "k8s_cluster"),
+    ("k8s_pod_http", "cluster_id", "k8s_cluster"),
+    ("k8s_pod_actions_list", "cluster_id", "k8s_cluster"),
 ];
 
 /// Messages an agent's `otto_room_read` returns when it names no `limit`.
@@ -2440,6 +2455,19 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             "/k8s/clusters/{}/monitor/health?{}",
             seg(&arg_str(args, "cluster_id")?),
             opt_query(args, &[("window", "window")]).trim_start_matches('&')
+        )),
+        "k8s_pod_actions_list" => ReadCall::get(format!(
+            "/k8s/clusters/{}/pod-actions?{}",
+            seg(&arg_str(args, "cluster_id")?),
+            opt_query(
+                args,
+                &[
+                    ("namespace", "namespace"),
+                    ("workload_kind", "workload_kind"),
+                    ("workload", "workload")
+                ]
+            )
+            .trim_start_matches('&')
         )),
         "k8s_top" => ReadCall::get(format!(
             "/k8s/clusters/{}/metrics?{}",
@@ -3633,6 +3661,38 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             });
             let raw = ctx
                 .post_json(&format!("/k8s/clusters/{}/actions", seg(&cluster)), &body)
+                .await?;
+            Ok(finalize(raw))
+        }
+        "k8s_pod_http" => {
+            let cluster = arg_str(args, "cluster_id")?;
+            let port = args
+                .get("port")
+                .and_then(u64_lenient)
+                .ok_or("missing argument 'port'")?;
+            let mut body = json!({
+                "namespace": arg_str(args, "namespace")?,
+                "port": port,
+                "method": arg_str(args, "method")?,
+                "path": arg_str(args, "path")?,
+            });
+            // Forwarded verbatim: the route owns validation and the prod
+            // confirm_name guard.
+            for k in [
+                "pod",
+                "workload",
+                "headers",
+                "body",
+                "timeout_ms",
+                "max_concurrency",
+                "confirm_name",
+            ] {
+                if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
+                    body[k] = v.clone();
+                }
+            }
+            let raw = ctx
+                .post_json(&format!("/k8s/clusters/{}/pod-http", seg(&cluster)), &body)
                 .await?;
             Ok(finalize(raw))
         }
@@ -5606,6 +5666,8 @@ mod tests {
             "k8s_logs",
             "k8s_top",
             "k8s_action",
+            "k8s_pod_http",
+            "k8s_pod_actions_list",
         ] {
             let tool = tools
                 .iter()
