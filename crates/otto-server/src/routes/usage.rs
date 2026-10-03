@@ -1,7 +1,10 @@
 //! Usage & metrics endpoints, backed by the embedded ClickHouse engine.
 //!
-//! Read/admin routes (`/usage/...`) are root-only — the dashboard aggregates
-//! across every workspace, mirroring the daemon-wide settings panel. The
+//! Reads (`status` / `summary` / `by-kind` / `report`) need `Usage:View` (the
+//! policy layer checks it): root sees every session, anyone else only the
+//! sessions they created (`scope: "own"`, external sessions excluded) — so a
+//! member granted Usage no longer lands on a dead end (U3). Config, install,
+//! budget writes, system metrics and the ccusage cross-check stay root-only. The
 //! `/ingest/usage` route is unauthenticated but gated by the per-session token
 //! Otto sets on the agent PTY, so injected provider hooks can report token
 //! usage without a user bearer token.
@@ -14,8 +17,9 @@ use otto_core::workref::WorkRef;
 use otto_core::Id;
 use otto_state::SettingsRepo;
 use otto_usage::{
-    AttributionDimension, AttributionRow, FeatureUsage, ForecastReq, ForecastResp, MetricPoint,
-    SessionTotals, UsageConfig, UsageEvent, UsageStatus, UsageSummary,
+    AttributionDimension, AttributionRow, CcusageCheck, CcusageCheckReq, FeatureUsage, ForecastReq,
+    ForecastResp, MetricPoint, SessionTotals, UsageConfig, UsageEvent, UsageReport, UsageScope,
+    UsageStatus, UsageSummary,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -66,28 +70,28 @@ pub struct WindowMinutes {
     pub minutes: Option<u32>,
 }
 
-/// `GET /usage/status` — engine + ClickHouse health (root).
+/// `GET /usage/status` — engine + ClickHouse health. Non-root callers get
+/// the health bits only (paths, version, sizes and row counts redacted).
 pub async fn status(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<UsageStatus>> {
-    require_root(&user)?;
-    Ok(Json(ctx.usage.status().await))
+    let mut st = ctx.usage.status().await;
+    if !user.is_root {
+        st.binary = None;
+        st.version = None;
+        st.data_dir = String::new();
+        st.usage_rows = 0;
+        st.metric_rows = 0;
+        st.disk_bytes = 0;
+    }
+    Ok(Json(st))
 }
 
-/// `GET /usage/summary?days=N` — provider/day/session/feature rollups (root).
-pub async fn summary(
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Query(q): Query<WindowDays>,
-) -> ApiResult<Json<UsageSummary>> {
-    require_root(&user)?;
-    let days = q.days.unwrap_or(30).clamp(1, 3650);
-    let otto_only = q.otto_only.unwrap_or(true);
-    let mut summary = ctx.usage.summary(days, otto_only).await.map_err(ApiError)?;
-    // ONE unfiltered sessions scan feeds both the enrichment and the per-kind
-    // rollup (it used to run twice per summary — perf O6).
-    let all_sessions = match otto_state::SessionsRepo::new(ctx.pool.clone())
+/// Every session, read once per request: feeds the enrichment, the per-kind
+/// rollup and (non-root) the caller's own-session scope.
+async fn all_sessions(ctx: &ServerCtx) -> Vec<otto_core::domain::Session> {
+    match otto_state::SessionsRepo::new(ctx.pool.clone())
         .list_all()
         .await
     {
@@ -96,43 +100,138 @@ pub async fn summary(
             tracing::warn!("usage: could not list sessions for enrichment: {e}");
             Vec::new()
         }
+    }
+}
+
+/// Session ids a non-root caller may see (the ones they created); `None` for
+/// root (everything).
+fn own_session_ids(
+    user: &otto_core::domain::User,
+    all: &[otto_core::domain::Session],
+) -> Option<Vec<String>> {
+    own_ids(
+        user.is_root,
+        &user.id,
+        all.iter().map(|s| (s.id.as_str(), s.created_by.as_str())),
+    )
+}
+
+/// [`own_session_ids`] over `(session_id, created_by)` pairs.
+fn own_ids<'a>(
+    is_root: bool,
+    user_id: &str,
+    sessions: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Option<Vec<String>> {
+    if is_root {
+        return None;
+    }
+    Some(
+        sessions
+            .filter(|(_, by)| *by == user_id)
+            .map(|(id, _)| id.to_string())
+            .collect(),
+    )
+}
+
+/// `GET /usage/summary?days=N` — provider/day/session/model/feature rollups.
+/// Root: every session; others: their own sessions (`scope: "own"`).
+pub async fn summary(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Query(q): Query<WindowDays>,
+) -> ApiResult<Json<UsageSummary>> {
+    let days = q.days.unwrap_or(30).clamp(1, 3650);
+    // ONE unfiltered sessions scan feeds the enrichment, the per-kind rollup
+    // and the scope (it used to run twice per summary — perf O6).
+    let all_sessions = all_sessions(&ctx).await;
+    let own = own_session_ids(&user, &all_sessions);
+    // A non-root view never includes external (machine-wide) sessions.
+    let otto_only = own.is_some() || q.otto_only.unwrap_or(true);
+    let scope = match &own {
+        Some(ids) => UsageScope::Sessions(ids),
+        None => UsageScope::All,
     };
+    let mut summary = ctx
+        .usage
+        .summary_scoped(days, otto_only, scope)
+        .await
+        .map_err(ApiError)?;
     enrich_sessions(&ctx, &mut summary.sessions, &all_sessions).await;
-    summary.by_kind = by_kind_rollup_with(&ctx, days, otto_only, &all_sessions).await;
+    summary.by_kind =
+        by_kind_rollup_with(&ctx, days, otto_only, &all_sessions, own.as_deref()).await;
     Ok(Json(summary))
 }
 
+/// `GET /usage/report?days=N&otto_only=B` — the ccusage-style report
+/// (daily / monthly / model / session tables). Scoped like the summary.
+pub async fn report(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Query(q): Query<WindowDays>,
+) -> ApiResult<Json<UsageReport>> {
+    let days = q.days.unwrap_or(30).clamp(1, 3650);
+    let all_sessions = all_sessions(&ctx).await;
+    let own = own_session_ids(&user, &all_sessions);
+    let otto_only = own.is_some() || q.otto_only.unwrap_or(true);
+    let scope = match &own {
+        Some(ids) => UsageScope::Sessions(ids),
+        None => UsageScope::All,
+    };
+    let mut report = ctx
+        .usage
+        .report(days, otto_only, scope)
+        .await
+        .map_err(ApiError)?;
+    enrich_sessions(&ctx, &mut report.sessions, &all_sessions).await;
+    Ok(Json(report))
+}
+
+/// `POST /usage/ccusage-check {days?}` — opt-in cross-check against
+/// `npx ccusage` (root: it runs a local subprocess and reads every
+/// transcript on the machine). Problems come back as `ran: false` + `error`.
+pub async fn ccusage_check(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    body: Option<Json<CcusageCheckReq>>,
+) -> ApiResult<Json<CcusageCheck>> {
+    require_root(&user)?;
+    let days = body.and_then(|Json(b)| b.days).unwrap_or(7);
+    Ok(Json(ctx.usage.ccusage_check(days).await))
+}
+
 /// `GET /usage/by-kind?days=N` — per-feature (review / product / channel /
-/// agent / …) token + cost rollup over the window (root). Same classification
+/// agent / …) token + cost rollup over the window (scoped like the summary). Same classification
 /// as the top-session `kind` badge; pricing is reused untouched.
 pub async fn by_kind(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
     Query(q): Query<WindowDays>,
 ) -> ApiResult<Json<Vec<FeatureUsage>>> {
-    require_root(&user)?;
     let days = q.days.unwrap_or(30).clamp(1, 3650);
-    let otto_only = q.otto_only.unwrap_or(true);
-    Ok(Json(by_kind_rollup(&ctx, days, otto_only).await))
+    let all_sessions = all_sessions(&ctx).await;
+    let own = own_session_ids(&user, &all_sessions);
+    let otto_only = own.is_some() || q.otto_only.unwrap_or(true);
+    Ok(Json(
+        by_kind_rollup_with(&ctx, days, otto_only, &all_sessions, own.as_deref()).await,
+    ))
 }
 
-/// Build the per-feature rollup: pull every session's raw token/cost sums from
-/// ClickHouse, classify each session via its SQLite metadata (the same label as
-/// the session-row `kind` badge), and fold into feature buckets. Best-effort —
-/// returns empty on any engine error so the summary still renders.
-async fn by_kind_rollup(ctx: &ServerCtx, days: u32, otto_only: bool) -> Vec<FeatureUsage> {
-    let repo = otto_state::SessionsRepo::new(ctx.pool.clone());
-    let all_sessions = repo.list_all().await.unwrap_or_default();
-    by_kind_rollup_with(ctx, days, otto_only, &all_sessions).await
-}
-
-/// [`by_kind_rollup`] over an already-loaded session list.
+/// Build the per-feature rollup over an already-loaded session list: pull
+/// every session's raw token/cost sums from ClickHouse, classify each session
+/// via its SQLite metadata (the same label as the session-row `kind` badge),
+/// and fold into feature buckets. Best-effort — returns empty on any engine
+/// error so the summary still renders.
 async fn by_kind_rollup_with(
     ctx: &ServerCtx,
     days: u32,
     otto_only: bool,
     all_sessions: &[otto_core::domain::Session],
+    // `Some(ids)`: only these sessions count (a non-root caller's own).
+    own: Option<&[String]>,
 ) -> Vec<FeatureUsage> {
+    const SKIP: &str = "\u{0}skip";
+    let own: Option<std::collections::HashSet<&str>> =
+        own.map(|ids| ids.iter().map(String::as_str).collect());
     // Resolve feature labels in one SQLite scan (list_all) instead of one GET
     // per session (the original N+1). Sessions absent from the map fall back
     // to "external". `feature_usage` issues its own `session_totals` query
@@ -143,6 +242,12 @@ async fn by_kind_rollup_with(
         .collect();
     ctx.usage
         .feature_usage(days, otto_only, |t: &SessionTotals| {
+            if own
+                .as_ref()
+                .is_some_and(|o| !o.contains(t.session_id.as_str()))
+            {
+                return SKIP.to_string();
+            }
             labels
                 .get(&t.session_id)
                 .cloned()
@@ -150,6 +255,9 @@ async fn by_kind_rollup_with(
         })
         .await
         .unwrap_or_default()
+        .into_iter()
+        .filter(|f| f.feature != SKIP)
+        .collect()
 }
 
 /// Enrich top-session rows with the Otto session title (pane name), kind
@@ -907,5 +1015,21 @@ mod session_usage_tests {
         let got = filter_session_totals(&rows, &visible);
         let ids: Vec<&str> = got.iter().map(|r| r.session_id.as_str()).collect();
         assert_eq!(ids, vec!["a", "c"]);
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::own_ids;
+
+    #[test]
+    fn root_sees_everything_others_only_their_sessions() {
+        let rows = [("s1", "alice"), ("s2", "bob"), ("s3", "alice")];
+        assert_eq!(own_ids(true, "alice", rows.iter().copied()), None);
+        assert_eq!(
+            own_ids(false, "alice", rows.iter().copied()),
+            Some(vec!["s1".to_string(), "s3".to_string()])
+        );
+        assert_eq!(own_ids(false, "carol", rows.iter().copied()), Some(vec![]));
     }
 }

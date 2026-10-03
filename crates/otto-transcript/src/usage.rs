@@ -74,6 +74,11 @@ pub struct ClaudeLine {
     pub dedup_key: Option<String>,
     /// The line's own `timestamp` (RFC3339), the true time of the API call.
     pub timestamp: Option<String>,
+    /// `message.stop_reason` is set — this line carries the response's FINAL
+    /// usage. While a response streams, Claude Code writes earlier lines with
+    /// `stop_reason: null` and a *partial* `output_tokens` (seen on subagent
+    /// transcripts: 5 → 141, 7 → 300); see [`ResponseFolder`].
+    pub complete: bool,
 }
 
 /// Parse a single Claude Code transcript line.
@@ -111,6 +116,7 @@ pub fn parse_claude_line(line: &str) -> Option<ClaudeLine> {
         .get("timestamp")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let complete = message.get("stop_reason").is_some_and(|r| !r.is_null());
     Some(ClaudeLine {
         usage: ParsedUsage {
             model,
@@ -121,7 +127,187 @@ pub fn parse_claude_line(line: &str) -> Option<ClaudeLine> {
         },
         dedup_key,
         timestamp,
+        complete,
     })
+}
+
+/// A Claude response held back until its usage is final (see
+/// [`ResponseFolder`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldResponse {
+    pub key: String,
+    /// Field-wise max of every line of the response seen so far.
+    pub line: ClaudeLine,
+    /// Byte offset of the response's FIRST line in its file. The tailer never
+    /// persists a cursor past it while the response is held, so a restart
+    /// re-reads (and re-holds) the response instead of losing it.
+    pub start_offset: u64,
+}
+
+/// Folds the several transcript lines of one Claude API response into ONE
+/// usage record carrying the response's FINAL counts.
+///
+/// Claude Code writes a response as several lines sharing `message.id` +
+/// `requestId`. Lines written while the response is still streaming carry a
+/// partial `output_tokens` (and `stop_reason: null`); the last line carries
+/// the final count. Counting the first sighting of a key (the old behaviour)
+/// under-counted output ~3× on subagent-heavy days. The folder instead:
+///
+///   * holds the newest response per file, merging lines field-wise (max);
+///   * releases it — counts it once, marks the key seen — when a line with a
+///     `stop_reason` arrives, when the next response starts, or when the
+///     caller sees the file go idle ([`Self::release`]);
+///   * remembers the released usage of recent keys, so a line that still
+///     arrives later with bigger counts (a response straddling an idle
+///     release) emits a positive **correction** delta instead of being lost.
+///
+/// Corrections are delta rows with the same key timestamp, so summing rows
+/// still yields the response's final usage.
+#[derive(Debug)]
+pub struct ResponseFolder {
+    cap: usize,
+    recent: HashMap<String, (ParsedUsage, Option<String>)>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl ResponseFolder {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            recent: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Feed one parsed line found at byte `offset` of the file whose held
+    /// response is `held`. Records to count are appended to `out` (a full
+    /// response, a key-less line, or a correction delta).
+    pub fn push(
+        &mut self,
+        held: &mut Option<HeldResponse>,
+        line: ClaudeLine,
+        offset: u64,
+        seen: &mut SeenKeys,
+        out: &mut Vec<ClaudeLine>,
+    ) {
+        let Some(key) = line.dedup_key.clone() else {
+            // Nothing to collide with — count as-is.
+            out.push(line);
+            return;
+        };
+        if let Some(h) = held.as_mut() {
+            if h.key == key {
+                merge_max(&mut h.line, &line);
+                if line.complete {
+                    self.release(held, seen, out);
+                }
+                return;
+            }
+            // A new response started: the held one is done.
+            self.release(held, seen, out);
+        }
+        if seen.contains(&key) {
+            self.correct(&key, &line, out);
+            return;
+        }
+        let complete = line.complete;
+        *held = Some(HeldResponse {
+            key,
+            line,
+            start_offset: offset,
+        });
+        if complete {
+            self.release(held, seen, out);
+        }
+    }
+
+    /// Count the held response (if any) with its best-known usage.
+    pub fn release(
+        &mut self,
+        held: &mut Option<HeldResponse>,
+        seen: &mut SeenKeys,
+        out: &mut Vec<ClaudeLine>,
+    ) {
+        let Some(h) = held.take() else { return };
+        if !seen.insert(&h.key) {
+            // Counted meanwhile (e.g. the same response replayed into another
+            // file and released there first): only a correction can apply.
+            self.correct(&h.key, &h.line, out);
+            return;
+        }
+        self.remember(&h.key, &h.line);
+        out.push(h.line);
+    }
+
+    /// Remember `line` as the counted usage of `key` (used after a bulk
+    /// rebuild, so in-flight responses can still be corrected).
+    pub fn remember(&mut self, key: &str, line: &ClaudeLine) {
+        if self
+            .recent
+            .insert(
+                key.to_string(),
+                (line.usage.clone(), line.timestamp.clone()),
+            )
+            .is_none()
+        {
+            self.order.push_back(key.to_string());
+            while self.order.len() > self.cap {
+                if let Some(old) = self.order.pop_front() {
+                    self.recent.remove(&old);
+                }
+            }
+        }
+    }
+
+    /// Emit the positive difference between `line` and what was counted for
+    /// `key`, if it is still remembered and anything grew.
+    fn correct(&mut self, key: &str, line: &ClaudeLine, out: &mut Vec<ClaudeLine>) {
+        let Some((counted, ts)) = self.recent.get_mut(key) else {
+            return; // long-gone key: a resume replay — already counted
+        };
+        let u = &line.usage;
+        let delta = ParsedUsage {
+            model: if u.model.is_empty() {
+                counted.model.clone()
+            } else {
+                u.model.clone()
+            },
+            input: u.input.saturating_sub(counted.input),
+            output: u.output.saturating_sub(counted.output),
+            cache_read: u.cache_read.saturating_sub(counted.cache_read),
+            cache_write: u.cache_write.saturating_sub(counted.cache_write),
+        };
+        if delta.input + delta.output + delta.cache_read + delta.cache_write == 0 {
+            return;
+        }
+        counted.input = counted.input.max(u.input);
+        counted.output = counted.output.max(u.output);
+        counted.cache_read = counted.cache_read.max(u.cache_read);
+        counted.cache_write = counted.cache_write.max(u.cache_write);
+        out.push(ClaudeLine {
+            usage: delta,
+            dedup_key: Some(key.to_string()),
+            timestamp: ts.clone().or_else(|| line.timestamp.clone()),
+            complete: true,
+        });
+    }
+}
+
+/// Merge `b` into `a`: every token bucket takes the max (the counts only grow
+/// while a response streams), a non-empty model wins, the first timestamp is
+/// kept (the true start of the call).
+pub fn merge_max(a: &mut ClaudeLine, b: &ClaudeLine) {
+    a.usage.input = a.usage.input.max(b.usage.input);
+    a.usage.output = a.usage.output.max(b.usage.output);
+    a.usage.cache_read = a.usage.cache_read.max(b.usage.cache_read);
+    a.usage.cache_write = a.usage.cache_write.max(b.usage.cache_write);
+    if a.usage.model.is_empty() {
+        a.usage.model = b.usage.model.clone();
+    }
+    if a.timestamp.is_none() {
+        a.timestamp = b.timestamp.clone();
+    }
+    a.complete |= b.complete;
 }
 
 /// Parse a single Codex rollout transcript line.
@@ -676,6 +862,7 @@ mod tests {
                 },
                 dedup_key: Some("msg_01Xezx:req_011Ccd".to_string()),
                 timestamp: Some("2026-06-15T18:20:13.595Z".to_string()),
+                complete: true,
             }
         );
     }
@@ -723,6 +910,145 @@ mod tests {
         let b = parse_claude_line(&mk("bbbb")).unwrap();
         assert_eq!(a.dedup_key, b.dedup_key);
         assert!(a.dedup_key.is_some());
+    }
+
+    // ── ResponseFolder (streamed multi-line responses) ──────────────────────
+
+    /// A streamed line: `stop` = Some("tool_use") on the final line.
+    fn streamed(msg: &str, output: u64, stop: Option<&str>, ts: &str) -> String {
+        let stop = stop.map(|s| format!("\"{s}\"")).unwrap_or("null".into());
+        format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","requestId":"req_{msg}","message":{{"id":"msg_{msg}","model":"claude-opus-5-5","stop_reason":{stop},"usage":{{"input_tokens":2,"output_tokens":{output},"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}}}}"#
+        )
+    }
+
+    fn fold_lines(
+        lines: &[String],
+        seen: &mut SeenKeys,
+        folder: &mut ResponseFolder,
+    ) -> Vec<ClaudeLine> {
+        let mut held = None;
+        let mut out = Vec::new();
+        let mut off = 0u64;
+        for l in lines {
+            if let Some(p) = parse_claude_line(l) {
+                folder.push(&mut held, p, off, seen, &mut out);
+            }
+            off += l.len() as u64 + 1;
+        }
+        folder.release(&mut held, seen, &mut out);
+        out
+    }
+
+    #[test]
+    fn parse_claude_complete_follows_stop_reason() {
+        let partial = parse_claude_line(&streamed("a", 5, None, "t")).unwrap();
+        let done = parse_claude_line(&streamed("a", 141, Some("tool_use"), "t")).unwrap();
+        assert!(!partial.complete);
+        assert!(done.complete);
+    }
+
+    #[test]
+    fn folder_keeps_the_final_usage_of_a_streamed_response() {
+        // Real subagent shape: first line partial (5), last line final (141).
+        let dir = tempfile::tempdir().unwrap();
+        let mut seen = SeenKeys::load(dir.path().join("seen.json"), 100);
+        let mut folder = ResponseFolder::new(100);
+        let lines = vec![
+            streamed("a", 5, None, "2026-10-03T08:00:00Z"),
+            streamed("a", 141, Some("tool_use"), "2026-10-03T08:00:04Z"),
+            streamed("b", 7, None, "2026-10-03T08:01:00Z"),
+            streamed("b", 300, Some("tool_use"), "2026-10-03T08:01:09Z"),
+            // A third, single-line response and a multi-block repeat of it.
+            streamed("c", 590, Some("end_turn"), "2026-10-03T08:02:00Z"),
+            streamed("c", 590, Some("end_turn"), "2026-10-03T08:02:00Z"),
+        ];
+        let out = fold_lines(&lines, &mut seen, &mut folder);
+        let outputs: Vec<u64> = out.iter().map(|l| l.usage.output).collect();
+        assert_eq!(outputs, vec![141, 300, 590], "one FINAL row per response");
+        // Input/cache are counted once per response, not per line.
+        assert_eq!(out.iter().map(|l| l.usage.cache_read).sum::<u64>(), 3000);
+        // The call's start time is kept.
+        assert_eq!(out[0].timestamp.as_deref(), Some("2026-10-03T08:00:00Z"));
+        // Replaying the same transcript (a resume) counts nothing again.
+        assert!(fold_lines(&lines, &mut seen, &mut folder).is_empty());
+    }
+
+    #[test]
+    fn folder_releases_a_response_without_stop_reason_on_the_next_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seen = SeenKeys::load(dir.path().join("seen.json"), 100);
+        let mut folder = ResponseFolder::new(100);
+        let mut held = None;
+        let mut out = Vec::new();
+        for (i, l) in [streamed("a", 5, None, "t1"), streamed("a", 90, None, "t1")]
+            .iter()
+            .enumerate()
+        {
+            folder.push(
+                &mut held,
+                parse_claude_line(l).unwrap(),
+                i as u64,
+                &mut seen,
+                &mut out,
+            );
+        }
+        assert!(out.is_empty(), "still streaming — held, not counted");
+        assert_eq!(held.as_ref().map(|h| h.start_offset), Some(0));
+        folder.push(
+            &mut held,
+            parse_claude_line(&streamed("b", 1, None, "t2")).unwrap(),
+            9,
+            &mut seen,
+            &mut out,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].usage.output, 90);
+        assert!(seen.contains("msg_a:req_a"));
+        assert!(
+            !seen.contains("msg_b:req_b"),
+            "b is held until it completes"
+        );
+    }
+
+    #[test]
+    fn folder_emits_a_correction_when_a_released_response_grows_later() {
+        // Idle release mid-stream (the tailer saw no growth for a scan), then
+        // the final line lands: the difference is recorded as a delta row.
+        let dir = tempfile::tempdir().unwrap();
+        let mut seen = SeenKeys::load(dir.path().join("seen.json"), 100);
+        let mut folder = ResponseFolder::new(100);
+        let first = fold_lines(&[streamed("a", 5, None, "t0")], &mut seen, &mut folder);
+        assert_eq!(first[0].usage.output, 5);
+        let later = fold_lines(
+            &[streamed("a", 141, Some("tool_use"), "t9")],
+            &mut seen,
+            &mut folder,
+        );
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].usage.output, 136, "only the missing output");
+        assert_eq!(later[0].usage.input + later[0].usage.cache_read, 0);
+        assert_eq!(
+            later[0].timestamp.as_deref(),
+            Some("t0"),
+            "dated like the call"
+        );
+        // Nothing more to correct on a repeat.
+        assert!(fold_lines(
+            &[streamed("a", 141, Some("tool_use"), "t9")],
+            &mut seen,
+            &mut folder
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn folder_counts_keyless_lines_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seen = SeenKeys::load(dir.path().join("seen.json"), 100);
+        let mut folder = ResponseFolder::new(100);
+        let l = r#"{"type":"assistant","message":{"usage":{"output_tokens":3}}}"#.to_string();
+        assert_eq!(fold_lines(&[l.clone(), l], &mut seen, &mut folder).len(), 2);
     }
 
     #[test]
