@@ -1893,7 +1893,7 @@ choices. The UI surfaces this distinction in the preview.
 | GET /library/bundled | root | — | bundled skill catalog |
 | GET /library/bundled/{name} | root | — | BundledSkillContent (SKILL.md body + file list; view without installing) |
 | POST /library/bundled/{name}/install | root | — | install/update one bundled skill |
-| POST /library/bundled/install-all | root | `?category=&backup=` | install all bundled skills (optionally one category) |
+| POST /library/bundled/install-all | root | `?category=&backup=&force=` | install all bundled skills (optionally one category) → `{installed, backed_up, skipped, failed: [{name, error}]}`. Skips skills already up to date, and ones whose installed copy is ahead of the bundled version unless `force=true`; a failing skill is reported in `failed` and the rest still install. Runs off the async workers; keeps the newest 3 `skills-backup/<name>-<secs>` per skill |
 
 Each catalog entry carries `{name, category, version, description, installed_version,
 state, update_available}`. `state` is `not_installed | up_to_date | update_available

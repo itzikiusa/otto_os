@@ -4453,7 +4453,10 @@ export interface InstallBundledResp {
 export interface InstallAllBundledResp {
   installed: string[];
   backed_up: string[];
-}
+  /** Already at the bundled version, or ahead of it (local edits) without `force` — untouched. */
+  skipped: string[];
+  /** Skills that failed to install; the rest of the batch still ran. */
+  failed: { name: string; error: string }
 
 export interface GlobalSoulReq {
   name: string;
