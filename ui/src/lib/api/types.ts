@@ -6656,6 +6656,9 @@ export interface VaultRevisionDetail extends VaultRevision {
 export interface VaultStatus {
   /** Opaque change token; unchanged scans keep it stable. */
   generation?: string | null;
+  /** Graph-shape token: moves only when links/titles/tags/types or the note
+   *  set change (a body-only save keeps it) — graph views refetch on it. */
+  graph_generation?: string | null;
   id: number;
   scan_state: string;
   last_scan_at: string | null;
@@ -6742,6 +6745,8 @@ export interface VaultRenameResult {
   from: string;
   to: string;
   links_updated: number;
+  /** Sources whose links could not be rewritten (the move still succeeded). */
+  links_failed?: string[];
 }
 
 export interface VaultSearchReq {

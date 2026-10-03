@@ -2798,16 +2798,16 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | PATCH /workspaces/{ws}/vault/vaults/{id} | ws editor | `{name?, okf?}` | `Vault` |
 | DELETE /workspaces/{ws}/vault/vaults/{id} | ws editor | — | 204 — unregister ONLY (files on disk untouched) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rescan | ws editor | — | `VaultStatus` — full incremental rescan (awaited) |
-| GET /workspaces/{ws}/vault/vaults/{id}/status | ws viewer | — | `VaultStatus{scan_state, last_scan_at, generation, notes, links, unresolved, tags, attachments}`; stale (>5s) probes kick a background incremental scan |
+| GET /workspaces/{ws}/vault/vaults/{id}/status | ws viewer | — | `VaultStatus{scan_state, last_scan_at, generation, graph_generation, notes, links, unresolved, tags, attachments}`; stale (>5s) probes kick a background incremental scan |
 | GET /workspaces/{ws}/vault/vaults/{id}/dir | ws viewer | `?path=` | `VaultDirListing` — one level: dirs (with child counts), notes, attachments |
 | GET /workspaces/{ws}/vault/vaults/{id}/note | ws viewer | `?path=` | `VaultNote{meta, raw, outgoing}` |
 | PUT /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `{path, content, if_hash?}` | `VaultNoteMeta` — create/update; parent folders auto-created; `if_hash` mismatch → 409 (optimistic concurrency; `""` = must-not-exist) |
 | PUT /workspaces/{ws}/vault/vaults/{id}/file | ws editor | `{path, content, if_hash?}` | `{path,size,hash}` — create/update a guarded UTF-8 documentation artifact (`.yaml/.yml/.json/.d2/.mmd/.txt/.csv`, max 4 MiB); parent folders auto-created; same optimistic-concurrency, traversal, hidden-segment, and symlink-escape guards as note writes. Markdown stays on `/note`; binary files are rejected. |
 | DELETE /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `?path=` | 204 — soft delete → `<vault>/.trash/` (never destroys files) |
-| POST /workspaces/{ws}/vault/vaults/{id}/rename | ws editor | `{from, to}` | `VaultRenameResult{links_updated}` — file OR folder move; rewrites every referencing wikilink/markdown link across the vault on disk (style-preserving); case-only renames use a two-step move |
+| POST /workspaces/{ws}/vault/vaults/{id}/rename | ws editor | `{from, to}` | `VaultRenameResult{from, to, links_updated, links_failed}` — file OR folder move; rewrites every referencing wikilink/markdown link across the vault on disk (style-preserving); case-only renames use a two-step move. All index reads run before the move; once the move succeeds the call never fails halfway — a source whose links could not be rewritten is listed in `links_failed` (left untouched), and the index is always refreshed to the new path |
 | POST /workspaces/{ws}/vault/vaults/{id}/folder | ws editor | `{path}` | 204 |
 | GET /workspaces/{ws}/vault/vaults/{id}/backlinks | ws viewer | `?path=` | `VaultBacklink[]` (linked mentions with a context snippet; the snippet is cached per source note's indexed hash, so only changed sources are re-read) |
-| POST /workspaces/{ws}/vault/vaults/{id}/search | ws viewer | `{query, tag?, path_prefix?, okf_type?, limit?}` | `VaultSearchHit[]` — FTS5 bm25 + snippets; `tag:`/`path:`/`type:` operators inside `query` |
+| POST /workspaces/{ws}/vault/vaults/{id}/search | ws viewer | `{query, tag?, path_prefix?, okf_type?, limit?}` | `VaultSearchHit[]` — FTS5 bm25 + snippets; `tag:`/`path:`/`type:` operators inside `query`. Filters are applied in SQL before the limit (`tag:x` also matches nested `x/…`; `path:` is a case-sensitive prefix; `type:` is case-insensitive), so a filtered match ranked below the first page is still returned |
 | GET /workspaces/{ws}/vault/vaults/{id}/switcher | ws viewer | `?q=` | `VaultSwitchHit[]` — server-side fuzzy over title/aliases/path (quick switcher + `[[` completion) |
 | GET /workspaces/{ws}/vault/vaults/{id}/tags | ws viewer | — | `VaultTagCount[]` |
 | GET /workspaces/{ws}/vault/vaults/{id}/graph | ws viewer | `?mode=full\|local&path=&depth=&tags=&orphans=&reserved=&ghosts=&edge_budget=` | `VaultGraphPayload` — compact parallel arrays (`paths,titles,types,type_labels,services,service_labels,tag_off,tag_ids,tag_labels,flags,edges`) with a flat `[src,dst,…]` edge index list; `flags` bits: 1=ghost, 2=tag, 4=reserved; `types`/`services` are label-table indices per node (types are case-folded, so `Flow`/`flow` share one bucket; `untyped`/`unresolved`/`tag` are synthetic buckets), tags are CSR-encoded (`tag_ids[tag_off[i]..tag_off[i+1]]`, `tag_off` has `n+1` entries) and load regardless of `tags`, which only controls whether tag NODES are drawn. The client filters, rolls up and colors on these attributes without refetching. Full mode enforces a degree-prioritized edge budget (default 2M) with `truncated` |
@@ -2839,6 +2839,14 @@ Recovery and freshness details:
   scans keep it stable. `last_scan_at` uses nanosecond-precision RFC3339.
   Clients should compare tokens, not parse or order them. Clean open notes
   refresh on changes; dirty drafts keep their base hash and show conflicts.
+- `graph_generation` is a second opaque token that changes only when the
+  graph's shape can change: a note added/removed, or a note's links, title,
+  tags, OKF type or reserved flag changing, or a link re-resolving. A
+  body-only save keeps it, so graph views key their refetch on it. The daemon
+  caches built graph payloads per vault for one graph generation (keyed by the
+  query options), and `mode=local` without `ghosts`/`tags` walks the focus
+  neighbourhood over the indexed link columns instead of building the whole
+  graph.
 - Note reads derive raw/hash/parsed metadata/outgoing links from the same bytes.
   Markdown and text-artifact writes share a per-vault mutation gate with
   rename/delete/restore; writes atomically replace files and eagerly rescan.
@@ -3265,6 +3273,9 @@ linked to a product story. CRUD lives in the `otto-canvas` crate; the
 agent-assist endpoints (prompt → diagram blocks) live in `otto-server` because
 they need the orchestrator. Gated by `Feature::Canvas` (read=View, write=Edit).
 Item routes resolve the workspace from the scene row.
+Scene create (#103) and update (#105) accept bodies up to **25 MiB** (an
+Excalidraw board inlines pasted images as base64 in `doc.source`); every other
+canvas route keeps axum's 2 MB default.
 
 Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The rich
 `Scene` schema (nodes/edges/slides) is owned by the UI (`ui/src/modules/canvas/types.ts`).
@@ -3276,7 +3287,9 @@ Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The ric
 | 104 | GET /api/v1/canvas/scenes/{id} | ws viewer | — | CanvasScene (full `doc_json`) |
 | 105 | PUT /api/v1/canvas/scenes/{id}[?summary=true] | ws editor | `{title?, doc?, thumbnail?, provider?, section?, story_id?}` | CanvasScene (partial; omitted fields unchanged, COALESCE). `?summary=true` answers with the `CanvasSceneSummary` row instead of echoing the whole document (the Canvas editor uses it). Summary `format` is a trigger-maintained column (migration 0143), no longer parsed out of `doc_json` per listed row |
 | 106 | DELETE /api/v1/canvas/scenes/{id} | ws editor | — | 204 |
-| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview) |
+| 106a | GET /api/v1/canvas/scenes/{id}/versions | ws viewer | — | `CanvasSceneVersion[]` newest first `{id, scene_id, origin: 'agent'\|'user'\|'restore', created_by?, format?, size, created_at}` — no documents. Each entry is the doc as it was JUST BEFORE a change: before every Ask AI commit, before a restore, and at most once per 10 min across user saves (#105 with `doc`); deduped against the newest entry; newest 30 kept (migration 0170) |
+| 106b | POST /api/v1/canvas/scenes/{id}/versions/{vid}/restore | ws editor | — | CanvasScene — snapshots the current doc (origin `restore`, so a restore is undoable) then writes the version's doc. 404 when `vid` isn't a version of THIS scene |
+| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview). On an Excalidraw board the agent sees only shapes/arrows/text in the simplified form; images, freedraw, lines, frames, free arrows (and anything bound to them) plus top-level `files`/`appState` are set aside and merged back into the committed scene, which may therefore mix simplified and full elements. The committed doc keeps the prior doc's extra keys (`sketch`, `positions`, …) and the pre-turn doc is recorded in #106a |
 | 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas") |
 | 145 | GET /api/v1/sessions/{sid}/canvas-refs | ws viewer | — | `CanvasSceneSummary[]` — scenes referenced by this session |
 | 146 | POST /api/v1/sessions/{sid}/canvas-refs | ws editor | `{scene_id}` | 204 (idempotent; 404 if the scene isn't in the session's workspace) |

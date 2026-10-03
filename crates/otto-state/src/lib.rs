@@ -119,7 +119,10 @@ pub use provider_models::{ProviderModel, ProviderModelsRepo};
 pub use sqlx::SqlitePool;
 // NewRun/RunPatch/NewRunEvent are referenced via the `runs::` path downstream to
 // avoid colliding with swarm's `RunPatch`/`RunFilter` re-exports.
-pub use canvas::{CanvasRepo, CanvasScene, CanvasSceneSummary, NewScene, SceneUpdate};
+pub use canvas::{
+    CanvasRepo, CanvasScene, CanvasSceneSummary, CanvasSceneVersion, NewScene, SceneUpdate,
+    SCENE_VERSIONS_KEPT, USER_SNAPSHOT_EVERY_SECS,
+};
 pub use eval_lab::{EvalMatricesRepo, GoldenTaskInput, GoldenTasksRepo};
 pub use finding_events::FindingEventsRepo;
 pub use improvements::{ImprovementsRepo, NewEdit};

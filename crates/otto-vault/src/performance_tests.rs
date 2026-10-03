@@ -827,3 +827,177 @@ async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
         .unwrap();
     assert_eq!(older.len(), N / 1000 - 1);
 }
+
+fn graph_opts(mode: &str, path: Option<&str>, depth: usize) -> GraphOpts {
+    GraphOpts {
+        mode: mode.into(),
+        path: path.map(Into::into),
+        depth,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn body_only_save_keeps_graph_generation_and_cached_graph() {
+    let (e, _dir, id) = fixture().await;
+    let full = graph_opts("full", None, 1);
+    let first = e.graph("ws", id, &full).await.unwrap();
+    let builds = e.graph_builds.load(Relaxed);
+    let graph_gen = e.graph_generation(id).load(Relaxed);
+    e.write_note("ws", id, "a.md", "# Before\n[[b]]\n\nMore prose.", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        e.graph_generation(id).load(Relaxed),
+        graph_gen,
+        "a body-only save must not move the graph generation"
+    );
+    let again = e.graph("ws", id, &full).await.unwrap();
+    assert_eq!(e.graph_builds.load(Relaxed), builds, "served from cache");
+    assert_eq!(again.paths, first.paths);
+    // A link change moves the graph generation and rebuilds.
+    e.write_note("ws", id, "a.md", "# Before\nno links now", None)
+        .await
+        .unwrap();
+    assert_ne!(e.graph_generation(id).load(Relaxed), graph_gen);
+    let rebuilt = e.graph("ws", id, &full).await.unwrap();
+    assert_eq!(e.graph_builds.load(Relaxed), builds + 1);
+    assert!(rebuilt.edges.is_empty(), "{:?}", rebuilt.edges);
+    let status = e.status("ws", id).await.unwrap();
+    assert_eq!(
+        status.graph_generation,
+        Some(e.graph_generation(id).load(Relaxed).to_string())
+    );
+}
+
+#[tokio::test]
+async fn local_graph_bfs_uses_indexed_neighbourhood() {
+    let engine = Arc::new(VaultEngine::new(otto_state::db::test_pool().await));
+    let dir = tempfile::tempdir().unwrap();
+    for (name, body) in [
+        ("a.md", "[[b]]"),
+        ("b.md", "[[c]] [[a]]"),
+        ("c.md", "[[d]]"),
+        ("d.md", "end"),
+        ("x.md", "[[y]]"),
+        ("y.md", "far away"),
+        ("index.md", "[[a]] [[x]]"),
+    ] {
+        std::fs::write(dir.path().join(name), body).unwrap();
+    }
+    let id = engine
+        .store
+        .create_vault("ws", "T", dir.path().to_str().unwrap(), true)
+        .await
+        .unwrap();
+    engine.scan(id).await.unwrap();
+    for depth in 1..=3 {
+        let o = graph_opts("local", Some("a.md"), depth);
+        let indexed = engine.graph_local_indexed(id, &o).await.unwrap();
+        let built = engine.graph_build(id, &o).await.unwrap();
+        let mut a: Vec<_> = indexed.paths.clone();
+        let mut b: Vec<_> = built.paths.clone();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "depth {depth}");
+        let pairs = |g: &GraphPayload| {
+            let mut v: Vec<(String, String)> = g
+                .edges
+                .chunks(2)
+                .map(|p| {
+                    (
+                        g.paths[p[0] as usize].clone(),
+                        g.paths[p[1] as usize].clone(),
+                    )
+                })
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        assert_eq!(pairs(&indexed), pairs(&built), "depth {depth}");
+    }
+    let o = graph_opts("local", Some("index.md"), 1);
+    assert!(
+        engine.graph_local_indexed(id, &o).await.is_err(),
+        "a reserved focus is hidden unless reserved=true"
+    );
+}
+
+#[tokio::test]
+async fn search_filters_apply_before_the_limit_without_full_reads() {
+    let engine = Arc::new(VaultEngine::new(otto_state::db::test_pool().await));
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("deep")).unwrap();
+    for i in 0..260 {
+        std::fs::write(
+            dir.path().join(format!("n{i:03}.md")),
+            "alpha alpha alpha alpha",
+        )
+        .unwrap();
+    }
+    let filler = "lorem ipsum dolor sit amet ".repeat(80);
+    std::fs::write(
+        dir.path().join("deep/rare.md"),
+        format!("---\ntype: Runbook\ntags: [rare/sub]\n---\nalpha {filler}"),
+    )
+    .unwrap();
+    let id = engine
+        .store
+        .create_vault("ws", "T", dir.path().to_str().unwrap(), false)
+        .await
+        .unwrap();
+    engine.scan(id).await.unwrap();
+    let reads = engine.store.all_reads.load(Relaxed);
+    let search = |q: &str| SearchReq {
+        query: q.into(),
+        limit: 10,
+        ..Default::default()
+    };
+    for q in [
+        "alpha tag:rare",
+        "alpha tag:#rare/sub",
+        "alpha path:deep/",
+        "alpha type:runbook",
+        "tag:rare",
+    ] {
+        let hits = engine.search("ws", id, &search(q)).await.unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(),
+            vec!["deep/rare.md"],
+            "{q}"
+        );
+    }
+    assert!(engine
+        .search("ws", id, &search("alpha tag:rar"))
+        .await
+        .unwrap()
+        .is_empty());
+    let plain = engine.search("ws", id, &search("alpha")).await.unwrap();
+    assert_eq!(plain.len(), 10);
+    assert_eq!(
+        engine.store.all_reads.load(Relaxed),
+        reads,
+        "search must not read the whole notes table"
+    );
+}
+
+#[tokio::test]
+async fn rename_survives_a_failed_link_rewrite() {
+    let (e, dir, id) = fixture().await;
+    *e.rename_fail.lock().unwrap() = Some("a.md".into());
+    let r = e.rename("ws", id, "b.md", "sub/c.md").await.unwrap();
+    assert_eq!(r.links_failed, vec!["a.md".to_string()]);
+    assert_eq!(r.links_updated, 0);
+    assert!(dir.path().join("sub/c.md").is_file());
+    assert!(
+        e.store.note_meta(id, "sub/c.md").await.is_ok(),
+        "the moved note is indexed"
+    );
+    assert!(e.store.note_meta(id, "b.md").await.is_err());
+    // The source kept its (now unresolved) link; nothing was half-written.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.md")).unwrap(),
+        "# Before\n[[b]]"
+    );
+}

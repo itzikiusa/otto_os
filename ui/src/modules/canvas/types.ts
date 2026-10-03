@@ -163,6 +163,19 @@ export interface CanvasScene {
   updated_at: string;
 }
 
+/** One entry of a scene's version history (`GET /canvas/scenes/{id}/versions`)
+ *  — the document as it was just before an Ask AI commit, a restore, or (at
+ *  most every 10 min) a user save. Newest 30 kept; no document in the row. */
+export interface CanvasSceneVersion {
+  id: string;
+  scene_id: string;
+  origin: 'agent' | 'user' | 'restore';
+  created_by?: string | null;
+  format?: string | null;
+  size: number;
+  created_at: string;
+}
+
 export interface CanvasSceneSummary {
   id: string;
   workspace_id: string;

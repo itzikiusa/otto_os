@@ -251,6 +251,7 @@ impl Store {
                 .get("c");
         Ok(VaultStatus {
             generation: None,
+            graph_generation: None,
             id,
             scan_state: v.scan_state,
             last_scan_at: v.last_scan_at,
@@ -828,6 +829,193 @@ impl Store {
         Ok(rows.iter().map(|r| (r.get("path"), r.get("tag"))).collect())
     }
 
+    /// `path → (title, okf_type, reserved)` for the given paths; a path with
+    /// no note row maps to `None` (a file or a stale target). Indexed lookups
+    /// only, chunked under SQLite's bind-parameter limit.
+    pub async fn notes_meta_for(
+        &self,
+        vault: i64,
+        paths: &[String],
+    ) -> Result<Vec<(String, Option<(String, Option<String>, bool)>)>> {
+        let mut found: std::collections::HashMap<String, (String, Option<String>, bool)> =
+            Default::default();
+        for chunk in paths.chunks(IN_CHUNK) {
+            let sql = format!(
+                "SELECT path, title, okf_type, reserved FROM vault_notes \
+                 WHERE vault_id = ? AND path IN ({})",
+                placeholders(chunk.len())
+            );
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(vault);
+            for p in chunk {
+                q = q.bind(p);
+            }
+            for r in q
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("vault.notes_meta_for"))?
+            {
+                found.insert(
+                    r.get("path"),
+                    (
+                        r.get("title"),
+                        r.get("okf_type"),
+                        r.get::<i64, _>("reserved") != 0,
+                    ),
+                );
+            }
+        }
+        Ok(paths.iter().map(|p| (p.clone(), found.remove(p))).collect())
+    }
+
+    /// Resolved `(src, dst)` links touching any of `paths` in either
+    /// direction — one local-graph BFS hop over `idx_vault_links_src`/`_dst`.
+    pub async fn link_neighbors(
+        &self,
+        vault: i64,
+        paths: &[String],
+    ) -> Result<Vec<(String, String)>> {
+        let mut out = Vec::new();
+        for chunk in paths.chunks(IN_CHUNK) {
+            let ph = placeholders(chunk.len());
+            let sql = format!(
+                "SELECT src_path, dst_path FROM vault_links \
+                 WHERE vault_id = ? AND src_path IN ({ph}) AND dst_path IS NOT NULL \
+                 UNION ALL \
+                 SELECT src_path, dst_path FROM vault_links \
+                 WHERE vault_id = ? AND dst_path IN ({ph})"
+            );
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(vault);
+            for p in chunk {
+                q = q.bind(p);
+            }
+            q = q.bind(vault);
+            for p in chunk {
+                q = q.bind(p);
+            }
+            for r in q
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("vault.link_neighbors"))?
+            {
+                out.push((r.get("src_path"), r.get("dst_path")));
+            }
+        }
+        Ok(out)
+    }
+
+    /// `path → [tags]` for the given notes (indexed by `idx_vault_tags_path`).
+    pub async fn note_tags_for(
+        &self,
+        vault: i64,
+        paths: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        let mut out: std::collections::HashMap<String, Vec<String>> = Default::default();
+        for chunk in paths.chunks(IN_CHUNK) {
+            let sql = format!(
+                "SELECT path, tag FROM vault_tags WHERE vault_id = ? AND path IN ({})",
+                placeholders(chunk.len())
+            );
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(vault);
+            for p in chunk {
+                q = q.bind(p);
+            }
+            for r in q
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("vault.note_tags_for"))?
+            {
+                out.entry(r.get("path")).or_default().push(r.get("tag"));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Search with the `tag:` / `path:` / `type:` filters applied IN SQL, before
+    /// the LIMIT — a filtered match ranked below the first page is still found,
+    /// and no whole-table read happens per search. Returns
+    /// `(path, title, snippet, score, reserved)`.
+    pub(crate) async fn search_filtered(
+        &self,
+        vault: i64,
+        mode: SearchMode<'_>,
+        f: &SearchFilters<'_>,
+        limit: i64,
+    ) -> Result<Vec<(String, String, String, f32, bool)>> {
+        let mut filter_sql = String::new();
+        if f.path_prefix.is_some() {
+            filter_sql.push_str(" AND substr(n.path, 1, length(?)) = ?");
+        }
+        if f.okf_type.is_some() {
+            filter_sql.push_str(" AND n.okf_type = ? COLLATE NOCASE");
+        }
+        if f.tag.is_some() {
+            filter_sql.push_str(
+                " AND EXISTS (SELECT 1 FROM vault_tags t WHERE t.vault_id = n.vault_id \
+                 AND t.path = n.path AND (t.tag = ? OR substr(t.tag, 1, length(?) + 1) = ? || '/'))",
+            );
+        }
+        let sql = match mode {
+            SearchMode::Fts(_) => format!(
+                "SELECT n.path AS path, n.title AS title, n.reserved AS reserved, \
+                 snippet(vault_fts, 3, '\u{2039}', '\u{203a}', '…', 14) AS snip, \
+                 bm25(vault_fts) AS rank FROM vault_fts \
+                 JOIN vault_notes n ON n.vault_id = ? AND n.path = vault_fts.path \
+                 WHERE vault_fts.vault_id = ? AND vault_fts MATCH ?{filter_sql} \
+                 ORDER BY rank LIMIT ?"
+            ),
+            SearchMode::Like(_) => format!(
+                "SELECT n.path AS path, n.title AS title, n.reserved AS reserved, \
+                 n.title AS snip, -0.1 AS rank FROM vault_notes n WHERE n.vault_id = ? AND \
+                 (n.title LIKE ? ESCAPE '\\' OR n.path LIKE ? ESCAPE '\\' OR n.description LIKE ? ESCAPE '\\')\
+                 {filter_sql} ORDER BY n.path LIMIT ?"
+            ),
+            SearchMode::FilterOnly => format!(
+                "SELECT n.path AS path, n.title AS title, n.reserved AS reserved, \
+                 n.title AS snip, 0.0 AS rank FROM vault_notes n WHERE n.vault_id = ?\
+                 {filter_sql} ORDER BY n.path LIMIT ?"
+            ),
+        };
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(vault);
+        match mode {
+            SearchMode::Fts(expr) => q = q.bind(vault).bind(expr.to_string()),
+            SearchMode::Like(needle) => {
+                let pat = format!("%{}%", needle.replace('%', "\\%").replace('_', "\\_"));
+                q = q.bind(pat.clone()).bind(pat.clone()).bind(pat);
+            }
+            SearchMode::FilterOnly => {}
+        }
+        if let Some(pp) = f.path_prefix {
+            q = q.bind(pp.to_string()).bind(pp.to_string());
+        }
+        if let Some(ty) = f.okf_type {
+            q = q.bind(ty.to_string());
+        }
+        if let Some(t) = f.tag {
+            q = q
+                .bind(t.to_string())
+                .bind(t.to_string())
+                .bind(t.to_string());
+        }
+        let rows = q
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("vault.search_filtered"))?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let rank: f64 = r.get("rank");
+                (
+                    r.get("path"),
+                    r.get("title"),
+                    r.get("snip"),
+                    -rank as f32,
+                    r.get::<i64, _>("reserved") != 0,
+                )
+            })
+            .collect())
+    }
+
     // -- FTS -------------------------------------------------------------------
 
     /// Create the FTS5 index if the linked SQLite supports it, plus the
@@ -1097,6 +1285,43 @@ async fn fts_del_conn(
             .await?;
     }
     Ok(())
+}
+
+/// Bind parameters per `IN (…)` chunk (SQLite's default limit is 32 766; a
+/// small chunk keeps each statement cheap to prepare).
+const IN_CHUNK: usize = 400;
+
+/// `?,?,…` for an `IN (…)` list. The dynamic SQL built in this file only ever
+/// interpolates these placeholders and fixed clause text (audited for
+/// `AssertSqlSafe`); every value is bound.
+fn placeholders(n: usize) -> String {
+    let mut s = String::with_capacity(n * 2);
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push('?');
+    }
+    s
+}
+
+/// How [`Store::search_filtered`] matches text.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SearchMode<'a> {
+    /// A sanitized FTS5 MATCH expression (bm25-ranked).
+    Fts(&'a str),
+    /// LIKE over title/path/description (no FTS5, or FTS found nothing).
+    Like(&'a str),
+    /// No text: only the filters select notes.
+    FilterOnly,
+}
+
+/// `tag:` / `path:` / `type:` operators for [`Store::search_filtered`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SearchFilters<'a> {
+    pub tag: Option<&'a str>,
+    pub path_prefix: Option<&'a str>,
+    pub okf_type: Option<&'a str>,
 }
 
 #[cfg(test)]

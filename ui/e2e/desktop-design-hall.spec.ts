@@ -189,3 +189,27 @@ test('references search finds designs in the team library', async ({ page }) => 
   await page.getByTestId('design-ref-hit').filter({ hasText: TARGET_TITLE }).getByTestId('design-ref-add').click();
   await expect(page.getByTestId('design-ref-hit').filter({ hasText: TARGET_TITLE })).toContainText('Referenced');
 });
+
+test('a project page loads its own designs from the server (not the lobby library)', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const project = await postJson(ctx, `${base}${V1}/design/projects`, { workspace_id: wsId, name: `Scoped page ${stamp}` });
+  const titles = [`Scoped A ${stamp}`, `Scoped B ${stamp}`];
+  for (const title of titles) {
+    await postJson(ctx, `${base}${V1}/design/artifacts`, {
+      workspace_id: wsId,
+      project_id: project.id,
+      format: 'd2',
+      title,
+      content: 'a -> b\n',
+    });
+  }
+  await ctx.dispose();
+
+  // The page asks /design/search scoped to the project.
+  const scoped = page.waitForRequest((r) => r.url().includes('/design/search') && r.url().includes(`project_id=${project.id}`));
+  await openDesign(page, `design/p/${project.id}`);
+  await scoped;
+  for (const title of titles) await expect(page.getByText(title, { exact: true })).toBeVisible();
+  await expect(page.getByTestId('design-collection-more')).toHaveCount(0); // 2 < one page
+  await expectNoHorizontalOverflow(page);
+});

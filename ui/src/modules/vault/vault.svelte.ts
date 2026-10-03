@@ -950,6 +950,14 @@ class VaultStore {
     try {
       const r = await renameVaultPath(this.wsId, this.current.id, from, to);
       toasts.success(r.links_updated === 1 ? '1 link updated' : `${r.links_updated} links updated`);
+      const failed = r.links_failed ?? [];
+      if (failed.length) {
+        const shown = failed.slice(0, 3).join(', ') + (failed.length > 3 ? ` +${failed.length - 3} more` : '');
+        toasts.warn(
+          `Moved, but links in ${failed.length === 1 ? '1 note' : `${failed.length} notes`} weren't updated`,
+          shown,
+        );
+      }
       // Keep open tabs pointing at the moved path (file or whole folder).
       this.tabs = this.tabs.map((t) =>
         t.path === from

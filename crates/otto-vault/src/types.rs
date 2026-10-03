@@ -24,6 +24,11 @@ pub struct VaultStatus {
     /// Opaque change token; stable across unchanged scans, changes after restart.
     #[serde(default)]
     pub generation: Option<String>,
+    /// Opaque graph-shape token: changes only when links, titles, tags, OKF
+    /// types or the note set change — a body-only save keeps it, so graph
+    /// views refetch on this rather than `generation`.
+    #[serde(default)]
+    pub graph_generation: Option<String>,
     pub id: i64,
     pub scan_state: String,
     pub last_scan_at: Option<String>,
@@ -148,6 +153,10 @@ pub struct RenameResult {
     pub to: String,
     /// Number of links rewritten in OTHER notes.
     pub links_updated: i64,
+    /// Sources whose links could not be rewritten (the move itself still
+    /// succeeded and the index was refreshed). Empty on a clean rename.
+    #[serde(default)]
+    pub links_failed: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
