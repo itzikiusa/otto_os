@@ -9,6 +9,7 @@ import type {
   ApiAuth,
   ApiAutomation,
   ApiBodyMode,
+  ApiClientStorage,
   ApiCollection,
   ApiEnvironment,
   ApiHistoryEntry,
@@ -494,6 +495,7 @@ class ApiClientStore {
     this.flushTabsWrite();
     this.resetResponses();
     this.running = false; this.lastRun = null; this.currentRun = null; this.automationRuns = [];
+    this.storage = null; this.storageAt = null;
     this.tabsWid = wid;
     let next: ApiDraft[] = [];
     let active = 0;
@@ -803,6 +805,46 @@ class ApiClientStore {
   /** Direct sends and WS append events share one metadata-only refresh. */
   noteHistoryAppended(workspaceId: string, entryId?: string): void {
     if (workspaceId === this.wsId()) void this.historyRefresh.request(entryId);
+  }
+
+  // ── Storage gauge (perf2 N2) ──────────────────────────────────────────────
+  /** What this workspace's history + automation runs occupy (History list). */
+  storage: ApiClientStorage | null = $state.raw(null);
+  private storageAt: { wid: Id; at: number } | null = null;
+
+  /** Load the gauge (at most once a minute per workspace; the daemon caches
+   *  it too). Best-effort: no gauge just hides the line. */
+  async loadStorage(opts: { force?: boolean } = {}): Promise<void> {
+    const wid = this.wsId();
+    const base = this.base();
+    if (!wid || !base) return;
+    if (!opts.force && this.storageAt?.wid === wid && Date.now() - this.storageAt.at < RELOAD_FRESH_MS) return;
+    this.storageAt = { wid, at: Date.now() };
+    try {
+      const s = await api.get<ApiClientStorage>(`${base}/storage`);
+      if (this.wsId() === wid) this.storage = s;
+    } catch {
+      if (this.wsId() === wid) this.storage = null;
+    }
+  }
+
+  /** Apply the workspace's (just saved) retention now and refresh the gauge
+   *  and the history list. Only deletes what the configured limits say. */
+  async applyRetention(): Promise<boolean> {
+    const wid = this.wsId();
+    const base = this.base();
+    if (!wid || !base) return false;
+    try {
+      const s = await api.post<ApiClientStorage>(`${base}/storage/prune`, {});
+      if (this.wsId() !== wid) return true;
+      this.storage = s;
+      this.storageAt = { wid, at: Date.now() };
+      void this.historyRefresh.request();
+      return true;
+    } catch (e) {
+      toasts.error('Couldn’t apply retention', errMsg(e));
+      return false;
+    }
   }
 
   // ── Changes made elsewhere (perf2 N4) ─────────────────────────────────────
