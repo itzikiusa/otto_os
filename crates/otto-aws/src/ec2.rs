@@ -203,14 +203,29 @@ pub async fn list_instances(
 ) -> Result<InstancesResp> {
     let mut args = vec!["ec2", "describe-instances"];
     let filter;
-    if let Some(st) = q.state.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let state = q.state.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if let Some(st) = state {
         if !STATES.contains(&st) {
             return Err(Error::Invalid(format!("unknown instance state '{st}'")));
         }
         filter = format!("Name=instance-state-name,Values={st}");
         args.extend(["--filters", filter.as_str()]);
     }
-    let v = svc.run_json(a, q.region.as_deref(), &args).await?;
+    // F2d: EC2 lists auto-refresh (and fan out per region) — one signed
+    // request per page instead of a Python child when static creds exist.
+    let native = match svc.native_target(a, q.region.as_deref()).await? {
+        Some(t) => {
+            crate::native::fallback(crate::native::describe_instances(&t, state, &[]).await)?
+        }
+        None => None,
+    };
+    let v = match native {
+        Some(v) => {
+            svc.touch(a).await;
+            v
+        }
+        None => svc.run_json(a, q.region.as_deref(), &args).await?,
+    };
     let mut instances = normalize_instances(&v);
     if let Some(text) = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         instances.retain(|i| matches_query(i, text));

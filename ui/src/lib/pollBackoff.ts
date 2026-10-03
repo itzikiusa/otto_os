@@ -58,3 +58,35 @@ export function adaptiveCadence(bounds: AdaptiveBounds): AdaptiveCadence {
     },
   };
 }
+
+export interface QuietBounds extends AdaptiveBounds {
+  /** Consecutive unchanged samples tolerated before the cadence stretches. */
+  quietAfter: number;
+}
+
+/** Dashboard-sample cadence (Kafka Overview metrics): stay at `min` while the
+ *  samples change; after `quietAfter` unchanged samples in a row, back off
+ *  toward `max` (doubling); the first changed sample snaps back to `min`. */
+export function quietCadence({ min, max, quietAfter }: QuietBounds): AdaptiveCadence & {
+  /** Feed whether the sample just received differs from the previous one. */
+  sample(changed: boolean): void;
+} {
+  const inner = adaptiveCadence({ min, max });
+  let unchanged = 0;
+  return {
+    get ms() {
+      return inner.ms;
+    },
+    record(gotData) {
+      inner.record(gotData);
+    },
+    sample(changed) {
+      unchanged = changed ? 0 : unchanged + 1;
+      inner.record(unchanged < quietAfter);
+    },
+    reset() {
+      unchanged = 0;
+      inner.reset();
+    },
+  };
+}

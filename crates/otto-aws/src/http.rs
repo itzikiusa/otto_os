@@ -621,9 +621,9 @@ async fn s3_download<S: AwsCtx>(
 }
 
 /// PUT /aws/accounts/{id}/s3/buckets/{bucket}/object?key=&overwrite= — AwsS3:Edit
-/// (`s3_write`, audited). The raw request body is spooled to an Otto-owned
-/// temp file (≤ 5 GiB) and uploaded with `aws s3 cp`. An existing key is a 409
-/// unless `overwrite=true`.
+/// (`s3_write`, audited). A body with a Content-Length (≤ 5 GiB) streams into
+/// `aws s3 cp - …` with no temp copy; a chunked body is spooled to an
+/// Otto-owned temp file first. An existing key is a 409 unless `overwrite=true`.
 async fn s3_upload<S: AwsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -632,8 +632,6 @@ async fn s3_upload<S: AwsCtx>(
     headers: axum::http::HeaderMap,
     body: axum::body::Body,
 ) -> ApiResult<(StatusCode, Json<s3::UploadResp>)> {
-    use futures_util::StreamExt;
-    use tokio::io::AsyncWriteExt;
     crate::access::check(&ctx.pool(), &user, &id, "s3_write", Some(&bucket)).await?;
     s3::validate_bucket(&bucket)?;
     s3::validate_key(&q.key)?;
@@ -648,6 +646,80 @@ async fn s3_upload<S: AwsCtx>(
         ))
         .into());
     }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|c| !c.starts_with("application/x-www-form-urlencoded"));
+    let too_large = || {
+        Error::PayloadTooLarge(format!(
+            "in-app uploads are capped at {} GiB — use `aws s3 cp` for bigger files",
+            s3::UPLOAD_CAP / (1024 * 1024 * 1024)
+        ))
+    };
+    let declared_len = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    // F9: a body with a known length streams straight into `s3 cp -` — no
+    // temp copy of up to 5 GiB first. An interrupted body (client gone) kills
+    // the child before EOF and aborts the multipart upload it started.
+    let size = if let Some(len) = declared_len {
+        if len > s3::UPLOAD_CAP {
+            return Err(too_large().into());
+        }
+        s3::upload_stream(
+            &svc,
+            &a,
+            &bucket,
+            &q.key,
+            body.into_data_stream(),
+            len,
+            content_type,
+            q.region.as_deref(),
+        )
+        .await?
+    } else {
+        spool_and_upload(
+            &svc,
+            &a,
+            &bucket,
+            &q.key,
+            body,
+            content_type,
+            q.region.as_deref(),
+        )
+        .await?
+    };
+    audit(
+        &ctx,
+        &user.id,
+        "aws.s3.upload",
+        format!("s3://{bucket}/{}", q.key),
+        serde_json::json!({ "account_id": id, "bytes": size, "overwrite": q.overwrite.unwrap_or(false) }),
+    )
+    .await;
+    Ok((
+        StatusCode::CREATED,
+        Json(s3::UploadResp {
+            key: q.key.clone(),
+            size,
+        }),
+    ))
+}
+
+/// Chunked body without a Content-Length: spool to an Otto-owned temp file
+/// (≤ 5 GiB), then `aws s3 cp <tmp>` outside the CLI cap.
+async fn spool_and_upload(
+    svc: &AwsService,
+    a: &otto_state::AwsAccountRow,
+    bucket: &str,
+    key: &str,
+    body: axum::body::Body,
+    content_type: Option<&str>,
+    region: Option<&str>,
+) -> otto_core::Result<u64> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
     let tmp_dir = crate::paths::owned_dir(&svc.data_dir, "tmp")?;
     let tmp = crate::paths::owned_file(&tmp_dir, &otto_core::new_id(), "")?;
     // Remove the spool file however this handler exits.
@@ -670,8 +742,7 @@ async fn s3_upload<S: AwsCtx>(
             return Err(Error::PayloadTooLarge(format!(
                 "in-app uploads are capped at {} GiB — use `aws s3 cp` for bigger files",
                 s3::UPLOAD_CAP / (1024 * 1024 * 1024)
-            ))
-            .into());
+            )));
         }
         file.write_all(&chunk)
             .await
@@ -681,35 +752,8 @@ async fn s3_upload<S: AwsCtx>(
         .await
         .map_err(|e| Error::Internal(format!("flush upload spool file: {e}")))?;
     drop(file);
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .filter(|c| !c.starts_with("application/x-www-form-urlencoded"));
-    s3::upload_file(
-        &svc,
-        &a,
-        &bucket,
-        &q.key,
-        &tmp,
-        content_type,
-        q.region.as_deref(),
-    )
-    .await?;
-    audit(
-        &ctx,
-        &user.id,
-        "aws.s3.upload",
-        format!("s3://{bucket}/{}", q.key),
-        serde_json::json!({ "account_id": id, "bytes": size, "overwrite": q.overwrite.unwrap_or(false) }),
-    )
-    .await;
-    Ok((
-        StatusCode::CREATED,
-        Json(s3::UploadResp {
-            key: q.key.clone(),
-            size,
-        }),
-    ))
+    s3::upload_file(svc, a, bucket, key, &tmp, content_type, region).await?;
+    Ok(size)
 }
 
 /// DELETE /aws/accounts/{id}/s3/buckets/{bucket}/object?key=&confirm= — AwsS3:Edit

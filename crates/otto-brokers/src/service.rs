@@ -1197,6 +1197,8 @@ impl BrokersService {
 
         // Resolve every registry schema this batch references (keys always
         // try Avro; values when Auto/Avro is requested) — a handful of ids.
+        // Lookups run concurrently; failed ids are negatively cached, so a
+        // topic whose keys only look framed costs no round trip per tail tick.
         let mut schemas: std::collections::HashMap<i32, Arc<apache_avro::Schema>> =
             std::collections::HashMap::new();
         if let Some(reg) = &registry {
@@ -1212,11 +1214,7 @@ impl BrokersService {
                     }
                 }
             }
-            for sid in ids {
-                if let Ok(schema) = reg.parsed_schema_by_id(sid).await {
-                    schemas.insert(sid, schema);
-                }
-            }
+            schemas = reg.parsed_schemas_by_ids(ids).await;
         }
 
         let req = req.clone();

@@ -195,8 +195,12 @@ the `prefix` "directory marker" object is hidden) → per-object **head**,
   `Cache-Control: no-store`). The child process is killed the moment the
   client disconnects. Objects over **2 GiB** are refused (413) — use the CLI.
 - **Upload** (toolbar button or drag-and-drop onto the list; `aws_s3:Edit` +
-  `s3_write`): each file goes to `<current folder>/<file name>`, spooled to a
-  temp file (≤ 5 GiB) and sent with `aws s3 cp`. An existing key asks
+  `s3_write`): each file goes to `<current folder>/<file name>` (≤ 5 GiB). A
+  browser upload carries its size, so the body streams straight into
+  `aws s3 cp - s3://…` with no temp copy; if the upload is interrupted (tab
+  closed, network drop) the child is killed before the object completes and
+  the multipart upload it opened is aborted, so no orphaned parts are billed.
+  A body without a `Content-Length` is spooled to a temp file first. An existing key asks
   "Replace existing object?" first (the daemon answers 409 without
   `overwrite=true`); production accounts confirm the destination first.
 - **Presigned link** (⋯ menu, `aws_s3:View`): pick 1 h / 12 h / 24 h / 7 d;
@@ -382,18 +386,36 @@ writes an `audit_log` row: `aws.sqs.send`, `aws.sqs.delete_message`,
   inline image / PDF preview up to 25 MB.
 - ✅ CloudWatch Logs: groups, streams, live tail, Logs Insights.
 - ✅ "All enabled regions" for EC2 / EKS / RDS (six regions at a time).
-- ⚠️ Every call is a subprocess: expect ~200–600 ms per request (the CLI's
+- ⚠️ Most calls are a subprocess: expect ~200–600 ms per request (the CLI's
   Python start-up), and 30 s hard timeouts (8 s per permission probe).
   Profile credentials are exported once and cached (single-flight per account,
   so a cold all-regions fan-out runs one export, not six), so SSO resolution is
   no longer paid per call. A text-looking S3 key previews with one call (the
   ranged `get-object`), not head + get.
+- **The per-tick calls skip the CLI.** The CloudWatch Logs tail
+  (`FilterLogEvents`), the Logs Insights and Athena status polls
+  (`GetQueryResults` / `GetQueryExecution`) and EC2 lists (`DescribeInstances`)
+  are signed in-process (SigV4 over one pooled HTTPS client) whenever the
+  account has static credentials — access keys, the cached exported SSO /
+  profile creds, or the cached assumed role. A 2 s tail tick is then one
+  keep-alive round trip instead of a Python start-up. Everything else, and any
+  account with a custom `endpoint_url` or a profile whose credentials can't be
+  exported (e.g. some `credential_process` setups) or an `AWS_CA_BUNDLE`, stays
+  on the CLI. If something other than AWS answers (a proxy page, TLS
+  interception), that call is repeated on the CLI and the endpoint stays on the
+  CLI for 5 minutes. Errors
+  classify exactly as CLI errors do (`login required:` / 403). Page tokens from
+  the native path start with `n1:`; `OTTO_AWS_NATIVE=off` in the daemon's
+  environment forces every call back onto the CLI.
 - ⚠️ At most **10 `aws` children run at once** daemon-wide; further calls
-  queue (each child is a ~60–100 MB Python process). S3 download streams and
-  the `sso login` PTY are not counted. `GET /aws/status` → `cli` shows the live
-  `running` / `queued` / `spawned_total` counters, and
-  `RUST_LOG=otto_aws::cli=debug` logs every call's service, operation, wall
-  time and exit status.
+  queue (each child is a ~60–100 MB Python process). Background work
+  (permission probes, all-regions fan-outs) may hold at most **6** of them, so
+  what you just clicked always has a slot and never waits behind probes. A
+  call's timeout includes its queue wait. S3 download/upload streams and the
+  `sso login` PTY are not counted. `GET /aws/status` → `cli` shows the live
+  `running` / `queued` / `spawned_total` counters plus p50/p95 queue wait and
+  call time over the last 256 calls and `native_total` (calls signed in-process), and `RUST_LOG=otto_aws::cli=debug` logs
+  every call's service, operation, lane, queue wait, wall time and exit status.
 - ⚠️ The permission probe checks *read* actions only; Edit-level denials
   surface when you act.
 - ⚠️ The EKS/Athena list views fan out `describe` calls (first 20 items) —
@@ -446,7 +468,7 @@ writes an `audit_log` row: `aws.sqs.send`, `aws.sqs.delete_message`,
 | **S3 preview says `binary: true` for a text file** | The object's `Content-Type` is something binary (e.g. `application/zip`) or the sample contains a NUL byte. Download it instead. |
 | **S3 download stops mid-way** | The client disconnected (the daemon kills `aws s3 cp` on disconnect) or the object exceeds 2 GiB (refused up front with 413). |
 | **EC2 stop/reboot → 400 "confirm_id must equal the instance id"** | The typed confirmation didn't match. This is enforced server-side on purpose. |
-| **Calls are slow (~0.5 s each)** | Each request is a fresh `aws` process (Python start-up). Auto-refresh lists at 10 s (30 s for All regions), not 1 s. If many views are busy, calls may also be queued behind the 10-child cap — check `cli.queued` in `GET /aws/status`, and `RUST_LOG=otto_aws::cli=debug` for per-call timings. |
+| **Calls are slow (~0.5 s each)** | Most requests are a fresh `aws` process (Python start-up); only the logs tail, query status polls and EC2 lists are signed in-process (`cli.native_total`). Auto-refresh lists at 10 s (30 s for All regions), not 1 s. If many views are busy, calls may also be queued behind the 10-child cap — check `cli.queued` in `GET /aws/status`, and `RUST_LOG=otto_aws::cli=debug` for per-call timings. |
 | **400 "endpoint_url: … is reached over plain http"** | A custom endpoint on a non-loopback host must be `https://`. Plain `http` is only accepted for `localhost` / `127.0.0.1` / `[::1]` (LocalStack). |
 | **Custom endpoint: chips `unknown`, `Could not connect to the endpoint URL`** | The endpoint is down or the port is wrong (`curl <url>/_localstack/health` for LocalStack). Athena / EKS chips stay non-green against LocalStack Community — those APIs are not emulated. |
 

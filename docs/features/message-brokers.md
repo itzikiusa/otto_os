@@ -315,7 +315,9 @@ and two health signals:
   brokers).
 
 Alongside, `GET /brokers/clusters/{id}/metrics` (a `ClusterMetrics`) is polled
-every ~4 s and drives the throughput chart and broker CPU/RAM:
+every ~4 s (stretching to 10 s once the cluster's total message count is
+unchanged for 3 samples in a row, and snapping back on the next change) and
+drives the throughput chart and broker CPU/RAM:
 
 - **Throughput** is derived from the **high-watermark delta** between calls (a
   cluster-wide watermark sweep, fanned across 16 worker threads). The sweep is

@@ -468,6 +468,7 @@ pub struct AwsService {
     events: broadcast::Sender<Event>,
     pub data_dir: PathBuf,
     spawner: Arc<dyn Spawner>,
+    native: crate::native::Mode,
 }
 
 impl AwsService {
@@ -479,6 +480,30 @@ impl AwsService {
             events: ctx.events().clone(),
             data_dir: ctx.data_dir().to_path_buf(),
             spawner: ctx.spawner().clone(),
+            native: ctx.aws_native(),
+        }
+    }
+
+    /// F2d: static creds + region for an in-process SigV4 call, built from the
+    /// same env a CLI child would get (cached exported / assumed / Keychain
+    /// creds). `None` ⇒ use the CLI (no static keys, custom endpoint, native
+    /// calls disabled).
+    pub async fn native_target(
+        &self,
+        account: &AwsAccountRow,
+        region: Option<&str>,
+    ) -> Result<Option<crate::native::Target>> {
+        if self.native == crate::native::Mode::Off {
+            return Ok(None);
+        }
+        let env = self.env_for(account, region).await?;
+        Ok(crate::native::target_from_env(&self.native, &env))
+    }
+
+    /// Record a successful call against `account` (rate-limited write).
+    pub(crate) async fn touch(&self, account: &AwsAccountRow) {
+        if touch_due(&account.id) {
+            self.repo.touch_used(&account.id).await;
         }
     }
 
@@ -1184,7 +1209,8 @@ impl AwsService {
             let env = env.clone();
             async move {
                 let argv = with_json_output(args);
-                cli::run_raw(&bin, &argv, &env, PROBE_TIMEOUT, None).await
+                // 7 probes per account must not crowd out user clicks (N1).
+                cli::background(cli::run_raw(&bin, &argv, &env, PROBE_TIMEOUT, None)).await
             }
         };
         let (sts, s3, sqs, ec2, athena, eks, rds) = tokio::join!(

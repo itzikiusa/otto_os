@@ -21,6 +21,10 @@ futures-util = { workspace = true }
 bytes = { workspace = true }
 dirs = { workspace = true }
 sqlx = { workspace = true }
+# F2d native calls: SigV4 over the workspace's reqwest + ring; EC2 answers XML.
+reqwest = { workspace = true }
+ring = { workspace = true }
+roxmltree = "0.21.1"
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }

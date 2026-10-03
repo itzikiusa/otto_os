@@ -8441,6 +8441,16 @@ export interface AwsCliStats {
   queued: number;
   spawned_total: number;
   max_concurrent: number;
+  /** Of `max_concurrent`, the share background probes / fan-outs may hold. */
+  background_max?: number;
+  /** Nearest-rank percentiles (ms) over the last `samples` (≤ 256) calls. */
+  wait_ms_p50?: number;
+  wait_ms_p95?: number;
+  call_ms_p50?: number;
+  call_ms_p95?: number;
+  samples?: number;
+  /** Calls signed in-process (logs tail, query status, EC2 lists) — no child. */
+  native_total?: number;
 }
 
 /** One profile parsed from `~/.aws/config` / `~/.aws/credentials` — never key values. */

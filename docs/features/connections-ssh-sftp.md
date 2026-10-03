@@ -164,7 +164,10 @@ the sessions docs.
 - **`first_command`** is written into the PTY ~1.5s after spawn, followed by a
   newline — handy for `USE db; SHOW TABLES;` or `cd /var/log`.
 - **SSH shell:** an interactive login on the remote host over the PTY — a real
-  terminal, scrollback, resize, copy/paste, the lot.
+  terminal, scrollback, resize, copy/paste, the lot. The ssh (and a DB CLI's
+  jump-host wrapper) runs with `ServerAliveInterval=15` / `ServerAliveCountMax=2`,
+  so a dead link ends the session in ~45 s instead of leaving a hung PTY; each
+  option is left out when your `~/.ssh/config` sets it.
 - **DB CLIs:** `mysql` / `redis-cli` / `mongosh` / `clickhouse-client` open
   interactively against the target; you type SQL/commands directly.
 - The Connections page also offers **"Open beside"** — the new terminal lands in a

@@ -667,7 +667,7 @@
       </div>
       <input class="grow" bind:value={valueFilter} placeholder="filter value…" aria-label="Filter by value" />
       <label class="auto" class:on={autoPoll} title="Append new messages every 3 s, backing off to 15 s while none arrive (incremental, capped at {TAIL_CAP})">
-        <input type="checkbox" bind:checked={autoPoll} disabled={!!consumeError && !autoPoll} /> Live · 1m
+        <input type="checkbox" bind:checked={autoPoll} disabled={!!consumeError && !autoPoll} /> Live
       </label>
       <label
         class="auto"

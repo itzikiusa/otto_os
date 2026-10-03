@@ -100,7 +100,8 @@ Brokers page**. Message Brokers has no sidebar entry of its own.
   decodes Confluent-framed Avro when a Schema Registry is set.
 - **Filter key…** runs on the server. Tick **From start** to search older
   messages. **Filter value…** matches the decoded value.
-- **Live · 1m** adds new messages every minute and keeps the latest 500.
+- **Live** adds new messages every 3 s, slowing to 15 s while none arrive,
+  and keeps the latest 500.
 - **Mask** makes the server hide sensitive values (emails, tokens and keys)
   before the messages leave the daemon.
 - Each row shows its partition, offset, a position bar (how far through the
