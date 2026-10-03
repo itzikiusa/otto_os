@@ -1945,24 +1945,59 @@ impl VaultEngine {
         Ok(finish_graph(nodes, flat, false, orphans_ok))
     }
 
+    /// Build the global/local graph. The SQL reads stay async; the O(N+E)
+    /// assembly (string clones, hash maps, BFS, degree sort) runs on the
+    /// blocking pool so a 10k-note vault never stalls a tokio worker.
     async fn graph_build(&self, id: i64, o: &GraphOpts) -> Result<GraphPayload> {
+        // Validate the focus up front (cheap) so a bad `path` fails before
+        // any row is read.
+        if o.mode == "local" {
+            let focus = o
+                .path
+                .as_deref()
+                .ok_or_else(|| Error::Invalid("local graph requires `path`".into()))?;
+            Self::check_rel(focus)?;
+        }
         let notes = self.store.all_notes(id).await?;
         let edges_raw = self.store.all_edges(id).await?;
+        // Per-note tags. Loaded unconditionally: they are a filterable node
+        // ATTRIBUTE regardless of whether `tags` also draws them as nodes.
+        let tag_rows = self.store.all_note_tags(id).await?;
+        let ghost_rows = if o.ghosts {
+            self.store.all_ghost_edges(id).await?
+        } else {
+            Vec::new()
+        };
+        let o = o.clone();
+        tokio::task::spawn_blocking(move || {
+            assemble_graph(&notes, &edges_raw, &tag_rows, ghost_rows, &o)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("vault graph build: {e}")))?
+    }
+}
+
+/// Pure graph assembly over rows already read (see [`VaultEngine::graph_build`]).
+fn assemble_graph(
+    notes: &[(String, String, Option<String>, bool)],
+    edges_raw: &[(String, String, String)],
+    tag_rows: &[(String, String)],
+    ghost_rows: Vec<(String, String)>,
+    o: &GraphOpts,
+) -> Result<GraphPayload> {
+    {
         let include_reserved = o.reserved;
         let orphans_ok = o.orphans.unwrap_or(true);
 
-        // Per-note tags. Loaded unconditionally: they are a filterable node
-        // ATTRIBUTE regardless of whether `tags` also draws them as nodes.
         let mut note_tags: HashMap<&str, Vec<String>> = HashMap::new();
-        let tag_rows = self.store.all_note_tags(id).await?;
-        for (p, tag) in &tag_rows {
+        for (p, tag) in tag_rows {
             note_tags.entry(p.as_str()).or_default().push(tag.clone());
         }
 
         // Node table: notes first.
         let mut index: HashMap<String, u32> = HashMap::new();
         let mut nodes = NodeTable::default();
-        for (p, t, ty, reserved) in &notes {
+        for (p, t, ty, reserved) in notes {
             if *reserved && !include_reserved {
                 continue;
             }
@@ -1982,7 +2017,7 @@ impl VaultEngine {
         }
 
         let mut edge_list: Vec<(u32, u32)> = Vec::new();
-        for (s, d, _kind) in &edges_raw {
+        for (s, d, _kind) in edges_raw {
             let (Some(&si), Some(&di)) = (index.get(s), index.get(d)) else {
                 continue;
             };
@@ -1995,7 +2030,7 @@ impl VaultEngine {
         // Ghost nodes for unresolved targets.
         if o.ghosts {
             let mut ghost_ix: HashMap<String, u32> = HashMap::new();
-            for (src, raw) in self.store.all_ghost_edges(id).await? {
+            for (src, raw) in ghost_rows {
                 let Some(&si) = index.get(&src) else { continue };
                 let key = raw.trim().to_lowercase();
                 let gi = *ghost_ix.entry(key).or_insert_with(|| {
@@ -2015,7 +2050,7 @@ impl VaultEngine {
         // Tag nodes.
         if o.tags {
             let mut tag_ix: HashMap<String, u32> = HashMap::new();
-            for (p, tag) in &tag_rows {
+            for (p, tag) in tag_rows {
                 let Some(&si) = index.get(p) else { continue };
                 let ti = *tag_ix.entry(tag.clone()).or_insert_with(|| {
                     nodes.push(
@@ -2037,7 +2072,7 @@ impl VaultEngine {
                 .path
                 .as_deref()
                 .ok_or_else(|| Error::Invalid("local graph requires `path`".into()))?;
-            let focus_rel = Self::check_rel(focus)?;
+            let focus_rel = VaultEngine::check_rel(focus)?;
             let Some(&fi) = index.get(&focus_rel) else {
                 return Err(Error::NotFound(format!("note {focus_rel}")));
             };
