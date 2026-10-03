@@ -15,6 +15,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { fmtAgo, roleFromArn, awsErrorText } from './util';
+  import { createLimiter } from '../../lib/poll';
+  import { onDestroy } from 'svelte';
   import type { AwsAccount, Feature } from '../../lib/api/types';
 
   interface Props {
@@ -68,14 +70,23 @@
   // First paint of a card whose row carries no cached probe (accounts created
   // through the API / MCP, or whose 10-min snapshot expired server-side and
   // was never re-requested) used to show five hollow "unknown" chips until
-  // someone clicked re-check. Probe such accounts once per mount instead.
+  // someone clicked re-check. Probe such accounts once per mount instead —
+  // at most 2 at a time: each probe spawns 7 `aws` CLI processes, and firing
+  // every un-probed account at once (10 accounts → 70 processes) pinned the
+  // CPU. Queued probes are dropped on leave; an explicit re-check bypasses
+  // the gate.
   const probed = new Set<string>();
+  const probeGate = createLimiter(2);
+  const probeLife = new AbortController();
+  onDestroy(() => probeLife.abort());
   $effect(() => {
     for (const a of aws.accounts) {
       if (!resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'view')) continue;
       if (probed.has(a.id) || aws.perms(a.id) || aws.permLoading[a.id]) continue;
       probed.add(a.id);
-      void aws.loadPermissions(a.id);
+      const id = a.id;
+      // Re-checked while queued (the menu) → skip the now-redundant probe.
+      probeGate(async () => { if (!aws.perms(id) && !aws.permLoading[id]) await aws.loadPermissions(id); }, probeLife.signal).catch(() => {});
     }
   });
 </script>

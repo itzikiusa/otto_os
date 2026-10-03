@@ -146,6 +146,7 @@
   filterPlaceholder="Filter identifier, engine, endpoint, tag…"
   {loading}
   bind:auto
+  {region}
   onrefresh={() => void load()}
 >
   <RegionPicker {account} service="rds" bind:region allowAll />

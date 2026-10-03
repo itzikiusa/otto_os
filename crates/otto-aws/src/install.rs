@@ -83,6 +83,8 @@ pub struct AwsStatus {
     pub version: Option<String>,
     pub path: Option<String>,
     pub install: InstallJob,
+    /// Live CLI-runner counters (children running / queued / spawned).
+    pub cli: crate::cli::CliStats,
 }
 
 /// Find the `aws` binary. Returns `None` when nothing runnable is found.
@@ -187,6 +189,7 @@ pub async fn status(data_dir: &Path) -> AwsStatus {
         version,
         path: path.map(|p| p.to_string_lossy().into_owned()),
         install: installer().snapshot(),
+        cli: crate::cli::stats(),
     }
 }
 

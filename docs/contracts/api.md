@@ -4872,7 +4872,7 @@ missing credentials are `400 invalid` whose message starts with
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /aws/status | Aws:View | — | `AwsStatus { installed, version?, path?, install: InstallJob }` |
+| GET /aws/status | Aws:View | — | `AwsStatus { installed, version?, path?, install: InstallJob, cli: AwsCliStats }` — `AwsCliStats { running, queued, spawned_total, max_concurrent }`: live counters of the daemon-wide `aws` child cap (at most `max_concurrent` = 10 CLI children at once; S3 download streams and the `sso login` PTY are not counted) |
 | POST /aws/install | Aws:Admin | — | 202 `InstallJob` — idempotent while `running`; `brew install awscli` when brew is present, else the official `.pkg` into `~/aws-cli` + symlinks in `<data_dir>/bin`. Never `sudo`. |
 | GET /aws/discover | Aws:View | — | `{ profiles: DiscoveredProfile[] }` parsed from `~/.aws/config` + `~/.aws/credentials` — names/metadata only, **never key values** |
 | GET /aws/regions | Aws:View | — | `{ regions: { code, name }[] }` (static, 32 regions) |
@@ -4896,6 +4896,10 @@ session_token?, role_arn?, endpoint_url?, environment?, color? }` (`role_arn`
 `AWS_ENDPOINT_URL=<url>` + `AWS_EC2_METADATA_DISABLED=true` in the env of
 **every** `aws` subprocess for that account, both auth modes — LocalStack,
 VPC interface endpoints, S3-compatible stores).
+`?region=all` answers for EC2 / EKS / RDS are cached per (account, service,
+query) for 20 s with in-flight dedupe; an EC2 start/stop/reboot clears that
+account's cached answers. Credential export (`configure export-credentials`)
+and `sts assume-role` are single-flight per account.
 `InstallJob { tool: "aws", state: "idle"|"running"|"done"|"failed", log_tail,
 started_at?, finished_at?, error? }`. `DiscoveredProfile { name, region?,
 sso_start_url?, sso_session?, role_arn?, source: "config"|"credentials" }`.

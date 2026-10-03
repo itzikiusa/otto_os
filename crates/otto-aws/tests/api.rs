@@ -50,11 +50,29 @@ case "$1 $2" in
     echo '{"Contents": [{"Key": "logs/app.log", "LastModified": "2024-01-02T00:00:00+00:00", "ETag": "\"abc\"", "Size": 11, "StorageClass": "STANDARD"}], "CommonPrefixes": [{"Prefix": "logs/2024/"}], "IsTruncated": false}'; exit 0;;
   "s3api head-object")
     echo '{"ContentLength": 11, "ContentType": "text/plain", "LastModified": "2024-01-02T00:00:00+00:00", "ETag": "\"abc\"", "Metadata": {}}'; exit 0;;
+  "s3api get-object")
+    # outfile is the last positional before the appended `--output json`
+    for a in "$@"; do [ "$a" = "--output" ] && break; out="$a"; done
+    printf 'hello world' > "$out"
+    echo '{"ContentType": "text/plain", "ContentLength": 11, "ContentRange": "bytes 0-10/11", "ETag": "\"abc\""}'; exit 0;;
   "s3 cp")
     printf 'hello world'; exit 0;;
   "sqs list-queues")
     echo '{"QueueUrls": ["https://sqs.eu-west-1.amazonaws.com/123456789012/orders"]}'; exit 0;;
+  "configure export-credentials")
+    # The spawn-count tests' profiles export creds (slowly, so a fan-out that
+    # does not single-flight would visibly start several exports).
+    case "$AWS_PROFILE" in regions-*)
+      sleep 0.3
+      echo '{"Version": 1, "AccessKeyId": "ASIAEXPORTEDEXAMPLE", "SecretAccessKey": "exportedSecretExample0000000000000000000", "SessionToken": "tok", "Expiration": "2099-01-01T00:00:00Z"}'; exit 0;;
+    esac
+    echo "fake aws: unhandled: $*" >&2; exit 252;;
+  "ec2 describe-regions")
+    echo '{"Regions": [{"RegionName": "eu-west-1"}, {"RegionName": "us-east-1"}, {"RegionName": "ap-south-1"}]}'; exit 0;;
   "ec2 describe-instances")
+    case "$AWS_PROFILE" in regions-*)
+      echo '{"Reservations": [{"Instances": [{"InstanceId": "i-0abc", "InstanceType": "t3.micro", "State": {"Name": "running"}}]}]}'; exit 0;;
+    esac
     echo "An error occurred (UnauthorizedOperation) when calling the DescribeInstances operation: You are not authorized to perform this operation." >&2; exit 254;;
   "athena list-work-groups")
     echo '{"WorkGroups": [{"Name": "primary", "State": "ENABLED"}]}'; exit 0;;
@@ -1169,4 +1187,146 @@ async fn aws_parent_page_is_required_and_discovery_redacts_configuration() {
     assert_eq!(st, StatusCode::OK);
     assert!(probe["identity"].is_null());
     assert_eq!(probe["message"], "Connection succeeded");
+}
+
+/// F14: spawn counts per action. A cold all-regions EC2 list costs one
+/// `describe-regions` and one `describe-instances` per region; repeating it
+/// within the 20 s all-regions TTL spawns nothing; and with expired exported
+/// creds the concurrent region calls run ONE `export-credentials` between
+/// them (single-flight), not one each.
+#[tokio::test]
+async fn all_regions_spawn_counts_cold_and_cached() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let (st, a, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("regions", "regions-spawn")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{a}");
+    let id = a["id"].as_str().unwrap().to_string();
+    let count = |op: &str| {
+        calls_log()
+            .lines()
+            .filter(|l| l.contains("PROFILE=regions-spawn ") && l.contains(op))
+            .count()
+    };
+    let exports_after_create = count("ARGS=configure export-credentials");
+    let uri = format!("/aws/accounts/{id}/ec2/instances?region=all");
+    let (st, v, _) = call(&ctx, &root, "GET", &uri, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["instances"].as_array().map(Vec::len), Some(3), "{v}");
+    assert_eq!(count("ARGS=ec2 describe-regions"), 1);
+    assert_eq!(
+        count("ARGS=ec2 describe-instances"),
+        3,
+        "one list per region"
+    );
+    assert!(
+        count("ARGS=configure export-credentials") <= exports_after_create + 1,
+        "creds exported at most once"
+    );
+    // Exported creds reach the region calls.
+    assert!(calls_log()
+        .lines()
+        .any(|l| l.contains("PROFILE=regions-spawn ")
+            && l.contains("AKID=ASIAEXPORTEDEXAMPLE")
+            && l.contains("ARGS=ec2 describe-instances")));
+
+    // Within the TTL: zero new children.
+    let before = calls_log().lines().count();
+    let (st, v2, _) = call(&ctx, &root, "GET", &uri, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v2, v);
+    let new_for_profile = calls_log()
+        .lines()
+        .skip(before)
+        .filter(|l| l.contains("PROFILE=regions-spawn "))
+        .count();
+    assert_eq!(new_for_profile, 0, "cached all-regions answer");
+
+    // Expired creds + a new filter (a different cached view): the three
+    // region calls start together and share ONE export; the region list is
+    // still cached.
+    otto_aws::creds::evict(&id);
+    let exports_before = count("ARGS=configure export-credentials");
+    let (st, _, _) = call(&ctx, &root, "GET", &format!("{uri}&state=running"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        count("ARGS=configure export-credentials"),
+        exports_before + 1,
+        "single-flight export across concurrent region calls"
+    );
+    assert_eq!(count("ARGS=ec2 describe-regions"), 1);
+    assert_eq!(count("ARGS=ec2 describe-instances"), 6);
+}
+
+/// F14: the runner exposes its live counters (children running / spawned).
+#[tokio::test]
+async fn cli_stats_count_spawns() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let before = otto_aws::cli::stats().spawned_total;
+    let (_, a, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("stats", "stats-profile")),
+    )
+    .await;
+    let id = a["id"].as_str().unwrap();
+    let (st, _, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        &format!("/aws/accounts/{id}/test"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let s = otto_aws::cli::stats();
+    // export-credentials (unhandled ⇒ fallback) + get-caller-identity.
+    assert!(s.spawned_total >= before + 2, "{s:?}");
+    assert!(s.running <= s.max_concurrent);
+}
+
+/// F10/F14: a text-looking key previews with ONE CLI spawn (ranged get-object;
+/// its JSON supplies type + size) — no head-object round trip.
+#[tokio::test]
+async fn s3_text_preview_is_a_single_spawn() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let (_, a, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("preview", "preview-profile")),
+    )
+    .await;
+    let id = a["id"].as_str().unwrap();
+    let (st, p, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/s3/buckets/logs-prod/preview?key=logs/app.log"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    assert_eq!(p["text"], "hello world");
+    assert_eq!(p["size"], 11);
+    assert_eq!(p["truncated"], false);
+    let log = calls_log();
+    let mine = |op: &str| {
+        log.lines()
+            .filter(|l| l.contains("PROFILE=preview-profile ") && l.contains(op))
+            .count()
+    };
+    assert_eq!(mine("ARGS=s3api get-object"), 1);
+    assert_eq!(mine("ARGS=s3api head-object"), 0, "no head for a texty key");
 }

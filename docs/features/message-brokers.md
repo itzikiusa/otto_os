@@ -334,8 +334,10 @@ batch-fetches stats for the visible page via
 `POST /brokers/clusters/{id}/topics/stats` (`{ names: [...] }`, ≤ 500 names),
 which fans counts across the shared watermark thread pool. A **Msg/s** column
 shows the production rate derived server-side from the high-watermark delta
-between two consecutive stats polls (the table re-polls visible rows every 5 s;
-`—` until a second sample lands).
+between two consecutive stats polls (the table re-polls visible rows every 10 s;
+`—` until a second sample lands). Topic → partition ids are cached per cluster
+for 60 s (filled by the topic list, cleared by create / delete), so a counts
+poll asks the broker only for watermarks, never for full-cluster metadata.
 
 - **Search**, **Show internal** (internal topics — `__*`, `_schemas`,
   `_redpanda*` — are hidden by default), and a **cleanup-policy** filter.
@@ -388,7 +390,9 @@ The response (`ConsumeResp`) includes the decoded `messages`, the per-partition
 `low/high` watermark `partitions`, and `truncated: true` if the limit/timeout was
 hit before draining the range. The detail view also supports an incremental
 **live-tail** that polls only offsets past the max seen per partition into a
-capped ring buffer.
+capped ring buffer (500 messages) — every 3 s while messages arrive, backing
+off (doubling) to 15 s while the topic is quiet, paused while the window is
+hidden.
 
 ### Produce
 

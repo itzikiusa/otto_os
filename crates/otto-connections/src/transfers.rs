@@ -646,12 +646,20 @@ for line in sys.stdin:
     }
     /// Manual local timing only: this fixture has no SSH handshake or network.
     /// It quantifies allocation/authorization overhead and repeated batch-client
-    /// invocation, not an expected speedup on user hosts.
+    /// invocation, not an expected speedup on user hosts. The nightly bench
+    /// workflow (`.github/workflows/nightly-bench.yml`) sets
+    /// `OTTO_BENCH_P95_MS` to turn a regression into a failure: every mode's
+    /// browse p95 must stay under that many milliseconds. Unset (manual
+    /// runs), it only prints.
     #[tokio::test]
     #[ignore = "manual synthetic SFTP latency measurement; timing is not a CI assertion"]
     async fn synthetic_sftp_browse_latency() {
         let fixture = Fixture::new().await;
         const SAMPLES: usize = 20;
+        // The fixture's `ls` prints full paths (real `ls -la` prints bare names).
+        let is_fixture_entry = |entry: &otto_ssh::SftpEntry| {
+            std::path::Path::new(&entry.name).file_name() == Some("sftp-fixture".as_ref())
+        };
         for cold in [true, false] {
             let mut acquisition_us = Vec::new();
             let mut browse_us = Vec::new();
@@ -672,7 +680,7 @@ for line in sys.stdin:
                 .await
                 .unwrap()
                 .iter()
-                .any(|entry| entry.name == "sftp-fixture"));
+                .any(is_fixture_entry));
             drop(session);
             for _ in 0..SAMPLES {
                 if cold {
@@ -701,7 +709,7 @@ for line in sys.stdin:
                     .await
                     .unwrap()
                     .iter()
-                    .any(|entry| entry.name == "sftp-fixture"));
+                    .any(is_fixture_entry));
                 browse_us.push(start.elapsed().as_micros());
             }
             acquisition_us.sort_unstable();
@@ -710,6 +718,16 @@ for line in sys.stdin:
                 if cold { "new_transport" } else { "cached_transport" }, SAMPLES,
                 acquisition_us[SAMPLES / 2], acquisition_us[(SAMPLES * 95 / 100) - 1],
                 browse_us[SAMPLES / 2], browse_us[(SAMPLES * 95 / 100) - 1]);
+            if let Some(ceiling_ms) = std::env::var("OTTO_BENCH_P95_MS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u128>().ok())
+            {
+                let p95_us = browse_us[(SAMPLES * 95 / 100) - 1];
+                assert!(
+                    p95_us <= ceiling_ms * 1000,
+                    "SFTP browse p95 {p95_us}us exceeds OTTO_BENCH_P95_MS={ceiling_ms} (cold={cold})"
+                );
+            }
         }
     }
 

@@ -367,6 +367,49 @@ pub async fn scrape(url: &str, skip_tls_verify: bool, socks_proxy: Option<&str>)
             .await
             .map_err(|m| Error::Forbidden(format!("metrics endpoint blocked: {m}")))?;
     }
+    let client = scrape_client(skip_tls_verify, socks_proxy)?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| Error::Upstream(format!("metrics endpoint: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(Error::Upstream(format!(
+            "metrics endpoint returned {}",
+            resp.status()
+        )));
+    }
+    resp.text()
+        .await
+        .map_err(|e| Error::Upstream(format!("metrics endpoint: {e}")))
+}
+
+/// Built scrape clients keyed by `(skip_tls_verify, socks_proxy)`. The Overview
+/// polls every 4 s; a fresh `reqwest::Client` per scrape meant a new connection
+/// pool (TCP + TLS handshake, through the SOCKS tunnel when there is one) every
+/// time. A tunnel's SOCKS URL is unique per cluster, so tunnelled clusters get
+/// their own client; direct ones share by TLS policy. The scraped TEXT is not
+/// cached: CPU rates are derived from successive counter samples timestamped
+/// at request time, so a replayed scrape would read as 0 % CPU.
+static SCRAPE_CLIENTS: std::sync::LazyLock<std::sync::Mutex<HashMap<ScrapeKey, reqwest::Client>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// `(skip_tls_verify, socks_proxy)` — everything a scrape client is built from.
+type ScrapeKey = (bool, Option<String>);
+
+/// Bound on [`SCRAPE_CLIENTS`]: tunnels come and go (new SOCKS port per
+/// reconnect), so drop the lot rather than grow forever.
+const SCRAPE_CLIENTS_MAX: usize = 32;
+
+fn scrape_client(skip_tls_verify: bool, socks_proxy: Option<&str>) -> Result<reqwest::Client> {
+    let key = (skip_tls_verify, socks_proxy.map(str::to_string));
+    if let Some(c) = SCRAPE_CLIENTS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&key)
+    {
+        return Ok(c.clone());
+    }
     // Direct scrapes also get the guarded resolver (the address dialled is the
     // one vetted above — no DNS rebinding); tunnelled ones resolve at the far
     // end and keep the plain re-validating redirect policy.
@@ -387,25 +430,31 @@ pub async fn scrape(url: &str, skip_tls_verify: bool, socks_proxy: Option<&str>)
     let client = builder
         .build()
         .map_err(|e| Error::Internal(format!("metrics client: {e}")))?;
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| Error::Upstream(format!("metrics endpoint: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(Error::Upstream(format!(
-            "metrics endpoint returned {}",
-            resp.status()
-        )));
+    let mut cache = SCRAPE_CLIENTS.lock().unwrap_or_else(|p| p.into_inner());
+    if cache.len() >= SCRAPE_CLIENTS_MAX {
+        cache.clear();
     }
-    resp.text()
-        .await
-        .map_err(|e| Error::Upstream(format!("metrics endpoint: {e}")))
+    Ok(cache.entry(key).or_insert(client).clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrape_client_is_reused_per_tls_and_proxy() {
+        scrape_client(false, Some("socks5h://127.0.0.1:40001")).unwrap();
+        let key = (false, Some("socks5h://127.0.0.1:40001".to_string()));
+        let before = SCRAPE_CLIENTS.lock().unwrap().len();
+        assert!(SCRAPE_CLIENTS.lock().unwrap().contains_key(&key));
+        // Same TLS policy + tunnel → served from the cache, no new entry.
+        scrape_client(false, Some("socks5h://127.0.0.1:40001")).unwrap();
+        assert!(SCRAPE_CLIENTS.lock().unwrap().len() <= before);
+        scrape_client(true, Some("socks5h://127.0.0.1:40002")).unwrap();
+        let cache = SCRAPE_CLIENTS.lock().unwrap();
+        assert!(cache.contains_key(&(true, Some("socks5h://127.0.0.1:40002".to_string()))));
+        assert!(cache.len() <= SCRAPE_CLIENTS_MAX);
+    }
 
     #[test]
     fn parse_basic_exposition() {

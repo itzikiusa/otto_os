@@ -8338,6 +8338,16 @@ export interface AwsStatus {
   version: string | null;
   path: string | null;
   install: InstallJob;
+  /** Live counters of the daemon-wide `aws` CLI child cap. */
+  cli?: AwsCliStats;
+}
+
+/** `GET /aws/status` → `cli`: the daemon-wide `aws` child cap, live. */
+export interface AwsCliStats {
+  running: number;
+  queued: number;
+  spawned_total: number;
+  max_concurrent: number;
 }
 
 /** One profile parsed from `~/.aws/config` / `~/.aws/credentials` — never key values. */

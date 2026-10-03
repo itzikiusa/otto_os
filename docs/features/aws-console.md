@@ -165,7 +165,10 @@ per account + service. EC2, EKS and RDS add **All enabled regions**
 (`?region=all`): the daemon lists the account's enabled regions
 (`ec2 describe-regions`, cached 1 h) and queries them six at a time; rows get
 a Region column, and regions that failed are listed in an inline note above
-the table while the rest still render.
+the table while the rest still render. The whole all-regions answer is cached
+for 20 s (concurrent identical requests share one fan-out; an EC2 start / stop
+/ reboot clears it), auto-refresh is floored at 30 s in that mode, and leaving
+the view cancels the fan-out — its in-flight `aws` children are killed.
 
 ### 3.1 S3
 
@@ -215,10 +218,12 @@ existing file.
 Account → **CloudWatch Logs**: log groups (prefix filter, newest streams
 first), a stream picker, time-range presets, a CloudWatch filter pattern, and
 an event list with expandable (pretty-printed JSON) lines. **Live tail**
-polls every 2 s while the window is visible, from the newest event seen,
-de-duplicated and capped at 5 000 lines. The **Insights** tab runs a Logs
-Insights query over the chosen groups (`logs start-query`, polled until
-done, Stop to cancel), shows the rows in the DB Explorer grid, keeps saved
+polls every 2 s while new events arrive and backs off (doubling) to 10 s while
+the stream is quiet, only while the window is visible, from the newest event
+seen, de-duplicated and capped at 5 000 lines. The **Insights** tab runs a Logs
+Insights query over the chosen groups (`logs start-query`, polled 1, 1, 2, 2,
+3, then every 5 s — 15 s while the window is hidden — until done, Stop to
+cancel), shows the rows in the DB Explorer grid, keeps saved
 queries per account, and exports CSV. The EKS cluster sheet links to its
 control-plane group (`/aws/eks/<name>/cluster`) and the RDS drawer to
 `/aws/rds/instance/<id>/…`. Everything is read-only (`aws:View`, the
@@ -379,8 +384,16 @@ writes an `audit_log` row: `aws.sqs.send`, `aws.sqs.delete_message`,
 - ✅ "All enabled regions" for EC2 / EKS / RDS (six regions at a time).
 - ⚠️ Every call is a subprocess: expect ~200–600 ms per request (the CLI's
   Python start-up), and 30 s hard timeouts (8 s per permission probe).
-  Profile credentials are exported once and cached, so SSO resolution is no
-  longer paid per call.
+  Profile credentials are exported once and cached (single-flight per account,
+  so a cold all-regions fan-out runs one export, not six), so SSO resolution is
+  no longer paid per call. A text-looking S3 key previews with one call (the
+  ranged `get-object`), not head + get.
+- ⚠️ At most **10 `aws` children run at once** daemon-wide; further calls
+  queue (each child is a ~60–100 MB Python process). S3 download streams and
+  the `sso login` PTY are not counted. `GET /aws/status` → `cli` shows the live
+  `running` / `queued` / `spawned_total` counters, and
+  `RUST_LOG=otto_aws::cli=debug` logs every call's service, operation, wall
+  time and exit status.
 - ⚠️ The permission probe checks *read* actions only; Edit-level denials
   surface when you act.
 - ⚠️ The EKS/Athena list views fan out `describe` calls (first 20 items) —
@@ -433,7 +446,7 @@ writes an `audit_log` row: `aws.sqs.send`, `aws.sqs.delete_message`,
 | **S3 preview says `binary: true` for a text file** | The object's `Content-Type` is something binary (e.g. `application/zip`) or the sample contains a NUL byte. Download it instead. |
 | **S3 download stops mid-way** | The client disconnected (the daemon kills `aws s3 cp` on disconnect) or the object exceeds 2 GiB (refused up front with 413). |
 | **EC2 stop/reboot → 400 "confirm_id must equal the instance id"** | The typed confirmation didn't match. This is enforced server-side on purpose. |
-| **Calls are slow (~0.5 s each)** | Each request is a fresh `aws` process (Python start-up). Auto-refresh lists at 10 s, not 1 s. |
+| **Calls are slow (~0.5 s each)** | Each request is a fresh `aws` process (Python start-up). Auto-refresh lists at 10 s (30 s for All regions), not 1 s. If many views are busy, calls may also be queued behind the 10-child cap — check `cli.queued` in `GET /aws/status`, and `RUST_LOG=otto_aws::cli=debug` for per-call timings. |
 | **400 "endpoint_url: … is reached over plain http"** | A custom endpoint on a non-loopback host must be `https://`. Plain `http` is only accepted for `localhost` / `127.0.0.1` / `[::1]` (LocalStack). |
 | **Custom endpoint: chips `unknown`, `Could not connect to the endpoint URL`** | The endpoint is down or the port is wrong (`curl <url>/_localstack/health` for LocalStack). Athena / EKS chips stay non-green against LocalStack Community — those APIs are not emulated. |
 

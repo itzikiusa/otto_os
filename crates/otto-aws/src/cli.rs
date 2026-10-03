@@ -9,11 +9,14 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use otto_core::{Error, Result};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 
 /// Default per-call budget (§1). Streams (S3 download) are exempt.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -22,6 +25,56 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 /// The message every caller sees when the binary is absent. The UI keys off
 /// the `not installed` substring to show the first-run install panel.
 pub const NOT_INSTALLED_MSG: &str = "aws CLI not installed — open the AWS module to install it";
+
+/// Daemon-wide cap on concurrent `aws` children spawned through [`run_raw`].
+/// Each child is a ~60–100 MB Python process: without a global cap the
+/// accounts overview (N accounts × 7 permission probes) plus a couple of
+/// all-regions fan-outs could hold dozens at once. Streams that spawn their own
+/// child (S3 download, `sso login` PTY) are deliberately not counted — they are
+/// long-lived and user-initiated, and must never queue behind list calls.
+pub const MAX_CONCURRENT_CHILDREN: usize = 10;
+
+fn children() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| Semaphore::new(MAX_CONCURRENT_CHILDREN))
+}
+
+/// Total `aws` children spawned by [`run_raw`] since the daemon started.
+static SPAWNED: AtomicU64 = AtomicU64::new(0);
+
+/// Live counters for the CLI runner (debug / metrics surface, F14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct CliStats {
+    /// `aws` children running right now (permits in use).
+    pub running: usize,
+    /// Calls waiting for a permit (approximate: Semaphore has no waiter count,
+    /// so this is tracked alongside it).
+    pub queued: u64,
+    /// Children spawned since start.
+    pub spawned_total: u64,
+    pub max_concurrent: usize,
+}
+
+static QUEUED: AtomicU64 = AtomicU64::new(0);
+
+pub fn stats() -> CliStats {
+    CliStats {
+        running: MAX_CONCURRENT_CHILDREN - children().available_permits(),
+        queued: QUEUED.load(Ordering::Relaxed),
+        spawned_total: SPAWNED.load(Ordering::Relaxed),
+        max_concurrent: MAX_CONCURRENT_CHILDREN,
+    }
+}
+
+/// `svc op` of an argv for logs (`s3api list-objects-v2`); never the
+/// remaining args, which can carry keys / bucket paths / query text.
+fn op_of(args: &[String]) -> (&str, &str) {
+    let mut it = args
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !a.starts_with('-'));
+    (it.next().unwrap_or(""), it.next().unwrap_or(""))
+}
 
 /// Raw result of one CLI invocation (exit status is NOT interpreted here).
 #[derive(Debug, Clone)]
@@ -165,6 +218,12 @@ pub async fn run_raw(
     timeout: Duration,
     stdin: Option<&[u8]>,
 ) -> Result<CliOutput> {
+    // Wait for a daemon-wide slot BEFORE spawning; the permit lives until the
+    // child is reaped (or this future is dropped, which kills the child).
+    QUEUED.fetch_add(1, Ordering::Relaxed);
+    let permit = children().acquire().await;
+    QUEUED.fetch_sub(1, Ordering::Relaxed);
+    let _permit = permit.map_err(|_| Error::Internal("aws runner closed".into()))?;
     let started = Instant::now();
     let mut cmd = Command::new(program);
     // The child never inherits the daemon's own AWS_PROFILE: keys-mode accounts
@@ -188,6 +247,7 @@ pub async fn run_raw(
             Error::Internal(format!("spawn {}: {e}", program.display()))
         }
     })?;
+    SPAWNED.fetch_add(1, Ordering::Relaxed);
     if let Some(bytes) = stdin {
         if let Some(mut si) = child.stdin.take() {
             let bytes = bytes.to_vec();
@@ -197,22 +257,28 @@ pub async fn run_raw(
             });
         }
     }
+    let (svc, op) = op_of(args);
     let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => return Err(Error::Internal(format!("aws: {e}"))),
         Err(_) => {
+            tracing::debug!(target: "otto_aws::cli", svc, op, ms = started.elapsed().as_millis() as u64, status = "timeout", "aws call");
             return Err(Error::Upstream(format!(
                 "aws timed out after {}s",
                 timeout.as_secs()
-            )))
+            )));
         }
     };
-    Ok(CliOutput {
+    let out = CliOutput {
         status: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         duration_ms: started.elapsed().as_millis() as u64,
-    })
+    };
+    // Per-call timing (F14): `RUST_LOG=otto_aws::cli=debug` shows every spawn
+    // with its wall time, so a slow view can be attributed to a specific call.
+    tracing::debug!(target: "otto_aws::cli", svc, op, ms = out.duration_ms, status = out.status, "aws call");
+    Ok(out)
 }
 
 /// [`run_raw`] + error mapping: non-zero exit ⇒ [`error_for`].
@@ -347,6 +413,52 @@ mod tests {
         assert_eq!(parse_stdout("  \n").unwrap(), serde_json::Value::Null);
         assert_eq!(parse_stdout("{\"a\":1}").unwrap()["a"], 1);
         assert!(matches!(parse_stdout("nope"), Err(Error::Upstream(_))));
+    }
+
+    #[test]
+    fn op_of_names_only_service_and_operation() {
+        let a: Vec<String> = ["s3api", "get-object", "--bucket", "b", "--key", "secret/k"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(op_of(&a), ("s3api", "get-object"));
+        assert_eq!(op_of(&[]), ("", ""));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_children_are_capped_daemon_wide() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("aws");
+        // Each child records itself while alive so the peak can be measured.
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nf=\"{d}/live.$$\"\ntouch \"$f\"\nls {d} | grep -c '^live' >> {d}/peaks\nsleep 0.15\nrm -f \"$f\"\n",
+                d = dir.path().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = stats().spawned_total;
+        let calls = (0..(MAX_CONCURRENT_CHILDREN * 2)).map(|_| {
+            let bin = bin.clone();
+            async move { run_raw(&bin, &[], &[], DEFAULT_TIMEOUT, None).await }
+        });
+        let outs = futures_util::future::join_all(calls).await;
+        assert!(outs
+            .iter()
+            .all(|o| o.as_ref().map(|o| o.ok()).unwrap_or(false)));
+        let peaks = std::fs::read_to_string(dir.path().join("peaks")).unwrap();
+        let peak = peaks
+            .lines()
+            .filter_map(|l| l.trim().parse::<usize>().ok())
+            .max()
+            .unwrap();
+        assert!(peak <= MAX_CONCURRENT_CHILDREN, "peak {peak} children");
+        assert!(stats().spawned_total >= before + (MAX_CONCURRENT_CHILDREN as u64 * 2));
+        assert_eq!(stats().max_concurrent, MAX_CONCURRENT_CHILDREN);
     }
 
     #[tokio::test]
