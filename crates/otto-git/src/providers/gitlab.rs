@@ -326,21 +326,19 @@ impl super::GitProvider for Gitlab {
     }
 
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {
-        let mr = self
-            .http
-            .json(self.req(
-                reqwest::Method::GET,
-                &Self::mr_path(r, &format!("/{number}")),
-            ))
-            .await?;
-
+        // The MR, its discussions, approvals and pipeline status are
+        // independent reads — fetched together (≈1 forge RTT, not 4).
+        //
         // Discussions: first non-system note is the thread head, rest replies.
         // For threads the exposed comment id is the DISCUSSION id so that
         // replies can target it (`in_reply_to`). An MR detail must be WHOLE, so
         // follow `Link rel="next"` rather than stopping at the first 100.
-        let discussions = self
-            .http
-            .paginate_json(
+        let (mr, discussions, approvals, ci) = tokio::join!(
+            self.http.json(self.req(
+                reqwest::Method::GET,
+                &Self::mr_path(r, &format!("/{number}")),
+            )),
+            self.http.paginate_json(
                 self.req(
                     reqwest::Method::GET,
                     &Self::mr_path(r, &format!("/{number}/discussions")),
@@ -348,8 +346,15 @@ impl super::GitProvider for Gitlab {
                 .query(&[("per_page", "100")]),
                 self.http.client(),
                 self.auth_header(),
-            )
-            .await?;
+            ),
+            self.http.json(self.req(
+                reqwest::Method::GET,
+                &Self::mr_path(r, &format!("/{number}/approvals")),
+            )),
+            // Best-effort CI pipeline status — never fails the MR fetch.
+            self.fetch_ci_status(r, number),
+        );
+        let (mr, discussions) = (mr?, discussions?);
         let mut comments: Vec<PrComment> = Vec::new();
         for d in &discussions {
             let disc_id = vstr(d, &["id"]);
@@ -376,14 +381,7 @@ impl super::GitProvider for Gitlab {
         // Approvals (best effort — endpoint exists on CE and SaaS).
         // GitLab exposes no per-approver timestamp, so reviewed_at is None and
         // anyone in approved_by is, by definition, an approver.
-        let (approved_by, reviewers): (Vec<String>, Vec<PrReviewer>) = match self
-            .http
-            .json(self.req(
-                reqwest::Method::GET,
-                &Self::mr_path(r, &format!("/{number}/approvals")),
-            ))
-            .await
-        {
+        let (approved_by, reviewers): (Vec<String>, Vec<PrReviewer>) = match approvals {
             Ok(ap) => {
                 let approved_by = varr(&ap, &["approved_by"])
                     .iter()
@@ -411,8 +409,6 @@ impl super::GitProvider for Gitlab {
             _ => None,
         };
 
-        // Best-effort CI pipeline status — never fails the MR fetch.
-        let ci = self.fetch_ci_status(r, number).await;
         let mut summary = summary_from(&mr);
         summary.ci_status = Some(ci.state.clone());
 
