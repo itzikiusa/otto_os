@@ -258,8 +258,12 @@ an edit compiles as before; it only changes how fast the dependencies run. Every
 test that opens a migrated SQLite database (146 migrations) spends its time in
 SQLite (C, built by `libsqlite3-sys` at the package's opt-level), sqlx, tokio
 and serde. One-time cost: rebuilding the 284 dependency units of otto-state and
-otto-sessions took 358 s of CPU (2m27 wall at 3 jobs); they are cached afterwards
-locally and by CI's rust-cache, whose key changes once with this profile.
+otto-sessions took 358 s of CPU (2m27 wall at 3 jobs); the whole otto-server
+tree (615 dependency units) took 2,186 s of CPU (about 12 minutes wall at 3
+jobs on the loaded host). They are cached afterwards locally and by CI's
+rust-cache, whose key changes once with this profile. On the new profile the
+complete otto-server suite (1,311 tests: lib, `it`, `snips`) passed in 65 s of
+nextest wall time, and the server lib still compiled at opt-level 0 (216 s).
 `debug = "line-tables-only"` / no dependency debuginfo would likely shorten
 local links further, but this host's throttle forces `debug = 0`, so it was
 not measured and not changed.
