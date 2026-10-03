@@ -889,34 +889,6 @@ impl UsageEngine {
         let since = since(days);
         let limit = SESSION_LIMIT.max(1);
 
-        let q_provider = format!(
-            "SELECT provider,
-                    count() AS events,
-                    sum(input_tokens) AS input_tokens,
-                    sum(output_tokens) AS output_tokens,
-                    sum(cache_read_tokens) AS cache_read_tokens,
-                    sum(cache_write_tokens) AS cache_write_tokens,
-                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
-                    round(sum(cost_usd), 6) AS cost_usd
-             FROM usage_events
-             WHERE event_date >= today() - {since} {ws}
-             GROUP BY provider
-             ORDER BY total_tokens DESC, events DESC"
-        );
-        let q_daily = format!(
-            "SELECT toString(event_date) AS day,
-                    count() AS events,
-                    sum(input_tokens) AS input_tokens,
-                    sum(output_tokens) AS output_tokens,
-                    sum(cache_read_tokens) AS cache_read_tokens,
-                    sum(cache_write_tokens) AS cache_write_tokens,
-                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
-                    round(sum(cost_usd), 6) AS cost_usd
-             FROM usage_events
-             WHERE event_date >= today() - {since} {ws}
-             GROUP BY event_date
-             ORDER BY event_date"
-        );
         let q_sessions = format!(
             "SELECT session_id,
                     any(workspace_id) AS workspace_id,
@@ -937,12 +909,28 @@ impl UsageEngine {
              LIMIT {limit}"
         );
 
-        let q_models = models_sql(&format!("event_date >= today() - {since} {ws}"));
-        let q_daily_models = daily_models_sql(&format!("event_date >= today() - {since} {ws}"));
+        // ONE grouped scan (day × provider × model, with event counts) feeds
+        // the provider, daily, model and day×model rollups — they are pure
+        // re-aggregations of it, done in Rust (`summary_rollups`). With the
+        // top-sessions query that is 2 scans per summary instead of 5.
+        let q_daily_models = format!(
+            "SELECT toString(event_date) AS day, provider, model,
+                    count() AS events,
+                    sum(input_tokens) AS input_tokens,
+                    sum(output_tokens) AS output_tokens,
+                    sum(cache_read_tokens) AS cache_read_tokens,
+                    sum(cache_write_tokens) AS cache_write_tokens,
+                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                    sum(cost_usd) AS cost_usd
+             FROM usage_events
+             WHERE event_date >= today() - {since} {ws}
+             GROUP BY event_date, provider, model
+             ORDER BY event_date, total_tokens DESC"
+        );
 
         // All-or-nothing: a failed read is an error, never zero totals (U1).
         let mut batches = ch
-            .query_batch(&[q_provider, q_daily, q_sessions, q_models, q_daily_models])
+            .query_batch(&[q_sessions, q_daily_models])
             .await
             .map_err(|e| {
                 tracing::warn!("usage: summary batch failed: {e}");
@@ -962,11 +950,9 @@ impl UsageEngine {
                 .collect()
         }
 
-        let daily_models: Vec<DailyModelUsage> = decode(batches.pop().unwrap_or_default());
-        let models: Vec<ModelUsage> = decode(batches.pop().unwrap_or_default());
+        let grouped: Vec<DayModelRow> = decode(batches.pop().unwrap_or_default());
         let sessions: Vec<SessionUsage> = decode(batches.pop().unwrap_or_default());
-        let daily: Vec<DailyUsage> = decode(batches.pop().unwrap_or_default());
-        let providers: Vec<ProviderUsage> = decode(batches.pop().unwrap_or_default());
+        let (providers, daily, models, daily_models) = summary_rollups(grouped);
 
         let total_events: u64 = providers.iter().map(|p| p.events).sum();
         let total_input_tokens: u64 = providers.iter().map(|p| p.input_tokens).sum();
@@ -1448,6 +1434,112 @@ fn models_sql(cond: &str) -> String {
     )
 }
 
+/// One `(day, provider, model)` group of the summary's single scan.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct DayModelRow {
+    day: String,
+    provider: String,
+    model: String,
+    events: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    total_tokens: u64,
+    cost_usd: f64,
+}
+
+/// Round a summed cost like the SQL `round(sum(cost_usd), 6)` did.
+fn round6(x: f64) -> f64 {
+    (x * 1e6).round() / 1e6
+}
+
+/// Derive the summary's provider / daily / model / day×model rollups from the
+/// `(day, provider, model)` groups, with the orderings the old per-rollup
+/// queries had (providers & models: total tokens desc, events desc; daily by
+/// day; day×model as scanned).
+fn summary_rollups(
+    rows: Vec<DayModelRow>,
+) -> (
+    Vec<ProviderUsage>,
+    Vec<DailyUsage>,
+    Vec<ModelUsage>,
+    Vec<DailyModelUsage>,
+) {
+    use std::collections::BTreeMap;
+    let mut providers: BTreeMap<String, ProviderUsage> = BTreeMap::new();
+    let mut daily: BTreeMap<String, DailyUsage> = BTreeMap::new();
+    let mut models: BTreeMap<(String, String), ModelUsage> = BTreeMap::new();
+    let mut daily_models = Vec::with_capacity(rows.len());
+    for r in rows {
+        let p = providers
+            .entry(r.provider.clone())
+            .or_insert_with(|| ProviderUsage {
+                provider: r.provider.clone(),
+                ..Default::default()
+            });
+        p.events += r.events;
+        p.input_tokens += r.input_tokens;
+        p.output_tokens += r.output_tokens;
+        p.cache_read_tokens += r.cache_read_tokens;
+        p.cache_write_tokens += r.cache_write_tokens;
+        p.total_tokens += r.total_tokens;
+        p.cost_usd += r.cost_usd;
+        let d = daily.entry(r.day.clone()).or_insert_with(|| DailyUsage {
+            day: r.day.clone(),
+            ..Default::default()
+        });
+        d.events += r.events;
+        d.input_tokens += r.input_tokens;
+        d.output_tokens += r.output_tokens;
+        d.cache_read_tokens += r.cache_read_tokens;
+        d.cache_write_tokens += r.cache_write_tokens;
+        d.total_tokens += r.total_tokens;
+        d.cost_usd += r.cost_usd;
+        let m = models
+            .entry((r.provider.clone(), r.model.clone()))
+            .or_insert_with(|| ModelUsage {
+                provider: r.provider.clone(),
+                model: r.model.clone(),
+                ..Default::default()
+            });
+        m.events += r.events;
+        m.input_tokens += r.input_tokens;
+        m.output_tokens += r.output_tokens;
+        m.cache_read_tokens += r.cache_read_tokens;
+        m.cache_write_tokens += r.cache_write_tokens;
+        m.total_tokens += r.total_tokens;
+        m.cost_usd += r.cost_usd;
+        daily_models.push(DailyModelUsage {
+            day: r.day,
+            provider: r.provider,
+            model: r.model,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            cache_read_tokens: r.cache_read_tokens,
+            cache_write_tokens: r.cache_write_tokens,
+            total_tokens: r.total_tokens,
+            cost_usd: round6(r.cost_usd),
+        });
+    }
+    let by_total = |a: (u64, u64), b: (u64, u64)| b.0.cmp(&a.0).then(b.1.cmp(&a.1));
+    let mut providers: Vec<ProviderUsage> = providers.into_values().collect();
+    for p in &mut providers {
+        p.cost_usd = round6(p.cost_usd);
+    }
+    providers.sort_by(|a, b| by_total((a.total_tokens, a.events), (b.total_tokens, b.events)));
+    let mut daily: Vec<DailyUsage> = daily.into_values().collect();
+    for d in &mut daily {
+        d.cost_usd = round6(d.cost_usd);
+    }
+    let mut models: Vec<ModelUsage> = models.into_values().collect();
+    for m in &mut models {
+        m.cost_usd = round6(m.cost_usd);
+    }
+    models.sort_by(|a, b| by_total((a.total_tokens, a.events), (b.total_tokens, b.events)));
+    (providers, daily, models, daily_models)
+}
+
 /// Per-(day, provider, model) token rollup under `cond` (a WHERE body).
 fn daily_models_sql(cond: &str) -> String {
     format!(
@@ -1658,5 +1750,51 @@ mod scope_tests {
             .daily_model_range("2026-01-01", "2026-01-02")
             .await
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod rollup_tests {
+    use super::*;
+
+    #[test]
+    fn summary_rollups_reaggregate_the_single_scan() {
+        let row = |day: &str, p: &str, m: &str, ev: u64, tot: u64, cost: f64| DayModelRow {
+            day: day.into(),
+            provider: p.into(),
+            model: m.into(),
+            events: ev,
+            input_tokens: tot,
+            total_tokens: tot,
+            cost_usd: cost,
+            ..Default::default()
+        };
+        let (providers, daily, models, dm) = summary_rollups(vec![
+            row("2026-10-01", "claude", "opus", 2, 100, 0.1),
+            row("2026-10-01", "codex", "gpt", 1, 500, 0.0000004),
+            row("2026-10-02", "claude", "opus", 3, 50, 0.2),
+            row("2026-10-02", "claude", "sonnet", 1, 50, 0.05),
+        ]);
+        let p: Vec<_> = providers
+            .iter()
+            .map(|p| (p.provider.as_str(), p.events, p.total_tokens))
+            .collect();
+        assert_eq!(p, vec![("codex", 1, 500), ("claude", 6, 200)]);
+        assert!((providers[1].cost_usd - 0.35).abs() < 1e-9);
+        assert_eq!(providers[0].cost_usd, 0.0, "rounded to 6 places like SQL");
+        let d: Vec<_> = daily
+            .iter()
+            .map(|d| (d.day.as_str(), d.events, d.total_tokens))
+            .collect();
+        assert_eq!(d, vec![("2026-10-01", 3, 600), ("2026-10-02", 4, 100)]);
+        let m: Vec<_> = models
+            .iter()
+            .map(|m| (m.model.as_str(), m.events, m.total_tokens))
+            .collect();
+        assert_eq!(
+            m,
+            vec![("gpt", 1, 500), ("opus", 5, 150), ("sonnet", 1, 50)]
+        );
+        assert_eq!(dm.len(), 4);
     }
 }
