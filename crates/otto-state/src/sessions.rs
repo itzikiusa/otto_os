@@ -13,6 +13,23 @@ pub struct SessionsRepo {
     pool: DbPool,
 }
 
+/// Bumped by every repo write that can change what
+/// [`SessionsRepo::list_usage_attribution`] returns (insert, provider-session
+/// id, delete). The usage tailer caches its attribution index across passes
+/// and only re-reads `sessions` on a lookup miss when this moved — so an
+/// external (non-Otto) transcript streaming every 2 s never re-queries.
+/// Process-wide, monotonic; a spurious bump only costs one extra rebuild.
+static ATTRIBUTION_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Current [`ATTRIBUTION_GENERATION`].
+pub fn attribution_generation() -> u64 {
+    ATTRIBUTION_GENERATION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+fn bump_attribution_generation() {
+    ATTRIBUTION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
 /// What [`SessionsRepo::mark_dormant_except`] changed at boot.
 #[derive(Debug, Clone, Default)]
 pub struct DormantPass {
@@ -23,6 +40,19 @@ pub struct DormantPass {
     /// `(id, workspace_id)` of exited, resumable agent rows flipped to
     /// `reconnectable`.
     pub resumable: Vec<(Id, Id)>,
+}
+
+/// One session's usage-page label inputs ([`SessionsRepo::list_usage_labels`]).
+#[derive(Debug, Clone)]
+pub struct UsageLabelRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub title: String,
+    pub created_by: String,
+    /// `sessions.kind` (`agent` / `connection`).
+    pub kind: String,
+    /// `meta.source` when it is a string (review / channel / product-…).
+    pub source: Option<String>,
 }
 
 /// Minimal read-only projection used by the usage tailer to attribute on-disk
@@ -230,6 +260,7 @@ impl SessionsRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("create session"))?;
+        bump_attribution_generation();
         self.get(&id).await
     }
 
@@ -545,6 +576,7 @@ impl SessionsRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("update session"))?;
+        bump_attribution_generation();
         Ok(())
     }
 
@@ -745,6 +777,7 @@ impl SessionsRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("delete session"))?;
+        bump_attribution_generation();
         Ok(())
     }
 
@@ -836,6 +869,33 @@ impl SessionsRepo {
 
     /// All sessions projected to the fields the usage tailer needs to attribute
     /// on-disk transcript turns. Read-only and unfiltered (see [`UsageAttrRow`]).
+    /// Narrow projection for the usage routes' session labels (R4): just
+    /// what the leaderboard enrichment, the per-kind rollup and the non-root
+    /// scope read — no `meta_json` decode, only its `source` string.
+    pub async fn list_usage_labels(&self) -> sqlx::Result<Vec<UsageLabelRow>> {
+        let rows = sqlx::query(
+            "SELECT id, workspace_id, title, created_by, kind, \
+                    CASE WHEN json_valid(meta_json) THEN \
+                      CASE WHEN json_type(meta_json, '$.source') = 'text' \
+                           THEN json_extract(meta_json, '$.source') END \
+                    END AS source \
+             FROM sessions",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| UsageLabelRow {
+                id: r.get("id"),
+                workspace_id: r.get("workspace_id"),
+                title: r.get("title"),
+                created_by: r.get("created_by"),
+                kind: r.get("kind"),
+                source: r.get("source"),
+            })
+            .collect())
+    }
+
     pub async fn list_usage_attribution(&self) -> sqlx::Result<Vec<UsageAttrRow>> {
         let rows = sqlx::query(
             "SELECT id, workspace_id, provider, cwd, provider_session_id FROM sessions",
@@ -1113,6 +1173,39 @@ mod tests {
         let mut want = vec![exited.as_str(), recon.as_str()];
         want.sort();
         assert_eq!(ids, want);
+    }
+
+    #[tokio::test]
+    async fn list_usage_labels_projects_source_without_meta_decode() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let a = insert_session_full(&pool, &ws, &user, "claude", "running", None, 0).await;
+        let b = insert_session_full(&pool, &ws, &user, "codex", "exited", None, 0).await;
+        let c = insert_session_full(&pool, &ws, &user, "codex", "exited", None, 0).await;
+        for (id, meta) in [
+            (&a, r#"{"source":"review"}"#),
+            (&b, r#"{"source":7}"#),
+            (&c, "{}"),
+        ] {
+            sqlx::query("UPDATE sessions SET meta_json = ? WHERE id = ?")
+                .bind(meta)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let got = repo.list_usage_labels().await.unwrap();
+        let src = |id: &str| got.iter().find(|r| r.id == id).unwrap().source.clone();
+        assert_eq!(src(&a).as_deref(), Some("review"));
+        assert_eq!(src(&b), None, "non-string source ignored");
+        assert_eq!(src(&c), None, "no source → the session kind labels it");
+        let row = got.iter().find(|r| r.id == a).unwrap();
+        assert_eq!(
+            (row.kind.as_str(), row.created_by.as_str()),
+            ("agent", user.as_str())
+        );
+        assert_eq!(row.workspace_id, ws);
     }
 
     #[tokio::test]

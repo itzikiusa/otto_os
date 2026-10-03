@@ -4459,6 +4459,7 @@ dependencies = [
  "rustls-pemfile",
  "serde_json",
  "sha2 0.11.0",
+ "sqlx",
  "tokio",
  "tracing",
  "tracing-appender",

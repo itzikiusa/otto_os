@@ -59,3 +59,7 @@ rustls = { version = "0.23.45", default-features = false, features = ["ring"] }
 rustls-pemfile = "2.2.0"
 rcgen = "0.14.10"
 sha2 = "0.11.0"
+
+[dev-dependencies]
+# usage_tailer tests seed `sessions` rows directly.
+sqlx.workspace = true
