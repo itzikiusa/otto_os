@@ -631,6 +631,13 @@ in **[code-review.md](./code-review.md)**.
   optional delete-source-branch)/decline PRs across all three forges, with CI
   status and mergeability shown.
 - Push/pull over HTTPS using a Keychain-stored token, or over SSH via your agent.
+- Work in big repos without the UI stalling: the PR list and PR detail repaint
+  instantly from a per-repo cache and revalidate in the background (fresh for
+  45 s; your own approve/decline/merge/edit/comment drops it); a graph reload
+  after a ref moved reads ONE 10k-commit page and splices it onto the history
+  already paged in, and "load more" lays out only the new rows; diff lines over
+  10 KB (minified bundles) show their first 10 KB with an **expand line**
+  button; a status capped at 5,000 untracked rows says how many more there are.
 
 **You cannot (by design / current behavior):**
 
