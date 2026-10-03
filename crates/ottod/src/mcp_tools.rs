@@ -6474,6 +6474,298 @@ mod tests {
         assert!(!text.contains("unknown tool"), "{text}");
     }
 
+    // --- Performance guards (perf/10-mcp F1/F2/F3/F9) -------------------------
+    //
+    // A mock daemon on an ephemeral port answers the three routes the bridge
+    // calls for governed tools, counting hits, so the tests can assert both
+    // behaviour (concurrency, grant-aware listing, list_changed) and cost
+    // (one enable-list read per cache window, catalog bytes).
+
+    #[derive(Default)]
+    struct MockDaemon {
+        enabled_hits: std::sync::atomic::AtomicUsize,
+        status_hits: std::sync::atomic::AtomicUsize,
+        gateway_hits: std::sync::atomic::AtomicUsize,
+        ui_granted: std::sync::atomic::AtomicBool,
+        /// Full names the mock reports enabled.
+        enabled: std::sync::Mutex<Vec<String>>,
+    }
+
+    /// Every governed spec enabled — the default-ish worst case for size.
+    fn all_governed_names() -> Vec<String> {
+        GOVERNED_SPECS
+            .iter()
+            .filter_map(|s| s["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    async fn mock_daemon(state: Arc<MockDaemon>) -> String {
+        use axum::routing::{get, post};
+        use std::sync::atomic::Ordering;
+        let app = axum::Router::new()
+            .route(
+                "/api/v1/mcp/otto-server/enabled",
+                get(
+                    |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>| async move {
+                        m.enabled_hits.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(json!({
+                            "enabled": *m.enabled.lock().unwrap(),
+                            "outward_enabled": false,
+                            "ui_granted": m.ui_granted.load(Ordering::SeqCst),
+                        }))
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/mcp/otto-server",
+                get(
+                    |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>| async move {
+                        m.status_hits.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(json!({ "tools": [] }))
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/mcp/gateway/tools",
+                get(
+                    |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>| async move {
+                        m.gateway_hits.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(json!({ "tools": [] }))
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/mcp/otto-tools/invoke",
+                post(
+                    |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>,
+                     axum::Json(body): axum::Json<Value>| async move {
+                        let tool = body["tool"].as_str().unwrap_or_default().to_string();
+                        // The "slow" tool: an approval wait / long workflow.
+                        if tool == "otto.create_pr" {
+                            tokio::time::sleep(Duration::from_millis(800)).await;
+                        }
+                        // Asking for UI control: the human clicks Allow.
+                        if tool == "otto.ui_state" {
+                            m.ui_granted.store(true, Ordering::SeqCst);
+                        }
+                        axum::Json(json!({
+                            "decision": "allowed", "executed": true,
+                            "content": { "tool": tool }
+                        }))
+                    },
+                ),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn ctx_at(base: &str) -> Ctx {
+        let mut ctx = test_ctx();
+        ctx.base = base.to_string();
+        // No workspace: the gateway list is skipped without a daemon call.
+        ctx.workspace_id = None;
+        ctx
+    }
+
+    /// Drive `serve` over in-memory pipes: write `requests` (one JSON per
+    /// line), collect every line written back until `expect` messages arrived.
+    async fn drive(ctx: Ctx, requests: &[Value], expect: usize) -> Vec<Value> {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut client_w, server_r) = tokio::io::duplex(1 << 20);
+        let (server_w, client_r) = tokio::io::duplex(1 << 22);
+        let server = tokio::spawn(serve(Arc::new(ctx), BufReader::new(server_r), server_w));
+        for r in requests {
+            let mut line = serde_json::to_vec(r).unwrap();
+            line.push(b'\n');
+            client_w.write_all(&line).await.unwrap();
+        }
+        let mut lines = BufReader::new(client_r).lines();
+        let mut out = Vec::new();
+        while out.len() < expect {
+            let line = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+                .await
+                .expect("bridge reply within 10 s")
+                .unwrap()
+                .expect("bridge closed early");
+            out.push(serde_json::from_str::<Value>(&line).unwrap());
+        }
+        drop(client_w); // EOF → the loop drains and returns.
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        out
+    }
+
+    fn call(id: i64, name: &str) -> Value {
+        json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+               "params":{"name":name,"arguments":{}}})
+    }
+
+    #[tokio::test]
+    async fn a_slow_call_no_longer_blocks_the_next_one_or_ping() {
+        let mock = Arc::new(MockDaemon::default());
+        *mock.enabled.lock().unwrap() = all_governed_names();
+        let base = mock_daemon(mock.clone()).await;
+        // #1 is slow (800 ms upstream); #2 (a fast governed read) and the
+        // ping are sent right behind it and must be answered FIRST.
+        let replies = drive(
+            ctx_at(&base),
+            &[
+                call(1, "otto_create_pr"),
+                call(2, "otto_list_workflows"),
+                json!({"jsonrpc":"2.0","id":3,"method":"ping"}),
+            ],
+            3,
+        )
+        .await;
+        let order: Vec<i64> = replies.iter().map(|r| r["id"].as_i64().unwrap()).collect();
+        assert_eq!(
+            order.last(),
+            Some(&1),
+            "the slow call finishes last: {order:?}"
+        );
+        assert!(order.contains(&2) && order.contains(&3), "{order:?}");
+        // Every reply is a whole, well-formed JSON-RPC line (one writer).
+        for r in &replies {
+            assert_eq!(r["jsonrpc"], json!("2.0"));
+        }
+        // Two governed calls inside one cache window: ONE enable-list read,
+        // and never the full status.
+        assert_eq!(
+            mock.enabled_hits.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            mock.status_hits.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrency_is_capped() {
+        // More slow calls than permits: all still answered, and the cap held
+        // (the semaphore never hands out more than MAX_CONCURRENT_CALLS).
+        let mock = Arc::new(MockDaemon::default());
+        *mock.enabled.lock().unwrap() = all_governed_names();
+        let base = mock_daemon(mock.clone()).await;
+        let n = MAX_CONCURRENT_CALLS + 2;
+        let reqs: Vec<Value> = (0..n as i64).map(|i| call(i, "otto_create_pr")).collect();
+        let started = Instant::now();
+        let replies = drive(ctx_at(&base), &reqs, n).await;
+        assert_eq!(replies.len(), n);
+        let took = started.elapsed();
+        // Parallel, but in two waves (8 + 2) of ~800 ms — not ten in a row
+        // (8 s) and not all at once (one wave).
+        assert!(
+            took >= Duration::from_millis(1500),
+            "cap not applied: {took:?}"
+        );
+        assert!(
+            took < Duration::from_secs(5),
+            "calls ran serially: {took:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_tools_are_listed_only_with_the_grant_and_a_grant_relists() {
+        let mock = Arc::new(MockDaemon::default());
+        *mock.enabled.lock().unwrap() = all_governed_names();
+        let base = mock_daemon(mock.clone()).await;
+        let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+        // Ungranted: no otto_ui_* tool, exactly one request stub. Then the stub
+        // is called (the mock "human" allows), which must emit list_changed,
+        // and the next tools/list carries the UI tools.
+        let replies = drive(ctx_at(&base), &[list.clone()], 1).await;
+        let names = |r: &Value| -> Vec<String> {
+            r["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let before = names(&replies[0]);
+        assert!(!before
+            .iter()
+            .any(|n| n.starts_with("otto_ui_") && n != UI_REQUEST_CONTROL_TOOL));
+        assert_eq!(
+            before
+                .iter()
+                .filter(|n| *n == UI_REQUEST_CONTROL_TOOL)
+                .count(),
+            1
+        );
+
+        // A fresh bridge that advertised the ungranted catalog (the default).
+        let replies = drive(
+            ctx_at(&base),
+            &[call(2, UI_REQUEST_CONTROL_TOOL)],
+            2, // list_changed notification + stub reply
+        )
+        .await;
+        assert!(
+            replies
+                .iter()
+                .any(|r| r["method"] == json!("notifications/tools/list_changed")),
+            "a grant must re-list: {replies:?}"
+        );
+        let stub = replies.iter().find(|r| r["id"] == json!(2)).unwrap();
+        assert!(stub["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"ui_control_granted\": true"));
+        let after = drive(ctx_at(&base), &[list], 1).await;
+        let after = names(&after[0]);
+        assert!(after.iter().any(|n| n == "otto_ui_state"));
+        assert!(!after.iter().any(|n| n == UI_REQUEST_CONTROL_TOOL));
+    }
+
+    /// The `tools/list` size budget: everything a default session can be
+    /// shown, UI tools hidden (no grant). Fails when the catalog silently
+    /// grows past the budget — raise it deliberately, with a reason.
+    #[test]
+    fn tools_list_catalog_stays_within_its_byte_budget() {
+        let info = EnabledInfo {
+            names: all_governed_names(),
+            ui_granted: false,
+        };
+        let mut cat = tool_catalog_for_source(None);
+        cat["tools"]
+            .as_array_mut()
+            .unwrap()
+            .extend(governed_tools_for_session(&info));
+        let ungranted = serde_json::to_vec(&cat).unwrap().len();
+        let granted_info = EnabledInfo {
+            ui_granted: true,
+            ..info
+        };
+        let mut full = tool_catalog_for_source(None);
+        full["tools"]
+            .as_array_mut()
+            .unwrap()
+            .extend(governed_tools_for_session(&granted_info));
+        let granted = serde_json::to_vec(&full).unwrap().len();
+        eprintln!("tools/list bytes: ungranted={ungranted} granted={granted}");
+        assert!(
+            ungranted < granted * 3 / 4,
+            "hiding the UI tools must cut the catalog by >25% ({ungranted} vs {granted})"
+        );
+        assert!(
+            ungranted <= TOOLS_LIST_BYTE_BUDGET,
+            "tools/list grew to {ungranted} bytes (budget {TOOLS_LIST_BYTE_BUDGET})"
+        );
+    }
+
+    /// See [`tools_list_catalog_stays_within_its_byte_budget`].
+    const TOOLS_LIST_BYTE_BUDGET: usize = 88_000; // 83_418 at perf/10-mcp (granted: 135_610)
+
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above
     /// (which never actually call out). Audit disabled.
     fn test_ctx() -> Ctx {

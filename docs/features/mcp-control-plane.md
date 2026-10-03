@@ -700,8 +700,31 @@ session used to see twice) is not re-advertised. The session's `workspace_id` is
 injected only when the governed tool REQUIRES one: an optional one means "span
 every workspace" (the directory list tools) or is filled server-side. A tool
 disabled in the checklist is refused by name with a pointer to where to enable
-it. If the daemon can't answer `GET /mcp/otto-server`, no governed tool is
-advertised and the reason is logged to the bridge's stderr.
+it. If the daemon can't answer `GET /mcp/otto-server/enabled`, no governed
+tool is advertised and the reason is logged to the bridge's stderr.
+
+**UI-control tools follow the grant.** The ~90 `otto_ui_*` tools are listed
+only while the session holds the per-session "Allow UI control" grant
+(`ui_granted` on `GET /mcp/otto-server/enabled`); without it each would answer
+`pending_grant`, yet they made up ~40% of the tool-schema context. Ungranted,
+one stub — `otto_ui_request_control` — stands in for them: calling it runs the
+read-only `otto.ui_state`, which raises the person's Allow prompt. When the
+grant flips (either way) the bridge sends `notifications/tools/list_changed`
+(advertised as `capabilities.tools.listChanged`), so the client re-lists. A
+UI tool called by name still works exactly as before (grant-gated
+server-side).
+
+**Bridge performance.** The bridge runs requests **concurrently** (up to 8)
+behind one stdout writer — a governed call waiting on an approval no longer
+queues every other call, or `ping`, behind it; replies are matched by JSON-RPC
+id. The enable list (+ grant) is cached for 5 s and the gateway tool list for
+30 s (refetched once on an unknown gateway tool); neither cache can widen
+access, because the daemon re-checks the enable list, the grant and the
+gateway authorization on every call. The bridge attaches to the daemon's
+database with `open_existing` — it never runs the repair `UPDATE`s or
+migrations at session start. A governed call that waits on an approval
+resumes on the `mcp_approval_changed` event (5 s fallback re-read), not on a
+1 s poll.
 
 **The gateway.** The inward server *also* surfaces the workspace's **governed
 downstream tools** — fetched from `GET /mcp/gateway/tools?workspace_id=` and
@@ -795,6 +818,7 @@ the workspace role.
 | Method & path | Purpose | RBAC |
 |---|---|---|
 | `GET /mcp/otto-server` | Outward status + tool catalog + token prefix | View (or `mcp` token) |
+| `GET /mcp/otto-server/enabled` | **CP24a** — the light read the stdio bridges poll: enabled `otto.*` names, master switch, the calling session's `ui_granted` | View (or `mcp` token) |
 | `PATCH /mcp/otto-server` | Enable/disable and per-tool allow; legacy-token rotation affects only `otto-mcp-server`-labelled tokens (prefer CP37) | **Admin** |
 | `GET /mcp/auto-approve` | **CP40** — auto-approve rules + the categories / irreversible tools a rule can name | View |
 | `POST /mcp/auto-approve` | **CP41** — create a rule (`{scope, workspace_id?, session_id?, target_kind, target, allow_irreversible?, name?}`) | **Admin** (human credential) |

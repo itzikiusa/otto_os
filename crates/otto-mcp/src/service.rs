@@ -1212,3 +1212,252 @@ mod tests {
         assert_ne!(canonical_hash(&a), canonical_hash(&c));
     }
 }
+
+/// Query budgets and verdict equivalence for the batched resource checks
+/// (perf/10-mcp F4/F9): the per-server batch must answer exactly what the
+/// single `resource_allowed` answers, for a fixed handful of statements.
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use otto_core::access::{AccessActor, AccessMode, AccessPolicy, AccessRule, ResourceKind};
+    use otto_core::access::{RuleEffect, SubjectKind};
+
+    struct NoSecrets;
+    impl SecretStore for NoSecrets {
+        fn put(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get(&self, _: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn delete(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn setup(tools: usize) -> (McpService, McpServerDetail, Vec<otto_core::domain::User>) {
+        // One connection keeps the in-memory database alive and shared.
+        let pool: otto_state::DbPool = {
+            let p = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            sqlx::migrate!("../otto-state/migrations")
+                .run(&p)
+                .await
+                .unwrap();
+            p.into()
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        for (id, root) in [("root", 1), ("bob", 0), ("eve", 0)] {
+            sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, ?, 'x', ?, ?, ?)")
+                .bind(id).bind(id).bind(id).bind(root).bind(&now)
+                .execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES ('w', 'w', '/tmp', ?)",
+        )
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (u, role) in [("root", "admin"), ("bob", "editor")] {
+            sqlx::query(
+                "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('w', ?, ?)",
+            )
+            .bind(u)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // bob may use MCP (View) and is a workspace member; eve is neither.
+        sqlx::query(
+            "INSERT INTO user_feature_grants (user_id, feature, capability) VALUES ('bob', 'mcp', 'view')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let svc = McpService::new(pool.clone(), Arc::new(NoSecrets));
+        let server = svc
+            .registry()
+            .create(otto_state::NewServerRow {
+                workspace_id: "w".into(),
+                name: "s".into(),
+                transport: "stdio".into(),
+                command: "true".into(),
+                args: vec![],
+                env: Default::default(),
+                url: None,
+                description: None,
+                headers: Default::default(),
+                secret_ref: None,
+                secret_env_keys: vec![],
+                secret_header_keys: vec![],
+                injection_risk: "low".into(),
+                default_tool_access: "allow".into(),
+                enabled: true,
+                created_by: "root".into(),
+            })
+            .await
+            .unwrap();
+        let discovered: Vec<otto_state::DiscoveredTool> = (0..tools)
+            .map(|i| otto_state::DiscoveredTool {
+                name: format!("t{i}"),
+                title: None,
+                description: None,
+                input_schema: json!({"type": "object"}),
+                annotations: json!({}),
+                risk_label: "read".into(),
+                injection_risk: "low".into(),
+                mutating: false,
+                supports_dry_run: false,
+            })
+            .collect();
+        svc.tools()
+            .upsert_discovered(&server.id, &discovered)
+            .await
+            .unwrap();
+        let mut users = Vec::new();
+        for u in ["root", "bob", "eve"] {
+            users.push(
+                otto_state::UsersRepo::new(pool.clone())
+                    .get(&u.to_string())
+                    .await
+                    .unwrap(),
+            );
+        }
+        (svc, server, users)
+    }
+
+    /// Replace the server's policy (creation may have initialized one).
+    async fn set_policy(
+        svc: &McpService,
+        server: &McpServerDetail,
+        mode: AccessMode,
+        rules: Vec<AccessRule>,
+    ) {
+        let repo = otto_state::ResourceAccessRepo::new(svc.pool.clone());
+        let current = repo
+            .get_policy(ResourceKind::McpServer, &server.id)
+            .await
+            .unwrap();
+        let policy = AccessPolicy {
+            kind: ResourceKind::McpServer,
+            resource_id: server.id.clone(),
+            mode,
+            revision: current.revision,
+            rules,
+        };
+        repo.put_policy(
+            &policy,
+            current.revision,
+            &AccessActor {
+                real_user_id: "root".into(),
+                effective_user_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_visible_tools_cost_a_fixed_handful_of_statements() {
+        let (svc, server, users) = setup(50).await;
+        set_policy(&svc, &server, AccessMode::Legacy, vec![]).await;
+        let before = svc.pool.op_count();
+        let visible = svc.visible_tools(&server, &users[1]).await.unwrap();
+        let used = svc.pool.op_count() - before;
+        assert_eq!(visible.len(), 50);
+        // live policy + the tool list; it used to be 3 checks × ~2 statements
+        // per tool (≈ 300 for 50 tools).
+        assert!(used <= 3, "{used} statements for 50 tools");
+    }
+
+    #[tokio::test]
+    async fn enforced_batch_verdicts_equal_the_single_checks() {
+        let (svc, server, users) = setup(6).await;
+        let rule = |op: Vec<&str>, children: Option<Vec<&str>>, effect| AccessRule {
+            id: otto_core::new_id(),
+            subject_kind: SubjectKind::User,
+            subject_id: "bob".into(),
+            effect,
+            operations: op.into_iter().map(str::to_string).collect(),
+            children: children.map(|c| c.into_iter().map(str::to_string).collect()),
+            grantable_operations: vec![],
+            credential_connection_id: None,
+        };
+        set_policy(
+            &svc,
+            &server,
+            AccessMode::Enforced,
+            vec![
+                rule(
+                    vec!["discover", "invoke"],
+                    Some(vec!["t1", "t2", "t3"]),
+                    RuleEffect::Allow,
+                ),
+                rule(vec!["configure"], Some(vec!["t4"]), RuleEffect::Allow),
+                rule(vec!["invoke"], Some(vec!["t2"]), RuleEffect::Deny),
+                rule(vec!["discover"], None, RuleEffect::Allow),
+            ],
+        )
+        .await;
+        let tools: Vec<String> = (0..6).map(|i| format!("t{i}")).collect();
+        for user in &users {
+            let mut single = Vec::new();
+            let mut checks = Vec::new();
+            for t in &tools {
+                for op in ["discover", "invoke", "configure"] {
+                    single.push(
+                        svc.resource_allowed(&server, user, op, Some(t))
+                            .await
+                            .unwrap(),
+                    );
+                    checks.push((op, Some(t.as_str())));
+                }
+            }
+            single.push(
+                svc.resource_allowed(&server, user, "discover", None)
+                    .await
+                    .unwrap(),
+            );
+            checks.push(("discover", None));
+            let live = otto_state::ResourceAccessRepo::new(svc.pool.clone())
+                .get_live_policy(ResourceKind::McpServer, &server.id)
+                .await
+                .unwrap();
+            let batch = svc
+                .resource_allowed_under(&live, &server, user, &checks)
+                .await
+                .unwrap();
+            assert_eq!(batch, single, "user {}", user.id);
+            // visible_tools = discover && (invoke || configure), per tool.
+            let expect: Vec<String> = tools
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| single[i * 3] && (single[i * 3 + 1] || single[i * 3 + 2]))
+                .map(|(_, t)| t.clone())
+                .collect();
+            let got: Vec<String> = svc
+                .visible_tools(&server, user)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+            assert_eq!(got, expect, "user {}", user.id);
+        }
+        // The rules really discriminate (bob sees a strict subset), so the
+        // equality above is not vacuous.
+        let bob: Vec<String> = svc
+            .visible_tools(&server, &users[1])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert!(!bob.is_empty() && bob.len() < 6, "{bob:?}");
+    }
+}

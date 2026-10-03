@@ -620,6 +620,16 @@ export interface McpOttoServerStatus {
   approval_exempt_tools?: string[];
 }
 
+/** `GET /mcp/otto-server/enabled` (CP24a) — the light read behind every agent
+ *  session's `tools/list`: just the enabled full `otto.*` names, the master
+ *  switch, and whether the CALLING session holds the UI-control grant. */
+export interface McpOttoServerEnabled {
+  enabled: string[];
+  outward_enabled: boolean;
+  /** False for a credential not bound to an Otto session. */
+  ui_granted: boolean;
+}
+
 // --- MCP auto-approve rules (`/mcp/auto-approve`) ---------------------------
 // The explicit, opt-in policy under which a mutating `otto.*` tool call skips
 // the per-call human approval. Mirrors `otto_state::McpAutoApproveRule`.
