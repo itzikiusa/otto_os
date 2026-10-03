@@ -2155,6 +2155,10 @@ mod tests {
             Require(Mcp, Admin)
         );
         assert_eq!(
+            pol(Method::GET, "/api/v1/mcp/otto-server/enabled"),
+            Require(Mcp, View)
+        );
+        assert_eq!(
             pol(Method::GET, "/api/v1/mcp/auto-approve"),
             Require(Mcp, View)
         );

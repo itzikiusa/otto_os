@@ -76,6 +76,52 @@ pub async fn open(path: &Path) -> Result<DbPool> {
     Ok(DbPool::split(read, pool))
 }
 
+/// Open the EXISTING Otto database at `path` for a short-lived helper process
+/// (the per-session `ottod mcp-tools` bridge) — same connection settings as
+/// [`open`], but no repair `UPDATE`s, no `sqlx::migrate!`, no file creation.
+///
+/// Why: every agent session spawns a bridge, and [`open`] at each spawn took
+/// the write lock for two repair `UPDATE`s and re-validated ~150 migration
+/// checksums against the live daemon's database — fighting the daemon's writer
+/// at every session start — and a bridge binary NEWER than the running daemon
+/// could even apply migrations behind its back. The daemon owns the schema;
+/// a helper only ever attaches to it. Fails when the file or the
+/// `_sqlx_migrations` table is missing (the daemon has never initialized it).
+pub async fn open_existing(path: &Path) -> Result<DbPool> {
+    if !path.exists() {
+        return Err(Error::NotFound(format!("database {}", path.display())));
+    }
+    let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
+        .map_err(|e| Error::Internal(format!("sqlite options: {e}")))?
+        .create_if_missing(false)
+        .synchronous(SqliteSynchronous::Normal)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5));
+    let read_opts = opts.clone().read_only(true);
+    // A helper writes rarely (audit rows): one writer connection, opened on
+    // first use, and a couple of lazy readers.
+    let write = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_lazy_with(opts);
+    let read = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect_lazy_with(read_opts);
+    let pool = DbPool::split(read, write);
+    let initialized: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| Error::Internal(format!("sqlite open: {e}")))?;
+    if !initialized {
+        return Err(Error::Internal(format!(
+            "database {} has no schema yet (the daemon initializes it)",
+            path.display()
+        )));
+    }
+    Ok(pool)
+}
+
 /// One-time data repair for DBs bricked by the vault-docs migration **renumber**
 /// (commit 2df6850): the vault-docs migrations were originally applied at
 /// versions 103/104, then the files were *renamed* to 105/106 and 103/104 were
@@ -258,6 +304,45 @@ mod tests {
             .fetch_all(pool)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn open_existing_attaches_without_migrating_or_creating() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otto.db");
+        // Never creates the file.
+        assert!(open_existing(&path).await.is_err());
+        assert!(!path.exists());
+        // An initialized database attaches; the helper sees the schema and can
+        // write (audit rows) through its writer.
+        let daemon = open(&path).await.unwrap();
+        let applied_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&daemon)
+            .await
+            .unwrap();
+        let helper = open_existing(&path).await.unwrap();
+        sqlx::query("INSERT INTO settings (key, value_json) VALUES ('probe', '1')")
+            .execute(&helper)
+            .await
+            .unwrap();
+        let applied_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&helper)
+            .await
+            .unwrap();
+        assert_eq!(applied_before, applied_after);
+        // An empty (never-initialized) file is refused, not migrated.
+        let blank = dir.path().join("blank.db");
+        std::fs::write(&blank, b"").unwrap();
+        assert!(open_existing(&blank).await.is_err());
+        let tables: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master")
+            .fetch_one(
+                &DbPool::connect(&format!("sqlite://{}", blank.display()))
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tables, 0);
     }
 
     #[tokio::test]

@@ -100,7 +100,7 @@ pub use browser_credentials::{
 };
 pub use connection_sections::ConnectionSectionsRepo;
 pub use connections::{ConnectionsRepo, NewConnection};
-pub use db::open;
+pub use db::{open, open_existing};
 // Re-exported so daemon-side background tasks can name the pool type without
 // taking a direct sqlx dependency.
 pub use db_explorer::{

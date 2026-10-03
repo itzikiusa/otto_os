@@ -97,7 +97,10 @@ use std::time::Duration;
 use otto_core::redact::redact_json;
 use otto_state::{McpAuditRepo, NewMcpToolCall};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::sync::Arc;
+use std::time::Instant;
+
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::config::Config;
 
@@ -149,7 +152,45 @@ struct Ctx {
     /// the daemon's WAL writer lock, up to the 5 s busy timeout) and are
     /// drained when stdin closes so the last calls are still recorded.
     audit_tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
+    /// The control-plane enable list (+ this session's UI grant), cached for
+    /// [`ENABLED_CACHE_TTL`]: every governed call and `tools/list` used to
+    /// fetch the full `/mcp/otto-server` status (~100 KB) for it. A stale
+    /// entry can never widen access — `governed_invoke` re-checks the enable
+    /// list itself, and the UI bridge the grant.
+    enabled_cache: tokio::sync::Mutex<Option<(Instant, EnabledInfo)>>,
+    /// The gateway's downstream tool list, cached for [`GATEWAY_CACHE_TTL`]
+    /// (refetched once on a miss). The daemon re-authorizes every gateway call.
+    gateway_cache: tokio::sync::Mutex<Option<(Instant, Vec<Value>)>>,
+    /// Whether the last `tools/list` advertised the `otto_ui_*` tools (the
+    /// session held the UI grant). When the grant flips, the bridge emits
+    /// `notifications/tools/list_changed` so the client re-lists.
+    advertised_ui: std::sync::atomic::AtomicBool,
+    /// The single stdout writer's channel, for server-initiated
+    /// notifications. Taken (dropped) at shutdown so the writer can finish.
+    notify: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>,
 }
+
+/// What `GET /mcp/otto-server/enabled` answers, as the bridge keeps it.
+#[derive(Clone, Debug, Default)]
+struct EnabledInfo {
+    /// Full `otto.*` names enabled in the control plane.
+    names: Vec<String>,
+    /// The calling session holds the per-session "Allow UI control" grant.
+    ui_granted: bool,
+}
+
+/// How long the control-plane enable list (+ UI grant) is reused.
+const ENABLED_CACHE_TTL: Duration = Duration::from_secs(5);
+/// How long the gateway's downstream tool list is reused.
+const GATEWAY_CACHE_TTL: Duration = Duration::from_secs(30);
+/// Concurrent requests the bridge runs at once. Claude/Codex issue parallel
+/// `tools/call`s; one slow call (a 15 s approval wait, a 60 s workflow run)
+/// must not queue every other call — and `ping` — behind it.
+const MAX_CONCURRENT_CALLS: usize = 8;
+/// The one stub advertised instead of the ~90 `otto_ui_*` tools while the
+/// session lacks the UI grant: calling it asks the human (it runs the
+/// read-only `otto.ui_state`, which raises the grant request).
+const UI_REQUEST_CONTROL_TOOL: &str = "otto_ui_request_control";
 
 impl Ctx {
     /// GET an `/api/v1` path with the bearer token, enforcing the call timeout
@@ -416,8 +457,24 @@ impl Ctx {
     /// The governed downstream tools the live-agent **gateway** exposes for this
     /// session's workspace, namespaced `mcp__<server>__<tool>`. Best-effort: an
     /// empty list (gateway off, no workspace, or the session user lacks MCP
-    /// access) leaves the inward catalog unchanged.
-    async fn gateway_tools(&self) -> Vec<Value> {
+    /// access) leaves the inward catalog unchanged. Cached for
+    /// [`GATEWAY_CACHE_TTL`]; `fresh` bypasses the cache (a call naming a tool
+    /// the cached list lacks).
+    async fn gateway_tools(&self, fresh: bool) -> Vec<Value> {
+        let mut cache = self.gateway_cache.lock().await;
+        if !fresh {
+            if let Some((at, tools)) = cache.as_ref() {
+                if at.elapsed() < GATEWAY_CACHE_TTL {
+                    return tools.clone();
+                }
+            }
+        }
+        let tools = self.fetch_gateway_tools().await;
+        *cache = Some((Instant::now(), tools.clone()));
+        tools
+    }
+
+    async fn fetch_gateway_tools(&self) -> Vec<Value> {
         let Some(ws) = &self.workspace_id else {
             eprintln!(
                 "ottod mcp-tools: gateway tools skipped — session has no workspace_id; \
@@ -451,25 +508,27 @@ impl Ctx {
         }
     }
 
-    /// The full `otto.*` names the operator has ENABLED in the control plane
-    /// (`GET /mcp/otto-server`, MCP View). `None` when the daemon can't answer —
-    /// then no governed tool is advertised or callable, and the reason is on
-    /// stderr, so "the control plane says X but the session can't see it" is
-    /// always explainable from the daemon's log.
-    async fn governed_enabled(&self) -> Option<Vec<String>> {
-        match self.get_json("/mcp/otto-server").await {
-            Ok(v) => Some(
-                v["tools"]
-                    .as_array()
-                    .map(|tools| {
-                        tools
-                            .iter()
-                            .filter(|t| t["enabled"].as_bool().unwrap_or(false))
-                            .filter_map(|t| t["name"].as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            ),
+    /// The full `otto.*` names the operator has ENABLED in the control plane,
+    /// plus this session's UI grant (`GET /mcp/otto-server/enabled`, MCP
+    /// View), cached for [`ENABLED_CACHE_TTL`]; `fresh` skips the cache.
+    /// `None` when the daemon can't answer — then no governed tool is
+    /// advertised or callable, and the reason is on stderr, so "the control
+    /// plane says X but the session can't see it" is always explainable from
+    /// the daemon's log.
+    async fn enabled_info(&self, fresh: bool) -> Option<EnabledInfo> {
+        let mut cache = self.enabled_cache.lock().await;
+        if !fresh {
+            if let Some((at, info)) = cache.as_ref() {
+                if at.elapsed() < ENABLED_CACHE_TTL {
+                    return Some(info.clone());
+                }
+            }
+        }
+        match self.fetch_enabled_info().await {
+            Ok(info) => {
+                *cache = Some((Instant::now(), info.clone()));
+                Some(info)
+            }
             Err(e) => {
                 eprintln!(
                     "ottod mcp-tools: control-plane tool list unavailable: {e} — governed \
@@ -477,6 +536,73 @@ impl Ctx {
                 );
                 None
             }
+        }
+    }
+
+    async fn fetch_enabled_info(&self) -> Result<EnabledInfo, String> {
+        match self.get_json("/mcp/otto-server/enabled").await {
+            Ok(v) => Ok(EnabledInfo {
+                names: v["enabled"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|n| n.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                ui_granted: v["ui_granted"].as_bool().unwrap_or(false),
+            }),
+            // A daemon older than this bridge has no light route: fall back to
+            // the full status (no grant field there — UI tools stay hidden
+            // behind the request stub, which still works).
+            Err(e) if e.contains("404") => {
+                let v = self.get_json("/mcp/otto-server").await?;
+                Ok(EnabledInfo {
+                    names: v["tools"]
+                        .as_array()
+                        .map(|tools| {
+                            tools
+                                .iter()
+                                .filter(|t| t["enabled"].as_bool().unwrap_or(false))
+                                .filter_map(|t| t["name"].as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    ui_granted: false,
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Send a server-initiated message (a notification) through the single
+    /// stdout writer. A no-op before the loop starts or after shutdown.
+    fn send_notification(&self, msg: Value) {
+        if let Some(tx) = self
+            .notify
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            let _ = tx.send(msg);
+        }
+    }
+
+    /// When the session's UI grant no longer matches what the last
+    /// `tools/list` advertised, tell the client to re-list
+    /// (`notifications/tools/list_changed`). `info` is the latest answer.
+    fn sync_ui_listing(&self, info: &EnabledInfo) {
+        use std::sync::atomic::Ordering;
+        let was = self.advertised_ui.load(Ordering::Relaxed);
+        if was != info.ui_granted
+            && self
+                .advertised_ui
+                .compare_exchange(was, info.ui_granted, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            self.send_notification(
+                json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" }),
+            );
         }
     }
 
@@ -1595,41 +1721,88 @@ fn native_tool_names() -> Vec<String> {
 /// The governed spec a stdio tool name proxies to, or `None` when the name is
 /// served natively (by the same or an aliased name) or is not a governed tool.
 fn governed_spec_for_stdio_name(name: &str) -> Option<Value> {
-    let short = name.strip_prefix("otto_")?;
-    let native: &[String] = &NATIVE_TOOL_NAMES;
-    if native.iter().any(|n| n == name)
-        || GOVERNED_ALIASED_BY_NATIVE
-            .iter()
-            .any(|(g, n)| *g == short && native.iter().any(|x| x == n))
-    {
-        return None;
-    }
-    let full = format!("otto.{short}");
-    GOVERNED_SPECS
-        .iter()
-        .find(|s| s["name"].as_str() == Some(full.as_str()))
-        .cloned()
+    governed_spec_ref(name).cloned()
 }
 
+/// [`governed_spec_for_stdio_name`] without the clone: an index lookup.
+fn governed_spec_ref(name: &str) -> Option<&'static Value> {
+    GOVERNED_BY_STDIO_NAME
+        .get(name)
+        .map(|&i| &GOVERNED_SPECS[i])
+}
+
+/// stdio name → index into [`GOVERNED_SPECS`], for every governed spec this
+/// surface PROXIES (not served natively under the same or an aliased name).
+/// Built once; the per-spec linear scans it replaces made `tools/list`
+/// O(N²) at N≈216.
+static GOVERNED_BY_STDIO_NAME: std::sync::LazyLock<std::collections::HashMap<String, usize>> =
+    std::sync::LazyLock::new(|| {
+        let native: std::collections::HashSet<&str> =
+            NATIVE_TOOL_NAMES.iter().map(String::as_str).collect();
+        GOVERNED_SPECS
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let full = s["name"].as_str()?;
+                let stdio = governed_stdio_name(full);
+                let short = stdio.strip_prefix("otto_")?;
+                let aliased = GOVERNED_ALIASED_BY_NATIVE
+                    .iter()
+                    .any(|(g, n)| *g == short && native.contains(n));
+                (!native.contains(stdio.as_str()) && !aliased).then_some((stdio, i))
+            })
+            .collect()
+    });
+
 /// The governed (`otto.*`) name a stdio tool name proxies to, if any.
+#[cfg(test)]
 fn governed_tool_for_stdio_name(name: &str) -> Option<String> {
     governed_spec_for_stdio_name(name).and_then(|s| s["name"].as_str().map(str::to_string))
 }
 
 /// The `tools/list` entries for the control-plane-enabled governed tools that
-/// have no native equivalent here. `enabled` holds full `otto.*` names.
+/// have no native equivalent here. `enabled` holds full `otto.*` names. Every
+/// enabled `otto_ui_*` tool is included — see [`governed_tools_for_session`]
+/// for the grant-aware listing.
+#[cfg(test)]
 fn governed_tools_for(enabled: &[String]) -> Vec<Value> {
+    governed_tools_listed(enabled, true)
+}
+
+/// The governed `tools/list` entries for THIS session: the ~90 `otto_ui_*`
+/// tools only when the session holds the "Allow UI control" grant — without
+/// it every one of them answers `pending_grant`, yet they made up ~40% of a
+/// session's tool-schema context. Ungranted, ONE stub
+/// ([`UI_REQUEST_CONTROL_TOOL`]) stands in for them (when `otto.ui_state` is
+/// enabled), and a call to a UI tool by name still works exactly as before.
+fn governed_tools_for_session(info: &EnabledInfo) -> Vec<Value> {
+    let mut out = governed_tools_listed(&info.names, info.ui_granted);
+    if !info.ui_granted && info.names.iter().any(|n| n == "otto.ui_state") {
+        out.push(json!({
+            "name": UI_REQUEST_CONTROL_TOOL,
+            "description": "Ask the person to let you drive the Otto app's UI (open pages, \
+                run queries, use the API client, browser, git…) for this session. Otto shows \
+                them an Allow prompt; once they allow it, the full set of otto_ui_* tools \
+                appears in your tool list. Call it only when the task needs the Otto UI.",
+            "inputSchema": { "type": "object", "properties": {} },
+        }));
+    }
+    out
+}
+
+fn governed_tools_listed(enabled: &[String], include_ui: bool) -> Vec<Value> {
+    let enabled: std::collections::HashSet<&str> = enabled.iter().map(String::as_str).collect();
     GOVERNED_SPECS
         .iter()
-        .filter(|s| {
-            s["name"]
-                .as_str()
-                .is_some_and(|n| enabled.iter().any(|e| e == n))
-        })
         .filter_map(|s| {
             let full = s["name"].as_str()?;
+            if !enabled.contains(full) || (!include_ui && is_ui_spec_name(full)) {
+                return None;
+            }
             let stdio = governed_stdio_name(full);
-            governed_spec_for_stdio_name(&stdio)?;
+            if !GOVERNED_BY_STDIO_NAME.contains_key(&stdio) {
+                return None;
+            }
             Some(json!({
                 "name": stdio,
                 "description": s["description"],
@@ -1637,6 +1810,11 @@ fn governed_tools_for(enabled: &[String]) -> Vec<Value> {
             }))
         })
         .collect()
+}
+
+/// Whether a full governed name is an agent-UI-control tool (`otto.ui_*`).
+fn is_ui_spec_name(full: &str) -> bool {
+    otto_server::ui_commands::is_ui_tool(full.strip_prefix("otto.").unwrap_or(full))
 }
 
 /// Arguments for a governed call: the agent's arguments plus this session's
@@ -3853,11 +4031,19 @@ async fn gateway_call(ctx: &Ctx, namespaced: &str, args: &Value) -> Result<(Valu
     let Some(ws) = &ctx.workspace_id else {
         return Err("gateway: no workspace context".into());
     };
-    let tools = ctx.gateway_tools().await;
-    let entry = tools
-        .iter()
-        .find(|t| t.get("name").and_then(Value::as_str) == Some(namespaced))
-        .ok_or_else(|| format!("unknown gateway tool `{namespaced}`"))?;
+    let find = |tools: &[Value]| {
+        tools
+            .iter()
+            .find(|t| t.get("name").and_then(Value::as_str) == Some(namespaced))
+            .cloned()
+    };
+    // The cached list first; a miss refetches once (a server/tool added or
+    // re-enabled since). The daemon re-authorizes the call either way.
+    let entry = match find(&ctx.gateway_tools(false).await) {
+        Some(e) => e,
+        None => find(&ctx.gateway_tools(true).await)
+            .ok_or_else(|| format!("unknown gateway tool `{namespaced}`"))?,
+    };
     let server_id = entry.get("server_id").and_then(Value::as_str).unwrap_or("");
     let tool = entry.get("tool").and_then(Value::as_str).unwrap_or("");
     let body = json!({
@@ -3888,9 +4074,10 @@ async fn governed_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, bo
     let spec = governed_spec_for_stdio_name(name)
         .ok_or_else(|| format!("`{name}` is not a governed Otto tool"))?;
     let full = spec["name"].as_str().unwrap_or_default().to_string();
-    let enabled = ctx.governed_enabled().await.ok_or_else(|| {
+    let info = ctx.enabled_info(false).await.ok_or_else(|| {
         format!("`{name}` is unavailable: the Otto MCP server tool list could not be read from the daemon")
     })?;
+    let enabled = &info.names;
     if !enabled.contains(&full) {
         return Err(format!(
             "`{name}` ({full}) is not enabled on the Otto MCP server — enable it under \
@@ -3915,7 +4102,39 @@ async fn governed_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, bo
         v.get("decision").and_then(Value::as_str),
         Some("denied") | Some("error")
     ) || v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+    // A UI tool called by name may just have obtained (or lost) the grant:
+    // re-read it and re-list if the advertised catalog is now wrong.
+    if is_ui_spec_name(&full) {
+        if let Some(fresh) = ctx.enabled_info(true).await {
+            ctx.sync_ui_listing(&fresh);
+        }
+    }
     Ok((v, is_error))
+}
+
+/// [`UI_REQUEST_CONTROL_TOOL`]: run the read-only `otto.ui_state` through the
+/// governed path — the UI bridge raises the owner's "Allow UI control" prompt
+/// and waits briefly for the decision — then re-read the grant and, when it
+/// now holds, emit `notifications/tools/list_changed` so the client lists the
+/// `otto_ui_*` tools. The envelope tells the agent what happened.
+async fn ui_request_control(ctx: &Ctx) -> Result<(Value, bool), String> {
+    let (v, is_error) = governed_call(ctx, "otto_ui_state", &json!({})).await?;
+    let granted = ctx
+        .enabled_info(true)
+        .await
+        .inspect(|info| ctx.sync_ui_listing(info))
+        .is_some_and(|info| info.ui_granted);
+    let note = if granted {
+        "UI control is allowed for this session: the otto_ui_* tools are now in your tool list \
+         (re-list tools if your client did not refresh)."
+    } else {
+        "UI control is not allowed (yet): the person has to click Allow in Otto. Ask again later \
+         only if the task still needs the Otto UI."
+    };
+    Ok((
+        json!({ "ui_control_granted": granted, "note": note, "result": v }),
+        is_error && !granted,
+    ))
 }
 
 /// Apply the row cap then redaction to a tool result, returning the cleaned
@@ -3959,7 +4178,10 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
         "initialize" => {
             let result = json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": {} },
+                // `listChanged`: the bridge emits `notifications/tools/list_changed`
+                // when the session's UI grant flips (the otto_ui_* tools appear
+                // or disappear).
+                "capabilities": { "tools": { "listChanged": true } },
                 "serverInfo": { "name": "otto", "version": env!("CARGO_PKG_VERSION") }
             });
             Some(rpc_ok(id.unwrap_or(Value::Null), result))
@@ -3972,20 +4194,23 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
             // gateway is enabled for this workspace — the governed downstream tools.
             let mut cat = tool_catalog_for_source(ctx.source.as_deref());
             let reviewer = is_vault_docs_reviewer(ctx.source.as_deref());
-            let gw = if reviewer {
-                Vec::new()
+            // The gateway list and the enable list are independent daemon
+            // reads: fetch them concurrently (each is cached briefly).
+            let (gw, enabled) = if reviewer {
+                (Vec::new(), None)
             } else {
-                ctx.gateway_tools().await
+                tokio::join!(ctx.gateway_tools(false), ctx.enabled_info(false))
             };
             // …plus the control-plane-enabled otto.* tools this surface doesn't
-            // serve natively (what the operator ticked under MCP → Otto server).
-            let governed = if reviewer {
-                Vec::new()
-            } else {
-                match ctx.governed_enabled().await {
-                    Some(enabled) => governed_tools_for(&enabled),
-                    None => Vec::new(),
+            // serve natively (what the operator ticked under MCP → Otto server),
+            // UI-control tools only once this session holds the UI grant.
+            let governed = match enabled {
+                Some(info) => {
+                    ctx.advertised_ui
+                        .store(info.ui_granted, std::sync::atomic::Ordering::Relaxed);
+                    governed_tools_for_session(&info)
                 }
+                None => Vec::new(),
             };
             if let Some(arr) = cat["tools"].as_array_mut() {
                 arr.extend(governed);
@@ -4045,9 +4270,18 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                     Err(e) => rpc_ok(id, tool_result(&json!({ "error": e }), true)),
                 });
             }
+            // The UI-control request stub: ask for the grant through the
+            // read-only `otto.ui_state` (which raises the human's Allow prompt
+            // and waits briefly), then re-list if the grant now holds.
+            if name == UI_REQUEST_CONTROL_TOOL {
+                return Some(match ui_request_control(ctx).await {
+                    Ok((v, is_error)) => rpc_ok(id, tool_result(&v, is_error)),
+                    Err(e) => rpc_ok(id, tool_result(&json!({ "error": e }), true)),
+                });
+            }
             // A control-plane otto.* tool with no native twin — governed proxy
             // (enabled-check, approval, audit all happen daemon-side).
-            if governed_tool_for_stdio_name(&name).is_some() {
+            if governed_spec_ref(&name).is_some() {
                 return Some(match governed_call(ctx, &name, &args).await {
                     Ok((v, is_error)) => rpc_ok(id, tool_result(&v, is_error)),
                     Err(e) => rpc_ok(id, tool_result(&json!({ "error": e }), true)),
@@ -4173,9 +4407,12 @@ pub async fn run() -> Result<(), String> {
     let workspace_id = creds.workspace_id;
     let source = creds.source;
 
-    // Open the same SQLite DB the daemon uses, for the audit ledger. Best-effort:
+    // Attach to the SQLite DB the daemon uses, for the audit ledger. Best-effort:
     // if it can't be opened the tools still run, audit just degrades to stderr.
-    let audit = match otto_state::open(&Config::load().db_path()).await {
+    // `open_existing`, never `open`: a per-session helper must not run the
+    // repair UPDATEs + migrations against the live daemon's database at every
+    // session start (the daemon owns the schema).
+    let audit = match otto_state::open_existing(&Config::load().db_path()).await {
         Ok(pool) => Some(McpAuditRepo::new(pool)),
         Err(e) => {
             eprintln!("ottod mcp-tools: audit DB unavailable ({e}); audit disabled");
@@ -4188,7 +4425,7 @@ pub async fn run() -> Result<(), String> {
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
 
-    let ctx = Ctx {
+    let ctx = Arc::new(Ctx::new(
         http,
         base,
         token,
@@ -4196,23 +4433,84 @@ pub async fn run() -> Result<(), String> {
         workspace_id,
         source,
         audit,
-        audit_tasks: Default::default(),
-    };
+    ));
+    serve(ctx, BufReader::new(tokio::io::stdin()), tokio::io::stdout()).await
+}
 
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin);
-    let mut stdout = tokio::io::stdout();
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("read stdin: {e}"))?;
-        if n == 0 {
-            break; // EOF: the client closed the pipe.
+impl Ctx {
+    fn new(
+        http: reqwest::Client,
+        base: String,
+        token: String,
+        session_id: Option<String>,
+        workspace_id: Option<String>,
+        source: Option<String>,
+        audit: Option<McpAuditRepo>,
+    ) -> Self {
+        Ctx {
+            http,
+            base,
+            token,
+            session_id,
+            workspace_id,
+            source,
+            audit,
+            audit_tasks: Default::default(),
+            enabled_cache: Default::default(),
+            gateway_cache: Default::default(),
+            advertised_ui: Default::default(),
+            notify: Default::default(),
         }
+    }
+}
+
+/// Whether a request is answered inline by the read loop (no daemon I/O, or
+/// it must complete before anything else runs) instead of on a task.
+fn answered_inline(msg: &Value) -> bool {
+    matches!(
+        msg.get("method").and_then(Value::as_str),
+        Some("initialize" | "ping" | "notifications/initialized" | "initialized")
+    )
+}
+
+/// The JSON-RPC loop: read newline-delimited requests from `reader`, answer
+/// them on `writer`, until EOF.
+///
+/// Requests run CONCURRENTLY (up to [`MAX_CONCURRENT_CALLS`]) — Claude and
+/// Codex send parallel `tools/call`s and match replies by JSON-RPC id, so a
+/// slow call no longer queues every other call (and `ping`) behind it. ONE
+/// writer task owns `writer`: each reply is a whole line, never interleaved.
+/// `initialize` / `ping` / the `initialized` notification are answered inline.
+/// At EOF in-flight calls get a bounded drain (6 s), then the audit drain.
+async fn serve<R, W>(ctx: Arc<Ctx>, mut reader: R, writer: W) -> Result<(), String>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    *ctx.notify.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx.clone());
+    let writer_task = tokio::spawn(async move {
+        let mut writer = writer;
+        while let Some(msg) = rx.recv().await {
+            if let Err(e) = write_line(&mut writer, &msg).await {
+                eprintln!("ottod mcp-tools: {e}");
+                break;
+            }
+        }
+    });
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CALLS));
+    let mut inflight = tokio::task::JoinSet::new();
+    let mut line = String::new();
+    let result = loop {
+        line.clear();
+        let n = match reader.read_line(&mut line).await {
+            Ok(n) => n,
+            Err(e) => break Err(format!("read stdin: {e}")),
+        };
+        if n == 0 {
+            break Ok(()); // EOF: the client closed the pipe.
+        }
+        while inflight.try_join_next().is_some() {}
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -4221,22 +4519,45 @@ pub async fn run() -> Result<(), String> {
             Ok(v) => v,
             Err(e) => {
                 // Malformed line: emit a parse-error response with null id.
-                let resp = rpc_err(Value::Null, -32700, format!("parse error: {e}"));
-                write_line(&mut stdout, &resp).await?;
+                let _ = tx.send(rpc_err(Value::Null, -32700, format!("parse error: {e}")));
                 continue;
             }
         };
-        if let Some(resp) = handle(&ctx, msg).await {
-            write_line(&mut stdout, &resp).await?;
+        if answered_inline(&msg) {
+            if let Some(resp) = handle(&ctx, msg).await {
+                let _ = tx.send(resp);
+            }
+            continue;
         }
-    }
+        // Backpressure: with MAX_CONCURRENT_CALLS in flight, stop reading
+        // until one finishes.
+        let Ok(permit) = permits.clone().acquire_owned().await else {
+            break Ok(());
+        };
+        let (ctx, tx) = (ctx.clone(), tx.clone());
+        inflight.spawn(async move {
+            if let Some(resp) = handle(&ctx, msg).await {
+                let _ = tx.send(resp);
+            }
+            drop(permit);
+        });
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(6), async {
+        while inflight.join_next().await.is_some() {}
+    })
+    .await;
+    // Close the writer's channel (the loop's sender, the tasks' clones are
+    // gone, and the notification sender) so it flushes and ends.
+    drop(tx);
+    ctx.notify.lock().unwrap_or_else(|p| p.into_inner()).take();
+    let _ = tokio::time::timeout(Duration::from_secs(2), writer_task).await;
     ctx.drain_audit().await;
-    Ok(())
+    result
 }
 
 /// Serialize one JSON-RPC message and write it as a single newline-terminated
 /// line, flushing so the client sees it immediately.
-async fn write_line(stdout: &mut tokio::io::Stdout, value: &Value) -> Result<(), String> {
+async fn write_line<W: AsyncWrite + Unpin>(stdout: &mut W, value: &Value) -> Result<(), String> {
     let mut buf = serde_json::to_vec(value).map_err(|e| format!("encode response: {e}"))?;
     buf.push(b'\n');
     stdout
@@ -6153,18 +6474,313 @@ mod tests {
         assert!(!text.contains("unknown tool"), "{text}");
     }
 
+    // --- Performance guards (perf/10-mcp F1/F2/F3/F9) -------------------------
+    //
+    // A mock daemon on an ephemeral port answers the three routes the bridge
+    // calls for governed tools, counting hits, so the tests can assert both
+    // behaviour (concurrency, grant-aware listing, list_changed) and cost
+    // (one enable-list read per cache window, catalog bytes).
+
+    #[derive(Default)]
+    struct MockDaemon {
+        enabled_hits: std::sync::atomic::AtomicUsize,
+        status_hits: std::sync::atomic::AtomicUsize,
+        gateway_hits: std::sync::atomic::AtomicUsize,
+        ui_granted: std::sync::atomic::AtomicBool,
+        /// Full names the mock reports enabled.
+        enabled: std::sync::Mutex<Vec<String>>,
+    }
+
+    /// Every governed spec enabled — the default-ish worst case for size.
+    fn all_governed_names() -> Vec<String> {
+        GOVERNED_SPECS
+            .iter()
+            .filter_map(|s| s["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    async fn mock_daemon(state: Arc<MockDaemon>) -> String {
+        use axum::routing::{get, post};
+        use std::sync::atomic::Ordering;
+        let app = axum::Router::new()
+            .route(
+                "/mcp/otto-server/enabled",
+                get(
+                    |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>| async move {
+                        m.enabled_hits.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(json!({
+                            "enabled": *m.enabled.lock().unwrap(),
+                            "outward_enabled": false,
+                            "ui_granted": m.ui_granted.load(Ordering::SeqCst),
+                        }))
+                    },
+                ),
+            )
+            .route(
+                "/mcp/otto-server",
+                get(
+                    |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>| async move {
+                        m.status_hits.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(json!({ "tools": [] }))
+                    },
+                ),
+            )
+            .route(
+                "/mcp/gateway/tools",
+                get(
+                    |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>| async move {
+                        m.gateway_hits.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(json!({ "tools": [] }))
+                    },
+                ),
+            )
+            .route(
+                "/mcp/otto-tools/invoke",
+                post(
+                    |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>,
+                     axum::Json(body): axum::Json<Value>| async move {
+                        let tool = body["tool"].as_str().unwrap_or_default().to_string();
+                        // The "slow" tool: an approval wait / long workflow.
+                        if tool == "otto.create_pr" {
+                            tokio::time::sleep(Duration::from_millis(800)).await;
+                        }
+                        // Asking for UI control: the human clicks Allow.
+                        if tool == "otto.ui_state" {
+                            m.ui_granted.store(true, Ordering::SeqCst);
+                        }
+                        axum::Json(json!({
+                            "decision": "allowed", "executed": true,
+                            "content": { "tool": tool }
+                        }))
+                    },
+                ),
+            )
+            .with_state(state);
+        // Nested so the route literals above carry the same paths the
+        // daemon registers (the route-inventory / policy-coverage scanners
+        // read every `.route` literal in the workspace).
+        let app = axum::Router::new().nest("/api/v1", app);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn ctx_at(base: &str) -> Ctx {
+        let mut ctx = test_ctx();
+        ctx.base = base.to_string();
+        // No workspace: the gateway list is skipped without a daemon call.
+        ctx.workspace_id = None;
+        ctx
+    }
+
+    /// Drive `serve` over in-memory pipes: write `requests` (one JSON per
+    /// line), collect every line written back until `expect` messages arrived.
+    async fn drive(ctx: Ctx, requests: &[Value], expect: usize) -> Vec<Value> {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut client_w, server_r) = tokio::io::duplex(1 << 20);
+        let (server_w, client_r) = tokio::io::duplex(1 << 22);
+        let server = tokio::spawn(serve(Arc::new(ctx), BufReader::new(server_r), server_w));
+        for r in requests {
+            let mut line = serde_json::to_vec(r).unwrap();
+            line.push(b'\n');
+            client_w.write_all(&line).await.unwrap();
+        }
+        let mut lines = BufReader::new(client_r).lines();
+        let mut out = Vec::new();
+        while out.len() < expect {
+            let line = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+                .await
+                .expect("bridge reply within 10 s")
+                .unwrap()
+                .expect("bridge closed early");
+            out.push(serde_json::from_str::<Value>(&line).unwrap());
+        }
+        drop(client_w); // EOF → the loop drains and returns.
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        out
+    }
+
+    fn call(id: i64, name: &str) -> Value {
+        json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+               "params":{"name":name,"arguments":{}}})
+    }
+
+    #[tokio::test]
+    async fn a_slow_call_no_longer_blocks_the_next_one_or_ping() {
+        let mock = Arc::new(MockDaemon::default());
+        *mock.enabled.lock().unwrap() = all_governed_names();
+        let base = mock_daemon(mock.clone()).await;
+        // #1 is slow (800 ms upstream); #2 (a fast governed read) and the
+        // ping are sent right behind it and must be answered FIRST.
+        let replies = drive(
+            ctx_at(&base),
+            &[
+                call(1, "otto_create_pr"),
+                call(2, "otto_list_workflows"),
+                json!({"jsonrpc":"2.0","id":3,"method":"ping"}),
+            ],
+            3,
+        )
+        .await;
+        let order: Vec<i64> = replies.iter().map(|r| r["id"].as_i64().unwrap()).collect();
+        assert_eq!(
+            order.last(),
+            Some(&1),
+            "the slow call finishes last: {order:?}"
+        );
+        assert!(order.contains(&2) && order.contains(&3), "{order:?}");
+        // Every reply is a whole, well-formed JSON-RPC line (one writer).
+        for r in &replies {
+            assert_eq!(r["jsonrpc"], json!("2.0"));
+        }
+        // Two governed calls inside one cache window: ONE enable-list read,
+        // and never the full status.
+        assert_eq!(
+            mock.enabled_hits.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            mock.status_hits.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrency_is_capped() {
+        // More slow calls than permits: all still answered, and the cap held
+        // (the semaphore never hands out more than MAX_CONCURRENT_CALLS).
+        let mock = Arc::new(MockDaemon::default());
+        *mock.enabled.lock().unwrap() = all_governed_names();
+        let base = mock_daemon(mock.clone()).await;
+        let n = MAX_CONCURRENT_CALLS + 2;
+        let reqs: Vec<Value> = (0..n as i64).map(|i| call(i, "otto_create_pr")).collect();
+        let started = Instant::now();
+        let replies = drive(ctx_at(&base), &reqs, n).await;
+        assert_eq!(replies.len(), n);
+        let took = started.elapsed();
+        // Parallel, but in two waves (8 + 2) of ~800 ms — not ten in a row
+        // (8 s) and not all at once (one wave).
+        assert!(
+            took >= Duration::from_millis(1500),
+            "cap not applied: {took:?}"
+        );
+        assert!(
+            took < Duration::from_secs(5),
+            "calls ran serially: {took:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_tools_are_listed_only_with_the_grant_and_a_grant_relists() {
+        let mock = Arc::new(MockDaemon::default());
+        *mock.enabled.lock().unwrap() = all_governed_names();
+        let base = mock_daemon(mock.clone()).await;
+        let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+        // Ungranted: no otto_ui_* tool, exactly one request stub. Then the stub
+        // is called (the mock "human" allows), which must emit list_changed,
+        // and the next tools/list carries the UI tools.
+        let replies = drive(ctx_at(&base), std::slice::from_ref(&list), 1).await;
+        let names = |r: &Value| -> Vec<String> {
+            r["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let before = names(&replies[0]);
+        assert!(!before
+            .iter()
+            .any(|n| n.starts_with("otto_ui_") && n != UI_REQUEST_CONTROL_TOOL));
+        assert_eq!(
+            before
+                .iter()
+                .filter(|n| *n == UI_REQUEST_CONTROL_TOOL)
+                .count(),
+            1
+        );
+
+        // A fresh bridge that advertised the ungranted catalog (the default).
+        let replies = drive(
+            ctx_at(&base),
+            &[call(2, UI_REQUEST_CONTROL_TOOL)],
+            2, // list_changed notification + stub reply
+        )
+        .await;
+        assert!(
+            replies
+                .iter()
+                .any(|r| r["method"] == json!("notifications/tools/list_changed")),
+            "a grant must re-list: {replies:?}"
+        );
+        let stub = replies.iter().find(|r| r["id"] == json!(2)).unwrap();
+        assert!(stub["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"ui_control_granted\": true"));
+        let after = drive(ctx_at(&base), &[list], 1).await;
+        let after = names(&after[0]);
+        assert!(after.iter().any(|n| n == "otto_ui_state"));
+        assert!(!after.iter().any(|n| n == UI_REQUEST_CONTROL_TOOL));
+    }
+
+    /// The `tools/list` size budget: everything a default session can be
+    /// shown, UI tools hidden (no grant). Fails when the catalog silently
+    /// grows past the budget — raise it deliberately, with a reason.
+    #[test]
+    fn tools_list_catalog_stays_within_its_byte_budget() {
+        let info = EnabledInfo {
+            names: all_governed_names(),
+            ui_granted: false,
+        };
+        let mut cat = tool_catalog_for_source(None);
+        cat["tools"]
+            .as_array_mut()
+            .unwrap()
+            .extend(governed_tools_for_session(&info));
+        let ungranted = serde_json::to_vec(&cat).unwrap().len();
+        let granted_info = EnabledInfo {
+            ui_granted: true,
+            ..info
+        };
+        let mut full = tool_catalog_for_source(None);
+        full["tools"]
+            .as_array_mut()
+            .unwrap()
+            .extend(governed_tools_for_session(&granted_info));
+        let granted = serde_json::to_vec(&full).unwrap().len();
+        eprintln!("tools/list bytes: ungranted={ungranted} granted={granted}");
+        assert!(
+            ungranted < granted * 3 / 4,
+            "hiding the UI tools must cut the catalog by >25% ({ungranted} vs {granted})"
+        );
+        assert!(
+            ungranted <= TOOLS_LIST_BYTE_BUDGET,
+            "tools/list grew to {ungranted} bytes (budget {TOOLS_LIST_BYTE_BUDGET})"
+        );
+    }
+
+    /// See [`tools_list_catalog_stays_within_its_byte_budget`].
+    const TOOLS_LIST_BYTE_BUDGET: usize = 88_000; // 83_418 at perf/10-mcp (granted: 135_610)
+
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above
     /// (which never actually call out). Audit disabled.
     fn test_ctx() -> Ctx {
-        Ctx {
-            http: reqwest::Client::new(),
-            base: "http://127.0.0.1:9".to_string(),
-            token: "test-token".to_string(),
-            session_id: Some("sess-test".into()),
-            workspace_id: Some("ws-test".into()),
-            source: None,
-            audit: None,
-            audit_tasks: Default::default(),
-        }
+        Ctx::new(
+            reqwest::Client::new(),
+            "http://127.0.0.1:9".to_string(),
+            "test-token".to_string(),
+            Some("sess-test".into()),
+            Some("ws-test".into()),
+            None,
+            None,
+        )
     }
 }

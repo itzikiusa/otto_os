@@ -3814,6 +3814,7 @@ enforce the entity's workspace role.
 | # | Method + Path | Role | Body | Response |
 |---|---|---|---|---|
 | CP24 | GET /api/v1/mcp/otto-server | mcp:view | — | `{enabled, tools, has_token, token_prefix?, require_approval_dangerous, approval_exempt_tools}` — each tool `{name, description, mutating, category, enabled, approval_exempt, irreversible, auto_approved_by: McpAutoApproveRef[]}` |
+| CP24a | GET /api/v1/mcp/otto-server/enabled | mcp:view (or the restricted mcp token) | — | `McpOttoServerEnabled` `{enabled: string[], outward_enabled, ui_granted}` — the ENABLED full `otto.*` names in catalog order, the master switch, and whether the CALLING session holds the "Allow UI control" grant (`false` for a credential not bound to a session). The light read the stdio bridges poll per `tools/list` / governed call instead of CP24 (no descriptions, rule badges or token prefix). Never a gate: CP26 re-checks the enable list per call |
 | CP25 | PATCH /api/v1/mcp/otto-server | mcp:admin | `{enabled?, tools?, approval_exempt_tools?, rotate_token?}` | status + `token?` (shown once) |
 | CP26 | POST /api/v1/mcp/otto-tools/invoke | mcp:edit (or the restricted mcp token) | `{tool, arguments, dry_run?, wait_seconds?}` | governed result |
 | CP27 | GET /api/v1/mcp/gateway/tools | mcp:view | `?workspace_id=` | `{tools}` (namespaced `mcp__server__tool`) |
