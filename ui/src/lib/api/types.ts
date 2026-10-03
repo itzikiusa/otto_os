@@ -9030,6 +9030,10 @@ export interface K8sRow {
   ready?: string | null;
   restarts?: number | null;
   age_seconds: number;
+  /** perf R1: unix seconds the age counts from (creationTimestamp; an
+   *  event's last-seen time). Render Age as `now - created_at` (`rowAge`) —
+   *  `age_seconds` is frozen at list time and a 304 keeps the old rows. */
+  created_at?: number | null;
   node?: string | null;
   ip?: string | null;
   /** Millicores (metrics-server); null when unavailable. Format client-side. */

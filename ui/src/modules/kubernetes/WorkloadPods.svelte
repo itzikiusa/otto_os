@@ -12,7 +12,7 @@
   import { k8sApi } from '../../lib/api/k8s';
   import type { K8sRow } from '../../lib/api/types';
   import type { K8sDrawerTab } from '../../lib/stores/k8s.svelte';
-  import { formatAge, formatBytes, formatMillicores, healthClass } from './k8s-util';
+  import { formatAge, formatBytes, formatMillicores, healthClass, rowAge } from './k8s-util';
 
   interface Props {
     clusterId: string;
@@ -108,7 +108,7 @@
           <span class="num mono">{p.cpu == null ? '' : formatMillicores(p.cpu)}</span>
           <span class="num mono">{p.mem == null ? '' : formatBytes(p.mem)}</span>
         {/if}
-        <span class="num mono">{formatAge(p.age_seconds)}</span>
+        <span class="num mono">{formatAge(rowAge(p))}</span>
         <span class="acts">
           <button class="icon-btn" onclick={(e) => { e.stopPropagation(); onopenpod(p.name, 'logs'); }} title="Logs" aria-label="Logs of {p.name}"><Icon name="file" size={12} /></button>
           {#if canEdit}<button class="icon-btn" onclick={(e) => { e.stopPropagation(); onopenpod(p.name, 'terminal'); }} title="Shell (exec)" aria-label="Shell into {p.name}"><Icon name="terminal" size={12} /></button>{/if}
