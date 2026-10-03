@@ -1014,7 +1014,14 @@ async fn apply_done_file_oracle(
     let Some(state) = nodes.iter_mut().find(|n| n.node_id == entry_id) else {
         return;
     };
-    let Some(content) = find_step_handoff(ctx, &run.id, node, state.started_at) else {
+    let (dir, slug, started_at) = (
+        ctx.data_dir.join("workflow-context").join(&run.id),
+        crate::workflow_context::slug(node_display_name(node)),
+        state.started_at,
+    );
+    // Directory scan + file read: blocking pool, not a runtime worker.
+    let found = crate::offload::blocking(move || find_step_handoff(&dir, &slug, started_at)).await;
+    let Some(content) = found else {
         return;
     };
     // R1: the file alone is NOT proof. An agent may write its handoff while its
@@ -1071,15 +1078,13 @@ async fn apply_done_file_oracle(
 /// mtime to postdate the step's recorded start (a leftover from an earlier
 /// attempt is cleared before each submit, but stay defensive), and require
 /// non-trivial content. Returns the file's content.
+#[allow(clippy::disallowed_methods)] // sync helper: apply_done_file_oracle runs it via offload::blocking
 fn find_step_handoff(
-    ctx: &ServerCtx,
-    run_id: &Id,
-    node: &WorkflowNode,
+    dir: &std::path::Path,
+    slug: &str,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Option<String> {
-    let slug = crate::workflow_context::slug(node_display_name(node));
-    let dir = ctx.data_dir.join("workflow-context").join(run_id);
-    let entries = std::fs::read_dir(&dir).ok()?;
+    let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         // step{N}-{slug}.md exactly (no loop-iteration/inner suffixes — those
@@ -7741,6 +7746,7 @@ fn fetchable_branch_name(base: &str) -> bool {
 async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
     let dir = ctx.data_dir.join("workflow-runs").join(run_id);
     // Listing (and the per-entry `is_dir` stats) is sync fs work: blocking pool.
+    #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
     let listed = {
         let dir = dir.clone();
         tokio::task::spawn_blocking(move || {
@@ -7850,6 +7856,7 @@ pub async fn sweep_stale_run_worktrees(ctx: &ServerCtx) {
         return;
     };
     let base = ctx.data_dir.join("workflow-runs");
+    #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
     let run_ids: Vec<String> = tokio::task::spawn_blocking(move || {
         std::fs::read_dir(&base)
             .map(|rd| {
@@ -8090,6 +8097,7 @@ fn match_repo_path(target: &str, repos: &[(String, String)]) -> Option<String> {
 /// --git-common-dir` yields the shared `…/.git`, whose parent is the origin repo.
 /// `None` when `path` isn't a git repo / git is unavailable. Runs on a blocking
 /// thread so it never stalls the async runtime.
+#[allow(clippy::disallowed_methods)] // the git subprocess runs inside spawn_blocking
 async fn git_main_worktree(path: &str) -> Option<String> {
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
@@ -8249,6 +8257,7 @@ fn canvas_node_ext(mode: &str) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod tests {
     #[test]
     fn run_acts_as_its_starter_else_workflow_creator() {

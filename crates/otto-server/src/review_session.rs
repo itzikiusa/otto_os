@@ -113,6 +113,7 @@ pub fn remove_lens_findings_files(review_id: &str, agent_index: usize) {
 }
 
 /// [`remove_lens_findings_files`] rooted at an explicit directory.
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 pub fn remove_lens_findings_files_in(dir: &Path, review_id: &str, agent_index: usize) {
     let prefix = format!("otto-review-{review_id}-{agent_index}-");
     let Ok(rd) = std::fs::read_dir(dir) else {

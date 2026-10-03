@@ -583,6 +583,7 @@ async fn gather_source_context(ctx: &ServerCtx, source: &Session) -> Option<Stri
 /// The exact encoding (every non-alphanumeric → `-`) is tried first; if that
 /// misses we scan every project dir for `<sid>.jsonl`, which makes a positive
 /// hit reliable even when the stored cwd doesn't encode 1:1 to the dir name.
+#[allow(clippy::disallowed_methods)] // sync helper: gather_source_context calls it inside spawn_blocking
 fn find_claude_transcript(cwd: &str, sid: &str) -> Option<PathBuf> {
     let home = std::env::var("HOME")
         .ok()

@@ -9,12 +9,26 @@
 //   - threads        OS threads after the idle window
 //   - wal_bytes      otto.db-wal size after the run (journal_size_limit cap)
 //   - free_pct       freelist share of otto.db (read from the file header)
-// and exits non-zero when one is over budget. Never touches port 7700 or the
-// real data dir. Usage:
+//   - boot phases    the daemon's `boot: ready in N ms (db_compact=… …)` log
+//                    line (perf2/03 N4): per-phase wall time
+//   - ch_threads / ch_cpu_pct   the embedded ClickHouse child, when a
+//                    `clickhouse` binary is on PATH (macOS job)
+// and exits non-zero when a BLOCKING budget is over. Blocking = deterministic
+// (threads, wal_bytes, free_pct, the compaction outcome); time/CPU budgets on
+// shared runners are reported only unless OTTO_PERF_STRICT_TIMING=1.
+//
+// Seeded DB (perf2/03 N4, default on; OTTO_PERF_SEED=0 skips): a first boot
+// creates the schema, the script then fragments otto.db (≈130 MB inserted,
+// 70 % deleted → ≈90 MB on the freelist, auto_vacuum=0) and boots again, so
+// the measured boot runs the offline compaction and free_pct / wal_bytes are
+// measured on a real-sized file instead of an empty one.
+// Never touches port 7700 or the real data dir. Usage:
 //   node scripts/perf/daemon-budget.mjs <path/to/ottod>
 // Env: OTTO_PERF_BUDGET_SCALE (multiplies time/CPU budgets; CI uses a debug
 // build on shared runners), OTTO_PERF_IDLE_SECS (default 20),
-// OTTO_PERF_SETTLE_SECS (default 30), OTTO_PERF_PORT (default 7893).
+// OTTO_PERF_SETTLE_SECS (default 30), OTTO_PERF_PORT (default 7893),
+// OTTO_PERF_SEED (default 1), OTTO_PERF_STRICT_TIMING (default 0),
+// OTTO_PERF_BLOCK_CH (default 0; 1 = ch_threads blocks).
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, existsSync, statSync, rmSync, readdirSync, openSync, readSync, closeSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,15 +51,32 @@ if (PORT === '7700') {
 }
 const API = `http://127.0.0.1:${PORT}/api/v1`;
 
+const SEED = (process.env.OTTO_PERF_SEED ?? '1') !== '0';
+const STRICT_TIMING = process.env.OTTO_PERF_STRICT_TIMING === '1';
+
 // Budgets: time/CPU scale with OTTO_PERF_BUDGET_SCALE, sizes don't.
 const BUDGET = {
   boot_ms: 2_000 * SCALE,
+  // Offline compaction of the seeded file (167 MB, 69 % free → 52 MB): 363 ms
+  // locally on 2026-10-03, debug build; runners are slower.
+  boot_db_compact_ms: 3_000 * SCALE,
+  boot_db_open_ms: 1_000 * SCALE,
   idle_cpu_pct: 1.0 * SCALE,
   idle_wakeups_per_s: 50 * SCALE,
   threads: 96,
   wal_bytes: 64 * 1024 * 1024,
   free_pct: 20,
+  // Embedded ClickHouse (only measured when a binary is on PATH). Measured
+  // 69 threads / 0.5 % CPU on 2026-10-03 (M-series, fresh dir, debug ottod);
+  // the trim target is < 60 — ratchet this down as the pools shrink.
+  ch_threads: 80,
+  ch_cpu_pct: 0.5 * SCALE,
 };
+/** Deterministic metrics: over budget fails the run. */
+const BLOCKING = new Set(['threads', 'wal_bytes', 'free_pct']);
+if (STRICT_TIMING) for (const k of Object.keys(BUDGET)) BLOCKING.add(k);
+// The macOS nightly (ClickHouse on PATH) also blocks on the CH thread count.
+if (process.env.OTTO_PERF_BLOCK_CH === '1') BLOCKING.add('ch_threads');
 
 const dataDir = mkdtempSync(join(tmpdir(), 'otto-perf-'));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -107,8 +138,8 @@ function dbHeader(path) {
 
 const results = {};
 const fail = [];
-const child = spawn(bin, [], {
-  env: {
+const warn = [];
+const daemonEnv = {
     ...process.env,
     OTTO_DATA_DIR: dataDir,
     OTTO_PORT: PORT,
@@ -119,29 +150,98 @@ const child = spawn(bin, [], {
     OTTO_PLUGINS_HOME: join(dataDir, 'plugins-home'),
     OTTO_SECRETS: 'file',
     OTTO_SECRETS_ALLOW_PLAINTEXT: '1',
-    RUST_LOG: process.env.RUST_LOG ?? 'warn',
-  },
-  stdio: ['ignore', 'ignore', 'inherit'],
-});
+    // `ottod=info` for the `boot: ready …` / `db maintenance: …` lines.
+    RUST_LOG: process.env.RUST_LOG ?? 'warn,ottod=info',
+};
 
-try {
+/** Spawn ottod with stderr captured (and echoed for warn+ lines). */
+function startDaemon() {
+  const c = spawn(bin, [], { env: daemonEnv, stdio: ['ignore', 'ignore', 'pipe'] });
+  c.log = '';
+  c.stderr.setEncoding('utf8');
+  c.stderr.on('data', (d) => {
+    c.log += d;
+    for (const line of d.split('\n')) if (/\b(WARN|ERROR)\b/.test(line)) process.stderr.write(`${line}\n`);
+  });
+  return c;
+}
+
+async function waitHealthy(c) {
   const t0 = performance.now();
-  let up = false;
   while (performance.now() - t0 < 60_000) {
-    if (child.exitCode !== null) throw new Error(`ottod exited early (code ${child.exitCode})`);
+    if (c.exitCode !== null) throw new Error(`ottod exited early (code ${c.exitCode})`);
     try {
       const r = await fetch(`${API}/health`, { signal: AbortSignal.timeout(1_000) });
-      if (r.ok) {
-        up = true;
-        break;
-      }
+      if (r.ok) return Math.round(performance.now() - t0);
     } catch {
       /* not listening yet */
     }
     await sleep(25);
   }
-  if (!up) throw new Error('ottod never became healthy within 60 s');
-  results.boot_ms = Math.round(performance.now() - t0);
+  throw new Error('ottod never became healthy within 60 s');
+}
+
+async function stopDaemon(c) {
+  c.kill('SIGTERM');
+  for (let i = 0; i < 100 && c.exitCode === null && c.signalCode === null; i++) await sleep(100);
+  if (c.exitCode === null && c.signalCode === null) c.kill('SIGKILL');
+}
+
+/** Fragment otto.db: ≈130 MB in, 70 % out → ≈90 MB free, auto_vacuum=0. */
+async function seedDb(path) {
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path);
+  db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS perf_seed (id INTEGER PRIMARY KEY, k TEXT, b BLOB)');
+  const ins = db.prepare('INSERT INTO perf_seed (k, b) VALUES (?, randomblob(1024))');
+  db.exec('BEGIN');
+  for (let i = 0; i < 120_000; i++) ins.run(`k${i % 97}`);
+  db.exec('COMMIT');
+  // A contiguous range, so whole pages land on the freelist (a scattered
+  // delete would leave every page partly full and nothing free).
+  db.exec('DELETE FROM perf_seed WHERE id <= 84000; PRAGMA wal_checkpoint(TRUNCATE);');
+  db.close();
+  const h = dbHeader(path);
+  results.seed_free_pct = Number(((h.freelist / h.pageCount) * 100).toFixed(1));
+  results.seed_db_bytes = h.pageSize * h.pageCount;
+}
+
+/** The embedded ClickHouse child of `pid`, if one is running. */
+function clickhousePid(pid) {
+  try {
+    const out = execFileSync('pgrep', ['-P', String(pid), '-f', 'clickhouse']).toString().trim();
+    return out ? Number(out.split('\n')[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
+let child = null;
+try {
+  if (SEED) {
+    const first = startDaemon();
+    try {
+      await waitHealthy(first);
+    } finally {
+      await stopDaemon(first);
+    }
+    await seedDb(join(dataDir, 'otto.db'));
+  }
+  child = startDaemon();
+  results.boot_ms = await waitHealthy(child);
+  const m = child.log.match(/boot: ready in (\d+) ms \(([^)]*)\)/);
+  if (m) {
+    results.boot_logged_ms = Number(m[1]);
+    for (const kv of m[2].split(' ')) {
+      const [k, v] = kv.split('=');
+      if (k && v !== undefined) results[`boot_${k}_ms`] = Number(v);
+    }
+  } else {
+    warn.push('no `boot: ready` line in the daemon log');
+  }
+  if (SEED) {
+    results.offline_compacted = /compacted offline/.test(child.log);
+    if (!results.offline_compacted) fail.push('seeded fragmented DB was not compacted offline at boot');
+  }
 
   // Let boot-time background work (retention first passes, sweeps) settle.
   await sleep(SETTLE_SECS * 1_000);
@@ -154,12 +254,18 @@ try {
   const v1 = voluntarySwitches(child.pid);
   if (v0 !== null && v1 !== null) results.idle_wakeups_per_s = Number(((v1 - v0) / wall).toFixed(1));
   results.threads = threadCount(child.pid);
+  const ch = clickhousePid(child.pid);
+  if (ch) {
+    const c0 = cpuSeconds(ch);
+    const w = performance.now();
+    await sleep(IDLE_SECS * 1_000);
+    results.ch_cpu_pct = Number((((cpuSeconds(ch) - c0) / ((performance.now() - w) / 1_000)) * 100).toFixed(2));
+    results.ch_threads = threadCount(ch);
+  }
 } catch (e) {
   fail.push(String(e instanceof Error ? e.message : e));
 } finally {
-  child.kill('SIGTERM');
-  for (let i = 0; i < 100 && child.exitCode === null && child.signalCode === null; i++) await sleep(100);
-  if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  if (child) await stopDaemon(child);
 }
 
 const db = join(dataDir, 'otto.db');
@@ -174,18 +280,30 @@ if (existsSync(db)) {
 for (const [k, budget] of Object.entries(BUDGET)) {
   const v = results[k];
   if (v === undefined || v === null) continue; // not measurable on this OS
-  if (v > budget) fail.push(`${k} = ${v} exceeds budget ${budget}`);
+  if (v > budget) (BLOCKING.has(k) ? fail : warn).push(`${k} = ${v} exceeds budget ${budget}`);
 }
 
-const report = { scale: SCALE, idle_secs: IDLE_SECS, results, budget: BUDGET, ok: fail.length === 0, failures: fail };
+const report = {
+  scale: SCALE,
+  idle_secs: IDLE_SECS,
+  seeded: SEED,
+  strict_timing: STRICT_TIMING,
+  results,
+  budget: BUDGET,
+  blocking: [...BLOCKING],
+  ok: fail.length === 0,
+  failures: fail,
+  warnings: warn,
+};
 console.log(JSON.stringify(report, null, 2));
 if (process.env.GITHUB_STEP_SUMMARY) {
   const rows = Object.entries(BUDGET)
-    .map(([k, b]) => `| ${k} | ${results[k] ?? 'n/a'} | ${b} |`)
+    .map(([k, b]) => `| ${k} | ${results[k] ?? 'n/a'} | ${b} | ${BLOCKING.has(k) ? 'yes' : 'report'} |`)
     .join('\n');
   appendFileSync(
     process.env.GITHUB_STEP_SUMMARY,
-    `### Daemon perf budget ${fail.length ? '❌' : '✅'}\n\n| metric | value | budget |\n|---|---|---|\n${rows}\n\n${fail.map((f) => `- ${f}`).join('\n')}\n`,
+    `### Daemon perf budget ${fail.length ? '❌' : '✅'}\n\n| metric | value | budget | blocking |\n|---|---|---|---|\n${rows}\n\n` +
+      `${fail.map((f) => `- ❌ ${f}`).join('\n')}\n${warn.map((f) => `- ⚠️ ${f}`).join('\n')}\n`,
   );
 }
 try {

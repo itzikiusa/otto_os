@@ -416,29 +416,33 @@ impl EncryptedFileStore {
 }
 
 impl SecretStore for EncryptedFileStore {
+    // The master key is fetched BEFORE the file lock (perf2/03 N2): the fetch
+    // can wait up to the Keychain timeout, and under the lock N concurrent
+    // callers would each wait their own full timeout in turn. Outside it they
+    // all share the one in-flight `MasterKeyCell` load and its deadline.
     fn put(&self, key: &str, value: &str) -> Result<()> {
-        let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         let mk = self.key.fetch(true)?;
+        let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut map = self.load(&mk)?;
         map.insert(key.to_string(), value.to_string());
         write_atomic(&self.path, &seal(&mk, &map)?)
     }
 
     fn get(&self, key: &str) -> Result<Option<String>> {
-        let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         if !self.path.exists() {
             return Ok(None);
         }
         let mk = self.key.fetch(false)?;
+        let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         Ok(self.load(&mk)?.remove(key))
     }
 
     fn delete(&self, key: &str) -> Result<()> {
-        let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         if !self.path.exists() {
             return Ok(());
         }
         let mk = self.key.fetch(false)?;
+        let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut map = self.load(&mk)?;
         if map.remove(key).is_some() {
             write_atomic(&self.path, &seal(&mk, &map)?)?;

@@ -3088,6 +3088,7 @@ pub fn build_improve_narrative_from_clarifications(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod tests {
     use super::*;
 

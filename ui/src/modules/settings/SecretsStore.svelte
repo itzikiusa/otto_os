@@ -63,7 +63,17 @@
       toasts.success('Secrets encrypted', `${r.migrated} secret${r.migrated === 1 ? '' : 's'} moved; the plaintext file was deleted.`);
       await load();
     } catch (e) {
-      actionError = `Secrets were not changed. ${msg(e)}`;
+      // A failure AFTER the switch (final live check) leaves the daemon on the
+      // encrypted store with the plaintext already removed — "not changed"
+      // would be false there. Re-read the status to tell the two apart.
+      await load();
+      const after = status as SecretsStatus | null;
+      actionError =
+        after && after.mode !== 'plaintext'
+          ? `Secrets were encrypted and the plaintext file was removed, but a final check failed.` +
+            (after.backup_present ? ' The encrypted backup secrets.migrate-backup.enc was kept.' : '') +
+            ` ${msg(e)}`
+          : `Secrets were not changed. ${msg(e)}`;
     } finally {
       securing = false;
     }

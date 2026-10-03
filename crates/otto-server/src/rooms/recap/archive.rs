@@ -53,6 +53,7 @@ fn regular(path: &Path) -> Result<()> {
     Ok(())
 }
 impl Store {
+    #[allow(clippy::disallowed_methods)] // sync store: rooms::recap opens it via spawn_blocking
     pub fn open(root: PathBuf) -> Result<Self> {
         let existed = root.exists();
         fs::create_dir_all(&root).map_err(disk)?;
@@ -205,6 +206,7 @@ impl Store {
     }
 }
 impl Archive {
+    #[allow(clippy::disallowed_methods)] // sync store: rooms::recap drives it via spawn_blocking
     pub fn ensure_index(&self) -> Result<()> {
         let mut s = self.state.lock().unwrap();
         if s.indexed {
@@ -547,6 +549,7 @@ fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::rename(temp, path).map_err(disk)
 }
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod tests {
     use super::*;
     fn metadata(owner: &str) -> RecapMetadata {

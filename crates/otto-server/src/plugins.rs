@@ -488,7 +488,10 @@ async fn install(
         let m = load_manifest(&srcp).map_err(|e| ApiError(Error::Invalid(e)))?;
         let dest = home.join(&m.slug);
         if srcp.canonicalize().ok() != dest.canonicalize().ok() {
-            copy_dir(&srcp, &dest).map_err(|e| ApiError(Error::Internal(e)))?;
+            let (from, to) = (srcp.clone(), dest.clone());
+            crate::offload::blocking(move || copy_dir(&from, &to))
+                .await
+                .map_err(|e| ApiError(Error::Internal(e)))?;
         }
         dest
     };
@@ -900,6 +903,7 @@ async fn run_codex_exec(prompt: &str, cwd: &str, model: Option<&str>) -> otto_co
 /// Recursively copy a directory (used to install a local plugin into the home,
 /// and to stage review-lens skills into a shared `--add-dir` bundle — see
 /// `modules::stage_review_skills`).
+#[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — install runs it via offload::blocking
 pub(crate) fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
     for entry in std::fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))? {

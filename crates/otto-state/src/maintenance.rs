@@ -25,6 +25,7 @@
 //! sqlx's SQLite driver runs every connection on its own worker thread, so
 //! awaiting these statements never blocks a Tokio worker.
 
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use otto_core::Result;
@@ -272,6 +273,386 @@ pub async fn compact(pool: &DbPool) -> Result<CompactReport> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Offline compaction at boot (perf2/03 N1)
+// ---------------------------------------------------------------------------
+//
+// An in-place `VACUUM` of a large file holds the write lock for the whole
+// rewrite, so a running daemon can only do it for SMALL files (or on an
+// explicit "Compact now"). Big files are compacted at the next start, BEFORE
+// the pool opens — nothing can be writing then, so nobody stalls and no write
+// made after the snapshot can be lost (a copy taken while the daemon runs
+// would miss every later write, and the daemon writes constantly):
+//
+// 1. `VACUUM INTO '<db>.compact-tmp'` with `auto_vacuum=INCREMENTAL` (a
+//    sequential copy — measured ~0.7 s for a 400 MB file on this class of
+//    SSD, vs ~2 s for an in-place VACUUM through the WAL);
+// 2. verify the copy: `quick_check`, the same schema, the same row count in
+//    every table, `auto_vacuum=2`;
+// 3. swap: write `<db>.compact-swapped`, rename `<db>` → `<db>.precompact`,
+//    the copy → `<db>`;
+// 4. the daemon opens + migrates the new file and only then calls
+//    [`confirm_offline_compaction`], which deletes `<db>.precompact`. A boot
+//    that dies before that leaves the `compact-swapped` marker, and the next
+//    start rolls back to the old file (and won't retry automatically).
+//
+// It runs automatically when [`needs_compaction`] (not converted yet, >20 %
+// and >64 MiB free) or when requested ([`request_compaction`], the Settings
+// "Compact at next restart" button).
+
+/// Explicit request marker ("Compact at next restart").
+const REQUEST_SUFFIX: &str = ".compact-requested";
+/// The `VACUUM INTO` target while it is built and verified.
+const TMP_SUFFIX: &str = ".compact-tmp";
+/// The pre-compaction file, kept until the new one opened cleanly.
+const PRECOMPACT_SUFFIX: &str = ".precompact";
+/// Present between the swap and [`confirm_offline_compaction`].
+const SWAPPED_SUFFIX: &str = ".compact-swapped";
+/// Written when an automatic attempt failed or was rolled back: no further
+/// AUTOMATIC attempts (an explicit request still runs).
+const FAILED_SUFFIX: &str = ".compact-failed";
+/// Automatic offline compaction is skipped above this much live data (a
+/// multi-GB copy at boot is better left to an explicit request).
+pub const BOOT_OFFLINE_COMPACT_MAX_LIVE_BYTES: i64 = 4 * 1024 * 1024 * 1024;
+/// Conservative throughput for duration estimates (`VACUUM INTO` + checks).
+const OFFLINE_COMPACT_BYTES_PER_SEC: i64 = 150 * 1024 * 1024;
+
+fn sibling(db: &Path, suffix: &str) -> PathBuf {
+    let mut s = db.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Rough wall time of an offline compaction of `s` (ms).
+pub fn estimate_offline_compact_ms(s: &DbStats) -> u64 {
+    let live = (s.size_bytes() - s.free_bytes()).max(0);
+    ((live * 1000) / OFFLINE_COMPACT_BYTES_PER_SEC).max(500) as u64
+}
+
+/// Ask for an offline compaction at the next start (idempotent). Also clears
+/// a previous automatic failure — an explicit request always runs.
+pub fn request_compaction(db: &Path) -> Result<()> {
+    let _ = std::fs::remove_file(sibling(db, FAILED_SUFFIX));
+    std::fs::write(sibling(db, REQUEST_SUFFIX), chrono::Utc::now().to_rfc3339())
+        .map_err(|e| otto_core::Error::Internal(format!("compaction request: {e}")))
+}
+
+/// Withdraw a [`request_compaction`] AND opt out of the automatic one (the
+/// user said "not at the next start"); a later request re-enables it.
+/// `true` when an explicit request was pending.
+pub fn cancel_compaction_request(db: &Path) -> bool {
+    let _ = std::fs::write(sibling(db, FAILED_SUFFIX), "cancelled");
+    std::fs::remove_file(sibling(db, REQUEST_SUFFIX)).is_ok()
+}
+
+/// Whether an offline compaction will run at the next start: requested, or
+/// needed and not blocked by an earlier failed automatic attempt.
+pub fn compaction_scheduled(db: &Path, s: &DbStats) -> bool {
+    sibling(db, REQUEST_SUFFIX).exists()
+        || (needs_compaction(s)
+            && !sibling(db, FAILED_SUFFIX).exists()
+            && s.size_bytes() - s.free_bytes() <= BOOT_OFFLINE_COMPACT_MAX_LIVE_BYTES)
+}
+
+/// Result of [`offline_compact_at_boot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OfflineOutcome {
+    /// Nothing to do.
+    NotNeeded,
+    /// Compacted; the old file waits for [`confirm_offline_compaction`].
+    Compacted(CompactReport),
+    /// A previous swap never confirmed: the old file was put back.
+    RolledBack,
+    /// Needed but not done (reason); the daemon boots on the untouched file.
+    Skipped(String),
+}
+
+fn mv_if_exists(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
+fn rm_if_exists(p: &Path) {
+    let _ = std::fs::remove_file(p);
+}
+
+fn fsync_dir(db: &Path) {
+    if let Some(dir) = db.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+}
+
+/// Undo an unconfirmed swap: the new file (and the WAL/SHM the failed boot
+/// created FOR it — a WAL must never be replayed into another file) is
+/// discarded, the pre-compaction file put back.
+fn roll_back(db: &Path) -> std::io::Result<()> {
+    let pre = sibling(db, PRECOMPACT_SUFFIX);
+    if pre.exists() {
+        for sfx in ["-wal", "-shm"] {
+            rm_if_exists(&sibling(db, sfx));
+        }
+        rm_if_exists(db);
+        std::fs::rename(&pre, db)?;
+    }
+    // Also when the original was never moved (a crash right after its
+    // WAL/SHM were set aside): they belong to `db` either way.
+    for sfx in ["-wal", "-shm"] {
+        mv_if_exists(
+            &sibling(db, &format!("{PRECOMPACT_SUFFIX}{sfx}")),
+            &sibling(db, sfx),
+        )?;
+    }
+    rm_if_exists(&sibling(db, SWAPPED_SUFFIX));
+    fsync_dir(db);
+    Ok(())
+}
+
+async fn raw_conn(path: &Path) -> Result<sqlx::SqliteConnection> {
+    use sqlx::ConnectOptions;
+    sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false)
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .connect()
+        .await
+        .map_err(dberr("offline compact: open"))
+}
+
+async fn conn_i64(c: &mut sqlx::SqliteConnection, sql: &str) -> Result<i64> {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_string()))
+        .fetch_one(&mut *c)
+        .await
+        .map_err(dberr("offline compact: read"))
+}
+
+async fn conn_stats(c: &mut sqlx::SqliteConnection) -> Result<DbStats> {
+    Ok(DbStats {
+        page_size: conn_i64(c, "PRAGMA page_size").await?,
+        page_count: conn_i64(c, "PRAGMA page_count").await?,
+        freelist_count: conn_i64(c, "PRAGMA freelist_count").await?,
+        auto_vacuum: conn_i64(c, "PRAGMA auto_vacuum").await?,
+    })
+}
+
+/// Schema text + per-table row counts: what the copy must match.
+async fn fingerprint(c: &mut sqlx::SqliteConnection) -> Result<(String, Vec<(String, i64)>)> {
+    let schema: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, COALESCE(sql, '') FROM sqlite_schema \
+         WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+    )
+    .fetch_all(&mut *c)
+    .await
+    .map_err(dberr("offline compact: schema"))?;
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' \
+         AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )
+    .fetch_all(&mut *c)
+    .await
+    .map_err(dberr("offline compact: tables"))?;
+    let mut counts = Vec::with_capacity(tables.len());
+    for t in tables {
+        // Virtual tables (FTS5) answer through their shadow tables, which are
+        // counted in their own right.
+        let virt = schema
+            .iter()
+            .any(|(n, sql)| n == &t && sql.to_ascii_uppercase().contains("VIRTUAL TABLE"));
+        if virt {
+            continue;
+        }
+        let q = format!("SELECT count(*) FROM \"{}\"", t.replace('"', "\"\""));
+        counts.push((t, conn_i64(c, &q).await?));
+    }
+    let text = schema
+        .into_iter()
+        .map(|(n, sql)| format!("{n}\u{1}{sql}"))
+        .collect::<Vec<_>>()
+        .join("\u{2}");
+    Ok((text, counts))
+}
+
+/// The boot-time offline compaction — call it BEFORE the pool opens. Never
+/// fails the boot: every problem degrades to [`OfflineOutcome::Skipped`]
+/// with the original file untouched.
+pub async fn offline_compact_at_boot(db: &Path) -> OfflineOutcome {
+    offline_compact_with(db, AUTO_COMPACT_MIN_FREE_BYTES).await
+}
+
+async fn offline_compact_with(db: &Path, min_free_bytes: i64) -> OfflineOutcome {
+    if sibling(db, SWAPPED_SUFFIX).exists() {
+        // The last start swapped but never confirmed (open/migrate failed or
+        // it crashed first): put the old file back, no automatic retry.
+        return match roll_back(db) {
+            Ok(()) => {
+                let _ = std::fs::write(sibling(db, FAILED_SUFFIX), "rolled back");
+                rm_if_exists(&sibling(db, REQUEST_SUFFIX));
+                OfflineOutcome::RolledBack
+            }
+            Err(e) => OfflineOutcome::Skipped(format!("roll back failed: {e}")),
+        };
+    }
+    // A confirm interrupted after removing the marker: the old file is done.
+    rm_if_exists(&sibling(db, PRECOMPACT_SUFFIX));
+    rm_if_exists(&sibling(db, TMP_SUFFIX));
+    if !db.exists() {
+        return OfflineOutcome::NotNeeded;
+    }
+    let requested = sibling(db, REQUEST_SUFFIX).exists();
+    match offline_compact_inner(db, requested, min_free_bytes).await {
+        Ok(o) => {
+            if requested && !matches!(o, OfflineOutcome::Skipped(_)) {
+                rm_if_exists(&sibling(db, REQUEST_SUFFIX));
+            }
+            o
+        }
+        Err(e) => {
+            rm_if_exists(&sibling(db, TMP_SUFFIX));
+            rm_if_exists(&sibling(db, REQUEST_SUFFIX));
+            let _ = std::fs::write(sibling(db, FAILED_SUFFIX), e.to_string());
+            OfflineOutcome::Skipped(e.to_string())
+        }
+    }
+}
+
+async fn offline_compact_inner(
+    db: &Path,
+    requested: bool,
+    min_free_bytes: i64,
+) -> Result<OfflineOutcome> {
+    use sqlx::Connection;
+    let started = Instant::now();
+    let mut src = raw_conn(db).await?;
+    let before = conn_stats(&mut src).await?;
+    let live = before.size_bytes() - before.free_bytes();
+    if !requested {
+        if !needs_compaction_over(&before, min_free_bytes) || sibling(db, FAILED_SUFFIX).exists() {
+            return Ok(OfflineOutcome::NotNeeded);
+        }
+        if live > BOOT_OFFLINE_COMPACT_MAX_LIVE_BYTES {
+            return Ok(OfflineOutcome::Skipped(format!(
+                "{live} bytes of live data — use Settings ▸ Database storage to compact"
+            )));
+        }
+    }
+    // Fold the WAL in first: the copy reads through it either way, but the
+    // swap below must leave no WAL that belongs to the old file.
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&mut src)
+        .await
+        .map_err(dberr("offline compact: checkpoint"))?;
+    let tmp = sibling(db, TMP_SUFFIX);
+    rm_if_exists(&tmp);
+    // `auto_vacuum` set on the source connection is what VACUUM INTO writes
+    // into the copy's header (the source file itself is not modified).
+    sqlx::query("PRAGMA auto_vacuum = INCREMENTAL")
+        .execute(&mut src)
+        .await
+        .map_err(dberr("offline compact: auto_vacuum"))?;
+    sqlx::query("VACUUM INTO ?")
+        .bind(tmp.to_string_lossy().to_string())
+        .execute(&mut src)
+        .await
+        .map_err(dberr("offline compact: vacuum into"))?;
+    let want = fingerprint(&mut src).await?;
+    src.close().await.map_err(dberr("offline compact: close"))?;
+
+    let mut copy = raw_conn(&tmp).await?;
+    let check: String = sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_one(&mut copy)
+        .await
+        .map_err(dberr("offline compact: quick_check"))?;
+    if check != "ok" {
+        return Err(otto_core::Error::Internal(format!(
+            "offline compact: copy failed quick_check: {check}"
+        )));
+    }
+    let mut after = conn_stats(&mut copy).await?;
+    if after.auto_vacuum != AUTO_VACUUM_INCREMENTAL {
+        // Older SQLite: convert the copy in place (still offline).
+        sqlx::query("PRAGMA auto_vacuum = INCREMENTAL")
+            .execute(&mut copy)
+            .await
+            .map_err(dberr("offline compact: copy auto_vacuum"))?;
+        sqlx::query("VACUUM")
+            .execute(&mut copy)
+            .await
+            .map_err(dberr("offline compact: copy vacuum"))?;
+        after = conn_stats(&mut copy).await?;
+    }
+    let got = fingerprint(&mut copy).await?;
+    copy.close()
+        .await
+        .map_err(dberr("offline compact: close copy"))?;
+    if got != want {
+        return Err(otto_core::Error::Internal(
+            "offline compact: the copy does not match the original (schema or row counts)".into(),
+        ));
+    }
+    std::fs::File::open(&tmp)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| otto_core::Error::Internal(format!("offline compact: fsync copy: {e}")))?;
+    let wal = sibling(db, "-wal");
+    if std::fs::metadata(&wal)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
+    {
+        return Err(otto_core::Error::Internal(
+            "offline compact: the WAL was not folded in; left the file untouched".into(),
+        ));
+    }
+
+    // Swap. The marker goes first: from here until the daemon confirms, a
+    // failed start rolls back.
+    let io = |what: &str, e: std::io::Error| {
+        otto_core::Error::Internal(format!("offline compact: {what}: {e}"))
+    };
+    std::fs::write(sibling(db, SWAPPED_SUFFIX), chrono::Utc::now().to_rfc3339())
+        .map_err(|e| io("marker", e))?;
+    for sfx in ["-wal", "-shm"] {
+        mv_if_exists(
+            &sibling(db, sfx),
+            &sibling(db, &format!("{PRECOMPACT_SUFFIX}{sfx}")),
+        )
+        .map_err(|e| io("move wal", e))?;
+    }
+    if let Err(e) = std::fs::rename(db, sibling(db, PRECOMPACT_SUFFIX)) {
+        let _ = roll_back(db);
+        return Err(io("rename original", e));
+    }
+    if let Err(e) = std::fs::rename(&tmp, db) {
+        let _ = roll_back(db);
+        return Err(io("rename copy", e));
+    }
+    fsync_dir(db);
+    Ok(OfflineOutcome::Compacted(CompactReport {
+        before_bytes: before.size_bytes(),
+        after_bytes: after.size_bytes(),
+        freed_bytes: (before.size_bytes() - after.size_bytes()).max(0),
+        duration_ms: started.elapsed().as_millis() as u64,
+        auto_vacuum: after.auto_vacuum,
+    }))
+}
+
+/// The new file opened and migrated cleanly: drop the pre-compaction file.
+/// A no-op when no swap is pending. Returns whether one was confirmed.
+pub fn confirm_offline_compaction(db: &Path) -> bool {
+    if !sibling(db, SWAPPED_SUFFIX).exists() {
+        return false;
+    }
+    // Marker first: if we die between the two, the next start just deletes
+    // the stale `.precompact` instead of rolling back a good file.
+    rm_if_exists(&sibling(db, SWAPPED_SUFFIX));
+    for sfx in ["", "-wal", "-shm"] {
+        rm_if_exists(&sibling(db, &format!("{PRECOMPACT_SUFFIX}{sfx}")));
+    }
+    fsync_dir(db);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,5 +782,119 @@ mod tests {
         // …and never again once converted.
         let b = boot_with(&pool, 0).await.unwrap();
         assert!(b.compacted.is_none() && !b.deferred_compaction);
+    }
+
+    async fn seeded_file(dir: &std::path::Path) -> std::path::PathBuf {
+        let pool = file_pool(dir).await;
+        fragmented(&pool).await;
+        pool.close().await;
+        dir.join("t.db")
+    }
+
+    async fn rows(db: &std::path::Path) -> (i64, i64) {
+        let mut c = raw_conn(db).await.unwrap();
+        let n = conn_i64(&mut c, "SELECT count(*) FROM t").await.unwrap();
+        let av = conn_i64(&mut c, "PRAGMA auto_vacuum").await.unwrap();
+        (n, av)
+    }
+
+    /// perf2/03 N1: the offline path converts + shrinks a fragmented file with
+    /// every row intact, keeps the old file until confirmed, and a database
+    /// opened on the result takes writes immediately.
+    #[tokio::test]
+    async fn offline_compaction_swaps_verified_copy_and_keeps_old_until_confirmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = seeded_file(dir.path()).await;
+        let before_len = std::fs::metadata(&db).unwrap().len();
+        // Default thresholds: a tiny file is left alone.
+        assert_eq!(
+            offline_compact_at_boot(&db).await,
+            OfflineOutcome::NotNeeded
+        );
+
+        let r = match offline_compact_with(&db, 0).await {
+            OfflineOutcome::Compacted(r) => r,
+            o => panic!("expected Compacted, got {o:?}"),
+        };
+        assert_eq!(r.auto_vacuum, AUTO_VACUUM_INCREMENTAL);
+        assert!(r.freed_bytes > 0 && r.after_bytes < r.before_bytes, "{r:?}");
+        assert!(std::fs::metadata(&db).unwrap().len() < before_len);
+        assert_eq!(rows(&db).await, (20, AUTO_VACUUM_INCREMENTAL));
+        assert!(sibling(&db, PRECOMPACT_SUFFIX).exists(), "old file kept");
+        assert!(!sibling(&db, TMP_SUFFIX).exists());
+
+        // The daemon opens the new file and writes at once.
+        let pool = file_pool(dir.path()).await;
+        let t = Instant::now();
+        sqlx::query("INSERT INTO t (k, b) VALUES ('new', zeroblob(10))")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(t.elapsed() < std::time::Duration::from_millis(250));
+        pool.close().await;
+        assert!(confirm_offline_compaction(&db));
+        assert!(!sibling(&db, PRECOMPACT_SUFFIX).exists());
+        assert!(!confirm_offline_compaction(&db));
+        // Converted → never again automatically.
+        assert_eq!(
+            offline_compact_with(&db, 0).await,
+            OfflineOutcome::NotNeeded
+        );
+    }
+
+    /// An unconfirmed swap (the new file failed to open/migrate) is rolled
+    /// back at the next start, with no automatic retry; an explicit request
+    /// runs anyway.
+    #[tokio::test]
+    async fn unconfirmed_swap_rolls_back_and_request_overrides_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = seeded_file(dir.path()).await;
+        assert!(matches!(
+            offline_compact_with(&db, 0).await,
+            OfflineOutcome::Compacted(_)
+        ));
+        // The failed boot left a WAL for the NEW file — it must not survive.
+        std::fs::write(sibling(&db, "-wal"), b"not-for-the-old-file").unwrap();
+        assert_eq!(
+            offline_compact_with(&db, 0).await,
+            OfflineOutcome::RolledBack
+        );
+        assert!(!sibling(&db, "-wal").exists());
+        assert!(!sibling(&db, PRECOMPACT_SUFFIX).exists());
+        assert_eq!(rows(&db).await, (20, 0), "original file is back");
+        // No automatic retry after a rollback…
+        assert_eq!(
+            offline_compact_with(&db, 0).await,
+            OfflineOutcome::NotNeeded
+        );
+        // …but the explicit button runs it (threshold irrelevant).
+        request_compaction(&db).unwrap();
+        let st = DbStats {
+            page_size: 4096,
+            page_count: 10,
+            freelist_count: 0,
+            auto_vacuum: 0,
+        };
+        assert!(compaction_scheduled(&db, &st));
+        assert!(matches!(
+            offline_compact_at_boot(&db).await,
+            OfflineOutcome::Compacted(_)
+        ));
+        assert!(!sibling(&db, REQUEST_SUFFIX).exists());
+        assert!(confirm_offline_compaction(&db));
+        assert_eq!(rows(&db).await, (20, AUTO_VACUUM_INCREMENTAL));
+        // Cancel withdraws a request and suppresses the automatic pass.
+        request_compaction(&db).unwrap();
+        assert!(cancel_compaction_request(&db));
+        assert!(!compaction_scheduled(&db, &st));
+        assert!(!cancel_compaction_request(&db));
+    }
+
+    #[test]
+    fn offline_estimate_scales_with_live_data() {
+        // The live install: 593 MB live → a few seconds, not minutes.
+        let ms = estimate_offline_compact_ms(&st(223_437, 78_607, 0));
+        assert!((2_000..10_000).contains(&ms), "{ms}");
+        assert_eq!(estimate_offline_compact_ms(&st(10, 0, 0)), 500);
     }
 }

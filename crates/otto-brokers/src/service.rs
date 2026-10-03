@@ -219,12 +219,12 @@ impl BrokersService {
         let mut sr_secret_ref = None;
         if let Some(pw) = nonempty(req.sasl_password) {
             let r = secret_ref_for(&row.id);
-            self.secrets.put(&r, &pw)?;
+            otto_core::secrets::put_async(&self.secrets, &r, &pw).await?;
             secret_ref = Some(Some(r));
         }
         if let Some(pw) = nonempty(req.schema_registry_password) {
             let r = sr_secret_ref_for(&row.id);
-            self.secrets.put(&r, &pw)?;
+            otto_core::secrets::put_async(&self.secrets, &r, &pw).await?;
             sr_secret_ref = Some(Some(r));
         }
         if secret_ref.is_some() || sr_secret_ref.is_some() {
@@ -245,18 +245,22 @@ impl BrokersService {
         let row = self.repo.get(id).await?;
 
         // Secret handling: absent password = keep; non-empty = set; empty = clear.
-        let secret_ref = self.secret_change(
-            id,
-            &secret_ref_for(id),
-            row.secret_ref.clone(),
-            req.sasl_password,
-        )?;
-        let sr_secret_ref = self.secret_change(
-            id,
-            &sr_secret_ref_for(id),
-            row.sr_secret_ref.clone(),
-            req.schema_registry_password,
-        )?;
+        let secret_ref = self
+            .secret_change(
+                id,
+                &secret_ref_for(id),
+                row.secret_ref.clone(),
+                req.sasl_password,
+            )
+            .await?;
+        let sr_secret_ref = self
+            .secret_change(
+                id,
+                &sr_secret_ref_for(id),
+                row.sr_secret_ref.clone(),
+                req.schema_registry_password,
+            )
+            .await?;
 
         let u = UpdateBrokerCluster {
             name: req.name,
@@ -287,10 +291,10 @@ impl BrokersService {
     pub async fn delete_cluster(&self, id: &Id) -> Result<()> {
         let row = self.repo.get(id).await?;
         if let Some(r) = &row.secret_ref {
-            let _ = self.secrets.delete(r);
+            let _ = otto_core::secrets::delete_async(&self.secrets, r).await;
         }
         if let Some(r) = &row.sr_secret_ref {
-            let _ = self.secrets.delete(r);
+            let _ = otto_core::secrets::delete_async(&self.secrets, r).await;
         }
         self.repo.delete(id).await?;
         self.evict(id);
@@ -300,7 +304,7 @@ impl BrokersService {
     }
 
     /// Apply a secret change and return the repo three-state ref update.
-    fn secret_change(
+    async fn secret_change(
         &self,
         id: &Id,
         key: &str,
@@ -312,13 +316,13 @@ impl BrokersService {
             Some(pw) if pw.is_empty() => {
                 // explicit clear
                 if let Some(r) = &existing {
-                    let _ = self.secrets.delete(r);
+                    let _ = otto_core::secrets::delete_async(&self.secrets, r).await;
                 }
                 Ok(Some(None))
             }
             Some(pw) => {
                 let _ = id;
-                self.secrets.put(key, &pw)?;
+                otto_core::secrets::put_async(&self.secrets, key, &pw).await?;
                 Ok(Some(Some(key.to_string())))
             }
         }

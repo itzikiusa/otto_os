@@ -11,11 +11,22 @@ export interface DbStatsResp {
   auto_vacuum: number;
   /** A compaction is running right now. */
   compacting: boolean;
+  /** An offline compaction runs at the next daemon start (requested or automatic). */
+  compaction_scheduled: boolean;
+  /** Rough duration of that offline compaction (it delays that start; no write stall). */
+  estimated_offline_ms: number;
 }
 
-/** Body of `POST /admin/db/compact` (root). */
+/** Body of `POST /admin/db/compact` (root). `at` defaults to `now`. */
 export interface DbCompactReq {
   confirm: true;
+  at?: 'now' | 'next_restart' | 'cancel';
+}
+
+/** Response of `POST /admin/db/compact` with `at: "next_restart" | "cancel"`. */
+export interface DbCompactScheduled {
+  compaction_scheduled: boolean;
+  estimated_offline_ms: number;
 }
 
 /** Response of `POST /admin/db/compact`. */

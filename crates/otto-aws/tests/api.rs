@@ -6,6 +6,7 @@
 //!
 //! The fake logs every invocation (env + argv) to `calls.log` next to itself
 //! so tests can assert what the CLI was asked to do.
+#![allow(clippy::disallowed_methods)] // integration tests: plain sync fs / secret store is fine
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;

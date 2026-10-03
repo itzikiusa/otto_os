@@ -5,6 +5,7 @@
 //! - setting ON → `list_for` scopes to caller; `require_conn_owner_or_root` 403s for non-owner
 //! - root bypasses owner check regardless of setting
 //! - owner sees / mutates their own connection regardless of setting
+#![allow(clippy::disallowed_methods)] // integration tests: plain sync fs / secret store is fine
 
 use std::sync::Arc;
 

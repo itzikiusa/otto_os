@@ -157,6 +157,7 @@ pub async fn capture_work(cwd: &str, base: Option<&str>) -> Result<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod evidence_tests {
     #[tokio::test]
     async fn captures_staged_and_untracked_without_commits() {

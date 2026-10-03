@@ -26,6 +26,14 @@ use crate::{FileStore, KeychainStore, PLAINTEXT_FILE};
 
 /// Encrypted copy of the plaintext entries kept while a migration verifies.
 pub const MIGRATION_BACKUP_FILE: &str = "secrets.migrate-backup.enc";
+/// `secrets.json` is renamed to this BEFORE it is zeroed and unlinked, so a
+/// failed wipe/unlink can never leave a zeroed `secrets.json` behind (which
+/// would select plaintext mode on the next boot and fail every read). A
+/// leftover is wiped by [`sweep_plaintext_residue`] at the next start.
+pub const WIPING_FILE: &str = "secrets.json.wiping";
+/// Prefix of the post-switch verification error — the UI tells it apart from
+/// "nothing was changed" (the plaintext is already gone at that point).
+pub const POST_SWITCH_VERIFY_FAILED: &str = "secrets were encrypted but the final check failed";
 
 /// The active backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -169,10 +177,13 @@ impl SecretsControl {
         let backup = self.data_dir.join(MIGRATION_BACKUP_FILE);
         if let Some(saved) = read_sealed(&backup, &mk)? {
             for (k, v) in &saved {
-                if enc.get(k)?.as_deref() != Some(v.as_str()) {
+                // The plaintext is already gone and the daemon is on the
+                // encrypted store: the error must not read "nothing changed".
+                let ok = matches!(enc.get(k), Ok(Some(ref got)) if got == v);
+                if !ok {
                     return Err(Error::Internal(format!(
-                        "secrets migration: live store verification failed; the encrypted \
-                         backup {MIGRATION_BACKUP_FILE} was kept"
+                        "{POST_SWITCH_VERIFY_FAILED}; the plaintext file was removed and the \
+                         encrypted backup {MIGRATION_BACKUP_FILE} was kept"
                     )));
                 }
             }
@@ -217,7 +228,10 @@ impl SecretStore for SecretsControl {
 /// 4. write `secrets.enc` and verify every plaintext entry reads back equal
 ///    from disk (failure → restore the previous `secrets.enc` / remove the new
 ///    one; the plaintext file is untouched);
-/// 5. overwrite `secrets.json` with zeros, fsync, unlink, fsync the directory.
+/// 5. rename `secrets.json` aside ([`WIPING_FILE`]), then overwrite it with
+///    zeros, fsync, unlink, fsync the directory. Once the rename succeeded the
+///    migration is committed: a failing wipe/unlink is logged and retried at
+///    the next start instead of failing the migration half-way.
 ///
 /// Returns `(migrated, total)`. The backup is left for the caller's final
 /// live verification.
@@ -290,9 +304,68 @@ fn migrate_files_with(
         ));
     }
 
-    // 5. Wipe + delete the plaintext.
-    wipe_and_remove(&plain_path)?;
+    // 5. Move aside, wipe + delete the plaintext.
+    retire_plaintext(&plain_path)?;
     Ok((plain.len(), merged.len()))
+}
+
+/// Step 5: move `secrets.json` aside first (atomic rename — a failure leaves
+/// it intact and the migration aborts; `secrets.enc` already holds a verified
+/// superset, so re-running it merges cleanly), then wipe + unlink the moved
+/// file. A wipe/unlink failure after the rename is not fatal: `secrets.json`
+/// no longer exists, so mode selection is unaffected, and
+/// [`sweep_plaintext_residue`] finishes the job at the next start.
+fn retire_plaintext(plain_path: &Path) -> Result<()> {
+    let aside = plain_path.with_file_name(WIPING_FILE);
+    std::fs::rename(plain_path, &aside).map_err(|e| {
+        Error::Internal(format!(
+            "secrets migration: could not move secrets.json aside ({e}) — plaintext kept, \
+             the encrypted store is complete; retry"
+        ))
+    })?;
+    if let Err(e) = wipe_and_remove(&aside) {
+        tracing::warn!("secrets: {WIPING_FILE} not removed yet ({e}); retrying at next start");
+    }
+    Ok(())
+}
+
+/// Boot-time cleanup (called from `from_env` before mode selection):
+/// - a leftover [`WIPING_FILE`] (a wipe/unlink that failed) is wiped + removed;
+/// - a `secrets.json` that is empty or all zero bytes NEXT TO a `secrets.enc`
+///   is the residue of an older migration whose unlink failed after the wipe —
+///   it holds no secrets, and leaving it would select plaintext mode and fail
+///   every read, so it is removed too.
+///
+/// Returns whether anything was cleaned.
+pub fn sweep_plaintext_residue(dir: &Path) -> bool {
+    let mut cleaned = false;
+    let aside = dir.join(WIPING_FILE);
+    if aside.exists() {
+        match wipe_and_remove(&aside) {
+            Ok(()) => cleaned = true,
+            Err(e) => tracing::warn!("secrets: could not remove {WIPING_FILE}: {e}"),
+        }
+    }
+    let plain = dir.join(PLAINTEXT_FILE);
+    if dir.join(ENCRYPTED_FILE).exists() {
+        if let Ok(bytes) = std::fs::read(&plain) {
+            if bytes.iter().all(|b| *b == 0) {
+                match std::fs::remove_file(&plain) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "secrets: removed a wiped (all-zero) {PLAINTEXT_FILE} left by an \
+                             earlier migration"
+                        );
+                        cleaned = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!("secrets: could not remove wiped {PLAINTEXT_FILE}: {e}")
+                    }
+                }
+            }
+        }
+    }
+    cleaned
 }
 
 /// Overwrite a file's bytes with zeros (fsync'd) before unlinking it. On APFS
@@ -626,6 +699,97 @@ mod tests {
         .unwrap();
         assert_eq!(migrate_files(dir.path(), &k).unwrap(), (1, 2));
         assert!(!dir.path().join(PLAINTEXT_FILE).exists());
+    }
+
+    #[test]
+    fn residue_of_a_failed_unlink_is_swept_not_stuck() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = MasterKey::generate().unwrap();
+        write_atomic(
+            &dir.path().join(ENCRYPTED_FILE),
+            &seal(&k, &map(&[("a", "1")])).unwrap(),
+        )
+        .unwrap();
+        // Old-code residue: secrets.json zeroed but not unlinked.
+        std::fs::write(dir.path().join(PLAINTEXT_FILE), [0u8; 64]).unwrap();
+        // New-code residue: the moved-aside file whose wipe failed.
+        std::fs::write(dir.path().join(WIPING_FILE), b"{\"a\":\"1\"}").unwrap();
+        assert!(sweep_plaintext_residue(dir.path()));
+        assert!(!dir.path().join(PLAINTEXT_FILE).exists());
+        assert!(!dir.path().join(WIPING_FILE).exists());
+        // ...so a stale `OTTO_SECRETS=file` boot now selects encrypted.
+        assert_eq!(
+            choose_mode(ModeInputs {
+                env: Some("file"),
+                allow_plaintext: true,
+                strict: false,
+                plaintext_exists: dir.path().join(PLAINTEXT_FILE).exists(),
+                encrypted_exists: true,
+            }),
+            SecretsMode::Encrypted
+        );
+        // A REAL plaintext file (non-zero) is never touched by the sweep.
+        FileStore::new(dir.path()).put("b", "2").unwrap();
+        assert!(!sweep_plaintext_residue(dir.path()));
+        assert!(dir.path().join(PLAINTEXT_FILE).exists());
+        // Nor is a zeroed one without a secrets.enc next to it.
+        let d2 = tempfile::tempdir().unwrap();
+        std::fs::write(d2.path().join(PLAINTEXT_FILE), [0u8; 8]).unwrap();
+        assert!(!sweep_plaintext_residue(d2.path()));
+        assert!(d2.path().join(PLAINTEXT_FILE).exists());
+    }
+
+    #[test]
+    fn plaintext_is_moved_aside_before_the_wipe() {
+        let dir = tempfile::tempdir().unwrap();
+        FileStore::new(dir.path()).put("conn-a", "pw").unwrap();
+        let k = MasterKey::generate().unwrap();
+        // A directory that refuses the rename → error, plaintext untouched,
+        // nothing moved aside (the caller's mode stays plaintext; a retry
+        // merges with the already-complete secrets.enc).
+        use std::os::unix::fs::PermissionsExt;
+        let ro = tempfile::tempdir().unwrap();
+        let p = ro.path().join(PLAINTEXT_FILE);
+        std::fs::write(&p, b"{}").unwrap();
+        std::fs::set_permissions(ro.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let err = retire_plaintext(&p).unwrap_err();
+        std::fs::set_permissions(ro.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(err.to_string().contains("plaintext kept"));
+        assert!(p.exists() && !ro.path().join(WIPING_FILE).exists());
+        // Normal path: nothing named secrets.json* is left.
+        assert_eq!(migrate_files(dir.path(), &k).unwrap(), (1, 1));
+        assert!(!dir.path().join(PLAINTEXT_FILE).exists());
+        assert!(!dir.path().join(WIPING_FILE).exists());
+    }
+
+    /// perf2/03 N2: concurrent reads with a locked Keychain share ONE bounded
+    /// wait instead of queueing behind the file mutex (k-th caller ≈ k × timeout).
+    #[test]
+    fn concurrent_reads_with_locked_keychain_share_one_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = MasterKey::from_bytes([3u8; 32]);
+        write_atomic(
+            &dir.path().join(ENCRYPTED_FILE),
+            &seal(&k, &map(&[("a", "1")])).unwrap(),
+        )
+        .unwrap();
+        let src = Arc::new(MemKey {
+            delay_ms: 2_000,
+            ..Default::default()
+        });
+        let s = Arc::new(EncryptedFileStore::new(dir.path(), cell(src, 100)));
+        let started = std::time::Instant::now();
+        let hs: Vec<_> = (0..8)
+            .map(|_| {
+                let s = s.clone();
+                std::thread::spawn(move || s.get("a"))
+            })
+            .collect();
+        for h in hs {
+            assert!(matches!(h.join().unwrap(), Err(Error::Upstream(_))));
+        }
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(400), "8 readers took {took:?}");
     }
 
     #[test]

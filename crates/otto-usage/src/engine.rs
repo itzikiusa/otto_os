@@ -39,9 +39,30 @@ type SessionTotalsMemo = ((u32, bool), std::time::Instant, Vec<SessionTotals>);
 const FLUSH_BATCH: usize = 200;
 /// Default cap on the session leaderboard.
 const SESSION_LIMIT: u32 = 50;
-/// How often the self-heal watcher checks whether an insert path flagged the
-/// server as dead (see [`Inner::heal`]).
-const HEAL_POLL: Duration = Duration::from_secs(5);
+/// Self-heal signal (perf2/03 N5): an insert path that failed against a DEAD
+/// server child raises it, and the watcher task wakes on the `Notify` —
+/// event-driven, so an idle daemon has no periodic heal wake-up (it used to
+/// poll every 5 s). `store` keeps the old `AtomicBool` call shape so raise
+/// sites read the same; storing `true` also wakes the watcher (a permit is
+/// kept when nobody waits, so a raise is never lost).
+#[derive(Default)]
+struct HealSignal {
+    flag: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl HealSignal {
+    fn store(&self, v: bool, order: Ordering) {
+        self.flag.store(v, order);
+        if v {
+            self.notify.notify_one();
+        }
+    }
+
+    fn swap(&self, v: bool, order: Ordering) -> bool {
+        self.flag.swap(v, order)
+    }
+}
 /// How long a measured on-disk size is reused by [`UsageEngine::status`].
 const DISK_SIZE_TTL: Duration = Duration::from_secs(300);
 /// Cap on events retained across failed flushes while the server is down —
@@ -69,13 +90,20 @@ pub struct UsageEngine {
     /// crashed out from under us). The self-heal watcher (spawned in
     /// [`Self::start`]) drains it and restarts the server via [`Self::reinit`],
     /// so usage tracking recovers without a daemon restart.
-    heal: Arc<AtomicBool>,
+    heal: Arc<HealSignal>,
     /// Last measured ClickHouse on-disk size + when (see [`DISK_SIZE_TTL`]).
     disk_cache: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
     /// Last `session_totals(days, otto_only)` result for SESSION_TOTALS_TTL:
     /// one Usage page open runs it for the summary's feature breakdown and
     /// again for budgets a few ms later — the same full scan twice.
     totals_cache: std::sync::Mutex<Option<SessionTotalsMemo>>,
+}
+
+/// Wake the heal watcher so it sees the engine is gone and exits.
+impl Drop for UsageEngine {
+    fn drop(&mut self) {
+        self.heal.notify.notify_one();
+    }
 }
 
 /// Which sessions a read covers: every recorded session (root), or only the
@@ -121,7 +149,7 @@ impl UsageEngine {
             config: RwLock::new(config.clone()),
             data_dir,
             reinit_lock: tokio::sync::Mutex::new(()),
-            heal: Arc::new(AtomicBool::new(false)),
+            heal: Arc::new(HealSignal::default()),
             disk_cache: std::sync::Mutex::new(None),
             totals_cache: std::sync::Mutex::new(None),
         });
@@ -133,9 +161,11 @@ impl UsageEngine {
         // (see `heal`), restart it. Weak so the watcher never keeps a dropped
         // engine alive; exits with it.
         let weak: Weak<Self> = Arc::downgrade(&engine);
+        let heal = Arc::clone(&engine.heal);
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(HEAL_POLL).await;
+                // No timer: sleeps until a raise (or the engine's Drop) wakes it.
+                heal.notify.notified().await;
                 let Some(engine) = weak.upgrade() else { break };
                 if engine.heal.swap(false, Ordering::SeqCst) {
                     tracing::warn!(
@@ -248,6 +278,12 @@ impl UsageEngine {
                 });
             }
         }
+    }
+
+    /// Test seam: raise the self-heal signal as a failed insert would.
+    #[cfg(test)]
+    fn raise_heal(&self) {
+        self.heal.store(true, Ordering::SeqCst);
     }
 
     /// Stop the ClickHouse server cleanly (SIGTERM → flush). Called from the
@@ -1326,7 +1362,7 @@ async fn ensure_partitioned(ch: &ClickHouse, retention_days: u32) {
 fn spawn_writer(
     ch: Arc<ClickHouse>,
     mut rx: mpsc::UnboundedReceiver<UsageEvent>,
-    heal: Arc<AtomicBool>,
+    heal: Arc<HealSignal>,
 ) {
     tokio::spawn(async move {
         let mut buf: Vec<UsageEvent> = Vec::new();
@@ -1365,7 +1401,7 @@ fn spawn_writer(
     });
 }
 
-async fn flush(ch: &ClickHouse, buf: &mut Vec<UsageEvent>, heal: &AtomicBool) {
+async fn flush(ch: &ClickHouse, buf: &mut Vec<UsageEvent>, heal: &HealSignal) {
     if buf.is_empty() {
         return;
     }
@@ -1750,6 +1786,31 @@ mod scope_tests {
             .daily_model_range("2026-01-01", "2026-01-02")
             .await
             .is_err());
+    }
+
+    /// perf2/03 N5: the heal watcher has no poll — a raise is acted on at
+    /// once (it used to wait for the next 5 s tick), and a raise made while
+    /// nobody waits is not lost.
+    #[tokio::test]
+    async fn heal_watcher_reacts_to_a_raise_without_polling() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = UsageConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let engine = UsageEngine::start(cfg, dir.path().to_path_buf()).await;
+        for _ in 0..2 {
+            engine.raise_heal();
+            let t = std::time::Instant::now();
+            while engine.heal.flag.load(Ordering::SeqCst) {
+                assert!(
+                    t.elapsed() < Duration::from_secs(1),
+                    "watcher did not drain the raise"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(t.elapsed() < Duration::from_secs(1));
+        }
     }
 }
 

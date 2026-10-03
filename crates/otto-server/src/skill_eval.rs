@@ -156,6 +156,7 @@ fn short_id(id: &Id) -> String {
 }
 
 /// Locate a `SKILL.md` (or the only `*.md`) under a directory tree.
+#[allow(clippy::disallowed_methods)] // sync helper: resolve_skill_source runs via spawn_blocking
 fn find_skill_file(dir: &Path) -> Option<PathBuf> {
     // Prefer a SKILL.md anywhere in the tree (shallow-first).
     let mut stack = vec![dir.to_path_buf()];
@@ -180,6 +181,7 @@ fn find_skill_file(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Extract an archive into `dest` using system tools (macOS ships unzip + tar).
+#[allow(clippy::disallowed_methods)] // sync helper: resolve_skill_source runs via spawn_blocking
 fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)
         .map_err(|e| Error::Internal(format!("create extract dir: {e}")))?;
@@ -1354,6 +1356,7 @@ async fn run_skill_eval_core(
         // instead of each spawning a separate `git diff` call. Best-effort:
         // if the diff can't be produced the validators fall back to running
         // `git diff` themselves (via the prompt instruction).
+        #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
         let precomputed_diff: Option<String> = {
             let dest_c = dest_str.clone();
             tokio::task::spawn_blocking(move || {
@@ -2186,8 +2189,17 @@ async fn list_sources(
             provider: None,
         });
     }
-    // Per-provider on-disk skills — the same dirs the Skills Lab lists
-    // (~/.claude/skills, $CODEX_HOME/skills, ~/.gemini/skills for agy).
+    // Per-provider on-disk skills — a directory walk + SKILL.md reads, so it
+    // runs on the blocking pool.
+    sources.extend(crate::offload::blocking(provider_skill_sources).await);
+    Ok(Json(SkillSourcesResp { sources }))
+}
+
+/// Per-provider on-disk skills — the same dirs the Skills Lab lists
+/// (~/.claude/skills, $CODEX_HOME/skills, ~/.gemini/skills for agy).
+#[allow(clippy::disallowed_methods)] // sync helper: list_sources runs it via offload::blocking
+fn provider_skill_sources() -> Vec<SkillSourceInfo> {
+    let mut out = Vec::new();
     for provider in otto_context::provider_skills::PROVIDERS {
         let Some(dir) = otto_context::provider_skills::provider_root(provider) else {
             continue;
@@ -2211,7 +2223,7 @@ async fn list_sources(
                 .ok()
                 .map(|b| parse_frontmatter_description(&b))
                 .unwrap_or_default();
-            sources.push(SkillSourceInfo {
+            out.push(SkillSourceInfo {
                 kind: "provider".into(),
                 name,
                 description,
@@ -2219,7 +2231,7 @@ async fn list_sources(
             });
         }
     }
-    Ok(Json(SkillSourcesResp { sources }))
+    out
 }
 
 /// Extract the `description:` from a skill's YAML frontmatter (best-effort).
@@ -2909,6 +2921,7 @@ async fn retry_validation(
         .await;
 
     // Pre-compute git diff for the retry case as well.
+    #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
     let retry_diff: Option<String> = {
         let wt = worktree.clone();
         tokio::task::spawn_blocking(move || {

@@ -1,4 +1,5 @@
 //! Export credential tests use an isolated FileStore, never the user's Keychain.
+#![allow(clippy::disallowed_methods)] // integration tests: plain sync fs / secret store is fine
 use otto_connections::ConnectionsService;
 use otto_core::{
     domain::{ConnectionKind, Environment},

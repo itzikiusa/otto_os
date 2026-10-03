@@ -51,6 +51,7 @@ fn has_any(t: &str, terms: &[&str]) -> bool {
 }
 
 /// Count files under a dir recursively (skipping dotfiles).
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 fn count_files(dir: &Path) -> usize {
     fn walk(dir: &Path, n: &mut usize) {
         if let Ok(rd) = std::fs::read_dir(dir) {
@@ -73,6 +74,7 @@ fn count_files(dir: &Path) -> usize {
     n
 }
 
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 fn list_files(dir: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         if let Ok(rd) = std::fs::read_dir(dir) {

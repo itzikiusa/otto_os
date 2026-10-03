@@ -176,10 +176,30 @@ Every hour the daemon runs `PRAGMA optimize` (planner statistics) and a
 `wal_checkpoint(TRUNCATE)` (PASSIVE when a reader still needs the log); the
 WAL is capped at 64 MiB (`journal_size_limit`). **Settings → Backup & restore
 → Database storage** (root) shows the file size and reclaimable free space,
-and **Compact database…** runs the one-time conversion to
-`auto_vacuum=INCREMENTAL` plus a `VACUUM`. The rewrite blocks database writes
-while it runs, so it asks first; nothing is deleted. After it, the hourly pass
-returns up to 4 000 free pages per hour (`incremental_vacuum`).
+and offers two ways to run the one-time conversion to
+`auto_vacuum=INCREMENTAL`; nothing is deleted either way:
+
+- **Compact at next restart…** (recommended for a large file) — at the next
+  daemon start, before anything opens the database, Otto writes a compacted
+  copy (`VACUUM INTO`), checks it (`quick_check`, same schema, same row count
+  in every table) and swaps it in. No write ever waits; that start takes about
+  the shown estimate longer (≈ live data ÷ 150 MB/s — a few seconds for a
+  600 MB file). The old file is kept as `otto.db.precompact` until the new one
+  has opened and migrated; if that start fails, the next one restores the old
+  file and does not retry on its own. **Cancel scheduled compaction** withdraws
+  it (and opts out of the automatic run below).
+- **Compact now…** — an in-place `VACUUM` on the running daemon. It blocks
+  database writes while it runs, so it asks first.
+
+The offline compaction also runs on its own at start when the file was never
+converted and more than 20 % and 64 MiB of it are free pages (live data up to
+4 GiB); the card then says "Scheduled for the next restart". A running daemon
+only compacts a small file (≤ 128 MiB live) by itself, while no session is
+live. After the conversion the hourly pass returns up to 4 000 free pages per
+hour (`incremental_vacuum`). Each start logs one line with its phases —
+`boot: ready in N ms (db_compact=… db_open=… maintenance=… modules=… restore=…
+recovery=…)` — and plugin sidecars plus the launchd-job and run-worktree
+sweeps start after the listener is serving.
 
 The per-session activity trail (`agent_trail`, newest 1 000 rows per session)
 is pruned by a separate hourly pass. After the first pass at startup it only

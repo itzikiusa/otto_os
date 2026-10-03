@@ -1,0 +1,62 @@
+name: Perf (nightly, macOS)
+
+# Daemon perf budget on macOS WITH the embedded ClickHouse (perf2/03 N4): the
+# Linux CI job has no ClickHouse binary, so the biggest idle consumer is only
+# sampled here. Nightly + on demand — a macOS runner per PR is too slow/costly.
+# Blocking here: threads, wal_bytes, free_pct, the offline-compaction outcome
+# and the ClickHouse child's thread count (OTTO_PERF_BLOCK_CH=1); CPU numbers
+# are reported in the step summary.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  daemon-budget-macos:
+    name: Daemon perf budget (macOS + ClickHouse)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: perf-macos
+
+      - name: Install build deps (librdkafka needs cmake)
+        run: brew install cmake
+
+      - name: Install ClickHouse (single binary, on PATH)
+        run: |
+          mkdir -p "$RUNNER_TEMP/ch" && cd "$RUNNER_TEMP/ch"
+          curl -fsSL https://clickhouse.com/ | sh
+          sudo mv ./clickhouse /usr/local/bin/clickhouse
+          clickhouse --version
+
+      - name: Build the test daemon
+        run: cargo build -p ottod
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.10.0
+
+      - name: Daemon perf budget
+        env:
+          OTTO_PERF_BUDGET_SCALE: '3'
+          OTTO_PERF_BLOCK_CH: '1'
+          # ClickHouse needs time to settle after its first schema/merge pass.
+          OTTO_PERF_SETTLE_SECS: '60'
+        run: node scripts/perf/daemon-budget.mjs target/debug/ottod
