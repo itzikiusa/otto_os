@@ -131,7 +131,9 @@ where
     let results: Vec<(String, Result<T>)> = futures_util::stream::iter(regions)
         .map(|region| {
             let fut = call(region.clone());
-            async move { (region, fut.await) }
+            // Fan-out children draw from the background share of the CLI cap,
+            // so a click elsewhere never queues behind 6 regions (N1).
+            async move { (region, crate::cli::background(fut).await) }
         })
         .buffered(FANOUT_CONCURRENCY)
         .collect()

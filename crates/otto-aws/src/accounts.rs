@@ -1179,7 +1179,8 @@ impl AwsService {
             let env = env.clone();
             async move {
                 let argv = with_json_output(args);
-                cli::run_raw(&bin, &argv, &env, PROBE_TIMEOUT, None).await
+                // 7 probes per account must not crowd out user clicks (N1).
+                cli::background(cli::run_raw(&bin, &argv, &env, PROBE_TIMEOUT, None)).await
             }
         };
         let (sts, s3, sqs, ec2, athena, eks, rds) = tokio::join!(
