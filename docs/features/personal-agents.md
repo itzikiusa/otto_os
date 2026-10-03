@@ -169,7 +169,10 @@ passes through this gate).
 state, **Watch session**), *Waiting for you* (approvals the agent's calls filed,
 with Sensitive / Agent-rule labels and a link to MCP → Activity), and a
 timeline merging its tool calls (called / blocked / needs approval) with its
-runs. Live over the `personal_agent_activity` WS event. The tool-call list is an
+runs. Live over the `personal_agent_activity` WS event; each event fetches only
+the entries after the tab's cursor (`?after_seq=`), run history is re-read only
+when a run changed (or once a minute), and an approval change refreshes the tab
+only when it is one of the approvals it shows (perf W4). The tool-call list is an
 in-memory view (newest 200 per agent, cleared on daemon restart);
 `mcp_call_log` remains the durable audit.
 

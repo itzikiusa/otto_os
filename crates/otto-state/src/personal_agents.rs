@@ -950,6 +950,20 @@ impl PersonalAgentsRepo {
         row_to_run(&row)
     }
 
+    /// The agent's newest `running` run, if any (the activity feed's "Now"
+    /// without listing history — perf W4).
+    pub async fn running_run(&self, agent_id: &str) -> Result<Option<PersonalAgentRun>> {
+        let row = sqlx::query(
+            "SELECT * FROM personal_agent_runs WHERE agent_id = ? AND status = 'running' \
+             ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("running personal agent run"))?;
+        row.as_ref().map(row_to_run).transpose()
+    }
+
     pub async fn list_runs(&self, agent_id: &str, limit: i64) -> Result<Vec<PersonalAgentRun>> {
         let rows = sqlx::query(
             "SELECT * FROM personal_agent_runs WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?",

@@ -16,6 +16,7 @@
   import RelTime from '../../lib/components/RelTime.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
+  import { approvalConcernsFeed, mergeActivity } from './activityFeed';
   import type {
     PersonalAgentActivity,
     PersonalAgentActivityItem,
@@ -29,10 +30,23 @@
 
   let data = $state<PersonalAgentActivity | null>(null);
   let error = $state<string | null>(null);
+  // Incremental refresh (perf W4): a tool-call event fetches only ring
+  // entries after the cursor and no run history; run history is re-read when
+  // a run changed, on the first load, and at least once a minute.
+  let wantRuns = true;
+  let lastFull = 0;
+  const FULL_EVERY_MS = 60_000;
 
   async function load(): Promise<boolean> {
     try {
-      data = await personalAgentsApi.activity(agentId);
+      const full = data === null || wantRuns || Date.now() - lastFull > FULL_EVERY_MS;
+      wantRuns = false;
+      const next = await personalAgentsApi.activity(
+        agentId,
+        data === null ? {} : { afterSeq: data.seq ?? 0, runs: full },
+      );
+      if (full) lastFull = Date.now();
+      data = mergeActivity(data, next);
       error = null;
       return true;
     } catch (e) {
@@ -47,10 +61,16 @@
     untrack(() => {
       poll?.stop();
       data = null;
+      wantRuns = true;
       poll = liveQuery({
         run: () => load(),
         on: ['personal_agent_activity', 'personal_agent_run_updated', 'mcp_approval_changed'],
-        match: (ev) => ev.agent_id === undefined || ev.agent_id === id,
+        match: (ev) => {
+          if (ev.type === 'mcp_approval_changed') return approvalConcernsFeed(data, ev.approval_id);
+          if (ev.agent_id !== id) return false;
+          if (ev.type === 'personal_agent_run_updated') wantRuns = true;
+          return true;
+        },
         fallbackMs: 10_000,
         debounceMs: 400,
       });
@@ -69,7 +89,7 @@
         // Waiting approvals have their own panel above.
         .filter((i) => i.kind !== 'approval_waiting')
         .map((item) => ({ key: `i${item.seq}`, at: item.at, kind: 'item' as const, item })),
-      ...data.runs.map((run) => ({ key: `r${run.id}`, at: run.started_at, kind: 'run' as const, run })),
+      ...(data.runs ?? []).map((run) => ({ key: `r${run.id}`, at: run.started_at, kind: 'run' as const, run })),
     ];
     return out.sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 120);
   });
