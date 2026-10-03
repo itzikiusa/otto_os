@@ -31,6 +31,12 @@
   let sendToAgentOpen = $state(false);
   const resp = $derived(apiClient.lastResponse);
   const failure = $derived(apiClient.lastError);
+  /** Set when this tab shows a history entry's stored response (not a send). */
+  const fromHistory = $derived(apiClient.responseFromHistory);
+  function historyWhen(at: string): string {
+    const d = new Date(at);
+    return Number.isNaN(d.getTime()) ? at : d.toLocaleString();
+  }
 
   // ── Pretty-print: memoized + size-gated ────────────────────────────────────
   // Bodies over 256 KB are shown raw (re-parsing would block the main thread).
@@ -298,6 +304,13 @@
   }
 </script>
 
+{#snippet historyBanner(h: { at: string; truncated: boolean })}
+  <div class="history-banner" role="note">
+    <Icon name="clock" size={12} />
+    <span><strong>From history</strong> · {historyWhen(h.at)} · Send to run it again{#if h.truncated} · only the first 64 KB of the body was stored{/if}</span>
+  </div>
+{/snippet}
+
 <div class="viewer" class:compact>
   {#if isStream}
     <div class="stream-console">
@@ -342,6 +355,7 @@
       {/if}
     </div>
   {:else if failure}
+    {#if fromHistory}{@render historyBanner(fromHistory)}{/if}
     <div class="failure" role="alert">
       <Icon name="warning" size={16} />
       <div class="f-body">
@@ -371,6 +385,7 @@
       {/if}
     </div>
   {:else}
+    {#if fromHistory}{@render historyBanner(fromHistory)}{/if}
     <div class="head">
       <StatusChip status={resp.status} text={resp.status_text} />
       <span class="chip" title="Total time">{formatSeconds(resp.duration_ms / 1000)}</span>
@@ -618,6 +633,21 @@
   .f-actions {
     display: flex;
     gap: 6px;
+  }
+  .history-banner {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    margin-block-end: 8px;
+    border-radius: 6px;
+    background: var(--info-soft);
+    color: var(--text);
+    font-size: var(--fs-xs);
+  }
+  .history-banner :global(svg) {
+    color: var(--info);
+    flex-shrink: 0;
   }
   .head {
     display: flex;

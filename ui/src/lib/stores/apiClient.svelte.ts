@@ -357,20 +357,18 @@ class ApiClientStore {
   openTab(d: ApiDraft = blankDraft()): void {
     this.tabs = [...this.tabs, {...d, tabId: crypto.randomUUID()}];
     this.activeTab = this.tabs.length - 1;
-    this.lastResponse = null;
-    this.lastError = null;
     this.persistTabs();
   }
+  /** Switching keeps every tab's response slot — the target tab shows its own
+   *  last response (or its in-flight send), never a blank pane. */
   switchTab(i: number): void {
     if (i >= 0 && i < this.tabs.length) {
       this.activeTab = i;
-      this.lastResponse = null;
-      this.lastError = null;
       this.persistTabs();
     }
   }
   closeTab(i: number): void {
-    if (this.tabs[i]?.tabId === this._executeTab) this.cancelExecute();
+    this.dropSlot(this.tabs[i]?.tabId);
     if (this.tabs.length === 1) {
       this.tabs = [blankDraft()];
       this.activeTab = 0;
@@ -379,8 +377,6 @@ class ApiClientStore {
       if (this.activeTab >= this.tabs.length) this.activeTab = this.tabs.length - 1;
       else if (i < this.activeTab) this.activeTab -= 1;
     }
-    this.lastResponse = null;
-    this.lastError = null;
     this.persistTabs();
   }
 
@@ -451,10 +447,8 @@ class ApiClientStore {
     this.historyLoaded = false;
     this.historyLoadError = null;
     this.flushTabsWrite();
-    this.cancelExecute();
+    this.resetResponses();
     this.running = false; this.lastRun = null; this.currentRun = null; this.automationRuns = [];
-    this.sending = false;
-    this.scriptLogs = []; this.testResults = [];
     this.tabsWid = wid;
     let next: ApiDraft[] = [];
     let active = 0;
@@ -473,16 +467,98 @@ class ApiClientStore {
     if (next.length === 0) next = [blankDraft()];
     this.tabs = next;
     this.activeTab = Math.min(Math.max(0, active), next.length - 1);
-    this.lastResponse = null;
   }
-  /** Last execute() result, shown in the ResponseViewer. */
-  // Raw (not deep-proxied): a response is replaced wholesale, never edited in place.
-  lastResponse: ApiResponse | null = $state.raw(null);
+
+  // ── Per-tab response slots ────────────────────────────────────────────────
+  // Every request tab keeps its own response / error / test results / script
+  // logs / in-flight send, so switching tabs never blanks a response, a send
+  // in one tab never cancels another tab's, and a response that lands while
+  // its tab is in the background is kept (not discarded). In memory only —
+  // bodies are large — and capped at MAX_TAB_RESPONSES idle slots (LRU).
+
+  /** tabId → that tab's response state. Raw: slots are replaced wholesale. */
+  responses: Map<string, TabResponse> = $state.raw(new Map());
+
+  private slot(tabId: string | null | undefined): TabResponse | undefined {
+    return tabId ? this.responses.get(tabId) : undefined;
+  }
+  /** Merge `patch` into `tabId`'s slot (moving it to most-recent), evicting
+   *  the least-recently-touched idle slots beyond the cap. */
+  private patchSlot(tabId: string | null | undefined, patch: Partial<TabResponse>): void {
+    if (!tabId) return;
+    const next = new Map(this.responses);
+    const prev = next.get(tabId) ?? emptySlot();
+    next.delete(tabId);
+    next.set(tabId, { ...prev, ...patch, at: Date.now() });
+    for (const [k, v] of next) {
+      if (next.size <= MAX_TAB_RESPONSES) break;
+      if (k !== tabId && !v.sending) next.delete(k);
+    }
+    this.responses = next;
+  }
+  /** Abort `tabId`'s in-flight send (if any) and forget its slot. */
+  private dropSlot(tabId: string | null | undefined): void {
+    const s = this.slot(tabId);
+    if (!s || !tabId) return;
+    s.ctrl?.abort();
+    const next = new Map(this.responses);
+    next.delete(tabId);
+    this.responses = next;
+  }
+  /** Abort every tab's send and clear all slots (workspace swap). */
+  private resetResponses(): void {
+    for (const s of this.responses.values()) s.ctrl?.abort();
+    this.responses = new Map();
+  }
+
+  /** The active tab's last response, shown in the ResponseViewer. */
+  get lastResponse(): ApiResponse | null {
+    return this.slot(this.draft?.tabId)?.resp ?? null;
+  }
+  set lastResponse(resp: ApiResponse | null) {
+    this.patchSlot(this.draft?.tabId, { resp, history: null });
+  }
   /** Why the active tab's last send failed (shown inline in the response
    *  pane instead of the previous response); null after a success. */
-  lastError: string | null = $state(null);
-  /** In-flight send. */
-  sending = $state(false);
+  get lastError(): string | null {
+    return this.slot(this.draft?.tabId)?.error ?? null;
+  }
+  set lastError(error: string | null) {
+    this.patchSlot(this.draft?.tabId, { error });
+  }
+  /** The active tab has a send in flight. */
+  get sending(): boolean {
+    return this.slot(this.draft?.tabId)?.sending ?? false;
+  }
+  /** Combined pre/post script console output for the active tab's last run. */
+  get scriptLogs(): string[] {
+    return this.slot(this.draft?.tabId)?.logs ?? [];
+  }
+  /** Post-response test results for the active tab's last run. */
+  get testResults(): TestResult[] {
+    return this.slot(this.draft?.tabId)?.tests ?? [];
+  }
+  /** The active tab's response was restored from a history entry (not sent
+   *  in this session) — the ResponseViewer's "From history" banner. */
+  get responseFromHistory(): TabResponse['history'] {
+    return this.slot(this.draft?.tabId)?.history ?? null;
+  }
+  /** Record a result for `tabId` (e.g. a gRPC invoke), whether or not that
+   *  tab is in front. Ignored once the tab is closed. */
+  setTabResult(tabId: string | null | undefined, resp: ApiResponse | null, error: string | null): void {
+    if (!tabId || !this.tabs.some((t) => t.tabId === tabId)) return;
+    this.patchSlot(tabId, { resp, error, history: null });
+  }
+  /** Tab-chip indicator: `sending` while in flight, else the outcome of the
+   *  tab's last send (`ok` 2xx/3xx, `fail` 4xx/5xx or an error), or null. */
+  tabStatus(tabId: string | null | undefined): 'sending' | 'ok' | 'fail' | null {
+    const s = this.slot(tabId);
+    if (!s) return null;
+    if (s.sending) return 'sending';
+    if (s.error) return 'fail';
+    if (s.resp) return s.resp.status >= 400 ? 'fail' : 'ok';
+    return null;
+  }
   loading = $state(false);
   /** Why the collections + requests lists couldn't load (the sidebar tree's
    *  inline error with Retry); null when fine. Scoped per list so a failed
@@ -492,15 +568,13 @@ class ApiClientStore {
   envLoadError: string | null = $state(null);
   /** Either list failed — gates onboarding (a failed load is not "empty"). */
   loadError: string | null = $derived(this.requestsLoadError ?? this.envLoadError);
-  /** AbortController for the currently in-flight execute() call; null when idle. */
-  private _abortCtrl: AbortController | null = null;
-  private _executeTab: string | null = null;
-  /** Cancel the in-flight HTTP request (if any). No-op when idle. */
-  cancelExecute(): void {
-    this._abortCtrl?.abort();
-    this._abortCtrl = null;
-    this._executeTab = null;
-    this.sending = false;
+  /** Cancel `tabId`'s in-flight send (default: the active tab's). Other
+   *  tabs' sends are untouched. No-op when idle. */
+  cancelExecute(tabId: string | null | undefined = this.draft?.tabId): void {
+    const s = this.slot(tabId);
+    if (!s?.ctrl && !s?.sending) return;
+    s.ctrl?.abort();
+    this.patchSlot(tabId, { ctrl: null, sending: false });
   }
 
   /** Active environment (is_active), or null. */
@@ -1079,11 +1153,6 @@ class ApiClientStore {
     delete next[key];
     this.runtimeVars = next;
   }
-  /** Combined pre/post script console output for the last run. */
-  scriptLogs: string[] = $state([]);
-  /** Post-response test results for the last run. */
-  testResults: TestResult[] = $state([]);
-
   /** Send the given draft through the daemon. Sets lastResponse + refreshes history. */
   async execute(draft: ApiDraft = this.draft): Promise<ApiResponse | null> {
     const base = this.base();
@@ -1095,14 +1164,16 @@ class ApiClientStore {
     draft = $state.snapshot(draft);
     const wid = this.wsId()!, tabId = draft.tabId ?? this.draft.tabId;
     const environmentId = this.activeEnv?.id ?? null;
-    this.cancelExecute();
+    // Only this tab's previous send is replaced; other tabs keep theirs.
+    this.cancelExecute(tabId);
     const controller = new AbortController();
-    this._abortCtrl = controller; this._executeTab = tabId ?? null;
-    this.sending = true; this.testResults = []; this.scriptLogs = []; this.lastError = null;
+    this.patchSlot(tabId, { ctrl: controller, sending: true, tests: [], logs: [], error: null, history: null });
     const { signal } = controller;
-    const ownsExecution = () => this._abortCtrl === controller && !signal.aborted
+    // The result belongs to the initiating tab's slot whether or not that tab
+    // is still in front — a background tab's response is kept, not dropped.
+    const ownsExecution = () => this.slot(tabId)?.ctrl === controller && !signal.aborted
       && this.wsId() === wid && this.tabs.some(tab => tab.tabId === tabId);
-    const ownsView = () => ownsExecution() && this.draft.tabId === tabId;
+    const ownsView = ownsExecution;
     const checkCurrent = () => { if (!ownsExecution()) throw new DOMException('Request canceled', 'AbortError'); };
     let runtimeVars = {...this.runtimeVars};
     const logs: string[] = [];
@@ -1157,7 +1228,7 @@ class ApiClientStore {
         resp = await api.long.post<ApiResponse>(`${base}/execute`, { ...body, confirm_new_host: true }, signal);
       }
       checkCurrent();
-      if (ownsView()) this.lastResponse = resp;
+      if (ownsView()) this.patchSlot(tabId, { resp, error: null });
       void this.loadHistory();
       if (draft.post_response_script?.trim()) {
         const headers: Record<string, string> = {};
@@ -1166,25 +1237,24 @@ class ApiClientStore {
           response:{code:resp.status,status:resp.status_text,responseTime:resp.duration_ms,headers,bodyText:resp.body}, vars:runtimeVars}, signal);
         checkCurrent();
         logs.push(...post.run.logs.map(l => `[test] ${l}`));
-        if (ownsView()) this.testResults = post.run.tests;
+        if (ownsView()) this.patchSlot(tabId, { tests: post.run.tests });
         if (post.run.error) logs.push(`[test] error: ${post.run.error}`);
         else this.runtimeScopes = {...this.runtimeScopes, [wid]: {...post.vars}};
       }
-      if (ownsView()) this.scriptLogs = logs;
+      if (ownsView()) this.patchSlot(tabId, { logs });
       return resp;
     } catch (e) {
-      if (ownsView()) this.scriptLogs = [...logs, `[error] ${errMsg(e)}`];
+      if (ownsView()) this.patchSlot(tabId, { logs: [...logs, `[error] ${errMsg(e)}`] });
       if (!signal.aborted && ownsExecution() && !isAbortError(e)) {
-        // The response pane shows the failure in place (with the reason); a
-        // send finishing on another tab still reports through a toast.
-        if (ownsView()) { this.lastError = errMsg(e); this.lastResponse = null; }
-        else toasts.error('Request failed', errMsg(e));
+        // The tab's response pane shows the failure in place (with the
+        // reason); a send failing on a background tab also toasts, since
+        // nobody is looking at that pane.
+        this.patchSlot(tabId, { error: errMsg(e), resp: null });
+        if (this.draft.tabId !== tabId) toasts.error('Request failed', errMsg(e));
       }
       return null;
     } finally {
-      if (this._abortCtrl === controller) {
-        this.sending = false; this._abortCtrl = null; this._executeTab = null;
-      }
+      if (this.slot(tabId)?.ctrl === controller) this.patchSlot(tabId, { sending: false, ctrl: null });
     }
   }
 
@@ -1463,13 +1533,14 @@ class ApiClientStore {
         return;
       }
     }
-    if (this.isDirty(this.draft)) {
+    // A tab with a send in flight is never repurposed — its result has a home.
+    if (this.isDirty(this.draft) || this.slot(this.draft.tabId)?.sending) {
       this.openTab(d);
       return;
     }
+    const replaced = this.draft.tabId;
     this.draft = d;
-    this.lastResponse = null;
-    this.lastError = null;
+    if (replaced !== this.draft.tabId) this.dropSlot(replaced);
   }
 
   /** Load a saved request into the builder (persisted extras included). */
@@ -1557,10 +1628,74 @@ class ApiClientStore {
       proto: '',
       grpc_method: '',
     });
+    // Show the response the entry already stored (no resend — matters for
+    // non-idempotent calls), flagged so the pane says where it came from.
+    const stored = historyResponse(h);
+    this.patchSlot(this.draft.tabId, {
+      resp: stored.resp, error: stored.error, tests: [], logs: [],
+      history: stored.resp || stored.error
+        ? { at: h.executed_at, truncated: stored.resp?.truncated ?? false }
+        : null,
+    });
     if (un.blanked) {
       toasts.info('Re-enter credentials', 'History stores secrets masked — fill the blanked credential fields before sending.');
     }
   }
+}
+
+/** One request tab's response state (see "Per-tab response slots"). */
+export interface TabResponse {
+  resp: ApiResponse | null;
+  error: string | null;
+  tests: TestResult[];
+  logs: string[];
+  sending: boolean;
+  ctrl: AbortController | null;
+  /** When the slot last changed (LRU order). */
+  at: number;
+  /** Set when `resp`/`error` was restored from a history entry rather than
+   *  sent in this session: when it ran, and whether only a preview of the
+   *  body was stored. */
+  history: { at: string; truncated: boolean } | null;
+}
+
+/** Idle response slots kept beyond the visible one (LRU-evicted). */
+export const MAX_TAB_RESPONSES = 20;
+
+function emptySlot(): TabResponse {
+  return { resp: null, error: null, tests: [], logs: [], sending: false, ctrl: null, at: 0, history: null };
+}
+
+/** A history entry's stored response as a displayable `ApiResponse` (or the
+ *  stored error). The stored body is a ≤64 KB preview; a `body_id` from the
+ *  original send has long expired, so it is dropped. */
+export function historyResponse(h: Pick<ApiHistoryEntry, 'response' | 'status' | 'duration_ms'>): { resp: ApiResponse | null; error: string | null } {
+  const r = h.response;
+  if (!r || typeof r !== 'object') return { resp: null, error: null };
+  const o = r as Record<string, unknown>;
+  if (typeof o.status !== 'number') {
+    return { resp: null, error: typeof o.error === 'string' ? o.error : null };
+  }
+  const body = typeof o.body === 'string' ? o.body : '';
+  const headers = Array.isArray(o.headers) ? (o.headers as ApiKeyVal[]) : [];
+  return {
+    error: null,
+    resp: {
+      status: o.status,
+      status_text: typeof o.status_text === 'string' ? o.status_text : '',
+      headers,
+      body,
+      body_base64: typeof o.body_base64 === 'string' ? o.body_base64 : '',
+      body_id: null,
+      truncated: o.truncated === true,
+      too_large: o.too_large === true,
+      duration_ms: typeof o.duration_ms === 'number' ? o.duration_ms : (h.duration_ms ?? 0),
+      size_bytes: typeof o.size_bytes === 'number' ? o.size_bytes : body.length,
+      content_type: typeof o.content_type === 'string' ? o.content_type
+        : headers.find((x) => x.key.toLowerCase() === 'content-type')?.value ?? null,
+      trace: Array.isArray(o.trace) ? (o.trace as ApiResponse['trace']) : [],
+    },
+  };
 }
 
 export const apiClient = new ApiClientStore();

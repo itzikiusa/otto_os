@@ -347,12 +347,15 @@
               <div class="req-tablist">
                 {#each apiClient.tabs as t, i (t.tabId ?? i)}
                   {@const active = view.kind === 'request' && apiClient.activeTab === i}
+                  {@const st = apiClient.tabStatus(t.tabId)}
                   <div class="req-tab" class:active>
                     <button class="req-tab-main" aria-current={active ? 'true' : undefined} onclick={() => { apiClient.switchTab(i); showRequest(); }}
                       title={apiClient.isDirty(t) ? `${apiClient.tabLabel(t)} (unsaved changes)` : apiClient.tabLabel(t)}>
                       <MethodTag method={t.kind === 'http' || t.kind === 'sse' ? t.method : t.kind === 'grpc' ? 'gRPC' : 'WS'} />
                       <span class="req-tab-label">{apiClient.tabLabel(t)}</span>
                       {#if apiClient.isDirty(t)}<span class="req-tab-dirty" aria-label="Unsaved changes"></span>{/if}
+                      {#if st === 'sending'}<span class="req-tab-status sending" role="status" aria-label="Sending" title="Sending…"></span>
+                      {:else if st}<span class="req-tab-status {st}" aria-label={st === 'ok' ? 'Last send succeeded' : 'Last send failed'} title={st === 'ok' ? 'Last send succeeded' : 'Last send failed'}></span>{/if}
                     </button>
                     <button class="req-tab-close icon-btn" title="Close tab" aria-label="Close tab" onclick={() => void closeRequestTab(i)}><Icon name="x" size={12} /></button>
                   </div>
@@ -577,6 +580,32 @@
     background: var(--warning);
     flex-shrink: 0;
   }
+  /* Per-tab response state: a spinner while the tab's send is in flight
+     (it keeps running in the background), then a dot for the outcome. */
+  .req-tab-status {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .req-tab-status.ok {
+    background: var(--success);
+  }
+  .req-tab-status.fail {
+    background: var(--danger);
+  }
+  .req-tab-status.sending {
+    width: 9px;
+    height: 9px;
+    border: 1.5px solid var(--accent-soft);
+    border-block-start-color: var(--accent-solid);
+    animation: req-tab-spin 0.8s linear infinite;
+  }
+  @keyframes req-tab-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
   .req-tab-close {
     width: 20px;
     height: 20px;
@@ -655,6 +684,10 @@
   @media (prefers-reduced-motion: reduce) {
     .resizer {
       transition: none;
+    }
+    .req-tab-status.sending {
+      animation: none;
+      background: var(--accent-solid);
     }
   }
 </style>
