@@ -248,6 +248,22 @@ jobs:
           OTTO_PERF_BUDGET_SCALE: '3'
         run: cargo test -p otto-pty --release --lib perf_budgets -- --nocapture
 
+      # Embedded ClickHouse budgets (perf2/09 R6): idle thread count of the
+      # usage server with Otto's config (OTTO_PERF), plus the per-summary /
+      # per-report statement + rows-read guard and the idle-stop wake test.
+      # The runner has no clickhouse binary, so fetch the official one into
+      # a temp dir first (these tests skip when it is missing). Report-only
+      # like the daemon budget below.
+      - name: ClickHouse usage budgets (otto-usage)
+        continue-on-error: true
+        env:
+          OTTO_PERF: '1'
+        run: |
+          mkdir -p "$RUNNER_TEMP/clickhouse"
+          (cd "$RUNNER_TEMP/clickhouse" && curl -fsSL https://clickhouse.com/ | sh)
+          PATH="$RUNNER_TEMP/clickhouse:$PATH" cargo test -p otto-usage --test e2e \
+            -- budget summary_and_report_query_budget idle_stop --nocapture
+
       - name: Install Node
         uses: actions/setup-node@v7.0.0
         with:
