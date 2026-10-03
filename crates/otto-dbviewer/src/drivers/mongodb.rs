@@ -58,7 +58,35 @@ pub struct MongoDriver {
     /// Per-connection completion cache: the collection list (cheap) plus each
     /// collection's sampled+indexed field paths (lazy, sampled only in context).
     completions: crate::complete::CompletionCache,
+    /// ONE shared, single-flight collection sample per `(cache_key, db, coll)`:
+    /// tree expand, the structure tab and field completion all derive from it
+    /// instead of each pulling its own ~2 MB `$sample` (DB-05).
+    samples:
+        crate::complete::SingleFlight<SampleKey, std::result::Result<CollectionSample, String>>,
 }
+
+/// Key of a shared collection sample: `(cache_key, db, collection)`.
+type SampleKey = (String, String, String);
+
+/// What one byte-bounded `$sample` pass yields — every consumer's view of a
+/// collection's shape derives from this.
+#[derive(Debug, Default, Clone)]
+struct CollectionSample {
+    /// Top-level keys with their first-seen BSON type (`_id` first) — over EVERY
+    /// sampled document, so a key absent from the first few still shows.
+    top_level: Vec<(String, String)>,
+    /// Dotted field paths (depth/count-bounded) with types, `_id` first.
+    paths: Vec<(String, String)>,
+    /// One representative document (the structure tab's "sample").
+    first_doc: Option<Document>,
+}
+
+/// How long a shared sample is reused. "Refresh schema" clears it at once;
+/// this only bounds staleness for a collection whose shape is changing.
+const SAMPLE_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+/// A failed sample is remembered briefly so a burst of keystrokes / expands
+/// against a sick collection doesn't each wait out the error again.
+const SAMPLE_ERROR_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[async_trait]
 impl Driver for MongoDriver {
@@ -165,9 +193,13 @@ impl Driver for MongoDriver {
         match parent.get("coll") {
             // Collection node → sampled top-level fields (filtered by name when set).
             Some(coll_name) => {
-                let coll: Collection<Document> = db.collection(coll_name);
-                let size = adaptive_sample_size(&db, coll_name).await;
-                let fields = sample_field_types(&coll, size).await?;
+                let sample = self
+                    .collection_sample(&cfg.cache_key(), &db, db_name, coll_name, None)
+                    .await;
+                let fields = match &*sample {
+                    Ok(s) => s.top_level.clone(),
+                    Err(e) => return Err(types::upstream(e.clone())),
+                };
                 let filter_lower = filter.map(|f| f.to_lowercase());
                 Ok(fields
                     .into_iter()
@@ -310,19 +342,23 @@ impl Driver for MongoDriver {
             .get("coll")
             .ok_or_else(|| types::invalid("object_detail expects a collection node"))?;
         let db = client.database(db_name);
-        let coll: Collection<Document> = db.collection(coll_name);
 
         let mut detail = ObjectDetail::new(coll_name.to_string(), NodeKind::Collection);
+        // DB-08: the three independent catalog reads (listIndexes, collStats,
+        // the validator via listCollections) go out together — one RTT instead
+        // of three; only the sample has to wait (it is sized by avgObjSize).
+        let (indexes_reply, stats_reply, validator) = tokio::join!(
+            db.run_command(doc! { "listIndexes": coll_name, "cursor": { "batchSize": 1000 } }),
+            db.run_command(doc! { "collStats": coll_name, "scale": 1 }),
+            collection_validator(&db, coll_name),
+        );
         // row_count is filled below from collStats (an exact, cheap count in
         // Mongo — unlike SQL's opt-in estimates).
 
         // Indexes: raw `listIndexes` documents so the full server definition
         // (partialFilterExpression, collation, expireAfterSeconds…) survives —
         // the typed IndexModel round-trip drops anything it doesn't model.
-        if let Ok(reply) = db
-            .run_command(doc! { "listIndexes": coll_name, "cursor": { "batchSize": 1000 } })
-            .await
-        {
+        if let Ok(reply) = indexes_reply {
             let batch = reply
                 .get_document("cursor")
                 .ok()
@@ -355,10 +391,7 @@ impl Driver for MongoDriver {
         // Collection stats FIRST: `avgObjSize` is what sizes the structure sample
         // below, so it has to be known before we sample.
         let mut avg_obj_size: Option<i64> = None;
-        if let Ok(stats) = db
-            .run_command(doc! { "collStats": coll_name, "scale": 1 })
-            .await
-        {
+        if let Ok(stats) = stats_reply {
             let mut s = Map::new();
             for k in [
                 "count",
@@ -393,15 +426,21 @@ impl Driver for MongoDriver {
 
         // ONE byte-bounded sample serves all three things we used to fetch
         // separately (top-level types, nested paths, the sample document).
-        let (paths, sample) = sample_structure(&coll, structure_sample_size(avg_obj_size))
-            .await
-            .unwrap_or_default();
-        // Top-level fields are exactly the dot-free paths — no second pass needed.
-        let field_types: Vec<(String, String)> = paths
-            .iter()
-            .filter(|(p, _)| !p.contains('.'))
-            .cloned()
-            .collect();
+        // Shared with tree expand + field completion (single-flight, cached).
+        let shared = self
+            .collection_sample(
+                &cfg.cache_key(),
+                &db,
+                db_name,
+                coll_name,
+                Some(avg_obj_size),
+            )
+            .await;
+        let CollectionSample {
+            top_level: field_types,
+            paths,
+            first_doc: sample,
+        } = shared.as_ref().clone().unwrap_or_default();
         extra.insert(
             "sampled_fields".into(),
             Value::Object(
@@ -437,7 +476,7 @@ impl Driver for MongoDriver {
             extra.insert("sample".into(), bson_to_json(&Bson::Document(s)));
         }
         // Validator (best-effort) from listCollections options.
-        if let Some(validator) = collection_validator(&db, coll_name).await {
+        if let Some(validator) = validator {
             extra.insert("validator".into(), bson_to_json(&validator));
         }
         // (collStats was already fetched above — `avgObjSize` had to be known
@@ -554,7 +593,9 @@ impl Driver for MongoDriver {
     }
 
     async fn invalidate_completion_cache(&self, cfg: &ResolvedConfig) {
-        self.completions.invalidate(&cfg.cache_key());
+        let cache_key = cfg.cache_key();
+        self.completions.invalidate(&cache_key);
+        self.samples.invalidate_where(|(k, _, _)| *k == cache_key);
     }
 
     /// Enforced-path assembly over a service-built snapshot: the same SQL-dialect
@@ -607,6 +648,7 @@ impl Driver for MongoDriver {
             captured.clients.insert_ready(key, value);
         }
         self.completions.invalidate(cache_key);
+        self.samples.invalidate_where(|(k, _, _)| k == cache_key);
         Some(std::sync::Arc::new(captured))
     }
 
@@ -616,6 +658,18 @@ impl Driver for MongoDriver {
             client.shutdown().await;
         }
         self.completions.invalidate(cache_key);
+        self.samples.invalidate_where(|(k, _, _)| k == cache_key);
+    }
+
+    /// Drop clients unused for `idle` (DB-09). Only the cache's reference is
+    /// dropped — no explicit `shutdown()` — so a query still running on its own
+    /// clone finishes; the client's monitors stop with the last clone.
+    async fn evict_idle(&self, idle: std::time::Duration) -> usize {
+        let evicted = self.clients.take_idle(idle);
+        for (key, _) in &evicted {
+            self.samples.invalidate_where(|(k, _, _)| k == key);
+        }
+        evicted.len()
     }
 
     /// Structured query plan via the server `explain` command (queryPlanner
@@ -951,8 +1005,12 @@ impl MongoDriver {
                 Ok(r)
             }
             MongoOp::Aggregate => {
-                let pipeline = parsed.pipeline.unwrap_or_default();
+                // Bound the result on the SERVER (DB-07): a trailing `$limit` of
+                // the +1 probe and a matching first batch, so a huge aggregate
+                // doesn't stream batches we'd only discard.
+                let pipeline = bound_pipeline(parsed.pipeline.unwrap_or_default(), max_rows);
                 let mut agg_opts = mongodb::options::AggregateOptions::default();
+                agg_opts.batch_size = Some(agg_batch_size(max_rows));
                 if let Some(ms) = max_time_ms {
                     agg_opts.max_time = Some(std::time::Duration::from_millis(ms as u64));
                 }
@@ -1292,14 +1350,28 @@ impl MongoDriver {
         db: &str,
         coll: &str,
     ) -> std::sync::Arc<Vec<crate::complete::FieldSnap>> {
+        let cache_key = cfg.cache_key();
+        // Single-flight: concurrent keystrokes against a cold collection share
+        // ONE build (index list + shared sample) instead of each sampling.
+        self.completions
+            .fields_or_build(&cache_key, db, coll, || {
+                self.build_completion_fields(cfg, &cache_key, db, coll)
+            })
+            .await
+    }
+
+    /// The uncached body of [`Self::completion_fields`].
+    async fn build_completion_fields(
+        &self,
+        cfg: &ResolvedConfig,
+        cache_key: &str,
+        db: &str,
+        coll: &str,
+    ) -> Vec<crate::complete::FieldSnap> {
         use crate::complete::{rank_strength, FieldSnap, Rank};
 
-        let cache_key = cfg.cache_key();
-        if let Some(f) = self.completions.get_fields(&cache_key, db, coll) {
-            return f;
-        }
         let Ok(client) = self.connect(cfg).await else {
-            return std::sync::Arc::new(Vec::new());
+            return Vec::new();
         };
         let collection: Collection<Document> = client.database(db).collection(coll);
 
@@ -1349,11 +1421,13 @@ impl MongoDriver {
 
         // Then sampled field paths (nested, depth-bounded); plain unless indexed.
         let mut types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let sample_size = adaptive_sample_size(&client.database(db), coll).await;
-        if let Ok(sampled) = sample_field_paths(&collection, sample_size).await {
-            for (path, ty) in sampled {
-                types.entry(path.clone()).or_insert(ty);
-                add(path, Rank::Plain);
+        let sample = self
+            .collection_sample(cache_key, &client.database(db), db, coll, None)
+            .await;
+        if let Ok(sampled) = sample.as_ref() {
+            for (path, ty) in &sampled.paths {
+                types.entry(path.clone()).or_insert(ty.clone());
+                add(path.clone(), Rank::Plain);
             }
         }
 
@@ -1365,8 +1439,38 @@ impl MongoDriver {
                 FieldSnap::new(path, ty, r)
             })
             .collect();
+        fields
+    }
 
-        self.completions.put_fields(&cache_key, db, coll, fields)
+    /// The shared, single-flight sample of one collection. `avg_obj_size` is
+    /// `Some(..)` when the caller already ran `collStats` (the structure tab),
+    /// saving the extra round trip that sizes the sample; `None` asks for it.
+    async fn collection_sample(
+        &self,
+        cache_key: &str,
+        db: &mongodb::Database,
+        db_name: &str,
+        coll_name: &str,
+        avg_obj_size: Option<Option<i64>>,
+    ) -> std::sync::Arc<std::result::Result<CollectionSample, String>> {
+        let key = (
+            cache_key.to_string(),
+            db_name.to_string(),
+            coll_name.to_string(),
+        );
+        self.samples
+            .get_or_build(key, || async move {
+                let size = match avg_obj_size {
+                    Some(avg) => structure_sample_size(avg),
+                    None => adaptive_sample_size(db, coll_name).await,
+                };
+                let coll: Collection<Document> = db.collection(coll_name);
+                match sample_collection(&coll, size).await {
+                    Ok(sample) => (Ok(sample), SAMPLE_TTL),
+                    Err(e) => (Err(e.to_string()), SAMPLE_ERROR_TTL),
+                }
+            })
+            .await
     }
 
     /// Get (or lazily build + cache) the `Client` for `cfg`, keyed by
@@ -1413,6 +1517,7 @@ impl MongoDriver {
         // the proxy, preserving the real SNI so Atlas's load balancer routes the
         // TLS handshake. It also fixes plain replica sets, whose SDAM would
         // otherwise dial member hostnames directly and bypass a local forward.
+        let tunnelled = cfg.params.get("__socks_port").is_some();
         if let Some(port) = cfg.params.get("__socks_port").and_then(Value::as_u64) {
             opts.socks5_proxy = Some(
                 Socks5Proxy::builder()
@@ -1443,6 +1548,7 @@ impl MongoDriver {
                 Compressor::Zlib { level: None },
             ]);
         }
+        apply_default_timeouts(&mut opts, tunnelled);
 
         Ok(opts)
     }
@@ -2891,110 +2997,119 @@ async fn adaptive_sample_size(db: &mongodb::Database, coll_name: &str) -> i64 {
     structure_sample_size(avg)
 }
 
-/// Sample up to `sample_size` docs and infer a type per top-level key. The
-/// first observed type wins; `_id` is always reported first.
-async fn sample_field_types(
+/// ONE byte-bounded `$sample` pass yielding every shape view the explorer
+/// needs: top-level key types (over every sampled document), the dotted field
+/// paths (depth/count-bounded) and a representative document. Shared through
+/// [`MongoDriver::collection_sample`] by the tree, structure tab and completion.
+async fn sample_collection(
     coll: &Collection<Document>,
     sample_size: i64,
-) -> Result<Vec<(String, String)>> {
+) -> Result<CollectionSample> {
     let pipeline = vec![doc! { "$sample": { "size": sample_size } }];
     let mut cursor = coll.aggregate(pipeline).await.map_err(types::upstream)?;
-    let mut order: Vec<String> = Vec::new();
-    let mut types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut acc = SampleAccumulator::default();
     while let Some(next) = cursor.next().await {
         let doc = match next {
             Ok(d) => d,
             Err(_) => continue,
         };
-        for (key, value) in doc.iter() {
-            if !types.contains_key(key) {
-                order.push(key.clone());
-                types.insert(key.clone(), bson_type_name(value).to_string());
-            }
-        }
+        acc.add(doc);
     }
-    // `_id` first, then insertion order.
-    order.sort_by_key(|k| if k == "_id" { 0 } else { 1 });
-    Ok(order
-        .into_iter()
-        .map(|k| {
-            let ty = types.get(&k).cloned().unwrap_or_default();
-            (k, ty)
-        })
-        .collect())
+    Ok(acc.finish())
 }
 
-/// ONE sample pass yielding everything the structure tab needs: the dotted field
-/// paths (top-level ones are simply the dot-free entries) and a representative
-/// document. Replaces the old three separate fetches of the same collection.
-async fn sample_structure(
-    coll: &Collection<Document>,
-    sample_size: i64,
-) -> Result<(Vec<(String, String)>, Option<Document>)> {
-    let pipeline = vec![doc! { "$sample": { "size": sample_size } }];
-    let mut cursor = coll.aggregate(pipeline).await.map_err(types::upstream)?;
-    let mut order: Vec<String> = Vec::new();
-    let mut types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut first: Option<Document> = None;
-    while let Some(next) = cursor.next().await {
-        let doc = match next {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        walk_field_paths(&doc, "", 0, &mut order, &mut types);
-        if first.is_none() {
-            first = Some(doc);
+/// Folds sampled documents into a [`CollectionSample`] (pure — unit-tested).
+#[derive(Default)]
+struct SampleAccumulator {
+    top_order: Vec<String>,
+    top_types: std::collections::HashMap<String, String>,
+    path_order: Vec<String>,
+    path_types: std::collections::HashMap<String, String>,
+    first: Option<Document>,
+}
+
+impl SampleAccumulator {
+    fn add(&mut self, doc: Document) {
+        for (key, value) in doc.iter() {
+            if !self.top_types.contains_key(key) {
+                self.top_order.push(key.clone());
+                self.top_types
+                    .insert(key.clone(), bson_type_name(value).to_string());
+            }
         }
-        if order.len() >= MAX_FIELD_PATHS {
-            break;
+        walk_field_paths(&doc, "", 0, &mut self.path_order, &mut self.path_types);
+        if self.first.is_none() {
+            self.first = Some(doc);
         }
     }
-    order.sort_by_key(|k| if k == "_id" { 0 } else { 1 });
-    let paths = order
-        .into_iter()
-        .map(|k| {
-            let ty = types.get(&k).cloned().unwrap_or_default();
-            (k, ty)
-        })
-        .collect();
-    Ok((paths, first))
+
+    fn finish(self) -> CollectionSample {
+        fn ordered(
+            mut order: Vec<String>,
+            types: std::collections::HashMap<String, String>,
+        ) -> Vec<(String, String)> {
+            // `_id` first, then insertion order (stable sort).
+            order.sort_by_key(|k| if k == "_id" { 0 } else { 1 });
+            order
+                .into_iter()
+                .map(|k| {
+                    let ty = types.get(&k).cloned().unwrap_or_default();
+                    (k, ty)
+                })
+                .collect()
+        }
+        CollectionSample {
+            top_level: ordered(self.top_order, self.top_types),
+            paths: ordered(self.path_order, self.path_types),
+            first_doc: self.first,
+        }
+    }
+}
+
+/// Fill in connect/selection/idle bounds the URI didn't set (DB-09). The
+/// driver defaults are 30 s selection with no connect bound, so an unreachable
+/// host sat silent for half a minute; idle pooled sockets were kept forever. A
+/// SOCKS-tunnelled link (TCP-over-SSH, SRV + TLS through a bastion) gets more
+/// headroom than a direct one.
+fn apply_default_timeouts(opts: &mut ClientOptions, tunnelled: bool) {
+    let bound = std::time::Duration::from_secs(if tunnelled { 15 } else { 8 });
+    if opts.server_selection_timeout.is_none() {
+        opts.server_selection_timeout = Some(bound);
+    }
+    if opts.connect_timeout.is_none() {
+        opts.connect_timeout = Some(bound);
+    }
+    if opts.max_idle_time.is_none() {
+        opts.max_idle_time = Some(std::time::Duration::from_secs(5 * 60));
+    }
+}
+
+/// Append `{$limit: max_rows+1}` (the truncation probe) to a run-path
+/// aggregate so the server stops producing rows we'd discard — unless the
+/// pipeline ends in a write stage (`$out`/`$merge` must stay last, and they
+/// return no rows anyway).
+fn bound_pipeline(mut pipeline: Vec<Document>, max_rows: usize) -> Vec<Document> {
+    let ends_in_write = pipeline
+        .last()
+        .and_then(|stage| stage.keys().next())
+        .is_some_and(|k| k == "$out" || k == "$merge");
+    if !ends_in_write {
+        let probe = i64::try_from(max_rows.saturating_add(1)).unwrap_or(i64::MAX);
+        pipeline.push(doc! { "$limit": probe });
+    }
+    pipeline
+}
+
+/// Cursor batch size for a run-path aggregate: the whole capped page in one
+/// batch (the +1 probe included), clamped to what the server accepts.
+fn agg_batch_size(max_rows: usize) -> u32 {
+    u32::try_from(max_rows.saturating_add(1)).unwrap_or(u32::MAX)
 }
 
 /// Max nesting depth for sampled embedded field paths (`a.b.c` is depth 3).
 const MAX_FIELD_DEPTH: usize = 3;
 /// Cap on total sampled paths so a wide/deep collection can't bloat completion.
 const MAX_FIELD_PATHS: usize = 400;
-
-/// Sample docs and infer dotted field PATHS (incl. embedded `addr.city` and the
-/// first element of document-arrays), depth- and count-bounded. Backs Mongo
-/// field completion's "indexes first, then sampled fields" with embedded support.
-async fn sample_field_paths(
-    coll: &Collection<Document>,
-    sample_size: i64,
-) -> Result<Vec<(String, String)>> {
-    let pipeline = vec![doc! { "$sample": { "size": sample_size } }];
-    let mut cursor = coll.aggregate(pipeline).await.map_err(types::upstream)?;
-    let mut order: Vec<String> = Vec::new();
-    let mut types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    while let Some(next) = cursor.next().await {
-        let doc = match next {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        walk_field_paths(&doc, "", 0, &mut order, &mut types);
-        if order.len() >= MAX_FIELD_PATHS {
-            break;
-        }
-    }
-    order.sort_by_key(|k| if k == "_id" { 0 } else { 1 });
-    Ok(order
-        .into_iter()
-        .map(|k| {
-            let ty = types.get(&k).cloned().unwrap_or_default();
-            (k, ty)
-        })
-        .collect())
-}
 
 /// Recursively record `prefix.key` paths and their BSON type names.
 fn walk_field_paths(
@@ -3032,7 +3147,7 @@ fn walk_field_paths(
 }
 
 // NOTE: the former `first_document` (a separate `find().limit(1)` purely to
-// populate `extra.sample`) is gone — `sample_structure` keeps the first document
+// populate `extra.sample`) is gone — `sample_collection` keeps the first document
 // of the sample it already pulled, so the structure tab makes one fewer
 // round trip and, on a fat collection, transfers one fewer ~370KB document.
 
@@ -3243,6 +3358,14 @@ async fn collect_docs(
     Ok(result)
 }
 
+/// Most distinct top-level keys shown as their own grid columns; the rest of a
+/// document's keys go into [`SPILL_COLUMN`] as one JSON object.
+const MAX_DOC_COLUMNS: usize = 500;
+/// The overflow column for keys beyond [`MAX_DOC_COLUMNS`]. `$`-prefixed so it
+/// can never collide with a real field and a stray `$set` of it is refused by
+/// the server instead of writing junk.
+const SPILL_COLUMN: &str = "$other";
+
 /// Documents with at least this many top-level cells in total are converted to
 /// JSON on the blocking pool (see [`collect_docs`]).
 const OFF_RUNTIME_CELLS: usize = 16 * 1024;
@@ -3279,18 +3402,30 @@ fn docs_to_result(docs: Vec<Document>, truncated: bool, started: Instant) -> Que
         columns.push("_id".into());
         seen.insert("_id".into());
     }
-    for doc in &docs {
+    // Sparse/heterogeneous documents can union to thousands of keys, and every
+    // row then carries a Null cell per key (rows × columns). Cap the union and
+    // spill the rest of each document's keys into one JSON column.
+    let mut spilled = false;
+    'union: for doc in &docs {
         for key in doc.keys() {
-            if seen.insert(key.clone()) {
-                columns.push(key.clone());
+            if seen.contains(key) {
+                continue;
             }
+            if columns.len() >= MAX_DOC_COLUMNS {
+                spilled = true;
+                break 'union;
+            }
+            seen.insert(key.clone());
+            columns.push(key.clone());
         }
     }
+    // Spill detection must see every doc (the loop above stops at the cap).
+    let spilled = spilled || docs.iter().any(|d| d.keys().any(|k| !seen.contains(k)));
 
     let rows: Vec<Vec<Value>> = docs
         .iter()
         .map(|doc| {
-            columns
+            let mut row: Vec<Value> = columns
                 .iter()
                 .map(|col| {
                     // Cap oversized cells like every other engine — a single
@@ -3299,9 +3434,25 @@ fn docs_to_result(docs: Vec<Document>, truncated: bool, started: Instant) -> Que
                         .map(|b| types::cap_cell(bson_to_json_typed(b)))
                         .unwrap_or(Value::Null)
                 })
-                .collect()
+                .collect();
+            if spilled {
+                let rest: Map<String, Value> = doc
+                    .iter()
+                    .filter(|(k, _)| !seen.contains(k.as_str()))
+                    .map(|(k, v)| (k.clone(), bson_to_json_typed(v)))
+                    .collect();
+                row.push(if rest.is_empty() {
+                    Value::Null
+                } else {
+                    types::cap_cell(Value::Object(rest))
+                });
+            }
+            row
         })
         .collect();
+    if spilled {
+        columns.push(SPILL_COLUMN.to_string());
+    }
 
     let row_count = rows.len();
     QueryResult {
@@ -4697,5 +4848,114 @@ mod sql_e2e {
         let r = run_sql(&d, r#"db.players.find({"country": "US"}).explain()"#).await;
         assert_eq!(r.rows.len(), 1);
         assert!(r.columns.iter().any(|c| c.name == "queryPlan"));
+    }
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+
+    #[test]
+    fn bound_pipeline_appends_the_probe_limit_but_never_after_a_write_stage() {
+        let p = bound_pipeline(vec![doc! { "$match": { "a": 1 } }], 50);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[1], doc! { "$limit": 51_i64 });
+        // Empty pipeline still gets bounded.
+        assert_eq!(
+            bound_pipeline(Vec::new(), 0),
+            vec![doc! { "$limit": 1_i64 }]
+        );
+        for stage in ["$out", "$merge"] {
+            let mut last = Document::new();
+            last.insert(stage, "target");
+            let p = bound_pipeline(vec![doc! { "$match": {} }, last.clone()], 50);
+            assert_eq!(p.len(), 2, "{stage} must stay the last stage");
+            assert_eq!(p[1], last);
+        }
+        assert_eq!(agg_batch_size(50), 51);
+        assert_eq!(agg_batch_size(usize::MAX), u32::MAX);
+    }
+
+    #[tokio::test]
+    async fn default_timeouts_fill_only_what_the_uri_left_unset() {
+        let mut opts = ClientOptions::default();
+        apply_default_timeouts(&mut opts, false);
+        assert_eq!(
+            opts.server_selection_timeout,
+            Some(std::time::Duration::from_secs(8))
+        );
+        assert_eq!(
+            opts.connect_timeout,
+            Some(std::time::Duration::from_secs(8))
+        );
+        assert_eq!(
+            opts.max_idle_time,
+            Some(std::time::Duration::from_secs(300))
+        );
+
+        let mut opts = ClientOptions::parse(
+            "mongodb://localhost:27017/?serverSelectionTimeoutMS=1234&connectTimeoutMS=99",
+        )
+        .await
+        .unwrap();
+        apply_default_timeouts(&mut opts, true);
+        assert_eq!(
+            opts.server_selection_timeout,
+            Some(std::time::Duration::from_millis(1234))
+        );
+        assert_eq!(
+            opts.connect_timeout,
+            Some(std::time::Duration::from_millis(99))
+        );
+    }
+
+    #[test]
+    fn one_sample_pass_feeds_tree_structure_and_completion() {
+        let mut acc = SampleAccumulator::default();
+        acc.add(doc! { "name": "a", "_id": 1, "addr": { "city": "x" } });
+        acc.add(doc! { "_id": 2, "late": true });
+        let s = acc.finish();
+        // Top-level keys over EVERY doc, `_id` first.
+        let top: Vec<&str> = s.top_level.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(top, ["_id", "name", "addr", "late"]);
+        assert_eq!(s.top_level[2].1, "object");
+        // Nested paths for completion / the structure tab.
+        assert!(s
+            .paths
+            .iter()
+            .any(|(p, t)| p == "addr.city" && t == "string"));
+        assert_eq!(s.paths[0].0, "_id");
+        // The first document is kept for the structure tab's sample.
+        assert_eq!(s.first_doc.unwrap().get_str("name").unwrap(), "a");
+    }
+
+    #[test]
+    fn sparse_documents_spill_keys_past_the_column_cap() {
+        let docs: Vec<Document> = (0..(MAX_DOC_COLUMNS + 20))
+            .map(|i| {
+                let mut d = Document::new();
+                d.insert("_id", i as i64);
+                d.insert(format!("k{i}"), i as i64);
+                d
+            })
+            .collect();
+        let r = docs_to_result(docs, false, Instant::now());
+        assert_eq!(r.columns.len(), MAX_DOC_COLUMNS + 1);
+        assert_eq!(r.columns.last().unwrap().name, SPILL_COLUMN);
+        let last_row = r.rows.last().unwrap();
+        assert_eq!(last_row.len(), MAX_DOC_COLUMNS + 1);
+        let spill = last_row.last().unwrap();
+        assert!(spill.get(format!("k{}", MAX_DOC_COLUMNS + 19)).is_some());
+        // A row whose keys all fit has a null spill cell.
+        assert!(r.rows[0].last().unwrap().is_null());
+
+        // Under the cap nothing changes.
+        let r = docs_to_result(
+            vec![doc! { "_id": 1, "a": 1 }, doc! { "_id": 2, "b": 2 }],
+            false,
+            Instant::now(),
+        );
+        let names: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["_id", "a", "b"]);
     }
 }

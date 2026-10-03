@@ -1138,13 +1138,18 @@ diagram for the active connection, backed by `POST …/db/schema-graph`:
   lets you choose which tables to render; the canvas auto-lays-out the selected
   cards (default ~12 shown) with **PK/FK-marked columns** and **FK relationship
   edges** labeled `from.col → to.col`. Pan and zoom are supported.
-- The backend walks the **same lazy schema tree** the UI browses
-  (`schema_children` + `object_detail`), so the diagram is engine-agnostic and the
-  FK data flows through the normal introspection. It introspects each object's
-  detail in parallel (concurrency 8) and **caps** the number of tables: `max_tables`
-  defaults to **60** and is clamped to **1..200** server-side. When the schema has
-  more tables than the cap, the graph is flagged **truncated** so the UI can prompt
-  you to pick a subset.
+- **MySQL, PostgreSQL and ClickHouse** read the whole schema in a few
+  set-based catalog queries (`Driver::schema_graph_bulk`: tables, columns and
+  PK/FK constraints for the schema at once). Other engines — or a bulk read the
+  credentials can't run — fall back to walking the **same lazy schema tree** the
+  UI browses (`schema_children` + `object_detail`, concurrency 8). Either way the
+  number of tables is **capped**: `max_tables` defaults to **60** and is clamped
+  to **1..200** server-side. When the schema has more tables than the cap, the
+  graph is flagged **truncated** so the UI can prompt you to pick a subset.
+- The built graph is **cached for 120 s** per connection, credentials, schema and
+  cap, and concurrent requests (Diagram, DB Assistant schema, enforced
+  completion) share **one** build. Edges are still filtered by the caller's
+  access on every request. **Refresh schema** clears the cache.
 - **Redis** returns an empty graph (its tree has no `db:`-rooted tables) and gets
   **no Diagram tab**. **MongoDB** renders collection cards but **no edges** (no FK
   metadata) and shows a **"no relationships"** hint. Both report
@@ -1593,3 +1598,32 @@ Database driver and SSH tunnel setup use independent initialization slots per co
 Closing a connection retires the generation held by already-started requests, including requests still resolving credentials/tunnels or waiting for native verification. Such requests cannot reopen a pool after close. An explicit later request can reconnect once cleanup completes; requests arriving during close receive a connection-closed error with retry guidance.
 
 Close cleanup owns the retired pools and tunnel leases independently of the HTTP caller. It attempts native cancellation before physical teardown, with separate five-second aggregate budgets for cancellation and driver shutdown. Cleanup then drops only its captured ownership; canceling the close request cannot abandon those resources or cause later cleanup to remove a new generation. Already-issued remote operations retain best-effort cancellation semantics; close is not a remote transaction rollback guarantee. Held tunnel leases remain alive while their owning operation/cancellation finishes.
+
+### Performance behaviour
+
+- **Access checks.** A Run reads the connection row and its access policy once
+  and shares them across the access gate, write guard and credential
+  resolution. While the query runs, eligibility (revoked access, a switch to
+  enforced mode, changed credentials) is re-checked every **2 s** — two indexed
+  state reads per tick on a legacy connection. Tree roots, object search and
+  diagram edges authorize all their nodes with one load, so a server with
+  hundreds of databases no longer costs two state reads per database.
+- **Idle handles.** Every five minutes the reaper drops driver handles (MySQL /
+  Postgres pools, Mongo / Redis / ClickHouse clients) unused for **30 min**. A
+  query still running keeps its own handle until it finishes.
+- **Timeouts.** MySQL/Postgres pools wait at most 10 s for a free session and
+  then report "connection busy"; Stop cancels on a separate connection, so it
+  never queues behind the busy ones. MongoDB defaults server selection and
+  connect timeouts to 8 s (15 s through an SSH SOCKS tunnel) and closes sockets
+  idle for 5 min, unless the URI sets its own values. Redis connects within
+  10 s and waits up to **30 s** for a reply (long blocking commands such as
+  `BLPOP` with a longer timeout will time out).
+- **Server-side row limits.** MongoDB aggregates get `batchSize` and a trailing
+  `$limit` of row-limit + 1 (not after `$out`/`$merge`). Redis replies are cut
+  to the row limit before conversion and count against the 32 MB response
+  budget. MongoDB results show at most 500 field columns; any further fields
+  of a document are gathered in one JSON column named `$other`.
+- **Shared Mongo sample.** Tree expand, the Structure tab and field
+  completion share one sample per collection (120 s), built once even when many
+  requests arrive together.
+

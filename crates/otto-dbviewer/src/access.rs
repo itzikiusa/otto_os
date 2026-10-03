@@ -36,7 +36,28 @@ pub(crate) fn canonical_node(node: Option<&str>) -> Option<String> {
     Scope::parse(node).map(|s| s.to_node())
 }
 
+/// Per-thread count of state-DB reads made by the access/connection helpers.
+/// Test-only: it backs the "≤ N state reads per Run" budget tests that lock in
+/// the request-scoped [`crate::service`] access snapshot (perf DB-06/DB-10).
+#[cfg(test)]
+pub(crate) mod reads {
+    use std::cell::Cell;
+    thread_local!(static COUNT: Cell<u64> = const { Cell::new(0) });
+    pub(crate) fn bump() {
+        COUNT.with(|c| c.set(c.get() + 1));
+    }
+    pub(crate) fn take() -> u64 {
+        COUNT.with(|c| c.replace(0))
+    }
+}
+#[cfg(test)]
+pub(crate) use reads::bump as count_read;
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) fn count_read() {}
+
 pub(crate) async fn policy(pool: &DbPool, id: &Id) -> Result<AccessPolicy> {
+    count_read();
     otto_state::resource_access::ResourceAccessRepo::new(pool.clone())
         .get_policy(ResourceKind::Connection, id)
         .await
@@ -45,6 +66,7 @@ pub(crate) async fn policy(pool: &DbPool, id: &Id) -> Result<AccessPolicy> {
 /// Reload the effective user and membership for every action. The passed id is
 /// supplied by authenticated adapters, never accepted from a request body.
 pub(crate) async fn current_user(pool: &DbPool, conn: &Connection, id: &Id) -> Result<User> {
+    count_read();
     let user = UsersRepo::new(pool.clone()).get(id).await?;
     if user.disabled {
         return Err(Error::Forbidden("account disabled".into()));
@@ -76,21 +98,85 @@ pub(crate) async fn check(
     child: Option<&str>,
     operation: &str,
 ) -> Result<()> {
-    if policy(pool, &conn.id).await?.mode == AccessMode::Legacy {
+    let policy = policy(pool, &conn.id).await?;
+    check_with(pool, conn, &policy, user_id, child, operation).await
+}
+
+/// [`check`] against a policy the caller already loaded for this request (the
+/// request-scoped access snapshot) — no second policy read.
+pub(crate) async fn check_with(
+    pool: &DbPool,
+    conn: &Connection,
+    policy: &AccessPolicy,
+    user_id: &Id,
+    child: Option<&str>,
+    operation: &str,
+) -> Result<()> {
+    if policy.mode == AccessMode::Legacy {
         return Ok(());
     }
     let user = current_user(pool, conn, user_id).await?;
+    check_loaded_user(pool, conn, &user, child, operation).await
+}
+
+/// The enforced half of [`check_with`] for a user the caller JUST reloaded via
+/// [`current_user`] in the same request step (no second user/grant reload).
+async fn check_loaded_user(
+    pool: &DbPool,
+    conn: &Connection,
+    user: &User,
+    child: Option<&str>,
+    operation: &str,
+) -> Result<()> {
     let access = ResourceAccess::new(pool.clone());
     if !access
-        .evaluate(&user, &target(&conn.id, None), "discover")
+        .evaluate(user, &target(&conn.id, None), "discover")
         .await?
         .allowed
     {
         return Err(Error::NotFound("connection".into()));
     }
     access
-        .check(&user, &target(&conn.id, child), operation)
+        .check(user, &target(&conn.id, child), operation)
         .await
+}
+
+/// [`check_with`] for many children at once (tree roots, search hits, ERD edge
+/// targets): the user/membership reload and the connection-level `discover`
+/// evaluation run ONCE instead of once per child. Returns one allow flag per
+/// child; a caller-level failure (disabled account, no discover) denies all.
+pub(crate) async fn check_many(
+    pool: &DbPool,
+    conn: &Connection,
+    policy: &AccessPolicy,
+    user_id: &Id,
+    children: &[Option<String>],
+    operation: &str,
+) -> Result<Vec<bool>> {
+    if policy.mode == AccessMode::Legacy {
+        return Ok(vec![true; children.len()]);
+    }
+    let Ok(user) = current_user(pool, conn, user_id).await else {
+        return Ok(vec![false; children.len()]);
+    };
+    let access = ResourceAccess::new(pool.clone());
+    if !access
+        .evaluate(&user, &target(&conn.id, None), "discover")
+        .await?
+        .allowed
+    {
+        return Ok(vec![false; children.len()]);
+    }
+    let mut out = Vec::with_capacity(children.len());
+    for child in children {
+        out.push(
+            access
+                .check(&user, &target(&conn.id, child.as_deref()), operation)
+                .await
+                .is_ok(),
+        );
+    }
+    Ok(out)
 }
 
 /// Choose only credentials attached to matching Allow rules. Ambiguous profiles
@@ -103,11 +189,23 @@ pub(crate) async fn credential_profile(
     operation: &str,
 ) -> Result<(Id, Option<String>)> {
     let policy = policy(pool, &conn.id).await?;
+    credential_profile_with(pool, conn, &policy, user_id, child, operation).await
+}
+
+/// [`credential_profile`] against an already-loaded policy.
+pub(crate) async fn credential_profile_with(
+    pool: &DbPool,
+    conn: &Connection,
+    policy: &AccessPolicy,
+    user_id: &Id,
+    child: Option<&str>,
+    operation: &str,
+) -> Result<(Id, Option<String>)> {
     if policy.mode == AccessMode::Legacy {
         return Ok((conn.id.clone(), None));
     }
     let user = current_user(pool, conn, user_id).await?;
-    check(pool, conn, user_id, child, operation).await?;
+    check_loaded_user(pool, conn, &user, child, operation).await?;
     let decision = ResourceAccess::new(pool.clone())
         .evaluate(&user, &target(&conn.id, child), operation)
         .await?;
