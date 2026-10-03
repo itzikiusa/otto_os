@@ -6686,7 +6686,7 @@ mod tests {
         // Ungranted: no otto_ui_* tool, exactly one request stub. Then the stub
         // is called (the mock "human" allows), which must emit list_changed,
         // and the next tools/list carries the UI tools.
-        let replies = drive(ctx_at(&base), &[list.clone()], 1).await;
+        let replies = drive(ctx_at(&base), std::slice::from_ref(&list), 1).await;
         let names = |r: &Value| -> Vec<String> {
             r["result"]["tools"]
                 .as_array()
