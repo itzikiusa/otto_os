@@ -148,6 +148,18 @@ jobs:
       - name: cargo nextest (ignored scale gates)
         run: cargo nextest run --workspace --profile ci --run-ignored only -E 'test(/_at_50k_revisions_/)'
 
+      # Daemon-side terminal budgets (perf 01 F7/N4): snapshot capture /
+      # format / reflow / feed throughput, release profile, ×3 for shared
+      # runners, best-of-N rounds. BLOCKING — unlike the advisory perf-gates
+      # job, this is pure CPU work with no browser, daemon or network, so a
+      # failure is a real regression. (The scrollback memory assertion,
+      # `short_lines_at_wide_grid_keep_a_small_scrollback`, runs in nextest.)
+      - name: Terminal emulator budgets (otto-pty, release)
+        env:
+          OTTO_PERF: '1'
+          OTTO_PERF_BUDGET_SCALE: '3'
+        run: cargo test -p otto-pty --release --lib perf_budgets -- --nocapture
+
       # nextest does not execute doctests, so retain Cargo's separate gate.
       - name: cargo test (doctests)
         run: cargo test --workspace --doc
@@ -239,14 +251,6 @@ jobs:
 
       - name: Build the test daemon
         run: cargo build -p ottod
-
-      # Daemon-side terminal budgets (snapshot capture / format / reflow /
-      # feed throughput), release profile, same scale as the Playwright set.
-      - name: Terminal emulator budgets (otto-pty, release)
-        env:
-          OTTO_PERF: '1'
-          OTTO_PERF_BUDGET_SCALE: '3'
-        run: cargo test -p otto-pty --release --lib perf_budgets -- --nocapture
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0

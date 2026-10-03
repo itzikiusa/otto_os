@@ -1707,7 +1707,10 @@ mod tests {
 
     /// Daemon-side terminal budgets (perf 01 F7). Gated: `OTTO_PERF=1`
     /// (run with `--release` for the real budgets; debug builds get ×10).
-    /// CI: the perf-gates job runs it in release with a ×3 scale.
+    /// CI: the BLOCKING Rust job runs it in release with a ×3 scale (perf 01
+    /// N4). Every timing is the best of several rounds, so one scheduler
+    /// hiccup on a shared runner cannot fail a PR — a real regression moves
+    /// every round.
     /// Full 4000 × 200 history of attribute-dense TUI rows:
     /// - capture (the parser-lock hold of every snapshot) < 2 ms,
     /// - format (off the lock, blocking pool) < 40 ms,
@@ -1735,18 +1738,26 @@ mod tests {
         for i in 0..(EMULATOR_SCROLLBACK_LINES + 100) {
             parser.process(format!("{i:05} {row}\x1b[0m\r\n").as_bytes());
         }
-        let screen = parser.screen();
-        let t = Instant::now();
-        let capture = ScreenCapture {
-            screen: screen.clone(),
-        };
-        let capture_cost = t.elapsed();
-        let t = Instant::now();
-        let bytes = capture.format(EMULATOR_SCROLLBACK_LINES);
-        let format_cost = t.elapsed();
-        let t = Instant::now();
-        parser.screen_mut().set_size(50, 150);
-        let reflow_cost = t.elapsed();
+        const ROUNDS: usize = 5;
+        let (mut capture_cost, mut format_cost, mut reflow_cost) =
+            (Duration::MAX, Duration::MAX, Duration::MAX);
+        let mut bytes = Vec::new();
+        for round in 0..ROUNDS {
+            let t = Instant::now();
+            let capture = ScreenCapture {
+                screen: parser.screen().clone(),
+            };
+            capture_cost = capture_cost.min(t.elapsed());
+            let t = Instant::now();
+            bytes = capture.format(EMULATOR_SCROLLBACK_LINES);
+            format_cost = format_cost.min(t.elapsed());
+            drop(capture);
+            // Alternate narrow / wide: every round reflows the whole history.
+            let cols = if round % 2 == 0 { 150 } else { 200 };
+            let t = Instant::now();
+            parser.screen_mut().set_size(50, cols);
+            reflow_cost = reflow_cost.min(t.elapsed());
+        }
 
         let m = Mirror::new(200, 50, RingBuffer::default());
         let mut subs: Vec<_> = (0..3).map(|_| m.tx.subscribe()).collect();
@@ -1778,12 +1789,15 @@ mod tests {
                 }
             })
             .collect();
-        let total = 64 * 1024 * 1024;
-        let t = Instant::now();
-        for _ in 0..(total / chunk.len()) {
-            m.feed(&chunk);
+        let total = 32 * 1024 * 1024;
+        let mut feed_cost = Duration::MAX;
+        for _ in 0..3 {
+            let t = Instant::now();
+            for _ in 0..(total / chunk.len()) {
+                m.feed(&chunk);
+            }
+            feed_cost = feed_cost.min(t.elapsed());
         }
-        let feed_cost = t.elapsed();
         stop.store(true, Ordering::Relaxed);
         for d in drains {
             d.join().unwrap();
