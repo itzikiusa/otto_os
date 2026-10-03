@@ -50,12 +50,23 @@ test('bounded work: a 50 KB document previews far faster than it serializes', ()
   // Warm both paths, then compare 40 cells' worth of work.
   previewJson({ warm: 1 }, 64);
   JSON.stringify(docs[0]);
-  let t = performance.now();
-  for (const doc of docs) previewJson(doc, CELL_MAX - 1); // uncached max
-  const bounded = performance.now() - t;
-  t = performance.now();
-  for (const doc of docs) JSON.stringify(doc);
-  const full = performance.now() - t;
+  // Best of 7 rounds each: a single ~1 ms sample loses to scheduler noise when
+  // the suite runs in parallel on a loaded machine.
+  const best = (fn: () => void): number => {
+    let min = Infinity;
+    for (let r = 0; r < 7; r++) {
+      const t = performance.now();
+      fn();
+      min = Math.min(min, performance.now() - t);
+    }
+    return min;
+  };
+  const bounded = best(() => {
+    for (const doc of docs) previewJson(doc, CELL_MAX - 1); // uncached max
+  });
+  const full = best(() => {
+    for (const doc of docs) JSON.stringify(doc);
+  });
   assert.ok(bounded < full, `bounded ${bounded.toFixed(2)} ms vs full ${full.toFixed(2)} ms`);
 });
 
