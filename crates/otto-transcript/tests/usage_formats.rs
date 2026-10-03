@@ -52,7 +52,15 @@ fn seen_keys_loads_the_frozen_format() {
     let raw: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.path().join("seen.json")).unwrap())
             .unwrap();
-    assert_eq!(raw, serde_json::json!(["a:b"]));
+    // Same JSON-array-of-strings shape; entries are now xxh3-128 hex hashes
+    // (raw keys like the fixture above still load and dedup).
+    assert_eq!(
+        raw,
+        serde_json::json!([format!(
+            "{:032x}",
+            otto_transcript::usage::seen_key_hash("a:b")
+        )])
+    );
 }
 
 #[test]

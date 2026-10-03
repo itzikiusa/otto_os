@@ -29,6 +29,12 @@ use crate::types::{
 /// keeps parts few; the live dashboard lags by up to this much. Shutdown still
 /// flushes when the channel closes.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How long a `session_totals` rollup is reused (see `totals_cache`). Shorter
+/// than the writer's flush interval, so it never hides a flush for long.
+const SESSION_TOTALS_TTL: Duration = Duration::from_secs(5);
+
+type SessionTotalsMemo = ((u32, bool), std::time::Instant, Vec<SessionTotals>);
 /// …or sooner once this many events are buffered.
 const FLUSH_BATCH: usize = 200;
 /// Default cap on the session leaderboard.
@@ -66,6 +72,10 @@ pub struct UsageEngine {
     heal: Arc<AtomicBool>,
     /// Last measured ClickHouse on-disk size + when (see [`DISK_SIZE_TTL`]).
     disk_cache: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
+    /// Last `session_totals(days, otto_only)` result for SESSION_TOTALS_TTL:
+    /// one Usage page open runs it for the summary's feature breakdown and
+    /// again for budgets a few ms later — the same full scan twice.
+    totals_cache: std::sync::Mutex<Option<SessionTotalsMemo>>,
 }
 
 /// Which sessions a read covers: every recorded session (root), or only the
@@ -113,6 +123,7 @@ impl UsageEngine {
             reinit_lock: tokio::sync::Mutex::new(()),
             heal: Arc::new(AtomicBool::new(false)),
             disk_cache: std::sync::Mutex::new(None),
+            totals_cache: std::sync::Mutex::new(None),
         });
         let bg = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -180,6 +191,12 @@ impl UsageEngine {
                                 if let Err(e) = ensure_ttl(&ch, config.retention_days).await {
                                     tracing::warn!("usage: modify ttl failed (non-fatal): {e}");
                                 }
+                                // One-time: tables created before the DDL had
+                                // PARTITION BY are rebuilt partitioned — BEFORE
+                                // the writer starts and before `available()`, so
+                                // nothing inserts mid-copy and the tailer's
+                                // rebuild purge only touches affected months.
+                                ensure_partitioned(&ch, config.retention_days).await;
                                 if let Err(e) = ch.exec(schema::parts_lifetime_sql()).await {
                                     tracing::warn!(
                                         "usage: old_parts_lifetime setting failed (non-fatal): {e}"
@@ -550,6 +567,22 @@ impl UsageEngine {
     /// unenriched. The server classifies these into per-feature buckets for the
     /// by-kind rollup (see [`Self::feature_usage`]).
     pub async fn session_totals(&self, days: u32, otto_only: bool) -> Result<Vec<SessionTotals>> {
+        if let Some((key, at, rows)) = &*self.totals_cache.lock().expect("totals cache lock") {
+            if *key == (days, otto_only) && at.elapsed() < SESSION_TOTALS_TTL {
+                return Ok(rows.clone());
+            }
+        }
+        let rows = self.session_totals_uncached(days, otto_only).await?;
+        *self.totals_cache.lock().expect("totals cache lock") =
+            Some(((days, otto_only), std::time::Instant::now(), rows.clone()));
+        Ok(rows)
+    }
+
+    async fn session_totals_uncached(
+        &self,
+        days: u32,
+        otto_only: bool,
+    ) -> Result<Vec<SessionTotals>> {
         self.rows(&format!(
             "SELECT session_id,
                     any(workspace_id) AS workspace_id,
@@ -856,34 +889,6 @@ impl UsageEngine {
         let since = since(days);
         let limit = SESSION_LIMIT.max(1);
 
-        let q_provider = format!(
-            "SELECT provider,
-                    count() AS events,
-                    sum(input_tokens) AS input_tokens,
-                    sum(output_tokens) AS output_tokens,
-                    sum(cache_read_tokens) AS cache_read_tokens,
-                    sum(cache_write_tokens) AS cache_write_tokens,
-                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
-                    round(sum(cost_usd), 6) AS cost_usd
-             FROM usage_events
-             WHERE event_date >= today() - {since} {ws}
-             GROUP BY provider
-             ORDER BY total_tokens DESC, events DESC"
-        );
-        let q_daily = format!(
-            "SELECT toString(event_date) AS day,
-                    count() AS events,
-                    sum(input_tokens) AS input_tokens,
-                    sum(output_tokens) AS output_tokens,
-                    sum(cache_read_tokens) AS cache_read_tokens,
-                    sum(cache_write_tokens) AS cache_write_tokens,
-                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
-                    round(sum(cost_usd), 6) AS cost_usd
-             FROM usage_events
-             WHERE event_date >= today() - {since} {ws}
-             GROUP BY event_date
-             ORDER BY event_date"
-        );
         let q_sessions = format!(
             "SELECT session_id,
                     any(workspace_id) AS workspace_id,
@@ -904,12 +909,28 @@ impl UsageEngine {
              LIMIT {limit}"
         );
 
-        let q_models = models_sql(&format!("event_date >= today() - {since} {ws}"));
-        let q_daily_models = daily_models_sql(&format!("event_date >= today() - {since} {ws}"));
+        // ONE grouped scan (day × provider × model, with event counts) feeds
+        // the provider, daily, model and day×model rollups — they are pure
+        // re-aggregations of it, done in Rust (`summary_rollups`). With the
+        // top-sessions query that is 2 scans per summary instead of 5.
+        let q_daily_models = format!(
+            "SELECT toString(event_date) AS day, provider, model,
+                    count() AS events,
+                    sum(input_tokens) AS input_tokens,
+                    sum(output_tokens) AS output_tokens,
+                    sum(cache_read_tokens) AS cache_read_tokens,
+                    sum(cache_write_tokens) AS cache_write_tokens,
+                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                    sum(cost_usd) AS cost_usd
+             FROM usage_events
+             WHERE event_date >= today() - {since} {ws}
+             GROUP BY event_date, provider, model
+             ORDER BY event_date, total_tokens DESC"
+        );
 
         // All-or-nothing: a failed read is an error, never zero totals (U1).
         let mut batches = ch
-            .query_batch(&[q_provider, q_daily, q_sessions, q_models, q_daily_models])
+            .query_batch(&[q_sessions, q_daily_models])
             .await
             .map_err(|e| {
                 tracing::warn!("usage: summary batch failed: {e}");
@@ -929,11 +950,9 @@ impl UsageEngine {
                 .collect()
         }
 
-        let daily_models: Vec<DailyModelUsage> = decode(batches.pop().unwrap_or_default());
-        let models: Vec<ModelUsage> = decode(batches.pop().unwrap_or_default());
+        let grouped: Vec<DayModelRow> = decode(batches.pop().unwrap_or_default());
         let sessions: Vec<SessionUsage> = decode(batches.pop().unwrap_or_default());
-        let daily: Vec<DailyUsage> = decode(batches.pop().unwrap_or_default());
-        let providers: Vec<ProviderUsage> = decode(batches.pop().unwrap_or_default());
+        let (providers, daily, models, daily_models) = summary_rollups(grouped);
 
         let total_events: u64 = providers.iter().map(|p| p.events).sum();
         let total_input_tokens: u64 = providers.iter().map(|p| p.input_tokens).sum();
@@ -1245,6 +1264,65 @@ impl UsageEngine {
 /// engine's watcher restarts it. Failed flushes RETAIN their events (bounded)
 /// for the next tick; what's still unflushed when the reinit ends this writer
 /// is lost — a bounded, logged loss instead of the old drop-every-batch.
+/// Repartition any usage table whose live definition has no `PARTITION BY`
+/// (schema drift: `CREATE TABLE IF NOT EXISTS` never upgrades a table). Copy
+/// → verify row counts → atomic `EXCHANGE` → drop the old data. Idempotent
+/// (detected from `system.tables`, so it runs once) and non-fatal: on any
+/// error the original table stays as it was and the next start retries.
+async fn ensure_partitioned(ch: &ClickHouse, retention_days: u32) {
+    for (table, date_col, order_by) in schema::PARTITIONED_TABLES {
+        let key = match ch.query_rows(&schema::partition_key_sql(table)).await {
+            Ok(rows) => rows
+                .first()
+                .and_then(|r| r.get("partition_key"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            Err(e) => {
+                tracing::warn!("usage: partition check of {table} failed (non-fatal): {e}");
+                continue;
+            }
+        };
+        if key.as_deref().is_none_or(|k| !k.is_empty()) {
+            continue; // partitioned already (or no such table)
+        }
+        tracing::info!("usage: repartitioning {table} by month (one-time)");
+        let copy = schema::repartition_sql(table, date_col, order_by, retention_days);
+        if let Err(e) = ch.exec(&copy).await {
+            tracing::warn!("usage: repartition copy of {table} failed (non-fatal): {e}");
+            let _ = ch
+                .exec(&format!("DROP TABLE IF EXISTS {table}_repart SYNC"))
+                .await;
+            continue;
+        }
+        let count = |t: String| async move {
+            ch.query_rows(&format!("SELECT count() AS n FROM {t}"))
+                .await
+                .ok()
+                .and_then(|r| r.first().and_then(|v| v.get("n")).map(|n| n.to_string()))
+        };
+        let (old_n, new_n) = (
+            count(table.to_string()).await,
+            count(format!("{table}_repart")).await,
+        );
+        if old_n.is_none() || old_n != new_n {
+            tracing::warn!(
+                "usage: repartition of {table} aborted — row counts differ ({old_n:?} vs {new_n:?})"
+            );
+            let _ = ch
+                .exec(&format!("DROP TABLE IF EXISTS {table}_repart SYNC"))
+                .await;
+            continue;
+        }
+        match ch.exec(&schema::swap_sql(table)).await {
+            Ok(()) => tracing::info!(
+                "usage: {table} repartitioned ({} rows)",
+                old_n.unwrap_or_default()
+            ),
+            Err(e) => tracing::warn!("usage: repartition swap of {table} failed (non-fatal): {e}"),
+        }
+    }
+}
+
 fn spawn_writer(
     ch: Arc<ClickHouse>,
     mut rx: mpsc::UnboundedReceiver<UsageEvent>,
@@ -1252,8 +1330,16 @@ fn spawn_writer(
 ) {
     tokio::spawn(async move {
         let mut buf: Vec<UsageEvent> = Vec::new();
-        let mut ticker = tokio::time::interval(FLUSH_INTERVAL);
+        // The flush timer is armed only while events are buffered (from the
+        // first one): an idle daemon has no 15 s wake-up at all.
+        let mut deadline: Option<tokio::time::Instant> = None;
         loop {
+            let tick = async {
+                match deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 maybe = rx.recv() => match maybe {
                     Some(ev) => {
@@ -1267,8 +1353,14 @@ fn spawn_writer(
                         break;
                     }
                 },
-                _ = ticker.tick() => flush(&ch, &mut buf, &heal).await,
+                _ = tick => flush(&ch, &mut buf, &heal).await,
             }
+            deadline = match (buf.is_empty(), deadline) {
+                (true, _) => None,
+                // A failed flush keeps its events: retry a full interval later.
+                (false, Some(d)) if d > tokio::time::Instant::now() => Some(d),
+                (false, _) => Some(tokio::time::Instant::now() + FLUSH_INTERVAL),
+            };
         }
     });
 }
@@ -1340,6 +1432,112 @@ fn models_sql(cond: &str) -> String {
          GROUP BY provider, model
          ORDER BY total_tokens DESC, events DESC"
     )
+}
+
+/// One `(day, provider, model)` group of the summary's single scan.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct DayModelRow {
+    day: String,
+    provider: String,
+    model: String,
+    events: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    total_tokens: u64,
+    cost_usd: f64,
+}
+
+/// Round a summed cost like the SQL `round(sum(cost_usd), 6)` did.
+fn round6(x: f64) -> f64 {
+    (x * 1e6).round() / 1e6
+}
+
+/// Derive the summary's provider / daily / model / day×model rollups from the
+/// `(day, provider, model)` groups, with the orderings the old per-rollup
+/// queries had (providers & models: total tokens desc, events desc; daily by
+/// day; day×model as scanned).
+fn summary_rollups(
+    rows: Vec<DayModelRow>,
+) -> (
+    Vec<ProviderUsage>,
+    Vec<DailyUsage>,
+    Vec<ModelUsage>,
+    Vec<DailyModelUsage>,
+) {
+    use std::collections::BTreeMap;
+    let mut providers: BTreeMap<String, ProviderUsage> = BTreeMap::new();
+    let mut daily: BTreeMap<String, DailyUsage> = BTreeMap::new();
+    let mut models: BTreeMap<(String, String), ModelUsage> = BTreeMap::new();
+    let mut daily_models = Vec::with_capacity(rows.len());
+    for r in rows {
+        let p = providers
+            .entry(r.provider.clone())
+            .or_insert_with(|| ProviderUsage {
+                provider: r.provider.clone(),
+                ..Default::default()
+            });
+        p.events += r.events;
+        p.input_tokens += r.input_tokens;
+        p.output_tokens += r.output_tokens;
+        p.cache_read_tokens += r.cache_read_tokens;
+        p.cache_write_tokens += r.cache_write_tokens;
+        p.total_tokens += r.total_tokens;
+        p.cost_usd += r.cost_usd;
+        let d = daily.entry(r.day.clone()).or_insert_with(|| DailyUsage {
+            day: r.day.clone(),
+            ..Default::default()
+        });
+        d.events += r.events;
+        d.input_tokens += r.input_tokens;
+        d.output_tokens += r.output_tokens;
+        d.cache_read_tokens += r.cache_read_tokens;
+        d.cache_write_tokens += r.cache_write_tokens;
+        d.total_tokens += r.total_tokens;
+        d.cost_usd += r.cost_usd;
+        let m = models
+            .entry((r.provider.clone(), r.model.clone()))
+            .or_insert_with(|| ModelUsage {
+                provider: r.provider.clone(),
+                model: r.model.clone(),
+                ..Default::default()
+            });
+        m.events += r.events;
+        m.input_tokens += r.input_tokens;
+        m.output_tokens += r.output_tokens;
+        m.cache_read_tokens += r.cache_read_tokens;
+        m.cache_write_tokens += r.cache_write_tokens;
+        m.total_tokens += r.total_tokens;
+        m.cost_usd += r.cost_usd;
+        daily_models.push(DailyModelUsage {
+            day: r.day,
+            provider: r.provider,
+            model: r.model,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            cache_read_tokens: r.cache_read_tokens,
+            cache_write_tokens: r.cache_write_tokens,
+            total_tokens: r.total_tokens,
+            cost_usd: round6(r.cost_usd),
+        });
+    }
+    let by_total = |a: (u64, u64), b: (u64, u64)| b.0.cmp(&a.0).then(b.1.cmp(&a.1));
+    let mut providers: Vec<ProviderUsage> = providers.into_values().collect();
+    for p in &mut providers {
+        p.cost_usd = round6(p.cost_usd);
+    }
+    providers.sort_by(|a, b| by_total((a.total_tokens, a.events), (b.total_tokens, b.events)));
+    let mut daily: Vec<DailyUsage> = daily.into_values().collect();
+    for d in &mut daily {
+        d.cost_usd = round6(d.cost_usd);
+    }
+    let mut models: Vec<ModelUsage> = models.into_values().collect();
+    for m in &mut models {
+        m.cost_usd = round6(m.cost_usd);
+    }
+    models.sort_by(|a, b| by_total((a.total_tokens, a.events), (b.total_tokens, b.events)));
+    (providers, daily, models, daily_models)
 }
 
 /// Per-(day, provider, model) token rollup under `cond` (a WHERE body).
@@ -1552,5 +1750,51 @@ mod scope_tests {
             .daily_model_range("2026-01-01", "2026-01-02")
             .await
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod rollup_tests {
+    use super::*;
+
+    #[test]
+    fn summary_rollups_reaggregate_the_single_scan() {
+        let row = |day: &str, p: &str, m: &str, ev: u64, tot: u64, cost: f64| DayModelRow {
+            day: day.into(),
+            provider: p.into(),
+            model: m.into(),
+            events: ev,
+            input_tokens: tot,
+            total_tokens: tot,
+            cost_usd: cost,
+            ..Default::default()
+        };
+        let (providers, daily, models, dm) = summary_rollups(vec![
+            row("2026-10-01", "claude", "opus", 2, 100, 0.1),
+            row("2026-10-01", "codex", "gpt", 1, 500, 0.0000004),
+            row("2026-10-02", "claude", "opus", 3, 50, 0.2),
+            row("2026-10-02", "claude", "sonnet", 1, 50, 0.05),
+        ]);
+        let p: Vec<_> = providers
+            .iter()
+            .map(|p| (p.provider.as_str(), p.events, p.total_tokens))
+            .collect();
+        assert_eq!(p, vec![("codex", 1, 500), ("claude", 6, 200)]);
+        assert!((providers[1].cost_usd - 0.35).abs() < 1e-9);
+        assert_eq!(providers[0].cost_usd, 0.0, "rounded to 6 places like SQL");
+        let d: Vec<_> = daily
+            .iter()
+            .map(|d| (d.day.as_str(), d.events, d.total_tokens))
+            .collect();
+        assert_eq!(d, vec![("2026-10-01", 3, 600), ("2026-10-02", 4, 100)]);
+        let m: Vec<_> = models
+            .iter()
+            .map(|m| (m.model.as_str(), m.events, m.total_tokens))
+            .collect();
+        assert_eq!(
+            m,
+            vec![("gpt", 1, 500), ("opus", 5, 150), ("sonnet", 1, 50)]
+        );
+        assert_eq!(dm.len(), 4);
     }
 }

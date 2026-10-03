@@ -86,48 +86,162 @@ pub struct ClaudeLine {
 /// Returns `Some` only for `type=="assistant"` lines that carry a
 /// `message.usage` object. Missing token fields default to 0; non-assistant
 /// lines, lines without usage, and parse failures all yield `None`.
+///
+/// Hot path (the one-time history rebuild runs it over every line of ~2 GB of
+/// transcripts): a substring prefilter rejects the ~85 % of lines that are not
+/// assistant usage lines without touching serde, and the rest deserialize into
+/// a typed, borrowed struct — unknown fields (the bulky `content`) are skipped
+/// instead of being built into a `serde_json::Value` DOM.
 pub fn parse_claude_line(line: &str) -> Option<ClaudeLine> {
     let line = line.trim();
-    if line.is_empty() {
+    if line.is_empty() || !line.contains("\"usage\"") || !line.contains("\"assistant\"") {
         return None;
     }
-    let v: Value = serde_json::from_str(line).ok()?;
-    if v.get("type").and_then(Value::as_str) != Some("assistant") {
+    let v: ClaudeWire<'_> = serde_json::from_str(line).ok()?;
+    if v.kind.as_deref() != Some("assistant") {
         return None;
     }
-    let message = v.get("message")?;
-    let usage = message.get("usage")?;
-    if !usage.is_object() {
-        return None;
-    }
-    let model = message
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let dedup_key = message.get("id").and_then(Value::as_str).map(|mid| {
-        let rid = v
-            .get("requestId")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+    let message = v.message?;
+    let usage = message.usage?;
+    let dedup_key = message.id.as_deref().map(|mid| {
+        let rid = v.request_id.as_deref().unwrap_or_default();
         format!("{mid}:{rid}")
     });
-    let timestamp = v
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let complete = message.get("stop_reason").is_some_and(|r| !r.is_null());
     Some(ClaudeLine {
         usage: ParsedUsage {
-            model,
-            input: u64_field(usage, "input_tokens"),
-            output: u64_field(usage, "output_tokens"),
-            cache_read: u64_field(usage, "cache_read_input_tokens"),
-            cache_write: u64_field(usage, "cache_creation_input_tokens"),
+            model: message.model.map(|m| m.into_owned()).unwrap_or_default(),
+            input: usage.input_tokens.0,
+            output: usage.output_tokens.0,
+            cache_read: usage.cache_read_input_tokens.0,
+            cache_write: usage.cache_creation_input_tokens.0,
         },
         dedup_key,
-        timestamp,
-        complete,
+        timestamp: v.timestamp.map(|t| t.into_owned()),
+        complete: message.stop_reason.is_some(),
+    })
+}
+
+/// The fields of a Claude transcript line the usage parser reads. Strings are
+/// `Cow` so plain values borrow from the line and escaped ones still parse.
+/// A field of an unexpected JSON type reads as absent (a non-string `type`,
+/// `model`, …) rather than failing the line — as the old DOM lookups did.
+#[derive(Deserialize)]
+struct ClaudeWire<'a> {
+    #[serde(rename = "type", default, borrow, deserialize_with = "lenient_str")]
+    kind: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow)]
+    message: Option<ClaudeWireMessage<'a>>,
+    #[serde(
+        rename = "requestId",
+        default,
+        borrow,
+        deserialize_with = "lenient_str"
+    )]
+    request_id: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow, deserialize_with = "lenient_str")]
+    timestamp: Option<std::borrow::Cow<'a, str>>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeWireMessage<'a> {
+    #[serde(default, borrow, deserialize_with = "lenient_str")]
+    id: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow, deserialize_with = "lenient_str")]
+    model: Option<std::borrow::Cow<'a, str>>,
+    /// `Some` for any non-null value (the response's final line).
+    #[serde(default)]
+    stop_reason: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    usage: Option<ClaudeWireUsage>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeWireUsage {
+    #[serde(default)]
+    input_tokens: LenientU64,
+    #[serde(default)]
+    output_tokens: LenientU64,
+    #[serde(default)]
+    cache_read_input_tokens: LenientU64,
+    #[serde(default)]
+    cache_creation_input_tokens: LenientU64,
+}
+
+/// A token count: any non-`u64` JSON value (null, float, string, object…)
+/// reads as 0, matching the old `Value::as_u64().unwrap_or(0)`.
+#[derive(Default)]
+struct LenientU64(u64);
+
+impl<'de> Deserialize<'de> for LenientU64 {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = LenientU64;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<LenientU64, E> {
+                Ok(LenientU64(v))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<LenientU64, E> {
+                Ok(LenientU64(u64::try_from(v).unwrap_or(0)))
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<LenientU64, E> {
+                Ok(LenientU64(0))
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<LenientU64, E> {
+                Ok(LenientU64(0))
+            }
+            fn visit_str<E>(self, _: &str) -> Result<LenientU64, E> {
+                Ok(LenientU64(0))
+            }
+            fn visit_unit<E>(self) -> Result<LenientU64, E> {
+                Ok(LenientU64(0))
+            }
+            fn visit_none<E>(self) -> Result<LenientU64, E> {
+                Ok(LenientU64(0))
+            }
+            fn visit_some<D2: serde::Deserializer<'de>>(
+                self,
+                d: D2,
+            ) -> Result<LenientU64, D2::Error> {
+                LenientU64::deserialize(d)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut a: A,
+            ) -> Result<LenientU64, A::Error> {
+                while a.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(LenientU64(0))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut a: A,
+            ) -> Result<LenientU64, A::Error> {
+                while a
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(LenientU64(0))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// A string field that reads as `None` when absent or of any other JSON type.
+fn lenient_str<'de: 'a, 'a, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<std::borrow::Cow<'a, str>>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum S<'b> {
+        Str(#[serde(borrow)] std::borrow::Cow<'b, str>),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match S::deserialize(d)? {
+        S::Str(s) => Some(s),
+        S::Other(_) => None,
     })
 }
 
@@ -412,11 +526,22 @@ pub fn parse_codex_session_meta(line: &str) -> Option<CodexMeta> {
 /// twice — not even across daemon restarts (there is no idempotency column in
 /// ClickHouse).
 ///
-/// Backed by a JSON file written atomically (tmp file + rename).
+/// Backed by a JSON file written atomically (tmp file + rename) plus an
+/// append-only sidecar `<path>.log` of `path\toffset` lines for the cursors
+/// that moved since the last compaction ([`Self::persist`]) — a scan while an
+/// agent writes appends a few hundred bytes instead of rewriting the whole
+/// ~0.5 MB map. `load` replays the log over the JSON (last line wins).
 #[derive(Debug, Default)]
 pub struct CursorStore {
     path: PathBuf,
     offsets: HashMap<String, u64>,
+    /// Keys whose offset changed since the last persist.
+    dirty: std::collections::HashSet<String>,
+    /// A key was removed (or can't be line-encoded): the next persist must
+    /// rewrite the full map.
+    needs_compact: bool,
+    /// Lines currently in the sidecar log (drives compaction).
+    log_lines: usize,
 }
 
 impl CursorStore {
@@ -428,7 +553,37 @@ impl CursorStore {
             .ok()
             .and_then(|s| serde_json::from_str::<HashMap<String, u64>>(&s).ok())
             .unwrap_or_default();
-        Self { path, offsets }
+        let mut s = Self {
+            path,
+            offsets,
+            ..Default::default()
+        };
+        if let Ok(log) = std::fs::read_to_string(s.log_path()) {
+            for line in log.split_inclusive('\n') {
+                // A torn final line (crash mid-append: no `\n`) is skipped, so
+                // that file is at worst re-read from its previous offset.
+                let Some(line) = line.strip_suffix('\n') else {
+                    continue;
+                };
+                if let Some((k, off)) = line.rsplit_once('\t') {
+                    if let Ok(off) = off.parse::<u64>() {
+                        s.offsets.insert(k.to_string(), off);
+                    }
+                }
+                s.log_lines += 1;
+            }
+        }
+        s
+    }
+
+    fn log_path(&self) -> PathBuf {
+        let mut name = self
+            .path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(".log");
+        self.path.with_file_name(name)
     }
 
     /// The persisted offset for `file`, if any. The key is the file's path as a
@@ -443,10 +598,13 @@ impl CursorStore {
         self.offsets.contains_key(&key(file))
     }
 
-    /// Record the new byte offset for `file` (in memory; call [`Self::save`] to
-    /// persist).
+    /// Record the new byte offset for `file` (in memory; call [`Self::save`] or
+    /// [`Self::persist`] to persist).
     pub fn set(&mut self, file: &Path, offset: u64) {
-        self.offsets.insert(key(file), offset);
+        let k = key(file);
+        if self.offsets.insert(k.clone(), offset) != Some(offset) {
+            self.dirty.insert(k);
+        }
     }
 
     /// Like [`Self::set`], but reports whether the stored value changed — lets
@@ -455,10 +613,25 @@ impl CursorStore {
         match self.offsets.get(&key(file)) {
             Some(&cur) if cur == offset => false,
             _ => {
-                self.offsets.insert(key(file), offset);
+                self.set(file, offset);
                 true
             }
         }
+    }
+
+    /// Force `file`'s cursor into the next [`Self::persist`] even though its
+    /// in-memory offset did not change (e.g. the persisted floor below a held
+    /// response must move on once the response is released).
+    pub fn mark_dirty(&mut self, file: &Path) {
+        let k = key(file);
+        if self.offsets.contains_key(&k) {
+            self.dirty.insert(k);
+        }
+    }
+
+    /// True when something changed since the last persist.
+    pub fn is_dirty(&self) -> bool {
+        self.needs_compact || !self.dirty.is_empty()
     }
 
     /// Drop cursors whose key fails `keep` (e.g. transcripts the CLI has since
@@ -466,7 +639,12 @@ impl CursorStore {
     pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) -> usize {
         let before = self.offsets.len();
         self.offsets.retain(|k, _| keep(k));
-        before - self.offsets.len()
+        let removed = before - self.offsets.len();
+        if removed > 0 {
+            self.dirty.retain(|k| keep(k));
+            self.needs_compact = true;
+        }
+        removed
     }
 
     /// Tracked file keys (lossy UTF-8 paths), in no particular order.
@@ -485,14 +663,77 @@ impl CursorStore {
 
     /// Atomically persist the cursor map: write to a sibling tmp file, then
     /// rename over the target so a crash mid-write never corrupts the cursors.
-    pub fn save(&self) -> std::io::Result<()> {
+    /// Empties the append-only sidecar.
+    pub fn save(&mut self) -> std::io::Result<()> {
+        self.save_floored(|_, off| off)
+    }
+
+    fn save_floored(&mut self, floor: impl Fn(&str, u64) -> u64) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string(&self.offsets).map_err(std::io::Error::other)?;
+        let floored: HashMap<&str, u64> = self
+            .offsets
+            .iter()
+            .map(|(k, v)| (k.as_str(), floor(k, *v)))
+            .collect();
+        let json = serde_json::to_string(&floored).map_err(std::io::Error::other)?;
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, json.as_bytes())?;
         std::fs::rename(&tmp, &self.path)?;
+        match std::fs::remove_file(self.log_path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        self.dirty.clear();
+        self.needs_compact = false;
+        self.log_lines = 0;
+        Ok(())
+    }
+
+    /// Persist what changed since the last write: append one `path\toffset`
+    /// line per dirty cursor to the sidecar log, or compact (full rewrite)
+    /// once the log would exceed `compact_after` lines / a key was removed.
+    /// `floor(key, offset)` maps each written offset (the tailer never
+    /// persists a cursor past a held response). No-op when nothing changed.
+    pub fn persist(
+        &mut self,
+        compact_after: usize,
+        floor: impl Fn(&str, u64) -> u64,
+    ) -> std::io::Result<()> {
+        if !self.is_dirty() {
+            return Ok(());
+        }
+        if self.needs_compact
+            || self.log_lines + self.dirty.len() > compact_after
+            || self
+                .dirty
+                .iter()
+                .any(|k| k.contains('\n') || k.contains('\t'))
+        {
+            return self.save_floored(floor);
+        }
+        use std::io::Write;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut buf = String::with_capacity(self.dirty.len() * 128);
+        for k in &self.dirty {
+            if let Some(off) = self.offsets.get(k) {
+                buf.push_str(k);
+                buf.push('\t');
+                buf.push_str(&floor(k, *off).to_string());
+                buf.push('\n');
+            }
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.log_path())?;
+        f.write_all(buf.as_bytes())?;
+        self.log_lines += self.dirty.len();
+        self.dirty.clear();
         Ok(())
     }
 }
@@ -677,29 +918,59 @@ impl CodexCounterStore {
 pub struct SeenKeys {
     path: PathBuf,
     cap: usize,
-    set: std::collections::HashSet<String>,
-    order: std::collections::VecDeque<String>,
+    /// 128-bit hashes of the keys, oldest first — ONE 16-byte copy per key.
+    /// The old `HashSet<String>` + `VecDeque<String>` pair held every ~57-char
+    /// key twice (~20 MB resident at the 100k cap); this is ~2.5 MB.
+    set: indexmap::IndexSet<u128>,
     /// Keys inserted since the last `save`/`append_pending`.
-    pending: Vec<String>,
+    pending: Vec<u128>,
     /// Lines currently in the sidecar log (drives compaction).
     log_lines: usize,
+}
+
+/// Hash a dedup key into the 128-bit id [`SeenKeys`] stores. xxh3-128: a
+/// collision (two distinct responses folded into one) needs ~2^64 keys.
+pub fn seen_key_hash(key: &str) -> u128 {
+    xxhash_rust::xxh3::xxh3_128(key.as_bytes())
+}
+
+/// Decode one persisted entry: the current format writes each key's hash as 32
+/// lowercase hex chars; older files hold the raw `msg_…:req_…` key, which is
+/// hashed on load (a raw key always contains `:`, so it never parses as hex).
+fn decode_seen_entry(entry: &str) -> u128 {
+    if entry.len() == 32 && entry.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if let Ok(h) = u128::from_str_radix(entry, 16) {
+            return h;
+        }
+    }
+    seen_key_hash(entry)
+}
+
+fn encode_seen_entry(h: u128) -> String {
+    format!("{h:032x}")
 }
 
 impl SeenKeys {
     /// Load from `path`, keeping at most `cap` keys (oldest evicted first). A
     /// missing or unparseable file yields an empty store bound to that path.
+    /// Accepts both the legacy raw-key array and the hashed form.
     pub fn load(path: impl Into<PathBuf>, cap: usize) -> Self {
         let path = path.into();
-        let order: std::collections::VecDeque<String> = std::fs::read_to_string(&path)
+        let entries: Vec<String> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-            .unwrap_or_default()
-            .into();
+            .unwrap_or_default();
+        // Sized once to the cap: the set fills to it within weeks and then
+        // stays there, so growth-doubling would only overshoot.
+        let mut set = indexmap::IndexSet::with_capacity(cap.max(1) + cap / 16 + 1);
+        for e in &entries {
+            set.insert(decode_seen_entry(e));
+        }
+        drop(entries);
         let mut s = Self {
             path,
             cap: cap.max(1),
-            set: order.iter().cloned().collect(),
-            order,
+            set,
             pending: Vec::new(),
             log_lines: 0,
         };
@@ -708,12 +979,11 @@ impl SeenKeys {
         if let Ok(log) = std::fs::read_to_string(s.log_path()) {
             for k in log.lines().filter(|l| !l.is_empty()) {
                 s.log_lines += 1;
-                if s.set.insert(k.to_string()) {
-                    s.order.push_back(k.to_string());
-                }
+                s.set.insert(decode_seen_entry(k));
             }
         }
-        s.evict();
+        let over = s.set.len().saturating_sub(s.cap);
+        s.set.drain(..over);
         s
     }
 
@@ -734,26 +1004,21 @@ impl SeenKeys {
 
     /// Persist only the keys inserted since the last write by appending them
     /// to the sidecar log; compacts via [`Self::save`] once the log holds more
-    /// than `compact_after` lines (or a key can't be line-encoded).
+    /// than `compact_after` lines.
     pub fn append_pending(&mut self, compact_after: usize) -> std::io::Result<()> {
         if self.pending.is_empty() {
             return Ok(());
         }
-        if self.log_lines + self.pending.len() > compact_after
-            || self
-                .pending
-                .iter()
-                .any(|k| k.contains('\n') || k.is_empty())
-        {
+        if self.log_lines + self.pending.len() > compact_after {
             return self.save();
         }
         use std::io::Write;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut buf = String::with_capacity(self.pending.len() * 48);
-        for k in &self.pending {
-            buf.push_str(k);
+        let mut buf = String::with_capacity(self.pending.len() * 33);
+        for h in &self.pending {
+            buf.push_str(&encode_seen_entry(*h));
             buf.push('\n');
         }
         let mut f = std::fs::OpenOptions::new()
@@ -763,50 +1028,82 @@ impl SeenKeys {
         f.write_all(buf.as_bytes())?;
         self.log_lines += self.pending.len();
         self.pending.clear();
+        self.pending.shrink_to(1024);
         Ok(())
     }
 
     pub fn contains(&self, key: &str) -> bool {
-        self.set.contains(key)
+        self.set.contains(&seen_key_hash(key))
     }
 
     /// Insert `key`; returns `true` if it was new (i.e. this occurrence should
     /// be counted) and `false` if it was already present (a duplicate).
     pub fn insert(&mut self, key: &str) -> bool {
-        if !self.set.insert(key.to_string()) {
+        self.insert_hash(seen_key_hash(key))
+    }
+
+    /// [`Self::insert`] for an already-hashed key ([`seen_key_hash`]).
+    pub fn insert_hash(&mut self, h: u128) -> bool {
+        if !self.set.insert(h) {
             return false;
         }
-        self.order.push_back(key.to_string());
-        self.pending.push(key.to_string());
+        self.pending.push(h);
         self.evict();
         true
     }
 
+    /// Evict oldest-first back down to `cap` once the set overshoots it by
+    /// the slack. Removing from the front of an `IndexSet` shifts (and
+    /// re-indexes) every entry, so doing it once per insert at the cap would
+    /// be O(n) per key; batching keeps inserts amortized O(1).
     fn evict(&mut self) {
-        while self.order.len() > self.cap {
-            if let Some(old) = self.order.pop_front() {
-                self.set.remove(&old);
-            }
+        if self.set.len() > self.cap + self.slack() {
+            let over = self.set.len() - self.cap;
+            self.set.drain(..over);
         }
     }
 
+    fn slack(&self) -> usize {
+        self.cap / 16
+    }
+
     pub fn len(&self) -> usize {
-        self.order.len()
+        self.set.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.order.is_empty()
+        self.set.is_empty()
+    }
+
+    /// Approximate heap bytes held by the set (measurability guard).
+    pub fn approx_heap_bytes(&self) -> usize {
+        // IndexSet = an entries Vec of (u64 hash, u128) + a hashbrown index
+        // table (one usize + one control byte per bucket, 7/8 load factor).
+        let buckets = (self.set.capacity() * 8 / 7).next_power_of_two();
+        self.set.capacity() * 24
+            + buckets * (std::mem::size_of::<usize>() + 1)
+            + self.pending.capacity() * 16
     }
 
     /// Atomically persist the full set (tmp file + rename), like
     /// [`CursorStore::save`], then empty the append-only sidecar (its keys are
-    /// now in the array). Clears the pending list.
+    /// now in the array). Clears the pending list. Entries are written as
+    /// 32-hex hashes (same JSON-array-of-strings shape as before).
     pub fn save(&mut self) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let keys: Vec<&String> = self.order.iter().collect();
-        let json = serde_json::to_string(&keys).map_err(std::io::Error::other)?;
+        let mut json = String::with_capacity(self.set.len() * 35 + 2);
+        json.push('[');
+        for (i, h) in self.set.iter().enumerate() {
+            if i > 0 {
+                json.push(',');
+            }
+            json.push('"');
+            json.push_str(&encode_seen_entry(*h));
+            json.push('"');
+        }
+        json.push(']');
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, json.as_bytes())?;
         std::fs::rename(&tmp, &self.path)?;
@@ -1333,8 +1630,15 @@ mod tests {
         seen.append_pending(10).unwrap();
         assert!(!seen.has_pending());
         // Array still holds only the compacted key; the log holds the rest.
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"["a"]"#);
-        assert_eq!(std::fs::read_to_string(&log).unwrap(), "b\nc\n");
+        let h = |k: &str| format!("{:032x}", seen_key_hash(k));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!(r#"["{}"]"#, h("a"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            format!("{}\n{}\n", h("b"), h("c"))
+        );
         let reloaded = SeenKeys::load(&path, 100);
         assert_eq!(reloaded.len(), 3);
         assert!(reloaded.contains("a") && reloaded.contains("b") && reloaded.contains("c"));
@@ -1350,6 +1654,108 @@ mod tests {
         let mut seen = reloaded;
         seen.append_pending(2).unwrap();
         assert!(!log.exists());
+    }
+
+    #[test]
+    fn parse_claude_is_lenient_like_the_dom_lookups_were() {
+        // Odd value types read as absent/0 instead of failing the line.
+        let l = r#"{"type":"assistant","timestamp":7,"message":{"id":"m","model":"o\u0070us","stop_reason":null,"usage":{"input_tokens":1.5,"output_tokens":"9","cache_read_input_tokens":4,"server_tool_use":{"web_search_requests":0}},"content":[{"type":"text","text":"\"usage\""}]}}"#;
+        let p = parse_claude_line(l).unwrap();
+        assert_eq!(p.usage.model, "opus", "escaped strings still parse");
+        assert_eq!(
+            (p.usage.input, p.usage.output, p.usage.cache_read),
+            (0, 0, 4)
+        );
+        assert_eq!(p.timestamp, None);
+        assert!(!p.complete);
+        assert_eq!(p.dedup_key.as_deref(), Some("m:"));
+        // Non-assistant / non-object usage / prefilter misses → None.
+        assert!(parse_claude_line(r#"{"type":"user","message":{"usage":{}}}"#).is_none());
+        assert!(parse_claude_line(r#"{"type":"assistant","message":{"usage":3}}"#).is_none());
+        assert!(parse_claude_line(r#"{"type":"assistant","message":{}}"#).is_none());
+        assert!(parse_claude_line(r#"{"type":"assistant","message":{"usage":null}}"#).is_none());
+    }
+
+    #[test]
+    fn seen_keys_load_legacy_raw_keys_and_mixed_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seen.json");
+        // Pre-hash daemons wrote raw keys (array + log); both still dedup.
+        std::fs::write(&path, r#"["msg_a:req_a","msg_b:req_b"]"#).unwrap();
+        std::fs::write(dir.path().join("seen.json.log"), "msg_c:req_c\n").unwrap();
+        let mut seen = SeenKeys::load(&path, 100);
+        assert_eq!(seen.len(), 3);
+        assert!(!seen.insert("msg_a:req_a"));
+        assert!(!seen.insert("msg_c:req_c"));
+        assert!(seen.insert("msg_d:req_d"));
+        // Rewritten hashed, reloads to the same set.
+        seen.save().unwrap();
+        let reloaded = SeenKeys::load(&path, 100);
+        assert_eq!(reloaded.len(), 4);
+        for k in ["msg_a:req_a", "msg_b:req_b", "msg_c:req_c", "msg_d:req_d"] {
+            assert!(reloaded.contains(k), "{k}");
+        }
+    }
+
+    /// Perf guard (U5): 100k keys — the live cap — must stay a few MB. The
+    /// old `HashSet<String>` + `VecDeque<String>` pair held ~20 MB.
+    #[test]
+    fn seen_keys_100k_stays_under_4_mib() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seen = SeenKeys::load(dir.path().join("seen.json"), 100_000);
+        for i in 0..120_000u32 {
+            seen.insert(&format!(
+                "msg_01E4yhe7M5khxwmKQS61Xo{i:06}:req_011Cc8ZRRT49B3TGoQ17x1HR"
+            ));
+            if i % 1_000 == 999 {
+                seen.append_pending(usize::MAX / 2).unwrap(); // a scan's persist
+            }
+        }
+        assert!((100_000..=100_000 + 100_000 / 16).contains(&seen.len()));
+        assert!(seen.contains("msg_01E4yhe7M5khxwmKQS61Xo119999:req_011Cc8ZRRT49B3TGoQ17x1HR"));
+        let bytes = seen.approx_heap_bytes();
+        assert!(bytes < 4 * 1024 * 1024, "SeenKeys holds {bytes} B");
+    }
+
+    #[test]
+    fn cursor_persist_appends_then_compacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cur.json");
+        let log = dir.path().join("cur.json.log");
+        let mut c = CursorStore::load(&path);
+        c.set(Path::new("/a"), 5);
+        c.set(Path::new("/b"), 9);
+        c.save().unwrap();
+        assert!(!c.is_dirty());
+        // Nothing moved → no write at all.
+        c.persist(10, |_, o| o).unwrap();
+        assert!(!log.exists());
+        // One cursor moved → one appended line, array untouched.
+        c.set(Path::new("/a"), 7);
+        c.persist(10, |_, o| o).unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "/a\t7\n");
+        // A floor is applied to what hits disk, not to memory.
+        c.set(Path::new("/b"), 20);
+        c.persist(10, |k, o| if k == "/b" { 12 } else { o })
+            .unwrap();
+        assert_eq!(c.get(Path::new("/b")), Some(20));
+        let r = CursorStore::load(&path);
+        assert_eq!(r.get(Path::new("/a")), Some(7));
+        assert_eq!(r.get(Path::new("/b")), Some(12));
+        // A torn final line is ignored.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, b"/a\t9"))
+            .unwrap();
+        assert_eq!(CursorStore::load(&path).get(Path::new("/a")), Some(7));
+        // Removal forces a compaction: log gone, JSON is the whole truth.
+        c.retain(|k| k != "/a");
+        c.persist(10, |_, o| o).unwrap();
+        assert!(!log.exists());
+        let r = CursorStore::load(&path);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.get(Path::new("/b")), Some(20));
     }
 
     #[test]

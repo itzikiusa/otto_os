@@ -126,9 +126,10 @@ async fn usage_engine_end_to_end() {
         300,
         0.01,
     ));
-    // The background writer flushes on a ~2s timer: wait for the buffered row
-    // to land (condition, not a fixed sleep — returns as soon as it flushes).
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    // The background writer flushes FLUSH_INTERVAL (15 s) after the first
+    // buffered event: wait for the row to land (condition, not a fixed sleep —
+    // returns as soon as it flushes).
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
     while engine
         .summary(30, false)
         .await

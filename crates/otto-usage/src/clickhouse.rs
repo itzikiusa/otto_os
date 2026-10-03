@@ -275,16 +275,13 @@ impl ClickHouse {
         Ok(rows)
     }
 
-    /// Run several queries and return their row sets in order — sequential
-    /// `query_rows` against the persistent server. ALL-OR-NOTHING: any failure
+    /// Run several queries and return their row sets in order — CONCURRENT
+    /// `query_rows` against the persistent server (a summary's five rollups
+    /// cost one round trip of latency, not five). ALL-OR-NOTHING: any failure
     /// errors the whole batch, and callers propagate it (a failed read must
     /// surface as an error, never as an all-zero dashboard).
     pub async fn query_batch(&self, queries: &[String]) -> Result<Vec<Vec<serde_json::Value>>> {
-        let mut out = Vec::with_capacity(queries.len());
-        for q in queries {
-            out.push(self.query_rows(q).await?);
-        }
-        Ok(out)
+        futures_util::future::try_join_all(queries.iter().map(|q| self.query_rows(q))).await
     }
 
     /// Bulk insert into `table` from newline-delimited JSON (one object per line).
@@ -452,6 +449,13 @@ fn free_loopback_port() -> std::io::Result<u16> {
 /// Net (idle, scratch dir): threads 125 + a 3-thread watchdog → 80, the 32 MB
 /// watchdog process gone (see `CLICKHOUSE_WATCHDOG_ENABLE` at spawn), CPU
 /// 0.7–0.8 % → 0.5–0.6 %.
+///
+/// Perf wave (U7a): the `MemoryWorker` wakes every 10 s instead of 1 s (it
+/// only refreshes the jemalloc RSS figure the 1 GiB cap reads), the IO /
+/// parts-loading / parts-cleaning / table-loader pools are capped at a couple
+/// of threads (a few MB of data never needs more), and the merge selector
+/// sleeps 30 s backing off to 5 min instead of polling every few seconds —
+/// with ~1 insert per 15 s there is never a merge to pick sooner.
 fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
     let server_dir = data_dir.join("server");
     std::fs::create_dir_all(&server_dir)
@@ -489,7 +493,16 @@ fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
          <background_common_pool_size>2</background_common_pool_size>\n\
          <background_move_pool_size>1</background_move_pool_size>\n\
          <background_fetches_pool_size>1</background_fetches_pool_size>\n\
-         <memory_worker_period_ms>1000</memory_worker_period_ms>\n\
+         <memory_worker_period_ms>10000</memory_worker_period_ms>\n\
+         <max_io_thread_pool_size>8</max_io_thread_pool_size>\n\
+         <max_io_thread_pool_free_size>0</max_io_thread_pool_free_size>\n\
+         <max_active_parts_loading_thread_pool_size>2</max_active_parts_loading_thread_pool_size>\n\
+         <max_outdated_parts_loading_thread_pool_size>2</max_outdated_parts_loading_thread_pool_size>\n\
+         <max_parts_cleaning_thread_pool_size>2</max_parts_cleaning_thread_pool_size>\n\
+         <tables_loader_foreground_pool_size>2</tables_loader_foreground_pool_size>\n\
+         <tables_loader_background_pool_size>2</tables_loader_background_pool_size>\n\
+         <merge_tree><merge_selecting_sleep_ms>30000</merge_selecting_sleep_ms>\
+<max_merge_selecting_sleep_ms>300000</max_merge_selecting_sleep_ms></merge_tree>\n\
          <compiled_expression_cache_size>16777216</compiled_expression_cache_size>\n\
          <background_message_broker_schedule_pool_size>2</background_message_broker_schedule_pool_size>\n\
          <background_distributed_schedule_pool_size>2</background_distributed_schedule_pool_size>\n\

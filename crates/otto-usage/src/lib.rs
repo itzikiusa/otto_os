@@ -41,8 +41,9 @@ pub use engine::{UsageEngine, UsageScope};
 pub use metrics::{Metric, MetricsSampler};
 pub use pricing::{estimate_cost, is_priced, PRICED_AS_OF};
 pub use tailer::{
-    merge_max, parse_claude_line, parse_codex_line, parse_codex_session_meta, ClaudeLine,
-    CodexCounterStore, CodexMeta, CursorStore, HeldResponse, ParsedUsage, ResponseFolder, SeenKeys,
+    merge_max, parse_claude_line, parse_codex_line, parse_codex_session_meta, seen_key_hash,
+    ClaudeLine, CodexCounterStore, CodexMeta, CursorStore, HeldResponse, ParsedUsage,
+    ResponseFolder, SeenKeys,
 };
 pub use types::{
     AttributionDimension, AttributionRow, CcusageCheck, CcusageCheckReq, CcusageDayRow,

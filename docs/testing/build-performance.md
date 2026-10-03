@@ -317,3 +317,30 @@ otto-server and ottod, i.e. still the server.
 3. **Debuginfo** (`line-tables-only` for workspace crates, none for
    dependencies) for local dev builds: measure link times on an unthrottled
    host before adopting.
+
+## Runtime guard: usage tailer and embedded ClickHouse idle cost
+
+The usage section's idle and memory cost is guarded by unit tests, plus a
+scripted probe for the ClickHouse child that tests can't run:
+
+- `cargo test -p ottod --bin ottod unchanged_tree_pass` — on a 2k-Claude +
+  1.4k-Codex synthetic tree with 10 transcripts ending in a partial line, an
+  unchanged-tree pass (full listing or event-driven) issues **zero** file reads
+  and **zero** `sessions` attribution queries; one appended usage line costs
+  exactly one read and one query.
+- `cargo test -p otto-transcript --lib seen_keys_100k` — the Claude dedup set
+  at its 100k-key cap stays under 4 MiB (it was ~20 MB as two `String`
+  copies per key).
+- `cargo test -p ottod --bin ottod fsevents_watcher` — the FSEvents watcher
+  reports a new transcript (the tailer's 20 s polling is now a fallback).
+- ClickHouse idle probe (scratch data dir + spare port, never the live one):
+  start `clickhouse server --config-file=<generated config.xml>` with
+  `CLICKHOUSE_WATCHDOG_ENABLE=0`, wait 20 s, then
+  `ps -M <pid> | wc -l` and `top -l 4 -s 5 -pid <pid> -stats pid,cpu,th,mem`.
+
+Measured 2026-10-03 (ClickHouse 26.6.1, 244k-row `usage_events`, machine
+shared with other builds): the perf-wave config (memory worker 10 s, capped
+IO/parts/table-loader pools, merge selector 30 s → 5 min) idles at
+**0.4 % CPU, 71 threads, 135 MB**; the previous config at **0.5–0.6 %, 71
+threads, 134 MB** (the capped pools are created lazily, so thread count is
+unchanged at idle; the saving is wake-ups).

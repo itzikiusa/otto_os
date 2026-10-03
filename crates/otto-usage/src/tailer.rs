@@ -5,6 +5,7 @@
 //! `usage_tailer_codex_totals.json`) are frozen and tested in that crate.
 
 pub use otto_transcript::usage::{
-    merge_max, parse_claude_line, parse_codex_line, parse_codex_session_meta, ClaudeLine,
-    CodexCounterStore, CodexMeta, CursorStore, HeldResponse, ParsedUsage, ResponseFolder, SeenKeys,
+    merge_max, parse_claude_line, parse_codex_line, parse_codex_session_meta, seen_key_hash,
+    ClaudeLine, CodexCounterStore, CodexMeta, CursorStore, HeldResponse, ParsedUsage,
+    ResponseFolder, SeenKeys,
 };

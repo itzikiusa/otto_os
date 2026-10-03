@@ -699,17 +699,23 @@ async fn get_report(
     State(ctx): State<ServerCtx>,
     Query(q): Query<ReportQuery>,
 ) -> ApiResult<Html<String>> {
-    let base = std::fs::canonicalize(insights_dir(&ctx))
-        .map_err(|e| ApiError(otto_core::Error::Internal(format!("insights dir: {e}"))))?;
-    let req = std::fs::canonicalize(Path::new(&q.path))
-        .map_err(|_| ApiError(otto_core::Error::NotFound("report".into())))?;
-    if !req.starts_with(&base) {
-        return Err(ApiError(otto_core::Error::Forbidden(
-            "path is outside the insights directory".into(),
-        )));
-    }
-    let html = std::fs::read_to_string(&req)
-        .map_err(|_| ApiError(otto_core::Error::NotFound("report".into())))?;
+    // Canonicalize + read on the blocking pool, not a runtime worker.
+    let dir = insights_dir(&ctx);
+    let html = tokio::task::spawn_blocking(move || -> Result<String, ApiError> {
+        let base = std::fs::canonicalize(dir)
+            .map_err(|e| ApiError(otto_core::Error::Internal(format!("insights dir: {e}"))))?;
+        let req = std::fs::canonicalize(Path::new(&q.path))
+            .map_err(|_| ApiError(otto_core::Error::NotFound("report".into())))?;
+        if !req.starts_with(&base) {
+            return Err(ApiError(otto_core::Error::Forbidden(
+                "path is outside the insights directory".into(),
+            )));
+        }
+        std::fs::read_to_string(&req)
+            .map_err(|_| ApiError(otto_core::Error::NotFound("report".into())))
+    })
+    .await
+    .map_err(|e| ApiError(otto_core::Error::Internal(format!("join: {e}"))))??;
     Ok(Html(html))
 }
 
