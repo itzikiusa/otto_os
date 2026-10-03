@@ -131,11 +131,14 @@ allowlists and policy-as-code controls.
 
 On create/enable Otto **discovers** the server's tools (`initialize` + `tools/list`),
 labels each (§6), and upserts the catalog. A background **health sweep** runs
-every `mcp_health_interval_secs` (default **300 s**; `0` disables it). It probes
-every managed, enabled **HTTP** server. A **stdio** server (probing one means
-starting its process) is only checked when a governed call used it in the last
-6 hours, over its parked session when one is live; unused stdio servers keep
-their last health until used or until you press **Health**. Governed calls
+every `mcp_health_interval_secs` (default **300 s**; `0` disables it). A server
+— **stdio** (probing one means starting its process) or **HTTP** (a fresh
+connection, DNS + TLS + `initialize`) — is only checked when a governed call
+used it in the last 6 hours, over its parked session when one is live; unused
+servers keep their last health until used or until you press **Health**.
+Each client parks up to **two** sessions: a call that finds both busy waits up
+to 250 ms for one before opening a throwaway session, so parallel calls to one
+`npx` server rarely pay a fresh spawn. Governed calls
 also record health as they go: a transport failure marks the server unhealthy,
 any answer marks it healthy (written only when the status changes).
 
@@ -605,6 +608,8 @@ and evaluate are read-only (View).
   **Time, Server, Tool, Decision, Dir, OK, Latency, Bytes**. Args and error text are
   stored redacted. An **Auto approved** decision (amber) is a mutating call an
   auto-approve rule let through without a person; hover it for the rule.
+  It loads 200 rows at a time; **Load more** fetches the next page (`offset`)
+  and appends it.
 - **Stats** (derived from the audit table) — choose **By tool** in the Audit panel to
   see **Calls, Errors, Err rate, Avg/Max latency, Avg/Total bytes, Last called**. Cost
   in USD is a **partial** signal — Otto meters latency/bytes/errors (the available
@@ -712,7 +717,20 @@ read-only `otto.ui_state`, which raises the person's Allow prompt. When the
 grant flips (either way) the bridge sends `notifications/tools/list_changed`
 (advertised as `capabilities.tools.listChanged`), so the client re-lists. A
 UI tool called by name still works exactly as before (grant-gated
-server-side).
+server-side). The reply to a UI tool's governed call carries the session's grant
+after the call (`ui_granted` on CP26), so the bridge re-lists without a second
+request.
+
+**Per-source listing.** A narrow session (source `review`,
+`review_summarizer`, `pr-draft`, `commit-draft`, `skillreview`, `skilleval`)
+is not shown the AWS, Kubernetes, Kafka-broker, canvas and browser tools; a
+call to one by name still works. Repeated reference descriptions (repo,
+account, workspace…) are kept to one short line. A byte-budget test pins the
+default and the review listing sizes.
+
+**Bridge audit.** Each native tool call's audit row (`mcp_tool_calls`) is
+appended through the daemon (`POST /mcp/tool-calls`, stamped with the calling
+session and its workspace); the bridge opens no database connection.
 
 **Bridge performance.** The bridge runs requests **concurrently** (up to 8)
 behind one stdout writer — a governed call waiting on an approval no longer
@@ -809,8 +827,9 @@ the workspace role.
 | `POST /mcp/policies/import` | Import (`{policies, replace?}`) | **Admin** |
 | `POST /mcp/policies/evaluate` | Preview the decision for a tool | View |
 | `GET /mcp/approvals` (`?status=`) | The approval queue (ws-filtered) | View |
+| `GET /mcp/approvals/count` (`?status=`) | **CP20a** — the badge count, same visibility as the list, uncapped | View |
 | `POST /mcp/approvals/{id}/decide` | Approve/deny (`{approved, note?}`) | **Admin**, human credential (approver ≠ requester) |
-| `GET /mcp/audit` (filters) | The call-log ledger (ws-filtered) | View |
+| `GET /mcp/audit` (filters, `limit`, `offset`) | The call-log ledger (ws-filtered), paged | View |
 | `GET /mcp/stats` | Per-tool aggregates (ws-filtered) | View |
 
 **Outward server, gateway & capabilities**
@@ -824,6 +843,7 @@ the workspace role.
 | `POST /mcp/auto-approve` | **CP41** — create a rule (`{scope, workspace_id?, session_id?, target_kind, target, allow_irreversible?, name?}`) | **Admin** (human credential) |
 | `PATCH /mcp/auto-approve/{id}` · `DELETE …` | **CP42/CP43** — rename / enable / flip `allow_irreversible`; delete | **Admin** (human credential) |
 | `POST /mcp/otto-tools/invoke` | The governed choke point for the `otto.*` tools | Edit (or `mcp` token) |
+| `POST /mcp/tool-calls` | **CP26a** — the stdio bridge's audit append, stamped with the calling session | session credential only |
 | `GET /mcp/gateway/tools` (`?workspace_id=`) | Namespaced governed downstream tools | View |
 | `POST /mcp/gateway/invoke` | Proxy a downstream call through the pipeline | Edit |
 | `POST /mcp/tokens/{id}/rotate` | **CP37** — rotate only the selected token; returns its new secret once | **Admin** |

@@ -87,7 +87,9 @@
 //! - **Redacted** — every tool result is passed through `otto_core::redact` so
 //!   tokens/PII never reach the agent transcript (the query path also masks cells
 //!   server-side).
-//! - **Audited** — every call appends a row to `mcp_tool_calls` (best-effort).
+//! - **Audited** — every call appends a row to `mcp_tool_calls` (best-effort),
+//!   through the daemon's `POST /mcp/tool-calls` — the bridge holds no
+//!   database connection of its own.
 //!
 //! The transport is newline-delimited JSON-RPC 2.0 (one JSON object per line on
 //! stdin/stdout), which is the MCP stdio framing claude/codex use.
@@ -95,7 +97,6 @@
 use std::time::Duration;
 
 use otto_core::redact::redact_json;
-use otto_state::{McpAuditRepo, NewMcpToolCall};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Instant;
@@ -146,11 +147,11 @@ struct Ctx {
     /// Session metadata source. Review sessions use this to receive a
     /// read-only Vault catalog and a dispatcher-level mutation deny.
     source: Option<String>,
-    /// Audit sink. `None` when the DB can't be opened (audit degrades to logs).
-    audit: Option<McpAuditRepo>,
-    /// In-flight audit inserts. They run off the reply path (an insert waits on
-    /// the daemon's WAL writer lock, up to the 5 s busy timeout) and are
-    /// drained when stdin closes so the last calls are still recorded.
+    /// Whether tool calls are audited (`POST /mcp/tool-calls`; off in tests
+    /// that never reach a daemon).
+    audit: bool,
+    /// In-flight audit posts. They run off the reply path and are drained
+    /// when stdin closes so the last calls are still recorded.
     audit_tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
     /// The control-plane enable list (+ this session's UI grant), cached for
     /// [`ENABLED_CACHE_TTL`]: every governed call and `tools/list` used to
@@ -179,6 +180,8 @@ struct EnabledInfo {
     ui_granted: bool,
 }
 
+/// Wall-clock cap on one audit append (`POST /mcp/tool-calls`).
+const AUDIT_POST_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the control-plane enable list (+ UI grant) is reused.
 const ENABLED_CACHE_TTL: Duration = Duration::from_secs(5);
 /// How long the gateway's downstream tool list is reused.
@@ -539,6 +542,15 @@ impl Ctx {
         }
     }
 
+    /// Fold a grant flag learned from a UI tool's reply into the cached
+    /// enabled info, so the next `tools/list` agrees with the re-list
+    /// notification without a refetch. No cache yet ⇒ nothing to correct.
+    async fn note_ui_grant(&self, granted: bool) {
+        if let Some((_, info)) = self.enabled_cache.lock().await.as_mut() {
+            info.ui_granted = granted;
+        }
+    }
+
     async fn fetch_enabled_info(&self) -> Result<EnabledInfo, String> {
         match self.get_json("/mcp/otto-server/enabled").await {
             Ok(v) => Ok(EnabledInfo {
@@ -592,12 +604,18 @@ impl Ctx {
     /// `tools/list` advertised, tell the client to re-list
     /// (`notifications/tools/list_changed`). `info` is the latest answer.
     fn sync_ui_listing(&self, info: &EnabledInfo) {
+        self.sync_ui_grant(info.ui_granted);
+    }
+
+    /// [`Self::sync_ui_listing`] from a bare grant flag (a UI tool's reply
+    /// carries it — perf2/10-mcp R4).
+    fn sync_ui_grant(&self, granted: bool) {
         use std::sync::atomic::Ordering;
         let was = self.advertised_ui.load(Ordering::Relaxed);
-        if was != info.ui_granted
+        if was != granted
             && self
                 .advertised_ui
-                .compare_exchange(was, info.ui_granted, Ordering::Relaxed, Ordering::Relaxed)
+                .compare_exchange(was, granted, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
         {
             self.send_notification(
@@ -606,36 +624,50 @@ impl Ctx {
         }
     }
 
-    /// Append a best-effort audit row for one tool call. Failures are logged to
-    /// stderr (never stdout — that's the protocol channel) and swallowed.
+    /// Append a best-effort audit row for one tool call, through the daemon
+    /// (`POST /mcp/tool-calls`, which stamps this session and its workspace —
+    /// perf2/10-mcp R7: the bridge used to hold its own writer connection to
+    /// the live DB, one per agent session). Failures are logged to stderr
+    /// (never stdout — that's the protocol channel) and swallowed.
     async fn audit(&self, tool: &str, args: &Value, ok: bool, rows: Option<i64>) {
-        let Some(audit) = &self.audit else {
+        if !self.audit {
             return;
-        };
-        // The arguments are redacted before persisting (defense-in-depth: a
-        // caller could pass a secret-looking value). The repo also caps long
-        // string values (`otto_state::mcp_audit::cap_args_json`).
-        let args_json = redact_json(args).value.to_string();
-        let audit = audit.clone();
-        let row = NewMcpToolCall {
-            workspace_id: self.workspace_id.clone(),
-            session_id: self.session_id.clone(),
-            tool: tool.to_string(),
-            args_json,
-            ok,
-            rows,
-        };
+        }
+        // The arguments are redacted before they leave (defense-in-depth: a
+        // caller could pass a secret-looking value); the daemon redacts again
+        // and the repo caps long string values.
+        let body = json!({
+            "tool": tool,
+            "arguments": redact_json(args).value,
+            "ok": ok,
+            "rows": rows,
+        });
+        let req = self
+            .http
+            .post(format!(
+                "{}/api/v1/mcp/tool-calls",
+                self.base.trim_end_matches('/')
+            ))
+            .timeout(AUDIT_POST_TIMEOUT)
+            .bearer_auth(&self.token)
+            .header(
+                "X-Otto-Session",
+                self.session_id.clone().unwrap_or_default(),
+            )
+            .json(&body);
         let mut tasks = self.audit_tasks.lock().unwrap_or_else(|p| p.into_inner());
-        // Reap finished inserts so the set stays small in a long session.
+        // Reap finished posts so the set stays small in a long session.
         while tasks.try_join_next().is_some() {}
         tasks.spawn(async move {
-            if let Err(e) = audit.record(row).await {
-                eprintln!("ottod mcp-tools: audit insert failed: {e}");
+            match req.send().await {
+                Ok(r) if r.status().is_success() => {}
+                Ok(r) => eprintln!("ottod mcp-tools: audit append refused: {}", r.status()),
+                Err(e) => eprintln!("ottod mcp-tools: audit append failed: {e}"),
             }
         });
     }
 
-    /// Wait (bounded) for in-flight audit inserts — called when stdin closes.
+    /// Wait (bounded) for in-flight audit posts — called when stdin closes.
     async fn drain_audit(&self) {
         let mut tasks =
             std::mem::take(&mut *self.audit_tasks.lock().unwrap_or_else(|p| p.into_inner()));
@@ -1601,6 +1633,50 @@ const VAULT_REVIEW_READ_TOOLS: [(&str, &str); 8] = [
     ("otto_vault_okf_validate", "otto.vault_okf_validate"),
 ];
 
+/// Session sources that do ONE narrow job — review a PR, summarize a review,
+/// draft a PR/commit message, review or evaluate a skill. Their `tools/list`
+/// leaves out the infrastructure consoles (AWS, Kubernetes, Kafka brokers),
+/// the canvas and the in-app browser — ~20 KB of schema Codex would otherwise
+/// re-read every turn (perf2/10-mcp R2). LISTING only: a call by name still
+/// runs through the normal dispatch and the daemon's RBAC, exactly as before.
+const NARROW_SOURCES: &[&str] = &[
+    "review",
+    "review_summarizer",
+    "pr-draft",
+    "commit-draft",
+    "skillreview",
+    "skilleval",
+];
+
+/// Tool-name prefixes a [`NARROW_SOURCES`] session is not shown.
+const NARROW_HIDDEN_PREFIXES: &[&str] = &[
+    "aws_",
+    "k8s_",
+    "canvas_",
+    "browser_",
+    "otto_list_broker_",
+    "otto_get_broker_",
+    "otto_consume_broker_",
+    "otto_produce_broker_",
+    "otto_list_consumer_groups",
+];
+
+fn is_narrow_source(source: Option<&str>) -> bool {
+    source.is_some_and(|s| NARROW_SOURCES.contains(&s))
+}
+
+/// Drop the families a narrow session does not need from a listing.
+fn scope_listing_for_source(tools: &mut Vec<Value>, source: Option<&str>) {
+    if !is_narrow_source(source) {
+        return;
+    }
+    tools.retain(|t| {
+        t["name"]
+            .as_str()
+            .is_some_and(|n| !NARROW_HIDDEN_PREFIXES.iter().any(|p| n.starts_with(p)))
+    });
+}
+
 fn is_vault_docs_reviewer(source: Option<&str>) -> bool {
     source == Some("vault-docs-review")
 }
@@ -2141,11 +2217,16 @@ const NATIVE_REPO_REF_TOOLS: &[&str] = &[
 /// Schema text for a friendly `repo_id` (kept in step with the governed
 /// catalog's wording in `otto_server::mcp_outward`).
 /// Schema text for the cross-workspace list tools' optional `workspace_id`.
-const WS_DIR_DESC: &str = "Optional: only this workspace (id or name). Omit to list every workspace you can read (this session's first).";
+const WS_DIR_DESC: &str = "Optional workspace id or name; omit = all you can read.";
 /// Schema text for an issue-account argument (resolved by `/refs/resolve`).
-const ISSUE_ACCOUNT_DESC: &str = "Your Jira/Confluence account id, label, email or base URL (otto_list_issue_accounts). Omit when you have exactly one account.";
+const ISSUE_ACCOUNT_DESC: &str =
+    "Jira/Confluence account id, label, email or URL; omit if you have one.";
 
-const REPO_REF_DESC: &str = "Otto repo id — or a repo name, local path, or remote (`owner/repo` or URL). Resolved across EVERY workspace you can read, not just this one. Omit it to use the repo this session is working in. An ambiguous or unknown reference returns the candidates to pick from.";
+/// Kept SHORT (perf2/10-mcp R2): it repeats in every repo-taking schema of a
+/// catalog Codex re-reads each turn; an ambiguous/unknown reference still
+/// answers with the candidates.
+const REPO_REF_DESC: &str =
+    "Repo id, name, path or remote (any readable workspace). Omit = this session's repo.";
 
 /// The `/git/repos/resolve` query for a tool call's `repo_id` (+ optional
 /// `workspace_id` filter). Pure, so the binding is unit-tested.
@@ -4106,10 +4187,20 @@ async fn governed_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, bo
         Some("denied") | Some("error")
     ) || v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
     // A UI tool called by name may just have obtained (or lost) the grant:
-    // re-read it and re-list if the advertised catalog is now wrong.
+    // re-list if the advertised catalog is now wrong. The daemon puts the
+    // post-call grant in the reply (`ui_granted`, R4) — no second request;
+    // only a daemon older than that field costs a fresh enabled read.
     if is_ui_spec_name(&full) {
-        if let Some(fresh) = ctx.enabled_info(true).await {
-            ctx.sync_ui_listing(&fresh);
+        match v.get("ui_granted").and_then(Value::as_bool) {
+            Some(granted) => {
+                ctx.note_ui_grant(granted).await;
+                ctx.sync_ui_grant(granted);
+            }
+            None => {
+                if let Some(fresh) = ctx.enabled_info(true).await {
+                    ctx.sync_ui_listing(&fresh);
+                }
+            }
         }
     }
     Ok((v, is_error))
@@ -4122,11 +4213,16 @@ async fn governed_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, bo
 /// `otto_ui_*` tools. The envelope tells the agent what happened.
 async fn ui_request_control(ctx: &Ctx) -> Result<(Value, bool), String> {
     let (v, is_error) = governed_call(ctx, "otto_ui_state", &json!({})).await?;
-    let granted = ctx
-        .enabled_info(true)
-        .await
-        .inspect(|info| ctx.sync_ui_listing(info))
-        .is_some_and(|info| info.ui_granted);
+    // `governed_call` already synced the listing from the reply's grant (or,
+    // on an older daemon, from a fresh read that refreshed the cache) — no
+    // second request here (R4).
+    let granted = match v.get("ui_granted").and_then(Value::as_bool) {
+        Some(g) => g,
+        None => ctx
+            .enabled_info(false)
+            .await
+            .is_some_and(|info| info.ui_granted),
+    };
     let note = if granted {
         "UI control is allowed for this session: the otto_ui_* tools are now in your tool list \
          (re-list tools if your client did not refresh)."
@@ -4224,6 +4320,7 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                         "inputSchema": t["inputSchema"],
                     }));
                 }
+                scope_listing_for_source(arr, ctx.source.as_deref());
             }
             Some(rpc_ok(id.unwrap_or(Value::Null), cat))
         }
@@ -4410,18 +4507,10 @@ pub async fn run() -> Result<(), String> {
     let workspace_id = creds.workspace_id;
     let source = creds.source;
 
-    // Attach to the SQLite DB the daemon uses, for the audit ledger. Best-effort:
-    // if it can't be opened the tools still run, audit just degrades to stderr.
-    // `open_existing`, never `open`: a per-session helper must not run the
-    // repair UPDATEs + migrations against the live daemon's database at every
-    // session start (the daemon owns the schema).
-    let audit = match otto_state::open_existing(&Config::load().db_path()).await {
-        Ok(pool) => Some(McpAuditRepo::new(pool)),
-        Err(e) => {
-            eprintln!("ottod mcp-tools: audit DB unavailable ({e}); audit disabled");
-            None
-        }
-    };
+    // Audit rows go through the daemon (`POST /mcp/tool-calls`): the bridge
+    // opens no database connection at all (R7; before, every agent session's
+    // bridge held a writer on the live DB just for these inserts).
+    let audit = true;
 
     let http = reqwest::Client::builder()
         .timeout(CALL_TIMEOUT)
@@ -4448,7 +4537,7 @@ impl Ctx {
         session_id: Option<String>,
         workspace_id: Option<String>,
         source: Option<String>,
-        audit: Option<McpAuditRepo>,
+        audit: bool,
     ) -> Self {
         Ctx {
             http,
@@ -6490,6 +6579,10 @@ mod tests {
         status_hits: std::sync::atomic::AtomicUsize,
         gateway_hits: std::sync::atomic::AtomicUsize,
         ui_granted: std::sync::atomic::AtomicBool,
+        /// Answer UI tools like a daemon older than R4 (no `ui_granted`).
+        legacy_reply: std::sync::atomic::AtomicBool,
+        /// `POST /mcp/tool-calls` bodies (the bridge's audit appends).
+        audits: std::sync::Mutex<Vec<Value>>,
         /// Full names the mock reports enabled.
         enabled: std::sync::Mutex<Vec<String>>,
     }
@@ -6551,10 +6644,25 @@ mod tests {
                         if tool == "otto.ui_state" {
                             m.ui_granted.store(true, Ordering::SeqCst);
                         }
-                        axum::Json(json!({
+                        let mut env = json!({
                             "decision": "allowed", "executed": true,
                             "content": { "tool": tool }
-                        }))
+                        });
+                        // R4: a UI tool's reply carries the post-call grant.
+                        if tool.starts_with("otto.ui_") && !m.legacy_reply.load(Ordering::SeqCst) {
+                            env["ui_granted"] = json!(m.ui_granted.load(Ordering::SeqCst));
+                        }
+                        axum::Json(env)
+                    },
+                ),
+            )
+            .route(
+                "/mcp/tool-calls",
+                post(
+                    |axum::extract::State(m): axum::extract::State<Arc<MockDaemon>>,
+                     axum::Json(body): axum::Json<Value>| async move {
+                        m.audits.lock().unwrap().push(body);
+                        axum::http::StatusCode::NO_CONTENT
                     },
                 ),
             )
@@ -6728,10 +6836,67 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("\"ui_control_granted\": true"));
+        // R4: the grant came back IN the reply — the stub call cost one
+        // enable read (the governed call's cached check), not three (+ a
+        // fresh re-read in governed_call and another in the stub).
+        assert_eq!(
+            mock.enabled_hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one read for the first tools/list, one for the stub call"
+        );
         let after = drive(ctx_at(&base), &[list], 1).await;
         let after = names(&after[0]);
         assert!(after.iter().any(|n| n == "otto_ui_state"));
         assert!(!after.iter().any(|n| n == UI_REQUEST_CONTROL_TOOL));
+    }
+
+    /// R4 fallback: a daemon older than the reply's `ui_granted` field still
+    /// gets a correct re-list, through a fresh enable read.
+    #[tokio::test]
+    async fn a_grant_relists_against_a_daemon_without_the_reply_field() {
+        let mock = Arc::new(MockDaemon::default());
+        *mock.enabled.lock().unwrap() = all_governed_names();
+        mock.legacy_reply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let base = mock_daemon(mock.clone()).await;
+        let replies = drive(ctx_at(&base), &[call(2, UI_REQUEST_CONTROL_TOOL)], 2).await;
+        assert!(replies
+            .iter()
+            .any(|r| r["method"] == json!("notifications/tools/list_changed")));
+        let stub = replies.iter().find(|r| r["id"] == json!(2)).unwrap();
+        assert!(stub["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"ui_control_granted\": true"));
+        // The cached check + ONE fresh re-read (the stub reuses it).
+        assert_eq!(
+            mock.enabled_hits.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+    }
+
+    /// R7: a native tool call's audit row goes to the daemon
+    /// (`POST /mcp/tool-calls`), redacted, and is drained at EOF — the bridge
+    /// opens no database connection.
+    #[tokio::test]
+    async fn native_tool_calls_are_audited_through_the_daemon() {
+        let mock = Arc::new(MockDaemon::default());
+        let base = mock_daemon(mock.clone()).await;
+        let mut ctx = ctx_at(&base);
+        ctx.audit = true;
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"otto_list_workspaces","arguments":{"password":"hunter2"}}});
+        let _ = drive(ctx, &[req], 1).await;
+        let audits = mock.audits.lock().unwrap().clone();
+        assert_eq!(audits.len(), 1, "{audits:?}");
+        assert_eq!(audits[0]["tool"], json!("otto_list_workspaces"));
+        // The mock has no /workspaces route: the call failed and says so.
+        assert_eq!(audits[0]["ok"], json!(false));
+        assert!(
+            !audits[0].to_string().contains("hunter2"),
+            "arguments are redacted before they leave: {}",
+            audits[0]
+        );
     }
 
     /// The `tools/list` size budget: everything a default session can be
@@ -6743,23 +6908,21 @@ mod tests {
             names: all_governed_names(),
             ui_granted: false,
         };
-        let mut cat = tool_catalog_for_source(None);
-        cat["tools"]
-            .as_array_mut()
-            .unwrap()
-            .extend(governed_tools_for_session(&info));
-        let ungranted = serde_json::to_vec(&cat).unwrap().len();
+        let listing = |source: Option<&str>, info: &EnabledInfo| -> usize {
+            let mut cat = tool_catalog_for_source(source);
+            let arr = cat["tools"].as_array_mut().unwrap();
+            arr.extend(governed_tools_for_session(info));
+            scope_listing_for_source(arr, source);
+            serde_json::to_vec(&cat).unwrap().len()
+        };
+        let ungranted = listing(None, &info);
         let granted_info = EnabledInfo {
             ui_granted: true,
-            ..info
+            ..info.clone()
         };
-        let mut full = tool_catalog_for_source(None);
-        full["tools"]
-            .as_array_mut()
-            .unwrap()
-            .extend(governed_tools_for_session(&granted_info));
-        let granted = serde_json::to_vec(&full).unwrap().len();
-        eprintln!("tools/list bytes: ungranted={ungranted} granted={granted}");
+        let granted = listing(None, &granted_info);
+        let narrow = listing(Some("review"), &info);
+        eprintln!("tools/list bytes: ungranted={ungranted} granted={granted} review={narrow}");
         assert!(
             ungranted < granted * 3 / 4,
             "hiding the UI tools must cut the catalog by >25% ({ungranted} vs {granted})"
@@ -6768,10 +6931,45 @@ mod tests {
             ungranted <= TOOLS_LIST_BYTE_BUDGET,
             "tools/list grew to {ungranted} bytes (budget {TOOLS_LIST_BYTE_BUDGET})"
         );
+        assert!(
+            narrow <= NARROW_TOOLS_LIST_BYTE_BUDGET,
+            "a review session's tools/list grew to {narrow} bytes \
+             (budget {NARROW_TOOLS_LIST_BYTE_BUDGET})"
+        );
+        // Scoping is listing-only and really trims: no infra console left.
+        assert!(narrow < ungranted);
     }
 
-    /// See [`tools_list_catalog_stays_within_its_byte_budget`].
-    const TOOLS_LIST_BYTE_BUDGET: usize = 88_000; // 83_418 at perf/10-mcp (granted: 135_610)
+    /// A narrow (review) session's listing hides the infra/canvas/browser
+    /// families, but the default and assistant listings keep them.
+    #[test]
+    fn narrow_sources_drop_the_infra_consoles_from_the_listing() {
+        let names = |source: Option<&str>| -> Vec<String> {
+            let mut cat = tool_catalog_for_source(source);
+            let arr = cat["tools"].as_array_mut().unwrap();
+            scope_listing_for_source(arr, source);
+            arr.iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let review = names(Some("review"));
+        assert!(!review
+            .iter()
+            .any(|n| n.starts_with("k8s_") || n.starts_with("aws_")));
+        assert!(review.iter().any(|n| n == "otto_get_pr"), "{review:?}");
+        let default = names(None);
+        assert!(default.iter().any(|n| n.starts_with("k8s_")));
+        assert!(names(Some("workflow"))
+            .iter()
+            .any(|n| n.starts_with("aws_")));
+    }
+
+    /// See [`tools_list_catalog_stays_within_its_byte_budget`]. 79_748 at
+    /// perf2/10-mcp R2 (shorter repeated reference texts; granted 131_940);
+    /// 83_418 at perf/10-mcp (granted: 135_610).
+    const TOOLS_LIST_BYTE_BUDGET: usize = 82_000;
+    /// A review-type session (R2 per-source scoping): 56_830 measured.
+    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 59_000;
 
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above
     /// (which never actually call out). Audit disabled.
@@ -6783,7 +6981,7 @@ mod tests {
             Some("sess-test".into()),
             Some("ws-test".into()),
             None,
-            None,
+            false,
         )
     }
 }

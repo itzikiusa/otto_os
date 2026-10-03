@@ -513,6 +513,8 @@ pub async fn evaluate_with(
 /// they apply [`decide`] themselves.
 const READ_ONLY_POST_ALLOW: &[&str] = &[
     "/mcp/otto-tools/invoke",
+    // The session's own tool-call audit row (an append to its ledger, R7).
+    "/mcp/tool-calls",
     "/mcp/http",
     "/workspaces/{}/memory/search",
     "/workspaces/{}/vault/vaults/{}/search",

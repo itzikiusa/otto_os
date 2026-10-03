@@ -114,12 +114,28 @@ async fn require_resource<S: McpCtx>(
 async fn public_server<S: McpCtx>(
     ctx: &S,
     user: &User,
+    server: McpServerDetail,
+) -> Result<McpServerDetail, ApiErr> {
+    let policy = otto_state::ResourceAccessRepo::new(ctx.mcp_pool().clone())
+        .get_live_policy(otto_core::access::ResourceKind::McpServer, &server.id)
+        .await?;
+    let mut access = crate::service::CallerAccess::default();
+    public_server_with(ctx, user, server, &policy, &mut access).await
+}
+
+/// [`public_server`] under an already-loaded live policy, sharing the
+/// caller-level inputs across the servers of one list request.
+async fn public_server_with<S: McpCtx>(
+    ctx: &S,
+    user: &User,
     mut server: McpServerDetail,
+    policy: &otto_core::access::AccessPolicy,
+    access: &mut crate::service::CallerAccess,
 ) -> Result<McpServerDetail, ApiErr> {
     if !ctx
         .mcp()
-        .resource_allowed(&server, user, "configure", None)
-        .await?
+        .resource_allowed_with(access, policy, &server, user, &[("configure", None)])
+        .await?[0]
     {
         server.command.clear();
         server.args.clear();
@@ -130,7 +146,11 @@ async fn public_server<S: McpCtx>(
         server.secret_header_keys.clear();
         server.has_secret = false;
         server.health_error = None;
-        server.tools_count = ctx.mcp().visible_tools(&server, user).await?.len() as i64;
+        server.tools_count = ctx
+            .mcp()
+            .visible_tools_with(access, policy, &server, user)
+            .await?
+            .len() as i64;
     }
     Ok(server)
 }
@@ -147,6 +167,9 @@ struct VisibilityMemo {
         Option<(otto_state::McpServerDetail, otto_core::access::AccessPolicy)>,
     >,
     verdicts: std::collections::HashMap<(String, Option<String>), bool>,
+    /// The caller's capability / groups / workspace membership, read at most
+    /// once per request under an Enforced policy (not per distinct pair).
+    access: crate::service::CallerAccess,
 }
 
 /// Whether the caller may see a governance row tied to `server_id` / `tool`
@@ -185,7 +208,13 @@ async fn visible_record_memo<S: McpCtx>(
         None => false,
         Some((server, policy)) => {
             ctx.mcp()
-                .resource_allowed_under(policy, server, user, &[("discover", tool)])
+                .resource_allowed_with(
+                    &mut memo.access,
+                    policy,
+                    server,
+                    user,
+                    &[("discover", tool)],
+                )
                 .await?[0]
         }
     };
@@ -252,6 +281,7 @@ pub fn api_router<S: McpCtx>() -> Router<S> {
         .route("/mcp/policies/evaluate", post(evaluate_policy::<S>))
         // approvals
         .route("/mcp/approvals", get(list_approvals::<S>))
+        .route("/mcp/approvals/count", get(count_approvals::<S>))
         .route("/mcp/approvals/{id}/decide", post(decide_approval::<S>))
         // audit + stats
         .route("/mcp/audit", get(list_audit::<S>))
@@ -269,13 +299,25 @@ async fn list_servers<S: McpCtx>(
 ) -> ApiResult<Json<Vec<McpServerDetail>>> {
     require_ws(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
     let mut visible = Vec::new();
+    // One live-policy read per server; the caller's capability / groups /
+    // membership once for the whole list (perf2/10-mcp R1).
+    let mut access = crate::service::CallerAccess::default();
     for server in ctx.mcp().registry().list_for_ws(&wid).await? {
+        let policy = match otto_state::ResourceAccessRepo::new(ctx.mcp_pool().clone())
+            .get_live_policy(otto_core::access::ResourceKind::McpServer, &server.id)
+            .await
+        {
+            Ok(p) => p,
+            // Deleted between the list and this read: hidden, as before.
+            Err(Error::NotFound(_)) => continue,
+            Err(e) => return Err(e.into()),
+        };
         if ctx
             .mcp()
-            .resource_allowed(&server, &user, "discover", None)
-            .await?
+            .resource_allowed_with(&mut access, &policy, &server, &user, &[("discover", None)])
+            .await?[0]
         {
-            visible.push(public_server(&ctx, &user, server).await?);
+            visible.push(public_server_with(&ctx, &user, server, &policy, &mut access).await?);
         }
     }
     Ok(Json(visible))
@@ -930,6 +972,31 @@ async fn list_approvals<S: McpCtx>(
         }
     }
     Ok(Json(visible))
+}
+
+/// `GET /mcp/approvals/count?status=pending` → `{count}`: the badge number,
+/// with exactly the visibility of `GET /mcp/approvals` (workspace scoping +
+/// `discover` per (server, tool)), from one grouped count instead of 200
+/// whole rows (perf2/10-mcp R7). Uncapped (the list stops at 200 rows).
+async fn count_approvals<S: McpCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Query(q): Query<ApprovalQuery>,
+) -> ApiResult<Json<Value>> {
+    let ws = accessible_ws(&ctx, &user).await?;
+    let mut memo = VisibilityMemo::default();
+    let mut count = 0i64;
+    for (server_id, tool, n) in ctx
+        .mcp()
+        .approvals()
+        .count_by_server_tool(ws.as_deref(), q.status.as_deref())
+        .await?
+    {
+        if visible_record_memo(&ctx, &user, &mut memo, server_id.as_ref(), tool.as_deref()).await? {
+            count += n;
+        }
+    }
+    Ok(Json(json!({ "count": count })))
 }
 
 async fn decide_approval<S: McpCtx>(
