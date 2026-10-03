@@ -894,3 +894,139 @@ mod github_read_back {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cached provider reads (perf G1/G10): a remount within the TTL makes no
+// request, a stale entry revalidates with If-None-Match (304 = cached body),
+// and our own write clears the repo's entries.
+// ---------------------------------------------------------------------------
+
+mod cached_reads {
+    use super::*;
+    use crate::providers::client::{enable_cache_for_tests, expire_cached_for_tests};
+    use crate::providers::github::Github;
+    use wiremock::matchers::header;
+
+    fn pr(number: u64) -> serde_json::Value {
+        json!({
+            "number": number, "title": format!("PR {number}"), "state": "open",
+            "user": { "login": "dev" }, "head": { "ref": "feat", "sha": "deadbeef" },
+            "base": { "ref": "main" }, "updated_at": "2026-09-01T10:00:00Z",
+            "html_url": format!("https://github.com/acme/app/pull/{number}"),
+        })
+    }
+
+    async fn list_gets(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method.as_str() == "GET" && r.url.path() == "/repos/acme/app/pulls")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn second_list_within_ttl_makes_no_request_and_304_serves_cache() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        // A conditional GET carrying the stored ETag is answered 304.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .and(header("if-none-match", "\"v1\""))
+            .respond_with(ResponseTemplate::new(304))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("etag", "\"v1\"")
+                    .set_body_json(json!([pr(1), pr(2)])),
+            )
+            .mount(&server)
+            .await;
+
+        let a = gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        let b = gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(a.items.len(), 2);
+        assert_eq!(b.items.len(), 2);
+        assert_eq!(
+            list_gets(&server).await,
+            1,
+            "a repeat within the TTL is free"
+        );
+
+        expire_cached_for_tests(&server.uri());
+        let c = gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(c.items.len(), 2, "the 304 serves the cached body");
+        let reqs = server.received_requests().await.unwrap();
+        let last = reqs.last().unwrap();
+        assert_eq!(
+            last.headers
+                .get("if-none-match")
+                .and_then(|v| v.to_str().ok()),
+            Some("\"v1\""),
+            "a stale entry revalidates with its ETag"
+        );
+        assert_eq!(list_gets(&server).await, 2);
+    }
+
+    #[tokio::test]
+    async fn own_write_invalidates_the_repo_reads() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([pr(1)])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/acme/app/pulls/1/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        gh.approve(&rr(), 1).await.unwrap();
+        gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(
+            list_gets(&server).await,
+            2,
+            "the approve cleared the cached list — no 15 s of stale state"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_detail_reopen_within_ttl_costs_no_rest_request() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/repos/acme/app/(pulls|issues)/7/(comments|reviews)$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/repos/acme/app/commits/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        gh.get_pr(&rr(), 7).await.unwrap();
+        let first = server.received_requests().await.unwrap().len();
+        assert!(first >= 4, "detail + 3 lists (+ CI): {first}");
+        gh.get_pr(&rr(), 7).await.unwrap();
+        let second = server.received_requests().await.unwrap().len();
+        assert_eq!(second, first, "a re-open within the TTL hits the cache");
+    }
+}
