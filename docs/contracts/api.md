@@ -3215,6 +3215,9 @@ linked to a product story. CRUD lives in the `otto-canvas` crate; the
 agent-assist endpoints (prompt → diagram blocks) live in `otto-server` because
 they need the orchestrator. Gated by `Feature::Canvas` (read=View, write=Edit).
 Item routes resolve the workspace from the scene row.
+Scene create (#103) and update (#105) accept bodies up to **25 MiB** (an
+Excalidraw board inlines pasted images as base64 in `doc.source`); every other
+canvas route keeps axum's 2 MB default.
 
 Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The rich
 `Scene` schema (nodes/edges/slides) is owned by the UI (`ui/src/modules/canvas/types.ts`).
@@ -3226,7 +3229,9 @@ Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The ric
 | 104 | GET /api/v1/canvas/scenes/{id} | ws viewer | — | CanvasScene (full `doc_json`) |
 | 105 | PUT /api/v1/canvas/scenes/{id}[?summary=true] | ws editor | `{title?, doc?, thumbnail?, provider?, section?, story_id?}` | CanvasScene (partial; omitted fields unchanged, COALESCE). `?summary=true` answers with the `CanvasSceneSummary` row instead of echoing the whole document (the Canvas editor uses it). Summary `format` is a trigger-maintained column (migration 0143), no longer parsed out of `doc_json` per listed row |
 | 106 | DELETE /api/v1/canvas/scenes/{id} | ws editor | — | 204 |
-| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview) |
+| 106a | GET /api/v1/canvas/scenes/{id}/versions | ws viewer | — | `CanvasSceneVersion[]` newest first `{id, scene_id, origin: 'agent'\|'user'\|'restore', created_by?, format?, size, created_at}` — no documents. Each entry is the doc as it was JUST BEFORE a change: before every Ask AI commit, before a restore, and at most once per 10 min across user saves (#105 with `doc`); deduped against the newest entry; newest 30 kept (migration 0170) |
+| 106b | POST /api/v1/canvas/scenes/{id}/versions/{vid}/restore | ws editor | — | CanvasScene — snapshots the current doc (origin `restore`, so a restore is undoable) then writes the version's doc. 404 when `vid` isn't a version of THIS scene |
+| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview). On an Excalidraw board the agent sees only shapes/arrows/text in the simplified form; images, freedraw, lines, frames, free arrows (and anything bound to them) plus top-level `files`/`appState` are set aside and merged back into the committed scene, which may therefore mix simplified and full elements. The committed doc keeps the prior doc's extra keys (`sketch`, `positions`, …) and the pre-turn doc is recorded in #106a |
 | 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas") |
 | 145 | GET /api/v1/sessions/{sid}/canvas-refs | ws viewer | — | `CanvasSceneSummary[]` — scenes referenced by this session |
 | 146 | POST /api/v1/sessions/{sid}/canvas-refs | ws editor | `{scene_id}` | 204 (idempotent; 404 if the scene isn't in the session's workspace) |
