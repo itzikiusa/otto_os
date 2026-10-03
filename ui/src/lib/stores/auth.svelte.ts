@@ -89,7 +89,10 @@ class AuthStore {
 
   /** Load identity + capabilities from /auth/me. */
   private async loadMe(): Promise<void> {
-    const resp = await api.get<MeResp>('/auth/me');
+    this.applyMe(await api.get<MeResp>('/auth/me'));
+  }
+
+  private applyMe(resp: MeResp): void {
     this.me = resp.user;
     this.realUser = resp.real_user;
     // Restore the isImpersonating state persisted in localStorage on reload
@@ -113,6 +116,17 @@ class AuthStore {
     // and a re-boot of an already-running app refreshes in place: dropping
     // back to 'loading' unmounts the whole shell (a visible full reload).
     if (!retry && this.phase !== 'ready') this.phase = 'loading';
+    // With a token, identity + grants go out WITH /meta instead of after it
+    // (perf F3: three serial round-trips → one; it matters on a remote
+    // daemon). Onboarding / login / offline below just drop the results.
+    const token = getToken();
+    const early = token
+      ? { me: api.get<MeResp>('/auth/me'), caps: api.get<CapabilitiesResp>('/auth/capabilities') }
+      : null;
+    // Observed now, so a branch that never awaits them can't leave an
+    // unhandled rejection behind.
+    early?.me.catch(() => {});
+    early?.caps.catch(() => {});
     try {
       this.meta = await api.get<MetaResp>('/meta');
       // Background/slow calls move to the daemon's second loopback host
@@ -131,9 +145,20 @@ class AuthStore {
       return;
     }
     try {
-      await this.loadMe();
-      // Fetch capabilities alongside identity; errors are non-fatal.
-      await this.loadCapabilities();
+      if (early && token === getToken()) {
+        this.applyMe(await early.me);
+        this.capabilities = {};
+        try {
+          const resp = await early.caps;
+          if (token === getToken()) this.capabilities = resp.capabilities;
+        } catch {
+          // non-fatal: capabilities stay empty (all-deny for non-root)
+        }
+      } else {
+        await this.loadMe();
+        // Errors are non-fatal.
+        await this.loadCapabilities();
+      }
       this.phase = 'ready';
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) setToken(null);

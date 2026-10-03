@@ -769,10 +769,12 @@
   });
 
   // ---- palette commands: connections ("connect <name>") ----
+  // Fetched only once ⌘K / the floating bar has been opened in this document
+  // (perf F8) — every boot and workspace switch used to pay for the list.
   $effect(() => {
     const wsId = ws.currentId;
     // The side pane's palette is the window's (its commands are mirrored).
-    if (!wsId || isEmbedded) return;
+    if (!wsId || isEmbedded || !registry.wanted) return;
     let cancelled = false;
     let unreg: (() => void) | null = null;
     void api
