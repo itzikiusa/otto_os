@@ -10,6 +10,7 @@
   // adds nothing to the desktop layout.
   import Icon from '../lib/components/Icon.svelte';
   import { router } from '../lib/router.svelte';
+  import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { assistant } from '../lib/stores/assistant.svelte';
@@ -67,7 +68,7 @@
 
 <nav class="bottomnav" aria-label="Primary">
   {#each primary as m (m.id)}
-    <button class="bn-btn" class:active={current === m.id} aria-current={current === m.id ? 'page' : undefined} data-nav-id={m.id} onclick={() => go(m.id)}>
+    <button class="bn-btn" class:active={current === m.id} aria-current={current === m.id ? 'page' : undefined} data-nav-id={m.id} aria-busy={navPending.id === m.id || undefined} onclick={() => go(m.id)}>
       <span class="bn-icon">
         <Icon name={m.icon} size={20} />
         {#if m.id === 'agents' && ws.workingCount > 0}
@@ -108,7 +109,7 @@
         <span>Commands</span>
       </button>
       {#each overflow as m (m.id)}
-        <button class="sheet-item" class:active={current === m.id} aria-current={current === m.id ? 'page' : undefined} data-nav-id={m.id} onclick={() => go(m.id)}>
+        <button class="sheet-item" class:active={current === m.id} aria-current={current === m.id ? 'page' : undefined} data-nav-id={m.id} aria-busy={navPending.id === m.id || undefined} onclick={() => go(m.id)}>
           <Icon name={m.icon} size={22} />
           <span>{m.label}</span>
         </button>

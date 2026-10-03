@@ -39,6 +39,7 @@
   import { availableSections, groupLabel as settingsGroupLabel } from '../modules/settings/sections';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { router } from '../lib/router.svelte';
+  import { navPending } from '../lib/navPending.svelte';
   import { startSnip } from '../lib/snip';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { startWindowDrag } from '../lib/windowDrag';
@@ -1064,6 +1065,13 @@
     <!-- Pages without a PageHeader (Agents, Browser…): the agent-driving
          strip sits above the page instead of under its toolbar. -->
     <AgentDrivingBar />
+  {/if}
+  {#if navPending.slow}
+    <!-- Zero-height anchor: the bar overlays the content's top edge without
+         shifting it (perf F7). -->
+    <div class="nav-pending-slot">
+      <div class="nav-pending-bar" role="progressbar" aria-label="Loading page" data-testid="nav-pending-bar"></div>
+    </div>
   {/if}
   <div class="content">
     <!-- The page for the current route (shell/pages.svelte.ts). A component swap is
