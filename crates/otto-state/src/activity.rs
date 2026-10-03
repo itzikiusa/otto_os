@@ -725,7 +725,8 @@ impl ActivityRepo {
 /// row — the `foreground=true&with_sources=channel` list rule. The summary's
 /// per-session `MAX(ts)` probe used to run for every row of a workspace (1.9 k
 /// hidden review agents); background panels read their own trail. The source
-/// names are compile-time constants (no quotes), so they are inlined.
+/// names are compile-time constants (no quotes), so they are inlined. Reads
+/// the indexed generated `source` column (migration 0162), not the JSON.
 fn shown_sessions_sql() -> String {
     let bg = otto_core::domain::BACKGROUND_SESSION_SOURCES
         .iter()
@@ -734,9 +735,7 @@ fn shown_sessions_sql() -> String {
         .join(", ");
     format!(
         "s.archived = 0 AND (s.kind <> 'agent' \
-         OR COALESCE(json_type(s.meta_json, '$.source'), '') <> 'text' \
-         OR json_extract(s.meta_json, '$.source') NOT IN ({bg}) \
-         OR json_extract(s.meta_json, '$.source') = 'channel')"
+         OR s.source IS NULL OR s.source NOT IN ({bg}) OR s.source = 'channel')"
     )
 }
 

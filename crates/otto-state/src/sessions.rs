@@ -117,16 +117,99 @@ pub struct SessionListFilter {
 
 /// Push the SQL form of [`Session::is_foreground_agent`] for an agent row:
 /// `meta.source` is absent / not a JSON string / not a background source.
+/// Reads the generated `source` column (migration 0162: `meta.source` when it
+/// is a JSON string, else NULL), which the list index carries — no per-row
+/// JSON parse.
 fn push_foreground_agent(q: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
-    q.push(
-        "(COALESCE(json_type(meta_json, '$.source'), '') <> 'text' \
-          OR json_extract(meta_json, '$.source') NOT IN (",
-    );
+    q.push("(source IS NULL OR source NOT IN (");
     let mut sep = q.separated(", ");
     for src in otto_core::domain::BACKGROUND_SESSION_SOURCES {
         sep.push_bind(src);
     }
     q.push("))");
+}
+
+/// The `list_filtered` statement, after `prefix` (`""`, or `EXPLAIN QUERY
+/// PLAN ` in the plan test). With a limit: the newest `limit` rows in a
+/// subquery, re-sorted oldest-first outside it.
+fn list_query(
+    prefix: &str,
+    scopes: &[SessionScope],
+    filter: &SessionListFilter,
+) -> sqlx::QueryBuilder<sqlx::Sqlite> {
+    let mut q = sqlx::QueryBuilder::<sqlx::Sqlite>::new(prefix);
+    q.push(if filter.limit.is_some() {
+        "SELECT * FROM (SELECT * FROM sessions WHERE ("
+    } else {
+        "SELECT * FROM sessions WHERE ("
+    });
+    for (i, scope) in scopes.iter().enumerate() {
+        if i > 0 {
+            q.push(" OR ");
+        }
+        q.push("(workspace_id = ")
+            .push_bind(scope.workspace_id.clone());
+        if let Some(owner) = &scope.owner {
+            q.push(" AND created_by = ").push_bind(owner.clone());
+        }
+        q.push(")");
+    }
+    q.push(")");
+    if let Some(archived) = filter.archived {
+        q.push(" AND archived = ").push_bind(archived as i64);
+    }
+    if let Some(kind) = &filter.kind {
+        q.push(" AND kind = ").push_bind(kind.clone());
+    }
+    if let Some(status) = &filter.status {
+        q.push(" AND status = ").push_bind(status.clone());
+    }
+    if let Some(source) = &filter.source {
+        // Parity with the old Rust filter: `meta.source` counts only when it
+        // is a JSON string.
+        if source == "none" {
+            q.push(" AND source IS NULL");
+        } else {
+            q.push(" AND source = ").push_bind(source.clone());
+        }
+    }
+    if let Some(before) = &filter.before {
+        q.push(" AND created_at < ").push_bind(before.clone());
+    }
+    if let Some(fg) = filter.foreground {
+        if fg {
+            q.push(" AND (kind <> 'agent' OR ");
+            push_foreground_agent(&mut q);
+            if !filter.with_sources.is_empty() {
+                q.push(" OR source IN (");
+                let mut sep = q.separated(", ");
+                for src in &filter.with_sources {
+                    sep.push_bind(src.clone());
+                }
+                q.push(")");
+            }
+            q.push(")");
+        } else {
+            q.push(" AND kind = 'agent' AND NOT ");
+            push_foreground_agent(&mut q);
+        }
+    }
+    if let Some(ids) = &filter.ids {
+        q.push(" AND id IN (");
+        let mut sep = q.separated(", ");
+        for id in ids {
+            sep.push_bind(id.clone());
+        }
+        q.push(")");
+    }
+    if let Some(limit) = filter.limit {
+        q.push(" ORDER BY created_at DESC, id DESC LIMIT ")
+            .push_bind(limit as i64)
+            .push(") ORDER BY created_at, id");
+    } else {
+        q.push(" ORDER BY created_at, id");
+    }
+    q
 }
 
 /// Insert payload for a new session row.
@@ -318,81 +401,7 @@ impl SessionsRepo {
         {
             return Ok(Vec::new());
         }
-        // With a limit: the newest `limit` rows in a subquery, re-sorted
-        // oldest-first outside it.
-        let mut q = sqlx::QueryBuilder::<sqlx::Sqlite>::new(if filter.limit.is_some() {
-            "SELECT * FROM (SELECT * FROM sessions WHERE ("
-        } else {
-            "SELECT * FROM sessions WHERE ("
-        });
-        for (i, scope) in scopes.iter().enumerate() {
-            if i > 0 {
-                q.push(" OR ");
-            }
-            q.push("(workspace_id = ")
-                .push_bind(scope.workspace_id.clone());
-            if let Some(owner) = &scope.owner {
-                q.push(" AND created_by = ").push_bind(owner.clone());
-            }
-            q.push(")");
-        }
-        q.push(")");
-        if let Some(archived) = filter.archived {
-            q.push(" AND archived = ").push_bind(archived as i64);
-        }
-        if let Some(kind) = &filter.kind {
-            q.push(" AND kind = ").push_bind(kind.clone());
-        }
-        if let Some(status) = &filter.status {
-            q.push(" AND status = ").push_bind(status.clone());
-        }
-        if let Some(source) = &filter.source {
-            // Parity with the old Rust filter: `meta.source` counts only when it
-            // is a JSON string.
-            if source == "none" {
-                q.push(" AND COALESCE(json_type(meta_json, '$.source'), '') <> 'text'");
-            } else {
-                q.push(" AND json_type(meta_json, '$.source') = 'text' AND json_extract(meta_json, '$.source') = ")
-                    .push_bind(source.clone());
-            }
-        }
-        if let Some(before) = &filter.before {
-            q.push(" AND created_at < ").push_bind(before.clone());
-        }
-        if let Some(fg) = filter.foreground {
-            if fg {
-                q.push(" AND (kind <> 'agent' OR ");
-                push_foreground_agent(&mut q);
-                if !filter.with_sources.is_empty() {
-                    q.push(" OR (json_type(meta_json, '$.source') = 'text' AND json_extract(meta_json, '$.source') IN (");
-                    let mut sep = q.separated(", ");
-                    for src in &filter.with_sources {
-                        sep.push_bind(src.clone());
-                    }
-                    q.push("))");
-                }
-                q.push(")");
-            } else {
-                q.push(" AND kind = 'agent' AND NOT ");
-                push_foreground_agent(&mut q);
-            }
-        }
-        if let Some(ids) = &filter.ids {
-            q.push(" AND id IN (");
-            let mut sep = q.separated(", ");
-            for id in ids {
-                sep.push_bind(id.clone());
-            }
-            q.push(")");
-        }
-        if let Some(limit) = filter.limit {
-            q.push(" ORDER BY created_at DESC, id DESC LIMIT ")
-                .push_bind(limit as i64)
-                .push(") ORDER BY created_at, id");
-        } else {
-            q.push(" ORDER BY created_at, id");
-        }
-        let rows = q
+        let rows = list_query("", scopes, filter)
             .build()
             .fetch_all(&self.pool)
             .await
@@ -415,7 +424,7 @@ impl SessionsRepo {
         }
         q.push(" AND archived = 0 AND (kind <> 'agent' OR ");
         push_foreground_agent(&mut q);
-        q.push(" OR (json_type(meta_json, '$.source') = 'text' AND json_extract(meta_json, '$.source') = 'channel'))");
+        q.push(" OR source = 'channel')");
         let rows = q
             .build()
             .fetch_all(&self.pool)
@@ -813,7 +822,7 @@ impl SessionsRepo {
         let rows = sqlx::query(
             "SELECT * FROM sessions \
              WHERE archived = 0 AND kind = 'agent' AND status != 'working' AND last_active_at < ? \
-               AND json_extract(meta_json, '$.source') = 'channel' \
+               AND source = 'channel' \
              ORDER BY last_active_at",
         )
         .bind(before)
@@ -836,7 +845,7 @@ impl SessionsRepo {
         let rows = sqlx::query(
             "SELECT * FROM sessions \
              WHERE archived = 1 AND kind = 'agent' AND last_active_at < ? \
-               AND json_extract(meta_json, '$.source') = 'channel' \
+               AND source = 'channel' \
              ORDER BY last_active_at",
         )
         .bind(before)
@@ -1729,6 +1738,111 @@ mod tests {
             ..Default::default()
         };
         assert!(repo.list_filtered(&scope, &none).await.unwrap().is_empty());
+    }
+
+    /// The generated `source` column (0162) follows meta edits (a merge that
+    /// sets / clears `meta.source` moves the row between the lists), and the
+    /// `source` filter (`none` / a name) reads it. (Malformed `meta_json`
+    /// can't be stored at all: 0134's `$.project_id` expression index
+    /// already rejects it.)
+    #[tokio::test]
+    async fn source_column_tracks_meta_edits() {
+        let pool = mem_pool().await;
+        let (alice, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let scope = [SessionScope {
+            workspace_id: ws.clone(),
+            owner: None,
+        }];
+        let fg = SessionListFilter {
+            archived: Some(false),
+            foreground: Some(true),
+            ..Default::default()
+        };
+        let a = insert_row(
+            &pool,
+            &ws,
+            &alice,
+            "agent",
+            "idle",
+            0,
+            "{}",
+            "2026-01-01T00:00:00+00:00",
+        )
+        .await;
+        let ids = |v: Vec<Session>| v.into_iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(repo.list_filtered(&scope, &fg).await.unwrap()),
+            vec![a.clone()]
+        );
+        repo.merge_meta(&a, &serde_json::json!({"source": "review"}))
+            .await
+            .unwrap();
+        assert!(repo.list_filtered(&scope, &fg).await.unwrap().is_empty());
+        let review = SessionListFilter {
+            source: Some("review".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(repo.list_filtered(&scope, &review).await.unwrap()),
+            vec![a.clone()]
+        );
+        repo.merge_meta(&a, &serde_json::json!({"source": null}))
+            .await
+            .unwrap();
+        let none = SessionListFilter {
+            source: Some("none".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(repo.list_filtered(&scope, &none).await.unwrap()),
+            vec![a.clone()]
+        );
+        assert_eq!(ids(repo.list_filtered(&scope, &fg).await.unwrap()), vec![a]);
+    }
+
+    /// The shown-list query is answered from the 0162 index: it is the one
+    /// the planner picks, and `kind`/`source` come from the index entry — so
+    /// a background row's JSON is never parsed (perf R3).
+    #[tokio::test]
+    async fn foreground_list_uses_the_source_index() {
+        let pool = mem_pool().await;
+        let scope = [SessionScope {
+            workspace_id: "ws".into(),
+            owner: None,
+        }];
+        let filters = [
+            SessionListFilter {
+                archived: Some(false),
+                foreground: Some(true),
+                with_sources: vec!["channel".into()],
+                ..Default::default()
+            },
+            SessionListFilter {
+                archived: Some(true),
+                limit: Some(100),
+                ..Default::default()
+            },
+        ];
+        for f in &filters {
+            let plan: Vec<String> = list_query("EXPLAIN QUERY PLAN ", &scope, f)
+                .build()
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.get::<String, _>("detail"))
+                .collect();
+            let plan = plan.join(" | ");
+            assert!(
+                plan.contains("USING INDEX idx_sessions_ws_arch_created_src"),
+                "{f:?}: {plan}"
+            );
+            // The paged form re-sorts its ≤ limit rows outside the subquery.
+            if f.limit.is_none() {
+                assert!(!plan.contains("TEMP B-TREE"), "{f:?}: {plan}");
+            }
+        }
     }
 
     #[tokio::test]

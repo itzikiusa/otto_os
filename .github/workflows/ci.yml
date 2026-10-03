@@ -295,6 +295,7 @@ jobs:
           e2e/desktop-terminal-flood-perf.spec.ts
           e2e/desktop-terminal-park-redraw.spec.ts
           e2e/desktop-terminal-compact-queue-perf.spec.ts
+          e2e/desktop-agents-scale-perf.spec.ts
 
       - name: Upload the Playwright report
         if: failure()
