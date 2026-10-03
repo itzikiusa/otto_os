@@ -14,7 +14,7 @@
 //   node scripts/perf/daemon-budget.mjs <path/to/ottod>
 // Env: OTTO_PERF_BUDGET_SCALE (multiplies time/CPU budgets; CI uses a debug
 // build on shared runners), OTTO_PERF_IDLE_SECS (default 20),
-// OTTO_PERF_PORT (default 7893).
+// OTTO_PERF_SETTLE_SECS (default 30), OTTO_PERF_PORT (default 7893).
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, existsSync, statSync, rmSync, readdirSync, openSync, readSync, closeSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,6 +27,9 @@ if (!bin || !existsSync(bin)) {
 }
 const SCALE = Number(process.env.OTTO_PERF_BUDGET_SCALE ?? '1') || 1;
 const IDLE_SECS = Number(process.env.OTTO_PERF_IDLE_SECS ?? '20') || 20;
+// Boot-time background work (first retention/catalog passes) burns CPU for
+// ~20 s on a debug build; measured locally: ~60 % at +5 s, 0.4 % from +20 s.
+const SETTLE_SECS = Number(process.env.OTTO_PERF_SETTLE_SECS ?? '30') || 30;
 const PORT = process.env.OTTO_PERF_PORT ?? '7893';
 if (PORT === '7700') {
   console.error('refusing to use the live daemon port 7700');
@@ -141,7 +144,7 @@ try {
   results.boot_ms = Math.round(performance.now() - t0);
 
   // Let boot-time background work (retention first passes, sweeps) settle.
-  await sleep(5_000);
+  await sleep(SETTLE_SECS * 1_000);
   const c0 = cpuSeconds(child.pid);
   const v0 = voluntarySwitches(child.pid);
   const w0 = performance.now();
