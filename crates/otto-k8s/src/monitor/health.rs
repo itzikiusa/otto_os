@@ -455,10 +455,6 @@ fn pod_counts(snap: &Snapshot) -> Value {
     json!({"running": running, "pending": pending, "failed": failed, "succeeded": succeeded, "crashloop": crashloop, "total": snap.len()})
 }
 
-fn snapshot_of(status: &K8sMonitorStatusRow) -> Snapshot {
-    serde_json::from_value(status.snapshot.clone()).unwrap_or_default()
-}
-
 fn limit_of<'a>(snap: &'a Snapshot, ns: &str, pod: &str) -> Option<&'a PodSnap> {
     snap.get(&super::classify::snap_key(ns, pod))
 }
@@ -469,13 +465,13 @@ pub async fn health(
     sink: &dyn MonitorSink,
     cluster: &K8sCluster,
     status: &K8sMonitorStatusRow,
+    snap: &Snapshot,
     enabled: bool,
     window: Duration,
     window_label: &str,
 ) -> Result<Value> {
-    let snap = snapshot_of(status);
     let cid = cluster.id.to_string();
-    let stats = workload_stats(sink, &cid, &snap, None, window).await?;
+    let stats = workload_stats(sink, &cid, snap, None, window).await?;
     let (mem, err, lat) = outliers(&stats);
 
     // Per-restart detail lists by class + churn summary.
@@ -507,7 +503,7 @@ pub async fn health(
         if kind == "restart" {
             let ns = st(&r, "namespace");
             let pod = st(&r, "pod");
-            let limit = limit_of(&snap, ns, pod).map(|p| p.mem_limit).unwrap_or(0);
+            let limit = limit_of(snap, ns, pod).map(|p| p.mem_limit).unwrap_or(0);
             let mut item = json!({
                 "workload": st(&r, "workload"), "pod": pod, "container": st(&r, "container"),
                 "at": st(&r, "ts"), "reason": st(&r, "reason"), "exit_code": f(&r, "exit_code") as i64,
@@ -567,7 +563,7 @@ pub async fn health(
             "pods_failed": status.pods_failed,
             "cycle_ms": status.cycle_ms,
         },
-        "pods": pod_counts(&snap),
+        "pods": pod_counts(snap),
         "unplanned_restarts": unplanned,
         "restarts": restarts,
         "churn": churn_list,

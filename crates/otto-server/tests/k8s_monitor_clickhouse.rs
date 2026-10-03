@@ -79,8 +79,7 @@ fn s(metric: &str, labels: &[(&str, &str)], value: f64) -> Sample {
 
 #[tokio::test]
 async fn every_query_builder_runs_on_a_real_clickhouse() {
-    if ClickHouse::locate(None).is_none() {
-        eprintln!("SKIP: no `clickhouse` binary on this machine");
+    if no_clickhouse() {
         return;
     }
     let tmp = tempfile::tempdir().unwrap();
@@ -400,9 +399,26 @@ async fn every_query_builder_runs_on_a_real_clickhouse() {
     engine.shutdown().await;
 }
 
+/// No `clickhouse` binary: skip on a dev box, FAIL where the ratchets are
+/// required (CI sets `OTTO_REQUIRE_CLICKHOUSE=1` after installing the pinned
+/// binary — a vacuous pass there hid every query-builder regression, perf K7).
+fn no_clickhouse() -> bool {
+    if ClickHouse::locate(None).is_some() {
+        return false;
+    }
+    let required = std::env::var("OTTO_REQUIRE_CLICKHOUSE")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+    assert!(
+        !required,
+        "OTTO_REQUIRE_CLICKHOUSE is set but no `clickhouse` binary was found"
+    );
+    eprintln!("SKIP: no `clickhouse` binary on this machine");
+    true
+}
+
 async fn start_engine(tmp: &tempfile::TempDir) -> Option<Arc<UsageEngine>> {
-    if ClickHouse::locate(None).is_none() {
-        eprintln!("SKIP: no `clickhouse` binary on this machine");
+    if no_clickhouse() {
         return None;
     }
     let engine = UsageEngine::start(

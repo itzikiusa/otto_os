@@ -11261,3 +11261,19 @@ export interface K8sPodActionInput {
 }
 
 export type * from './maintenance-types';
+
+// --- perf K8s (UI half of review K2/K6) ---------------------------------------
+// Declaration-merged into the interfaces above so the additions stay in one block.
+
+export interface K8sResourcesResp {
+  /** Opaque version of this list (contract K2): also the quoted `ETag`; send it
+   *  back as `If-None-Match` and an unchanged list answers `304` (no body).
+   *  Optional so an older daemon's body still type-checks. */
+  version?: string;
+}
+
+/** `GET /k8s/monitor/fleet/series/batch?metrics=a,b,…` (≤ 8 metrics): one
+ *  `K8sFleetSeries` per requested metric, keyed by metric id. */
+export interface K8sFleetSeriesBatch {
+  series: Partial<Record<K8sFleetMetric, K8sFleetSeries>>;
+}

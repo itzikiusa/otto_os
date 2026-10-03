@@ -250,7 +250,10 @@ fn cors_layer() -> CorsLayer {
             // Agent UI control: the result/progress POSTs name the Otto window
             // (event-socket connection) the command was sent to.
             header::HeaderName::from_static("x-otto-ui-conn"),
+            // Conditional list reads (k8s resources: an unchanged list is a 304).
+            header::IF_NONE_MATCH,
         ])
+        .expose_headers([header::ETAG])
         // Every call carries `Authorization`, so every call is preflighted.
         // Without a max-age WebKit caches a preflight ~5 s (per URL), so a
         // poller paid an extra OPTIONS round-trip on almost every tick. 600 s

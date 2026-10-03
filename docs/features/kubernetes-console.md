@@ -160,7 +160,7 @@ the active Kubernetes entry in the sidebar again for the clusters overview.
 ### Namespaces, nodes, resource kinds
 
 The top bar has a namespace filter (**All namespaces** ⇒ kubectl `-A`,
-remembered per cluster), a free-text filter, refresh + 10 s auto-refresh, the
+remembered per cluster), a free-text filter, refresh + auto-refresh (10 s; slower on big lists, see below), the
 cluster switcher and the k9s button. Namespaces are always lowercased (they
 are DNS labels; phones auto-capitalize). When the kubeconfig user can't
 `get namespaces` (Rancher project-scoped users), the picker lists the
@@ -179,6 +179,14 @@ contract for the per-kind `extra` columns). `-o wide` is never used; the
 daemon derives the columns itself so they are stable across kubectl versions.
 `q` is a case-insensitive substring match over the visible columns, applied
 daemon-side.
+
+Lists are cached for 5 s with single-flight, so the console, a second window,
+WorkloadPods and an agent asking for the same list share one kubectl call.
+Each answer carries a content `version` (also the `ETag`); the console's poll
+sends it back as `If-None-Match` and an unchanged list is a body-less 304
+that leaves the table untouched. Auto-refresh runs every 10 s below 1,000
+rows and every `max(30 s, 3 × last load time)` above, and pauses while the
+k9s terminal covers the table (one refresh when it closes).
 
 `health` colours the status cell: `ok`, `warn`, `bad`, `progressing`. For
 pods: `Terminating` when `deletionTimestamp` is set; a container waiting /

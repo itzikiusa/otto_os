@@ -208,7 +208,64 @@ impl K8sMonitorRepo {
         Ok(r.as_ref().map(row_to_status))
     }
 
+    /// [`Self::get_status`] WITHOUT `snapshot_json` (`snapshot` is `Null`):
+    /// the dashboard's cache-key / response read. A 5k-pod snapshot is ~4 MB
+    /// of JSON that a cache hit never needs (perf K3).
+    pub async fn get_status_meta(&self, cluster_id: &str) -> Result<Option<K8sMonitorStatusRow>> {
+        let r = sqlx::query(
+            "SELECT cluster_id, last_cycle_at, last_ok_at, last_error, transport_used,
+                    metrics_server, pods_seen, pods_scraped, pods_failed, cycle_ms,
+                    'null' AS snapshot_json
+             FROM k8s_monitor_status WHERE cluster_id = ?",
+        )
+        .bind(cluster_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("k8s monitor status"))?;
+        Ok(r.as_ref().map(|r| {
+            let mut s = row_to_status(r);
+            s.snapshot = Value::Null;
+            s
+        }))
+    }
+
+    /// The stored snapshot as raw JSON text (parse it off the runtime) plus
+    /// the row's `last_cycle_at`.
+    pub async fn get_snapshot_json(
+        &self,
+        cluster_id: &str,
+    ) -> Result<Option<(String, Option<String>)>> {
+        let r = sqlx::query(
+            "SELECT snapshot_json, last_cycle_at FROM k8s_monitor_status WHERE cluster_id = ?",
+        )
+        .bind(cluster_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("k8s monitor snapshot"))?;
+        Ok(r.map(|r| (r.get("snapshot_json"), r.get("last_cycle_at"))))
+    }
+
+    /// [`Self::upsert_status`] with the snapshot already serialised (the
+    /// collector serialises its typed snapshot straight to text — no `Value`
+    /// round-trip, perf K4). `row.snapshot` is ignored.
+    pub async fn upsert_status_with_snapshot_str(
+        &self,
+        row: &K8sMonitorStatusRow,
+        snapshot_json: &str,
+    ) -> Result<()> {
+        self.upsert_status_inner(row, snapshot_json).await
+    }
+
     pub async fn upsert_status(&self, row: &K8sMonitorStatusRow) -> Result<()> {
+        self.upsert_status_inner(row, &row.snapshot.to_string())
+            .await
+    }
+
+    async fn upsert_status_inner(
+        &self,
+        row: &K8sMonitorStatusRow,
+        snapshot_json: &str,
+    ) -> Result<()> {
         sqlx::query(
             "INSERT INTO k8s_monitor_status (cluster_id, last_cycle_at, last_ok_at, last_error,
                                              transport_used, metrics_server, pods_seen, pods_scraped,
@@ -231,7 +288,7 @@ impl K8sMonitorRepo {
         .bind(row.pods_scraped)
         .bind(row.pods_failed)
         .bind(row.cycle_ms)
-        .bind(row.snapshot.to_string())
+        .bind(snapshot_json)
         .execute(&self.pool)
         .await
         .map_err(dberr("upsert k8s monitor status"))?;
@@ -356,6 +413,32 @@ mod tests {
         assert_eq!(
             repo.get_status("c1").await.unwrap().unwrap().snapshot,
             serde_json::json!({})
+        );
+    }
+
+    #[tokio::test]
+    async fn meta_read_skips_the_snapshot_and_str_upsert_stores_it_verbatim() {
+        let repo = K8sMonitorRepo::new(pool_with_cluster().await);
+        assert!(repo.get_status_meta("c1").await.unwrap().is_none());
+        let mut st = K8sMonitorStatusRow::empty("c1");
+        st.pods_seen = 3;
+        st.last_cycle_at = Some("2026-10-03T10:00:00.000Z".into());
+        repo.upsert_status_with_snapshot_str(&st, r#"{"ns/p":{"phase":"Running"}}"#)
+            .await
+            .unwrap();
+        let meta = repo.get_status_meta("c1").await.unwrap().unwrap();
+        assert_eq!(meta.pods_seen, 3);
+        assert_eq!(
+            meta.snapshot,
+            Value::Null,
+            "meta read never parses the snapshot"
+        );
+        let (raw, at) = repo.get_snapshot_json("c1").await.unwrap().unwrap();
+        assert_eq!(raw, r#"{"ns/p":{"phase":"Running"}}"#);
+        assert_eq!(at.as_deref(), Some("2026-10-03T10:00:00.000Z"));
+        assert_eq!(
+            repo.get_status("c1").await.unwrap().unwrap().snapshot["ns/p"]["phase"],
+            "Running"
         );
     }
 

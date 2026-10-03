@@ -35,6 +35,7 @@ pub mod clusters;
 pub mod eks_token;
 pub mod http;
 pub mod install;
+pub mod list_cache;
 pub mod logs;
 pub mod monitor;
 pub mod pod_http;

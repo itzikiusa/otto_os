@@ -3,7 +3,7 @@
 // a streaming helper for `kubectl logs -f` (a chunked `text/plain` body the
 // JSON-parsing `request()` cannot read).
 
-import { api, ApiError, getToken, laneFetch } from './client';
+import { api, ApiError, getToken, laneFetch, type Conditional } from './client';
 import type {
   ImportK8sClusterReq,
   K8sActionReq,
@@ -15,8 +15,10 @@ import type {
   K8sExecReq,
   K8sFleetEvents,
   K8sFleetFilters,
+  K8sFleetMetric,
   K8sFleetRequests,
   K8sFleetSeries,
+  K8sFleetSeriesBatch,
   K8sFleetTable,
   K8sHealthDigest,
   K8sInstallJob,
@@ -98,6 +100,23 @@ export const k8sApi = {
       `/k8s/clusters/${enc(id)}/resources${qs({ kind, ns: opts.ns ?? '', label: opts.label || undefined, q: opts.q || undefined })}`,
       signal,
     ),
+  /** perf K8s: {@link resources} as a conditional GET. `ifNoneMatch` is the
+   *  validator of the rows the caller holds (`resourcesValidator`,
+   *  modules/kubernetes/resourcePoll.ts);
+   *  an unchanged list resolves `{ notModified: true }` (304, nothing parsed).
+   *  Same path ⇒ same lane / connection pool as `resources`. */
+  resourcesIfChanged: (
+    id: string,
+    kind: K8sResourceKind,
+    opts: { ns?: string; label?: string; q?: string } = {},
+    ifNoneMatch: string | null,
+    signal?: AbortSignal,
+  ): Promise<Conditional<K8sResourcesResp>> =>
+    api.getConditional<K8sResourcesResp>(
+      `/k8s/clusters/${enc(id)}/resources${qs({ kind, ns: opts.ns ?? '', label: opts.label || undefined, q: opts.q || undefined })}`,
+      ifNoneMatch,
+      signal,
+    ),
   resource: (id: string, kind: K8sResourceKind, ns: string, name: string, signal?: AbortSignal) =>
     api.get<K8sResourceDetail>(
       `/k8s/clusters/${enc(id)}/resource${qs({ kind, ns, name })}`,
@@ -141,6 +160,12 @@ export const k8sApi = {
     p: { window: string; metric: string; by?: string; step?: number; cluster?: string; ns?: string; workload?: string; pod?: string },
     signal?: AbortSignal,
   ) => api.get<K8sFleetSeries>(`/k8s/monitor/fleet/series${qs(p)}`, signal),
+  /** perf K8s: every overview metric in ONE request (`metrics` ≤ 8) — one
+   *  socket and one server cache key instead of a `fleetSeries` per chart. */
+  fleetSeriesBatch: (
+    p: { window: string; metrics: K8sFleetMetric[]; by?: string; step?: number; cluster?: string; ns?: string; workload?: string; pod?: string },
+    signal?: AbortSignal,
+  ) => api.get<K8sFleetSeriesBatch>(`/k8s/monitor/fleet/series/batch${qs({ ...p, metrics: p.metrics.join(',') })}`, signal),
   fleetEvents: (
     p: { window: string; cluster?: string; ns?: string; workload?: string; pod?: string; class?: string; sort?: string; dir?: string; limit?: number; offset?: number },
     signal?: AbortSignal,

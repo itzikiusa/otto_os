@@ -6,7 +6,7 @@
   // workload, pod), the table grouping / sort and the events sort are all
   // persisted per device, and every row is a drill-down (cluster → namespace
   // → workload → pod → events).
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { radioKey } from '../../../lib/radioKey';
   import { router } from '../../../lib/router.svelte';
   import { k8s } from '../../../lib/stores/k8s.svelte';
@@ -32,7 +32,9 @@
   import MetricChart from '../../../lib/components/MetricChart.svelte';
   import { formatBytes } from '../k8s-util';
   import EnvBadge from '../../../lib/components/EnvBadge.svelte';
-  import { WINDOWS, classColor, classLabel, fmtMs, fmtPct, fmtRate, isWindow, liveRefreshLimit, FLEET_TABLE_MAX, FLEET_EVENTS_MAX } from './monitor-util';
+  import VirtualList from '../../../lib/components/VirtualList.svelte';
+  import { ApiError } from '../../../lib/api/client';
+  import { WINDOWS, classColor, classLabel, fmtMs, fmtPct, fmtRate, isWindow, liveRefreshLimit, FLEET_TABLE_MAX, FLEET_EVENTS_MAX, fleetEventKey, fleetRowKey, reuseByKey, uniqueKeys } from './monitor-util';
 
   interface Props {
     tab: string;
@@ -183,6 +185,12 @@
   let tableError = $state('');
   let quick = $state('');
   const PAGE = 200;
+  /** Fleet table / events row height (px): fixed, the lists are windowed. */
+  const ROW_H = 32;
+  /** Keyboard focus inside the table (roving tabindex) + VirtualList scroll. */
+  let tableFocus = $state(0);
+  let tableScrollIndex = $state(-1);
+  let tableScrollVersion = $state(0);
   let tAbort: AbortController | null = null;
   let tAppendCtrl: AbortController | null = null;
   async function loadTable(quiet = false, append = false): Promise<void> {
@@ -197,9 +205,13 @@
     if (append) tAppendCtrl = ctrl;
     try {
       const r = await k8sApi.fleetTable({ ...sel, group, sort, dir, limit: refreshLimit, offset: append ? rows.length : 0 }, ctrl.signal);
-      rows = append ? [...rows, ...r.rows] : r.rows;
+      const before = rows.length;
+      // perf K8s: unchanged rows keep their object (keyed each skips them).
+      rows = append ? [...rows, ...r.rows] : reuseByKey(rows, r.rows, fleetRowKey);
       total = r.total;
       tableError = '';
+      // "Load more": bring the first new row into view (the list is windowed).
+      if (append && rows.length > before) void scrollTableTo(before);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
       tableError = e instanceof Error ? e.message : String(e);
@@ -250,7 +262,9 @@
     { id: 'err', label: '5xx %', unit: 'percent' },
     { id: 'latency', label: 'Latency (avg)', unit: 'ms' },
   ];
-  let charts = $state<Partial<Record<K8sFleetMetric, K8sFleetSeries>>>({});
+  // Raw: replaced per load; an unchanged metric keeps its object so the
+  // memoised chart data below (and the chart) stays put.
+  let charts = $state.raw<Partial<Record<K8sFleetMetric, K8sFleetSeries>>>({});
   let chartsLoading = $state(true);
   let chartsError = $state('');
   let sAbort: AbortController | null = null;
@@ -259,9 +273,13 @@
     sAbort = new AbortController();
     if (!quiet) chartsLoading = true;
     try {
-      const all = await Promise.all(METRICS.map((m) => k8sApi.fleetSeries({ ...sel, metric: m.id, by }, sAbort!.signal)));
+      const fresh = await fetchSeries(sAbort.signal);
       const next: Partial<Record<K8sFleetMetric, K8sFleetSeries>> = {};
-      METRICS.forEach((m, i) => (next[m.id] = all[i]));
+      for (const m of METRICS) {
+        const f = fresh[m.id];
+        const p = charts[m.id];
+        next[m.id] = p && f && JSON.stringify(p) === JSON.stringify(f) ? p : f;
+      }
       charts = next;
       chartsError = '';
     } catch (e) {
@@ -271,6 +289,43 @@
       chartsLoading = false;
     }
   }
+  /** perf K8s: every chart in ONE request (`/fleet/series/batch`). A daemon
+   *  without the batch route (404) gets the per-metric reads instead. */
+  let batchMissing = false;
+  async function fetchSeries(signal: AbortSignal): Promise<Partial<Record<K8sFleetMetric, K8sFleetSeries>>> {
+    if (!batchMissing) {
+      try {
+        return (await k8sApi.fleetSeriesBatch({ ...sel, metrics: METRICS.map((m) => m.id), by }, signal)).series;
+      } catch (e) {
+        if (!(e instanceof ApiError && e.status === 404)) throw e;
+        batchMissing = true;
+      }
+    }
+    const all = await Promise.all(METRICS.map((m) => k8sApi.fleetSeries({ ...sel, metric: m.id, by }, signal)));
+    const out: Partial<Record<K8sFleetMetric, K8sFleetSeries>> = {};
+    METRICS.forEach((m, i) => (out[m.id] = all[i]));
+    return out;
+  }
+  /** toChart per metric, memoised on the series object (unchanged metric ⇒
+   *  same array ⇒ the chart doesn't redraw). */
+  const chartMemo = new WeakMap<K8sFleetSeries, MetricChartSeries[]>();
+  const chartData = $derived.by(() => {
+    const out: Partial<Record<K8sFleetMetric, MetricChartSeries[]>> = {};
+    for (const m of METRICS) {
+      const s = charts[m.id];
+      if (!s) {
+        out[m.id] = [];
+        continue;
+      }
+      let c = chartMemo.get(s);
+      if (!c) {
+        c = toChart(s);
+        chartMemo.set(s, c);
+      }
+      out[m.id] = c;
+    }
+    return out;
+  });
   function toChart(s: K8sFleetSeries | undefined): MetricChartSeries[] {
     if (!s) return [];
     // Restart classes keep their semantic colours; everything else cycles the palette.
@@ -299,7 +354,7 @@
     if (append) eAppendCtrl = ctrl;
     try {
       const r = await k8sApi.fleetEvents({ ...sel, class: evClass || undefined, sort: evSort, dir: evDir, limit: refreshLimit, offset: append ? events.length : 0 }, ctrl.signal);
-      events = append ? [...events, ...r.rows] : r.rows;
+      events = append ? [...events, ...r.rows] : reuseByKey(events, r.rows, fleetEventKey);
       evTotal = r.total;
       evError = '';
     } catch (e) {
@@ -310,6 +365,8 @@
       if (eAppendCtrl === ctrl) eAppendCtrl = null;
     }
   }
+  /** Stable, unique per-event keys for the windowed list (never the index). */
+  const eventKeys = $derived(uniqueKeys(events.map(fleetEventKey)));
   function evSortBy(k: K8sFleetEventSort): void {
     if (evSort === k) evDir = evDir === 'asc' ? 'desc' : 'asc';
     else {
@@ -411,7 +468,8 @@
         if (activeTab === 'table') void loadTable(true);
         if (activeTab === 'events') void loadEvents(true);
         if (activeTab === 'requests') void loadRequests(true);
-        void loadFilters();
+        // perf K8s: no loadFilters here — the filter options only change with
+        // the window / selection (its own effect) or a manual Refresh.
       });
     }
   });
@@ -442,6 +500,46 @@
       goTab('events');
     }
   }
+  // Table keyboard: one tab stop (roving tabindex); ↑/↓/Home/End move, Enter
+  // drills (the same as a click). The focused row stays mounted (VirtualList
+  // `pinnedIndex`) even when scrolled out of the window.
+  let tableEl = $state<HTMLDivElement | null>(null);
+  const focusIdx = $derived(Math.max(0, Math.min(tableFocus, visibleRows.length - 1)));
+  function rowKeydown(e: KeyboardEvent, r: K8sFleetRow, i: number): void {
+    if (e.target !== e.currentTarget) return; // a drill button handles its own Enter
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      drillRow(r);
+      return;
+    }
+    const n = visibleRows.length;
+    let j = -1;
+    if (e.key === 'ArrowDown') j = Math.min(n - 1, i + 1);
+    else if (e.key === 'ArrowUp') j = Math.max(0, i - 1);
+    else if (e.key === 'Home') j = 0;
+    else if (e.key === 'End') j = n - 1;
+    if (j < 0) return;
+    e.preventDefault();
+    tableFocus = j;
+    void scrollTableTo(j).then(() => tableEl?.querySelector<HTMLElement>(`[data-i="${j}"]`)?.focus());
+  }
+  /** One-shot scroll of the windowed table to row `i` (cleared after the
+   *  flush, so a later refresh never yanks the list back there). */
+  async function scrollTableTo(i: number): Promise<void> {
+    tableScrollIndex = i;
+    tableScrollVersion += 1;
+    await tick();
+    tableScrollIndex = -1;
+  }
+  function restartBreakdown(r: K8sFleetRow): string {
+    return [r.restarts.oom && `oom ${r.restarts.oom}`, r.restarts.crash && `crash ${r.restarts.crash}`, r.restarts.probe && `probe ${r.restarts.probe}`, r.restarts.unknown && `? ${r.restarts.unknown}`].filter(Boolean).join(' · ');
+  }
+  /** The table's shared grid template (header + every windowed row). */
+  const tableCols = $derived(
+    `minmax(150px, 1.2fr) minmax(110px, 1fr) minmax(150px, 1.4fr) ${group === 'pod' ? 'minmax(170px, 1.4fr)' : '64px'} minmax(150px, 1fr) 56px 64px 88px 88px 80px 70px 120px`,
+  );
+  const EV_COLS = '130px minmax(130px, 1fr) minmax(110px, 1fr) minmax(140px, 1.2fr) minmax(170px, 1.4fr) 130px minmax(200px, 2fr)';
+  const ariaSort = (on: boolean, d: 'asc' | 'desc'): 'ascending' | 'descending' | 'none' => (on ? (d === 'asc' ? 'ascending' : 'descending') : 'none');
   function restartsTotal(r: K8sFleetRow): number {
     return r.restarts.oom + r.restarts.crash + r.restarts.probe + r.restarts.unknown;
   }
@@ -547,7 +645,7 @@
         {#each METRICS as m (m.id)}
           <div class="card chart">
             <div class="chart-head"><b>{m.label}</b><span class="dim small">{charts[m.id]?.step_secs ? `${charts[m.id]?.step_secs}s buckets` : ''}</span></div>
-            <MetricChart series={toChart(charts[m.id])} unit={m.unit} height={150} area={m.id !== 'restarts'} emptyText="No samples in this window" />
+            <MetricChart series={chartData[m.id] ?? []} unit={m.unit} height={150} area={m.id !== 'restarts'} emptyText="No samples in this window" />
           </div>
         {/each}
       </div>
@@ -570,49 +668,63 @@
       <EmptyState icon="clock" title="No data in this window" body="Nothing was collected for this selection. Widen the window, clear a filter, or enable monitoring on a cluster." />
     {:else}
       <div class="tablewrap card">
-        <table class="wl" data-testid="k8s-fleet-table">
-          <thead>
-            <tr>
-              <th><button class="th-btn" class:on={sort === 'cluster'} onclick={() => sortBy('cluster')}>Cluster{arrow(sort === 'cluster', dir)}</button></th>
-              <th><button class="th-btn" class:on={sort === 'namespace'} onclick={() => sortBy('namespace')}>Namespace{arrow(sort === 'namespace', dir)}</button></th>
-              <th><button class="th-btn" class:on={sort === 'workload'} onclick={() => sortBy('workload')}>Workload{arrow(sort === 'workload', dir)}</button></th>
+        <div class="vt" role="table" aria-label={group === 'pod' ? 'Fleet pods' : 'Fleet workloads'} aria-rowcount={visibleRows.length + 1} data-testid="k8s-fleet-table" bind:this={tableEl}>
+          <div role="rowgroup">
+            <div class="vt-head" role="row" aria-rowindex={1} style="grid-template-columns:{tableCols}">
+              <div class="vt-th" role="columnheader" aria-sort={ariaSort(sort === 'cluster', dir)}><button class="th-btn" class:on={sort === 'cluster'} onclick={() => sortBy('cluster')}>Cluster{arrow(sort === 'cluster', dir)}</button></div>
+              <div class="vt-th" role="columnheader" aria-sort={ariaSort(sort === 'namespace', dir)}><button class="th-btn" class:on={sort === 'namespace'} onclick={() => sortBy('namespace')}>Namespace{arrow(sort === 'namespace', dir)}</button></div>
+              <div class="vt-th" role="columnheader" aria-sort={ariaSort(sort === 'workload', dir)}><button class="th-btn" class:on={sort === 'workload'} onclick={() => sortBy('workload')}>Workload{arrow(sort === 'workload', dir)}</button></div>
               {#if group === 'pod'}
-                <th><button class="th-btn" class:on={sort === 'pod'} onclick={() => sortBy('pod')}>Pod{arrow(sort === 'pod', dir)}</button></th>
+                <div class="vt-th" role="columnheader" aria-sort={ariaSort(sort === 'pod', dir)}><button class="th-btn" class:on={sort === 'pod'} onclick={() => sortBy('pod')}>Pod{arrow(sort === 'pod', dir)}</button></div>
               {:else}
-                <th class="num"><button class="th-btn" class:on={sort === 'pods'} onclick={() => sortBy('pods')}>Pods{arrow(sort === 'pods', dir)}</button></th>
+                <div class="vt-th num" role="columnheader" aria-sort={ariaSort(sort === 'pods', dir)}><button class="th-btn" class:on={sort === 'pods'} onclick={() => sortBy('pods')}>Pods{arrow(sort === 'pods', dir)}</button></div>
               {/if}
-              <th class="num" title="Unplanned restarts in the window; OOM / crash / probe breakdown"><button class="th-btn" class:on={sort === 'restarts'} onclick={() => sortBy('restarts')}>Restarts{arrow(sort === 'restarts', dir)}</button></th>
-              <th class="num"><button class="th-btn" class:on={sort === 'oom'} onclick={() => sortBy('oom')}>OOM{arrow(sort === 'oom', dir)}</button></th>
-              <th class="num" title="Planned pod replacements"><button class="th-btn" class:on={sort === 'churn'} onclick={() => sortBy('churn')}>Churn{arrow(sort === 'churn', dir)}</button></th>
-              <th class="num" title="Latest sample summed over pods"><button class="th-btn" class:on={sort === 'mem_last'} onclick={() => sortBy('mem_last')}>Memory{arrow(sort === 'mem_last', dir)}</button></th>
-              <th class="num" title="Hungriest pod sample in the window"><button class="th-btn" class:on={sort === 'mem_max'} onclick={() => sortBy('mem_max')}>Peak{arrow(sort === 'mem_max', dir)}</button></th>
-              <th class="num"><button class="th-btn" class:on={sort === 'rps'} onclick={() => sortBy('rps')}>Req/s{arrow(sort === 'rps', dir)}</button></th>
-              <th class="num"><button class="th-btn" class:on={sort === 'err_pct'} onclick={() => sortBy('err_pct')}>5xx{arrow(sort === 'err_pct', dir)}</button></th>
-              <th class="num"><button class="th-btn" class:on={sort === 'latency_ms'} onclick={() => sortBy('latency_ms')}>Latency{arrow(sort === 'latency_ms', dir)}</button></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each visibleRows as r (`${r.cluster_id}/${r.namespace}/${r.workload}/${r.pod}`)}
-              <tr class="wl-row" onclick={() => drillRow(r)} title={group === 'workload' ? "Show this workload's pods" : "Show this pod's events"} data-testid="k8s-fleet-row">
-                <td><span class="dot" style="background: {r.cluster.color ?? 'var(--accent)'}"></span> {r.cluster.name} <EnvBadge env={r.cluster.environment} /></td>
-                <td class="dim">{r.namespace}</td>
-                <td>{#if group === 'workload'}<button class="drill-btn" aria-label={`Show pods for ${r.workload}`} onclick={(e) => { e.stopPropagation(); drillRow(r); }}>{r.workload}</button>{:else}<b>{r.workload}</b>{/if}</td>
-                {#if group === 'pod'}<td class="mono small"><button class="drill-btn" aria-label={`Show events for ${r.pod}`} onclick={(e) => { e.stopPropagation(); drillRow(r); }}>{r.pod}</button></td>{:else}<td dir="ltr" class="num mono">{r.pods}</td>{/if}
-                <td dir="ltr" class="num mono" class:bad={restartsTotal(r) > 0}>
-                  {restartsTotal(r)}
-                  {#if restartsTotal(r) > 0}<span class="dim small"> ({[r.restarts.oom && `oom ${r.restarts.oom}`, r.restarts.crash && `crash ${r.restarts.crash}`, r.restarts.probe && `probe ${r.restarts.probe}`, r.restarts.unknown && `? ${r.restarts.unknown}`].filter(Boolean).join(' · ')})</span>{/if}
-                </td>
-                <td dir="ltr" class="num mono" class:bad={r.restarts.oom > 0}>{r.restarts.oom}</td>
-                <td dir="ltr" class="num mono">{r.churn}</td>
-                <td dir="ltr" class="num mono">{r.mem_last ? formatBytes(r.mem_last) : '—'}</td>
-                <td dir="ltr" class="num mono">{r.mem_max ? formatBytes(r.mem_max) : '—'}</td>
-                <td dir="ltr" class="num mono">{r.rps ? fmtRate(r.rps) : '—'}</td>
-                <td dir="ltr" class="num mono" class:bad={r.err_pct >= 5} class:warn={r.err_pct >= 1 && r.err_pct < 5}>{r.rps ? fmtPct(r.err_pct) : '—'}</td>
-                <td dir="ltr" class="num mono">{r.latency_kind ? `${fmtMs(r.latency_ms)} ${r.latency_kind}` : '—'}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+              <div class="vt-th num" role="columnheader" aria-sort={ariaSort(sort === 'restarts', dir)} title="Unplanned restarts in the window; OOM / crash / probe breakdown"><button class="th-btn" class:on={sort === 'restarts'} onclick={() => sortBy('restarts')}>Restarts{arrow(sort === 'restarts', dir)}</button></div>
+              <div class="vt-th num" role="columnheader" aria-sort={ariaSort(sort === 'oom', dir)}><button class="th-btn" class:on={sort === 'oom'} onclick={() => sortBy('oom')}>OOM{arrow(sort === 'oom', dir)}</button></div>
+              <div class="vt-th num" role="columnheader" aria-sort={ariaSort(sort === 'churn', dir)} title="Planned pod replacements"><button class="th-btn" class:on={sort === 'churn'} onclick={() => sortBy('churn')}>Churn{arrow(sort === 'churn', dir)}</button></div>
+              <div class="vt-th num" role="columnheader" aria-sort={ariaSort(sort === 'mem_last', dir)} title="Latest sample summed over pods"><button class="th-btn" class:on={sort === 'mem_last'} onclick={() => sortBy('mem_last')}>Memory{arrow(sort === 'mem_last', dir)}</button></div>
+              <div class="vt-th num" role="columnheader" aria-sort={ariaSort(sort === 'mem_max', dir)} title="Hungriest pod sample in the window"><button class="th-btn" class:on={sort === 'mem_max'} onclick={() => sortBy('mem_max')}>Peak{arrow(sort === 'mem_max', dir)}</button></div>
+              <div class="vt-th num" role="columnheader" aria-sort={ariaSort(sort === 'rps', dir)}><button class="th-btn" class:on={sort === 'rps'} onclick={() => sortBy('rps')}>Req/s{arrow(sort === 'rps', dir)}</button></div>
+              <div class="vt-th num" role="columnheader" aria-sort={ariaSort(sort === 'err_pct', dir)}><button class="th-btn" class:on={sort === 'err_pct'} onclick={() => sortBy('err_pct')}>5xx{arrow(sort === 'err_pct', dir)}</button></div>
+              <div class="vt-th num" role="columnheader" aria-sort={ariaSort(sort === 'latency_ms', dir)}><button class="th-btn" class:on={sort === 'latency_ms'} onclick={() => sortBy('latency_ms')}>Latency{arrow(sort === 'latency_ms', dir)}</button></div>
+            </div>
+          </div>
+          <div role="rowgroup" class="vt-body">
+            <VirtualList items={visibleRows} estimateHeight={ROW_H} class="vt-list" key={fleetRowKey} pinnedIndex={focusIdx} scrollIndex={tableScrollIndex} scrollVersion={tableScrollVersion}>
+              {#snippet row(r, i)}
+                {@const rt = restartsTotal(r)}
+                <div
+                  class="vt-row wl-row"
+                  role="row"
+                  aria-rowindex={i + 2}
+                  tabindex={i === focusIdx ? 0 : -1}
+                  data-i={i}
+                  style="grid-template-columns:{tableCols};height:{ROW_H}px"
+                  onclick={() => drillRow(r)}
+                  onkeydown={(e) => rowKeydown(e, r, i)}
+                  onfocus={() => (tableFocus = i)}
+                  title={group === 'workload' ? "Show this workload's pods" : "Show this pod's events"}
+                  data-testid="k8s-fleet-row"
+                >
+                  <div class="vt-td" role="cell"><span class="dot" style="background: {r.cluster.color ?? 'var(--accent)'}"></span> {r.cluster.name} <EnvBadge env={r.cluster.environment} /></div>
+                  <div class="vt-td dim" role="cell" title={r.namespace}>{r.namespace}</div>
+                  <div class="vt-td" role="cell" title={r.workload}>{#if group === 'workload'}<button class="drill-btn" tabindex="-1" aria-label={`Show pods for ${r.workload}`} onclick={(e) => { e.stopPropagation(); drillRow(r); }}>{r.workload}</button>{:else}<b>{r.workload}</b>{/if}</div>
+                  {#if group === 'pod'}<div class="vt-td mono small" role="cell" title={r.pod}><button class="drill-btn" tabindex="-1" aria-label={`Show events for ${r.pod}`} onclick={(e) => { e.stopPropagation(); drillRow(r); }}>{r.pod}</button></div>{:else}<div dir="ltr" class="vt-td num mono" role="cell">{r.pods}</div>{/if}
+                  <div dir="ltr" class="vt-td num mono" role="cell" class:bad={rt > 0} title={rt > 0 ? restartBreakdown(r) : undefined}>
+                    {rt}{#if rt > 0}<span class="dim small"> ({restartBreakdown(r)})</span>{/if}
+                  </div>
+                  <div dir="ltr" class="vt-td num mono" role="cell" class:bad={r.restarts.oom > 0}>{r.restarts.oom}</div>
+                  <div dir="ltr" class="vt-td num mono" role="cell">{r.churn}</div>
+                  <div dir="ltr" class="vt-td num mono" role="cell">{r.mem_last ? formatBytes(r.mem_last) : '—'}</div>
+                  <div dir="ltr" class="vt-td num mono" role="cell">{r.mem_max ? formatBytes(r.mem_max) : '—'}</div>
+                  <div dir="ltr" class="vt-td num mono" role="cell">{r.rps ? fmtRate(r.rps) : '—'}</div>
+                  <div dir="ltr" class="vt-td num mono" role="cell" class:bad={r.err_pct >= 5} class:warn={r.err_pct >= 1 && r.err_pct < 5}>{r.rps ? fmtPct(r.err_pct) : '—'}</div>
+                  <div dir="ltr" class="vt-td num mono" role="cell">{r.latency_kind ? `${fmtMs(r.latency_ms)} ${r.latency_kind}` : '—'}</div>
+                </div>
+              {/snippet}
+            </VirtualList>
+          </div>
+        </div>
         {#if rows.length < total}
           <div class="more"><button class="btn small ghost" onclick={() => void loadTable(true, true)}>Load {Math.min(PAGE, total - rows.length)} more</button></div>
         {/if}
@@ -636,32 +748,35 @@
       <EmptyState icon="check" title="Nothing in this window" body="No restarts or pod replacements were recorded for this selection." />
     {:else}
       <div class="tablewrap card">
-        <table class="wl" data-testid="k8s-fleet-events">
-          <thead>
-            <tr>
-              <th><button class="th-btn" class:on={evSort === 'ts'} onclick={() => evSortBy('ts')}>When{arrow(evSort === 'ts', evDir)}</button></th>
-              <th><button class="th-btn" class:on={evSort === 'cluster'} onclick={() => evSortBy('cluster')}>Cluster{arrow(evSort === 'cluster', evDir)}</button></th>
-              <th><button class="th-btn" class:on={evSort === 'namespace'} onclick={() => evSortBy('namespace')}>Namespace{arrow(evSort === 'namespace', evDir)}</button></th>
-              <th><button class="th-btn" class:on={evSort === 'workload'} onclick={() => evSortBy('workload')}>Workload{arrow(evSort === 'workload', evDir)}</button></th>
-              <th><button class="th-btn" class:on={evSort === 'pod'} onclick={() => evSortBy('pod')}>Pod{arrow(evSort === 'pod', evDir)}</button></th>
-              <th><button class="th-btn" class:on={evSort === 'class'} onclick={() => evSortBy('class')}>Class{arrow(evSort === 'class', evDir)}</button></th>
-              <th><button class="th-btn" class:on={evSort === 'reason'} onclick={() => evSortBy('reason')}>Detail{arrow(evSort === 'reason', evDir)}</button></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each events as e, i (i)}
-              <tr>
-                <td class="mono small nowrap">{fmtTs(e.ts)}</td>
-                <td><span class="dot" style="background: {e.cluster.color ?? 'var(--accent)'}"></span> {e.cluster.name}</td>
-                <td class="dim">{e.namespace}</td>
-                <td><b>{e.workload}</b></td>
-                <td class="mono small">{e.pod}</td>
-                <td><span class="tclass" style="color: {e.kind === 'version' ? 'var(--status-working)' : classColor(e.class)}">{e.kind === 'k8s_event' ? e.reason : e.kind === 'version' ? 'New version' : e.kind === 'churn' ? `churn · ${classLabel(e.class)}` : classLabel(e.class)}</span></td>
-                <td class="dim">{eventMsg(e)}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+        <div class="vt ev" role="table" aria-label="Fleet events" aria-rowcount={events.length + 1} data-testid="k8s-fleet-events">
+          <div role="rowgroup">
+            <div class="vt-head" role="row" aria-rowindex={1} style="grid-template-columns:{EV_COLS}">
+              <div class="vt-th" role="columnheader" aria-sort={ariaSort(evSort === 'ts', evDir)}><button class="th-btn" class:on={evSort === 'ts'} onclick={() => evSortBy('ts')}>When{arrow(evSort === 'ts', evDir)}</button></div>
+              <div class="vt-th" role="columnheader" aria-sort={ariaSort(evSort === 'cluster', evDir)}><button class="th-btn" class:on={evSort === 'cluster'} onclick={() => evSortBy('cluster')}>Cluster{arrow(evSort === 'cluster', evDir)}</button></div>
+              <div class="vt-th" role="columnheader" aria-sort={ariaSort(evSort === 'namespace', evDir)}><button class="th-btn" class:on={evSort === 'namespace'} onclick={() => evSortBy('namespace')}>Namespace{arrow(evSort === 'namespace', evDir)}</button></div>
+              <div class="vt-th" role="columnheader" aria-sort={ariaSort(evSort === 'workload', evDir)}><button class="th-btn" class:on={evSort === 'workload'} onclick={() => evSortBy('workload')}>Workload{arrow(evSort === 'workload', evDir)}</button></div>
+              <div class="vt-th" role="columnheader" aria-sort={ariaSort(evSort === 'pod', evDir)}><button class="th-btn" class:on={evSort === 'pod'} onclick={() => evSortBy('pod')}>Pod{arrow(evSort === 'pod', evDir)}</button></div>
+              <div class="vt-th" role="columnheader" aria-sort={ariaSort(evSort === 'class', evDir)}><button class="th-btn" class:on={evSort === 'class'} onclick={() => evSortBy('class')}>Class{arrow(evSort === 'class', evDir)}</button></div>
+              <div class="vt-th" role="columnheader" aria-sort={ariaSort(evSort === 'reason', evDir)}><button class="th-btn" class:on={evSort === 'reason'} onclick={() => evSortBy('reason')}>Detail{arrow(evSort === 'reason', evDir)}</button></div>
+            </div>
+          </div>
+          <div role="rowgroup" class="vt-body">
+            <VirtualList items={events} estimateHeight={ROW_H} class="vt-list" key={(_e, i) => eventKeys[i]}>
+              {#snippet row(e, i)}
+                {@const msg = eventMsg(e)}
+                <div class="vt-row" role="row" aria-rowindex={i + 2} style="grid-template-columns:{EV_COLS};height:{ROW_H}px" data-testid="k8s-fleet-event-row">
+                  <div class="vt-td mono small" role="cell">{fmtTs(e.ts)}</div>
+                  <div class="vt-td" role="cell" title={e.cluster.name}><span class="dot" style="background: {e.cluster.color ?? 'var(--accent)'}"></span> {e.cluster.name}</div>
+                  <div class="vt-td dim" role="cell" title={e.namespace}>{e.namespace}</div>
+                  <div class="vt-td" role="cell" title={e.workload}><b>{e.workload}</b></div>
+                  <div class="vt-td mono small" role="cell" title={e.pod}>{e.pod}</div>
+                  <div class="vt-td" role="cell"><span class="tclass" style="color: {e.kind === 'version' ? 'var(--status-working)' : classColor(e.class)}">{e.kind === 'k8s_event' ? e.reason : e.kind === 'version' ? 'New version' : e.kind === 'churn' ? `churn · ${classLabel(e.class)}` : classLabel(e.class)}</span></div>
+                  <div class="vt-td dim" role="cell" title={msg}>{msg}</div>
+                </div>
+              {/snippet}
+            </VirtualList>
+          </div>
+        </div>
         {#if events.length < evTotal}
           <div class="more"><button class="btn small ghost" onclick={() => void loadEvents(true, true)}>Load {Math.min(PAGE, evTotal - events.length)} more</button></div>
         {/if}
@@ -931,6 +1046,59 @@
     font-weight: 600;
     cursor: pointer;
   }
+  /* Windowed Fleet table / events (perf K8s): a sticky header row + a
+     VirtualList body sharing one grid template; fixed-height rows. */
+  .vt {
+    display: flex;
+    flex-direction: column;
+    min-width: 1180px;
+    font-size: var(--fs-s);
+  }
+  .vt.ev {
+    min-width: 1040px;
+  }
+  .vt-head,
+  .vt-row {
+    display: grid;
+    align-items: center;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .vt-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .vt-th {
+    padding: 8px 10px;
+    font-size: var(--fs-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    text-align: start;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .vt-body :global(.vt-list) {
+    max-height: min(70vh, 720px);
+  }
+  .vt-row {
+    border-bottom: 1px solid var(--border);
+  }
+  .vt-row:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  .vt-td {
+    padding: 0 10px;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .wl-row {
     cursor: pointer;
   }
@@ -939,9 +1107,6 @@
   }
   .num {
     text-align: end;
-    white-space: nowrap;
-  }
-  .nowrap {
     white-space: nowrap;
   }
   .mono {

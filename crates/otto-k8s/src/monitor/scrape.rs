@@ -26,7 +26,7 @@ use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use super::gateway::KubeProxy;
+use super::gateway::{GatewayResponse, KubeProxy};
 use super::probes::{Probe, Transport};
 use crate::cli::Kubectl;
 
@@ -83,8 +83,8 @@ pub fn parse_forward_port(stdout_line: &str) -> Option<u16> {
     port.parse().ok()
 }
 
-/// Decide the transport for this cycle. `Auto` tries the proxy once against
-/// `sample`; a 2xx (kubectl exit 0) picks proxy, anything else port-forward.
+/// Decide the transport for this cycle. `Auto` tries the proxy against
+/// `sample`: see [`pick_transport_multi`] for what counts as "unavailable".
 pub async fn pick_transport(
     k: &Kubectl,
     want: Transport,
@@ -103,28 +103,152 @@ pub async fn pick_transport_via(
     sample: &ScrapeTarget,
     path: &str,
 ) -> TransportUsed {
+    pick_transport_multi(k, gw, want, std::slice::from_ref(sample), path)
+        .await
+        .0
+}
+
+/// Most pods the `Auto` sniff tries before deciding (K1: one sample pod that
+/// answered its app 404 used to send the whole cycle to port-forward).
+pub const SNIFF_TARGETS: usize = 3;
+
+/// What one proxy sniff against one pod proved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SniffVerdict {
+    /// The API server delivered the APP's answer — any status, a 404 or 500
+    /// from the app included. The proxy transport works.
+    ProxyWorks,
+    /// The API server itself refused (RBAC `Forbidden` / `Unauthorized`
+    /// `Status`) or the hop to it failed: port-forward is the way.
+    ApiDenied,
+    /// Says nothing about the transport (the pod vanished, is not listening on
+    /// that port, timed out): try another pod.
+    Inconclusive,
+}
+
+/// Is `body` a Kubernetes API `Status` object (what the API server — not the
+/// app — answers an error with)? Returns its `reason`.
+fn k8s_status_reason(body: &str) -> Option<String> {
+    let t = body.trim_start();
+    if !t.starts_with('{') || !t.contains("\"Status\"") {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(t).ok()?;
+    if v.get("kind").and_then(|k| k.as_str()) != Some("Status") {
+        return None;
+    }
+    Some(
+        v.get("reason")
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .to_string(),
+    )
+}
+
+/// Classify a gateway (`kubectl proxy`) answer to the sniff.
+pub fn verdict_from_gateway(res: &Result<GatewayResponse>) -> SniffVerdict {
+    match res {
+        Ok(r) if (200..300).contains(&r.status) => SniffVerdict::ProxyWorks,
+        Ok(r) => match k8s_status_reason(&r.body).as_deref() {
+            // Not a k8s Status: the app answered (its 404 / 500 still proves
+            // the API server proxied the request).
+            None => SniffVerdict::ProxyWorks,
+            Some("Forbidden") | Some("Unauthorized") => SniffVerdict::ApiDenied,
+            // NotFound (pod gone), ServiceUnavailable (nothing listening on
+            // the port), InternalError, … — not about the transport.
+            Some(_) => SniffVerdict::Inconclusive,
+        },
+        Err(e) => {
+            let m = e.to_string().to_ascii_lowercase();
+            if m.contains("timeout") || m.contains("timed out") {
+                SniffVerdict::Inconclusive
+            } else {
+                SniffVerdict::ApiDenied
+            }
+        }
+    }
+}
+
+/// Classify a `kubectl get --raw` answer to the sniff (kubectl turns every
+/// non-2xx into an exit 1 + `Error from server (<Reason>): …`).
+pub fn verdict_from_kubectl<T>(res: &Result<T>) -> SniffVerdict {
+    match res {
+        Ok(_) => SniffVerdict::ProxyWorks,
+        Err(Error::Forbidden(_)) => SniffVerdict::ApiDenied,
+        Err(e) if crate::cli::is_credentials_rejected(e) => SniffVerdict::ApiDenied,
+        // The app's 404 relayed by the API server — the pod itself missing
+        // reads `pods "x" not found` instead.
+        Err(Error::NotFound(m)) if m.contains("could not find the requested resource") => {
+            SniffVerdict::ProxyWorks
+        }
+        Err(_) => SniffVerdict::Inconclusive,
+    }
+}
+
+/// Fold per-pod verdicts (in order) into the transport + whether the answer
+/// is conclusive (cacheable). First decisive verdict wins; all-inconclusive
+/// stays on the cheap proxy path but is re-sniffed next cycle.
+pub fn decide(verdicts: &[SniffVerdict]) -> (TransportUsed, bool) {
+    for v in verdicts {
+        match v {
+            SniffVerdict::ProxyWorks => return (TransportUsed::Proxy, true),
+            SniffVerdict::ApiDenied => return (TransportUsed::PortForward, true),
+            SniffVerdict::Inconclusive => {}
+        }
+    }
+    (TransportUsed::Proxy, false)
+}
+
+/// Pick up to [`SNIFF_TARGETS`] sniff pods spread over `targets` (first,
+/// middle, last — different namespaces/workloads more often than not).
+pub fn sniff_sample<T: Clone>(targets: &[T]) -> Vec<T> {
+    let n = targets.len();
+    let mut idx: Vec<usize> = match n {
+        0 => vec![],
+        1..=3 => (0..n).collect(),
+        _ => vec![0, n / 2, n - 1],
+    };
+    idx.dedup();
+    idx.into_iter().map(|i| targets[i].clone()).collect()
+}
+
+/// The `Auto` sniff over several pods (K1). Only an API-server-level failure
+/// (RBAC `Status`, a broken hop) selects port-forward; an app's own non-2xx
+/// proves the proxy works. Returns the transport and whether it is
+/// conclusive — the collector caches a conclusive answer per cluster.
+pub async fn pick_transport_multi(
+    k: &Kubectl,
+    gw: Option<&KubeProxy>,
+    want: Transport,
+    samples: &[ScrapeTarget],
+    path: &str,
+) -> (TransportUsed, bool) {
     match want {
-        Transport::Proxy => TransportUsed::Proxy,
-        Transport::PortForward => TransportUsed::PortForward,
+        Transport::Proxy => (TransportUsed::Proxy, true),
+        Transport::PortForward => (TransportUsed::PortForward, true),
         Transport::Auto => {
-            let p = proxy_path(sample, path);
-            let res = match gw {
-                Some(gw) => gw
-                    .get(&p, Duration::from_secs(5), MAX_BODY)
-                    .await
-                    .and_then(|r| require_2xx(r.status)),
-                None => k
-                    .run_timeout(["get", "--raw", p.as_str()], Duration::from_secs(5))
-                    .await
-                    .map(|_| ()),
-            };
-            match res {
-                Ok(()) => TransportUsed::Proxy,
-                Err(e) => {
-                    tracing::debug!("k8s monitor: proxy unavailable ({e}); using port-forward");
-                    TransportUsed::PortForward
+            let mut verdicts = Vec::with_capacity(samples.len());
+            for sample in samples.iter().take(SNIFF_TARGETS) {
+                let p = proxy_path(sample, path);
+                let v = match gw {
+                    Some(gw) => {
+                        verdict_from_gateway(&gw.get(&p, Duration::from_secs(5), MAX_BODY).await)
+                    }
+                    None => verdict_from_kubectl(
+                        &k.run_timeout(["get", "--raw", p.as_str()], Duration::from_secs(5))
+                            .await,
+                    ),
+                };
+                verdicts.push(v);
+                if v != SniffVerdict::Inconclusive {
+                    break;
                 }
             }
+            let (t, conclusive) = decide(&verdicts);
+            if t == TransportUsed::PortForward {
+                tracing::debug!("k8s monitor: proxy denied by the API server; using port-forward");
+            }
+            (t, conclusive)
         }
     }
 }
@@ -157,6 +281,19 @@ pub async fn fetch_via(
     target: &ScrapeTarget,
     probes: &[Probe],
 ) -> Vec<Result<ProbeResult>> {
+    fetch_pooled(k, gw, None, t, target, probes).await
+}
+
+/// [`fetch_via`]; port-forward fetches reuse a long-lived forward from
+/// `pool` (kept across cycles) instead of spawning + killing one per pod.
+pub async fn fetch_pooled(
+    k: &Kubectl,
+    gw: Option<&KubeProxy>,
+    pool: Option<&ForwardPool>,
+    t: TransportUsed,
+    target: &ScrapeTarget,
+    probes: &[Probe],
+) -> Vec<Result<ProbeResult>> {
     match t {
         TransportUsed::Proxy => {
             let mut out = Vec::with_capacity(probes.len());
@@ -168,14 +305,182 @@ pub async fn fetch_via(
             }
             out
         }
-        TransportUsed::PortForward => match fetch_forward(k, target, probes).await {
-            Ok(v) => v,
-            Err(e) => probes
-                .iter()
-                .map(|_| Err(Error::Upstream(e.to_string())))
-                .collect(),
-        },
+        TransportUsed::PortForward => {
+            let res = match pool {
+                Some(pool) => pool.fetch(k, target, probes).await,
+                None => fetch_forward(k, target, probes).await,
+            };
+            match res {
+                Ok(v) => v,
+                Err(e) => probes
+                    .iter()
+                    .map(|_| Err(Error::Upstream(e.to_string())))
+                    .collect(),
+            }
+        }
     }
+}
+
+/// `(namespace, pod, port)` — one forward each.
+type ForwardKey = (String, String, u16);
+
+struct Forward {
+    child: tokio::process::Child,
+    local: u16,
+}
+
+/// Long-lived `kubectl port-forward`s keyed by `(ns, pod, port)`, kept across
+/// collector cycles (K1: a forward per pod per cycle was 40 s of a 60 s cycle
+/// at 150 pods), plus ONE shared HTTP client. A forward whose child exited or
+/// whose connection broke is dropped and re-spawned on the next use; the
+/// collector [`retain`](Self::retain)s only pods still being scraped. Every
+/// child is `kill_on_drop`, so dropping the pool ends them all.
+pub struct ForwardPool {
+    client: reqwest::Client,
+    map: tokio::sync::Mutex<std::collections::HashMap<ForwardKey, Forward>>,
+    spawned: std::sync::atomic::AtomicU64,
+}
+
+impl Default for ForwardPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ForwardPool {
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap_or_default(),
+            map: Default::default(),
+            spawned: Default::default(),
+        }
+    }
+
+    fn key(t: &ScrapeTarget) -> ForwardKey {
+        (t.namespace.clone(), t.pod.clone(), t.port)
+    }
+
+    /// Forwards spawned over the pool's life (tests / diagnostics).
+    pub fn spawned(&self) -> u64 {
+        self.spawned.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Open forwards right now.
+    pub async fn len(&self) -> usize {
+        self.map.lock().await.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
+    }
+
+    /// Kill every forward whose target `keep` rejects.
+    pub async fn retain(&self, keep: impl Fn(&str, &str, u16) -> bool) {
+        self.map
+            .lock()
+            .await
+            .retain(|(ns, pod, port), _| keep(ns, pod, *port));
+    }
+
+    pub async fn clear(&self) {
+        self.map.lock().await.clear();
+    }
+
+    /// The local port of a live forward to `target`, spawning one if needed.
+    /// Each target is scraped by one task per cycle, so the lock is only held
+    /// for map lookups — never across the spawn.
+    async fn local_port(&self, k: &Kubectl, target: &ScrapeTarget) -> Result<u16> {
+        let key = Self::key(target);
+        {
+            let mut m = self.map.lock().await;
+            if let Some(f) = m.get_mut(&key) {
+                if matches!(f.child.try_wait(), Ok(None)) {
+                    return Ok(f.local);
+                }
+                m.remove(&key);
+            }
+        }
+        let (child, local) = spawn_forward(k, target).await?;
+        self.spawned
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.map.lock().await.insert(key, Forward { child, local });
+        Ok(local)
+    }
+
+    async fn fetch(
+        &self,
+        k: &Kubectl,
+        target: &ScrapeTarget,
+        probes: &[Probe],
+    ) -> Result<Vec<Result<ProbeResult>>> {
+        let local = self.local_port(k, target).await?;
+        let (out, broken) = get_probes(&self.client, local, probes).await;
+        if broken {
+            // The forward died under us (pod restarted, kubectl lost the
+            // stream): drop it so the next cycle starts a fresh one.
+            self.map.lock().await.remove(&Self::key(target));
+        }
+        Ok(out)
+    }
+}
+
+/// GET every probe on `127.0.0.1:{local}`. The flag is true when every probe
+/// failed to CONNECT (the forward itself is broken, not the app).
+async fn get_probes(
+    client: &reqwest::Client,
+    local: u16,
+    probes: &[Probe],
+) -> (Vec<Result<ProbeResult>>, bool) {
+    let mut out = Vec::with_capacity(probes.len());
+    let mut connect_failures = 0usize;
+    for p in probes {
+        let started = Instant::now();
+        let url = format!("http://127.0.0.1:{local}{}", p.path);
+        let res = client
+            .get(&url)
+            .timeout(Duration::from_millis(p.timeout_ms))
+            .send()
+            .await;
+        let r = match res {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                match resp.text().await {
+                    Ok(mut body) => {
+                        if body.len() > MAX_BODY {
+                            body.truncate(MAX_BODY);
+                        }
+                        Ok(ProbeResult {
+                            probe: p.name.clone(),
+                            status,
+                            body,
+                            ms: started.elapsed().as_millis() as u64,
+                        })
+                    }
+                    Err(e) => Err(Error::Upstream(format!("{}: read body: {e}", p.name))),
+                }
+            }
+            Err(e) => {
+                if e.is_connect() || e.is_request() {
+                    connect_failures += 1;
+                }
+                Err(Error::Upstream(format!(
+                    "{}: {}",
+                    p.name,
+                    if e.is_timeout() {
+                        "timeout".to_string()
+                    } else {
+                        e.to_string()
+                    }
+                )))
+            }
+        };
+        out.push(r);
+    }
+    let broken = !probes.is_empty() && connect_failures == probes.len();
+    (out, broken)
 }
 
 async fn fetch_proxy(k: &Kubectl, target: &ScrapeTarget, p: &Probe) -> Result<ProbeResult> {
@@ -322,45 +627,7 @@ async fn fetch_forward(
         .no_proxy()
         .build()
         .map_err(|e| Error::Internal(format!("http client: {e}")))?;
-    let mut out = Vec::with_capacity(probes.len());
-    for p in probes {
-        let started = Instant::now();
-        let url = format!("http://127.0.0.1:{local}{}", p.path);
-        let res = client
-            .get(&url)
-            .timeout(Duration::from_millis(p.timeout_ms))
-            .send()
-            .await;
-        let r = match res {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                match resp.text().await {
-                    Ok(mut body) => {
-                        if body.len() > MAX_BODY {
-                            body.truncate(MAX_BODY);
-                        }
-                        Ok(ProbeResult {
-                            probe: p.name.clone(),
-                            status,
-                            body,
-                            ms: started.elapsed().as_millis() as u64,
-                        })
-                    }
-                    Err(e) => Err(Error::Upstream(format!("{}: read body: {e}", p.name))),
-                }
-            }
-            Err(e) => Err(Error::Upstream(format!(
-                "{}: {}",
-                p.name,
-                if e.is_timeout() {
-                    "timeout".to_string()
-                } else {
-                    e.to_string()
-                }
-            ))),
-        };
-        out.push(r);
-    }
+    let (out, _) = get_probes(&client, local, probes).await;
     let _ = child.kill().await;
     Ok(out)
 }
@@ -401,6 +668,112 @@ mod tests {
         );
         assert_eq!(parse_forward_port("error: unable to forward"), None);
         assert_eq!(parse_forward_port(""), None);
+    }
+
+    fn gw(status: u16, body: &str) -> Result<GatewayResponse> {
+        Ok(GatewayResponse {
+            status,
+            body: body.into(),
+        })
+    }
+
+    #[test]
+    fn an_app_error_proves_the_proxy_works() {
+        // The live K1 failure: Spring's 404 JSON on /actuator/info.
+        let spring = r#"{"timestamp":"2026-10-03T10:00:00Z","status":404,"error":"Not Found","path":"/actuator/info"}"#;
+        assert_eq!(
+            verdict_from_gateway(&gw(404, spring)),
+            SniffVerdict::ProxyWorks
+        );
+        assert_eq!(
+            verdict_from_gateway(&gw(500, "<html>boom</html>")),
+            SniffVerdict::ProxyWorks
+        );
+        assert_eq!(
+            verdict_from_gateway(&gw(200, "{}")),
+            SniffVerdict::ProxyWorks
+        );
+    }
+
+    #[test]
+    fn only_an_api_server_refusal_selects_port_forward() {
+        let status = |reason: &str, code: u16| {
+            format!(
+                r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"{reason}","code":{code}}}"#
+            )
+        };
+        assert_eq!(
+            verdict_from_gateway(&gw(403, &status("Forbidden", 403))),
+            SniffVerdict::ApiDenied
+        );
+        assert_eq!(
+            verdict_from_gateway(&gw(401, &status("Unauthorized", 401))),
+            SniffVerdict::ApiDenied
+        );
+        assert_eq!(
+            verdict_from_gateway(&gw(404, &status("NotFound", 404))),
+            SniffVerdict::Inconclusive,
+            "pod gone"
+        );
+        assert_eq!(
+            verdict_from_gateway(&gw(503, &status("ServiceUnavailable", 503))),
+            SniffVerdict::Inconclusive,
+            "nothing listening"
+        );
+        assert_eq!(
+            verdict_from_gateway(&Err(Error::Upstream("connect: refused".into()))),
+            SniffVerdict::ApiDenied
+        );
+        assert_eq!(
+            verdict_from_gateway(&Err(Error::Upstream("gateway timeout".into()))),
+            SniffVerdict::Inconclusive
+        );
+    }
+
+    #[test]
+    fn kubectl_raw_verdicts() {
+        let ok: Result<()> = Ok(());
+        assert_eq!(verdict_from_kubectl(&ok), SniffVerdict::ProxyWorks);
+        let app404: Result<()> = Err(Error::NotFound(
+            "Error from server (NotFound): the server could not find the requested resource".into(),
+        ));
+        assert_eq!(verdict_from_kubectl(&app404), SniffVerdict::ProxyWorks);
+        let gone: Result<()> = Err(Error::NotFound(
+            "Error from server (NotFound): pods \"x\" not found".into(),
+        ));
+        assert_eq!(verdict_from_kubectl(&gone), SniffVerdict::Inconclusive);
+        let denied: Result<()> = Err(Error::Forbidden("cluster RBAC: forbidden".into()));
+        assert_eq!(verdict_from_kubectl(&denied), SniffVerdict::ApiDenied);
+    }
+
+    #[test]
+    fn decide_takes_the_first_decisive_verdict() {
+        use SniffVerdict::*;
+        assert_eq!(
+            decide(&[Inconclusive, ProxyWorks]),
+            (TransportUsed::Proxy, true)
+        );
+        assert_eq!(
+            decide(&[Inconclusive, ApiDenied]),
+            (TransportUsed::PortForward, true)
+        );
+        assert_eq!(
+            decide(&[Inconclusive, Inconclusive, Inconclusive]),
+            (TransportUsed::Proxy, false),
+            "all inconclusive: stay cheap, don't cache"
+        );
+        assert_eq!(decide(&[]), (TransportUsed::Proxy, false));
+    }
+
+    #[test]
+    fn sniff_sample_spreads_over_targets() {
+        assert!(sniff_sample::<u32>(&[]).is_empty());
+        assert_eq!(sniff_sample(&[1]), vec![1]);
+        assert_eq!(sniff_sample(&[1, 2, 3]), vec![1, 2, 3]);
+        assert_eq!(
+            sniff_sample(&(0..150).collect::<Vec<_>>()),
+            vec![0, 75, 149]
+        );
     }
 
     #[test]

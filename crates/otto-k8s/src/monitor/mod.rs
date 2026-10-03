@@ -14,6 +14,7 @@
 //! | [`wide`] | the one-row-per-pod-per-cycle wide row + reset-aware counter increments |
 //! | [`queries`] | ClickHouse SQL builders + the rollup-tier planner ([`queries::Span`]) |
 //! | [`cache`] | dashboard read cache + single-flight |
+//! | [`latest`] | the newest typed pod snapshot per cluster (no per-request JSON parse) |
 //! | [`health`] | the compact `k8s_health` digest |
 //! | [`http`] | `/k8s/monitor/*` + `/k8s/clusters/{id}/monitor*` routes |
 //! | [`fleet`] | `/k8s/monitor/fleet/*` — the ClickHouse-only cross-cluster dashboard |
@@ -24,6 +25,7 @@ pub mod fleet;
 pub mod gateway;
 pub mod health;
 pub mod http;
+pub mod latest;
 pub mod parse;
 pub mod probes;
 pub mod queries;
