@@ -56,10 +56,13 @@
   });
 
   // Load the per-work-item proof roll-up so each session row can show an inline
-  // proof chip; kept fresh from the events WS (proof_pack_updated).
+  // proof chip; kept fresh from the events WS (proof_pack_updated). Scoped to
+  // the sessions this sidebar lists: only their packs are read (never every
+  // pack in the workspace), and only sessions not asked for before.
   $effect(() => {
     const w = ws.currentId;
-    if (w) void proof.loadSummary(w);
+    const keys = ws.sessions.map((s) => `session:${s.id}`);
+    if (w) void proof.loadSummary(w, keys);
   });
 
   // One session vocabulary (lib/status.ts): a row's dot, tooltip and resume

@@ -83,7 +83,6 @@
     if (!id) return;
     const f = filter;
     void loadList(id, f);
-    void proof.loadSummary(id);
   });
 
   // Event-driven list/detail refreshes run only while this page is mounted.

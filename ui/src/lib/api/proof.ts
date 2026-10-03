@@ -77,9 +77,15 @@ export async function listProofPacksPage(
   return { packs: (await resp.json()) as ProofPackResp[], next: resp.headers.get('x-next-cursor') };
 }
 
-/** Cheap per-work-item badge/status roll-up for the whole workspace. */
-export function proofSummary(wsId: string): Promise<ProofSummaryResp> {
-  return api.get<ProofSummaryResp>(`/workspaces/${wsId}/proof-summary`);
+/** Most `kind:id` entries one scoped summary request carries (server cap 1000). */
+export const PROOF_SUMMARY_CHUNK = 200;
+
+/** Cheap per-work-item badge/status roll-up. With `workItems`
+ *  (`"<kind>:<id>"`, ≤ 1000) only those work items' packs are read — an
+ *  index probe, not a whole-workspace scan; without, the whole workspace. */
+export function proofSummary(wsId: string, workItems?: string[]): Promise<ProofSummaryResp> {
+  const q = workItems ? `?work_items=${encodeURIComponent(workItems.join(','))}` : '';
+  return api.get<ProofSummaryResp>(`/workspaces/${wsId}/proof-summary${q}`);
 }
 
 /** Create (or reuse, by work item) a proof pack. */

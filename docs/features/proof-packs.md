@@ -581,7 +581,15 @@ Live updates arrive over the `proof_pack_updated` WS event (the store re-fetches
 the affected pack and refreshes the workspace summary). The cheap
 `GET /proof-summary` roll-up (now carrying `done_score` per row) powers compact
 status chips elsewhere in the app (e.g. alongside a session) without loading every
-pack.
+pack. The sidebar asks for exactly the sessions it lists
+(`?work_items=session:<id>,…`, only ids it has not asked for before), so the
+read is an index probe per listed session — at 10k session packs the sidebar
+still reads only its own rows. Without `work_items` the endpoint returns every
+pack in the workspace (kept as a fallback).
+
+Review proof-pack exports (`POST /reviews/{id}/proof-pack/export`) keep every
+snapshot by default — an older snapshot is the only record of the review as it
+stood then. Pass `keep_last: N` to keep only the newest N for that review.
 
 ---
 
@@ -596,7 +604,7 @@ workspace role.
 |---|---|---|---|---|
 | 115 | `GET /workspaces/{id}/proof-packs` | ws viewer · ProofPack View | `?status & work_item_kind & work_item_id` | `ProofPackResp[]` |
 | 116 | `POST /workspaces/{id}/proof-packs` | ws editor · ProofPack Edit | `CreateProofPackReq {work_item_kind, work_item_id, title?, parent_pack_id?, repo_id?}` | `ProofPackResp` (ensure-or-create; `repo_id` links policy, strengthen-only) |
-| 117 | `GET /workspaces/{id}/proof-summary` | ws viewer · ProofPack View | — | `ProofSummaryResp {rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, done_score, badges[]}]}` |
+| 117 | `GET /workspaces/{id}/proof-summary` | ws viewer · ProofPack View | `?work_items=kind:id,…` (optional, ≤ 1000) | `ProofSummaryResp {rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, done_score, badges[]}]}` |
 | 118 | `GET /proof-packs/{id}` | ws viewer · ProofPack View | — | `ProofPackDetailResp {pack, badges[], artifacts[], children[], done_contract, snapshots[]}` (done_contract live) |
 | 119 | `PATCH /proof-packs/{id}` | ws editor · ProofPack Edit | `{title?, summary?}` | `ProofPackResp` |
 | 120 | `DELETE /proof-packs/{id}` | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts, snapshots, blobs) |

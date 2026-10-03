@@ -11,8 +11,11 @@ use crate::convert::{dberr, fmt};
 use otto_core::finding::ReviewProofPackExport;
 use otto_core::{new_id, Result};
 
-/// Export snapshots kept per review; each export stores the whole rendered
-/// markdown, so an unbounded history grew forever (PP-08).
+/// A suggested `keep_last` for the OPT-IN export cap (PP-08). Each export
+/// stores the whole rendered markdown and an older snapshot is the only record
+/// of the review as it stood then, so [`ReviewProofPacksRepo::create`] never
+/// prunes on its own — the caller asks (`POST …/proof-pack/export
+/// {keep_last}`) and [`ReviewProofPacksRepo::prune`] runs.
 pub const KEEP_EXPORTS_PER_REVIEW: u32 = 5;
 
 #[derive(Clone)]
@@ -53,10 +56,6 @@ impl ReviewProofPacksRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("create proof pack"))?;
-        // Best-effort: a failed prune never fails the export.
-        if let Err(e) = self.prune(review_id, KEEP_EXPORTS_PER_REVIEW).await {
-            tracing::warn!("review proof pack prune failed: {e}");
-        }
         Ok(ReviewProofPackExport {
             id,
             review_id: review_id.to_string(),
@@ -148,7 +147,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proof_exports_keep_only_the_newest_per_review() {
+    async fn proof_exports_keep_everything_unless_pruned_on_request() {
         let repo = ReviewProofPacksRepo::new(mem_pool().await);
         let mut last = String::new();
         for i in 0..(KEEP_EXPORTS_PER_REVIEW + 3) {
@@ -161,6 +160,16 @@ mod tests {
         repo.create("rev2", "ws1", "markdown", "# other", "{}", "u1")
             .await
             .unwrap();
+        // Default: nothing is deleted behind the user's back.
+        assert_eq!(
+            repo.list_for_review("rev1").await.unwrap().len(),
+            KEEP_EXPORTS_PER_REVIEW as usize + 3
+        );
+        // Opt-in cap: only the newest `keep` survive, other reviews untouched.
+        assert_eq!(
+            repo.prune("rev1", KEEP_EXPORTS_PER_REVIEW).await.unwrap(),
+            3
+        );
         let list = repo.list_for_review("rev1").await.unwrap();
         assert_eq!(list.len(), KEEP_EXPORTS_PER_REVIEW as usize);
         assert!(list.iter().any(|e| e.id == last));

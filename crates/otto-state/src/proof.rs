@@ -333,6 +333,48 @@ impl ProofRepo {
         Ok((packs, next))
     }
 
+    /// The packs of exactly these work items (`(kind, work_item_id)` pairs) in
+    /// `workspace_id` — the scoped proof summary (R3). One query per distinct
+    /// kind, each driving from `json_each` into the unique
+    /// `idx_proof_packs_workitem` index (`CROSS JOIN` pins the loop order and
+    /// `+workspace_id` keeps the planner off `idx_proof_packs_ws_updated`, which
+    /// it otherwise picks — a scan of the whole workspace), so the rows read
+    /// match the filter however many packs the workspace holds. Order:
+    /// unspecified.
+    pub async fn list_packs_for_work_items(
+        &self,
+        workspace_id: &str,
+        items: &[(String, String)],
+    ) -> Result<Vec<ProofPack>> {
+        // Deduped per kind: a repeated id never yields a repeated row.
+        let mut by_kind: std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> =
+            std::collections::BTreeMap::new();
+        for (k, id) in items {
+            by_kind.entry(k.as_str()).or_default().insert(id.as_str());
+        }
+        let mut out = Vec::new();
+        for (kind, ids) in by_kind {
+            let ids_json = serde_json::to_string(&ids)
+                .map_err(|e| Error::Internal(format!("proof work items: {e}")))?;
+            let rows = sqlx::query(
+                "SELECT p.* FROM json_each(?2) AS j \
+                 CROSS JOIN proof_packs p \
+                   ON p.work_item_kind = ?1 AND p.work_item_id = j.value \
+                 WHERE +p.workspace_id = ?3",
+            )
+            .bind(kind)
+            .bind(&ids_json)
+            .bind(workspace_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("list proof packs for work items"))?;
+            for r in &rows {
+                out.push(row_to_pack(r)?);
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn list_children(&self, parent_id: &str) -> Result<Vec<ProofPack>> {
         let rows = sqlx::query(
             "SELECT * FROM proof_packs WHERE parent_pack_id = ? ORDER BY updated_at DESC",
@@ -1150,6 +1192,89 @@ mod proof_perf_tests {
         let all = repo.list_packs("ws", None, None, None).await.unwrap();
         assert_eq!(seen.len(), 7);
         assert_eq!(seen, all.into_iter().map(|p| p.id).collect::<Vec<_>>());
+    }
+
+    /// R4 budget: at 5 000 packs (with an artifact each) the first keyset
+    /// page and the work-item-scoped summary read stay well under 50 ms and
+    /// read exactly the rows asked for — not the whole workspace.
+    #[tokio::test]
+    async fn proof_5k_packs_page_and_scoped_summary_within_budget() {
+        let pool = mem_pool().await;
+        sqlx::query(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 4999)
+             INSERT INTO proof_packs (id, workspace_id, work_item_kind, work_item_id, title,
+                                      created_by, created_at, updated_at)
+             SELECT printf('p%05d', i), 'ws', 'session', printf('s%05d', i), 't', 'u',
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 1767225600 + i, 'unixepoch'),
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 1767225600 + i, 'unixepoch')
+             FROM n",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO proof_artifacts (id, proof_pack_id, workspace_id, kind, title,
+                                          content_ref, status, created_by, created_at, updated_at)
+             SELECT 'a' || id, id, 'ws', 'diff', 'diff', 'x', 'info', 'u', created_at, created_at
+             FROM proof_packs",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The scoped read is an index probe on the unique work-item index,
+        // never a scan of the workspace's packs.
+        let detail: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT p.* FROM json_each(?2) AS j \
+             CROSS JOIN proof_packs p ON p.work_item_kind = ?1 AND p.work_item_id = j.value \
+             WHERE +p.workspace_id = ?3",
+        )
+        .bind("session")
+        .bind("[\"s00001\"]")
+        .bind("ws")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            detail
+                .iter()
+                .any(|r| r.3.contains("idx_proof_packs_workitem")),
+            "{detail:?}"
+        );
+        let repo = ProofRepo::new(pool);
+        // Warm the statement cache / page cache once, then measure.
+        repo.list_packs_page("ws", None, None, None, Some(100), None)
+            .await
+            .unwrap();
+        let t = std::time::Instant::now();
+        let (page, next) = repo
+            .list_packs_page("ws", None, None, None, Some(100), None)
+            .await
+            .unwrap();
+        let page_ms = t.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(page.len(), 100);
+        assert!(next.is_some());
+
+        let items: Vec<(String, String)> = (0..200)
+            .map(|i| ("session".to_string(), format!("s{:05}", i * 25)))
+            .chain(std::iter::once(("session".into(), "not-a-session".into())))
+            .collect();
+        let t = std::time::Instant::now();
+        let packs = repo.list_packs_for_work_items("ws", &items).await.unwrap();
+        let ids: Vec<String> = packs.iter().map(|p| p.id.clone()).collect();
+        let arts = repo.artifacts_meta_for_packs(&ids).await.unwrap();
+        let summary_ms = t.elapsed().as_secs_f64() * 1e3;
+        // Rows read match the filter: 200 known work items, the unknown one
+        // matches nothing, and another workspace's pack never leaks in.
+        assert_eq!(packs.len(), 200);
+        assert_eq!(arts.values().map(Vec::len).sum::<usize>(), 200);
+        assert!(repo
+            .list_packs_for_work_items("other-ws", &items)
+            .await
+            .unwrap()
+            .is_empty());
+        eprintln!("proof 5k: first page {page_ms:.2} ms, scoped summary (200) {summary_ms:.2} ms");
+        assert!(page_ms < 50.0, "first page took {page_ms:.2} ms");
+        assert!(summary_ms < 50.0, "scoped summary took {summary_ms:.2} ms");
     }
 
     #[tokio::test]

@@ -131,6 +131,11 @@ async fn get_proof_pack(
 struct ExportReq {
     #[serde(default)]
     format: Option<String>,
+    /// OPT-IN cap (PP-08): after this export, keep only the newest
+    /// `keep_last` snapshots of the review. Absent = keep every snapshot
+    /// (older ones are the only record of the review as it stood then).
+    #[serde(default)]
+    keep_last: Option<u32>,
 }
 
 /// `POST /reviews/{review_id}/proof-pack/export` — persist a snapshot + ingest
@@ -143,7 +148,9 @@ async fn export_proof_pack(
 ) -> ApiResult<Json<ReviewProofPackExport>> {
     let ws = review_workspace(&ctx, &review_id).await?;
     require_ws_role(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
-    let _format = body.map(|b| b.0.format).unwrap_or_default();
+    let (_format, keep_last) = body
+        .map(|b| (b.0.format, b.0.keep_last))
+        .unwrap_or_default();
 
     let pack = assemble(&ctx, &review_id, &ws).await?;
     let markdown = render_markdown(&pack);
@@ -155,6 +162,12 @@ async fn export_proof_pack(
         .create(&review_id, &ws, "markdown", &markdown, &summary_json, &who)
         .await
         .map_err(ApiError)?;
+    if let Some(keep) = keep_last.filter(|k| *k > 0) {
+        // Best-effort: a failed prune never fails the export.
+        if let Err(e) = ctx.proof_packs_store.prune(&review_id, keep).await {
+            tracing::warn!("review proof pack prune failed: {e}");
+        }
+    }
 
     // Ingest VERIFIED findings into the memory store for durable hybrid recall
     // (the Context-Engine recall side of the loop).
