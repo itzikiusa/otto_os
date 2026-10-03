@@ -137,7 +137,10 @@ test('2,000 background + 300 archived sessions: list, archive paging, event stor
   expect(await page.locator('.nav-item', { hasText: /^Review agent/ }).count()).toBe(0);
 
   // R4 — the archived "any?" probe runs once per selection, not per refresh.
+  // The probe runs once the list has painted and the page is idle (it only
+  // decides the folded header), so wait for it before counting.
   const probes = () => lists.filter((l) => l.q.get('archived') === 'true' && l.q.get('limit') === '1').length;
+  await expect.poll(probes, { message: 'the first load probed Archived', timeout: 10_000 }).toBeGreaterThan(0);
   const probesBefore = probes();
   await page.evaluate(async () => {
     const path = '/src/lib/stores/workspace.svelte.ts';
