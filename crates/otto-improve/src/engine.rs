@@ -1035,7 +1035,7 @@ fn cap_bytes(s: &str, max: usize) -> &str {
 
 /// Blocking impl of `read_memory` (called from `spawn_blocking`).
 fn blocking_read_memory(root: &str) -> Vec<(String, String)> {
-    let dir = otto_orchestrator::claude_pty::project_dir(root).join("memory");
+    let dir = crate::pathsafe::project_dir(root).join("memory");
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -1266,7 +1266,7 @@ mod tests {
 
         // Seed a session with a transcript so the run has something to analyze.
         let psid = "22222222-2222-4222-8222-222222222222";
-        let proj = otto_orchestrator::claude_pty::project_dir(dir.path().to_str().unwrap());
+        let proj = crate::pathsafe::project_dir(dir.path().to_str().unwrap());
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(
             proj.join(format!("{psid}.jsonl")),
@@ -1287,7 +1287,7 @@ mod tests {
             events,
             library_root: dir.path().join("library"),
         };
-        engine
+        let seeded = engine
             .sessions
             .create(otto_state::NewSession {
                 workspace_id: ws.id.clone(),
@@ -1300,6 +1300,15 @@ mod tests {
                 created_by: uid.clone(),
                 meta: serde_json::json!({}),
             })
+            .await
+            .unwrap();
+        // The seeded transcript lives under the test HOME, not `$HOME`.
+        engine
+            .sessions
+            .set_transcript_path(
+                &seeded.id,
+                proj.join(format!("{psid}.jsonl")).to_str().unwrap(),
+            )
             .await
             .unwrap();
 
@@ -1629,7 +1638,7 @@ mod tests {
 
         // Seed a session WITH a transcript so the next run has something to do.
         let psid = "11111111-1111-4111-8111-111111111111";
-        let proj = otto_orchestrator::claude_pty::project_dir(dir.path().to_str().unwrap());
+        let proj = crate::pathsafe::project_dir(dir.path().to_str().unwrap());
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(
             proj.join(format!("{psid}.jsonl")),
@@ -1639,7 +1648,7 @@ mod tests {
             ),
         )
         .unwrap();
-        engine
+        let seeded = engine
             .sessions
             .create(otto_state::NewSession {
                 workspace_id: ws_id.clone(),
@@ -1652,6 +1661,15 @@ mod tests {
                 created_by: uid.clone(),
                 meta: serde_json::json!({}),
             })
+            .await
+            .unwrap();
+        // The seeded transcript lives under the test HOME, not `$HOME`.
+        engine
+            .sessions
+            .set_transcript_path(
+                &seeded.id,
+                proj.join(format!("{psid}.jsonl")).to_str().unwrap(),
+            )
             .await
             .unwrap();
 
