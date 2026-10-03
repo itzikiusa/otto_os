@@ -190,7 +190,7 @@ pub fn validate_headers(h: &BTreeMap<String, String>) -> Result<Vec<(String, Str
     if h.len() > MAX_HEADERS {
         return Err(Error::Invalid(format!("at most {MAX_HEADERS} headers")));
     }
-    let mut out = Vec::with_capacity(h.len());
+    let mut out = Vec::new();
     for (k, v) in h {
         let k = k.trim();
         let token = !k.is_empty()

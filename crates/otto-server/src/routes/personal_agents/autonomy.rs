@@ -116,7 +116,7 @@ fn merge_autonomy(mut cfg: AgentAutonomy, req: SaveAutonomyReq) -> Result<AgentA
                 "at most {MAX_GOALS} standing goals"
             ))));
         }
-        let mut next = Vec::with_capacity(goals.len());
+        let mut next = Vec::new();
         for g in goals {
             let text = clean_text(&g.text, "a goal")?;
             if text.is_empty() {
@@ -145,7 +145,7 @@ fn merge_autonomy(mut cfg: AgentAutonomy, req: SaveAutonomyReq) -> Result<AgentA
                 "at most {MAX_RULES} rules"
             ))));
         }
-        let mut next = Vec::with_capacity(rules.len());
+        let mut next = Vec::new();
         for r in rules {
             let text = clean_text(&r.text, "a rule")?;
             if text.is_empty() {
