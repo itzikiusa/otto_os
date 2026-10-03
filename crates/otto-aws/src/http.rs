@@ -15,6 +15,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::Problem;
 use otto_core::auth::AuthUser;
+use otto_core::domain::Environment;
 use otto_core::domain::{Capability, Feature, Session};
 use otto_core::{Error, Id};
 use otto_state::{AuditRepo, GrantsRepo, NewAuditEntry};
@@ -25,7 +26,8 @@ use crate::accounts::{
 };
 use crate::discover::{self, DiscoverResp};
 use crate::install::{self, AwsStatus, InstallJob};
-use crate::{athena, ec2, eks, metrics, rds, s3, sqs, AwsCtx};
+use crate::regions::{self, RegionError};
+use crate::{athena, ec2, eks, logs, metrics, rds, s3, sqs, AwsCtx};
 
 /// Local problem-details mapper (orphan rule: cannot impl IntoResponse for
 /// `otto_core::Error` here). Same table as otto-connections.
@@ -90,7 +92,11 @@ pub fn api_router<S: AwsCtx>() -> Router<S> {
         )
         .route(
             "/aws/accounts/{id}/s3/buckets/{bucket}/object",
-            get(s3_head::<S>),
+            get(s3_head::<S>).put(s3_upload::<S>).delete(s3_delete::<S>),
+        )
+        .route(
+            "/aws/accounts/{id}/s3/buckets/{bucket}/presign",
+            post(s3_presign::<S>),
         )
         .route(
             "/aws/accounts/{id}/s3/buckets/{bucket}/preview",
@@ -188,6 +194,51 @@ pub fn api_router<S: AwsCtx>() -> Router<S> {
         )
         // --- CloudWatch metrics (View) ---
         .route("/aws/accounts/{id}/metrics", get(cloudwatch_metrics::<S>))
+        // --- CloudWatch Logs (View; Insights start/stop are read-only POSTs) ---
+        .route("/aws/accounts/{id}/logs/groups", get(logs_groups::<S>))
+        .route("/aws/accounts/{id}/logs/streams", get(logs_streams::<S>))
+        .route("/aws/accounts/{id}/logs/events", get(logs_events::<S>))
+        .route(
+            "/aws/accounts/{id}/logs/insights",
+            post(logs_insights_start::<S>),
+        )
+        .route(
+            "/aws/accounts/{id}/logs/insights/{qid}",
+            get(logs_insights_results::<S>),
+        )
+        .route(
+            "/aws/accounts/{id}/logs/insights/{qid}/stop",
+            post(logs_insights_stop::<S>),
+        )
+}
+
+/// One row of an "All regions" list: the per-region DTO plus its region.
+#[derive(Debug, Clone, Serialize)]
+pub struct Regional<T> {
+    #[serde(flatten)]
+    pub item: T,
+    pub region: String,
+}
+
+/// Flatten a fan-out into region-tagged rows.
+fn tag<T>(per_region: Vec<(String, Vec<T>)>) -> Vec<Regional<T>> {
+    per_region
+        .into_iter()
+        .flat_map(|(region, items)| {
+            items.into_iter().map(move |item| Regional {
+                item,
+                region: region.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Session info is computed for profile accounts only (keys accounts have no
+/// sign-in to expire).
+fn attach_session(account: &mut AwsAccount) {
+    if account.auth_mode == crate::accounts::AuthMode::Profile {
+        account.session = crate::creds::session_info(&account.id, account.profile.as_deref());
+    }
 }
 
 /// Best-effort audit row (failure is logged, never propagated).
@@ -307,6 +358,7 @@ async fn list_accounts<S: AwsCtx>(
     let mut visible = Vec::new();
     for mut account in AwsService::from_ctx(&ctx).list().await? {
         if crate::access::allowed(&ctx.pool(), &user, &account.id, "discover", None).await? {
+            attach_session(&mut account);
             if !crate::access::can_configure(&ctx.pool(), &user, &account.id).await? {
                 account.redact_configuration();
             }
@@ -334,6 +386,7 @@ async fn get_account<S: AwsCtx>(
 ) -> ApiResult<Json<AwsAccount>> {
     crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
     let mut account = AwsService::from_ctx(&ctx).get(&id).await?;
+    attach_session(&mut account);
     if !crate::access::can_configure(&ctx.pool(), &user, &id).await? {
         account.redact_configuration();
     }
@@ -522,14 +575,22 @@ async fn s3_download<S: AwsCtx>(
     crate::access::check(&ctx.pool(), &user, &id, "s3_read", Some(&bucket)).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
-    let mut dl = s3::download(&svc, &a, &bucket, &q.key, q.region.as_deref()).await?;
+    let inline = q.inline.unwrap_or(false);
+    let mut dl = s3::download(&svc, &a, &bucket, &q.key, q.region.as_deref(), inline).await?;
     dl.body = crate::access::guard_body(dl.body, ctx.pool(), user, id, Some(bucket), "s3_read");
-    let ct = dl
-        .head
-        .content_type
-        .clone()
-        .unwrap_or_else(|| "application/octet-stream".into());
-    let disposition = format!("attachment; filename=\"{}\"", attachment_name(&q.key));
+    let ct = if inline {
+        s3::inline_content_type(dl.head.content_type.as_deref(), &q.key)
+    } else {
+        dl.head
+            .content_type
+            .clone()
+            .unwrap_or_else(|| "application/octet-stream".into())
+    };
+    let disposition = format!(
+        "{}; filename=\"{}\"",
+        if inline { "inline" } else { "attachment" },
+        attachment_name(&q.key)
+    );
     let mut resp = Response::new(dl.body);
     let h = resp.headers_mut();
     h.insert(
@@ -546,7 +607,162 @@ async fn s3_download<S: AwsCtx>(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
+    // An inline SVG/PDF must never run script or reach the network with the
+    // daemon's origin: the sandbox CSP applies even when opened directly.
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'",
+        ),
+    );
     Ok(resp)
+}
+
+/// PUT /aws/accounts/{id}/s3/buckets/{bucket}/object?key=&overwrite= — AwsS3:Edit
+/// (`s3_write`, audited). The raw request body is spooled to an Otto-owned
+/// temp file (≤ 5 GiB) and uploaded with `aws s3 cp`. An existing key is a 409
+/// unless `overwrite=true`.
+async fn s3_upload<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, bucket)): Path<(Id, String)>,
+    Query(q): Query<s3::UploadQuery>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Body,
+) -> ApiResult<(StatusCode, Json<s3::UploadResp>)> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    crate::access::check(&ctx.pool(), &user, &id, "s3_write", Some(&bucket)).await?;
+    s3::validate_bucket(&bucket)?;
+    s3::validate_key(&q.key)?;
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    if !q.overwrite.unwrap_or(false)
+        && s3::object_exists(&svc, &a, &bucket, &q.key, q.region.as_deref()).await?
+    {
+        return Err(Error::Conflict(format!(
+            "s3://{bucket}/{} already exists — confirm to replace it",
+            q.key
+        ))
+        .into());
+    }
+    let tmp_dir = crate::paths::owned_dir(&svc.data_dir, "tmp")?;
+    let tmp = crate::paths::owned_file(&tmp_dir, &otto_core::new_id(), "")?;
+    // Remove the spool file however this handler exits.
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(tmp.clone());
+    let mut file = tokio::fs::File::create(&tmp)
+        .await
+        .map_err(|e| Error::Internal(format!("create upload spool file: {e}")))?;
+    let mut size: u64 = 0;
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| Error::Invalid(format!("upload interrupted: {e}")))?;
+        size += chunk.len() as u64;
+        if size > s3::UPLOAD_CAP {
+            return Err(Error::PayloadTooLarge(format!(
+                "in-app uploads are capped at {} GiB — use `aws s3 cp` for bigger files",
+                s3::UPLOAD_CAP / (1024 * 1024 * 1024)
+            ))
+            .into());
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| Error::Internal(format!("write upload spool file: {e}")))?;
+    }
+    file.flush()
+        .await
+        .map_err(|e| Error::Internal(format!("flush upload spool file: {e}")))?;
+    drop(file);
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|c| !c.starts_with("application/x-www-form-urlencoded"));
+    s3::upload_file(
+        &svc,
+        &a,
+        &bucket,
+        &q.key,
+        &tmp,
+        content_type,
+        q.region.as_deref(),
+    )
+    .await?;
+    audit(
+        &ctx,
+        &user.id,
+        "aws.s3.upload",
+        format!("s3://{bucket}/{}", q.key),
+        serde_json::json!({ "account_id": id, "bytes": size, "overwrite": q.overwrite.unwrap_or(false) }),
+    )
+    .await;
+    Ok((
+        StatusCode::CREATED,
+        Json(s3::UploadResp {
+            key: q.key.clone(),
+            size,
+        }),
+    ))
+}
+
+/// DELETE /aws/accounts/{id}/s3/buckets/{bucket}/object?key=&confirm= — AwsS3:Edit
+/// (`s3_delete`, audited). Prod accounts require `confirm` == the key.
+async fn s3_delete<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, bucket)): Path<(Id, String)>,
+    Query(q): Query<s3::DeleteQuery>,
+) -> ApiResult<StatusCode> {
+    crate::access::check(&ctx.pool(), &user, &id, "s3_delete", Some(&bucket)).await?;
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    if a.environment == Environment::Prod && q.confirm.as_deref() != Some(q.key.as_str()) {
+        return Err(Error::Invalid(format!(
+            "'{}' is a production account — type the object key to confirm the delete",
+            a.name
+        ))
+        .into());
+    }
+    s3::delete_object(&svc, &a, &bucket, &q.key, q.region.as_deref()).await?;
+    audit(
+        &ctx,
+        &user.id,
+        "aws.s3.delete",
+        format!("s3://{bucket}/{}", q.key),
+        serde_json::json!({ "account_id": id }),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /aws/accounts/{id}/s3/buckets/{bucket}/presign — AwsS3:View
+/// (`s3_read`: the link grants exactly the read the caller already has;
+/// audited because it hands that read to whoever holds the URL).
+async fn s3_presign<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, bucket)): Path<(Id, String)>,
+    Query(rq): Query<RegionQ>,
+    Json(req): Json<s3::PresignReq>,
+) -> ApiResult<Json<s3::PresignResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "s3_read", Some(&bucket)).await?;
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    let resp = s3::presign(&svc, &a, &bucket, &req, rq.region.as_deref()).await?;
+    audit(
+        &ctx,
+        &user.id,
+        "aws.s3.presign",
+        format!("s3://{bucket}/{}", req.key),
+        serde_json::json!({ "account_id": id, "expires_at": resp.expires_at }),
+    )
+    .await;
+    Ok(Json(resp))
 }
 
 /// POST /aws/accounts/{id}/s3/buckets/{bucket}/download-to — AwsS3:View.
@@ -736,11 +952,45 @@ async fn ec2_instances<S: AwsCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<ec2::InstancesQuery>,
-) -> ApiResult<Json<ec2::InstancesResp>> {
+) -> ApiResult<Json<serde_json::Value>> {
     crate::access::check(&ctx.pool(), &user, &id, "ec2_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
-    Ok(Json(ec2::list_instances(&svc, &a, &q).await?))
+    if regions::is_all(q.region.as_deref()) {
+        let list = regions::enabled_regions(&svc, &a).await?;
+        let (ok, region_errors) = regions::fan_out(list, |region| {
+            let (svc, a, mut q) = (svc.clone(), a.clone(), q.clone());
+            q.region = Some(region);
+            async move { ec2::list_instances(&svc, &a, &q).await.map(|r| r.instances) }
+        })
+        .await?;
+        return Ok(Json(
+            serde_json::to_value(AllRegions {
+                instances: tag(ok),
+                region_errors,
+            })
+            .map_err(Error::from)?,
+        ));
+    }
+    Ok(Json(
+        serde_json::to_value(ec2::list_instances(&svc, &a, &q).await?).map_err(Error::from)?,
+    ))
+}
+
+/// `?region=all` response for EC2 / RDS (`instances`) — rows carry `region`.
+#[derive(Debug, Serialize)]
+struct AllRegions<T> {
+    instances: Vec<Regional<T>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    region_errors: Vec<RegionError>,
+}
+
+/// `?region=all` response for EKS (`clusters`).
+#[derive(Debug, Serialize)]
+struct AllRegionsClusters<T> {
+    clusters: Vec<Regional<T>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    region_errors: Vec<RegionError>,
 }
 
 /// GET /aws/accounts/{id}/ec2/instances/{instance_id}?region= — AwsEc2:View
@@ -968,12 +1218,32 @@ async fn eks_clusters<S: AwsCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<eks::RegionQuery>,
-) -> ApiResult<Json<eks::ClustersResp>> {
+) -> ApiResult<Json<serde_json::Value>> {
     crate::access::check(&ctx.pool(), &user, &id, "eks_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
+    if regions::is_all(q.region.as_deref()) {
+        let list = regions::enabled_regions(&svc, &a).await?;
+        let (ok, region_errors) = regions::fan_out(list, |region| {
+            let (svc, a) = (svc.clone(), a.clone());
+            async move {
+                eks::list_clusters(&svc, &a, Some(&region))
+                    .await
+                    .map(|r| r.clusters)
+            }
+        })
+        .await?;
+        return Ok(Json(
+            serde_json::to_value(AllRegionsClusters {
+                clusters: tag(ok),
+                region_errors,
+            })
+            .map_err(Error::from)?,
+        ));
+    }
     Ok(Json(
-        eks::list_clusters(&svc, &a, q.region.as_deref()).await?,
+        serde_json::to_value(eks::list_clusters(&svc, &a, q.region.as_deref()).await?)
+            .map_err(Error::from)?,
     ))
 }
 
@@ -1043,11 +1313,29 @@ async fn rds_instances<S: AwsCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<rds::InstancesQuery>,
-) -> ApiResult<Json<rds::InstancesResp>> {
+) -> ApiResult<Json<serde_json::Value>> {
     crate::access::check(&ctx.pool(), &user, &id, "rds_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
-    Ok(Json(rds::list_instances(&svc, &a, &q).await?))
+    if regions::is_all(q.region.as_deref()) {
+        let list = regions::enabled_regions(&svc, &a).await?;
+        let (ok, region_errors) = regions::fan_out(list, |region| {
+            let (svc, a, mut q) = (svc.clone(), a.clone(), q.clone());
+            q.region = Some(region);
+            async move { rds::list_instances(&svc, &a, &q).await.map(|r| r.instances) }
+        })
+        .await?;
+        return Ok(Json(
+            serde_json::to_value(AllRegions {
+                instances: tag(ok),
+                region_errors,
+            })
+            .map_err(Error::from)?,
+        ));
+    }
+    Ok(Json(
+        serde_json::to_value(rds::list_instances(&svc, &a, &q).await?).map_err(Error::from)?,
+    ))
 }
 
 /// GET /aws/accounts/{id}/rds/instances/{identifier}?region= — AwsRds:View
@@ -1093,6 +1381,95 @@ async fn cloudwatch_metrics<S: AwsCtx>(
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(metrics::get_metrics(&svc, &a, &q).await?))
+}
+
+// ---------------------------------------------------------------------------
+// CloudWatch Logs — authorised by the account's `metrics` (CloudWatch read)
+// operation; the policy table grades every `/logs/*` route Aws:View.
+// ---------------------------------------------------------------------------
+
+/// GET /aws/accounts/{id}/logs/groups?prefix=&token=&max=&region=
+async fn logs_groups<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<logs::GroupsQuery>,
+) -> ApiResult<Json<logs::GroupsResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "metrics", None).await?;
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    Ok(Json(logs::list_groups(&svc, &a, &q).await?))
+}
+
+/// GET /aws/accounts/{id}/logs/streams?group=&prefix=&token=&max=&region=
+async fn logs_streams<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<logs::StreamsQuery>,
+) -> ApiResult<Json<logs::StreamsResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "metrics", None).await?;
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    Ok(Json(logs::list_streams(&svc, &a, &q).await?))
+}
+
+/// GET /aws/accounts/{id}/logs/events?group=&streams=&pattern=&start=&end=&token=&max=&region=
+async fn logs_events<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<logs::EventsQuery>,
+) -> ApiResult<Json<logs::EventsResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "metrics", None).await?;
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    Ok(Json(logs::filter_events(&svc, &a, &q).await?))
+}
+
+/// POST /aws/accounts/{id}/logs/insights?region= — start a Logs Insights query.
+async fn logs_insights_start<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(rq): Query<logs::RegionQuery>,
+    Json(req): Json<logs::InsightsReq>,
+) -> ApiResult<Json<logs::InsightsStartedResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "metrics", None).await?;
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    Ok(Json(
+        logs::start_insights(&svc, &a, &req, rq.region.as_deref()).await?,
+    ))
+}
+
+/// GET /aws/accounts/{id}/logs/insights/{qid}?region=
+async fn logs_insights_results<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, qid)): Path<(Id, String)>,
+    Query(rq): Query<logs::RegionQuery>,
+) -> ApiResult<Json<logs::InsightsResultsResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "metrics", None).await?;
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    Ok(Json(
+        logs::insights_results(&svc, &a, &qid, rq.region.as_deref()).await?,
+    ))
+}
+
+/// POST /aws/accounts/{id}/logs/insights/{qid}/stop?region= → 204
+async fn logs_insights_stop<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, qid)): Path<(Id, String)>,
+    Query(rq): Query<logs::RegionQuery>,
+) -> ApiResult<StatusCode> {
+    crate::access::check(&ctx.pool(), &user, &id, "metrics", None).await?;
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    logs::stop_insights(&svc, &a, &qid, rq.region.as_deref()).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

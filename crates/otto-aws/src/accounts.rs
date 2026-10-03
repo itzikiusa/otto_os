@@ -123,6 +123,10 @@ pub struct AwsAccount {
     pub identity: Option<AwsIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<AwsPermissions>,
+    /// When the sign-in ends (SSO token / exported temporary credentials) —
+    /// the UI warns ahead of time. Filled by the list/get handlers.
+    #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
+    pub session: Option<crate::creds::SessionInfo>,
     pub created_by: Option<Id>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -167,6 +171,7 @@ impl AwsAccount {
                 .permissions
                 .as_ref()
                 .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            session: None,
             created_by: r.created_by.clone(),
             created_at: r.created_at,
             updated_at: r.updated_at,
@@ -306,6 +311,23 @@ pub fn build_env(
         }
     }
     env
+}
+
+/// Add static creds to a profile-mode env. `AWS_PROFILE` stays: env
+/// credentials win over the profile's credential source while the profile
+/// keeps supplying its other settings.
+pub fn push_creds(env: &mut Vec<(String, String)>, c: &StaticCreds) {
+    env.retain(|(k, _)| {
+        !matches!(
+            k.as_str(),
+            "AWS_ACCESS_KEY_ID" | "AWS_SECRET_ACCESS_KEY" | "AWS_SESSION_TOKEN"
+        )
+    });
+    env.push(("AWS_ACCESS_KEY_ID".into(), c.access_key_id.clone()));
+    env.push(("AWS_SECRET_ACCESS_KEY".into(), c.secret_access_key.clone()));
+    if let Some(t) = &c.session_token {
+        env.push(("AWS_SESSION_TOKEN".into(), t.clone()));
+    }
 }
 
 /// `sts get-caller-identity` JSON → `AwsIdentity`.
@@ -680,6 +702,7 @@ impl AwsService {
                 params.insert("role_arn".into(), r.trim().into());
             }
             assume_cache_evict(id);
+            crate::creds::evict(id);
         }
         if let Some(u) = &req.endpoint_url {
             if u.trim().is_empty() {
@@ -689,6 +712,7 @@ impl AwsService {
             }
             // Assumed creds were minted against the old endpoint's STS.
             assume_cache_evict(id);
+            crate::creds::evict(id);
         }
         match mode {
             AuthMode::Profile => {
@@ -756,6 +780,7 @@ impl AwsService {
                     patch.profile = Some(None);
                 }
                 assume_cache_evict(id);
+                crate::creds::evict(id);
             }
         }
         patch.params = Some(serde_json::Value::Object(params));
@@ -771,6 +796,7 @@ impl AwsService {
             let _ = self.secrets.delete(sref);
         }
         assume_cache_evict(id);
+        crate::creds::evict(id);
         self.repo.delete(id).await?;
         self.emit(id, true);
         Ok(())
@@ -816,13 +842,18 @@ impl AwsService {
             AuthMode::AccessKeys => Some(self.static_creds(account)?),
         };
         let endpoint = endpoint_url_of(account);
-        let base = build_env(
+        let mut base = build_env(
             mode,
             account.profile.as_deref(),
             region,
             base_creds.as_ref(),
             endpoint,
         );
+        if let (AuthMode::Profile, Some(profile)) = (mode, account.profile.as_deref()) {
+            if let Some(c) = self.exported_creds(account, profile, &base).await? {
+                push_creds(&mut base, &c);
+            }
+        }
         let role_arn = account
             .params
             .get("role_arn")
@@ -867,6 +898,73 @@ impl AwsService {
             Some(&creds),
             endpoint,
         ))
+    }
+
+    /// A-5: the profile's credentials, exported once and cached until shortly
+    /// before they expire (`creds.rs`). `Ok(None)` ⇒ let the child resolve the
+    /// profile itself (old CLI without `export-credentials`, or a recent
+    /// non-credential failure). A credential failure is returned as the
+    /// `login required:` error, naming the profile and the fix.
+    async fn exported_creds(
+        &self,
+        account: &AwsAccountRow,
+        profile: &str,
+        base: &[(String, String)],
+    ) -> Result<Option<StaticCreds>> {
+        if let Some(c) = crate::creds::get(&account.id, profile) {
+            return Ok(Some(c));
+        }
+        if crate::creds::recently_failed(&account.id) {
+            return Ok(None);
+        }
+        let bin = self.bin()?;
+        let args: Vec<String> = [
+            "configure",
+            "export-credentials",
+            "--profile",
+            profile,
+            "--format",
+            "process",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let out = cli::run_raw(&bin, &args, base, PROBE_TIMEOUT, None).await?;
+        if !out.ok() {
+            if cli::classify_stderr(&out.stderr) == StderrClass::LoginRequired {
+                crate::creds::evict(&account.id);
+                return Err(Error::Invalid(format!(
+                    "login required: the sign-in for AWS profile '{profile}' has expired — press Sign in (runs `aws sso login --profile {profile}`) and retry"
+                )));
+            }
+            tracing::debug!(
+                account = %account.id,
+                "export-credentials unavailable, falling back to per-call resolution: {}",
+                cli::redact_stderr(out.stderr.lines().next().unwrap_or(""))
+            );
+            crate::creds::mark_failed(&account.id);
+            return Ok(None);
+        }
+        let parsed = cli::parse_stdout(&out.stdout)
+            .ok()
+            .as_ref()
+            .and_then(crate::creds::parse_exported);
+        match parsed {
+            Some((c, exp)) => {
+                crate::creds::put(&account.id, profile, c.clone(), exp);
+                Ok(Some(c))
+            }
+            None => {
+                crate::creds::mark_failed(&account.id);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Expiry of the temporary credentials this account currently signs with
+    /// (exported SSO / process creds), when known.
+    pub fn temporary_credentials_expiry(&self, account: &AwsAccountRow) -> Option<DateTime<Utc>> {
+        crate::creds::expires_at(&account.id)
     }
 
     /// Run `aws <args> --output json` for `account` and return the raw output
@@ -1065,6 +1163,9 @@ impl AwsService {
             .clone()
             .ok_or_else(|| Error::Invalid("account has no profile".into()))?;
         let bin = self.bin()?;
+        // A fresh sign-in must be picked up by the next call, not a stale
+        // export (or the failure back-off).
+        crate::creds::evict(&account.id);
         // No assume-role here: the login is for the base profile.
         let env = build_env(
             AuthMode::Profile,

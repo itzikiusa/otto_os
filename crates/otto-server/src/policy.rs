@@ -1259,7 +1259,18 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
             let host_write = !get
                 && (rest.ends_with("/download-to")
                     || (rest.starts_with("s3/download-jobs/") && rest.ends_with("/cancel")));
-            return Require(AwsS3, if host_write { Edit } else { View });
+            // Object writes: upload (PUT) and delete (DELETE) on `…/object`.
+            // `presign` (POST) stays View: the link carries only the read the
+            // caller already has (the handler audits it).
+            let object_write = method == Method::PUT || method == Method::DELETE;
+            return Require(
+                AwsS3,
+                if host_write || object_write {
+                    Edit
+                } else {
+                    View
+                },
+            );
         }
         if rest.starts_with("sqs/") {
             let read = get || rest.ends_with("/peek");
@@ -1279,6 +1290,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
             return Require(AwsRds, View);
         }
         if rest == "metrics" {
+            return Require(Aws, View);
+        }
+        // CloudWatch Logs: every route reads (Insights start/stop POSTs run
+        // or cancel a read-only query), same key as metrics.
+        if rest.starts_with("logs/") {
             return Require(Aws, View);
         }
         // Account-level probes: `test` (sts get-caller-identity), `permissions`
@@ -1388,6 +1404,32 @@ mod tests {
             "/api/v1/aws/accounts/{id}/s3/download-jobs/{job}",
         ] {
             assert_eq!(pol(Method::GET, path), Require(AwsS3, View), "{path}");
+        }
+    }
+
+    #[test]
+    fn s3_object_writes_need_edit_and_presign_and_logs_stay_view() {
+        let obj = "/api/v1/aws/accounts/{id}/s3/buckets/{bucket}/object";
+        assert_eq!(pol(Method::PUT, obj), Require(AwsS3, Edit));
+        assert_eq!(pol(Method::DELETE, obj), Require(AwsS3, Edit));
+        assert_eq!(pol(Method::GET, obj), Require(AwsS3, View));
+        assert_eq!(
+            pol(
+                Method::POST,
+                "/api/v1/aws/accounts/{id}/s3/buckets/{bucket}/presign"
+            ),
+            Require(AwsS3, View)
+        );
+        for (m, path) in [
+            (Method::GET, "/api/v1/aws/accounts/{id}/logs/groups"),
+            (Method::GET, "/api/v1/aws/accounts/{id}/logs/events"),
+            (Method::POST, "/api/v1/aws/accounts/{id}/logs/insights"),
+            (
+                Method::POST,
+                "/api/v1/aws/accounts/{id}/logs/insights/{qid}/stop",
+            ),
+        ] {
+            assert_eq!(pol(m, path), Require(Aws, View), "{path}");
         }
     }
 
