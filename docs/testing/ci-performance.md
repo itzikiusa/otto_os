@@ -85,7 +85,11 @@ style, layout and paint dominate, so the gates could not see its regressions.
   `desktop-git-sidebar-perf`, `desktop-docs-orch-perf`, `desktop-infra-perf`,
   `desktop-db-results-perf`, `desktop-nav-smooth-perf`, `desktop-boot-perf`,
   `desktop-terminal-flood-perf` (flood backlog, ^C latency, one snapshot per
-  attach) and `desktop-terminal-park-redraw`, with `OTTO_PERF_BUDGET_SCALE=3`,
+  attach), `desktop-terminal-park-redraw` and the `@ci`-tagged subset of
+  `desktop-db-scale-perf` (wide 20k × 300 grid: header + body column window,
+  DOM < 3,000, V step layout < 12 ms, V/H painted step < 40 ms; column filter
+  over 100k JSON rows; result memory budget release + Re-run), with
+  `OTTO_PERF_BUDGET_SCALE=3`,
   plus the daemon's terminal emulator budgets
   (`OTTO_PERF=1 cargo test -p otto-pty --release --lib perf_budgets`: snapshot
   capture < 2 ms, format < 40 ms, 4000-row reflow < 50 ms, feed ≥ 50 MB/s with
