@@ -952,13 +952,15 @@ async fn run(cfg: Config) -> Result<(), String> {
                     Ok(r) if r.total() > 0 => tracing::info!(
                         "retention: pruned {} work_events, {} mcp_tool_calls, \
                          {} mcp_call_log, {} audit_log, {} review_agent_prompts, \
-                         {} review_diffs row(s)",
+                         {} review_diffs, {} notifications, {} room_messages row(s)",
                         r.work_events,
                         r.mcp_tool_calls,
                         r.mcp_call_log,
                         r.audit_log,
                         r.review_agent_prompts,
-                        r.review_diffs
+                        r.review_diffs,
+                        r.notifications,
+                        r.room_messages
                     ),
                     Ok(_) => {}
                     Err(e) => tracing::warn!("retention prune failed: {e}"),
