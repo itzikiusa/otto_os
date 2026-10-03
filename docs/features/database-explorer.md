@@ -547,6 +547,40 @@ Mongo — native Mongo queries (`db.coll.find({…})`, aggregate pipelines, BSON
 literals) are JS-shaped, so JS highlighting reads naturally (the SQL subset Mongo
 also accepts still renders fine).
 
+### When a query fails: the error panel
+
+A failed run replaces the grid with an **error panel** built for reading, not
+for parsing:
+
+- **Headline** — one line saying what failed (`Unknown column \`nme\`.`,
+  `Table \`default.userz\` doesn't exist.`, `Can't reach ClickHouse at
+  10.0.3.4:8123 (connection refused).`), with the engine's code as a chip
+  (`Code 60 · UNKNOWN_TABLE`, `Error 1054 · 42S22`, `42703`, `2 BadValue`).
+- **Cause** and **hint** — the server's detail (Postgres `DETAIL`, a Mongo
+  duplicate key, the rows a ClickHouse query had streamed before it failed) and
+  what to do next (check the tunnel, raise the ⏱ timeout, use `uniq` instead of
+  `uniqExact`, …).
+- **Did you mean** chips — for an unknown column/table/operator/command: the
+  server's own suggestion (ClickHouse `Maybe you meant`, Postgres `HINT`), else
+  the nearest names from the connection's **already-cached autocomplete schema**
+  (no extra query), else a static list (Mongo operators, Redis commands).
+  Clicking a chip replaces the name in the editor as one undoable edit (⌘Z).
+- **Caret excerpt** — the failing line with a caret under the reported column
+  (Postgres `POSITION`, ClickHouse `line X, col Y`, MySQL `at line N`). A
+  position past the statement shows no caret rather than a wrong one.
+- **Show full error** — the untouched text, with **Copy**. **Ask AI to fix**
+  still sends the full text.
+
+A query that fails in a **background** tab toasts only the headline.
+
+The daemon does the cleaning before the text leaves it: ClickHouse stack traces
+and `(version …)` banners are dropped (native traces go to the debug log), long
+`Expected one of:` lists are cut to six, Mongo's `labels/source/server response`
+dump is removed, and Postgres/MySQL keep what sqlx's `Display` threw away as
+tagged lines (see §11). A ClickHouse query that fails **after** streaming
+started is reported as that failure, never as a success with partial rows or a
+JSON parse error.
+
 ### Run on multiple targets ("Run on…")
 
 **Run on…** in the query toolbar runs the **selection** (else the whole buffer)
@@ -1320,6 +1354,23 @@ without loss. The UI renders them as `ObjectId("…")`, `ISODate("…")`,
 `NumberLong("…")`, `UUID("…")`, `BinData(n, "…")`, `Timestamp(t, i)`.
 
 ---
+
+### Engine error text (tagged trailer lines)
+
+A query failure is still a `502` Problem JSON whose `message` is
+`upstream: <text>`. The text is the cleaned engine message followed by optional
+**tagged trailer lines**, one per line, which `ui/src/modules/database/error-normalize.ts`
+parses (and which read fine as plain text in history rows and MCP results):
+
+| Tag | Engine | Meaning |
+|---|---|---|
+| `DETAIL:` / `HINT:` | Postgres | the server's detail / hint |
+| `SQLSTATE:` | Postgres, MySQL | the SQLSTATE code |
+| `POSITION:` | Postgres | 1-based character offset into the statement as sent |
+| `ERRNO:` | MySQL | the error number |
+| `CODE:` | MongoDB | `<code> <codeName>` |
+| `STREAMED_ROWS:` | ClickHouse | rows already streamed when the query failed mid-stream (`unknown` when the body was cut) |
+| `SUGGEST:` | MySQL, Postgres, ClickHouse | comma-separated nearest names for an unknown column/table, from the cached completion snapshot |
 
 ## 12. Capabilities & limitations
 
