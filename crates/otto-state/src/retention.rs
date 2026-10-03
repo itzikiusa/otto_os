@@ -48,6 +48,11 @@ const BATCH: i64 = 1_000;
 const BATCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
 /// Default `work_events_idle_days`.
 pub const DEFAULT_WORK_EVENTS_IDLE_DAYS: i64 = 90;
+/// Default `review_retry_days` (14-daemon-perf P4).
+pub const DEFAULT_REVIEW_RETRY_DAYS: i64 = 14;
+/// Smallest `review_retry_days`: a finished review keeps its retry artifacts
+/// at least this long.
+pub const MIN_REVIEW_RETRY_DAYS: i64 = 3;
 
 /// Retention windows. Defaults are conservative; see
 /// `docs/features/backup-restore.md` ("Data retention").
@@ -68,6 +73,11 @@ pub struct RetentionPolicy {
     pub mcp_audit_days: i64,
     /// `audit_log` age window.
     pub audit_log_days: i64,
+    /// `review_agent_prompts` + `review_diffs` (the durable per-agent retry
+    /// artifacts): rows of a FINISHED review (`done`/`error`/`cancelled`, or
+    /// whose review row is gone) older than this are pruned. A running
+    /// review's artifacts are never touched.
+    pub review_retry_days: i64,
 }
 
 impl Default for RetentionPolicy {
@@ -79,6 +89,7 @@ impl Default for RetentionPolicy {
             work_events_idle_days: DEFAULT_WORK_EVENTS_IDLE_DAYS,
             mcp_audit_days: 90,
             audit_log_days: 90,
+            review_retry_days: DEFAULT_REVIEW_RETRY_DAYS,
         }
     }
 }
@@ -100,6 +111,7 @@ impl RetentionPolicy {
         self.work_events_idle_days = self.work_events_idle_days.max(self.work_events_days);
         self.mcp_audit_days = self.mcp_audit_days.max(MIN_DAYS);
         self.audit_log_days = self.audit_log_days.max(MIN_AUDIT_LOG_DAYS);
+        self.review_retry_days = self.review_retry_days.max(MIN_REVIEW_RETRY_DAYS);
         self
     }
 }
@@ -111,11 +123,18 @@ pub struct RetentionReport {
     pub mcp_tool_calls: u64,
     pub mcp_call_log: u64,
     pub audit_log: u64,
+    pub review_agent_prompts: u64,
+    pub review_diffs: u64,
 }
 
 impl RetentionReport {
     pub fn total(&self) -> u64 {
-        self.work_events + self.mcp_tool_calls + self.mcp_call_log + self.audit_log
+        self.work_events
+            + self.mcp_tool_calls
+            + self.mcp_call_log
+            + self.audit_log
+            + self.review_agent_prompts
+            + self.review_diffs
     }
 }
 
@@ -158,7 +177,44 @@ impl RetentionRepo {
         report.audit_log = self
             .delete_older("audit_log", "ts", &cutoff(p.audit_log_days))
             .await?;
+        let review_cut = cutoff(p.review_retry_days);
+        report.review_agent_prompts = self
+            .delete_review_artifacts("review_agent_prompts", &review_cut)
+            .await?;
+        report.review_diffs = self
+            .delete_review_artifacts("review_diffs", &review_cut)
+            .await?;
         Ok(report)
+    }
+
+    /// Batched delete of a review retry-artifact table's rows older than
+    /// `cutoff` whose review is terminal or gone. A `running` review keeps
+    /// its artifacts whatever their age (a long run can still retry an
+    /// agent). Past the window, `POST /reviews/{id}/agents/{i}/retry` falls
+    /// back to its existing "prompt unavailable" path.
+    async fn delete_review_artifacts(&self, table: &str, cutoff: &str) -> Result<u64> {
+        // `table` is a compile-time constant from `prune`, never input.
+        let q = format!(
+            "DELETE FROM {table} WHERE rowid IN \
+             (SELECT a.rowid FROM {table} a LEFT JOIN pr_reviews r ON r.id = a.review_id \
+              WHERE a.created_at < ? \
+                AND (r.id IS NULL OR r.status IN ('done','error','cancelled')) \
+              LIMIT {BATCH})"
+        );
+        let mut total = 0u64;
+        loop {
+            let n = sqlx::query(sqlx::AssertSqlSafe(q.as_str()))
+                .bind(cutoff)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("retention: review artifacts"))?
+                .rows_affected();
+            total += n;
+            if n < BATCH as u64 {
+                return Ok(total);
+            }
+            tokio::time::sleep(BATCH_PAUSE).await;
+        }
     }
 
     /// Batched `DELETE … WHERE <col> < cutoff`. Timestamps are stored as
@@ -453,6 +509,61 @@ mod tests {
                     .unwrap();
             assert_eq!(ids, vec!["young".to_string()], "{t}");
         }
+    }
+
+    #[tokio::test]
+    async fn review_artifacts_pruned_only_for_finished_old_reviews() {
+        let pool = mem_pool().await;
+        for (id, status) in [("done", "done"), ("run", "running"), ("err", "error")] {
+            sqlx::query(
+                "INSERT INTO pr_reviews (id, repo_id, pr_number, status, created_at) \
+                 VALUES (?, 'r', 1, ?, ?)",
+            )
+            .bind(id)
+            .bind(status)
+            .bind(ago(30))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // (review, age days): old finished → pruned; young finished, old
+        // running → kept; an orphan (review row gone) that is old → pruned.
+        for (review, days) in [("done", 20), ("run", 20), ("err", 2), ("gone", 20)] {
+            sqlx::query(
+                "INSERT INTO review_agent_prompts (review_id, agent_index, prompt, created_at) \
+                 VALUES (?, 0, 'p', ?)",
+            )
+            .bind(review)
+            .bind(ago(days))
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO review_diffs (review_id, diff, created_at) VALUES (?, 'd', ?)",
+            )
+            .bind(review)
+            .bind(ago(days))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let r = RetentionRepo::new(pool.clone())
+            .prune(&RetentionPolicy::default())
+            .await
+            .unwrap();
+        assert_eq!((r.review_agent_prompts, r.review_diffs), (2, 2));
+        for t in ["review_agent_prompts", "review_diffs"] {
+            let mut ids: Vec<String> =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT review_id FROM {t}")))
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            ids.sort();
+            assert_eq!(ids, vec!["err".to_string(), "run".to_string()], "{t}");
+        }
+        // The floor: 1 day is raised to MIN_REVIEW_RETRY_DAYS.
+        let p = RetentionPolicy::from_setting(Some(&serde_json::json!({"review_retry_days": 1})));
+        assert_eq!(p.review_retry_days, MIN_REVIEW_RETRY_DAYS);
     }
 
     #[tokio::test]

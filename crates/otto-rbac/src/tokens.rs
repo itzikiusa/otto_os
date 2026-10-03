@@ -491,6 +491,41 @@ impl AuthRepo {
         Ok(res.rows_affected())
     }
 
+    /// Purge credentials that expired more than `grace_days` ago (14-daemon-perf
+    /// P10). Every other DELETE here is targeted, so expired login / API /
+    /// impersonation rows (thousands of `otto-mcp:<session>` API tokens on a
+    /// real install) piled up forever. `share` rows are left to their own
+    /// window (`max_expires_at`). Runs in 500-row batches (one short write transaction each), evicting each
+    /// deleted hash from the auth cache. Returns the rows deleted.
+    pub async fn purge_expired(&self, grace_days: i64) -> Result<u64> {
+        const BATCH: i64 = 500;
+        let cutoff = (Utc::now() - Duration::days(grace_days.max(0))).to_rfc3339();
+        let mut total = 0u64;
+        loop {
+            let hashes: Vec<String> = sqlx::query_scalar(
+                "DELETE FROM auth_sessions WHERE rowid IN \
+                 (SELECT rowid FROM auth_sessions \
+                  WHERE kind IN ('session','api','agent_mcp','impersonation') \
+                    AND expires_at < ? LIMIT ?) \
+                 RETURNING token_hash",
+            )
+            .bind(&cutoff)
+            .bind(BATCH)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("purge expired tokens: {e}")))?;
+            if let Some(cache) = &self.cache {
+                for h in &hashes {
+                    cache.evict(h);
+                }
+            }
+            total += hashes.len() as u64;
+            if (hashes.len() as i64) < BATCH {
+                return Ok(total);
+            }
+        }
+    }
+
     /// Mint a long-lived API (personal access) token for `user_id`. Returns the
     /// RAW token (shown to the caller exactly once) plus its metadata.
     pub async fn issue_api_token(
@@ -1616,6 +1651,50 @@ mod tests {
             .bind(&sid).bind(&ws).bind(owner).bind(&now).bind(&now)
             .execute(pool).await.unwrap();
         sid
+    }
+
+    #[tokio::test]
+    async fn purge_expired_drops_only_long_expired_non_share_rows() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "purge").await;
+        let live = repo.issue(&owner).await.unwrap();
+        let fresh_expired = repo.issue(&owner).await.unwrap();
+        let old_expired = repo.issue(&owner).await.unwrap();
+        let (old_api, _) = repo.issue_api_token(&owner, Some("x")).await.unwrap();
+        let set_exp = |tok: &str, days: i64, kind: &str| {
+            let pool = pool.clone();
+            let hash = token_hash(tok);
+            let kind = kind.to_string();
+            async move {
+                sqlx::query(
+                    "UPDATE auth_sessions SET expires_at = ?, kind = ? WHERE token_hash = ?",
+                )
+                .bind((Utc::now() - Duration::days(days)).to_rfc3339())
+                .bind(kind)
+                .bind(hash)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+        set_exp(&fresh_expired, 1, "session").await;
+        set_exp(&old_expired, 30, "session").await;
+        set_exp(&old_api, 30, "api").await;
+        // A long-expired share row is left to its own window.
+        let share = repo.issue(&owner).await.unwrap();
+        set_exp(&share, 30, "share").await;
+
+        assert_eq!(repo.purge_expired(7).await.unwrap(), 2);
+        let left: Vec<String> = sqlx::query_scalar("SELECT token_hash FROM auth_sessions")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        for keep in [&live, &fresh_expired, &share] {
+            assert!(left.contains(&token_hash(keep)));
+        }
+        assert_eq!(left.len(), 3);
+        assert_eq!(repo.purge_expired(7).await.unwrap(), 0);
     }
 
     #[tokio::test]
