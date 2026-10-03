@@ -2315,6 +2315,8 @@ impl Driver for ClickhouseDriver {
     /// close explicitly: a query running longer than the window holds its own
     /// clone, and the handle goes away with the last clone.
     async fn evict_idle(&self, idle: Duration) -> usize {
+        // Same 5-minute tick: expired completion snapshots go too (DB2-07).
+        self.completions.sweep();
         let http = self.clients.take_idle(idle);
         let native = self.native.take_idle(idle);
         let mut memo = self

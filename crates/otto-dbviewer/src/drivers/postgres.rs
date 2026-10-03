@@ -534,6 +534,8 @@ impl Driver for PostgresDriver {
     /// holds its own clone, so it finishes and the pool goes with the last
     /// clone; idle sessions are then closed by sqlx.
     async fn evict_idle(&self, idle: Duration) -> usize {
+        // Same 5-minute tick: expired completion snapshots go too (DB2-07).
+        self.completions.sweep();
         self.pools.take_idle(idle).len()
     }
 
@@ -1374,16 +1376,30 @@ impl PostgresDriver {
         }
 
         // The four catalog reads are independent: one concurrent wave instead
-        // of four back-to-back round trips.
+        // of four back-to-back round trips. Straight off `pg_class` /
+        // `pg_attribute` (like the bulk schema graph), NOT the
+        // `information_schema` views: those evaluate per-row privilege checks
+        // over the whole catalog and cost seconds on 10k+ relations (DB2-07).
+        // Matviews now complete too (the view skipped them); types come from
+        // `format_type` (`character varying(255)`, `text[]`).
         let tables_q = sqlx::query_as::<_, (String, String)>(
-            "SELECT table_name, table_type FROM information_schema.tables \
-             WHERE table_schema = $1 ORDER BY table_name",
+            "SELECT c.relname, \
+                    CASE WHEN c.relkind IN ('v','m') THEN 'VIEW' ELSE 'BASE TABLE' END \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind IN ('r','p','f','v','m') \
+             ORDER BY c.relname",
         )
         .bind(schema)
         .fetch_all(&pool);
         let cols_q = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT table_name, column_name, data_type FROM information_schema.columns \
-             WHERE table_schema = $1 ORDER BY table_name, ordinal_position",
+            "SELECT c.relname, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) \
+             FROM pg_catalog.pg_attribute a \
+             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind IN ('r','p','f','v','m') \
+               AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY c.relname, a.attnum",
         )
         .bind(schema)
         .fetch_all(&pool);

@@ -520,6 +520,15 @@ impl GraphCache {
             .unwrap_or_else(|e| e.into_inner())
             .retain(|k, _| !k.starts_with(prefix));
     }
+    /// Drop expired graphs. `get` only purges when a diagram is requested, so
+    /// a multi-MB graph used to linger until the next one (DB2-07); the
+    /// 5-minute reaper calls this.
+    fn sweep(&self) -> usize {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let before = entries.len();
+        entries.retain(|_, (at, _)| at.elapsed() < SCHEMA_GRAPH_TTL);
+        before - entries.len()
+    }
 }
 
 /// `secret_ref` → (secret, read time); see [`DbViewerService::completion_secrets`].
@@ -646,11 +655,9 @@ impl DbViewerService {
                 return Ok(value.clone());
             }
         }
-        let store = self.secrets.clone();
-        let owned = key.to_string();
-        let value = tokio::task::spawn_blocking(move || store.get(&owned))
-            .await
-            .map_err(|e| Error::Internal(format!("secret read task failed: {e}")))??;
+        // Cache hits answer inline; only a real backend read hops to the
+        // blocking pool (DB2-07).
+        let value = otto_core::secrets::get_async(&self.secrets, key).await?;
         let mut cache = self
             .completion_secrets
             .lock()
@@ -1354,6 +1361,11 @@ impl DbViewerService {
     /// evicted before, so a Mongo client kept heartbeating to a reaped
     /// tunnel's dead SOCKS port. Returns how many handles were dropped.
     pub async fn reap_idle_handles(&self) -> usize {
+        // Expired derived caches go on the same tick (DB2-07): schema graphs
+        // and the enforced-completion snapshots (drivers sweep their own in
+        // `evict_idle`).
+        self.graphs.sweep();
+        self.enforced_completions.sweep();
         let mut evicted = 0;
         for engine in [
             Engine::Mysql,
@@ -3442,6 +3454,34 @@ mod tests {
     //! query leaves no stale entry a later cancel could hit.
 
     use super::*;
+
+    /// DB2-07: the reaper's sweep drops expired schema graphs without anyone
+    /// requesting a diagram, and keeps fresh ones.
+    #[test]
+    fn graph_cache_sweep_drops_only_expired_graphs() {
+        let cache = GraphCache::default();
+        let graph = || {
+            Arc::new(SchemaGraph {
+                schema: "s".into(),
+                tables: vec![],
+                edges: vec![],
+                relationships: true,
+                truncated: false,
+            })
+        };
+        cache.put("fresh".into(), graph());
+        let old = Instant::now()
+            .checked_sub(SCHEMA_GRAPH_TTL + Duration::from_secs(1))
+            .expect("monotonic clock far enough from boot");
+        cache
+            .entries
+            .lock()
+            .unwrap()
+            .insert("stale".into(), (old, graph()));
+        assert_eq!(cache.sweep(), 1);
+        assert!(cache.get("fresh").is_some());
+        assert_eq!(cache.entries.lock().unwrap().len(), 1);
+    }
 
     fn entry(conn_id: &str, handle: Option<QueryHandle>) -> InFlightQuery {
         let token = CancelToken::new();

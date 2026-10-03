@@ -581,6 +581,8 @@ impl Driver for MysqlDriver {
     /// holds its own clone, so it finishes and the pool goes with the last
     /// clone; idle sessions are then closed by sqlx.
     async fn evict_idle(&self, idle: Duration) -> usize {
+        // Same 5-minute tick: expired completion snapshots go too (DB2-07).
+        self.completions.sweep();
         self.pools.take_idle(idle).len()
     }
 
