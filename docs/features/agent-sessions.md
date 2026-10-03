@@ -307,12 +307,29 @@ substituted with `DEFAULT_ATTACH_HISTORY_LINES` (1000) so even a minimal client
 restores ample context. Over-asking (2000 requested, ≤10,000 retained) is
 clamped, never an error.
 
+The attach request also carries the pane's measured grid
+(`{"type":"scrollback","lines":…,"cols":…,"rows":…}`): a pane that holds size
+authority has the PTY resized to that grid **before** the snapshot is taken,
+so opening a pane costs exactly one snapshot. The depth a client asked for is
+reused for every snapshot the daemon later pushes on its own (lag, flow-control
+recovery, a respawned process), so a 2000-row tile is never sent 4000 rows.
+
+**Memory.** The daemon's emulator keeps 4000 rows of formatted history per live
+session. Rows that scrolled off are stored trimmed of trailing blanks and shared
+between snapshot copies, so a session of short lines at 200 columns holds about
+2.4 MB instead of 25 MB, and taking a snapshot no longer copies the history. A
+live terminal **nobody has viewed for 10 minutes** keeps only its newest 1000
+rows of emulator history; the next viewer restores the 4000-row cap and history
+grows again from there (the 10,000-line raw ring used by search is unaffected).
+
 **Two searches:**
 - **In-viewport** — the xterm `SearchAddon` over the currently rendered buffer
   (instant, but lost on reconnect).
 - **Server-side ring search** — the `{"type":"search"}` frame greps the full
   10,000-line ring (plain substring, case-insensitive, ANSI-stripped) and
-  returns up to 200 matches in buffer order. Use it after reopening a session or
+  returns up to 200 matches in buffer order (the newest 200 when more match; the
+scan runs off the daemon's async workers and never blocks the session's
+output). Use it after reopening a session or
   to find output that scrolled off. The UI find bar runs both: local first, then
   a 300 ms-debounced server query.
 
@@ -339,8 +356,13 @@ switch, a split animation, a window restore) they only *measure*, and resize
 the local xterm once the same grid has measured twice (≈350 ms). A passing size
 never reflows the TUI's screen. If the local grid did change and came back to
 the size the PTY already has (no SIGWINCH, so no repaint), the pane asks for a
-fresh snapshot instead. A pane parked by a tab switch is put back to the PTY's
-grid first. If a pane still looks garbled, **⋯ → Redraw terminal** (or ⌘K
+fresh snapshot instead. Such a "compact" only runs when the grid grew wider or
+the height changed by more than two rows, one pane at a time per window (the
+focused pane first); panes that are off-screen or in a hidden window compact
+when they come back into view. A pane parked by a tab switch is put back to the
+PTY's grid first, and while parked (or in a hidden window, unless focused) it
+stops acknowledging output: the daemon holds or drops what it would have sent
+and the pane catches up with one snapshot when it returns. If a pane still looks garbled, **⋯ → Redraw terminal** (or ⌘K
 "Redraw terminal") rebuilds the screen from the session without reconnecting.
 
 ### Watching, splitting, tiling

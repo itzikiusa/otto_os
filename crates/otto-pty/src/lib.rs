@@ -1707,6 +1707,7 @@ mod tests {
 
     /// Daemon-side terminal budgets (perf 01 F7). Gated: `OTTO_PERF=1`
     /// (run with `--release` for the real budgets; debug builds get ×10).
+    /// CI: the perf-gates job runs it in release with a ×3 scale.
     /// Full 4000 × 200 history of attribute-dense TUI rows:
     /// - capture (the parser-lock hold of every snapshot) < 2 ms,
     /// - format (off the lock, blocking pool) < 40 ms,
@@ -1719,7 +1720,14 @@ mod tests {
             eprintln!("skipped: set OTTO_PERF=1 to enforce terminal perf budgets");
             return;
         }
-        let k: u32 = if cfg!(debug_assertions) { 10 } else { 1 };
+        // Debug builds ×10; CI runners scale further with the same knob as
+        // the Playwright perf gates (`OTTO_PERF_BUDGET_SCALE`, default 1).
+        let scale: u32 = std::env::var("OTTO_PERF_BUDGET_SCALE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1)
+            .max(1);
+        let k: u32 = scale * if cfg!(debug_assertions) { 10 } else { 1 };
         let row: String = (0..24)
             .map(|j| format!("\x1b[{}m{:<8}", 31 + (j % 7), format!("seg{j:02}")))
             .collect();

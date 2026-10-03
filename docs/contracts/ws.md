@@ -74,16 +74,32 @@ below). Clients need no change: keep sending, and treat a dropped socket or a
 ```json
 {"type":"input","data":"<base64 bytes>","user":true}
 {"type":"resize","cols":120,"rows":32}
-{"type":"scrollback","lines":2000}
+{"type":"scrollback","lines":2000,"cols":160,"rows":48}   // snapshot request; optional grid = "resize to this first" (see below)
 {"type":"search","query":"foo"}                     // server-side ring-buffer search (see below)
 {"type":"claim"}                                    // claim size authority (sent on terminal focus)
 {"type":"pause"}                                    // flow control: stop sending me output (see below)
 {"type":"resume"}                                   // flow control: send again (+ one snapshot if anything was held back)
-{"type":"resync","lines":2000}                      // typed over a dropped local backlog: discard my queued output, send ONE snapshot (see below)
+{"type":"resync","lines":2000}                      // (optional "cols"/"rows" as on scrollback) typed over a dropped local backlog: discard my queued output, send ONE snapshot (see below)
 {"type":"credit","window":1048576}                  // credit flow control: send me at most `window` unacknowledged binary bytes (see below)
 {"type":"ack","bytes":4194304}                      // credit: cumulative binary bytes consumed (parsed or dropped) since the grant
 {"type":"probe","id":7}                             // latency probe: answered at once with `probe_ack` (see below); read-only safe
 ```
+
+**Attach with grid (`scrollback` / `resync` `cols`+`rows`).** Optional. When
+both are present and this viewer may resize (it can input and holds size
+authority — the same rule as `resize`), the server resizes the PTY and its
+emulator to that grid BEFORE capturing the snapshot, so the reply is already
+at the client's width and the TUI's SIGWINCH repaint arrives as ordinary live
+bytes after it. One attach therefore costs one snapshot (no follow-up
+"compact" once the client's resize confirms). A viewer that may not resize
+gets the snapshot at the current grid (the grid is ignored); a same-size grid
+is a no-op. Older servers ignore the fields.
+
+**History depth.** The `lines` of the client's latest `scrollback`/`resync`
+(0 → the full emulator depth, 4000; larger values are clamped to it) is also
+the depth of every snapshot the server sends on its own for this socket
+(credit skip/stall recovery, lag, `resume`, revival) — a 2000-row embed is
+never sent 4000 rows it would trim. Before the first request: 4000.
 
 **Credit flow control (`credit` / `ack`) — preferred.** `pause`/`resume`
 cannot bound the client's backlog: whatever the server sends during the
@@ -251,7 +267,9 @@ sample. `null` when the viewer has no live PTY. Viewers (read-only) may probe.
 Grep the persistent ring-buffer scrollback (10 000 lines, survives WS reconnects) for `query`
 (plain substring, case-insensitive, ANSI-stripped). The server replies with a single
 `{"type":"search_result","query":"…","matches":[{"line":<ring-index>,"text":"<plain>"},…]}`
-frame containing up to 200 matches in buffer order (oldest → newest). Empty `query` is
+frame containing up to 200 matches in buffer order (oldest → newest); when more
+lines match, the newest 200 are returned (the scan runs newest-first, off the
+socket's worker and outside the PTY's locks). Empty `query` is
 a no-op (no reply). This complements the xterm `SearchAddon` (which searches only the
 current emulator viewport, lost on reconnect) — use server search when the session has
 been reopened or when looking for output that scrolled off the visible viewport.
