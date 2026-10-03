@@ -80,3 +80,35 @@ test('the entry chunk never carries the mock-API fixtures (perf F10)', () => {
   const mock = join(SRC, 'lib/api/mock.ts');
   assert.ok(!staticClosure(entry).has(mock), chainTo(entry, mock, SRC).join(' → '));
 });
+
+test('the right activity panel loads each tab on demand (perf G1)', () => {
+  const entry = join(SRC, 'shell/RightPanel.svelte');
+  const closure = staticClosure(entry);
+  const heavy = [
+    'lib/components/CodeEditor.svelte',
+    'lib/components/Terminal.svelte',
+    'modules/git/GitPanel.svelte',
+    'modules/api/ApiPanel.svelte',
+    'modules/panels/FilesPanel.svelte',
+    'modules/panels/BrowserPanel.svelte',
+    'modules/panels/BrowserPanelV2.svelte',
+    'modules/panels/CanvasPanel.svelte',
+    'modules/panels/ActivityPanel.svelte',
+    'modules/panels/OutputsPanel.svelte',
+    'modules/panels/InfoPanel.svelte',
+  ];
+  const reached = heavy
+    .filter((f) => closure.has(join(SRC, f)))
+    .map((f) => chainTo(entry, join(SRC, f), SRC).join(' → '));
+  assert.deepEqual(reached, [], 'load the tab through PANEL_LOADERS in RightPanel.svelte');
+
+  // Every tab but Notes (inline) has a loader.
+  const src = read('shell/RightPanel.svelte');
+  const tabs = [...src.slice(src.indexOf('const tabs:')).matchAll(/\{ id: '([a-z]+)'/g)].map((m) => m[1]);
+  const loaders = src.slice(src.indexOf('PANEL_LOADERS'), src.indexOf('};', src.indexOf('PANEL_LOADERS')));
+  const keys = new Set([...loaders.matchAll(/^\s*([a-zA-Z0-9]+):\s*\(\)/gm)].map((m) => m[1]));
+  assert.ok(tabs.length >= 9, `parsed the tab list (${tabs.join()})`);
+  const missing = tabs.filter((t) => t !== 'notes' && t !== 'browser' && !keys.has(t));
+  assert.deepEqual(missing, [], 'add the tab to PANEL_LOADERS');
+  for (const k of ['browserV1', 'browserV2']) assert.ok(keys.has(k), k);
+});

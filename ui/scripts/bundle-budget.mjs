@@ -9,6 +9,11 @@
 //   shell          the shell chunk (src/shell/App.svelte) + closure, minus entry
 //   page:<key>     each shell/pages.svelte.ts LOADERS target + closure, minus
 //                  entry ∪ shell — the bytes a first visit to that page adds
+//   rightPanel     the right activity panel (src/shell/RightPanel.svelte, which
+//                  the Agents page loads with itself) + closure, minus entry ∪
+//                  shell ∪ page:agents — what it adds to the default landing
+//   panel:<key>    each RightPanel.svelte PANEL_LOADERS tab + closure, minus
+//                  all of the above — the bytes the first open of that tab adds
 //
 // The numbers are ratcheted like scripts/ui-guards-baseline.json: they live in
 // scripts/bundle-budget.json and a target more than 3 % over its budget (or a
@@ -29,6 +34,7 @@ const DIST = join(UI, 'dist');
 const MANIFEST = join(DIST, '.vite', 'manifest.json');
 const BUDGET = join(UI, 'scripts', 'bundle-budget.json');
 const PAGES = join(UI, 'src', 'shell', 'pages.svelte.ts');
+const RIGHT_PANEL = join(UI, 'src', 'shell', 'RightPanel.svelte');
 /** Allowed growth over the recorded budget before CI fails. */
 const TOLERANCE = 0.03;
 
@@ -75,20 +81,48 @@ const base = new Set([...entry, ...shell]);
 /** @type {Record<string, number>} */
 const measured = { entry: sum(entry), shell: sum(shell) };
 
-// Page targets straight from the lazy page map, so a new page is budgeted
-// the moment it is added.
-const pagesSrc = readFileSync(PAGES, 'utf8');
-const loaders = pagesSrc.slice(pagesSrc.indexOf('const LOADERS'), pagesSrc.indexOf('\n};', pagesSrc.indexOf('const LOADERS')));
-let current = null;
-for (const line of loaders.split('\n')) {
-  const key = line.match(/^\s*'?([a-z][a-z-]*)'?:\s*(?:\(\)|async)/);
-  if (key) current = key[1];
-  const imp = line.match(/import\('(\.\.?\/[^']+)'\)/);
-  if (imp && current) {
-    const src = join('src/shell', imp[1]).replaceAll('\\', '/');
-    if (manifest[src]) measured[`page:${current}`] = sum(minus(closure(src), base));
-    current = null;
+/** `key → manifest key` of a `{ key: () => import('./x') }` loader map in a
+ *  src/shell file, read from source so a new entry is budgeted the moment it
+ *  is added. A key's target is the first `import('…')` after it. */
+function loaderMap(file, marker) {
+  const src = readFileSync(file, 'utf8');
+  const at = src.indexOf(marker);
+  if (at < 0) throw new Error(`bundle-budget: "${marker}" not found in ${file}`);
+  const end = Math.min(...['\n};', '\n  };'].map((t) => src.indexOf(t, at)).filter((i) => i >= 0));
+  /** @type {Map<string, string>} */
+  const out = new Map();
+  let current = null;
+  for (const line of src.slice(at, end).split('\n')) {
+    const key = line.match(/^\s*'?([a-zA-Z][\w-]*)'?:\s*(?:\(\)|async)/);
+    if (key) current = key[1];
+    const imp = line.match(/import\('(\.\.?\/[^']+)'\)/);
+    if (imp && current) {
+      out.set(current, join('src/shell', imp[1]).replaceAll('\\', '/'));
+      current = null;
+    }
   }
+  return out;
+}
+
+// Page targets straight from the lazy page map.
+const pages = loaderMap(PAGES, 'const LOADERS');
+for (const [key, src] of pages) {
+  if (manifest[src]) measured[`page:${key}`] = sum(minus(closure(src), base));
+}
+
+// The right activity panel and its per-tab chunks (perf G1).
+const RP_KEY = 'src/shell/RightPanel.svelte';
+if (manifest[RP_KEY]) {
+  const agents = pages.get('agents');
+  const landing = new Set([...base, ...(agents && manifest[agents] ? closure(agents) : [])]);
+  const rp = minus(closure(RP_KEY), landing);
+  measured.rightPanel = sum(rp);
+  const withPanel = new Set([...landing, ...rp]);
+  for (const [key, src] of loaderMap(RIGHT_PANEL, 'PANEL_LOADERS: Record')) {
+    if (manifest[src]) measured[`panel:${key}`] = sum(minus(closure(src), withPanel));
+  }
+} else {
+  throw new Error(`bundle-budget: no manifest entry "${RP_KEY}" — is the right panel still a lazy chunk?`);
 }
 
 const budget = existsSync(BUDGET) ? JSON.parse(readFileSync(BUDGET, 'utf8')) : {};
