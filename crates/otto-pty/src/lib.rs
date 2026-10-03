@@ -6,6 +6,8 @@ pub mod ring;
 pub mod input_authority;
 pub use input_authority::InputAuthorization;
 
+mod echo;
+pub use echo::EchoStats;
 mod held;
 pub mod holder;
 pub use holder::{AdoptError, HolderConfig, HolderInfo, HolderLauncher};
@@ -265,6 +267,8 @@ pub(crate) struct Mirror {
     tx: broadcast::Sender<Bytes>,
     epoch: Instant,
     last_output_ms: Arc<AtomicU64>,
+    /// Keystroke → first-output clock shared with the writer thread.
+    echo: Arc<echo::EchoClock>,
 }
 
 impl Mirror {
@@ -289,6 +293,7 @@ impl Mirror {
             tx,
             epoch: Instant::now(),
             last_output_ms: Arc::new(AtomicU64::new(0)),
+            echo: Arc::new(echo::EchoClock::new()),
         }
     }
 
@@ -296,6 +301,7 @@ impl Mirror {
     pub(crate) fn feed(&self, data: &[u8]) {
         self.last_output_ms
             .store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+        self.echo.output();
         // Publish under the same lock as the emulator update:
         // snapshot_and_subscribe must never include a chunk in its replay and
         // then receive that chunk again.
@@ -477,7 +483,7 @@ impl PtyHandle {
             });
         }
 
-        let input_tx = spawn_writer(Box::new(writer));
+        let input_tx = spawn_writer(Box::new(writer), Arc::clone(&mirror.echo));
 
         Ok(PtyHandle {
             backend: Backend::Local {
@@ -526,7 +532,10 @@ impl PtyHandle {
         exit_rx: watch::Receiver<Option<i32>>,
         reader_done: watch::Receiver<bool>,
     ) -> PtyHandle {
-        let input_tx = spawn_writer(Box::new(held::HeldWriter::new(Arc::clone(&conn))));
+        let input_tx = spawn_writer(
+            Box::new(held::HeldWriter::new(Arc::clone(&conn))),
+            Arc::clone(&mirror.echo),
+        );
         let child_pid = conn.info().child_pid;
         PtyHandle {
             backend: Backend::Held(conn),
@@ -658,6 +667,12 @@ impl PtyHandle {
                 timeout.as_secs()
             ))),
         }
+    }
+
+    /// Keystroke-echo statistics: input reaching the PTY → the child's first
+    /// output after it (latency diagnostics, the terminal HUD's "child echo").
+    pub fn echo_stats(&self) -> EchoStats {
+        self.mirror.echo.stats()
     }
 
     /// Current emulator grid as `(cols, rows)`.
@@ -948,7 +963,10 @@ fn next_spawn_seq() -> u64 {
 /// held PTY's transient loss of its holder connection (`ConnectionReset`)
 /// fails only the in-flight job — the connection is re-established and later
 /// input flows again.
-fn spawn_writer(writer: Box<dyn std::io::Write + Send>) -> SyncSender<WriteJob> {
+fn spawn_writer(
+    writer: Box<dyn std::io::Write + Send>,
+    echo: Arc<echo::EchoClock>,
+) -> SyncSender<WriteJob> {
     let (input_tx, input_rx) = sync_channel::<WriteJob>(INPUT_QUEUE_DEPTH);
     std::thread::spawn(move || {
         let mut writer = writer;
@@ -958,6 +976,9 @@ fn spawn_writer(writer: Box<dyn std::io::Write + Send>) -> SyncSender<WriteJob> 
                 &job.data,
                 job.authorization.as_ref(),
             );
+            if res.is_ok() {
+                echo.input_written();
+            }
             let failed = res.as_ref().is_err_and(|e| {
                 !matches!(
                     e.kind(),

@@ -90,6 +90,29 @@ export interface WsTermResyncFrame {
   lines: number;
 }
 
+/** Client → server `/ws/term` latency probe (docs/contracts/ws.md §1
+ *  "Latency probe"): answered at once with a `probe_ack` echoing `id`. */
+export interface WsTermProbeFrame {
+  type: 'probe';
+  id: number;
+}
+
+/** PTY keystroke-echo clock: input reaching the PTY → the child's first
+ *  output after it, since spawn (`avg_ms` is an EWMA, α = 1/8). */
+export interface TermEchoStats {
+  last_ms: number;
+  avg_ms: number;
+  max_ms: number;
+  samples: number;
+}
+
+/** Server → client reply to `probe`; `echo` is null with no live PTY. */
+export interface WsTermProbeAckFrame {
+  type: 'probe_ack';
+  id: number;
+  echo: TermEchoStats | null;
+}
+
 export interface Session {
   id: Id;
   workspace_id: Id;
