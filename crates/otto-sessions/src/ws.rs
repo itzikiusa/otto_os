@@ -1291,11 +1291,18 @@ async fn next_evict(rx: &mut Option<broadcast::Receiver<()>>) {
 }
 
 /// Bytes of keystrokes / pastes one connection may have queued for the PTY
-/// (perf 01 N7). Past this the socket loop stops READING client frames until
-/// the writer drains — TCP backpressure to the sender — instead of dropping
-/// input. Bounded by bytes, not frames: 256 one-byte keystrokes behind a slow
-/// child used to overflow a frame-count queue and lose the rest of the line.
+/// (perf 01 N7). Past this further `input` frames are deferred in order on
+/// the socket loop ([`DeferredInput`]) instead of dropped. Bounded by bytes,
+/// not frames: 256 one-byte keystrokes behind a slow child used to overflow a
+/// frame-count queue and lose the rest of the line.
 const INPUT_BUDGET_BYTES: usize = 1024 * 1024;
+
+/// Bytes of `input` frames the socket loop holds back while the budget above
+/// is full (perf3 R6). Below it the loop keeps READING client frames, so
+/// `ack` / `resize` / `probe` still land and output keeps flowing while a
+/// child is not reading its tty; only past it does the loop stop reading
+/// (TCP backpressure to the sender, nothing dropped).
+const INPUT_DEFER_BYTES: usize = 1024 * 1024;
 
 /// Upper bound on one coalesced PTY write: the writer joins consecutive
 /// queued frames of the same kind up to this many bytes per `human_input`.
@@ -1315,7 +1322,7 @@ struct InputJob {
 /// to the PTY in order on their own task, off the socket's `select!` loop, so
 /// a paste into a TUI that is slow to read its tty no longer freezes output.
 /// The queue never drops: it is bounded by [`INPUT_BUDGET_BYTES`], and a frame
-/// that does not fit waits (the loop parks it and stops reading the socket).
+/// that does not fit waits in the loop's [`DeferredInput`].
 struct InputQueue {
     tx: tokio::sync::mpsc::UnboundedSender<InputJob>,
     budget: Arc<tokio::sync::Semaphore>,
@@ -1328,21 +1335,31 @@ impl InputQueue {
         len.clamp(1, INPUT_BUDGET_BYTES) as u32
     }
 
-    /// Queue a frame if its budget is free now; `Err` hands it back to park.
+    /// A job for one `input` frame, holding no budget yet.
+    fn job(bytes: Vec<u8>, user: bool, prev_owner: Option<u64>) -> InputJob {
+        InputJob {
+            cost: Self::cost(bytes.len()),
+            bytes,
+            user,
+            prev_owner,
+        }
+    }
+
+    /// Queue a frame if its budget is free now; `Err` hands it back. (The
+    /// socket loop goes through [`DeferredInput::push`], which keeps order.)
+    #[cfg(test)]
     fn try_push(
         &self,
         bytes: Vec<u8>,
         user: bool,
         prev_owner: Option<u64>,
     ) -> Result<(), InputJob> {
-        let cost = Self::cost(bytes.len());
-        let job = InputJob {
-            bytes,
-            user,
-            cost,
-            prev_owner,
-        };
-        match self.budget.try_acquire_many(cost) {
+        self.try_queue(Self::job(bytes, user, prev_owner))
+    }
+
+    /// [`InputQueue::try_push`] for a job that is already built.
+    fn try_queue(&self, job: InputJob) -> Result<(), InputJob> {
+        match self.budget.try_acquire_many(job.cost) {
             Ok(permit) => {
                 permit.forget();
                 self.send(job);
@@ -1364,6 +1381,67 @@ impl InputQueue {
     fn send(&self, job: InputJob) {
         // Fails only once the writer task ended (connection teardown).
         let _ = self.tx.send(job);
+    }
+}
+
+/// `input` frames waiting for [`InputQueue`] budget, in arrival order (perf3
+/// R6). The socket loop used to park ONE such frame and stop reading the
+/// socket until it fit — which also stopped reading `ack` frames, so once the
+/// credit window ran out output stalled behind a child that was not reading
+/// its stdin. Now the loop keeps reading: input frames queue here (bounded by
+/// [`INPUT_DEFER_BYTES`]) while every other frame is handled as it arrives.
+#[derive(Default)]
+struct DeferredInput {
+    jobs: std::collections::VecDeque<InputJob>,
+    /// Payload bytes held in `jobs`.
+    bytes: usize,
+}
+
+impl DeferredInput {
+    /// Whether the loop may read client frames: until the deferred bytes
+    /// reach their bound (then TCP backpressure, never a drop).
+    fn reading(&self) -> bool {
+        self.bytes < INPUT_DEFER_BYTES
+    }
+
+    /// Budget the oldest deferred frame needs, if any frame waits.
+    fn front_cost(&self) -> Option<u32> {
+        self.jobs.front().map(|j| j.cost)
+    }
+
+    /// Hand one `input` frame to the queue — behind anything already
+    /// deferred, so order is kept — or defer it when the budget is full.
+    fn push(&mut self, q: &InputQueue, bytes: Vec<u8>, user: bool, prev_owner: Option<u64>) {
+        let job = InputQueue::job(bytes, user, prev_owner);
+        let job = if self.jobs.is_empty() {
+            match q.try_queue(job) {
+                Ok(()) => return,
+                Err(job) => job,
+            }
+        } else {
+            job
+        };
+        self.bytes += job.bytes.len();
+        self.jobs.push_back(job);
+    }
+
+    /// The oldest frame's budget was just reserved ([`InputQueue::reserve`]
+    /// with [`DeferredInput::front_cost`]): send it, then every frame behind
+    /// it that fits now.
+    fn release(&mut self, q: &InputQueue) {
+        let Some(job) = self.jobs.pop_front() else {
+            return;
+        };
+        self.bytes -= job.bytes.len();
+        q.send(job);
+        while let Some(job) = self.jobs.pop_front() {
+            let len = job.bytes.len();
+            if let Err(job) = q.try_queue(job) {
+                self.jobs.push_front(job);
+                break;
+            }
+            self.bytes -= len;
+        }
     }
 }
 
@@ -1583,9 +1661,10 @@ async fn serve_terminal<S: SessionsCtx>(
         input_scoped,
         conn_id,
     );
-    // An input frame waiting for byte budget (perf 01 N7); while set, the
-    // socket is not read — backpressure instead of dropping keystrokes.
-    let mut pending_input: Option<InputJob> = None;
+    // Input frames waiting for byte budget (perf 01 N7), in order. The socket
+    // keeps being read meanwhile (perf3 R6): acks, resizes and probes are
+    // never stuck behind a child that is not reading its stdin.
+    let mut deferred = DeferredInput::default();
     let mut can_rx = shared_reauth(&ctx, &session_id, live_auth, reauth_period);
     // Joining a pass that already narrowed: apply its latest verdict now.
     can_input &= *can_rx.borrow_and_update();
@@ -1757,19 +1836,19 @@ async fn serve_terminal<S: SessionsCtx>(
             // NOTE: no auth work here. `can_input` is whatever the attach
             // decided, narrowed by the re-auth task's watch above — a keystroke
             // must never wait on the state DB (investigation H2).
-            // A parked input frame (budget full): wait for the writer to free
-            // room, then queue it. Output, acks-in-flight and the other arms
-            // keep running; only reading NEW client frames pauses (below).
+            // Deferred input frames (budget full): wait for the writer to free
+            // room for the oldest, then queue it and whatever fits behind it.
+            // Every other arm keeps running, including reading client frames
+            // (below) — `ack`s must land or output stalls once credit runs out
+            // (perf3 R6). Only past INPUT_DEFER_BYTES does reading pause.
             _ = InputQueue::reserve(
                 input_q.budget.clone(),
-                pending_input.as_ref().map_or(1, |j| j.cost),
-            ), if pending_input.is_some() => {
-                if let Some(job) = pending_input.take() {
-                    input_q.send(job);
-                }
+                deferred.front_cost().unwrap_or(1),
+            ), if deferred.front_cost().is_some() => {
+                deferred.release(&input_q);
             }
 
-            msg = socket.recv(), if pending_input.is_none() => {
+            msg = socket.recv(), if deferred.reading() => {
                 let Some(Ok(msg)) = msg else { return };
                 let Message::Text(text) = msg else {
                     if matches!(msg, Message::Close(_)) { return; }
@@ -1851,11 +1930,9 @@ async fn serve_terminal<S: SessionsCtx>(
                                 None
                             };
                             // Never dropped (N7): a frame that does not fit the
-                            // byte budget is parked and the loop stops reading
-                            // the socket until the writer frees room.
-                            if let Err(job) = input_q.try_push(bytes, user, prev_owner) {
-                                pending_input = Some(job);
-                            }
+                            // byte budget (or arrives behind one that did not)
+                            // is deferred in order until the writer frees room.
+                            deferred.push(&input_q, bytes, user, prev_owner);
                         }
                     }
                     ClientFrame::Resize { cols, rows } => {
@@ -3379,6 +3456,136 @@ mod input_queue_tests {
             .collect();
         assert_eq!(got.len(), 5 * chunk);
         assert_eq!(got[4 * chunk], 9, "the waited frame lands last, in order");
+    }
+
+    /// Perf3 R6: with the input budget full behind a child that is not
+    /// reading its stdin, the loop must keep reading client frames. A paste
+    /// interleaved with `ack`s still frees credit, so held output flows, and
+    /// once the child reads every deferred byte arrives, in order.
+    ///
+    /// This drives the socket loop's own input/read arms (`DeferredInput`
+    /// guard + reserve/release) over a scripted client; before the fix the
+    /// read arm was disabled while a frame was parked, so the `ack` behind
+    /// the paste was never read and this timed out.
+    #[tokio::test]
+    async fn a_full_input_budget_still_reads_acks_so_output_keeps_flowing() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (q, _res, writes, _) = gated(gate.clone(), false);
+        let now = tokio::time::Instant::now();
+        let window = CREDIT_WINDOW_MIN;
+        let mut credit = CreditGate::new(window);
+        // Output producer: two windows of output, the second held for credit.
+        let mut delivered = 0usize;
+        for chunk in [vec![b'o'; window as usize], vec![b'p'; window as usize]] {
+            if let CreditStep::Send(b) = credit.push(chunk, now) {
+                delivered += b.len();
+            }
+        }
+        assert_eq!(delivered, window as usize, "one window out, one held");
+
+        // Client: six quarter-budget paste frames (four fill the budget, two
+        // are deferred), then the ack for the first window, a probe-like
+        // no-op resize, and one more keystroke.
+        let quarter = INPUT_BUDGET_BYTES / 4;
+        let mut expected: Vec<u8> = Vec::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        for i in 0..6u8 {
+            let data = vec![b'a' + i; quarter];
+            expected.extend_from_slice(&data);
+            let frame = serde_json::json!({"type": "input", "data": B64.encode(&data)});
+            tx.send(frame.to_string()).unwrap();
+        }
+        tx.send(format!(r#"{{"type":"ack","bytes":{window}}}"#))
+            .unwrap();
+        tx.send(r#"{"type":"resize","cols":80,"rows":24}"#.into())
+            .unwrap();
+        tx.send(serde_json::json!({"type": "input", "data": B64.encode(b"z")}).to_string())
+            .unwrap();
+        expected.push(b'z');
+        drop(tx);
+
+        // The loop's two input-related arms, as in `serve_terminal`.
+        let mut deferred = DeferredInput::default();
+        let (mut acks, mut resizes) = (0, 0);
+        let run = async {
+            loop {
+                tokio::select! {
+                    _ = InputQueue::reserve(q.budget.clone(), deferred.front_cost().unwrap_or(1)),
+                        if deferred.front_cost().is_some() => deferred.release(&q),
+                    msg = rx.recv(), if deferred.reading() => {
+                        let Some(text) = msg else { break };
+                        match serde_json::from_str::<ClientFrame>(&text).unwrap() {
+                            ClientFrame::Input { data, user } => {
+                                let bytes = B64.decode(data.as_bytes()).unwrap();
+                                deferred.push(&q, bytes, user, None);
+                            }
+                            ClientFrame::Ack { bytes } => {
+                                acks += 1;
+                                if let CreditStep::Send(b) = credit.ack(bytes, now) {
+                                    delivered += b.len();
+                                }
+                            }
+                            ClientFrame::Resize { .. } => resizes += 1,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("client frames behind a full input budget are still read");
+        assert_eq!((acks, resizes), (1, 1), "ack and resize processed");
+        assert_eq!(
+            delivered,
+            2 * window as usize,
+            "the ack freed credit: the held window went out"
+        );
+        assert!(
+            deferred.front_cost().is_some(),
+            "input past the budget is deferred, not dropped"
+        );
+        assert!(
+            writes.lock().unwrap().is_empty(),
+            "the child has not read yet"
+        );
+
+        // The child starts reading stdin: every deferred frame drains, in order.
+        gate.add_permits(Semaphore::MAX_PERMITS / 2);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(cost) = deferred.front_cost() {
+                InputQueue::reserve(q.budget.clone(), cost).await;
+                deferred.release(&q);
+            }
+        })
+        .await
+        .expect("deferred input drains once the child reads");
+        settle(&writes, expected.len()).await;
+        let got: Vec<u8> = writes
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|w| w.0.clone())
+            .collect();
+        assert_eq!(got.len(), expected.len(), "nothing dropped");
+        assert!(got == expected, "all input arrives in order");
+        assert_eq!(deferred.bytes, 0);
+    }
+
+    /// The deferral itself is bounded: past INPUT_DEFER_BYTES the loop stops
+    /// reading (TCP backpressure) rather than buffering without limit.
+    #[tokio::test]
+    async fn deferred_input_is_bounded_and_keeps_order() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (q, _res, _writes, _) = gated(gate, false);
+        let mut d = DeferredInput::default();
+        d.push(&q, vec![0; INPUT_BUDGET_BYTES], true, None); // takes the whole budget
+        assert!(d.front_cost().is_none() && d.reading());
+        // Everything behind a deferred frame is deferred too: order is kept.
+        d.push(&q, vec![1; INPUT_DEFER_BYTES - 1], true, None);
+        d.push(&q, vec![2], true, None);
+        assert_eq!(d.jobs.len(), 2);
+        assert!(!d.reading(), "the deferral bound pauses reading");
     }
 
     #[tokio::test]
