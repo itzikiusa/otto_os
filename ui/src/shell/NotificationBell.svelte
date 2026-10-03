@@ -22,6 +22,7 @@
   import { copyText } from '../lib/clipboard';
   import { toasts } from '../lib/toast.svelte';
   import type { Notice } from '../lib/api/types';
+  import { nowMinute } from '../lib/stores/now.svelte';
 
   let { placement = 'side' }: { placement?: 'side' | 'below' } = $props();
 
@@ -168,13 +169,11 @@
     return { destroy: () => node.remove() };
   }
 
-  // Tick so relative timestamps refresh while the panel is open.
-  let now = $state(Date.now());
-  $effect(() => {
-    if (!open) return;
-    const t = setInterval(() => (now = Date.now()), 30_000);
-    return () => clearInterval(t);
-  });
+  // Relative timestamps follow the shared minute clock (it skips writes while
+  // the window is hidden — no interval of our own); `openedAt` makes a label
+  // exact the moment the panel opens, not up to a minute behind.
+  let openedAt = $state(Date.now());
+  const now = $derived(Math.max(nowMinute(), openedAt));
 
   // Load notices once on mount.
   $effect(() => {
@@ -184,7 +183,7 @@
   function toggle(): void {
     if (open) close();
     else {
-      now = Date.now();
+      openedAt = Date.now();
       expanded = new Set();
       open = true;
     }
