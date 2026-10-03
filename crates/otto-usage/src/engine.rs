@@ -29,6 +29,12 @@ use crate::types::{
 /// keeps parts few; the live dashboard lags by up to this much. Shutdown still
 /// flushes when the channel closes.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How long a `session_totals` rollup is reused (see `totals_cache`). Shorter
+/// than the writer's flush interval, so it never hides a flush for long.
+const SESSION_TOTALS_TTL: Duration = Duration::from_secs(5);
+
+type SessionTotalsMemo = ((u32, bool), std::time::Instant, Vec<SessionTotals>);
 /// …or sooner once this many events are buffered.
 const FLUSH_BATCH: usize = 200;
 /// Default cap on the session leaderboard.
@@ -66,6 +72,10 @@ pub struct UsageEngine {
     heal: Arc<AtomicBool>,
     /// Last measured ClickHouse on-disk size + when (see [`DISK_SIZE_TTL`]).
     disk_cache: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
+    /// Last `session_totals(days, otto_only)` result for SESSION_TOTALS_TTL:
+    /// one Usage page open runs it for the summary's feature breakdown and
+    /// again for budgets a few ms later — the same full scan twice.
+    totals_cache: std::sync::Mutex<Option<SessionTotalsMemo>>,
 }
 
 /// Which sessions a read covers: every recorded session (root), or only the
@@ -113,6 +123,7 @@ impl UsageEngine {
             reinit_lock: tokio::sync::Mutex::new(()),
             heal: Arc::new(AtomicBool::new(false)),
             disk_cache: std::sync::Mutex::new(None),
+            totals_cache: std::sync::Mutex::new(None),
         });
         let bg = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -556,6 +567,22 @@ impl UsageEngine {
     /// unenriched. The server classifies these into per-feature buckets for the
     /// by-kind rollup (see [`Self::feature_usage`]).
     pub async fn session_totals(&self, days: u32, otto_only: bool) -> Result<Vec<SessionTotals>> {
+        if let Some((key, at, rows)) = &*self.totals_cache.lock().expect("totals cache lock") {
+            if *key == (days, otto_only) && at.elapsed() < SESSION_TOTALS_TTL {
+                return Ok(rows.clone());
+            }
+        }
+        let rows = self.session_totals_uncached(days, otto_only).await?;
+        *self.totals_cache.lock().expect("totals cache lock") =
+            Some(((days, otto_only), std::time::Instant::now(), rows.clone()));
+        Ok(rows)
+    }
+
+    async fn session_totals_uncached(
+        &self,
+        days: u32,
+        otto_only: bool,
+    ) -> Result<Vec<SessionTotals>> {
         self.rows(&format!(
             "SELECT session_id,
                     any(workspace_id) AS workspace_id,

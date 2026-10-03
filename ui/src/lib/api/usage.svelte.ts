@@ -371,6 +371,12 @@ class UsageStore {
   async loadAll(): Promise<void> {
     this.loading = true;
     let mine: number | null = null;
+    // Budgets are config (not engine) data — load them whether or not the
+    // engine is available (or the summary failed) so the caps are still
+    // editable, and a skipped load never reads as "No budgets set". Started
+    // now, in parallel with status → summary, instead of after them (it was
+    // a third serial round trip on every page open). Never rejects.
+    const budgets = this.loadBudgets();
     try {
       await this.loadStatus();
       if (this.status?.available) {
@@ -396,10 +402,7 @@ class UsageStore {
       if (mine === this.summarySeq) this.summaryError = loadErrorText(e);
     }
     try {
-      // Budgets are config (not engine) data — load them whether or not the
-      // engine is available (or the summary failed) so the caps are still
-      // editable, and a skipped load never reads as "No budgets set".
-      await this.loadBudgets();
+      await budgets;
     } finally {
       this.loading = false;
     }
