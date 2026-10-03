@@ -96,14 +96,6 @@ impl SecretsControl {
         self.active.read().unwrap_or_else(|p| p.into_inner()).0
     }
 
-    fn store(&self) -> Arc<dyn SecretStore> {
-        self.active
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .1
-            .clone()
-    }
-
     /// Status for Settings. Reads `secrets.json` only to COUNT entries.
     pub fn status(&self) -> SecretsStatus {
         let mode = self.mode();
@@ -154,6 +146,12 @@ impl SecretsControl {
         }
         let _reset = Reset(&self.migrating);
         let started = std::time::Instant::now();
+        if !self.data_dir.join(PLAINTEXT_FILE).exists() {
+            // Don't create a Keychain master key for nothing.
+            return Err(Error::Invalid(
+                "no plaintext secrets.json to migrate".into(),
+            ));
+        }
 
         // Master key FIRST, outside the store lock: it may wait on a Keychain
         // prompt (bounded). Locked → abort with nothing changed.
@@ -192,15 +190,21 @@ impl SecretsControl {
     }
 }
 
+/// Every operation holds the READ side of `active` for its duration, so the
+/// migration (write side) can't interleave with a plaintext write — a `put`
+/// landing in `secrets.json` after the migration read it would be lost.
 impl SecretStore for SecretsControl {
     fn put(&self, key: &str, value: &str) -> Result<()> {
-        self.store().put(key, value)
+        let g = self.active.read().unwrap_or_else(|p| p.into_inner());
+        g.1.put(key, value)
     }
     fn get(&self, key: &str) -> Result<Option<String>> {
-        self.store().get(key)
+        let g = self.active.read().unwrap_or_else(|p| p.into_inner());
+        g.1.get(key)
     }
     fn delete(&self, key: &str) -> Result<()> {
-        self.store().delete(key)
+        let g = self.active.read().unwrap_or_else(|p| p.into_inner());
+        g.1.delete(key)
     }
 }
 
@@ -365,9 +369,9 @@ pub fn choose_mode(i: ModeInputs<'_>) -> SecretsMode {
         Some("encrypted") => SecretsMode::Encrypted,
         Some("keychain") => SecretsMode::Keychain,
         Some("file") => {
-            if i.encrypted_exists && !i.plaintext_exists {
-                SecretsMode::Encrypted
-            } else if i.strict && !i.allow_plaintext && !i.plaintext_exists {
+            let migrated = i.encrypted_exists && !i.plaintext_exists;
+            let refused = i.strict && !i.allow_plaintext && !i.plaintext_exists;
+            if migrated || refused {
                 SecretsMode::Encrypted
             } else {
                 SecretsMode::Plaintext
