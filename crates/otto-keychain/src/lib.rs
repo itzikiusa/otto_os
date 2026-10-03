@@ -47,6 +47,9 @@ pub fn from_env(data_dir: &Path) -> Arc<dyn SecretStore> {
     let env = std::env::var("OTTO_SECRETS").ok();
     let allow_plaintext = std::env::var("OTTO_SECRETS_ALLOW_PLAINTEXT").as_deref() == Ok("1");
     let strict = cfg!(all(not(debug_assertions), target_os = "macos"));
+    // Finish an interrupted plaintext wipe before deciding the mode (a zeroed
+    // secrets.json next to secrets.enc must not select plaintext).
+    control::sweep_plaintext_residue(data_dir);
     let plaintext_exists = data_dir.join(PLAINTEXT_FILE).exists();
     let mode = control::choose_mode(control::ModeInputs {
         env: env.as_deref(),
