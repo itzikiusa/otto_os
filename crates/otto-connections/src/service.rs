@@ -1050,7 +1050,10 @@ mod tests {
                 .await
                 .unwrap();
             assert!(!resp.ok, "{kind:?}");
-            assert!(resp.message.contains("nothing to test"), "{}", resp.message);
+            assert!(
+                resp.message.contains("nothing to test"),
+                "{kind:?}: no \"nothing to test\" message"
+            );
             assert_eq!(resp.latency_ms, None);
         }
     }

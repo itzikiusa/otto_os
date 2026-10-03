@@ -811,10 +811,11 @@ mod tests {
         let dash = spec.args.iter().position(|a| a == "--").unwrap();
         let remote = &spec.args[dash + 1..];
         assert_eq!(remote[0], "clickhouse-client");
-        assert!(remote.contains(&"'a b'".to_string()), "{remote:?}");
+        // Failure messages never print `remote`: it carries the password.
+        assert!(remote.contains(&"'a b'".to_string()), "user not quoted");
         assert!(
             remote.contains(&"'x;touch /tmp/p'".to_string()),
-            "{remote:?}"
+            "database not quoted"
         );
         // Re-parsing the joined command (what the remote shell does) yields
         // the original argv exactly.

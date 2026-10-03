@@ -234,10 +234,7 @@ mod tests {
     fn audit_reason_names_the_policy() {
         let r = rule("01ABC", SCOPE_WORKSPACE, TARGET_CATEGORY, "Git");
         let reason = audit_reason(&r);
-        assert!(
-            reason.starts_with("auto-approved by policy '01ABC'"),
-            "{reason}"
-        );
+        assert!(reason.starts_with("auto-approved by policy '01ABC'"));
         assert!(reason.contains("workspace ws1") && reason.contains("category 'Git'"));
     }
 }
