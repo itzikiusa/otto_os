@@ -39,6 +39,7 @@
     RepoStatusResp,
   } from '../../lib/api/types';
   import { matchByName, matchRepos, norm, workloadRouteKind, type EntityHints } from './structuredNote';
+  import { monitorPath, resourcesPath } from '../kubernetes/viewState';
 
   let { hints, wsId }: { hints: EntityHints; wsId: string } = $props();
 
@@ -156,7 +157,7 @@
   }
 
   function openWorkload(h: WorkloadHit): void {
-    router.go(`kubernetes/${encodeURIComponent(h.cluster.id)}/${workloadRouteKind(h.row.kind)}/${encodeURIComponent(h.row.namespace || '-')}/${encodeURIComponent(h.row.workload)}`);
+    router.go(resourcesPath(h.cluster.id, workloadRouteKind(h.row.kind), h.row.namespace, h.row.workload));
   }
   function openRepo(id: string, sub?: string): void {
     git.openRepoTab(id, sub);
@@ -203,7 +204,7 @@
           </div>
           <div class="acts">
             <button class="btn small" onclick={() => openWorkload(h)}>Open workload</button>
-            <button class="btn small ghost" onclick={() => router.go(`kubernetes/monitor/${encodeURIComponent(h.cluster.id)}/workloads`)}>K8s Monitor</button>
+            <button class="btn small ghost" onclick={() => router.go(monitorPath(h.cluster.id))}>K8s Monitor</button>
           </div>
         </div>
       {/each}
