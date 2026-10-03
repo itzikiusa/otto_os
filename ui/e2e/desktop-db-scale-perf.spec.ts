@@ -8,7 +8,9 @@ import { budgetMs, isDesktopProject, isWebkitProject, percentile, scrollFrameWor
 // (perf review 04-db-ui, F1–F6). Mocked (db-mock.ts + page.route), Docker-free.
 //
 //   1. wide result 20k × 300 columns (column virtualisation, F2)
-//        grid DOM < 6,000 nodes · vertical step p95 < 16 ms · horizontal step p95 < 16 ms
+//        header + body both windowed (< 60 cells a row) · grid DOM < 3,000 nodes
+//        V step (JS + layout) p95 < 12 ms · V/H step to painted frame p95 < 40 ms
+//        (the same budgets as the 100k × 30 grid in desktop-db-results-perf)
 //   2. column filter over 100k rows with a JSON column (F3)
 //        key → next frame < 50 ms · key → filtered < 700 ms
 //   3. result memory budget across tabs (F1)
@@ -24,6 +26,8 @@ import { budgetMs, isDesktopProject, isWebkitProject, percentile, scrollFrameWor
 //   8. multi-run sheet with 200 runs polling
 //        no poll frame over 50 ms · polls slow down (≤ 1.6/s)
 // Timings are budgetMs()-scaled; DOM / request counts never are.
+// `@ci` (1–3: deterministic counts + scaled timings, ~1 min) runs in the CI
+// perf-gates job (`--grep @ci`); the rest run locally with the full perf set.
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.use({ serviceWorkers: 'block' });
@@ -124,6 +128,29 @@ function perfLine(line: string): void {
   test.info().annotations.push({ type: 'perf', description: line });
 }
 
+/** Vertical step to the end of style + layout (no paint): the metric the
+ *  100k × 30 grid gates at 12 ms (desktop-db-results-perf `scrollSteps`). */
+async function layoutSteps(page: Page, selector: string, dy: number, steps: number): Promise<number[]> {
+  return page.evaluate(
+    async ({ selector, dy, steps }) => {
+      const el = document.querySelector(selector) as HTMLElement;
+      const out: number[] = [];
+      for (let i = 0; i < steps; i++) {
+        const t0 = performance.now();
+        el.scrollTop += dy;
+        el.dispatchEvent(new Event('scroll'));
+        await new Promise<void>((r) => queueMicrotask(r)); // Svelte's flush ran first
+        await Promise.resolve();
+        void (document.body as HTMLElement).offsetHeight; // force style + layout
+        out.push(performance.now() - t0);
+        await new Promise((r) => requestAnimationFrame(() => r(null)));
+      }
+      return out;
+    },
+    { selector, dy, steps },
+  );
+}
+
 /** Horizontal twin of scrollFrameWork: scrollLeft += dx per frame, to paint. */
 async function hScrollFrameWork(page: Page, selector: string, dx: number, steps: number): Promise<number[]> {
   return page.evaluate(
@@ -173,36 +200,69 @@ async function keyToFrame(page: Page, selector: string, text: string, doneExpr: 
 }
 
 // ── 1. wide result ───────────────────────────────────────────────────────────
-test('wide 20k × 300 result: only the columns in view are mounted', async ({ page }, info) => {
+test('wide 20k × 300 result: only the columns in view are mounted', { tag: '@ci' }, async ({ page }, info) => {
   webkitOnly(info.project.name);
   test.setTimeout(180_000);
   await routeQueries(page);
   await openConn(page);
   await run(page, 'SELECT * FROM wide');
-  // Header keeps every column; the body renders a window of them + spacers.
-  await expect(page.locator('.grid-scroll thead tr:first-child th')).toHaveCount(301);
+  // Header and body both render a window of the columns + colspan spacers.
   await expect(page.locator('.grid-scroll tbody td.hpad').first()).toBeVisible({ timeout: 5_000 });
+  await expect(page.locator('.grid-scroll thead tr:first-child th.hpad')).toHaveCount(1);
+  const headCells = await page.locator('.grid-scroll thead tr:first-child th:not(.hpad)').count();
+  expect(headCells, `header cells ${headCells}`).toBeLessThan(60);
   const firstRowCells = await page.evaluate(
     () => document.querySelector('.grid-scroll tbody tr:not(.spacer)')?.querySelectorAll('td.cell').length ?? 0,
   );
   expect(firstRowCells, `cells in one row ${firstRowCells}`).toBeLessThan(60);
   const nodes = await page.evaluate(() => document.querySelectorAll('.grid-scroll *').length);
+  await layoutSteps(page, '.grid-scroll', 300, 5); // warm-up
+  const vLayout = await layoutSteps(page, '.grid-scroll', 300, 30);
   const v = await scrollFrameWork(page, '.grid-scroll', 300, 30);
   const h = await hScrollFrameWork(page, '.grid-scroll', 400, 30);
-  // Columns far to the right render after the horizontal scroll.
+  // Columns far to the right render (body AND header) after the horizontal scroll.
   const lastP = await page.evaluate(() => {
     const tds = document.querySelectorAll<HTMLElement>('.grid-scroll tbody tr:not(.spacer) td.cell');
     return Math.max(...[...tds].map((td) => Number(td.dataset.p)));
   });
-  perfLine(`wide 20k×300: DOM ${nodes}; row cells ${firstRowCells}; v-step p95 ${percentile(v, 95).toFixed(1)} ms; h-step p95 ${percentile(h, 95).toFixed(1)} ms`);
+  await expect(page.locator('.grid-scroll thead tr:first-child th', { hasText: `c_${lastP}` }).first()).toBeAttached();
+  // Cells kept across the horizontal steps stay in display order, one run of
+  // positions per row, and show their own column's value (`w{(r + c) % 997}`).
+  const rowsOk = await page.evaluate(() => {
+    for (const tr of document.querySelectorAll<HTMLTableRowElement>('.grid-scroll tbody tr:not(.spacer)')) {
+      const tds = [...tr.querySelectorAll<HTMLElement>('td.cell')];
+      const r = Number(tds[0]?.dataset.r);
+      for (let i = 0; i < tds.length; i++) {
+        const p = Number(tds[i].dataset.p);
+        if (i > 0 && p !== Number(tds[i - 1].dataset.p) + 1) return `gap at p${p}`;
+        if (p > 0 && tds[i].textContent !== `w${(r + p) % 997}`) return `r${r} p${p} shows ${tds[i].textContent}`;
+      }
+    }
+    return 'ok';
+  });
+  expect(rowsOk).toBe('ok');
+  perfLine(
+    `wide 20k×300: DOM ${nodes}; head cells ${headCells}; row cells ${firstRowCells}; ` +
+      `v-step layout p95 ${percentile(vLayout, 95).toFixed(1)} ms; v-step painted p95 ${percentile(v, 95).toFixed(1)} ms; ` +
+      `h-step painted p95 ${percentile(h, 95).toFixed(1)} ms`,
+  );
   expect(lastP).toBeGreaterThan(60);
-  expect(nodes, `grid DOM ${nodes}`).toBeLessThan(6_000);
-  expect(percentile(v, 95), 'vertical step p95').toBeLessThan(budgetMs(16));
-  expect(percentile(h, 95), 'horizontal step p95').toBeLessThan(budgetMs(16));
+  // Was ~3,500 with all 300 header cells mounted; ~1,550 windowed.
+  expect(nodes, `grid DOM ${nodes}`).toBeLessThan(3_000);
+  // Budgets match the 100k × 30 grid (desktop-db-results-perf): 12 ms to
+  // style + layout, 40 ms to the painted frame. The old 16 ms PAINTED budget
+  // was tighter than the narrow grid's own (measured 18–19 ms p95 there), so
+  // it failed on every run. Measured here (WebKit, M-series, load avg 10–18):
+  // V layout p95 8–9 ms, V painted p95 18–23 ms, H painted p95 21–22 ms. Before
+  // (all 300 header cells re-laid out per step; every row rebuilt per H step):
+  // V painted p95 46–90 ms (layout alone 15–17 ms), H painted p95 32–35 ms.
+  expect(percentile(vLayout, 95), 'vertical step (JS + layout) p95').toBeLessThan(budgetMs(12));
+  expect(percentile(v, 95), 'vertical step to painted frame p95').toBeLessThan(budgetMs(40));
+  expect(percentile(h, 95), 'horizontal step to painted frame p95').toBeLessThan(budgetMs(40));
 });
 
 // ── 2. column filter ─────────────────────────────────────────────────────────
-test('column filter over 100k rows with a JSON column: debounced + cached', async ({ page }, info) => {
+test('column filter over 100k rows with a JSON column: debounced + cached', { tag: '@ci' }, async ({ page }, info) => {
   webkitOnly(info.project.name);
   test.setTimeout(180_000);
   await routeQueries(page);
@@ -228,7 +288,7 @@ test('column filter over 100k rows with a JSON column: debounced + cached', asyn
 });
 
 // ── 3. result memory budget ──────────────────────────────────────────────────
-test('background results are released past the memory budget and re-run on demand', async ({ page }, info) => {
+test('background results are released past the memory budget and re-run on demand', { tag: '@ci' }, async ({ page }, info) => {
   test.skip(!isDesktopProject(info.project.name), 'desktop flow');
   test.setTimeout(180_000);
   // ~6–7 MB per `mid` result (estimated); a 15 MB budget holds two.
