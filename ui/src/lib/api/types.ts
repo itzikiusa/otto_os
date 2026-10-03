@@ -10191,6 +10191,31 @@ export interface DesignPruneReport {
   blobs: string[];
 }
 
+/** One daily scheduled retention pass (`GET /design/admin/storage`). */
+export interface DesignScheduledPruneRun {
+  at: string;
+  versions_removed: number;
+  blobs_removed: number;
+}
+
+/** `GET /design/admin/storage` — the Design Hall blob-store gauge. */
+export interface DesignStorageReport {
+  /** Files / bytes on disk under `<data>/design/blobs` (after dedupe). */
+  blob_count: number;
+  blob_bytes: number;
+  /** Version rows and the bytes they reference (before dedupe). */
+  version_count: number;
+  version_bytes: number;
+  auto_prune: boolean;
+  last_prune: DesignScheduledPruneRun | null;
+}
+
+/** `POST /design/artifacts/{id}/versions/{v}/restore`. */
+export interface DesignRestoreReq {
+  base_version?: Id;
+  message?: string;
+}
+
 export interface CreateDesignProjectReq {
   workspace_id: Id;
   name: string;

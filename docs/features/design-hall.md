@@ -80,10 +80,19 @@ otto.db
 - Rows hold metadata only; there are no foreign keys (child rows are removed
   explicitly), so the saved-state archive can restore tables in any order.
 
-### Retention — opt-in only
+### Retention
 
-The daemon never deletes a version or a blob on its own. `POST
-/design/admin/prune` (dry run unless `apply: true`) squashes `autosave`
+Every content save keeps a full content-addressed blob, so the store needs
+squashing. A **daily scheduled pass** (first run 10 minutes after boot) applies
+the policy below to `autosave` versions **older than a day** only — an editing
+session's recent history is never touched — then GCs unreferenced blobs.
+`OTTO_DESIGN_AUTO_PRUNE=0` turns it off; `OTTO_DESIGN_PRUNE_WINDOW_SECS`
+(default 600) and `OTTO_DESIGN_PRUNE_MIN_AGE_SECS` (default 86400) tune it.
+`GET /design/admin/storage` (root) is the size gauge: blob files/bytes on disk,
+version rows/bytes, and the last scheduled pass. A replaced thumbnail's blob is
+GC'd immediately when nothing else references it.
+
+`POST /design/admin/prune` (dry run unless `apply: true`) squashes `autosave`
 versions to the last one per editing window (default 10 minutes). It never
 touches the head, the approved version, versions a link pins or was
 extracted from, published or publish-pinned versions, versions a signal

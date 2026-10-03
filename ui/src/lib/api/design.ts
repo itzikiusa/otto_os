@@ -16,6 +16,7 @@ import type {
   DesignLink,
   DesignLinksResp,
   DesignProject,
+  DesignRestoreReq,
   DesignSaveResult,
   DesignSearchHit,
   DesignSignal,
@@ -47,6 +48,8 @@ export interface DesignListFilter {
   include_archived?: boolean;
   limit?: number;
   offset?: number;
+  /** Keyset page: the last row's `updated_at|id` (term-less listings only). */
+  cursor?: string;
 }
 
 /** Build a `?a=b&…` query from a flat record, skipping empty values. */
@@ -110,6 +113,12 @@ export function putContent(id: Id, body: DesignContentPutReq) {
 
 export function listVersions(id: Id, p: { kind?: string; limit?: number; offset?: number } = {}) {
   return api.get<DesignVersion[]>(`/design/artifacts/${enc(id)}/versions${qs({ ...p })}`);
+}
+
+/** Restore an older version server-side as a new `restore` head (the blob is
+ *  reused; nothing round-trips through the client). `base_version` ≠ head → 409. */
+export function restoreVersion(id: Id, version: string, body: DesignRestoreReq = {}) {
+  return api.post<DesignSaveResult>(`/design/artifacts/${enc(id)}/versions/${enc(version)}/restore`, body);
 }
 
 /** Named commit (`kind: named`). */
@@ -207,10 +216,12 @@ export async function fetchContent(id: Id, opts: { version?: string; asText: boo
 }
 
 /** Authed object URL of the PNG thumbnail (caller revokes). */
-export async function thumbnailUrl(id: Id): Promise<string> {
+export async function thumbnailUrl(id: Id, sha?: string | null): Promise<string> {
   const token = getToken();
   const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const resp = await fetch(`${baseUrl()}/api/v1/design/artifacts/${enc(id)}/thumbnail`, { headers });
+  // `?v=<thumb_blob>` makes the URL content-keyed: the daemon answers it as
+  // immutable, so the HTTP cache serves repeat loads without a round-trip.
+  const resp = await fetch(`${baseUrl()}/api/v1/design/artifacts/${enc(id)}/thumbnail${sha ? `?v=${enc(sha)}` : ''}`, { headers });
   if (!resp.ok) throw new ApiError(resp.status, { code: 'not_found', message: resp.statusText });
   return URL.createObjectURL(await resp.blob());
 }

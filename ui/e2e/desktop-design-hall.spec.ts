@@ -127,7 +127,10 @@ test('create → edit → new version → compare → restore', async ({ page })
   await page.getByTestId('design-restore').click();
   const confirm = page.getByRole('dialog', { name: 'Restore version' });
   await expect(confirm).toContainText('nothing is lost');
+  // Restore runs server-side (no download + base64 re-upload of the bytes).
+  const restoreReq = page.waitForRequest((r) => r.method() === 'POST' && /\/design\/artifacts\/[^/]+\/versions\/[^/]+\/restore$/.test(new URL(r.url()).pathname));
   await confirm.getByRole('button', { name: 'Restore v1' }).click();
+  await restoreReq;
   await expect(chips).toHaveCount(3);
   await expect(chips.filter({ hasText: 'v3' })).toContainText('current');
 
@@ -212,4 +215,18 @@ test('a project page loads its own designs from the server (not the lobby librar
   for (const title of titles) await expect(page.getByText(title, { exact: true })).toBeVisible();
   await expect(page.getByTestId('design-collection-more')).toHaveCount(0); // 2 < one page
   await expectNoHorizontalOverflow(page);
+
+  // A live rename PATCHES that one card (a detail GET) — it no longer
+  // re-reads the whole slice through /design/search.
+  let searches = 0;
+  page.on('request', (r) => {
+    if (r.url().includes('/design/search') && r.url().includes(`project_id=${project.id}`)) searches++;
+  });
+  const { ctx: ctx2, base: base2 } = await apiCtx();
+  const first = await ctx2.get(`${base2}${V1}/design/artifacts?project_id=${project.id}`).then((r) => r.json());
+  const renamed = `Scoped renamed ${stamp}`;
+  await ctx2.patch(`${base2}${V1}/design/artifacts/${first[0].id}`, { data: { title: renamed } });
+  await ctx2.dispose();
+  await expect(page.getByText(renamed, { exact: true })).toBeVisible();
+  expect(searches, 'a meta update patches the card, no slice reload').toBe(0);
 });
