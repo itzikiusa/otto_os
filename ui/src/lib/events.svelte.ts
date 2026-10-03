@@ -643,7 +643,12 @@ class EventsClient {
         } else if (parsed.type === 'api_run_progress') {
           // A running automation finished a step: fetch its delta now
           // instead of waiting for the fallback poll.
-          apiClientStore.use((apiClient) => apiClient.noteRunProgress(parsed.run_id));
+          apiClientStore.use((apiClient) => apiClient.noteRunProgress(parsed.run_id, parsed.status));
+        } else if (parsed.type === 'api_client_changed') {
+          // Requests / collections / envs / automations changed (maybe by an
+          // agent): keep the API store's 60 s reuse window honest. A store
+          // that never loaded has nothing stale — don't load the chunk for it.
+          apiClientStore.peek()?.noteClientChanged(parsed);
         } else if (
           parsed.type === 'swarm_run_updated' ||
           parsed.type === 'swarm_task_updated' ||

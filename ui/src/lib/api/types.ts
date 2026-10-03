@@ -1282,6 +1282,16 @@ export type OttoEvent =
       status: ApiAutomationRun['status'];
       steps_done: number;
     }
+  | {
+      /** A saved request / collection / environment / automation changed —
+       *  by the UI, an agent's MCP tool or another user (perf2 N4). `id` is
+       *  null for a bulk change; an import emits one event per row. */
+      type: 'api_client_changed';
+      workspace_id: Id;
+      kind: 'request' | 'collection' | 'environment' | 'automation';
+      id: Id | null;
+      deleted: boolean;
+    }
   | { type: 'tasks_updated'; workspace_id: Id; session_id: Id; tasks: AgentTask[] }
   | { type: 'swarm_run_updated'; workspace_id: Id; swarm_id: Id; run: Record<string, unknown> }
   | {
@@ -4861,6 +4871,28 @@ export interface ApiOverviewRequest {
   /** True when the request was created or edited through an agent session. */
   agent_authored: boolean;
   updated_at: string;
+  /** Sidebar order inside its collection (`requests/summaries`; absent from
+   *  daemons older than perf2 — the UI falls back to the list order). */
+  position?: number;
+}
+
+/** A saved request as the API page's tree, search, pickers and ⌘K hold it:
+ *  the `GET …/api-client/requests/summaries` projection (no body, headers,
+ *  scripts, docs or files) stamped with the workspace it was loaded for. The
+ *  full `ApiRequest` is fetched when a request is opened (perf2 N1). */
+export type ApiRequestItem = ApiOverviewRequest & { workspace_id: Id; position: number };
+
+/** `GET …/api-client/storage` — what this workspace's API history and
+ *  automation runs occupy (cached ≤60 s daemon-side). Retention stays opt-in;
+ *  the History list shows this and offers presets (perf2 N2). */
+export interface ApiClientStorage {
+  history_rows: number;
+  history_bytes: number;
+  run_rows: number;
+  step_rows: number;
+  run_bytes: number;
+  /** Most finished runs any one automation holds. */
+  max_runs_per_automation: number;
 }
 
 export interface ApiOverviewEnvironment {
