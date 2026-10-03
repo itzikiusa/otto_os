@@ -1643,3 +1643,60 @@ async fn logs_tail_and_ec2_list_are_native_with_static_creds() {
     assert_ne!(st, StatusCode::OK, "the fake CLI has no filter-log-events");
     assert!(calls_log().contains("ARGS=logs filter-log-events --log-group-name app"));
 }
+
+/// F2d: when something between Otto and AWS answers instead of AWS (a proxy
+/// page, a TLS-inspecting middlebox), the call is repeated on the CLI — and
+/// that endpoint stays on the CLI for a while instead of failing every tick.
+#[tokio::test]
+async fn native_transport_failure_falls_back_to_the_cli() {
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let h2 = hits.clone();
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::post(move || {
+            let hits = h2.clone();
+            async move {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                axum::response::Html("<html><body>Proxy login required")
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let mut ctx = TestCtx::new().await;
+    ctx.native = otto_aws::native::Mode::Endpoint(format!("http://{addr}"));
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let body = serde_json::json!({
+        "name": "proxied", "auth_mode": "access_keys", "region": "ap-south-1",
+        "access_key_id": "AKIAPROXIEDEXAMPLE01",
+        "secret_access_key": "proxiedSecretExample000000000000000000000",
+    });
+    let (st, a, _) = call(&ctx, &root, "POST", "/aws/accounts", Some(body)).await;
+    assert_eq!(st, StatusCode::CREATED, "{a}");
+    let id = a["id"].as_str().unwrap();
+    for _ in 0..2 {
+        let (st, r, _) = call(
+            &ctx,
+            &root,
+            "GET",
+            &format!("/aws/accounts/{id}/ec2/instances"),
+            None,
+        )
+        .await;
+        // The fake CLI's answer (UnauthorizedOperation → 403), not the proxy page.
+        assert_eq!(st, StatusCode::FORBIDDEN, "{r}");
+    }
+    let cli_calls = calls_log()
+        .lines()
+        .filter(|l| l.contains("AKID=AKIAPROXIEDEXAMPLE01") && l.contains("ec2 describe-instances"))
+        .count();
+    assert_eq!(cli_calls, 2, "both calls answered by the CLI");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the failing endpoint is not retried natively on the next tick"
+    );
+}

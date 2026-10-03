@@ -98,7 +98,9 @@ pub fn target_from_env(mode: &Mode, env: &[(String, String)]) -> Option<Target> 
         Mode::Aws => None,
         Mode::Endpoint(u) => Some(u.trim_end_matches('/').to_string()),
     };
-    if get("AWS_ENDPOINT_URL").is_some() {
+    // A custom endpoint or CA bundle is CLI configuration this client does not
+    // replicate.
+    if get("AWS_ENDPOINT_URL").is_some() || get("AWS_CA_BUNDLE").is_some() {
         return None;
     }
     let region = get("AWS_REGION")?;
@@ -131,6 +133,50 @@ fn host_for(service: &str, region: &str) -> String {
         "amazonaws.com"
     };
     format!("{service}.{region}.{suffix}")
+}
+
+/// Marks a transport-level failure (TLS, proxy, DNS, a non-AWS answer) as
+/// opposed to an AWS API error. [`fallback`] turns it into "use the CLI".
+const TRANSPORT: &str = "native transport: ";
+/// After a transport failure the native path stays off this long — e.g. a
+/// corporate TLS-inspecting proxy whose CA only the CLI's `ca_bundle` knows.
+const TRANSPORT_BACKOFF: Duration = Duration::from_secs(300);
+
+type FailedAt = std::sync::Mutex<std::collections::HashMap<String, Instant>>;
+
+/// Endpoint URL → when it last failed below the API (bounded: one entry per
+/// service × region in use).
+fn transport_failed_at() -> &'static FailedAt {
+    static T: OnceLock<FailedAt> = OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+fn transport_error(url: &str, msg: String) -> Error {
+    transport_failed_at()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(url.to_string(), Instant::now());
+    tracing::debug!(target: "otto_aws::native", "falling back to the CLI: {msg}");
+    Error::Upstream(format!("{TRANSPORT}{msg}"))
+}
+
+/// `true` while a recent transport failure keeps `url` on the CLI.
+fn transport_backoff(url: &str) -> bool {
+    transport_failed_at()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(url)
+        .is_some_and(|at| at.elapsed() < TRANSPORT_BACKOFF)
+}
+
+/// A native result, or `Ok(None)` when the call never reached AWS (the caller
+/// then repeats it through the CLI, which may know a proxy / CA we don't).
+pub fn fallback<T>(r: Result<T>) -> Result<Option<T>> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(Error::Upstream(m)) if m.starts_with(TRANSPORT) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Native calls made since start (exposed on `/aws/status` → `cli`).
@@ -227,19 +273,24 @@ pub fn authorization(
     )
 }
 
-/// One signed POST to `/`; returns `(status, body)`.
+/// One signed POST to `/`; returns `(status, body, url)`.
 async fn post(
     t: &Target,
     service: &str,
     content_type: &str,
     target_header: Option<&str>,
     body: Vec<u8>,
-) -> Result<(u16, String)> {
+) -> Result<(u16, String, String)> {
     let host = host_for(service, &t.region);
     let url = match &t.endpoint {
         Some(base) => format!("{base}/"),
         None => format!("https://{host}/"),
     };
+    if transport_backoff(&url) {
+        return Err(Error::Upstream(format!(
+            "{TRANSPORT}{service}: recent failure"
+        )));
+    }
     let now = Utc::now();
     let mut headers: Vec<(String, String)> = vec![
         ("host".into(), host),
@@ -278,14 +329,14 @@ async fn post(
         .body(body)
         .send()
         .await
-        .map_err(|e| Error::Upstream(format!("{service}: {}", e.without_url())))?;
+        .map_err(|e| transport_error(&url, format!("{service}: {}", e.without_url())))?;
     let status = resp.status().as_u16();
     let text = resp
         .text()
         .await
-        .map_err(|e| Error::Upstream(format!("{service}: {}", e.without_url())))?;
+        .map_err(|e| transport_error(&url, format!("{service}: {}", e.without_url())))?;
     tracing::debug!(target: "otto_aws::native", service, ms = started.elapsed().as_millis() as u64, status, "aws native call");
-    Ok((status, text))
+    Ok((status, text, url))
 }
 
 /// Render a failed call the way the CLI prints it, then classify it with the
@@ -315,8 +366,20 @@ pub async fn json_call(
 ) -> Result<Value> {
     let body = serde_json::to_vec(input)?;
     let th = format!("{target_prefix}.{op}");
-    let (status, text) = post(t, service, "application/x-amz-json-1.1", Some(&th), body).await?;
-    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let (status, text, url) =
+        post(t, service, "application/x-amz-json-1.1", Some(&th), body).await?;
+    let v: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        // AWS always answers JSON on this protocol; anything else came from a
+        // proxy / captive portal in between.
+        Err(_) if (200..300).contains(&status) || status == 407 => {
+            return Err(transport_error(
+                &url,
+                format!("{service}: non-JSON answer (HTTP {status})"),
+            ))
+        }
+        Err(_) => Value::Null,
+    };
     if (200..300).contains(&status) {
         return Ok(v);
     }
@@ -420,7 +483,7 @@ pub async fn describe_instances(t: &Target, state: Option<&str>, ids: &[&str]) -
             .map(|(k, v)| format!("{}={}", form_enc(k), form_enc(v)))
             .collect::<Vec<_>>()
             .join("&");
-        let (status, text) = post(
+        let (status, text, url) = post(
             t,
             "ec2",
             "application/x-www-form-urlencoded; charset=utf-8",
@@ -428,8 +491,9 @@ pub async fn describe_instances(t: &Target, state: Option<&str>, ids: &[&str]) -
             body.into_bytes(),
         )
         .await?;
+        // Not XML at all: something between us and AWS answered (a proxy page).
         let doc = roxmltree::Document::parse(&text)
-            .map_err(|e| Error::Upstream(format!("ec2: unreadable response ({e})")))?;
+            .map_err(|e| transport_error(&url, format!("ec2: unreadable response ({e})")))?;
         if !(200..300).contains(&status) {
             let err = doc.descendants().find(|n| n.has_tag_name("Error"));
             let field = |name: &str| {
@@ -644,6 +708,18 @@ mod tests {
             Error::Invalid(m) => assert!(m.contains("ResourceNotFoundException"), "{m}"),
             e => panic!("{e:?}"),
         }
+    }
+
+    #[test]
+    fn transport_failures_fall_back_to_the_cli() {
+        assert!(matches!(fallback(Ok::<_, Error>(1)), Ok(Some(1))));
+        assert!(matches!(
+            fallback::<()>(Err(Error::Upstream(format!("{TRANSPORT}logs: tls")))),
+            Ok(None)
+        ));
+        // An AWS answer is an answer, not a reason to retry on the CLI.
+        assert!(fallback::<()>(Err(Error::Forbidden("denied".into()))).is_err());
+        assert!(fallback::<()>(Err(Error::Upstream("Throttling".into()))).is_err());
     }
 
     #[test]

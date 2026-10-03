@@ -400,7 +400,10 @@ writes an `audit_log` row: `aws.sqs.send`, `aws.sqs.delete_message`,
   profile creds, or the cached assumed role. A 2 s tail tick is then one
   keep-alive round trip instead of a Python start-up. Everything else, and any
   account with a custom `endpoint_url` or a profile whose credentials can't be
-  exported (e.g. some `credential_process` setups), stays on the CLI. Errors
+  exported (e.g. some `credential_process` setups) or an `AWS_CA_BUNDLE`, stays
+  on the CLI. If something other than AWS answers (a proxy page, TLS
+  interception), that call is repeated on the CLI and the endpoint stays on the
+  CLI for 5 minutes. Errors
   classify exactly as CLI errors do (`login required:` / 403). Page tokens from
   the native path start with `n1:`; `OTTO_AWS_NATIVE=off` in the daemon's
   environment forces every call back onto the CLI.

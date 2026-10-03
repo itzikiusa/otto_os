@@ -577,33 +577,39 @@ pub async fn status(
                 let t = t.clone();
                 async move { crate::native::json_call(&t, "athena", "AmazonAthena", op, &input).await }
             };
-            let v = athena(
-                "GetQueryExecution",
-                serde_json::json!({ "QueryExecutionId": qid }),
-            )
-            .await?;
-            let mut st = normalize_status(&v);
-            if st.state == "SUCCEEDED" {
-                let max = q.max.unwrap_or(1000).clamp(1, 1000);
-                let mut input = serde_json::json!({ "QueryExecutionId": qid, "MaxResults": max });
-                if let Some(tok) = token.and_then(crate::native::native_token) {
-                    input["NextToken"] = tok.into();
+            let native = async {
+                let v = athena(
+                    "GetQueryExecution",
+                    serde_json::json!({ "QueryExecutionId": qid }),
+                )
+                .await?;
+                let mut st = normalize_status(&v);
+                if st.state == "SUCCEEDED" {
+                    let max = q.max.unwrap_or(1000).clamp(1, 1000);
+                    let mut input =
+                        serde_json::json!({ "QueryExecutionId": qid, "MaxResults": max });
+                    if let Some(tok) = token.and_then(crate::native::native_token) {
+                        input["NextToken"] = tok.into();
+                    }
+                    let mut r = athena("GetQueryResults", input).await?;
+                    if let Some(next) = r.get("NextToken").and_then(|n| n.as_str()) {
+                        r["NextToken"] = format!("{}{next}", crate::native::TOKEN_PREFIX).into();
+                    }
+                    let (result, next) = results_to_query_result(
+                        &r,
+                        token.is_none(),
+                        st.stats.execution_ms,
+                        st.stats.data_scanned_bytes,
+                    );
+                    st.result = Some(result);
+                    st.next_token = next;
                 }
-                let mut r = athena("GetQueryResults", input).await?;
-                if let Some(next) = r.get("NextToken").and_then(|n| n.as_str()) {
-                    r["NextToken"] = format!("{}{next}", crate::native::TOKEN_PREFIX).into();
-                }
-                let (result, next) = results_to_query_result(
-                    &r,
-                    token.is_none(),
-                    st.stats.execution_ms,
-                    st.stats.data_scanned_bytes,
-                );
-                st.result = Some(result);
-                st.next_token = next;
+                Ok::<_, Error>(st)
+            };
+            if let Some(st) = crate::native::fallback(native.await)? {
+                svc.touch(a).await;
+                return Ok(st);
             }
-            svc.touch(a).await;
-            return Ok(st);
         }
     }
     if token.is_some_and(|t| crate::native::native_token(t).is_some()) {

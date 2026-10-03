@@ -506,9 +506,11 @@ pub async fn filter_events(
                 input.insert("nextToken".into(), tok.into());
             }
             let n = max.parse::<usize>().unwrap_or(1);
-            let v = crate::native::filter_log_events(&t, input, n).await?;
-            svc.touch(a).await;
-            return Ok(normalize_events(&v));
+            let r = crate::native::filter_log_events(&t, input, n).await;
+            if let Some(v) = crate::native::fallback(r)? {
+                svc.touch(a).await;
+                return Ok(normalize_events(&v));
+            }
         }
     }
     if token.is_some_and(|t| crate::native::native_token(t).is_some()) {
@@ -584,16 +586,18 @@ pub async fn insights_results(
     validate_query_id(qid)?;
     // F2d: the Insights status poll — in-process when static creds exist.
     if let Some(t) = svc.native_target(a, region).await? {
-        let v = crate::native::json_call(
+        let r = crate::native::json_call(
             &t,
             "logs",
             "Logs_20140328",
             "GetQueryResults",
             &serde_json::json!({ "queryId": qid }),
         )
-        .await?;
-        svc.touch(a).await;
-        return Ok(normalize_insights(&v));
+        .await;
+        if let Some(v) = crate::native::fallback(r)? {
+            svc.touch(a).await;
+            return Ok(normalize_insights(&v));
+        }
     }
     let v = svc
         .run_json(a, region, &["logs", "get-query-results", "--query-id", qid])

@@ -213,9 +213,14 @@ pub async fn list_instances(
     }
     // F2d: EC2 lists auto-refresh (and fan out per region) — one signed
     // request per page instead of a Python child when static creds exist.
-    let v = match svc.native_target(a, q.region.as_deref()).await? {
+    let native = match svc.native_target(a, q.region.as_deref()).await? {
         Some(t) => {
-            let v = crate::native::describe_instances(&t, state, &[]).await?;
+            crate::native::fallback(crate::native::describe_instances(&t, state, &[]).await)?
+        }
+        None => None,
+    };
+    let v = match native {
+        Some(v) => {
             svc.touch(a).await;
             v
         }
