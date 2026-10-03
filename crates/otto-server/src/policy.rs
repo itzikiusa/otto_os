@@ -1116,6 +1116,25 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/personal-agents/{id}" || p == "/agent-rooms/{id}" {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }
+    // Autonomy (permission modes, standing goals, rules, primary), the live
+    // activity feed and the memory inspector — same posture; reset and a
+    // goal's "work on it now" are writes.
+    if matches!(
+        p,
+        "/personal-agents/{id}/autonomy"
+            | "/personal-agents/{id}/activity"
+            | "/personal-agents/{id}/memories"
+    ) {
+        return Require(ScheduledTasks, if get { View } else { Edit });
+    }
+    if matches!(
+        p,
+        "/personal-agents/{id}/memories/edit"
+            | "/personal-agents/{id}/reset"
+            | "/personal-agents/{id}/goals/{goal_id}/run"
+    ) {
+        return Require(ScheduledTasks, Edit);
+    }
     if p == "/personal-agents/{id}/memory" || p == "/personal-agents/{id}/context" {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }

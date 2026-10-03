@@ -7,9 +7,14 @@ import type {
   AgentRoomMessage,
   AgentRoomWithMembers,
   PersonalAgent,
+  PersonalAgentActivity,
+  PersonalAgentAutonomy,
   PersonalAgentDocument,
+  PersonalAgentMemories,
+  PersonalAgentPermission,
   PersonalAgentRun,
   PersonalAgentSchedule,
+  SavePersonalAgentAutonomyReq,
 } from './types';
 
 export interface PersonalAgentInput {
@@ -29,6 +34,8 @@ export interface AgentScheduleInput {
   timezone?: string;
   directive?: string;
   enabled?: boolean;
+  /** The schedule's own permission set (default `directed`). */
+  permission?: PersonalAgentPermission;
 }
 
 export const personalAgentsApi = {
@@ -69,6 +76,27 @@ export const personalAgentsApi = {
     api.get<PersonalAgentDocument>(`/personal-agents/${agentId}/${kind}`),
   saveDocument: (agentId: string, kind: 'memory' | 'context', body: { content: string; version: string }) =>
     api.put<PersonalAgentDocument>(`/personal-agents/${agentId}/${kind}`, body),
+
+  // -- Autonomy (modes, goals, rules, primary), activity, memory inspector --
+  autonomy: (agentId: string) =>
+    api.get<PersonalAgentAutonomy>(`/personal-agents/${agentId}/autonomy`),
+  saveAutonomy: (agentId: string, body: SavePersonalAgentAutonomyReq) =>
+    api.put<PersonalAgentAutonomy>(`/personal-agents/${agentId}/autonomy`, body),
+  /** Work a standing goal now (a proactive, read-only run). */
+  runGoal: (agentId: string, goalId: string) =>
+    api.post<PersonalAgentRun>(`/personal-agents/${agentId}/goals/${goalId}/run`, {}),
+  activity: (agentId: string) =>
+    api.get<PersonalAgentActivity>(`/personal-agents/${agentId}/activity`),
+  memories: (agentId: string) =>
+    api.get<PersonalAgentMemories>(`/personal-agents/${agentId}/memories`),
+  /** Edit (`text`) or forget (`text: null`) one memory item. */
+  editMemory: (
+    agentId: string,
+    body: { version: string; line: number; raw: string; text: string | null },
+  ) => api.post<PersonalAgentMemories>(`/personal-agents/${agentId}/memories/edit`, body),
+  /** Forget everything the agent learned and did (`confirm` = the agent's name). */
+  reset: (agentId: string, confirm: string) =>
+    api.post<{ ok: boolean }>(`/personal-agents/${agentId}/reset`, { confirm }),
 
   // -- Rooms ---------------------------------------------------------------
   rooms: (ws: string) => api.get<AgentRoomWithMembers[]>(`/workspaces/${ws}/agent-rooms`),

@@ -478,6 +478,15 @@ pub enum Event {
         run_id: Id,
         status: String,
     },
+    /// A personal agent's live activity changed: one of its sessions made a
+    /// governed tool call (allowed / blocked / needs approval) or is waiting on
+    /// an approval. Ids only — the agent page re-fetches
+    /// `GET /personal-agents/{id}/activity`. `kind` is the entry kind.
+    PersonalAgentActivity {
+        workspace_id: Id,
+        agent_id: Id,
+        kind: String,
+    },
     /// A message was appended to an agent room (by an agent over the room MCP
     /// tools, or by the user over REST). Carries ids only — clients re-fetch the
     /// room's messages after their cursor. `author_kind` is "agent" | "user".
@@ -747,6 +756,7 @@ impl Event {
             Event::ProofPackUpdated { .. } => "proof_pack_updated",
             Event::ScheduledTaskRunUpdated { .. } => "scheduled_task_run_updated",
             Event::PersonalAgentRunUpdated { .. } => "personal_agent_run_updated",
+            Event::PersonalAgentActivity { .. } => "personal_agent_activity",
             Event::AgentRoomMessage { .. } => "agent_room_message",
             Event::OttoRunUpdated { .. } => "otto_run_updated",
             Event::CanvasRefsChanged { .. } => "canvas_refs_changed",

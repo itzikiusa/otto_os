@@ -443,6 +443,7 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // Personal-agent run updates + room messages go to the workspace members
         // (rooms are always fully user-visible by design).
         | Event::PersonalAgentRunUpdated { workspace_id, .. }
+        | Event::PersonalAgentActivity { workspace_id, .. }
         | Event::AgentRoomMessage { workspace_id, .. }
         // Run with Otto stage updates go to the run's workspace members.
         | Event::OttoRunUpdated { workspace_id, .. }

@@ -1609,6 +1609,26 @@ pub(crate) async fn governed_invoke(
         return Ok(deny_audit(ctx, &mut audit, reason).await);
     }
 
+    // PERSONAL-AGENT POLICY (crate::personal_agent_policy): a read-only agent
+    // session (proactive / read-only schedule) is refused every mutating tool
+    // and send; an agent's enforceable custom rules deny or force approval; and
+    // an account / credential / sharing action ALWAYS needs a human approval —
+    // no auto-approve rule or token write grant skips it. Right after the
+    // enable gate and BEFORE reference resolution (like the scope check, a
+    // refused call never resolves anything); rules and the sensitive check
+    // read the caller's own arguments (the names it typed, e.g. `prod-api`).
+    let (agent_gate, calling_agent) =
+        crate::personal_agent_policy::evaluate(ctx, auth, &short, arguments).await;
+    if let crate::personal_agent_policy::AgentGate::Deny(reason) = &agent_gate {
+        return Ok(deny_audit(ctx, &mut audit, reason).await);
+    }
+    let forced_approval = match &agent_gate {
+        crate::personal_agent_policy::AgentGate::ForceApproval { reason, risk } => {
+            Some((reason.clone(), *risk))
+        }
+        _ => None,
+    };
+
     // Git tools take a FRIENDLY repo reference (name / path / remote, or none
     // → the calling session's repo), resolved across every workspace the
     // caller can read. Deliberately AFTER the scope + enable gates above, so a
@@ -1690,6 +1710,9 @@ pub(crate) async fn governed_invoke(
     // trusted token grant, under the global `mcp_require_approval_dangerous`.
     let gate_applies = approval_gated(dangerous, false, token_write_grant)
         && require_approval_dangerous(ctx).await;
+    // A forced approval (sensitive action / agent rule) is never covered by
+    // an auto-approve rule.
+    let gate_applies = gate_applies && forced_approval.is_none();
     // An operator who explicitly auto-approved this tool (or its category) for
     // this scope — global, the call's workspace, or the calling agent session —
     // has already made the decision: don't ask a second time. Opt-in, off by
@@ -1700,8 +1723,9 @@ pub(crate) async fn governed_invoke(
     } else {
         None
     };
-    let needs_approval =
-        approval_gated(dangerous, auto_rule.is_some(), token_write_grant) && gate_applies;
+    let needs_approval = (approval_gated(dangerous, auto_rule.is_some(), token_write_grant)
+        && gate_applies)
+        || forced_approval.is_some();
     if let Some(rule) = &auto_rule {
         // Recorded on every terminal row below (dry-run and execution alike).
         audit.decision_reason = Some(otto_mcp::auto_approve::audit_reason(rule));
@@ -1752,20 +1776,31 @@ pub(crate) async fn governed_invoke(
                                 server_name: Some("otto".into()),
                                 tool: Some(tool.to_string()),
                                 title: format!("otto MCP server → {tool}"),
-                                detail: Some(match &repo_label {
-                                    // The resolved repo by name, so the approver isn't
-                                    // judging an opaque id.
-                                    Some(label) => {
-                                        format!(
-                                            "{} — repo {label}",
-                                            dangerous_detail(tool, arguments)
-                                        )
+                                detail: Some({
+                                    let base = match &repo_label {
+                                        // The resolved repo by name, so the approver isn't
+                                        // judging an opaque id.
+                                        Some(label) => {
+                                            format!(
+                                                "{} — repo {label}",
+                                                dangerous_detail(tool, arguments)
+                                            )
+                                        }
+                                        None => dangerous_detail(tool, arguments),
+                                    };
+                                    match &forced_approval {
+                                        Some((why, _)) => format!("{why}. {base}"),
+                                        None => base,
                                     }
-                                    None => dangerous_detail(tool, arguments),
                                 }),
                                 args_redacted_json: audit.args_redacted_json.clone(),
                                 args_hash: Some(args_hash.clone()),
-                                risk_label: Some("dangerous".into()),
+                                risk_label: Some(
+                                    forced_approval
+                                        .as_ref()
+                                        .map_or("dangerous", |(_, risk)| *risk)
+                                        .into(),
+                                ),
                                 requested_by: Some(user.id.clone()),
                                 requested_by_kind: Some("mcp_server".into()),
                                 requested_by_session_id: audit.caller_session_id.clone(),
@@ -1779,6 +1814,16 @@ pub(crate) async fn governed_invoke(
                             .id
                     }
                 };
+                if let Some(a) = &calling_agent {
+                    crate::personal_agent_activity::record_approval_waiting(
+                        ctx,
+                        &a.workspace_id,
+                        &a.agent_id,
+                        Some(&a.session_id),
+                        &short,
+                        &appr_id,
+                    );
+                }
                 match wait_for_decision(ctx, &appr_id, wait_seconds).await {
                     Some(true) => {
                         let _ = ctx.mcp.approvals().consume(&appr_id).await;

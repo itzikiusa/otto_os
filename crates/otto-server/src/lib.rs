@@ -57,6 +57,10 @@ pub mod modules;
 pub mod monitor;
 pub mod offload;
 mod personal_agent_documents;
+// Personal agents: tool-layer permission policy + live activity (batch 2026-10-03).
+pub mod personal_agent_activity;
+pub mod personal_agent_memory;
+pub mod personal_agent_policy;
 pub mod personal_agents_engine;
 pub mod personal_agents_scheduler;
 pub mod plugins;

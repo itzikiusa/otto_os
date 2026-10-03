@@ -1,5 +1,6 @@
 <script lang="ts">
-  // One personal agent: Overview / Schedules / Runs / Chat / Memory tabs.
+  // One personal agent: Overview / Activity / Autonomy / Schedules / Runs /
+  // Chat / Memory / Context tabs.
   import RelTime from '../../lib/components/RelTime.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -23,6 +24,9 @@
   import AgentAvatar from './AgentAvatar.svelte';
   import AgentEditSheet from './AgentEditSheet.svelte';
   import AgentDocuments from './AgentDocuments.svelte';
+  import AgentAutonomy from './AgentAutonomy.svelte';
+  import AgentActivity from './AgentActivity.svelte';
+  import AgentMemoryInspector from './AgentMemoryInspector.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import {
     browserTz,
@@ -33,16 +37,23 @@
     WEEKDAYS,
     type CadenceForm,
   } from './cadence';
-  import type { PersonalAgentRun, PersonalAgentSchedule } from '../../lib/api/types';
+  import type {
+    PersonalAgentAutonomy,
+    PersonalAgentPermission,
+    PersonalAgentRun,
+    PersonalAgentSchedule,
+  } from '../../lib/api/types';
 
   interface Props {
     agentId: string;
   }
   let { agentId }: Props = $props();
 
-  type Tab = 'overview' | 'schedules' | 'runs' | 'chat' | 'memory' | 'context';
+  type Tab = 'overview' | 'activity' | 'autonomy' | 'schedules' | 'runs' | 'chat' | 'memory' | 'context';
   const TABS: { id: Tab; label: string }[] = [
     { id: 'overview', label: 'Overview' },
+    { id: 'activity', label: 'Activity' },
+    { id: 'autonomy', label: 'Autonomy' },
     { id: 'schedules', label: 'Schedules' },
     { id: 'runs', label: 'Runs' },
     { id: 'chat', label: 'Chat' },
@@ -87,6 +98,45 @@
     if (tab === 'runs') void personalAgents.loadRuns(agentId);
   });
 
+  // Autonomy summary for the header badges (primary / proactive). Best-effort:
+  // the Autonomy tab shows its own load state.
+  let autonomy = $state<PersonalAgentAutonomy | null>(null);
+  $effect(() => {
+    const id = agentId;
+    autonomy = null;
+    personalAgentsApi
+      .autonomy(id)
+      .then((a) => { if (id === agentId) autonomy = a; })
+      .catch(() => {});
+  });
+
+  // Reset: memories + conversations + schedules + run history (confirmed by
+  // typing the agent's name — the server checks it too).
+  let memoryReload = $state(0);
+  async function resetAgent(): Promise<void> {
+    if (!agent) return;
+    const name = agent.name;
+    const typed = await confirmer.promptText(
+      `Reset “${name}”? It forgets everything it learned (memory), its chat is closed, and its schedules and run history are deleted. Its persona, rules, goals and model stay. Type the agent’s name to confirm.`,
+      { title: 'Reset agent', confirmLabel: 'Reset agent', placeholder: name, danger: true },
+    );
+    if (typed === null) return;
+    if (typed.trim() !== name.trim()) {
+      toasts.error('Not reset', 'The name didn’t match.');
+      return;
+    }
+    try {
+      await personalAgentsApi.reset(agentId, typed);
+      chatSessionId = '';
+      memoryReload += 1;
+      void personalAgents.loadSchedules(agentId);
+      void personalAgents.loadRuns(agentId);
+      toasts.success(`Reset ${name}`);
+    } catch (e) {
+      toasts.error(`Couldn’t reset ${name}`, loadErrorText(e));
+    }
+  }
+
   /** Stop a running run — asks first: what it did so far is not reported. */
   async function stopRun(r: PersonalAgentRun): Promise<void> {
     const ok = await confirmer.ask(
@@ -126,6 +176,7 @@
   let sfTimezone = $state(browserTz());
   let sfDirective = $state('');
   let sfEnabled = $state(true);
+  let sfPermission = $state<PersonalAgentPermission>('directed');
 
   function openSchedCreate(): void {
     schedEditId = null;
@@ -133,6 +184,7 @@
     sfTimezone = browserTz();
     sfDirective = '';
     sfEnabled = true;
+    sfPermission = 'directed';
     schedFormOpen = true;
     error = '';
   }
@@ -143,6 +195,7 @@
     sfTimezone = s.timezone || browserTz();
     sfDirective = s.directive;
     sfEnabled = s.enabled;
+    sfPermission = s.permission ?? 'directed';
     schedFormOpen = true;
     error = '';
   }
@@ -159,6 +212,7 @@
       timezone: sfTimezone.trim() || 'UTC',
       directive: sfDirective,
       enabled: sfEnabled,
+      permission: sfPermission,
     };
     try {
       if (schedEditId) await personalAgents.updateSchedule(agentId, schedEditId, body);
@@ -257,6 +311,10 @@
   }
 
   function scheduleName(r: PersonalAgentRun): string {
+    if (r.mode === 'proactive') {
+      const g = autonomy?.goals.find((x) => x.id === r.goal_id);
+      return g ? `Goal · ${g.text}` : 'Standing goal';
+    }
     if (!r.schedule_id) return 'Manual';
     const s = schedules.find((x) => x.id === r.schedule_id);
     return s ? cadenceLabel(s.schedule, s.timezone) : 'Deleted schedule';
@@ -297,6 +355,8 @@
       </span>
       {#if !agent.enabled}<span class="chip" title="Schedules don’t fire while paused. Run now and chat still work.">Paused</span>{/if}
       {#if agent.browser}<span class="chip" title="The otto-browser MCP is attached to runs and chat">Browser</span>{/if}
+      {#if autonomy?.primary}<span class="chip pa-accent" title="Your primary assistant — routes specialist work to your other agents"><Icon name="star" size={11} /> Your agent</span>{/if}
+      {#if autonomy?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={11} /> Proactive</span>{/if}
     {/if}
   {/snippet}
   {#snippet actions()}
@@ -309,6 +369,9 @@
         <button class="btn small" data-icon="play" disabled={busy} onclick={() => runNow()} title="Run it once without enabling its schedules">Run once</button>
       {/if}
       <button class="btn small" data-icon="edit" onclick={() => (editing = true)}><Icon name="edit" size={12} /> Edit</button>
+      <button class="icon-btn" data-overflow="-1" data-icon="undo" data-label="Reset agent…" onclick={resetAgent} aria-label="Reset agent" title="Reset agent — forget memory, chat, schedules and runs">
+        <Icon name="undo" size={14} />
+      </button>
       <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete agent…" onclick={removeAgent} aria-label="Delete agent" title="Delete agent">
         <Icon name="trash" size={14} />
       </button>
@@ -384,6 +447,10 @@
         </dl>
       </section>
     </div>
+  {:else if tab === 'activity'}
+    {#key agentId}<AgentActivity {agentId} />{/key}
+  {:else if tab === 'autonomy'}
+    {#key agentId}<AgentAutonomy {agentId} editable={canEditDocuments} onsaved={(a) => (autonomy = a)} />{/key}
   {:else if tab === 'schedules'}
     {#if schedules.length > 0 || schedFormOpen}
       <div class="section-head">
@@ -448,6 +515,13 @@
           <span>Directive (the run’s task prompt)</span>
           <textarea bind:value={sfDirective} rows="4" placeholder="Produce the daily recap…"></textarea>
         </label>
+        <label class="fld">
+          <span>Permissions for its runs</span>
+          <select bind:value={sfPermission}>
+            <option value="directed">Directed — your normal approvals and auto-approve rules</option>
+            <option value="read_only">Read-only — can read and report, can’t change anything</option>
+          </select>
+        </label>
         <label class="chk"><input type="checkbox" bind:checked={sfEnabled} /> Enabled</label>
         <div class="actions">
           <button class="btn" disabled={busy} onclick={() => { schedFormOpen = false; error = ''; }}>Cancel</button>
@@ -472,6 +546,7 @@
               <div class="rowtitle">
                 <strong>{cadenceLabel(s.schedule, s.timezone)}</strong>
                 {#if !s.enabled}<span class="chip">Paused</span>{/if}
+                {#if s.permission === 'read_only'}<span class="chip" title="Its runs can read and report, but can’t send, post, write or change anything"><Icon name="lock" size={11} /> Read-only</span>{/if}
               </div>
               <!-- a paused schedule (or paused agent) never fires: no "next" promise -->
               <span class="meta">{#if s.enabled && agent.enabled}Next <RelTime iso={s.next_run_at} /> · {/if}Last <RelTime iso={s.last_run_at} fallback="never" /></span>
@@ -512,7 +587,8 @@
           <li class="run">
             <StatusBadge status={runStatus(r.status)} variant="text" />
             <span class="run-when"><RelTime iso={r.started_at} /></span>
-            <span class="chip" title="What started this run">{scheduleName(r)}</span>
+            <span class="chip clip-chip" title="What started this run">{scheduleName(r)}</span>
+            {#if r.read_only}<span class="chip" title="This run could read and report, but not change anything"><Icon name="lock" size={11} /> Read-only</span>{/if}
             {#if duration(r)}<span class="meta">{duration(r)}</span>{/if}
             <span class="run-sum" title={r.summary || r.error || undefined}>{r.summary || r.error || 'No summary'}</span>
             {#if (r.attempts ?? 1) > 1}<span class="chip pa-warn">{r.attempts} attempts</span>{/if}
@@ -554,7 +630,10 @@
       <p class="muted" role="status">Opening {agent.name}’s chat session…</p>
     {/if}
   {:else if (tab === 'memory' || tab === 'context') && agent}
-    {#key `${agentId}:${tab}`}
+    {#if tab === 'memory'}
+      <AgentMemoryInspector {agentId} editable={canEditDocuments} reloadKey={memoryReload} />
+    {/if}
+    {#key `${agentId}:${tab}:${memoryReload}`}
       <AgentDocuments {agentId} workspaceId={agent.workspace_id} kind={tab} editable={canEditDocuments} sharedWorkspace={!!agent.cwd.trim()} />
     {/key}
   {/if}
@@ -586,6 +665,8 @@
 <style>
   .agent-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .prov { max-width: 260px; }
+  .pa-accent { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 35%, transparent); display: inline-flex; align-items: center; gap: 4px; }
+  .clip-chip { max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .prov :global(svg) { flex-shrink: 0; }
   .mono { font-family: var(--font-mono); }
   .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

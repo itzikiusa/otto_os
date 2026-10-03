@@ -1044,6 +1044,24 @@ blind timer.
 
 ---
 
+### `personal_agent_activity`
+
+```json
+{ "type": "personal_agent_activity", "workspace_id": "<Id>", "agent_id": "<Id>",
+  "kind": "tool_call|blocked|approval_required|approval_waiting" }
+```
+
+- Emitted by `otto_server::personal_agent_activity` when one of a personal
+  agent's sessions makes a governed `otto.*` call (allowed, blocked by the
+  read-only / rule policy, or forced to approval) or files an approval it now
+  waits on.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- Ids only: the agent page's **Activity** tab re-fetches
+  `GET /personal-agents/{id}/activity` on a matching tick.
+- TypeScript type: `{ type: 'personal_agent_activity'; workspace_id: Id; agent_id: Id; kind: string }`.
+
+---
+
 ### `otto_run_updated`
 
 ```json
