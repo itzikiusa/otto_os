@@ -764,11 +764,19 @@ impl PtyHandle {
     /// [`UNVIEWED_SCROLLBACK_LINES`]). Lowering drops the oldest rows now;
     /// raising lets history grow again. Clamped to
     /// `1..=`[`EMULATOR_SCROLLBACK_LINES`]; a no-op when unchanged.
+    ///
+    /// A held PTY forwards the cap to its holder too (perf 01 N1): the
+    /// holder's emulator is the copy future adoptions are rebuilt from, and
+    /// it used to keep the full history of every unviewed session forever.
     pub fn set_history_cap(&self, lines: usize) {
         let lines = lines.clamp(1, EMULATOR_SCROLLBACK_LINES);
         let mut parser = lock_unpoisoned(&self.mirror.parser);
         if parser.screen().scrollback_len() != lines {
             parser.screen_mut().set_scrollback_len(lines);
+        }
+        drop(parser);
+        if let Backend::Held(conn) = &self.backend {
+            conn.set_history_cap(lines);
         }
     }
 
