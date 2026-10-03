@@ -104,6 +104,16 @@ pub struct VaultEngine {
     /// Scans have their own lock; mutation holders may await a scan.
     writes: Mutex<HashMap<VaultWriteKey, VaultWriteLock>>,
     fts_ok: std::sync::atomic::AtomicU8, // 0 unknown / 1 yes / 2 no
+    /// FSEvents watchers per vault (F2) — see `watch.rs`. Off in unit tests
+    /// unless a test opts in (counter-asserting tests must stay deterministic).
+    pub(crate) watches: Mutex<HashMap<i64, crate::watch::VaultWatch>>,
+    pub(crate) watch_starting: Mutex<HashSet<i64>>,
+    pub(crate) watch_enabled: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub(crate) watch_kicks: std::sync::atomic::AtomicUsize,
+    /// `(generation, graph generation)` → the status COUNTs (F2): the page's
+    /// 5 s status poll runs no aggregate SQL while nothing changed.
+    status_counts: Mutex<HashMap<i64, ((i64, i64), crate::store::StatusCounts)>>,
 }
 
 impl VaultEngine {
@@ -133,6 +143,12 @@ impl VaultEngine {
             graph_cache: Mutex::new(HashMap::new()),
             writes: Mutex::new(HashMap::new()),
             fts_ok: std::sync::atomic::AtomicU8::new(0),
+            watches: Mutex::new(HashMap::new()),
+            watch_starting: Mutex::new(HashSet::new()),
+            watch_enabled: std::sync::atomic::AtomicBool::new(cfg!(not(test))),
+            #[cfg(test)]
+            watch_kicks: Default::default(),
+            status_counts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -245,6 +261,8 @@ impl VaultEngine {
         self.generations.lock().unwrap().remove(&id);
         self.graph_generations.lock().unwrap().remove(&id);
         self.graph_cache.lock().unwrap().remove(&id);
+        self.status_counts.lock().unwrap().remove(&id);
+        self.stop_watch(id);
         Ok(())
     }
 
@@ -286,7 +304,22 @@ impl VaultEngine {
         let mut incoming = vec![];
         if added && reconcile_added {
             let resolver = resolver.as_ref().unwrap();
-            for (rowid, source, raw, dst) in self.store.all_links_full(id).await? {
+            // F9: only a link whose raw target mentions the new file's stem can
+            // re-resolve to it (case-folded superset filter in SQL); a stem with
+            // characters a link might percent-encode falls back to every row.
+            let file = note.row.path.rsplit('/').next().unwrap_or(&note.row.path);
+            let stem = file.to_ascii_lowercase();
+            let stem = stem.strip_suffix(".md").unwrap_or(&stem);
+            let plain = !stem.is_empty()
+                && stem
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+            let rows = if plain {
+                self.store.links_mentioning(id, stem).await?
+            } else {
+                self.store.all_links_full(id).await?
+            };
+            for (rowid, source, raw, dst) in rows {
                 if source == note.row.path {
                     continue;
                 }
@@ -424,10 +457,14 @@ impl VaultEngine {
 
     /// Ensure freshness before a read: if the last completed scan is older than
     /// the staleness window, kick a background scan (non-blocking).
+    /// With a healthy FSEvents watcher (F2) external changes trigger their own
+    /// scan, so the window stretches to a 10-minute safety net.
     pub fn ensure_fresh(self: &Arc<Self>, id: i64) {
+        self.ensure_watch(id);
         let cell = self.last_scan_cell(id);
         let now = chrono::Utc::now().timestamp();
-        if now - cell.load(Ordering::Relaxed) > STALE_AFTER_SECS {
+        let window = self.stale_after(id).unwrap_or(STALE_AFTER_SECS);
+        if now - cell.load(Ordering::Relaxed) > window {
             self.kick_scan(id);
         }
     }
@@ -698,13 +735,23 @@ impl VaultEngine {
     pub async fn status(self: &Arc<Self>, ws: &str, id: i64) -> Result<VaultStatus> {
         self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
-        let mut status = self.store.status(id).await?;
-        status.generation = Some(self.generation(id).load(Ordering::Relaxed).to_string());
-        status.graph_generation = Some(
-            self.graph_generation(id)
-                .load(Ordering::Relaxed)
-                .to_string(),
+        let key = (
+            self.generation(id).load(Ordering::Relaxed),
+            self.graph_generation(id).load(Ordering::Relaxed),
         );
+        let cached = self
+            .status_counts
+            .lock()
+            .unwrap()
+            .get(&id)
+            .filter(|(k, _)| *k == key)
+            .map(|(_, c)| *c);
+        let (mut status, counts) = self.store.status_with(id, cached).await?;
+        if cached.is_none() {
+            self.status_counts.lock().unwrap().insert(id, (key, counts));
+        }
+        status.generation = Some(key.0.to_string());
+        status.graph_generation = Some(key.1.to_string());
         Ok(status)
     }
 
@@ -973,6 +1020,22 @@ impl VaultEngine {
         content: &str,
         if_hash: Option<&str>,
     ) -> Result<NoteMeta> {
+        self.write_note_opts(ws, id, path, content, if_hash, false)
+            .await
+    }
+
+    /// [`Self::write_note`] with `autosave`: an editor autosave, whose history
+    /// revision may coalesce with the same note's open one (F1). Agent writes,
+    /// restores, renames and deletes always pass `false` → their own revision.
+    pub async fn write_note_opts(
+        self: &Arc<Self>,
+        ws: &str,
+        id: i64,
+        path: &str,
+        content: &str,
+        if_hash: Option<&str>,
+        autosave: bool,
+    ) -> Result<NoteMeta> {
         let v = self.get_scoped(ws, id).await?;
         let rel = Self::check_rel(path)?;
         if !rel.to_ascii_lowercase().ends_with(".md") {
@@ -1008,6 +1071,7 @@ impl VaultEngine {
             before.as_deref(),
             content.as_bytes(),
             "note write",
+            autosave,
         )
         .await?;
         state.mutated(&[&rel]);
@@ -1095,6 +1159,7 @@ impl VaultEngine {
             before.as_deref(),
             bytes,
             "artifact write",
+            false,
         )
         .await?;
         state.mutated(&[&rel]);
@@ -1401,6 +1466,7 @@ impl VaultEngine {
                 Some(content.as_bytes()),
                 new_content.as_bytes(),
                 "rename links",
+                false,
             )
             .await?;
             let (parent, name) = Self::text_parent(root, &src_now)?;
@@ -1521,22 +1587,21 @@ impl VaultEngine {
                 }
                 continue;
             }
-            let mut best: Option<(f32, Option<String>)> = None;
-            for (cand, alias) in std::iter::once((title.clone(), None))
-                .chain(std::iter::once((path.clone(), None)))
-                .chain(aliases.iter().map(|a| (a.clone(), Some(a.clone()))))
-            {
-                if let Some(s) = fuzzy_score(&ql, &cand.to_lowercase()) {
-                    if best.as_ref().map(|(b, _)| s > *b).unwrap_or(true) {
-                        best = Some((s, alias));
+            // Candidates were lower-cased at index time; index 0 = title,
+            // 1 = path, 2.. = aliases (no per-keystroke clones, F8).
+            let mut best: Option<(f32, usize)> = None;
+            for (i, cand) in record.search_lc.iter().enumerate() {
+                if let Some(s) = fuzzy_score(&ql, cand) {
+                    if best.is_none_or(|(b, _)| s > b) {
+                        best = Some((s, i));
                     }
                 }
             }
-            if let Some((score, alias)) = best {
+            if let Some((score, i)) = best {
                 out.push(SwitchHit {
                     path: path.clone(),
                     title: title.clone(),
-                    alias,
+                    alias: i.checked_sub(2).and_then(|k| aliases.get(k)).cloned(),
                     score,
                 });
             }
@@ -1627,10 +1692,17 @@ impl VaultEngine {
 
     // -- graph -----------------------------------------------------------------
 
-    pub async fn graph(self: &Arc<Self>, ws: &str, id: i64, o: &GraphOpts) -> Result<GraphPayload> {
+    /// The cached payload itself (F8): a hit is an `Arc` bump, never a deep
+    /// copy of a 10k-node / 50k-edge graph.
+    pub async fn graph(
+        self: &Arc<Self>,
+        ws: &str,
+        id: i64,
+        o: &GraphOpts,
+    ) -> Result<Arc<GraphPayload>> {
         self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
-        Ok((*self.graph_cached(id, o).await?).clone())
+        self.graph_cached(id, o).await
     }
 
     /// Graph payload through the per-vault cache: a request repeated within

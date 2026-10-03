@@ -427,6 +427,14 @@ History begins with this feature and captures guarded writes/link rewrites;
 direct filesystem changes from other editors are detected for freshness but
 are not versioned. No history is silently pruned.
 
+Editor autosaves of one note within **5 minutes** share one revision: its
+*before* stays the content at the start of the burst and its *after* moves to
+the latest save, so a long editing session costs one revision per 5 minutes
+instead of one per typing pause. Agent writes, restores and link rewrites always
+get their own revision. Revision bodies are stored once by content hash under
+`.otto-history/.blobs/` (a revision's *before* is a hard link to the previous
+revision's *after*), and older history from before this layout still opens.
+
 Failed or conflicting saves retain the current note and tab. Closing a dirty
 last tab or switching vaults first saves successfully. Draft recovery is saved
 per vault/path in local browser storage, and edits typed during a slow save are
@@ -640,9 +648,15 @@ keyword-proxy remain. Contract: `docs/contracts/api.md` → *Memory layer*.
 
 **Limitations / honest caveats**
 
-- **No filesystem watcher.** External edits are picked up by the freshness
-  model (§3): within one 5 s poll cycle while the page is open, or at the next
-  API/MCP read. They are not pushed instantly.
+- **Filesystem watcher (FSEvents).** Once a vault is read, an FSEvents watcher
+  watches its folder. Touched paths are debounced (300 ms) and checked against
+  their indexed size/mtime; only a real external change (edit, new/removed
+  note, a folder moved in or out) kicks the incremental scan, so Otto's own
+  saves and hidden folders (`.otto-history`, `.trash`, `.git`) cost nothing.
+  While the watcher is healthy the full-walk safety net runs every 10 minutes
+  instead of every 30 s; if FSEvents errors or overflows, the 30 s freshness
+  model (§3) returns. The page's 5 s status poll reuses its link/tag/attachment
+  counts until the index changes.
 - **Notes >4 MiB** are indexed by filename/hash only — no body parsing, tags, aliases, outgoing links or full-text body search.
 - **Ambiguous basenames stay unresolved** by design (never silently picked);
   fix by qualifying the link path.
@@ -724,7 +738,7 @@ PDF annotation, community plugins.
 
 Saving an existing note updates its own metadata, tags, outgoing links, search entry and directory/switcher label before success is returned. Atomic source writes, hash conflicts and recoverable before/after versions still apply. Adding/removing paths reconciles incoming and unresolved links, including ambiguous basenames; titles and YAML aliases remain search/switcher metadata rather than new link-target names.
 
-External edits are checked on the existing five-second freshness schedule. Unchanged scans retain lookup caches; incomplete directory reads never authorize pruning unseen files. File-tree refreshes fetch visible branches, and collapsed branches refresh when reopened.
+External edits are picked up by the vault's FSEvents watcher (debounced, signature-checked; the 30 s freshness walk is the fallback when no watcher is running). Unchanged scans retain lookup caches; incomplete directory reads never authorize pruning unseen files. File-tree refreshes fetch visible branches, and collapsed branches refresh when reopened.
 
 Notes larger than 4 MiB keep their original bytes and exact streamed hash but skip content parsing/indexing. The Properties panel explains this limitation; the note remains findable by filename and can still be a path-link target. Body tags, aliases, headings and outgoing links are unavailable until the file is small enough to index. Explicit raw-note reads remain complete. Preparation runs outside async workers with two active jobs and bounded admission; a busy response asks the caller to retry rather than queueing unlimited body copies.
 

@@ -16,6 +16,7 @@ pub mod resolve;
 pub mod scan;
 pub mod store;
 pub mod types;
+mod watch;
 
 pub use engine::VaultEngine;
 pub use http::{router, VaultCtx};

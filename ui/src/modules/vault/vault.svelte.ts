@@ -839,6 +839,8 @@ class VaultStore {
           const meta = await writeVaultNote(wsId, id, {
             path, content: savedDraft,
             if_hash: overwrite ? undefined : this.note!.meta.hash,
+            // A conflict overwrite is a deliberate act: its own revision.
+            autosave: !overwrite,
           });
           overwrite = false;
           if (this.current?.id !== id || this.notePath !== path) return false;

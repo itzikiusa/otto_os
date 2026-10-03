@@ -61,7 +61,9 @@ export function vaultNote(ws: string, id: number, path: string) {
 export function writeVaultNote(
   ws: string,
   id: number,
-  body: { path: string; content: string; if_hash?: string },
+  // `autosave`: an editor autosave — its history revision may coalesce with
+  // the note's open one (5-min window) instead of minting a new revision.
+  body: { path: string; content: string; if_hash?: string; autosave?: boolean },
 ) {
   return api.put<VaultNoteMeta>(`${base(ws)}/${id}/note`, body);
 }

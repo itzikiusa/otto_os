@@ -113,6 +113,9 @@ struct WriteNoteReq {
     content: String,
     #[serde(default)]
     if_hash: Option<String>,
+    /// Editor autosave: its history revision may coalesce (F1).
+    #[serde(default)]
+    autosave: bool,
 }
 
 #[derive(Deserialize)]
@@ -233,7 +236,14 @@ async fn write_note<C: VaultCtx>(
     require(&c, &user, &ws, WorkspaceRole::Editor).await?;
     Ok(Json(
         c.vault()
-            .write_note(&ws, id, &req.path, &req.content, req.if_hash.as_deref())
+            .write_note_opts(
+                &ws,
+                id,
+                &req.path,
+                &req.content,
+                req.if_hash.as_deref(),
+                req.autosave,
+            )
             .await?,
     ))
 }
@@ -329,9 +339,17 @@ async fn graph<C: VaultCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(WsVaultPath { ws, id }): Path<WsVaultPath>,
     Query(o): Query<GraphOpts>,
-) -> ApiResult<Json<GraphPayload>> {
+) -> ApiResult<Json<SharedGraph>> {
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
-    Ok(Json(c.vault().graph(&ws, id, &o).await?))
+    Ok(Json(SharedGraph(c.vault().graph(&ws, id, &o).await?)))
+}
+
+/// Serializes the engine's cached graph in place (no per-request clone).
+struct SharedGraph(Arc<GraphPayload>);
+impl Serialize for SharedGraph {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        self.0.as_ref().serialize(s)
+    }
 }
 
 async fn okf_validate<C: VaultCtx>(
