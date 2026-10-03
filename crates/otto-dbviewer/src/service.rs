@@ -535,7 +535,12 @@ impl GraphCache {
 /// eligibility check right before the driver call (DB2-06). Short on purpose:
 /// it only dedupes the back-to-back read; the in-flight tick and the
 /// post-execution check still read fresh.
+#[cfg(not(test))]
 const PRE_SNAPSHOT_REUSE: Duration = Duration::from_millis(50);
+/// Tests lock the dedupe itself (the read budget), not the window: a loaded CI
+/// runner must not turn the budget test into a timing test.
+#[cfg(test)]
+const PRE_SNAPSHOT_REUSE: Duration = Duration::from_secs(10);
 
 /// `secret_ref` → (secret, read time); see [`DbViewerService::completion_secrets`].
 type CompletionSecrets = HashMap<String, (Option<String>, Instant)>;

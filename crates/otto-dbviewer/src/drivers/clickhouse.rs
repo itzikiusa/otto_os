@@ -3725,10 +3725,11 @@ mod perf_bench {
         let t = std::time::Instant::now();
         let raw = decode(&body, None);
         eprintln!(
-            "bench CH JSONCompact decode 100k×30 ({} MB): {:?}, rows {}",
+            "bench CH JSONCompact decode 100k×30 ({} MB): {:?}, rows {} (byte budget hit: {})",
             body.len() / (1024 * 1024),
             t.elapsed(),
-            raw.data.len()
+            raw.data.len(),
+            raw.truncated_bytes
         );
         let t = std::time::Instant::now();
         let raw = decode(&body, Some(1_001));

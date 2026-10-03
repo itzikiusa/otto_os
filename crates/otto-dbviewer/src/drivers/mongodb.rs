@@ -5217,3 +5217,61 @@ mod perf_tests {
         assert_eq!(names, ["_id", "a", "b"]);
     }
 }
+
+/// Shaping timing for materialised Mongo documents (DB2-04).
+#[cfg(test)]
+mod perf_bench {
+    use super::*;
+
+    fn docs(n: usize, fields: usize) -> Vec<Document> {
+        (0..n)
+            .map(|i| {
+                let mut d = Document::new();
+                d.insert("_id", Bson::Int64(i as i64));
+                for f in 1..fields {
+                    let key = format!("f{f}");
+                    match f % 4 {
+                        0 => d.insert(key, Bson::Int32((i + f) as i32)),
+                        1 => d.insert(key, Bson::String(format!("customer-{i}-{f}@example.com"))),
+                        2 => d.insert(key, Bson::Boolean(i % 2 == 0)),
+                        _ => d.insert(
+                            key,
+                            mongodb::bson::doc! { "k": i as i64, "tags": ["a", "b"] },
+                        ),
+                    };
+                }
+                d
+            })
+            .collect()
+    }
+
+    /// CI ceiling: shaping 10k×30 documents into a grid stays under a few
+    /// seconds in a debug build.
+    #[test]
+    fn docs_to_result_10k_x_30_within_ceiling() {
+        let d = docs(10_000, 30);
+        let t = Instant::now();
+        let r = docs_to_result(d, false, Instant::now());
+        let took = t.elapsed();
+        assert_eq!(r.rows.len(), 10_000);
+        assert_eq!(r.columns.len(), 30);
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "10k×30 docs_to_result took {took:?} (ceiling 5 s)"
+        );
+    }
+
+    /// Bench (on demand, `-- --ignored --nocapture bench_`): 100k×30.
+    #[test]
+    #[ignore]
+    fn bench_docs_to_result_100k_x_30() {
+        let d = docs(100_000, 30);
+        let t = Instant::now();
+        let r = docs_to_result(d, false, Instant::now());
+        eprintln!(
+            "bench Mongo docs_to_result 100k×30: {:?}, rows {}",
+            t.elapsed(),
+            r.rows.len()
+        );
+    }
+}
