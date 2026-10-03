@@ -133,8 +133,12 @@ covers it. The layout mirrors itself **if you use logical properties**:
   .nav-item.active::before { inset-inline-start: 0; border-radius: 0 2px 2px 0; }
   :global([dir='rtl']) .nav-item.active::before { border-radius: 2px 0 0 2px; }
   ```
-- **Directional icons** (`chevronLeft`/`chevronRight`, `→` in flows, back
-  buttons) flip in RTL. Non-directional icons (play, refresh, clock) don't.
+- **Directional icons** (`chevronLeft`/`chevronRight`, `arrow`, `send`,
+  `undo`, `logout`) flip in RTL — `Icon.svelte` does it for every use (its
+  `DIRECTIONAL` set). Never add a per-module `[dir='rtl'] … scaleX(-1)` on an
+  Icon (it would flip twice); pass `noflip` when the wrapper rotates the glyph
+  (a disclosure chevron). Non-directional icons (play, refresh, clock) don't
+  flip, and nothing flips inside a `dir="ltr"` island.
 - **Code, paths, commands, terminals and diffs stay LTR** (`dir="ltr"` on the
   container) even in an RTL UI.
 - About 247 physical `left`/`right` declarations remain in the tree. Convert
