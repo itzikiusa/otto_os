@@ -10261,6 +10261,9 @@ export interface DesignPruneReport {
   artifacts_scanned: number;
   versions: Id[];
   blobs: string[];
+  /** Bytes the removed blobs held (dry run: would free). */
+  reclaimable_bytes: number;
+  reclaimable_blobs: number;
 }
 
 /** One daily scheduled retention pass (`GET /design/admin/storage`). */
@@ -10278,9 +10281,22 @@ export interface DesignStorageReport {
   /** Version rows and the bytes they reference (before dedupe). */
   version_count: number;
   version_bytes: number;
-  /** Scheduled retention pass enabled — opt-in, off unless `OTTO_DESIGN_AUTO_PRUNE=1`. */
+  /** Auto-tidy is in effect: the Settings toggle, unless the env override forces it. */
   auto_prune: boolean;
+  /** The persisted Settings → Design Hall toggle (default false — opt-in). */
+  auto_tidy: boolean;
+  /** `OTTO_DESIGN_AUTO_PRUNE` override when set (`false` = hard off, beats the toggle). */
+  auto_tidy_forced: boolean | null;
+  /** Only autosaves older than this are candidates (default 7 days). */
+  min_age_secs: number;
+  /** What a pass would reclaim right now (dry run). */
+  reclaimable: { versions: number; blobs: number; bytes: number };
   last_prune: DesignScheduledPruneRun | null;
+}
+
+/** `PUT /design/admin/auto-tidy` — returns the refreshed `DesignStorageReport`. */
+export interface DesignAutoTidyReq {
+  enabled: boolean;
 }
 
 /** `POST /design/artifacts/{id}/versions/{v}/restore`. */

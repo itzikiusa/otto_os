@@ -1355,6 +1355,47 @@ impl Store {
         Ok(blobs)
     }
 
+    /// Bytes (and blob count) deleting `doomed` versions would free: blobs
+    /// only those versions reference — no surviving version, no thumbnail.
+    /// One query whatever the set size (`json_each` over a bound array, no
+    /// placeholder limit). Sizes are the versions' logical `size_bytes`.
+    pub async fn reclaimable(&self, doomed: &[String]) -> Result<(i64, i64)> {
+        if doomed.is_empty() {
+            return Ok((0, 0));
+        }
+        let ids = serde_json::to_string(doomed).unwrap_or_else(|_| "[]".into());
+        let row = sqlx::query(
+            "WITH d(id) AS (SELECT value FROM json_each(?1)),
+                  b AS (SELECT blob_sha256 AS sha, MAX(size_bytes) AS sz
+                          FROM design_versions WHERE id IN (SELECT id FROM d)
+                         GROUP BY blob_sha256)
+             SELECT COUNT(*) AS n, COALESCE(SUM(sz), 0) AS bytes FROM b
+              WHERE NOT EXISTS (SELECT 1 FROM design_versions v
+                                 WHERE v.blob_sha256 = b.sha
+                                   AND v.id NOT IN (SELECT id FROM d))
+                AND NOT EXISTS (SELECT 1 FROM design_artifacts a WHERE a.thumb_blob = b.sha)",
+        )
+        .bind(ids)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("design.version.reclaimable"))?;
+        Ok((row.get("n"), row.get("bytes")))
+    }
+
+    /// The persisted auto-tidy toggle (off when unset).
+    pub async fn auto_tidy(&self) -> Result<bool> {
+        let v = otto_state::SettingsRepo::new(self.pool.clone())
+            .get(crate::retention::AUTO_TIDY_SETTING)
+            .await?;
+        Ok(v.and_then(|v| v.as_bool()).unwrap_or(false))
+    }
+
+    pub async fn set_auto_tidy(&self, on: bool) -> Result<()> {
+        otto_state::SettingsRepo::new(self.pool.clone())
+            .put(crate::retention::AUTO_TIDY_SETTING, &Value::Bool(on))
+            .await
+    }
+
     /// Is `sha` still referenced by any version or thumbnail?
     pub async fn blob_in_use(&self, sha: &str) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(

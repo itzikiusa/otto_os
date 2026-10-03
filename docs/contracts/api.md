@@ -1312,7 +1312,7 @@ viewer/editor.
 | POST /repo-rules/{id}/toggle | ws editor (Context) | `{enabled}` | `RepoRule` (enable/disable; re-materializes the workspace's rules block) |
 | DELETE /repo-rules/{id} | ws editor (Context) | — | 204 |
 | GET /reviews/{review_id}/proof-pack | ws viewer (Git) | — | `ReviewProofPack` (live-assembled: summary counts + per-finding evidence/timeline/artifacts + the repo rules from this review) |
-| POST /reviews/{review_id}/proof-pack/export | ws editor (Git) | `{format?}` | `ReviewProofPackExport` `{id, review_id, format, markdown, created_at}` (persists a markdown snapshot + ingests verified findings into memory; emits `proof_pack_exported`) |
+| POST /reviews/{review_id}/proof-pack/export | ws editor (Git) | `{format?, keep_last?}` | `ReviewProofPackExport` `{id, review_id, format, markdown, created_at}` (persists a markdown snapshot + ingests verified findings into memory; emits `proof_pack_exported`). Every snapshot is kept by default; `keep_last: N` (opt-in) then deletes all but the review's newest N snapshots |
 
 `Finding` fields: `id, review_id, workspace_id, repo_id, pr_number, fingerprint,
 severity` (`critical`\|`high`\|`medium`\|`low`\|`info`)`, category, path, line,
@@ -3376,9 +3376,11 @@ workspaces the caller can view (root: all). The library is global — a
 **Never destructive by default.** `DELETE` archives (status `archived`,
 every version kept); `?hard=true` (workspace Admin) removes the graph rows but
 never a blob. Retention: an admin's `/design/admin/prune` (dry run unless
-`apply`), plus an opt-in daily scheduled pass that only squashes `autosave`
-versions older than a day (off by default; `OTTO_DESIGN_AUTO_PRUNE=1` enables it; see
-`docs/features/design-hall.md` § Retention). The legacy import mirrors — it never moves or edits
+`apply`), plus an opt-in daily "auto-tidy" pass that only squashes `autosave`
+versions older than a week. It is a visible Settings toggle (Backup & restore →
+Design Hall storage, `PUT /design/admin/auto-tidy`), OFF by default, shown next
+to what it would reclaim; `OTTO_DESIGN_AUTO_PRUNE=0|1` hard-overrides the toggle
+(see `docs/features/design-hall.md` § Retention). The legacy import mirrors — it never moves or edits
 `product_attachments` / `canvas_scenes` rows or files.
 
 Types: `crates/otto-design/src/types.rs` ↔ `ui/src/lib/api/types.ts`
@@ -3427,8 +3429,9 @@ to (`dst_kind: "story"` — `implements` — links), sorted;
 | GET /api/v1/design/signals | design view | `?workspace_id=&artifact_id=&kind=&since=&limit=` | `DesignSignal[]` (newest first) |
 | POST /api/v1/design/signals | design edit + ws editor on the artifact | `DesignSignalReq {artifact_id, kind, version_id?, actor_kind?, session_id?, payload?}` | 201 `DesignSignal`; kinds `variant_chosen`, `variant_accepted`, `variant_rejected`, `agent_draft`, `edit_after_draft`, `review_comment`, `critique_finding`, `a11y_fix`, `brand_correction`, `rule_feedback`, `status_change`, `shipped`, `restored`, `reference_added`, `forked` (`variant_accepted` / `agent_draft` are normally server-recorded — see Design assist). The last three are client-recorded and need a payload key (400 otherwise): `restored` — `version_id` = the new head, `payload.from_version_id` = the version restored; `reference_added` — `payload.target_artifact_id` (the artifact added as a reference); `forked` — recorded on the NEW artifact, `payload.source_artifact_id` (+ optional `source_version_id`). Payload a JSON object ≤ 8 KB, ≤ 8 levels (400/413); emits `design_learning_update` |
 | POST /api/v1/design/admin/import | design admin | — | `DesignImportReport {attachments_scanned, scenes_scanned, created, synced, unchanged, skipped, links_created, errors}` — re-runs the idempotent legacy import (also runs at daemon start) |
-| POST /api/v1/design/admin/prune | design admin (+ ws admin on `artifact_id`; whole library = root) | `DesignPruneReq {artifact_id?, apply? (default false), window_secs? (default 600)}` | `DesignPruneReport {applied, artifacts_scanned, versions, blobs}` — squashes `autosave` versions to the last per window; never head, approved, link-pinned/extracted-from, published or signal-referenced versions, nor any non-autosave kind; unreferenced blobs GC'd on apply |
-| GET /api/v1/design/admin/storage | design admin + root | — | `DesignStorageReport {blob_count, blob_bytes, version_count, version_bytes, auto_prune, last_prune: {at, versions_removed, blobs_removed} \| null}` — the blob-store size gauge (files/bytes on disk after dedupe vs. bytes the version rows reference) and the scheduled retention pass |
+| POST /api/v1/design/admin/prune | design admin (+ ws admin on `artifact_id`; whole library = root) | `DesignPruneReq {artifact_id?, apply? (default false), window_secs? (default 600)}` | `DesignPruneReport {applied, artifacts_scanned, versions, blobs, reclaimable_bytes, reclaimable_blobs}` — squashes `autosave` versions to the last per window; never head, approved, link-pinned/extracted-from, published or signal-referenced versions, nor any non-autosave kind; unreferenced blobs GC'd on apply |
+| GET /api/v1/design/admin/storage | design admin + root | — | `DesignStorageReport {blob_count, blob_bytes, version_count, version_bytes, auto_prune, auto_tidy, auto_tidy_forced: bool \| null, min_age_secs, reclaimable: {versions, blobs, bytes}, last_prune: {at, versions_removed, blobs_removed} \| null}` — the blob-store size gauge (files/bytes on disk after dedupe vs. bytes the version rows reference), the auto-tidy toggle (`auto_prune` = in effect after the env override) and a dry run of what a pass would reclaim now |
+| PUT /api/v1/design/admin/auto-tidy | design admin + root | `DesignAutoTidyReq {enabled}` | `DesignStorageReport` (refreshed) — persists the opt-in auto-tidy toggle (`settings` key `design.auto_tidy`, default false); the scheduler re-reads it hourly and runs at most one pass a day |
 
 **Link extraction** (every commit; `crates/otto-design/src/extract.rs`): html/svg
 `src=`/`data=`/`poster=` → `embeds`, other attributes → `references`
@@ -3727,7 +3730,7 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 |---|---|---|---|---|
 | 115 | GET /api/v1/workspaces/{id}/proof-packs | ws viewer · ProofPack View | query `status?`, `work_item_kind?`, `work_item_id?`, `limit?` (1..500), `cursor?` | `ProofPackResp[]` newest first (`updated_at DESC, id DESC`). With `limit`, a keyset page; the `x-next-cursor` response header carries the opaque cursor for the next page (absent on the last page). Without `limit`, every pack (legacy) |
 | 116 | POST /api/v1/workspaces/{id}/proof-packs | ws editor · ProofPack Edit | CreateProofPackReq `{work_item_kind, work_item_id, title?, parent_pack_id?, repo_id?}` | ProofPackResp (`repo_id` links the pack to a repo so its proof policy applies — strengthen-only) |
-| 117 | GET /api/v1/workspaces/{id}/proof-summary | ws viewer · ProofPack View | — | ProofSummaryResp `{rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, done_score, badges[]}]}` |
+| 117 | GET /api/v1/workspaces/{id}/proof-summary | ws viewer · ProofPack View | query `work_items?` = `kind:id,kind:id,…` (≤ 1000; 400 on an unknown kind / malformed entry) | ProofSummaryResp `{rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, done_score, badges[]}]}` — with `work_items` only those work items' packs are read (index probes on `(work_item_kind, work_item_id)`; rows read = the filter, not the workspace); without it, every pack in the workspace (legacy full read). The sidebar sends the sessions it lists, incrementally |
 | 118 | GET /api/v1/proof-packs/{id} | ws viewer · ProofPack View | — | ProofPackDetailResp `{pack, badges[], artifacts[], children[], done_contract, snapshots[]}` (done_contract computed live). Each artifact's `content_ref` is cut to the preview (`PREVIEW_CAP`, 8 KiB) server-side — `truncated:true` when more is stored; fetch the full body from `/proof-artifacts/{id}/content` |
 | 119 | PATCH /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | `{title?, summary?}` | ProofPackResp |
 | 120 | DELETE /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts, snapshots, blobs) |

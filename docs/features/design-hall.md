@@ -83,16 +83,24 @@ otto.db
 ### Retention
 
 Every content save keeps a full content-addressed blob, so the store needs
-squashing. An **opt-in daily scheduled pass** (first run 10 minutes after boot) applies
-the policy below to `autosave` versions **older than a day** only — an editing
-session's recent history is never touched — then GCs unreferenced blobs.
-It is **off by default** — it deletes intermediate autosave versions, which are
-user data — and runs only when `OTTO_DESIGN_AUTO_PRUNE=1` (or `true`/`on`/`yes`)
-is set; `OTTO_DESIGN_PRUNE_WINDOW_SECS`
-(default 600) and `OTTO_DESIGN_PRUNE_MIN_AGE_SECS` (default 86400) tune it.
-`GET /design/admin/storage` (root) is the size gauge: blob files/bytes on disk,
-version rows/bytes, and the last scheduled pass. A replaced thumbnail's blob is
-GC'd immediately when nothing else references it.
+squashing. **Auto-tidy** is a daily pass that applies the policy below to
+`autosave` versions **older than a week** only — an editing session's recent
+history is never touched — then GCs unreferenced blobs.
+
+It is **opt-in and off by default**, because it deletes intermediate autosave
+versions, which are user data. Root turns it on in **Settings → Backup &
+restore → Design Hall storage**: the card shows the bytes on disk, the version
+count, and what a pass would free right now (a dry run of the same pass), and
+asks for confirmation before enabling. The toggle is persisted in the
+`settings` table (`design.auto_tidy`); the scheduler re-reads it hourly (first
+check 10 minutes after boot) and runs at most one pass a day.
+`OTTO_DESIGN_AUTO_PRUNE=0` turns it off whatever the toggle says, `=1` forces it
+on (the toggle is then shown disabled with the reason);
+`OTTO_DESIGN_PRUNE_WINDOW_SECS` (default 600) and
+`OTTO_DESIGN_PRUNE_MIN_AGE_SECS` (default 604800) tune it.
+`GET /design/admin/storage` (root) is the gauge; `PUT /design/admin/auto-tidy
+{enabled}` flips the toggle. A replaced thumbnail's blob is GC'd immediately
+when nothing else references it.
 
 `POST /design/admin/prune` (dry run unless `apply: true`) squashes `autosave`
 versions to the last one per editing window (default 10 minutes). It never

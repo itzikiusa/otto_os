@@ -15,7 +15,7 @@ use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use otto_core::api::Problem;
 use otto_core::auth::{AuthUser, RoleChecker};
@@ -289,6 +289,7 @@ pub fn router<S: DesignCtx>() -> Router<S> {
         .route("/design/admin/import", post(run_import::<S>))
         .route("/design/admin/prune", post(prune::<S>))
         .route("/design/admin/storage", get(storage::<S>))
+        .route("/design/admin/auto-tidy", put(set_auto_tidy::<S>))
         .merge(crate::brand::http::routes::<S>())
         .merge(crate::site::http::routes::<S>())
 }
@@ -1243,6 +1244,24 @@ async fn storage<S: DesignCtx>(
         )));
     }
     Ok(Json(ctx.design().storage().await?).into_response())
+}
+
+/// Flip the Settings → Design Hall auto-tidy toggle (root only, like the
+/// gauge). Opt-in: nothing is deleted until a person turns it on. Returns the
+/// refreshed gauge.
+async fn set_auto_tidy<S: DesignCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(req): Json<AutoTidyReq>,
+) -> ApiResult<Response> {
+    if !user.is_root {
+        return Err(ApiErr(Error::Forbidden(
+            "design auto-tidy is a root-only setting".into(),
+        )));
+    }
+    let svc = ctx.design();
+    svc.set_auto_tidy(req.enabled).await?;
+    Ok(Json(svc.storage().await?).into_response())
 }
 
 #[cfg(test)]
