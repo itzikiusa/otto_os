@@ -15,16 +15,23 @@
   import RecoveryTools from './RecoveryTools.svelte';
   import { gitBridge } from './gitBridge.svelte';
   import FocusView from './FocusView.svelte';
-  import PrList from './PrList.svelte';
-  import LocalReviewPanel from './LocalReviewPanel.svelte';
-  import MergeApprovalModal from './MergeApprovalModal.svelte';
-  import ConflictResolverView from './ConflictResolverView.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { toasts } from '../../lib/toast.svelte';
+
+  // Views only some visits open stay out of the Git chunk (perf R7): the PR
+  // list (+ CreatePr), the local review, the merge dialog and the conflict
+  // resolver load on first use, then mount synchronously (lazyComponent).
+  // Graph and WIP — what every visit shows — stay eager.
+  const PrListLazy = lazyComponent(() => import('./PrList.svelte'));
+  const LocalReviewLazy = lazyComponent(() => import('./LocalReviewPanel.svelte'));
+  const MergeApprovalLazy = lazyComponent(() => import('./MergeApprovalModal.svelte'));
+  const ConflictResolverLazy = lazyComponent(() => import('./ConflictResolverView.svelte'));
 
   interface Props {
     repo: Repo;
@@ -392,12 +399,16 @@
 
   <div class="rv-body">
     {#if resolving}
-      <ConflictResolverView
-        repoId={repo.id}
-        initialFiles={conflictSeed.files}
-        initialSource={conflictSeed.source}
-        initialOp={mergeOp}
-        onleave={leaveResolver}
+      <LazyMount
+        lazy={ConflictResolverLazy}
+        what="the conflict resolver"
+        props={{
+          repoId: repo.id,
+          initialFiles: conflictSeed.files,
+          initialSource: conflictSeed.source,
+          initialOp: mergeOp,
+          onleave: leaveResolver,
+        }}
       />
     {:else if effTab === 'prs'}
       {#if repo.forge === null && !repo.remote_url}
@@ -421,11 +432,11 @@
           body="Otto supports GitHub, Bitbucket Cloud, and GitLab. This repository’s remote isn’t one of them, so there’s no pull request view here."
         />
       {:else}
-        <PrList repoId={repo.id} />
+        <LazyMount lazy={PrListLazy} what="pull requests" props={{ repoId: repo.id }} />
       {/if}
     {:else if effTab === 'review'}
       <div class="rv-tab-scroll">
-        <LocalReviewPanel repoId={repo.id} />
+        <LazyMount lazy={LocalReviewLazy} what="the local review" variant="panel" props={{ repoId: repo.id }} />
       </div>
     {:else if effTab === 'focus'}
       <FocusView />
@@ -492,13 +503,18 @@
 {/if}
 
 {#if mergeReq}
-  <MergeApprovalModal
-    repoId={repo.id}
-    source={mergeReq.source}
-    target={mergeReq.target}
-    onclose={() => (mergeReq = null)}
-    onmerged={onMerged}
-    onconflicts={onConflicts}
+  <LazyMount
+    lazy={MergeApprovalLazy}
+    what="the merge dialog"
+    quiet
+    props={{
+      repoId: repo.id,
+      source: mergeReq.source,
+      target: mergeReq.target,
+      onclose: () => (mergeReq = null),
+      onmerged: onMerged,
+      onconflicts: onConflicts,
+    }}
   />
 {/if}
 
