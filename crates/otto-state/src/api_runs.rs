@@ -281,7 +281,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::raw_sql(include_str!(
-            "../migrations/0166_api_automation_run_steps.sql"
+            "../migrations/0157_api_automation_run_steps.sql"
         ))
         .execute(&pool)
         .await
@@ -349,7 +349,7 @@ mod tests {
             .unwrap();
         for sql in [
             include_str!("../migrations/0128_api_automation_runs.sql"),
-            include_str!("../migrations/0166_api_automation_run_steps.sql"),
+            include_str!("../migrations/0157_api_automation_run_steps.sql"),
         ] {
             sqlx::raw_sql(sql).execute(&pool).await.unwrap();
         }
