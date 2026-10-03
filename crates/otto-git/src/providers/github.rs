@@ -136,9 +136,41 @@ impl Github {
         Ok(v)
     }
 
+    /// Where the review-thread memo lives in the GET cache: a synthetic URL
+    /// under the repo's REST scope, so any write to the repo (an inline
+    /// comment, a review) clears it with the rest of the repo's reads.
+    fn threads_memo_url(&self, r: &RemoteRef, number: u64) -> String {
+        format!(
+            "{}/repos/{}/{}/pulls/{number}/review-threads#graphql",
+            self.base, r.owner, r.repo
+        )
+    }
+
     /// Review threads with resolution state — REST doesn't expose `isResolved`,
     /// so this is the one GraphQL read. Returns the `reviewThreads.nodes` array.
+    /// Memoised for the GET cache's short TTL (a PR re-open, or the detail in
+    /// two windows, costs one POST); a resolve/unresolve or any REST write to
+    /// the repo drops it.
     async fn fetch_review_threads(&self, r: &RemoteRef, number: u64) -> Result<Vec<Value>> {
+        let memo_url = self.threads_memo_url(r, number);
+        let auth = format!("Bearer {}", self.token);
+        if let Some(body) = crate::providers::client::memo_read(&memo_url, &auth) {
+            if let Ok(nodes) = serde_json::from_str::<Vec<Value>>(&body) {
+                return Ok(nodes);
+            }
+        }
+        let nodes = self.fetch_review_threads_uncached(r, number).await?;
+        if let Ok(body) = serde_json::to_string(&nodes) {
+            crate::providers::client::memo_store(&memo_url, &auth, body);
+        }
+        Ok(nodes)
+    }
+
+    async fn fetch_review_threads_uncached(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+    ) -> Result<Vec<Value>> {
         const Q: &str = "query($owner:String!,$name:String!,$number:Int!){\
             repository(owner:$owner,name:$name){pullRequest(number:$number){\
             reviewThreads(first:100){nodes{id isResolved \
@@ -862,8 +894,8 @@ impl super::GitProvider for Github {
     /// is the reviewThread node id from `get_pr` (not a REST comment id).
     async fn resolve_pr_thread(
         &self,
-        _r: &RemoteRef,
-        _number: u64,
+        r: &RemoteRef,
+        number: u64,
         thread_id: &str,
         resolved: bool,
     ) -> Result<()> {
@@ -872,9 +904,16 @@ impl super::GitProvider for Github {
         } else {
             "mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{id}}}"
         };
-        self.graphql(m, json!({ "id": thread_id }))
+        let out = self
+            .graphql(m, json!({ "id": thread_id }))
             .await
-            .map(|_| ())
+            .map(|_| ());
+        // GraphQL writes skip the automatic scope clear (the endpoint also
+        // serves reads): drop this repo's cached reads, the thread memo with
+        // them, so the next PR read shows the new state. Even on an error —
+        // the mutation may have landed.
+        crate::providers::client::invalidate_scope(&self.threads_memo_url(r, number));
+        out
     }
 
     async fn approve(&self, r: &RemoteRef, number: u64) -> Result<()> {

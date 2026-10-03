@@ -1029,4 +1029,96 @@ mod cached_reads {
         let second = server.received_requests().await.unwrap().len();
         assert_eq!(second, first, "a re-open within the TTL hits the cache");
     }
+
+    #[tokio::test]
+    async fn concurrent_cold_reads_share_one_request() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(150))
+                    .set_body_json(json!([pr(1)])),
+            )
+            .mount(&server)
+            .await;
+        let r = rr();
+        let reads = (0..4).map(|_| gh.list_prs(&r, PrState::Open, 1, 50));
+        for r in futures_util::future::join_all(reads).await {
+            assert_eq!(r.unwrap().items.len(), 1);
+        }
+        assert_eq!(
+            list_gets(&server).await,
+            1,
+            "four windows opening the list on a cold cache cost one GET"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_thread_probe_is_memoised_until_a_resolve() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        // One inline comment, so the GraphQL resolution probe runs.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "id": 11, "body": "nit", "user": { "login": "rev" },
+                "path": "a.rs", "line": 3, "created_at": "2026-09-01T10:00:00Z",
+            }])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/repos/acme/app/(issues/7/comments|pulls/7/reviews)$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/repos/acme/app/commits/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "repository": { "pullRequest": { "reviewThreads": { "nodes": [
+                    { "id": "T1", "isResolved": false,
+                      "comments": { "nodes": [ { "databaseId": 11 } ] } }
+                ] } } } }
+            })))
+            .mount(&server)
+            .await;
+        let posts = || async {
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/graphql")
+                .count()
+        };
+
+        gh.get_pr(&rr(), 7).await.unwrap();
+        assert_eq!(posts().await, 1);
+        gh.get_pr(&rr(), 7).await.unwrap();
+        assert_eq!(
+            posts().await,
+            1,
+            "a re-open within the TTL makes no GraphQL POST"
+        );
+
+        gh.resolve_pr_thread(&rr(), 7, "T1", true).await.unwrap();
+        assert_eq!(posts().await, 2, "the resolve mutation");
+        gh.get_pr(&rr(), 7).await.unwrap();
+        assert_eq!(posts().await, 3, "the resolve dropped the memo");
+    }
 }

@@ -32,6 +32,9 @@
 //! and an entry older than [`CACHE_STALE`] reads as a miss — a process-wide
 //! cache keyed by (url, credential) must not grow for the life of the daemon.
 //!
+//! Concurrent misses on one key share a single request ([`page_flights`]):
+//! N windows opening one PR on a cold cache cost one GET, not N.
+//!
 //! Callers that need pagination or mutation continue to use `send` / `json` /
 //! `text` / `ok` directly; those paths are unaffected.
 
@@ -193,6 +196,44 @@ pub(crate) fn invalidate_scope(url: &str) {
     // A repo's own URL without the trailing slash (`GET /repos/o/r`) too.
     let bare = scope.trim_end_matches('/');
     guard.retain(|_, e| !(e.url.starts_with(&scope) || e.url == bare));
+}
+
+/// The network leg of a cached GET, shared by concurrent misses on one cache
+/// key (url + credential). Abort-safe: when every waiter is gone the request
+/// is dropped.
+fn page_flights() -> &'static crate::diff_cache::SingleFlight<(String, Option<String>)> {
+    static F: OnceLock<crate::diff_cache::SingleFlight<(String, Option<String>)>> = OnceLock::new();
+    F.get_or_init(crate::diff_cache::SingleFlight::new)
+}
+
+/// A read that is not a GET (GitHub's GraphQL review-thread probe), memoised
+/// in the GET cache under a synthetic repo-scoped `url`, so it shares the
+/// byte budget, the [`SHORT_TTL`] and — through [`invalidate_scope`] — every
+/// write to that repository. `None` when absent, older than the TTL, or the
+/// cache is off.
+pub(crate) fn memo_read(url: &str, auth: &str) -> Option<String> {
+    if !cache_enabled() {
+        return None;
+    }
+    let (_, body, at) = read_cached(&cache_key(url, auth))?;
+    (at.elapsed() < SHORT_TTL).then_some(body)
+}
+
+/// Store a [`memo_read`] body.
+pub(crate) fn memo_store(url: &str, auth: &str, body: String) {
+    if !cache_enabled() {
+        return;
+    }
+    insert_cached(
+        cache_key(url, auth),
+        CachedGet {
+            etag: None,
+            body,
+            fetched_at: Instant::now(),
+            url: url.to_string(),
+            next: None,
+        },
+    );
 }
 
 /// Lock-free body of [`read_cached`] (see [`insert_into`]).
@@ -367,6 +408,7 @@ fn rate_limited_err(provider: &str, wait: Duration) -> Error {
 // Http helper
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct Http {
     client: reqwest::Client,
     provider: &'static str,
@@ -553,6 +595,36 @@ impl Http {
                 .map_err(|e| Error::Upstream(format!("{}: body read: {e}", self.provider)))?;
             return Ok((body, next));
         }
+        // -- Read the cache (lock scope: just the lookup) -------------------
+        // Still within TTL → return without hitting the network. With an
+        // ETag the revalidation is cheap (and free of rate-limit cost on
+        // GitHub), but a burst inside the TTL still needs no request.
+        let cached = read_cached(&key);
+        if let Some((_, body, fetched_at)) = &cached {
+            if fetched_at.elapsed() < SHORT_TTL {
+                return Ok((body.clone(), cached_next(&key)));
+            }
+        }
+        // -- Miss / stale: one network leg per key, however many callers ----
+        let this = self.clone();
+        let flight_key = key.clone();
+        page_flights()
+            .run(&flight_key, move || async move {
+                this.fetch_page(req, url, key, cached).await
+            })
+            .await
+    }
+
+    /// The network leg of [`get_cached_page`](Self::get_cached_page): a
+    /// conditional GET when the stale entry has an ETag (`304` → the cached
+    /// body), otherwise a plain one; the result is stored.
+    async fn fetch_page(
+        &self,
+        req: reqwest::Request,
+        url: String,
+        key: String,
+        cached: Option<(Option<String>, String, Instant)>,
+    ) -> Result<(String, Option<String>)> {
         let rebuild = |validator: Option<&str>| {
             let mut b = self.client.get(&url);
             for (name, value) in req.headers() {
@@ -564,33 +636,23 @@ impl Http {
             b
         };
 
-        // -- Read the cache (lock scope: just the lookup) -------------------
-        let cached = read_cached(&key);
         let mut validator = None;
-        if let Some((etag, body, fetched_at)) = cached {
-            // Still within TTL → return without hitting the network. With an
-            // ETag the revalidation is cheap (and free of rate-limit cost on
-            // GitHub), but a burst inside the TTL still needs no request.
-            if fetched_at.elapsed() < SHORT_TTL {
-                return Ok((body, cached_next(&key)));
+        if let Some((Some(tag), body, _)) = cached {
+            // Same retry / rate-limit classification as `send`, with 304
+            // surfaced as success.
+            let resp = self.send_checked(rebuild(Some(&tag))).await?;
+            if resp.status().as_u16() == 304 {
+                // Not Modified: refresh fetched_at, return cached body.
+                let mut guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
+                let next = guard.get_mut(&key).and_then(|entry| {
+                    entry.fetched_at = Instant::now();
+                    entry.next.clone()
+                });
+                return Ok((body, next));
             }
-            if let Some(tag) = etag {
-                // Same retry / rate-limit classification as `send`, with 304
-                // surfaced as success.
-                let resp = self.send_checked(rebuild(Some(&tag))).await?;
-                if resp.status().as_u16() == 304 {
-                    // Not Modified: refresh fetched_at, return cached body.
-                    let mut guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
-                    let next = guard.get_mut(&key).and_then(|entry| {
-                        entry.fetched_at = Instant::now();
-                        entry.next.clone()
-                    });
-                    return Ok((body, next));
-                }
-                validator = Some(resp);
-            }
-            // TTL elapsed, no ETag → unconditional GET (below).
+            validator = Some(resp);
         }
+        // TTL elapsed and no ETag, or no usable entry → unconditional GET.
 
         // -- A 200 from the conditional GET, or no usable entry -------------
         // No validator is sent on the fresh GET, so `send_checked` can only
