@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
+import * as livePaths from '../src/lib/gitLivePaths.ts';
 
 // `repo_status_changed` (otto-git watch.rs) → git.applyRepoChanged(): the Git
 // page re-reads local status right away instead of on the next auto-fetch.
@@ -27,6 +28,7 @@ function fixture() {
       return result.promise;
     } } },
     '../loadError': { loadErrorText: (e: unknown) => (e instanceof Error ? e.message : String(e)) },
+    '../gitLivePaths': livePaths,
   }, { document, setTimeout, clearTimeout });
   return { git, gets, document, listeners };
 }
@@ -77,4 +79,29 @@ test('a hidden window waits and reads once when visible again', async () => {
   f.listeners.get('visibilitychange')?.();
   assert.equal(f.gets.length, 1);
   assert.equal(f.listeners.has('visibilitychange'), false);
+});
+
+test('the open diff learns which paths a change touched, unioned across a coalesced burst', async () => {
+  const f = fixture();
+  f.git.openRepoIds = ['r1'];
+  f.git.applyRepoChanged('r1', ['src/a.ts']);
+  f.gets[0].result.resolve(status(1));
+  await flush();
+  assert.equal(f.git.liveTouches('r1', 'src/a.ts'), true);
+  assert.equal(f.git.liveTouches('r1', 'src/b.ts'), false, 'another file skips its re-read');
+
+  // Two events while a read is in flight: the follow-up read covers both.
+  f.git.applyRepoChanged('r1', ['src/b.ts']);
+  f.git.applyRepoChanged('r1', ['src/c.ts']);
+  f.gets[1].result.resolve(status(1));
+  await flush();
+  f.gets[2].result.resolve(status(1));
+  await flush();
+  assert.equal(f.git.liveTouches('r1', 'src/c.ts'), true);
+
+  // No paths (index/HEAD moved): every open diff re-reads.
+  f.git.applyRepoChanged('r1');
+  f.gets[3].result.resolve(status(1));
+  await flush();
+  assert.equal(f.git.liveTouches('r1', 'anything.ts'), true);
 });

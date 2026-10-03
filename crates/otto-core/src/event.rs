@@ -6,6 +6,10 @@ use crate::domain::{AgentTask, Notice, Session, SessionStatus, TrailEvent};
 use crate::Id;
 use std::sync::Arc;
 
+/// Most worktree paths one `RepoStatusChanged` lists before it falls back to
+/// "unknown" (`paths: None`).
+pub const REPO_CHANGED_MAX_PATHS: usize = 64;
+
 /// Daemon-wide event. Serialized as JSON with a `type` tag, one per WS message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -542,7 +546,19 @@ pub enum Event {
     /// the repo's local status instead of waiting for the next auto-fetch.
     /// Debounced per repo; only repos a client recently asked about are
     /// watched (`otto-git` `watch.rs`).
-    RepoStatusChanged { workspace_id: Id, repo_id: Id },
+    ///
+    /// `paths`: the repo-relative worktree paths (files or directories) the
+    /// burst touched, so an open diff re-reads only when ITS file changed.
+    /// Absent means "unknown — assume anything": more than
+    /// [`REPO_CHANGED_MAX_PATHS`] paths, a dropped-events rescan, or a change
+    /// inside `.git` (index / HEAD / branch refs alter every file's diff).
+    /// Present and empty: only status-level state moved (e.g. remote refs).
+    RepoStatusChanged {
+        workspace_id: Id,
+        repo_id: Id,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paths: Option<Vec<String>>,
+    },
     /// A browser tab was created, navigated, or had its mode changed. The open
     /// Browser page re-fetches (or applies in place) the matching tab. `tab` is
     /// the serialized `otto_state::browser::BrowserTab` (opaque here — otto-core
@@ -912,6 +928,7 @@ mod tests {
             Event::RepoStatusChanged {
                 workspace_id: "w".into(),
                 repo_id: "r".into(),
+                paths: Some(vec!["src/a.rs".into()]),
             },
             Event::McpApprovalChanged {
                 approval_id: None,

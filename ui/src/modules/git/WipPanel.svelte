@@ -16,7 +16,7 @@
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { git } from '../../lib/stores/git.svelte';
+  import { autoFetchAllowed, git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import DiffViewer from './DiffViewer.svelte';
   import { repoDiffFileLoader } from './diff-load';
@@ -187,13 +187,12 @@
   // A live on-disk change (`repo_status_changed`) re-reads the open file's
   // diff in place: the change list can stay identical (the file was already
   // modified) while its content moved on. No blanking — the old diff stays
-  // until the new one lands.
-  $effect(() => {
-    const rev = git.liveRev[repoId] ?? 0;
-    if (rev === 0) return;
-    const path = untrack(() => selectedPath);
-    const target = untrack(() => selTarget);
-    if (path === null) return;
+  // until the new one lands. Only when the change touched THIS file (the
+  // event's `paths`; unknown → yes), and only in the window the user is in:
+  // a visible-but-unfocused window marks the diff stale and catches up once
+  // on its next focus/visibility instead of re-reading per save.
+  let diffLiveStale = false;
+  function refetchOpenDiff(path: string, target: typeof selTarget): () => void {
     const ctl = new AbortController();
     void api
       .get<DiffResp>(`/repos/${repoId}/diff?target=${target}&path=${encodeURIComponent(path)}`, ctl.signal)
@@ -207,6 +206,42 @@
         /* keep the diff on screen; the next change or a reselect retries */
       });
     return () => ctl.abort();
+  }
+  $effect(() => {
+    const rev = git.liveRev[repoId] ?? 0;
+    if (rev === 0) return;
+    const path = untrack(() => selectedPath);
+    const target = untrack(() => selTarget);
+    if (path === null || !untrack(() => git.liveTouches(repoId, path))) return;
+    if (!autoFetchAllowed()) {
+      diffLiveStale = true;
+      return;
+    }
+    diffLiveStale = false;
+    return refetchOpenDiff(path, target);
+  });
+  $effect(() => {
+    // Picking another file loads it fresh, so a pending catch-up is moot.
+    void selectedPath;
+    diffLiveStale = false;
+  });
+  $effect(() => {
+    let cancel: (() => void) | null = null;
+    const catchUp = (): void => {
+      if (!diffLiveStale || !autoFetchAllowed()) return;
+      diffLiveStale = false;
+      const path = selectedPath;
+      if (path === null) return;
+      cancel?.();
+      cancel = refetchOpenDiff(path, selTarget);
+    };
+    window.addEventListener('focus', catchUp);
+    document.addEventListener('visibilitychange', catchUp);
+    return () => {
+      window.removeEventListener('focus', catchUp);
+      document.removeEventListener('visibilitychange', catchUp);
+      cancel?.();
+    };
   });
   /** Over-cap files ("Load anyway") re-fetch through the same target. */
   const loadWipFile = $derived(repoDiffFileLoader(repoId, selTarget));

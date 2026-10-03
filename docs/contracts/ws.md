@@ -1373,7 +1373,7 @@ repository's working tree, index or refs change on disk: an editor save, a CLI
 `git add`, commit, checkout or branch update.
 
 ```json
-{ "type": "repo_status_changed", "workspace_id": "<Id>", "repo_id": "<Id>" }
+{ "type": "repo_status_changed", "workspace_id": "<Id>", "repo_id": "<Id>", "paths": ["src/a.rs"] }
 ```
 
 - What is watched: a repo becomes watched on `GET /repos/{id}/status` or
@@ -1389,16 +1389,25 @@ repository's working tree, index or refs change on disk: an editor save, a CLI
     `info/exclude`.
 - Timing: one event per burst, 150 ms after the first change, and at most one
   per 400 ms per repo. The last change of a burst is never dropped.
-- Payload: carries no paths. Clients re-read `GET /repos/{id}/status`, which
+- Payload: `paths` (optional) lists the repo-relative worktree paths (files or
+  directories) the burst touched, deduped. It is **absent** when the daemon
+  can't tell: more than 64 paths, a dropped-events rescan, or a change inside
+  `.git` that can alter every file's diff (`index`, `HEAD`, branch refs,
+  merge/rebase state). It is present and **empty** when only remote-tracking
+  refs or tags moved. Clients re-read `GET /repos/{id}/status` either way; it
   is local and lock-free (`GIT_OPTIONAL_LOCKS=0`), so it can't retrigger the
   watcher.
 - Scope: `Workspace`. The status read applies the per-repo role check.
 - UI routing: `events.svelte.ts` → `git.applyRepoChanged()`.
   - Refresh: the store re-reads status for any repo it shows, one read at a
     time per repo. A hidden window reads once, when it becomes visible again.
-  - Diff: the store bumps `git.liveRev[repo]`, and the WIP panel re-reads the
-    open file's diff in place.
-- TypeScript type: `{ type: 'repo_status_changed'; workspace_id: Id; repo_id: Id }`.
+  - Diff: the store unions the `paths` of coalesced events into
+    `git.liveChanged[repo]` and bumps `git.liveRev[repo]`. The WIP panel
+    re-reads the open file's diff in place only when that set is unknown or
+    contains the file (or a parent directory), and only in the focused window:
+    a visible but unfocused window marks the diff stale and re-reads it once
+    on its next focus/visibility.
+- TypeScript type: `{ type: 'repo_status_changed'; workspace_id: Id; repo_id: Id; paths?: string[] }`.
 
 ### `transcript_appended` / `transcript_live` / `artifact_added` / `history_index_progress`
 

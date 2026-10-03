@@ -736,7 +736,7 @@ class EventsClient {
           canvasRefsBus.apply(parsed.session_id);
         } else if (parsed.type === 'repo_status_changed') {
           // A watched repo changed on disk: the Git page re-reads its status.
-          git.applyRepoChanged(parsed.repo_id);
+          git.applyRepoChanged(parsed.repo_id, parsed.paths);
         } else if (parsed.type === 'mockup_updated') {
           // Live design edits: the arena's Assistant preview + the open artifact
           // reload. `content` is an explicit null for binary / oversized payloads
