@@ -1220,15 +1220,147 @@ async fn next_evict(rx: &mut Option<broadcast::Receiver<()>>) {
     }
 }
 
-/// Keystroke frames one connection may have queued for delivery.
-const INPUT_BACKLOG: usize = 256;
+/// Bytes of keystrokes / pastes one connection may have queued for the PTY
+/// (perf 01 N7). Past this the socket loop stops READING client frames until
+/// the writer drains — TCP backpressure to the sender — instead of dropping
+/// input. Bounded by bytes, not frames: 256 one-byte keystrokes behind a slow
+/// child used to overflow a frame-count queue and lose the rest of the line.
+const INPUT_BUDGET_BYTES: usize = 1024 * 1024;
 
-/// Per-connection input task (perf 01 F10): delivers `input` frames to the
-/// PTY in order, off the socket's `select!` loop, and reports each outcome
-/// back (`Err` = the message for the one-per-stretch `input_failed` notice).
-/// Successful explicit typing claims size authority, as before. Ends when
-/// the connection drops its sender.
-#[allow(clippy::type_complexity)]
+/// Upper bound on one coalesced PTY write: the writer joins consecutive
+/// queued frames of the same kind up to this many bytes per `human_input`.
+const INPUT_COALESCE_BYTES: usize = 64 * 1024;
+
+/// One queued `input` frame. `cost` is the budget it holds (released after
+/// the write); `prev_owner` is the size owner its optimistic authority claim
+/// replaced (user typing only), restored if the write fails.
+struct InputJob {
+    bytes: Vec<u8>,
+    user: bool,
+    cost: u32,
+    prev_owner: Option<u64>,
+}
+
+/// Per-connection input queue (perf 01 F10 + N7): `input` frames are written
+/// to the PTY in order on their own task, off the socket's `select!` loop, so
+/// a paste into a TUI that is slow to read its tty no longer freezes output.
+/// The queue never drops: it is bounded by [`INPUT_BUDGET_BYTES`], and a frame
+/// that does not fit waits (the loop parks it and stops reading the socket).
+struct InputQueue {
+    tx: tokio::sync::mpsc::UnboundedSender<InputJob>,
+    budget: Arc<tokio::sync::Semaphore>,
+}
+
+impl InputQueue {
+    /// Budget a frame of `len` bytes holds. A frame larger than the whole
+    /// budget holds all of it (it waits for an empty queue, then goes alone).
+    fn cost(len: usize) -> u32 {
+        len.clamp(1, INPUT_BUDGET_BYTES) as u32
+    }
+
+    /// Queue a frame if its budget is free now; `Err` hands it back to park.
+    fn try_push(
+        &self,
+        bytes: Vec<u8>,
+        user: bool,
+        prev_owner: Option<u64>,
+    ) -> Result<(), InputJob> {
+        let cost = Self::cost(bytes.len());
+        let job = InputJob {
+            bytes,
+            user,
+            cost,
+            prev_owner,
+        };
+        match self.budget.try_acquire_many(cost) {
+            Ok(permit) => {
+                permit.forget();
+                self.send(job);
+                Ok(())
+            }
+            Err(_) => Err(job),
+        }
+    }
+
+    /// Wait until `cost` bytes of budget are free and take them. Cancel-safe
+    /// (a dropped wait holds nothing), so it can sit in a `select!` arm.
+    async fn reserve(budget: Arc<tokio::sync::Semaphore>, cost: u32) {
+        if let Ok(permit) = budget.acquire_many_owned(cost).await {
+            permit.forget();
+        }
+    }
+
+    /// Hand a job whose budget is already reserved to the writer.
+    fn send(&self, job: InputJob) {
+        // Fails only once the writer task ended (connection teardown).
+        let _ = self.tx.send(job);
+    }
+}
+
+/// Spawn the writer behind an [`InputQueue`]. `write` delivers one (possibly
+/// coalesced) chunk; `revert` undoes a failed chunk's optimistic size claim.
+/// Each outcome is reported on the returned receiver (`Err` = the message for
+/// the one-per-stretch `input_failed` notice). Ends when the queue is dropped.
+fn spawn_input_queue<W, Fut, R>(
+    write: W,
+    revert: R,
+) -> (
+    InputQueue,
+    tokio::sync::mpsc::Receiver<std::result::Result<(), String>>,
+)
+where
+    W: Fn(Vec<u8>, bool) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = std::result::Result<(), String>> + Send,
+    R: Fn(Option<u64>) + Send + 'static,
+{
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<InputJob>();
+    let budget = Arc::new(tokio::sync::Semaphore::new(INPUT_BUDGET_BYTES));
+    let (res_tx, res_rx) = tokio::sync::mpsc::channel(64);
+    let task_budget = budget.clone();
+    tokio::spawn(async move {
+        let mut carry: Option<InputJob> = None;
+        loop {
+            let first = match carry.take() {
+                Some(job) => job,
+                None => match rx.recv().await {
+                    Some(job) => job,
+                    None => break,
+                },
+            };
+            // Coalesce whatever queued up behind it while the last write ran:
+            // a burst of keystrokes becomes one PTY write, not N lock round
+            // trips. Only frames of the same kind join (an emulator reply is
+            // never billed as typing), and order is kept.
+            let user = first.user;
+            let prev_owner = first.prev_owner;
+            let mut cost = first.cost;
+            let mut bytes = first.bytes;
+            while bytes.len() < INPUT_COALESCE_BYTES {
+                match rx.try_recv() {
+                    Ok(job) if job.user == user => {
+                        bytes.extend_from_slice(&job.bytes);
+                        cost += job.cost;
+                    }
+                    Ok(job) => {
+                        carry = Some(job);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            let res = write(bytes, user).await;
+            task_budget.add_permits(cost as usize);
+            if res.is_err() && user {
+                revert(prev_owner);
+            }
+            // Outcomes only drive a notice: never block on a busy loop.
+            let _ = res_tx.try_send(res);
+        }
+    });
+    (InputQueue { tx, budget }, res_rx)
+}
+
+/// [`spawn_input_queue`] wired to the session manager for one connection.
 fn spawn_input_writer<S: SessionsCtx>(
     ctx: S,
     session_id: Id,
@@ -1236,34 +1368,40 @@ fn spawn_input_writer<S: SessionsCtx>(
     scoped: bool,
     conn_id: u64,
 ) -> (
-    tokio::sync::mpsc::Sender<(Vec<u8>, bool)>,
+    InputQueue,
     tokio::sync::mpsc::Receiver<std::result::Result<(), String>>,
 ) {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, bool)>(INPUT_BACKLOG);
-    let (res_tx, res_rx) = tokio::sync::mpsc::channel(INPUT_BACKLOG);
-    tokio::spawn(async move {
-        while let Some((bytes, user_input)) = rx.recv().await {
-            let started = std::time::Instant::now();
-            let res = ctx
+    let revert_ctx = ctx.clone();
+    let revert_id = session_id.clone();
+    spawn_input_queue(
+        move |bytes: Vec<u8>, user_input: bool| {
+            let ctx = ctx.clone();
+            let session_id = session_id.clone();
+            let user = user.clone();
+            async move {
+                let started = std::time::Instant::now();
+                let res = ctx
+                    .manager()
+                    .human_input(&session_id, &user, scoped, user_input, &bytes)
+                    .await;
+                let elapsed = started.elapsed();
+                if elapsed > INPUT_SLOW {
+                    tracing::debug!(
+                        session = %session_id,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        bytes = bytes.len(),
+                        "terminal ws: slow PTY write (child not draining its tty?)"
+                    );
+                }
+                res.map_err(|e| e.to_string())
+            }
+        },
+        move |prev| {
+            revert_ctx
                 .manager()
-                .human_input(&session_id, &user, scoped, user_input, &bytes)
-                .await;
-            let elapsed = started.elapsed();
-            if elapsed > INPUT_SLOW {
-                tracing::debug!(
-                    session = %session_id,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "terminal ws: slow PTY write (child not draining its tty?)"
-                );
-            }
-            if res.is_ok() && user_input {
-                ctx.manager().note_input_authority(&session_id, conn_id);
-            }
-            // Outcomes only drive a notice: never block on a busy loop.
-            let _ = res_tx.try_send(res.map_err(|e| e.to_string()));
-        }
-    });
-    (tx, res_rx)
+                .revert_input_authority(&revert_id, conn_id, prev)
+        },
+    )
 }
 
 async fn serve_terminal<S: SessionsCtx>(
@@ -1366,13 +1504,16 @@ async fn serve_terminal<S: SessionsCtx>(
     };
     let input_user = live_auth.user.id.clone();
     let input_scoped = live_auth.scoped;
-    let (input_tx, mut input_res_rx) = spawn_input_writer(
+    let (input_q, mut input_res_rx) = spawn_input_writer(
         ctx.clone(),
         session_id.clone(),
         input_user.clone(),
         input_scoped,
         conn_id,
     );
+    // An input frame waiting for byte budget (perf 01 N7); while set, the
+    // socket is not read — backpressure instead of dropping keystrokes.
+    let mut pending_input: Option<InputJob> = None;
     let mut can_rx = shared_reauth(&ctx, &session_id, live_auth, reauth_period);
     // Joining a pass that already narrowed: apply its latest verdict now.
     can_input &= *can_rx.borrow_and_update();
@@ -1544,7 +1685,19 @@ async fn serve_terminal<S: SessionsCtx>(
             // NOTE: no auth work here. `can_input` is whatever the attach
             // decided, narrowed by the re-auth task's watch above — a keystroke
             // must never wait on the state DB (investigation H2).
-            msg = socket.recv() => {
+            // A parked input frame (budget full): wait for the writer to free
+            // room, then queue it. Output, acks-in-flight and the other arms
+            // keep running; only reading NEW client frames pauses (below).
+            _ = InputQueue::reserve(
+                input_q.budget.clone(),
+                pending_input.as_ref().map_or(1, |j| j.cost),
+            ), if pending_input.is_some() => {
+                if let Some(job) = pending_input.take() {
+                    input_q.send(job);
+                }
+            }
+
+            msg = socket.recv(), if pending_input.is_none() => {
                 let Some(Ok(msg)) = msg else { return };
                 let Message::Text(text) = msg else {
                     if matches!(msg, Message::Close(_)) { return; }
@@ -1616,17 +1769,20 @@ async fn serve_terminal<S: SessionsCtx>(
                             // slow to read its tty no longer freezes this
                             // loop's output, acks and resizes. Order is kept
                             // (one queue); results come back on `input_res_rx`.
-                            if input_tx.try_send((bytes, user)).is_err() && !warned_input {
-                                warned_input = true;
-                                let frame = serde_json::json!({
-                                    "type": "error",
-                                    "code": "input_failed",
-                                    "message": "session is not accepting input (input backlog full — the process is not reading its terminal)",
-                                })
-                                .to_string();
-                                if socket.send(Message::Text(frame.into())).await.is_err() {
-                                    return;
-                                }
+                            // Typing claims size authority NOW (perf 01 N7),
+                            // not when the write lands: a `resize` right behind
+                            // the first keystroke must see this viewer as owner.
+                            // A failed write reverts it.
+                            let prev_owner = if user {
+                                ctx.manager().claim_input_authority(&session_id, conn_id)
+                            } else {
+                                None
+                            };
+                            // Never dropped (N7): a frame that does not fit the
+                            // byte budget is parked and the loop stops reading
+                            // the socket until the writer frees room.
+                            if let Err(job) = input_q.try_push(bytes, user, prev_owner) {
+                                pending_input = Some(job);
                             }
                         }
                     }
@@ -2994,5 +3150,160 @@ mod tests {
         assert_eq!(requested_history(0), DEFAULT_ATTACH_HISTORY_LINES);
         assert_eq!(requested_history(2000), 2000);
         assert_eq!(requested_history(10_000), DEFAULT_ATTACH_HISTORY_LINES);
+    }
+}
+
+#[cfg(test)]
+mod input_queue_tests {
+    //! Perf 01 N7: the per-connection input queue never loses keystrokes. It
+    //! coalesces what queued behind a slow write and bounds the backlog by
+    //! BYTES with backpressure, where round 1 dropped every frame past 256.
+
+    use super::*;
+    use std::sync::Mutex;
+
+    type Writes = Arc<Mutex<Vec<(Vec<u8>, bool)>>>;
+    type Reverts = Arc<Mutex<Vec<Option<u64>>>>;
+    type Results = tokio::sync::mpsc::Receiver<std::result::Result<(), String>>;
+
+    /// A queue whose writer blocks until `gate` has a permit per write.
+    fn gated(gate: Arc<Semaphore>, fail: bool) -> (InputQueue, Results, Writes, Reverts) {
+        let writes: Writes = Arc::default();
+        let reverts: Reverts = Arc::default();
+        let (w, r) = (writes.clone(), reverts.clone());
+        let (q, res) = spawn_input_queue(
+            move |bytes: Vec<u8>, user: bool| {
+                let gate = gate.clone();
+                let w = w.clone();
+                async move {
+                    gate.acquire().await.unwrap().forget();
+                    w.lock().unwrap().push((bytes, user));
+                    if fail {
+                        Err("not live".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            move |prev| r.lock().unwrap().push(prev),
+        );
+        (q, res, writes, reverts)
+    }
+
+    /// What the socket loop does per frame: queue it, or park it and wait.
+    async fn push(q: &InputQueue, bytes: Vec<u8>, user: bool, prev: Option<u64>) {
+        if let Err(job) = q.try_push(bytes, user, prev) {
+            InputQueue::reserve(q.budget.clone(), job.cost).await;
+            q.send(job);
+        }
+    }
+
+    async fn settle(writes: &Writes, total: usize) {
+        for _ in 0..500 {
+            if writes
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|w| w.0.len())
+                .sum::<usize>()
+                >= total
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("writer never delivered {total} bytes");
+    }
+
+    #[tokio::test]
+    async fn thousands_of_keystrokes_behind_a_stuck_write_are_all_delivered_in_order() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (q, _res, writes, _) = gated(gate.clone(), false);
+        // 5000 one-byte keystrokes while the child is not reading (the first
+        // write is stuck): 20× the old 256-frame cap. None may be dropped.
+        let expected: Vec<u8> = (0..5000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        for b in &expected {
+            push(&q, vec![*b], true, None).await;
+        }
+        gate.add_permits(Semaphore::MAX_PERMITS / 2);
+        settle(&writes, expected.len()).await;
+        let writes = writes.lock().unwrap();
+        let got: Vec<u8> = writes.iter().flat_map(|w| w.0.clone()).collect();
+        assert_eq!(got, expected, "every keystroke arrives, in order");
+        // Coalesced: the stuck first write, then the backlog in few chunks.
+        assert!(
+            writes.len() <= 1 + 5000usize.div_ceil(INPUT_COALESCE_BYTES) + 1,
+            "the backlog is coalesced, got {} writes",
+            writes.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_byte_budget_waits_instead_of_dropping() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (q, _res, writes, _) = gated(gate.clone(), false);
+        let chunk = INPUT_BUDGET_BYTES / 4;
+        // Four quarter-budget pastes fill the budget (the first sits in the
+        // stuck write and still holds its share).
+        for i in 0..4u8 {
+            assert!(q.try_push(vec![i; chunk], true, None).is_ok());
+        }
+        let Err(job) = q.try_push(vec![9; chunk], true, None) else {
+            panic!("a fifth quarter must not fit the byte budget");
+        };
+        // …so it waits, it is not dropped:
+        let wait = InputQueue::reserve(q.budget.clone(), job.cost);
+        tokio::pin!(wait);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut wait)
+                .await
+                .is_err(),
+            "the parked frame waits while the budget is full"
+        );
+        // The child reads: budget frees, the parked frame goes through.
+        gate.add_permits(Semaphore::MAX_PERMITS / 2);
+        tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .expect("budget frees once the writer drains");
+        q.send(job);
+        settle(&writes, 5 * chunk).await;
+        let got: Vec<u8> = writes
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|w| w.0.clone())
+            .collect();
+        assert_eq!(got.len(), 5 * chunk);
+        assert_eq!(got[4 * chunk], 9, "the waited frame lands last, in order");
+    }
+
+    #[tokio::test]
+    async fn emulator_replies_never_coalesce_with_typing_and_a_failed_typing_write_reverts() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (q, mut res, writes, reverts) = gated(gate.clone(), true);
+        push(&q, b"x".to_vec(), true, Some(7)).await; // stuck write
+                                                      // Let the writer pick it up and block in the write.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        push(&q, b"a".to_vec(), true, Some(7)).await;
+        push(&q, b"b".to_vec(), true, Some(7)).await;
+        push(&q, b"\x1b[1;1R".to_vec(), false, None).await; // DSR reply
+        push(&q, b"c".to_vec(), true, Some(7)).await;
+        gate.add_permits(100);
+        settle(&writes, 3 + 6 + 1).await;
+        let kinds: Vec<(Vec<u8>, bool)> = writes.lock().unwrap().clone();
+        assert_eq!(
+            kinds,
+            vec![
+                (b"x".to_vec(), true),
+                (b"ab".to_vec(), true),
+                (b"\x1b[1;1R".to_vec(), false),
+                (b"c".to_vec(), true),
+            ]
+        );
+        for _ in 0..4 {
+            assert!(res.recv().await.unwrap().is_err());
+        }
+        // Only the three failed TYPING writes revert the size claim.
+        assert_eq!(*reverts.lock().unwrap(), vec![Some(7); 3]);
     }
 }

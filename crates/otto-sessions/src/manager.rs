@@ -3257,6 +3257,32 @@ impl SessionManager {
         self.size_owner.insert(id.clone(), conn_id);
     }
 
+    /// Optimistic [`Self::note_input_authority`] for the terminal socket
+    /// (perf 01 N7): typing claims the size the moment the keystroke is
+    /// QUEUED, so a `resize` right behind the first keystroke is not judged
+    /// against stale authority while the PTY write is still pending. Returns
+    /// the previous owner for [`Self::revert_input_authority`].
+    pub fn claim_input_authority(&self, id: &Id, conn_id: u64) -> Option<u64> {
+        self.size_owner.insert(id.clone(), conn_id)
+    }
+
+    /// Undo an optimistic claim whose write failed — only while `conn_id`
+    /// still holds it (a newer claim by someone else stands).
+    pub fn revert_input_authority(&self, id: &Id, conn_id: u64, prev: Option<u64>) {
+        if let dashmap::mapref::entry::Entry::Occupied(mut e) = self.size_owner.entry(id.clone()) {
+            if *e.get() == conn_id {
+                match prev {
+                    Some(p) => {
+                        e.insert(p);
+                    }
+                    None => {
+                        e.remove();
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether `conn_id` may resize `id` under the size-authority policy:
     /// yes when it IS the owner, or when nobody has ever claimed/typed (a
     /// session only ever watched by claim-less embeds — e.g. a vault-run or
@@ -7201,6 +7227,36 @@ mod tests {
         // …until the survivor claims (pane re-attach claims on open).
         mgr.note_input_authority(&id, pane.conn_id());
         assert!(mgr.may_resize(&id, pane.conn_id()));
+    }
+
+    /// Perf 01 N7: the socket claims authority when a keystroke is QUEUED and
+    /// reverts only its own claim when the write fails.
+    #[tokio::test]
+    async fn optimistic_input_claim_reverts_only_its_own_claim() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, Some("sid-claim")).await;
+        let pane = mgr.attach(&id);
+        let tile = mgr.attach(&id);
+
+        // Unclaimed → claim → failed write: back to "nobody owns it".
+        assert_eq!(mgr.claim_input_authority(&id, pane.conn_id()), None);
+        assert!(!mgr.may_resize(&id, tile.conn_id()));
+        mgr.revert_input_authority(&id, pane.conn_id(), None);
+        assert!(mgr.may_resize(&id, tile.conn_id()));
+
+        // Tile owned it; the pane's failed claim hands it back to the tile.
+        mgr.note_input_authority(&id, tile.conn_id());
+        let prev = mgr.claim_input_authority(&id, pane.conn_id());
+        assert_eq!(prev, Some(tile.conn_id()));
+        mgr.revert_input_authority(&id, pane.conn_id(), prev);
+        assert!(mgr.may_resize(&id, tile.conn_id()));
+        assert!(!mgr.may_resize(&id, pane.conn_id()));
+
+        // A newer claim by someone else stands through a stale revert.
+        let prev = mgr.claim_input_authority(&id, pane.conn_id());
+        mgr.note_input_authority(&id, tile.conn_id());
+        mgr.revert_input_authority(&id, pane.conn_id(), prev);
+        assert!(mgr.may_resize(&id, tile.conn_id()));
     }
 
     #[tokio::test]

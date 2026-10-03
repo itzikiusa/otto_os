@@ -243,8 +243,11 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
 {"type":"terminated"}                               // session force-terminated (admin terminate / share-link revoke); socket closes immediately after
 {"type":"error","code":"forbidden","message":"..."}
 {"type":"error","code":"input_failed","message":"..."} // input not delivered: no live process, or the process is not reading
-                                                    // its terminal (queue full / not drained in 15 s — already-queued bytes
-                                                    // are still delivered in order). Sent once per failing stretch.
+                                                    // its terminal (not drained in 15 s — already-queued bytes are still
+                                                    // delivered in order). Sent once per failing stretch. Input is never
+                                                    // dropped for volume: past 1 MiB queued per socket the server stops
+                                                    // reading client frames until the PTY drains (TCP backpressure), and
+                                                    // consecutive queued frames are coalesced into one PTY write.
 {"type":"search_result","query":"foo","matches":[{"line":42,"text":"foo bar baz"},...]}  // up to 200 matches; always valid JSON
                                                     // (text is ANSI-stripped but may contain tabs/C0 bytes, JSON-escaped)
 {"type":"probe_ack","id":7,"echo":{"last_ms":3.2,"avg_ms":4.1,"max_ms":48.0,"samples":120}}  // reply to `probe`; `echo` null with no live PTY
