@@ -24,6 +24,35 @@ export function mergeRunProgress(current: WorkflowRun, next: WorkflowRun): boole
   return true;
 }
 
+/** A live `workflow_run_updated` event as the run view sees it. */
+export interface LiveRunEvent {
+  rev: number;
+  status: string;
+  node: NodeRunState | null;
+  waitingApproval: boolean;
+}
+
+/** Apply a live event's node SUMMARY in place (perf W5) — the event carries
+ *  exactly the node shape `/progress` serves, so a contiguous event needs no
+ *  refetch. Returns false (→ refetch) unless it is safe: a summary view of a
+ *  running run, the very next `rev`, a node the view already lists, and no
+ *  checkpointed (loop) pages, whose freshness an event cannot describe. */
+export function applyLiveNode(run: WorkflowRun, ev: LiveRunEvent): boolean {
+  const node = ev.node;
+  if (!run.summary || !node || ev.rev <= 0 || ev.rev !== (run.rev ?? 0) + 1) return false;
+  if (run.status !== 'running' || ev.status !== 'running') return false;
+  if (run.checkpoint_rev) return false;
+  const old = run.nodes.find((n) => n.node_id === node.node_id);
+  if (!old) return false;
+  // Same `detail_version` + status ⇒ nothing to rewrite (see mergeRunProgress).
+  if (!(node.detail_version && old.detail_version === node.detail_version && old.status === node.status)) {
+    Object.assign(old, node);
+  }
+  run.rev = ev.rev;
+  run.waiting_approval = ev.waitingApproval;
+  return true;
+}
+
 /** Bound inactive detail bodies; explicitly expanded bodies can stay pinned. */
 export class RunBodyCache {
   private entries = new Map<string, {version: string; body: unknown; bytes: number}>();

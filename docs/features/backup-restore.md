@@ -132,6 +132,7 @@ install (one real `otto.db` reached 514 MB). The daemon prunes them **hourly**
 | `review_agent_prompts` + `review_diffs` (per-agent review retry data) | **14 days** after the artifact was written, and only for a finished review (`done` / `error` / `cancelled`, or the review row is gone). A running review keeps them. Past the window, retrying a review agent falls back to "prompt unavailable" |
 | `notifications` (notification center) | read notices **30 days**, unread notices **90 days**, and never more than the newest **5 000** rows overall |
 | `agent_room_messages` (Agent rooms) | each room's newest **5 000** messages (the room's message count is recomputed after a trim) |
+| Run history (`run_history_days`) — **off by default** (`0` = keep forever). Opt in by setting a window; values are floored at 14 days | When enabled: `otto_runs` + `otto_run_events` (Run with Otto): terminal runs (`completed` / `failed` / `rejected` / `cancelled`) last updated before the window, unless a Proof Pack is attached. `swarm_runs`: terminal runs (`done` / `error` / `stopped`) finished before the window — first added to the swarm's `pruned_runs` / `pruned_cost_usd` rollup (migration `0161`), so `max_total_runs` / `max_cost_usd` budgets still count them. `swarm_messages`: older than the window. `goal_loop_iterations`: every iteration but the last of a loop that finished (terminal) before the window. Live runs and loops are never touched |
 
 Rows younger than their window are never touched. The policy lives in the
 `data_retention` setting (a partial object merges over the defaults) and is
@@ -142,14 +143,16 @@ re-read every pass; set it with `POST /settings/import`:
                     "work_events_idle_days": 90, "mcp_audit_days": 90, "audit_log_days": 90,
                     "review_retry_days": 14, "notifications_read_days": 30,
                     "notifications_unread_days": 90, "notifications_max_rows": 5000,
-                    "room_messages_keep_per_room": 5000}}
+                    "room_messages_keep_per_room": 5000, "run_history_days": 0}}
 ```
 
 `enabled: false` turns the job off. Floors a setting can't go below: 7 days
 (30 for `audit_log`, 3 for `review_retry_days`), 50 events per item, and `work_events_idle_days` never
 below `work_events_days`; `notifications_unread_days` never below
 `notifications_read_days`, and at least 500 for `notifications_max_rows` and
-`room_messages_keep_per_room`. Deletes run in 1 000-row batches, each a bounded
+`room_messages_keep_per_room`. `run_history_days` is opt-in: `0` (the default)
+or a negative value keeps run history forever; any positive value is floored at
+14 days. Deletes run in 1 000-row batches, each a bounded
 range on an index, with a 25 ms pause between batches so the SQLite writer is
 never held for long; the candidate items are found by reads on the read-only
 pool (index `idx_work_events_ts`, migration `0144`). Freed pages are reused,

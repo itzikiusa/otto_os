@@ -31,6 +31,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::convert::{dberr, fmt};
 
+// --- Run history (perf W6) ---------------------------------------------------
+mod runs;
+pub use runs::{RunHistoryReport, DEFAULT_RUN_HISTORY_DAYS, MIN_RUN_HISTORY_DAYS};
+// -----------------------------------------------------------------------------
+
 /// Settings key holding the JSON [`RetentionPolicy`] (partial objects merge
 /// over the defaults).
 pub const SETTING_KEY: &str = "data_retention";
@@ -92,6 +97,14 @@ pub struct RetentionPolicy {
     pub notifications_max_rows: i64,
     /// `agent_room_messages`: each room keeps its newest N messages.
     pub room_messages_keep_per_room: i64,
+    // --- Run history (perf W6) ---
+    /// `otto_runs` (+ events), `swarm_runs` (spend rolled up first),
+    /// `swarm_messages`, and all-but-the-last iteration of finished goal
+    /// loops: terminal rows older than this are pruned (see
+    /// `retention/runs.rs`). OPT-IN: `0` (the default) keeps them forever —
+    /// these are user records, so only a set window (floored at
+    /// [`MIN_RUN_HISTORY_DAYS`]) deletes anything.
+    pub run_history_days: i64,
 }
 
 impl Default for RetentionPolicy {
@@ -108,6 +121,8 @@ impl Default for RetentionPolicy {
             notifications_unread_days: 90,
             notifications_max_rows: 5_000,
             room_messages_keep_per_room: 5_000,
+            // --- Run history (perf W6) ---
+            run_history_days: DEFAULT_RUN_HISTORY_DAYS,
         }
     }
 }
@@ -137,6 +152,13 @@ impl RetentionPolicy {
         self.notifications_max_rows = self.notifications_max_rows.max(MIN_NOTIFICATIONS_MAX_ROWS);
         self.room_messages_keep_per_room =
             self.room_messages_keep_per_room.max(MIN_ROOM_MESSAGES_KEEP);
+        // --- Run history (perf W6) ---
+        // Opt-in: 0 (or below) = keep forever; a set window is floored.
+        self.run_history_days = if self.run_history_days <= 0 {
+            0
+        } else {
+            self.run_history_days.max(MIN_RUN_HISTORY_DAYS)
+        };
         self
     }
 }
@@ -152,6 +174,8 @@ pub struct RetentionReport {
     pub review_diffs: u64,
     pub notifications: u64,
     pub room_messages: u64,
+    // --- Run history (perf W6) ---
+    pub run_history: RunHistoryReport,
 }
 
 impl RetentionReport {
@@ -164,6 +188,8 @@ impl RetentionReport {
             + self.review_diffs
             + self.notifications
             + self.room_messages
+            // --- Run history (perf W6) ---
+            + self.run_history.total()
     }
 }
 
@@ -223,6 +249,10 @@ impl RetentionRepo {
         report.room_messages = self
             .prune_room_messages(p.room_messages_keep_per_room)
             .await?;
+        // --- Run history (perf W6) ---
+        if p.run_history_days > 0 {
+            report.run_history = self.prune_run_history(&cutoff(p.run_history_days)).await?;
+        }
         Ok(report)
     }
 

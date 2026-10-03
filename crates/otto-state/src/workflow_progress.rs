@@ -85,6 +85,14 @@ fn project(value: &Value, checkpoint: bool) -> Result<Value> {
     }
     Ok(Value::Object(out))
 }
+/// One node's summary — the element [`nodes_projection`] produces for it
+/// (what `/progress` serves). The engine sends it on `WorkflowRunUpdated` so
+/// the run view applies a live change without a refetch (perf W5).
+pub fn node_summary(node: &NodeRunState) -> Result<Value> {
+    serde_json::to_value(node)
+        .map_err(json_error)
+        .and_then(|v| project(&v, false))
+}
 pub fn nodes_projection(nodes: &[NodeRunState]) -> Result<String> {
     let values = nodes
         .iter()

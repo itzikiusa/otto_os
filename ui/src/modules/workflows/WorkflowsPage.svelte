@@ -30,7 +30,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
   import { workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
-  import { mergeRunProgress, fmtStepMs, sharedNodeBodies } from './runProgress';
+  import { applyLiveNode, mergeRunProgress, fmtStepMs, sharedNodeBodies } from './runProgress';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { workflowRunBus } from '../../lib/events.svelte';
   import { workflowsPagePort } from '../../lib/uiCommands/workflows';
@@ -224,8 +224,16 @@
       const evRev = workflowRunBus.rev;
       const curRev = cur.rev ?? 0;
       if (evRev > 0 && evRev <= curRev) return; // already have this state
-      // Poll the small projection even for contiguous events: a node event
-      // cannot describe checkpoint-only freshness or its current body version.
+      // Perf W5: the event carries the node's summary (the exact `/progress`
+      // node shape, with its `detail_version`) — apply a contiguous one in
+      // place. A gap, a status change, a new node or a checkpointed run still
+      // polls the small projection.
+      if (applyLiveNode(cur, {
+        rev: evRev,
+        status: workflowRunBus.status,
+        node: workflowRunBus.node,
+        waitingApproval: workflowRunBus.waitingApproval,
+      })) return;
       void refetchRun(cur.id);
     });
   });

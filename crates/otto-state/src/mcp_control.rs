@@ -1325,6 +1325,28 @@ impl McpApprovalRepo {
         Ok(row_to_approval(&r))
     }
 
+    /// Several approvals in ONE statement (perf W4: the personal-agent
+    /// activity feed did one `get` per waiting item). Missing ids are simply
+    /// absent; order is unspecified.
+    pub async fn get_many(&self, ids: &[String]) -> Result<Vec<McpApproval>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let q = format!(
+            "SELECT * FROM mcp_approvals WHERE id IN ({})",
+            vec!["?"; ids.len()].join(",")
+        );
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(q.as_str()));
+        for id in ids {
+            query = query.bind(id);
+        }
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("approvals"))?;
+        Ok(rows.iter().map(row_to_approval).collect())
+    }
+
     pub async fn list(
         &self,
         workspace_ids: Option<&[String]>,

@@ -1049,7 +1049,23 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask, sched_run_id: &
     let deadline = std::time::Instant::now() + WORKFLOW_WAIT;
     loop {
         tokio::time::sleep(WORKFLOW_POLL).await;
-        if let Ok(r) = repo.get_run(&run_id).await {
+        // Perf W2: poll the status only; the full row (50–200 KB of
+        // `nodes_json`) is read ONCE, when the run has settled.
+        let settled = matches!(
+            repo.run_status(&run_id).await,
+            Ok(Some((
+                otto_core::workflows::RunStatus::Success
+                    | otto_core::workflows::RunStatus::Error
+                    | otto_core::workflows::RunStatus::Canceled,
+                _
+            )))
+        );
+        let full = if settled {
+            repo.get_run(&run_id).await.ok()
+        } else {
+            None
+        };
+        if let Some(r) = full {
             let status = format!("{:?}", r.status).to_lowercase();
             if matches!(status.as_str(), "success" | "error" | "canceled") {
                 let report = workflow_report(&workflow.name, &r);
@@ -1194,13 +1210,21 @@ async fn gc_old_worktrees(
     worktrees_dir: &std::path::Path,
     keep: usize,
 ) {
-    let mut stamps: Vec<String> = match std::fs::read_dir(worktrees_dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect(),
-        Err(_) => return,
+    // Directory scan + deletes off the runtime (perf: a worktree's
+    // `remove_dir_all` can take seconds on a big checkout).
+    let dir = worktrees_dir.to_path_buf();
+    let listed = tokio::task::spawn_blocking(move || {
+        std::fs::read_dir(&dir).map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect::<Vec<String>>()
+        })
+    })
+    .await;
+    let mut stamps: Vec<String> = match listed {
+        Ok(Ok(v)) => v,
+        _ => return,
     };
     stamps.sort();
     stamps.reverse(); // newest first
@@ -1220,7 +1244,7 @@ async fn gc_old_worktrees(
         let _ = git.worktree_remove(&path.to_string_lossy()).await;
         let _ = git.delete_branch(&branch, true).await;
         // worktree_remove --force usually deletes the dir; ensure it (best-effort).
-        let _ = std::fs::remove_dir_all(&path);
+        let _ = tokio::fs::remove_dir_all(&path).await;
     }
 }
 

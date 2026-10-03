@@ -1359,6 +1359,9 @@ export type OttoEvent =
       status: string;
       node_id?: Id | null;
       rev?: number;
+      /** The changed node's SUMMARY — the `/progress` node shape (`logs: []` +
+       *  `log_count`, `output: null` + `has_output`, `detail_version`); applied
+       *  in place on a contiguous `rev` (perf W5). */
       node?: NodeRunState | null;
       nodes_done?: number;
       nodes_total?: number;
@@ -8238,9 +8241,14 @@ export interface PersonalAgentActivityApproval {
 
 export interface PersonalAgentActivity {
   now: { run: PersonalAgentRun | null; session_status: string | null };
+  /** Newest first. With `?after_seq=N`, only entries with `seq > N`. */
   items: PersonalAgentActivityItem[];
   approvals: PersonalAgentActivityApproval[];
-  runs: PersonalAgentRun[];
+  /** `null` when asked with `?runs=false` (keep the ones you have). Run
+   *  `summary` is clipped to 280 chars here. */
+  runs: PersonalAgentRun[] | null;
+  /** Cursor: the newest ring `seq` the answer covers (pass as `after_seq`). */
+  seq?: number;
 }
 
 export type PersonalAgentMemorySource =

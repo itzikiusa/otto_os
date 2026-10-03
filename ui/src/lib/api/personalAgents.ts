@@ -85,8 +85,15 @@ export const personalAgentsApi = {
   /** Work a standing goal now (a proactive, read-only run). */
   runGoal: (agentId: string, goalId: string) =>
     api.post<PersonalAgentRun>(`/personal-agents/${agentId}/goals/${goalId}/run`, {}),
-  activity: (agentId: string) =>
-    api.get<PersonalAgentActivity>(`/personal-agents/${agentId}/activity`),
+  /** `afterSeq`: only ring entries newer than this cursor; `runs: false`
+   *  leaves the run history out (`runs: null`). */
+  activity: (agentId: string, opts: { afterSeq?: number; runs?: boolean } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.afterSeq !== undefined) q.set('after_seq', String(opts.afterSeq));
+    if (opts.runs === false) q.set('runs', 'false');
+    const qs = q.toString();
+    return api.get<PersonalAgentActivity>(`/personal-agents/${agentId}/activity${qs ? `?${qs}` : ''}`);
+  },
   memories: (agentId: string) =>
     api.get<PersonalAgentMemories>(`/personal-agents/${agentId}/memories`),
   /** Edit (`text`) or forget (`text: null`) one memory item. */
