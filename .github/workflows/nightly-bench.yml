@@ -1,0 +1,76 @@
+name: Nightly bench
+
+# Timing benches kept out of the per-PR run (`#[ignore]`: wall-clock numbers on
+# a shared runner are noisy). Nightly, plus on demand, so a regression shows up
+# within a day instead of when a user notices.
+#
+# synthetic_sftp_browse_latency (otto-connections) drives the real SFTP pool,
+# authorization and subprocess paths against a Python stand-in for the `sftp`
+# batch client — no sshd, network or credentials. It prints median/p95 per mode
+# (`SFTP_SYNTHETIC …` lines) and fails when a browse p95 exceeds
+# OTTO_BENCH_P95_MS. The ceiling is deliberately generous (locally the p95 is
+# tens of ms) — it catches order-of-magnitude regressions, not runner jitter.
+# otto-connections doesn't link librdkafka, so no cmake/libcurl setup is needed.
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # 03:17 UTC nightly (off the top of the hour)
+  workflow_dispatch:
+    inputs:
+      p95_ms:
+        description: "Browse p95 ceiling in ms (blank = default)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  sftp-latency:
+    name: SFTP browse latency (synthetic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      OTTO_BENCH_P95_MS: ${{ github.event.inputs.p95_ms || '1500' }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: nightly-bench
+
+      # The fixture `sftp` is a python3 script (preinstalled on the runner).
+      - name: Check python3
+        run: python3 --version
+
+      - name: Run synthetic SFTP browse bench
+        # Explicit `shell: bash` = `-eo pipefail`, so `tee` can't mask a failure.
+        shell: bash
+        run: |
+          cargo test -p otto-connections --lib synthetic_sftp_browse_latency \
+            -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/bench.log"
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### SFTP synthetic browse latency"
+            echo "Ceiling: browse p95 <= ${OTTO_BENCH_P95_MS} ms"
+            echo '```'
+            grep '^SFTP_SYNTHETIC' "$RUNNER_TEMP/bench.log" || echo "no bench output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -470,7 +470,9 @@ would require per-CLI env-passing support).
   client's — intended, since the daemon is local, but worth knowing for remote/PWA
   access.
 - ⚠️ SFTP text view is capped at **1 MiB**; larger files report `truncated` (use
-  Download for the whole file). No in-place file editing.
+  Download for the whole file). The view probes the size first and stops the
+  transfer once 1 MiB has arrived, so previewing a multi-GB log costs ~1 MiB,
+  not the whole file. No in-place file editing.
 - ✅ The unified Connections hub lists all database, SSH, custom and Kafka entries.
 - ⚠️ Requires the relevant client binaries on `PATH` (`ssh`, `sftp`, `mysql`,
   `redis-cli`, `mongosh`, `clickhouse-client`).

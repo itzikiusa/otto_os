@@ -870,8 +870,9 @@ async fn sftp_rename<S: ConnectionsCtx>(
 /// Max bytes returned by the SFTP text viewer (1 MiB).
 const SFTP_READ_CAP: u64 = 1024 * 1024;
 
-/// GET /connections/{id}/sftp/read?path= — Connections:View. Downloads to a
-/// temp file, reads up to a size cap, returns text + a truncated flag.
+/// GET /connections/{id}/sftp/read?path= — Connections:View. Downloads (at
+/// most a cap-sized prefix) to a temp file, reads up to the cap, returns text +
+/// a truncated flag.
 async fn sftp_read<S: ConnectionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -886,28 +887,55 @@ async fn sftp_read<S: ConnectionsCtx>(
         .filter(|p| !p.is_empty())
         .ok_or_else(|| ApiErr(Error::Invalid("'path' is required".into())))?;
 
-    // Download to a private temp file, then read+cap it locally.
+    // Download to a private temp file, then read+cap it locally. All local
+    // file work stays off the async workers (tokio::fs / spawn_blocking).
     let tmp_dir = std::env::temp_dir().join(format!(
         "otto-sftp-read-{}-{}",
         std::process::id(),
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
     ));
-    std::fs::create_dir_all(&tmp_dir)
+    tokio::fs::create_dir_all(&tmp_dir)
+        .await
         .map_err(|e| ApiErr(Error::Internal(format!("create temp dir: {e}"))))?;
     let tmp_file = tmp_dir.join("file");
     let tmp_str = tmp_file.to_string_lossy().into_owned();
 
-    let result = sftp.download(remote, &tmp_str).await;
-    let resp = result.map_err(ApiErr).and_then(|_| {
-        read_capped(&tmp_file).map_err(|e| ApiErr(Error::Invalid(format!("read file: {e}"))))
-    });
+    let result = fetch_preview(&sftp, remote, &tmp_str, SFTP_READ_CAP).await;
+    let resp = match result {
+        Err(e) => Err(ApiErr(e)),
+        Ok(stopped) => {
+            let path = tmp_file.clone();
+            tokio::task::spawn_blocking(move || read_capped(&path))
+                .await
+                .map_err(|e| ApiErr(Error::Internal(format!("read file: {e}"))))
+                .and_then(|r| r.map_err(|e| ApiErr(Error::Invalid(format!("read file: {e}")))))
+                .map(|(text, over)| (text, over || stopped))
+        }
+    };
     // Always clean up the temp dir, success or not.
-    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     let (text, truncated) = resp?;
     ctx.connections()
         .authorize(&id, &user.id, "sftp_read")
         .await?;
     Ok(Json(SftpReadResp { text, truncated }))
+}
+
+/// Pull what the viewer needs into `local`: a quick size probe (≤500 ms) picks
+/// a plain `get` for a file known to fit under `cap`; anything larger — or of
+/// unknown size (probe timed out / unsupported listing) — takes the prefix
+/// download, which cancels the `get` once `cap` bytes are on disk instead of
+/// pulling a multi-GB log for a 1 MiB preview. `true` = stopped at the cap.
+async fn fetch_preview(
+    sftp: &SftpSession,
+    remote: &str,
+    local: &str,
+    cap: u64,
+) -> otto_core::Result<bool> {
+    match sftp.file_size(remote).await {
+        Ok(size) if size <= cap => sftp.download(remote, local).await.map(|_| false),
+        _ => sftp.download_prefix(remote, local, cap).await,
+    }
 }
 
 /// Read up to `SFTP_READ_CAP` bytes from a local file, returning the UTF-8
@@ -1116,5 +1144,98 @@ mod tests {
         .unwrap();
         assert_eq!(ok.port, Some(2222));
         assert_eq!(ok.jump.as_deref(), Some("bastion"));
+    }
+
+    /// A fixture `sftp`: `@ls -ln` answers with `size`, `get` writes `body_kb`
+    /// KiB (`None` = streams forever). Batch commands are logged per call.
+    #[cfg(unix)]
+    fn preview_fixture(
+        dir: &std::path::Path,
+        size: Option<u64>,
+        body_kb: Option<u32>,
+    ) -> SftpSession {
+        use std::os::unix::fs::PermissionsExt;
+        let program = dir.join("fixture-sftp");
+        let ls = match size {
+            Some(n) => {
+                format!("print('-rw-r--r-- 1 1 1 {n} Sep 13 10:00 '+shlex.split(line[1:])[2])")
+            }
+            None => "sys.exit(1)".into(),
+        };
+        let body = match body_kb {
+            Some(kb) => format!("f.write(b'a'*1024*{kb})"),
+            None => {
+                "\n    ".to_string()
+                    + "while True:\n        f.write(b'a'*8192); f.flush(); time.sleep(0.002)"
+            }
+        };
+        let log = dir.join("log");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/usr/bin/env python3\nimport sys,shlex,time\nline=sys.stdin.read().strip()\n\
+                 open({log:?},'a').write(line.split()[0]+'\\n')\n\
+                 if line.startswith('@ls'):\n    {ls}\nelse:\n    f=open(shlex.split(line)[2],'wb')\n    {body}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        SftpSession::with_program(
+            SftpParams {
+                host: "fixture.invalid".into(),
+                port: None,
+                user: None,
+                identity_file: None,
+                jump: None,
+            },
+            program,
+        )
+        .unwrap()
+    }
+
+    /// The preview never pulls a whole oversized file: a probe-confirmed small
+    /// file takes the plain `get`; a large or unknown-size one stops at the cap
+    /// and is flagged truncated.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sftp_preview_probes_then_stops_large_downloads_at_the_cap() {
+        let cap = 64 * 1024;
+        for (size, body_kb, want_truncated) in [
+            (Some(4u64 * 1024), Some(4u32), false), // small: plain get
+            (Some(10 * 1024 * 1024 * 1024), None, true), // 10 GiB: prefix only
+            (None, None, true),                     // probe failed: prefix only
+            (None, Some(4), false),                 // unknown but small
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "otto-sftp-preview-test-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let sftp = preview_fixture(&dir, size, body_kb);
+            let local = dir.join("file");
+            let started = std::time::Instant::now();
+            let stopped = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                fetch_preview(&sftp, "/var/log/app.log", local.to_str().unwrap(), cap),
+            )
+            .await
+            .expect("preview finishes without the whole file")
+            .unwrap();
+            let (text, over) = read_capped(&local).unwrap();
+            assert_eq!(stopped || over, want_truncated, "{size:?} {body_kb:?}");
+            assert!(text.len() as u64 <= SFTP_READ_CAP);
+            assert!(started.elapsed() < std::time::Duration::from_secs(20));
+            let log = std::fs::read_to_string(dir.join("log")).unwrap();
+            // Probe first (its log line may be lost if the 500 ms bound fires
+            // under a loaded test run — the fallback is the prefix path), then
+            // exactly one get.
+            assert!(
+                log.ends_with("get\n") && log.matches("get").count() == 1,
+                "{log}"
+            );
+            assert!(!log.contains("get\n@ls"), "{log}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
