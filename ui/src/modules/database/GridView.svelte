@@ -83,6 +83,30 @@
   let scrollTop = $state(0);
   let viewportH = $state(0);
   const virtualize = $derived(!mini);
+  // ── Column (horizontal) virtualisation ──────────────────────────────────────
+  // A 200–300-column ClickHouse result used to mount every column of every
+  // windowed row (10–20k cells, 12×N rebuilt per scroll step). Past HVIRT_MIN
+  // columns the body renders only the columns near the viewport: a leading
+  // spacer cell spanning (colspan) the columns before the window, the window's
+  // real cells, a trailing spacer for the rest. The header row keeps every
+  // column — with `table-layout: fixed` it defines the column grid, so the
+  // colspan spacers are exactly as wide as the cells they stand for, and its
+  // `th` offsets give the exact column edges the window is computed from.
+  // Cells keep their real `data-p` (display position), so delegated clicks,
+  // the keyboard cursor and find are unaffected. Off in RTL (scrollLeft and
+  // offsets flip there) and for mini grids.
+  const HVIRT_MIN = 40;
+  /** Columns rendered beyond each side of the viewport. */
+  const COL_OVERSCAN = 3;
+  /** Window bounds snap to multiples of this, so a horizontal scroll rebuilds
+   *  the mounted rows every few columns rather than on every column edge. */
+  const COL_CHUNK = 4;
+  let scrollLeft = $state(0);
+  let viewportW = $state(0);
+  let rtl = $state(false);
+  /** Right edge (px, from the table's start) of each display position, from
+   *  the header cells; empty until measured. */
+  let colEdges = $state.raw<number[]>([]);
 
   // Track the scroll viewport height with a ResizeObserver rather than a plain
   // `bind:clientHeight`. On mobile the flex height chain isn't settled at first
@@ -94,8 +118,11 @@
     const el = scrollEl;
     if (!el) return;
     viewportH = el.clientHeight;
+    viewportW = el.clientWidth;
+    rtl = getComputedStyle(el).direction === 'rtl';
     const ro = new ResizeObserver(() => {
       viewportH = el.clientHeight;
+      viewportW = el.clientWidth;
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -169,7 +196,71 @@
   const padBottom = $derived(Math.max(0, (total - endIdx) * ROW_H));
 
   function onScroll(): void {
-    if (scrollEl) scrollTop = scrollEl.scrollTop;
+    if (!scrollEl) return;
+    scrollTop = scrollEl.scrollTop;
+    if (hvirt) scrollLeft = scrollEl.scrollLeft;
+  }
+
+  const hvirt = $derived(virtualize && !rtl && result.columns.length > HVIRT_MIN);
+  // Re-measure the column edges whenever the header's widths can change
+  // (columns, order, auto/dragged widths, the filter row). One layout read
+  // of N header cells, after the DOM settles — never per scroll step.
+  $effect(() => {
+    if (!hvirt) {
+      colEdges = [];
+      return;
+    }
+    void cols;
+    void autoWidths;
+    void colWidths;
+    void filterRow;
+    const el = scrollEl;
+    let live = true;
+    void tick().then(() => {
+      if (!live || !el) return;
+      const ths = el.querySelectorAll<HTMLElement>('thead tr:first-child th');
+      // ths[0] is the row-number column.
+      const edges = new Array<number>(Math.max(0, ths.length - 1));
+      for (let p = 1; p < ths.length; p++) edges[p - 1] = ths[p].offsetLeft + ths[p].offsetWidth;
+      colEdges = edges;
+    });
+    return () => {
+      live = false;
+    };
+  });
+  /** First display position whose right edge is past `x` (binary search). */
+  function colAt(x: number): number {
+    let lo = 0;
+    let hi = colEdges.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (colEdges[mid] < x) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+  /** [colStart, colEnd) — the display positions the body renders. */
+  const colWindow = $derived.by<[number, number]>(() => {
+    const n = cols.length;
+    if (!hvirt || colEdges.length !== n || n === 0) return [0, n];
+    const first = colAt(scrollLeft);
+    const last = colAt(scrollLeft + Math.max(viewportW, 1));
+    const start = Math.max(0, Math.floor((first - COL_OVERSCAN) / COL_CHUNK) * COL_CHUNK);
+    const end = Math.min(n, Math.ceil((last + 1 + COL_OVERSCAN) / COL_CHUNK) * COL_CHUNK);
+    return [start, end];
+  });
+  const colStart = $derived(colWindow[0]);
+  const colEnd = $derived(colWindow[1]);
+  /** Bring display column `pos` into the horizontal viewport (keyboard cursor). */
+  function ensureColVisible(pos: number): void {
+    if (!scrollEl || !hvirt) return;
+    const right = colEdges[pos];
+    if (right === undefined) return;
+    const left = pos > 0 ? colEdges[pos - 1] : 0;
+    const rn = (scrollEl.querySelector<HTMLElement>('thead th.rownum')?.offsetWidth ?? 0);
+    if (left - rn < scrollEl.scrollLeft) scrollEl.scrollLeft = Math.max(0, left - rn);
+    else if (right > scrollEl.scrollLeft + viewportW) scrollEl.scrollLeft = right - viewportW;
+    scrollLeft = scrollEl.scrollLeft;
   }
 
   // ⌘F over every row (lib/findProviders.ts): the body mounts ~40 of 100k
@@ -396,6 +487,8 @@
   function rowCells(row: unknown[], idx: number): Attachment<HTMLTableRowElement> {
     return (tr) => {
       const order = cols;
+      const cs = colStart;
+      const ce = colEnd;
       const columns = result.columns;
       const kindsNow = kinds;
       const editableNow = editableCols;
@@ -404,18 +497,23 @@
       const editCol = ed && ed.rowIdx === idx ? ed.colIdx : -1;
       const needle = filtering ? searchLc : null;
       const expand = expandJson;
-      const pv = order.map((ci) => (pendingOn ? flow.pendingValue(idx, ci) : undefined));
-      const under = order.map((ci, p) =>
-        pendingOn && pv[p] === undefined ? flow.hasPendingUnder(idx, columns[ci].name) : false,
-      );
+      const pv = new Array<string | undefined>(order.length);
+      const under = new Array<boolean>(order.length);
+      for (let p = cs; p < ce; p++) {
+        const ci = order[p];
+        pv[p] = pendingOn ? flow.pendingValue(idx, ci) : undefined;
+        under[p] = pendingOn && pv[p] === undefined ? flow.hasPendingUnder(idx, columns[ci].name) : false;
+      }
       const cells = untrack(() => {
         const focusPos = focusIdx === idx ? (focusCell?.c ?? -1) : -1;
         const frag = document.createDocumentFragment();
         const out: HTMLTableCellElement[] = [];
-        order.forEach((ci, pos) => {
+        if (cs > 0) out.push(frag.appendChild(hpadCell(cs)));
+        for (let pos = cs; pos < ce; pos++) {
+          const ci = order[pos];
           const td =
             ci === editCol
-              ? editorCell(ci)
+              ? editorCell(ci, pos)
               : buildCell(row[ci], idx, ci, pos, {
                   kind: kindsNow[ci],
                   editable: editableNow[ci],
@@ -428,7 +526,8 @@
                 });
           out.push(td);
           frag.append(td);
-        });
+        }
+        if (ce < order.length) out.push(frag.appendChild(hpadCell(order.length - ce)));
         tr.append(frag);
         return out;
       });
@@ -438,10 +537,21 @@
     };
   }
 
+  /** A spacer cell standing for `span` columns outside the column window. */
+  function hpadCell(span: number): HTMLTableCellElement {
+    const td = document.createElement('td');
+    td.className = 'hpad';
+    td.colSpan = span;
+    td.setAttribute('aria-hidden', 'true');
+    td.dataset.findSkip = '';
+    return td;
+  }
+
   /** The open inline editor (the old `bind:value` + `use:focusEditor` input). */
-  function editorCell(ci: number): HTMLTableCellElement {
+  function editorCell(ci: number, pos: number): HTMLTableCellElement {
     const td = document.createElement('td');
     td.className = 'cell editing';
+    td.dataset.p = String(pos);
     td.setAttribute('style', widthStyle(widthFor(ci)));
     const input = document.createElement('input');
     input.className = 'cell-input mono';
@@ -460,10 +570,14 @@
   const rowWidths: Attachment<HTMLTableRowElement> = (tr) => {
     const styles = cols.map((ci) => widthStyle(widthFor(ci)));
     const tds = tr.cells;
-    // cells[0] is the row-number column; data cells follow in display order.
-    for (let p = 0; p < styles.length && p + 1 < tds.length; p++) {
-      const td = tds[p + 1];
-      if (td.getAttribute('style') !== styles[p]) td.setAttribute('style', styles[p]);
+    // cells[0] is the row-number column; data cells carry their display
+    // position (the column window may start past 0, behind a spacer).
+    for (let i = 1; i < tds.length; i++) {
+      const td = tds[i];
+      const p = td.dataset.p;
+      if (p === undefined) continue;
+      const style = styles[Number(p)];
+      if (style !== undefined && td.getAttribute('style') !== style) td.setAttribute('style', style);
     }
   };
 
@@ -516,6 +630,7 @@
         c: Math.max(0, Math.min(nCols - 1, c)),
       };
       ensureRowVisible(focusCell.r);
+      ensureColVisible(focusCell.c);
       e.preventDefault();
     };
     switch (e.key) {
@@ -998,6 +1113,10 @@
     border: none;
     background: transparent;
     height: auto;
+  }
+  /* Column-window spacer (see HVIRT_MIN): spans the unrendered columns. */
+  .grid tbody :global(td.hpad) {
+    padding: 0;
   }
   .rownum {
     color: var(--text-dim);
