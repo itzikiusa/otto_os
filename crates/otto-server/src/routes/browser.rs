@@ -189,6 +189,62 @@ impl BrowserEngineHandle {
     }
 }
 
+/// Longest tab URL accepted (a data-URL paste or a runaway query string must
+/// not become a multi-MB `browser_tabs` row).
+const TAB_URL_MAX_CHARS: usize = 8 * 1024;
+/// Longest stored tab title.
+const TAB_TITLE_MAX_CHARS: usize = 300;
+
+/// A tab URL must be a well-formed `http(s)` URL (or `about:blank`, the
+/// live view's empty tab) — anything else would only fail later, after the
+/// row (and, for an agent's `browser_navigate`, a visible tab) exists.
+fn validate_tab_url(url: &str) -> Result<(), ApiError> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err(ApiError(Error::Invalid("url is required".into())));
+    }
+    if url.chars().count() > TAB_URL_MAX_CHARS {
+        return Err(ApiError(Error::Invalid(format!(
+            "url too long (max {TAB_URL_MAX_CHARS} chars)"
+        ))));
+    }
+    if url == "about:blank" {
+        return Ok(());
+    }
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| ApiError(Error::Invalid(format!("invalid url: {e}"))))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ApiError(Error::Invalid(format!(
+            "unsupported url scheme {:?} (http or https only)",
+            parsed.scheme()
+        ))));
+    }
+    Ok(())
+}
+
+/// A caller-supplied tab title, made safe for the prompt / note sinks the
+/// title reaches (see `otto_browser::extract_title`): whitespace — newlines
+/// included — collapsed to single spaces, trimmed, length-capped.
+fn clean_title(title: &str) -> String {
+    title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(TAB_TITLE_MAX_CHARS)
+        .collect()
+}
+
+/// 400 for a selector `/query` can't run (empty, over the cap, unparseable).
+fn check_query_selector(selector: &str) -> Result<(), ApiError> {
+    if selector.chars().count() > SELECTOR_MAX_CHARS {
+        return Err(ApiError(Error::Invalid(format!(
+            "selector too long (max {SELECTOR_MAX_CHARS} chars)"
+        ))));
+    }
+    otto_browser::check_selector(selector).map_err(|m| ApiError(Error::Invalid(m)))
+}
+
 /// Map a browser-engine failure onto the shared `Error` → HTTP status convention.
 fn engine_err(e: otto_browser::EngineError) -> ApiError {
     use otto_browser::EngineError::*;
@@ -477,14 +533,12 @@ async fn create_tab(
     Json(req): Json<CreateTabReq>,
 ) -> ApiResult<Json<BrowserTab>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    if req.url.trim().is_empty() {
-        return Err(ApiError(Error::Invalid("url is required".into())));
-    }
+    validate_tab_url(&req.url)?;
     let tab = ctx
         .browser_tabs
         .create(NewBrowserTab {
             workspace_id: wid,
-            url: req.url,
+            url: req.url.trim().to_string(),
         })
         .await
         .map_err(ApiError)?;
@@ -493,7 +547,11 @@ async fn create_tab(
 }
 
 /// `PATCH /browser/tabs/{id}` — `{url?, title?, mode?}`. Navigating a
-/// reader-mode tab re-fetches the page and adopts its title (see module docs).
+/// reader-mode tab without a `title` fetches the page and adopts its title
+/// (the agent `browser_navigate` path); the reader UI has JUST fetched the
+/// page itself and sends its title along, so no second fetch is paid. Every
+/// check (mode, URL shape, netguard, the fetch) runs before anything is
+/// written, so a failed navigation leaves the tab exactly as it was.
 async fn update_tab(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
@@ -514,33 +572,44 @@ async fn update_tab(
                 "unknown browser tab mode {mode:?} (expected \"reader\" or \"live\")"
             ))));
         }
+    }
+    let effective_mode = req.mode.as_deref().unwrap_or(tab.mode.as_str());
+    let supplied_title = req
+        .title
+        .as_deref()
+        .map(clean_title)
+        .filter(|t| !t.is_empty());
+
+    // Resolve the navigation (if any) fully before writing.
+    let nav = match req.url.as_deref() {
+        Some(url) => {
+            let url = url.trim().to_string();
+            validate_tab_url(&url)?;
+            let title = if effective_mode == "reader" {
+                otto_netguard::check_url(&url)
+                    .await
+                    .map_err(|m| ApiError(Error::Invalid(m)))?;
+                match supplied_title {
+                    Some(title) => title,
+                    None => ctx.browser.page(&url).await.map_err(engine_err)?.title,
+                }
+            } else {
+                supplied_title.unwrap_or_else(|| tab.title.clone())
+            };
+            Some((url, title))
+        }
+        None => supplied_title.map(|title| (tab.url.clone(), title)),
+    };
+
+    if let Some(mode) = req.mode.as_deref() {
         ctx.browser_tabs
             .set_mode(&id, mode)
             .await
             .map_err(ApiError)?;
     }
-    let effective_mode = req.mode.as_deref().unwrap_or(tab.mode.as_str());
-
-    if let Some(url) = req.url {
-        if effective_mode == "reader" {
-            otto_netguard::check_url(&url)
-                .await
-                .map_err(|m| ApiError(Error::Invalid(m)))?;
-            let page = ctx.browser.page(&url).await.map_err(engine_err)?;
-            ctx.browser_tabs
-                .update_nav(&id, &url, &page.title)
-                .await
-                .map_err(ApiError)?;
-        } else {
-            let title = req.title.unwrap_or(tab.title);
-            ctx.browser_tabs
-                .update_nav(&id, &url, &title)
-                .await
-                .map_err(ApiError)?;
-        }
-    } else if let Some(title) = req.title {
+    if let Some((url, title)) = nav {
         ctx.browser_tabs
-            .update_nav(&id, &tab.url, &title)
+            .update_nav(&id, &url, &title)
             .await
             .map_err(ApiError)?;
     }
@@ -594,7 +663,11 @@ async fn fetch_page(
         .await
         .map_err(|m| ApiError(Error::Invalid(m)))?;
     let page = ctx.browser.page(&q.url).await.map_err(engine_err)?;
-    let html = if q.wants_html() { page.html } else { String::new() };
+    let html = if q.wants_html() {
+        page.html
+    } else {
+        String::new()
+    };
     Ok(Json(BrowserPageResp {
         url: page.url,
         title: page.title,
@@ -615,6 +688,9 @@ async fn query_page(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<BrowserQueryResp>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    // A malformed selector is the caller's mistake (400), found before the
+    // navigation it would otherwise waste — not a 502 after the render.
+    check_query_selector(&q.selector)?;
     otto_netguard::check_url(&q.url)
         .await
         .map_err(|m| ApiError(Error::Invalid(m)))?;
@@ -876,7 +952,13 @@ async fn send_annotation(
     let nonce = otto_core::new_id();
     let block = build_context_block(&annotation, &title, &nonce);
     ctx.manager
-        .human_input(&req.session_id, &user.id, false, true, format!("{block}\n").as_bytes())
+        .human_input(
+            &req.session_id,
+            &user.id,
+            false,
+            true,
+            format!("{block}\n").as_bytes(),
+        )
         .await
         .map_err(ApiError)?;
     Ok(StatusCode::OK)
@@ -957,7 +1039,13 @@ async fn ask_session(
     let nonce = otto_core::new_id();
     let block = build_ask_block(&req.url, &title, &marks, text, &nonce);
     ctx.manager
-        .human_input(&req.session_id, &user.id, false, true, format!("{block}\n").as_bytes())
+        .human_input(
+            &req.session_id,
+            &user.id,
+            false,
+            true,
+            format!("{block}\n").as_bytes(),
+        )
         .await
         .map_err(ApiError)?;
     Ok(StatusCode::OK)
@@ -1625,9 +1713,9 @@ mod tests {
     use otto_rbac::RbacRoleChecker;
     use otto_sessions::{ProviderRegistry, SessionManager};
     use otto_state::{
-        ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, GitStore, IntegrationsRepo,
-        IssuesRepo, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, DbPool, SwarmRepo,
-        WorkspacesRepo,
+        ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool, GitStore,
+        IntegrationsRepo, IssuesRepo, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo,
+        SwarmRepo, WorkspacesRepo,
     };
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use tempfile::TempDir;
@@ -1757,7 +1845,7 @@ mod tests {
             db_explorer,
             db_assist: crate::db_assist::new_registry(),
             transcript_cache: Default::default(),
-        rooms: Default::default(),
+            rooms: Default::default(),
             brokers,
             mcp,
             spawner: Arc::new(NoopSpawner),
@@ -2111,6 +2199,209 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
+    /// Counts page fetches; answers every one with `title: "Fetched"`, or
+    /// fails them all with a navigation error.
+    struct CountingEngine {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl otto_browser::BrowserEngine for CountingEngine {
+        async fn fetch_page(
+            &self,
+            url: &str,
+        ) -> std::result::Result<otto_browser::Page, otto_browser::EngineError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                return Err(otto_browser::EngineError::Nav("unreachable".into()));
+            }
+            Ok(otto_browser::Page {
+                url: url.into(),
+                title: "Fetched".into(),
+                html: String::new(),
+                markdown: String::new(),
+                degraded: false,
+                engine: "mock".into(),
+            })
+        }
+        async fn query(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<Vec<otto_browser::MatchedNode>, otto_browser::EngineError>
+        {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    async fn counting_app(fail: bool) -> (TempDir, Arc<std::sync::atomic::AtomicUsize>, Router) {
+        let (tmp, _pool, ctx, _) = test_ctx_and_app().await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = otto_browser::BrowserService::with_engines(
+            Arc::new(CountingEngine {
+                calls: calls.clone(),
+                fail,
+            }),
+            otto_browser::FallbackEngine::from_static("<title>fallback</title>"),
+        );
+        let ctx = ServerCtx {
+            browser: Arc::new(BrowserEngineHandle::with_service(service)),
+            ..ctx
+        };
+        (tmp, calls, browser_router(ctx))
+    }
+
+    #[tokio::test]
+    async fn create_tab_rejects_non_web_urls() {
+        let (_tmp, app) = test_app().await;
+        for bad in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "not a url",
+            "   ",
+        ] {
+            let (status, body) = post_json(
+                &app,
+                "/workspaces/ws1/browser/tabs",
+                serde_json::json!({ "url": bad }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{bad}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        let huge = format!("https://a.io/?q={}", "x".repeat(TAB_URL_MAX_CHARS));
+        let (status, _) = post_json(
+            &app,
+            "/workspaces/ws1/browser/tabs",
+            serde_json::json!({ "url": huge }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = post_json(
+            &app,
+            "/workspaces/ws1/browser/tabs",
+            serde_json::json!({ "url": "about:blank" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// The reader UI fetched the page itself and sends its title: no second
+    /// fetch. The agent path (no title) still fetches and adopts the title.
+    #[tokio::test]
+    async fn reader_nav_with_a_title_does_not_refetch() {
+        let (_tmp, calls, app) = counting_app(false).await;
+        let (_, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/tabs",
+            serde_json::json!({"url": "https://8.8.8.8/"}),
+        )
+        .await;
+        let id = json(&body)["id"].as_str().unwrap().to_string();
+
+        let (status, body) = send(
+            &app,
+            Method::PATCH,
+            &format!("/browser/tabs/{id}"),
+            Some(
+                serde_json::json!({"url": "https://8.8.8.8/a", "title": "Mine\n\nInjected   line"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(json(&body)["title"], "Mine Injected line");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let (status, body) = send(
+            &app,
+            Method::PATCH,
+            &format!("/browser/tabs/{id}"),
+            Some(serde_json::json!({"url": "https://8.8.8.8/b"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(json(&body)["title"], "Fetched");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Netguard still runs on the trusted-title path.
+        let (status, _) = send(
+            &app,
+            Method::PATCH,
+            &format!("/browser/tabs/{id}"),
+            Some(serde_json::json!({"url": "http://169.254.169.254/", "title": "x"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// A navigation that fails writes nothing — not even the mode switch it
+    /// arrived with.
+    #[tokio::test]
+    async fn failed_reader_nav_leaves_the_tab_untouched() {
+        let (_tmp, _calls, app) = counting_app(true).await;
+        let (_, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/tabs",
+            serde_json::json!({"url": "https://8.8.8.8/start"}),
+        )
+        .await;
+        let id = json(&body)["id"].as_str().unwrap().to_string();
+        let (status, _) = send(
+            &app,
+            Method::PATCH,
+            &format!("/browser/tabs/{id}"),
+            Some(serde_json::json!({"mode": "live"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) = send(
+            &app,
+            Method::PATCH,
+            &format!("/browser/tabs/{id}"),
+            Some(serde_json::json!({"mode": "reader", "url": "https://8.8.8.8/next"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let (_, body) = get(&app, "/workspaces/ws1/browser/tabs").await;
+        let tab = &json(&body)[0];
+        assert_eq!(tab["mode"], "live");
+        assert_eq!(tab["url"], "https://8.8.8.8/start");
+    }
+
+    #[tokio::test]
+    async fn query_rejects_a_bad_selector_before_fetching() {
+        let (_tmp, calls, app) = counting_app(false).await;
+        let (status, body) = get(
+            &app,
+            "/workspaces/ws1/browser/query?url=https://8.8.8.8/&selector=div%5B",
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let (status, _) = get(
+            &app,
+            "/workspaces/ws1/browser/query?url=https://8.8.8.8/&selector=p.lead",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn annotation_update_and_delete_via_http() {
         let (_tmp, app) = test_app().await;
@@ -2310,7 +2601,10 @@ mod tests {
             "{status}"
         );
         let code = json(&body)["code"].as_str().unwrap_or("").to_string();
-        assert!(code == "engine_not_installed" || code == "unsupported_platform", "{code}");
+        assert!(
+            code == "engine_not_installed" || code == "unsupported_platform",
+            "{code}"
+        );
 
         // A native tab needs no daemon session.
         let (status, _) = post_json(
@@ -2350,15 +2644,16 @@ mod tests {
         // so the route's idempotent path is exercised without downloading or
         // launching Chrome. Archive verification has isolated installer tests.
         if let Some(platform) = otto_browser::live::install::current_platform() {
-            use otto_browser::live::install::{
-                build_dir, managed_exe, pin_for, INSTALLED_MARKER,
-            };
+            use otto_browser::live::install::{build_dir, managed_exe, pin_for, INSTALLED_MARKER};
             let pin = pin_for(otto_browser::live::ChromeBuild::Chrome, platform).unwrap();
             let exe = managed_exe(tmp.path(), pin);
             std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
             std::fs::write(&exe, b"test fixture; never executed").unwrap();
-            std::fs::write(build_dir(tmp.path(), pin).join(INSTALLED_MARKER), pin.sha256)
-                .unwrap();
+            std::fs::write(
+                build_dir(tmp.path(), pin).join(INSTALLED_MARKER),
+                pin.sha256,
+            )
+            .unwrap();
             let (status, body) =
                 post_json(&app, "/browser/live/install", serde_json::json!({})).await;
             assert_eq!(status, StatusCode::OK);
@@ -2387,7 +2682,11 @@ mod tests {
             Some(serde_json::json!({"build": "chrome-headless-shell", "headed": true})),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "headed needs the full build");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "headed needs the full build"
+        );
 
         let (status, body) = send(
             &app,

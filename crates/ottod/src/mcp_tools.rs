@@ -41,14 +41,18 @@
 //! naming (`otto.create_pr` → `otto_create_pr`) and its calls are proxied
 //! through `POST /mcp/otto-tools/invoke` — the same allow-list → approval →
 //! audit choke point the outward server uses, so a mutating tool such as
-//! `otto_create_pr` still waits on a human approval. Native tools win by name
+//! `otto_create_pr` still waits on a human approval — unless an explicit
+//! auto-approve rule (MCP → Otto server → Auto-approve; global, this
+//! workspace, or this session) covers it, in which case it runs at once and is
+//! audited `auto_approved` (the envelope's `auto_approved_by` names the rule,
+//! passed through to the agent unchanged). Native tools win by name
 //! (see `governed_tools_for`), so what the control plane shows as enabled is
 //! what a session can call, with no second hand-maintained list to drift.
 //!
 //! The Design Hall WRITES (`otto_design_assist` — start an agent turn that
 //! commits a version, `otto_design_link` — file an explicit link) are
 //! deliberately NOT native: they exist only as that governed bridge, so they
-//! stay approval-gated (DANGEROUS) unless the operator exempts them, and no
+//! stay approval-gated (DANGEROUS) unless an auto-approve rule covers them, and no
 //! tool approves a design version (humans only).
 //!
 //! Beyond Otto's own data, the DB tools (`otto_list_connections`,
@@ -332,10 +336,11 @@ impl Ctx {
         parse_ok_body(&bytes)
     }
 
-    /// DELETE an `/api/v1` path with the bearer token. Used ONLY by
+    /// DELETE an `/api/v1` path with the bearer token. Used by
     /// `otto_vault_delete` — a soft delete (the daemon moves the note into the
-    /// vault's `.trash/`, never destroying files). Same error handling as
-    /// [`Self::post_json`]; tolerates an empty (204) body.
+    /// vault's `.trash/`, never destroying files) — and by `browser_navigate`
+    /// to remove the tab IT just created when that tab's fetch failed. Same
+    /// error handling as [`Self::post_json`]; tolerates an empty (204) body.
     async fn delete_ok(&self, path: &str) -> Result<(), String> {
         let url = format!("{}/api/v1{}", self.base.trim_end_matches('/'), path);
         let resp = tokio::time::timeout(
@@ -1232,8 +1237,8 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "otto_room_read",
-                "description": "Personal agents: read messages from an agent room this agent is a member of, oldest first. Pass `after` (the last message id you saw) to page forward.",
-                "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string" }, "after": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["room_id"] }
+                "description": "Personal agents: read messages from an agent room this agent is a member of (oldest first within the page). With no cursor it returns the room's NEWEST messages (default 50); pass `after` (the last message id you saw) to get only newer ones, or `before` (the oldest id you hold) to page back through history.",
+                "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string" }, "after": { "type": "string" }, "before": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["room_id"] }
             },
             // ---- API client. Reads return the daemon's masked agent shapes;
             // writers use the normal ApiClient:Edit routes as the session owner.
@@ -1268,7 +1273,7 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "otto_api_execute",
-                "description": "SENDS A REAL HTTP REQUEST: execute a SAVED request (by `request_id` or unique `name`) against an environment (`environment` = id or name, default the active one). Non-GET/HEAD/OPTIONS methods require `confirm:true`; an agent-authored request targeting a host no human request/run used requires `confirm_new_host:true` (the error says which). Secrets are resolved server-side and scrubbed from the result; JWTs come back as decoded claims (`jwt_claims`), never the token. `vars` override variables (values must not contain '{{').",
+                "description": "SENDS A REAL HTTP REQUEST: execute a SAVED request (by `request_id` or unique `name`) against an environment (`environment` = id or name, default the active one). Non-GET/HEAD/OPTIONS methods require `confirm:true`; an agent-authored request targeting a host no human request/run used requires `confirm_new_host:true` (the error says which); a send that would carry a stored secret to a host it isn't bound to is refused outright (a person must send it from the Otto UI). Secrets are resolved server-side and scrubbed from the result; JWTs come back as decoded claims (`jwt_claims`), never the token. `vars` override variables (values must not contain '{{').",
                 "inputSchema": { "type": "object", "properties": {
                     "request_id": { "type": "string", "description": "Saved request id." },
                     "name": { "type": "string", "description": "Unique saved request name (used when request_id is omitted)." },
@@ -1781,6 +1786,33 @@ const NATIVE_REF_ARGS: &[(&str, &str, &str)] = &[
     ("k8s_health", "cluster_id", "k8s_cluster"),
     ("k8s_action", "cluster_id", "k8s_cluster"),
 ];
+
+/// Messages an agent's `otto_room_read` returns when it names no `limit`.
+const ROOM_READ_DEFAULT_LIMIT: i64 = 50;
+
+/// The `/agent-rooms/{id}/messages` query for `otto_room_read` (without the
+/// session id). `after` pages forward; `before` pages back; with neither the
+/// read opens on the room's TAIL — it used to start from the room's very first
+/// message, so an agent catching up on a long room got the oldest 100 posts
+/// (up to 1.6 MB of context) instead of what was just said. Pure — unit-tested.
+fn room_read_query(args: &Value) -> String {
+    let arg = |k: &str| {
+        args.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_i64)
+        .unwrap_or(ROOM_READ_DEFAULT_LIMIT);
+    let cursor = match (arg("after"), arg("before")) {
+        (Some(after), _) => format!("after={}", seg(after)),
+        (None, Some(before)) => format!("before={}", seg(before)),
+        (None, None) => "tail=true".to_string(),
+    };
+    format!("{cursor}&limit={limit}")
+}
 
 /// The `/refs/directory` query for a native list tool. Pure — unit-tested.
 fn directory_path(kind: &str, args: &Value, session_ws: Option<&str>) -> String {
@@ -2909,26 +2941,12 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
         }
         "otto_room_read" => {
             let room = arg_str(args, "room_id")?;
-            let mut q = String::new();
-            if let Some(after) = args
-                .get("after")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                q.push_str(&format!("&after={}", seg(after)));
-            }
-            if let Some(limit) = args.get("limit").and_then(Value::as_i64) {
-                q.push_str(&format!("&limit={limit}"));
-            }
+            let mut q = room_read_query(args);
             if let Some(sid) = ctx.session_id.clone() {
                 q.push_str(&format!("&session_id={}", seg(&sid)));
             }
             let raw = ctx
-                .get_json(&format!(
-                    "/agent-rooms/{}/messages?{}",
-                    seg(&room),
-                    q.trim_start_matches('&')
-                ))
+                .get_json(&format!("/agent-rooms/{}/messages?{q}", seg(&room)))
                 .await?;
             Ok(finalize(json!({ "messages": raw })))
         }
@@ -3359,12 +3377,23 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             // The tab is created in mode:"reader" by construction (see
             // `otto_state::browser::BrowserTabsRepo::create`), so this PATCH
             // runs the fetch pipeline and adopts the fetched page's title.
-            let updated = ctx
+            let updated = match ctx
                 .patch_json(
                     &format!("/browser/tabs/{}", seg(&tab_id)),
                     &json!({ "url": url }),
                 )
-                .await?;
+                .await
+            {
+                Ok(updated) => updated,
+                Err(error) => {
+                    // A refused / unreachable URL must not leave a blank tab
+                    // in the person's Browser for every failed agent attempt.
+                    let _ = ctx
+                        .delete_ok(&format!("/browser/tabs/{}", seg(&tab_id)))
+                        .await;
+                    return Err(error);
+                }
+            };
             let title = updated
                 .get("title")
                 .cloned()
@@ -4303,6 +4332,34 @@ mod tests {
         ]);
         let error = pick_by_name(ambiguous.as_array().unwrap(), "login", "request").unwrap_err();
         assert_eq!(error, "ambiguous request 'login': r1, r3");
+    }
+
+    /// `otto_room_read` opens on the room's tail and pages both ways.
+    #[test]
+    fn room_read_opens_on_the_tail_and_pages_both_ways() {
+        // No cursor: the newest messages, with a bounded default page.
+        assert_eq!(
+            room_read_query(&json!({"room_id":"r1"})),
+            "tail=true&limit=50"
+        );
+        assert_eq!(
+            room_read_query(&json!({"room_id":"r1","limit":10})),
+            "tail=true&limit=10"
+        );
+        // `after` pages forward (and wins over `before`); `before` pages back.
+        assert_eq!(
+            room_read_query(&json!({"after":"m9","before":"m1"})),
+            "after=m9&limit=50"
+        );
+        assert_eq!(
+            room_read_query(&json!({"before":"m1"})),
+            "before=m1&limit=50"
+        );
+        // Blank cursors are ignored, not sent as `after=`.
+        assert_eq!(
+            room_read_query(&json!({"after":"  "})),
+            "tail=true&limit=50"
+        );
     }
 
     /// The cross-workspace list tools read the daemon's directory — every

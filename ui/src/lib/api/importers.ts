@@ -26,12 +26,26 @@ export interface ImportedCollection {
 }
 
 /** A Postman environment export (`*.postman_environment.json`) — becomes an
- * Otto API environment. Secret-typed values import as plain variables (Postman
- * exports don't carry secret values); the user can mark them secret after. */
+ * Otto API environment. File exports usually blank secret values, but the
+ * Postman ACCOUNT sync returns them: every `type: "secret"` variable (and any
+ * credential-named one, mirroring the daemon's `secret_shaped`) is listed in
+ * `secretKeys`, so the import stores it in the Keychain — never as a plain
+ * variable in the state DB. */
 export interface ImportedEnvironment {
   format: 'postman-env';
   name: string;
   variables: Record<string, string>;
+  /** Keys of `variables` that are secrets (Keychain-backed on import). */
+  secretKeys?: string[];
+}
+
+/** Variable names that carry credentials — mirrors the daemon's
+ *  `api_secrets::secret_shaped`. */
+export function secretShapedName(key: string): boolean {
+  const k = key.toLowerCase();
+  return ['token', 'secret', 'passw', 'apikey', 'api_key', 'api-key', 'authorization', 'credential'].some((s) =>
+    k.includes(s),
+  );
 }
 
 export type ImportedDoc = ImportedCollection | ImportedEnvironment;
@@ -64,16 +78,43 @@ export function detectAndParse(text: string, filename: string): ImportedDoc {
  * Disabled entries are skipped; values are coerced to strings. */
 function parsePostmanEnvironment(doc: Record<string, unknown>): ImportedEnvironment {
   const variables: Record<string, string> = {};
+  const secretKeys: string[] = [];
   for (const raw of doc.values as unknown[]) {
-    const v = raw as { key?: string; value?: unknown; enabled?: boolean };
+    const v = raw as { key?: string; value?: unknown; enabled?: boolean; type?: string };
     if (!v.key || v.enabled === false) continue;
-    variables[v.key] = v.value == null ? '' : String(v.value);
+    const value = v.value == null ? '' : String(v.value);
+    variables[v.key] = value;
+    // An empty secret has nothing to protect; it stays a plain (blank) variable
+    // the user can fill in and mark secret later.
+    if (value !== '' && (v.type === 'secret' || secretShapedName(v.key)) && !secretKeys.includes(v.key)) {
+      secretKeys.push(v.key);
+    }
   }
   return {
     format: 'postman-env',
     name: String(doc.name ?? 'Imported Environment'),
     variables,
+    secretKeys,
   };
+}
+
+/** The environment-create request for an import: secret variables travel
+ *  ONLY in the write-only `secret_values` (the daemon moves them to the
+ *  Keychain and strips them from the row). */
+export function environmentUpsertFor(env: ImportedEnvironment): {
+  name: string;
+  variables: Record<string, string>;
+  secret_keys: string[];
+  secret_values: Record<string, string>;
+} {
+  const secretKeys = env.secretKeys ?? [];
+  const variables: Record<string, string> = {};
+  const secretValues: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env.variables)) {
+    if (secretKeys.includes(key)) secretValues[key] = value;
+    else variables[key] = value;
+  }
+  return { name: env.name, variables, secret_keys: secretKeys, secret_values: secretValues };
 }
 
 // ── Postman v2.1 ────────────────────────────────────────────────────────────

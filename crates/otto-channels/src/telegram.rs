@@ -315,7 +315,13 @@ fn redact_token(s: impl std::fmt::Display, token: &str) -> String {
 
 /// Long-poll until `cancel` is set. Each incoming text message is forwarded
 /// to `bridge`.
-pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel: Arc<AtomicBool>) {
+pub async fn run(
+    integ: Integration,
+    token: String,
+    bridge: Arc<Bridge>,
+    cancel: Arc<AtomicBool>,
+    health: crate::health::Health,
+) {
     let adapter = Arc::new(TelegramAdapter::new(token.clone()));
     // Long-poll client: its overall timeout exceeds LONG_POLL_TIMEOUT so the
     // held-open getUpdates request is not cut off mid-poll.
@@ -339,7 +345,9 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
         let resp = match http.get(&url).send().await {
             Ok(r) => r,
             Err(e) => {
-                error!("telegram getUpdates: {}", redact_token(&e, &token));
+                let why = redact_token(&e, &token);
+                error!("telegram getUpdates: {why}");
+                health.failed(&format!("Couldn't reach Telegram: {why}"), false);
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue;
@@ -349,7 +357,9 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
         let tg: TgResponse<Vec<TgUpdate>> = match resp.json().await {
             Ok(v) => v,
             Err(e) => {
-                error!("telegram getUpdates parse: {}", redact_token(&e, &token));
+                let why = redact_token(&e, &token);
+                error!("telegram getUpdates parse: {why}");
+                health.failed(&format!("Unreadable reply from Telegram: {why}"), false);
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue;
@@ -357,10 +367,13 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
         };
 
         if !tg.ok {
-            error!(
-                "telegram getUpdates not ok: {}",
-                tg.description.unwrap_or_default()
-            );
+            let desc = tg.description.unwrap_or_default();
+            error!("telegram getUpdates not ok: {desc}");
+            // 401 Unauthorized (revoked/wrong token) won't fix itself; a 409
+            // Conflict (another poller / a webhook set on the bot) needs the
+            // user too. Both are retried, but reported as failing.
+            let permanent = desc.contains("Unauthorized") || desc.contains("Conflict");
+            health.failed(&format!("Telegram rejected getUpdates: {desc}"), permanent);
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
             continue;
@@ -368,6 +381,7 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
 
         // Successful poll — reset backoff.
         backoff_ms = 3_000;
+        health.connected();
 
         let updates = tg.result.unwrap_or_default();
         for update in &updates {
@@ -380,6 +394,7 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
                         .unwrap_or_default();
                     let chat = msg.chat.id.to_string();
                     let thread = msg.message_thread_id.map(|t| t.to_string());
+                    health.event();
 
                     let inbound = Inbound {
                         workspace_id: integ.workspace_id.clone(),

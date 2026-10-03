@@ -10,9 +10,15 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { mcpCpExtraApi, type McpGatewayToolRow } from './cp-api';
   import ExposePanel from './ExposePanel.svelte';
+  import AutoApprovePanel from './AutoApprovePanel.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
-  import type { McpOttoServerStatus, McpOttoToolInfo, McpSessionAttach } from '../../lib/api/types';
+  import type {
+    McpAutoApproveRef,
+    McpOttoServerStatus,
+    McpOttoToolInfo,
+    McpSessionAttach,
+  } from '../../lib/api/types';
 
   interface Props {
     wsId: string | null;
@@ -33,16 +39,19 @@
   let gatewayLoading = $state(false);
   let gatewayError = $state<string | null>(null);
   let exposeOpen = $state(false);
+  /** Bumped when the catalog switches change rules — the rules panel reloads. */
+  let rulesRevision = $state(0);
 
   const isMcpAdmin = $derived(auth.can('mcp', 'admin'));
   const tools = $derived(status?.tools ?? []);
   const enabledNames = $derived(new Set(tools.filter((tool) => tool.enabled).map((tool) => tool.name)));
   const mutatingCount = $derived(tools.filter((tool) => tool.mutating).length);
-  // Full `otto.*` names of the mutating tools whose "Ask before each call" is off.
-  const exemptNames = $derived(new Set(tools.filter((tool) => tool.approval_exempt).map((tool) => tool.name)));
   // Global `mcp_require_approval_dangerous` — when off, nothing asks at all.
   const approvalsOn = $derived(status?.require_approval_dangerous ?? true);
-  const skippedCount = $derived(tools.filter((tool) => tool.enabled && tool.mutating && tool.approval_exempt).length);
+  // Enabled mutating tools some auto-approve rule (any scope) covers.
+  const skippedCount = $derived(
+    tools.filter((tool) => tool.enabled && tool.mutating && (tool.auto_approved_by?.length ?? 0) > 0).length,
+  );
   const attached = $derived(attach?.attached ?? true);
   const gatewayNames = $derived([...new Set(gatewayTools.map((tool) => tool.name))]);
   const shownGatewayNames = $derived(gatewayNames.slice(0, 60));
@@ -122,37 +131,100 @@
     return list.filter((tool) => tool.mutating && tool.enabled);
   }
 
-  async function confirmSkip(names: string[]): Promise<boolean> {
-    const what = names.length === 1 ? names[0] : `${names.length} tools`;
+  /** The GLOBAL per-tool rule behind a tool's "Auto-approve everywhere" switch. */
+  function globalToolRule(tool: McpOttoToolInfo): McpAutoApproveRef | undefined {
+    return tool.auto_approved_by?.find((r) => r.scope === 'global' && r.target_kind === 'tool');
+  }
+
+  /** The GLOBAL category rule a category's switch reflects (read off any tool
+   *  of the category it covers). */
+  function globalCategoryRule(category: string, list: McpOttoToolInfo[]): McpAutoApproveRef | undefined {
+    for (const tool of list) {
+      const rule = tool.auto_approved_by?.find(
+        (r) => r.scope === 'global' && r.target_kind === 'category' && r.target === category,
+      );
+      if (rule) return rule;
+    }
+    return undefined;
+  }
+
+  /** Rules other than the tool's own global switch — shown as badges. */
+  function otherRules(tool: McpOttoToolInfo): McpAutoApproveRef[] {
+    const own = globalToolRule(tool);
+    return (tool.auto_approved_by ?? []).filter((r) => r.id !== own?.id);
+  }
+
+  function ruleBadge(rule: McpAutoApproveRef): string {
+    const where = rule.scope === 'global' ? 'everywhere' : rule.scope === 'workspace' ? 'in a workspace' : 'for one session';
+    return rule.target_kind === 'category' ? `${rule.target} writes ${where}` : `${where}`;
+  }
+
+  async function confirmAuto(what: string, irreversible: boolean): Promise<boolean> {
+    const first = await confirmer.ask(
+      `Auto-approve ${what} everywhere? Agents and external clients will run it without a human approval. Every call is still audited as “Auto approved”, and you can turn this off here at any time.`,
+      { title: 'Auto-approve', confirmLabel: 'Auto-approve', danger: true },
+    );
+    if (!first || !irreversible) return first;
+    // The guardrail's second explicit toggle.
     return confirmer.ask(
-      `Stop asking before each call to ${what}? Agents and external clients will run it without a human approval. Every call is still audited, and you can turn asking back on here at any time.`,
-      { title: "Don't ask before each call", confirmLabel: "Don't ask", danger: true },
+      `${what} is IRREVERSIBLE — nobody can undo it from Otto once it runs. Run it without asking anyway?`,
+      { title: 'Irreversible tool', confirmLabel: 'Run without asking', danger: true },
     );
   }
 
-  /** "Ask before each call" for one tool. Turning it OFF confirms first; a
-   *  cancelled confirm restores the checkbox (its bound value never changed). */
-  async function setAsk(tool: McpOttoToolInfo, ask: boolean, input: HTMLInputElement): Promise<void> {
-    if (!ask && !(await confirmSkip([tool.name]))) {
-      input.checked = true;
-      return;
-    }
-    const next = new Set(exemptNames);
-    if (ask) next.delete(tool.name);
-    else next.add(tool.name);
-    if (!(await patch({ approval_exempt_tools: [...next] }))) input.checked = !exemptNames.has(tool.name);
+  async function afterRuleChange(): Promise<void> {
+    rulesRevision++;
+    await load();
   }
 
-  async function setCategoryAsk(categoryTools: McpOttoToolInfo[], ask: boolean): Promise<void> {
-    const targets = gatedTools(categoryTools).map((tool) => tool.name);
-    if (!targets.length) return;
-    if (!ask && !(await confirmSkip(targets))) return;
-    const next = new Set(exemptNames);
-    for (const name of targets) {
-      if (ask) next.delete(name);
-      else next.add(name);
+  /** The per-tool "Auto-approve everywhere" switch: a global per-tool rule. A
+   *  cancelled confirm or failed save restores the checkbox. */
+  async function setAuto(tool: McpOttoToolInfo, on: boolean, input: HTMLInputElement): Promise<void> {
+    const rule = globalToolRule(tool);
+    if (on && !(await confirmAuto(tool.name, !!tool.irreversible))) {
+      input.checked = false;
+      return;
     }
-    await patch({ approval_exempt_tools: [...next] });
+    saving = true;
+    try {
+      if (on) {
+        await mcpCpExtraApi.createAutoApprove({
+          scope: 'global',
+          target_kind: 'tool',
+          target: tool.name,
+          allow_irreversible: tool.irreversible ? true : undefined,
+        });
+      } else if (rule) {
+        await mcpCpExtraApi.deleteAutoApprove(rule.id);
+      }
+      await afterRuleChange();
+    } catch (e) {
+      input.checked = !!rule;
+      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      saving = false;
+    }
+  }
+
+  /** "Auto-approve every <category> write": one global category rule —
+   *  covers future tools of the category, never an irreversible one. */
+  async function setCategoryAuto(category: string, list: McpOttoToolInfo[], on: boolean, input: HTMLInputElement): Promise<void> {
+    const rule = globalCategoryRule(category, list);
+    if (on && !(await confirmAuto(`every ${category} write (except irreversible tools)`, false))) {
+      input.checked = false;
+      return;
+    }
+    saving = true;
+    try {
+      if (on) await mcpCpExtraApi.createAutoApprove({ scope: 'global', target_kind: 'category', target: category });
+      else if (rule) await mcpCpExtraApi.deleteAutoApprove(rule.id);
+      await afterRuleChange();
+    } catch (e) {
+      input.checked = !!rule;
+      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      saving = false;
+    }
   }
 
   async function loadAttach(id: string): Promise<void> {
@@ -288,9 +360,11 @@
       </span>
     </label>
     <p class="counts muted small">
-      {tools.length} tools · {enabledNames.size} exposed · {mutatingCount} mutating{#if skippedCount}{' '}· <span class="noask">{skippedCount} run without asking</span>{/if}
+      {tools.length} tools · {enabledNames.size} exposed · {mutatingCount} mutating{#if skippedCount}{' '}· <span class="noask">{skippedCount} auto-approved</span>{/if}
     </p>
   </section>
+
+  <AutoApprovePanel {isMcpAdmin} revision={rulesRevision} onchange={() => void load()} />
 
   {#if (loading || loadError) && !status}
     <LoadState what="the external tool catalog" {loading} error={loadError} empty rows={3} onretry={() => void load()} />
@@ -302,7 +376,7 @@
       <p class="muted small catalog-note">
         Enabled tools are served to external clients, and to Otto sessions (for tools that aren't
         built in, e.g. <code>otto_create_pr</code>) through the same gate. A mutating tool asks a
-        person before each call unless you turn <em>Ask before each call</em> off; every call is
+        person before each call unless an <em>Auto-approve</em> rule covers it; every call is
         audited. Policies govern registered external servers, not these tools.
       </p>
     </div>
@@ -317,8 +391,8 @@
   {#if status && !approvalsOn}
     <p class="warn" data-testid="mcp-approvals-globally-off">
       Approval prompts are turned off globally (<code>mcp_require_approval_dangerous</code>), so no
-      otto.* call asks for approval — the per-tool <em>Ask before each call</em> setting has no effect
-      until that is turned back on.
+      otto.* call asks for approval — the <em>Auto-approve</em> rules have no effect until that is
+      turned back on.
     </p>
   {/if}
   {#each groups as group (group.cat)}
@@ -342,23 +416,20 @@
         >None</button>
       </div>
       {#if gated.length}
-        <div class="grp-ask">
-          <span class="muted">
-            Approval for {gated.length} enabled mutating tool{gated.length === 1 ? '' : 's'}:
-          </span>
-          <button
-            class="btn small"
-            data-testid="mcp-category-ask"
-            disabled={saving || !status || !isMcpAdmin || gated.every((tool) => !tool.approval_exempt)}
-            onclick={() => void setCategoryAsk(group.tools, true)}
-          >Always ask</button>
-          <button
-            class="btn small"
-            data-testid="mcp-category-no-ask"
-            disabled={saving || !status || !isMcpAdmin || gated.every((tool) => tool.approval_exempt)}
-            onclick={() => void setCategoryAsk(group.tools, false)}
-          >Don't ask</button>
-        </div>
+        {@const catRule = globalCategoryRule(group.cat, group.tools)}
+        <label class="grp-ask" title="One rule for the category: covers its mutating tools (and future ones), never an irreversible tool.">
+          <input
+            type="checkbox"
+            data-testid="mcp-category-auto"
+            checked={!!catRule}
+            disabled={saving || !status || !isMcpAdmin || !approvalsOn}
+            onchange={(event) => void setCategoryAuto(group.cat, group.tools, event.currentTarget.checked, event.currentTarget)}
+          />
+          <span>Auto-approve every {group.cat} write</span>
+          {#if group.tools.some((tool) => tool.mutating && tool.irreversible)}
+            <span class="muted">(irreversible tools keep asking)</span>
+          {/if}
+        </label>
       {/if}
       <div class="tool-list">
         {#each group.tools as tool (tool.name)}
@@ -378,22 +449,28 @@
               </span>
             </label>
             {#if tool.mutating && tool.enabled}
-              <label
-                class="ask"
-                title="On: a human approves each call. Off: calls run without asking — still audited."
-              >
-                <input
-                  type="checkbox"
-                  data-testid={`mcp-ask-${tool.name}`}
-                  checked={!tool.approval_exempt}
-                  disabled={saving || !status || !isMcpAdmin}
-                  onchange={(event) => void setAsk(tool, event.currentTarget.checked, event.currentTarget)}
-                />
-                <span>Ask before each call</span>
-                {#if tool.approval_exempt}
-                  <span class="noask">runs without asking · still audited</span>
-                {/if}
-              </label>
+              {@const own = globalToolRule(tool)}
+              <div class="ask">
+                <label
+                  class="ask-toggle"
+                  title="On: calls run without asking a person — still audited. Off: a human approves each call."
+                >
+                  <input
+                    type="checkbox"
+                    data-testid={`mcp-auto-${tool.name}`}
+                    checked={!!own}
+                    disabled={saving || !status || !isMcpAdmin}
+                    onchange={(event) => void setAuto(tool, event.currentTarget.checked, event.currentTarget)}
+                  />
+                  <span>Auto-approve everywhere</span>
+                </label>
+                {#if tool.irreversible}<span class="irr">Irreversible</span>{/if}
+                {#each otherRules(tool) as rule (rule.id)}
+                  <span class="noask" title={rule.name}>Auto-approved {ruleBadge(rule)}</span>
+                {/each}
+                {#if own}<span class="noask">runs without asking · still audited</span>{/if}
+                {#if !own && !otherRules(tool).length}<span class="muted">asks before each call</span>{/if}
+              </div>
             {/if}
           </div>
         {/each}
@@ -582,10 +659,22 @@
     margin-inline-start: 23px;
     font-size: var(--fs-s);
     color: var(--text);
-    cursor: pointer;
   }
   .noask {
     color: var(--warning);
+  }
+  .ask-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }
+  .irr {
+    font-size: var(--fs-xs);
+    color: var(--danger);
+    background: var(--danger-soft);
+    border-radius: 999px;
+    padding: 0 7px;
   }
   .grp-ask {
     display: flex;
@@ -593,7 +682,9 @@
     flex-wrap: wrap;
     gap: 6px;
     padding: 0 2px;
-    font-size: var(--fs-xs);
+    font-size: var(--fs-s);
+    color: var(--text);
+    cursor: pointer;
   }
   .t-meta {
     display: flex;

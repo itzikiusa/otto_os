@@ -54,6 +54,22 @@ last 100 runs; run updates stream over WS.
 Manual fire: **Run now** on the agent (or a specific schedule) →
 `POST /personal-agents/{id}/run`.
 
+**One run per agent at a time.** Every run of an agent works in the same folder
+and rewrites the same `memory/notes.md`, so scheduled, manual and delegated runs
+share one per-agent guard: a due schedule waits (its cursor untouched, so it fires
+on a later tick) while another run is going, and Run now answers 409. A failed run
+keeps its session linked (*Open session*) and its error and any delivery failure
+show inline on the run row. Each run's scratch report file is removed once read. A running run has **Stop…**
+(`POST /personal-agents/runs/{run_id}/cancel`): its session is killed (no retry)
+and it settles `canceled`.
+
+**Arming.** A schedule never fires an occurrence from before its `armed_at` — set
+on create, on resume (the schedule's or the whole agent's), and when its cadence or
+timezone really changes. Re-enabling an agent after a week therefore doesn't fire
+(and deliver) the week's missed recaps at once. A `once` schedule — the Assistant
+creates them; the schedule form now supports them too — fires again after its
+`run_at` is edited and it is re-enabled.
+
 ## 3. Chat anytime
 
 `POST /personal-agents/{id}/chat-session` returns (creating if absent) the
@@ -74,6 +90,18 @@ Rooms (`agent_rooms` / `agent_room_members` / `agent_room_messages`) are the
   room** (a post without a `session_id` is a user post).
 - Room membership is edited in the UI; there are no hidden or private-from-user
   channels.
+- **Agents are told about their rooms.** The agent's persona file
+  (CLAUDE.md/AGENTS.md, re-provisioned on every run and every new chat) carries
+  a "Your rooms" section: each room's name and id, the other member agents, and
+  how to use `otto_room_read` / `otto_room_post`. Adding an agent to a room
+  reaches it on its next run or new chat; an already-open chat keeps its file
+  until reopened. Room messages are framed as information from other agents,
+  never as instructions that override the agent's task.
+- `otto_room_read` with no cursor returns the room's **newest** messages
+  (default 50); `after` pages forward from the last id the agent saw, `before`
+  pages back. (It used to start from the room's first message.)
+- The rooms list shows each room's member count and last activity; names are
+  capped at 120 characters.
 
 ## 5. Per-session model pinning (foundation, applies everywhere)
 
@@ -131,8 +159,10 @@ module-level **Rooms** view (live feed, membership editor, user post box).
   Selection fills the field without saving the parent form. TLS certificate/key
   and ClickHouse binary inputs browse files. The authenticated picker browses the
   daemon host; browser onboarding before authentication retains text entry.
-- Room history paging is forward-only; very large backlogs (>5000 messages)
-  truncate the tail in the UI.
+- Room history opens on the newest 200 messages and pages back with **Show
+  earlier messages**; the UI keeps at most 500 in memory at once.
+- Room create/rename/delete and membership changes are not broadcast — another
+  open window sees them on its next rooms reload.
 - The example casino-login agent expects credentials in the Keychain; Otto
   never renders them into prompts.
 - Panda browser (external, in progress) can replace the Playwright backend via
@@ -150,3 +180,6 @@ module-level **Rooms** view (live feed, membership editor, user post box).
   points elsewhere.
 - **Rooms: agent post rejected** — the agent isn't a member of the room, or the
   post exceeded 16 KB.
+- **Rooms: an agent never posts** — check it is a member (Rooms view) and that it
+  has run (or a new chat was opened) since it was added: membership reaches the
+  agent through its persona file at session start.

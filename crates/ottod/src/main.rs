@@ -43,6 +43,13 @@ use tracing_subscriber::util::SubscriberInitExt;
 use crate::config::Config;
 
 fn main() -> ExitCode {
+    // `ottod pty-holder`: a detached process that owns ONE session's PTY so the
+    // session survives a daemon restart (otto_pty::holder). Dispatched before
+    // anything else — it inherits the daemon's already-augmented environment,
+    // must not open the daemon's logs, and talks to its launcher on stdout.
+    if std::env::args().nth(1).as_deref() == Some("pty-holder") {
+        return ExitCode::from(otto_sessions::pty_holder::run_from_stdin().clamp(0, 255) as u8);
+    }
     if std::env::args().nth(1).as_deref() == Some("room-ocr") {
         return if otto_server::run_room_ocr_helper() {
             ExitCode::SUCCESS
@@ -353,7 +360,10 @@ async fn run(cfg: Config) -> Result<(), String> {
             // `otto` server (runs `ottod mcp-tools`) into the workspace `.mcp.json`.
             .with_auth_repo(otto_rbac::AuthRepo::new(pool.clone()))
             // Record Otto-side lifecycle + user actions to the activity trail.
-            .with_activity_repo(ActivityRepo::new(pool.clone())),
+            .with_activity_repo(ActivityRepo::new(pool.clone()))
+            // Sessions the user started run in PTY holders (`ottod pty-holder`)
+            // and survive a daemon restart (setting `session_persistence`).
+            .with_pty_holders_opt(pty_holder_config(&cfg.data_dir)),
     );
     // The guard writes keystrokes back via the manager; wire the (weak) handle
     // now that the Arc exists.
@@ -1369,8 +1379,15 @@ async fn run(cfg: Config) -> Result<(), String> {
     }
 
     // Terminate every live PTY so a daemon stop / system shutdown never leaves
-    // orphaned agent processes behind.
-    let killed = manager.shutdown_all().await;
+    // orphaned agent processes behind — except the sessions running in PTY
+    // holders (setting `session_persistence`, default on): those are detached
+    // and re-adopted, still running, by the next daemon start.
+    let (killed, kept) = manager.shutdown_for_restart().await;
+    if kept > 0 {
+        tracing::info!(
+            "left {kept} session(s) running in their pty holders for the next daemon start"
+        );
+    }
     // Close remote live sessions and stop their Chromium processes (no-op when
     // the remote live view was never used this run).
     browser_handle.shutdown_live().await;
@@ -1382,6 +1399,31 @@ async fn run(cfg: Config) -> Result<(), String> {
     usage.shutdown().await;
     tracing::info!("ottod stopped");
     Ok(())
+}
+
+/// Where this daemon's PTY holders live (`<data_dir>/pty-holders`, or a
+/// per-user temp fallback when that path is too long for a unix socket) and
+/// how to start one: this very binary, `ottod pty-holder`. `None` (logged)
+/// disables session persistence for this run.
+fn pty_holder_config(
+    data_dir: &std::path::Path,
+) -> Option<otto_sessions::pty_holder::HolderConfig> {
+    use otto_sessions::pty_holder::{HolderConfig, HolderLauncher};
+    let launcher = match HolderLauncher::current_exe(vec!["pty-holder".into()]) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("session persistence off: cannot locate the ottod binary: {e}");
+            return None;
+        }
+    };
+    let config = HolderConfig::for_data_dir(data_dir, launcher);
+    if config.is_none() {
+        tracing::warn!(
+            data_dir = %data_dir.display(),
+            "session persistence off: no pty-holder socket directory fits the unix socket path limit"
+        );
+    }
+    config
 }
 
 /// launchd starts agents with a bare PATH (`/usr/bin:/bin:...`), which hides

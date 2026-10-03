@@ -30,11 +30,13 @@
       case 'decision':
         return v === 'allowed'
           ? 'ok'
-          : v === 'approved' || v === 'dry_run'
-            ? 'info'
-            : v === 'pending_approval'
-              ? 'warn'
-              : 'bad';
+          : v === 'auto_approved'
+            ? 'warn' // ran without a person — visible, never silent
+            : v === 'approved' || v === 'dry_run'
+              ? 'info'
+              : v === 'pending_approval'
+                ? 'warn'
+                : 'bad';
       case 'status':
         return v === 'approved'
           ? 'ok'

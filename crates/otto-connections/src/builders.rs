@@ -57,7 +57,7 @@ fn opt_port(params: &Value, key: &str, kind: &str) -> Result<Option<u16>> {
 /// host / user: a leading `-`, or whitespace / control characters that would
 /// split or smuggle an argument. Profiles can be imported from third-party
 /// connection files, so these values are not trusted just for being saved.
-fn reject_option_like(kind: &str, key: &str, value: &str) -> Result<()> {
+pub(crate) fn reject_option_like(kind: &str, key: &str, value: &str) -> Result<()> {
     if value.starts_with('-') || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(Error::Invalid(format!(
             "{kind}: param '{key}' must not start with '-' or contain whitespace"
@@ -66,8 +66,24 @@ fn reject_option_like(kind: &str, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// True when a DB-kind profile runs its client ON the jump host
+/// (`params.jump`, see [`maybe_wrap_ssh_tunnel`]).
+fn runs_on_jump_host(p: &Value) -> bool {
+    opt_str(p, "jump").is_some()
+}
+
 /// If `jump` is set for a non-SSH kind, wrap the given local command spec to
 /// run via `ssh -t [-i identity] <jump> -- <program> <args…>`.
+///
+/// ssh hands the remote command to the jump host's login shell as ONE string
+/// (its argv joined by spaces), so every word is shell-quoted here: a database
+/// name, user or (ClickHouse) password containing a space, `;`, `$` or a quote
+/// would otherwise be split or interpreted by the remote shell.
+///
+/// The spec's environment is dropped: ssh never forwards it, so a password in
+/// `MYSQL_PWD` / `PGPASSWORD` / `REDISCLI_AUTH` would only sit in the local ssh
+/// process without ever reaching the client. Builders ask the remote client
+/// to prompt instead (see the MySQL arm).
 fn maybe_wrap_ssh_tunnel(p: &Value, spec: CommandSpec, kind_name: &str) -> Result<CommandSpec> {
     let jump = match opt_str(p, "jump") {
         Some(j) => j,
@@ -90,14 +106,14 @@ fn maybe_wrap_ssh_tunnel(p: &Value, spec: CommandSpec, kind_name: &str) -> Resul
     }
     ssh_args.push(jump.into());
     ssh_args.push("--".into());
-    ssh_args.push(spec.program.clone());
-    ssh_args.extend(spec.args);
+    ssh_args.push(shell_words::quote(&spec.program).into_owned());
+    ssh_args.extend(spec.args.iter().map(|a| shell_words::quote(a).into_owned()));
     let _ = kind_name; // used for docs only
     Ok(CommandSpec {
         program: "ssh".into(),
         args: ssh_args,
         cwd: None,
-        env: spec.env,
+        env: vec![],
     })
 }
 
@@ -167,12 +183,17 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                 args.push("-u".into());
                 args.push(user.into());
             }
+            let mut env = Vec::new();
+            if secret.is_some() && runs_on_jump_host(p) {
+                // The saved password can't travel to the jump host without
+                // landing in an argv; have mysql ask for it on the terminal
+                // instead of failing with "using password: NO".
+                args.push("-p".into());
+            } else if let Some(pw) = secret {
+                env.push(("MYSQL_PWD".to_string(), pw.to_string()));
+            }
             if let Some(db) = opt_str(p, "db") {
                 args.push(db.into());
-            }
-            let mut env = Vec::new();
-            if let Some(pw) = secret {
-                env.push(("MYSQL_PWD".to_string(), pw.to_string()));
             }
             let spec = maybe_wrap_ssh_tunnel(
                 p,
@@ -762,15 +783,58 @@ mod tests {
                 "3306",
                 "-u",
                 "root",
+                "-p",
                 "mydb",
             ]
         );
-        // Password is still passed via env, not argv
-        assert_eq!(
-            spec.env,
-            vec![("MYSQL_PWD".to_string(), "s3cret".to_string())]
-        );
+        // The password never reaches argv, and isn't parked in the local ssh
+        // process's env either (ssh would not forward it): mysql prompts.
+        assert!(spec.env.is_empty());
+        assert!(!spec.args.iter().any(|a| a.contains("s3cret")));
         assert!(!warn);
+
+        // Without a stored secret there is nothing to prompt for.
+        let (spec, _) = build_command(&c, None).unwrap();
+        assert!(!spec.args.iter().any(|a| a == "-p"));
+    }
+
+    /// The remote command is one string parsed by the jump host's shell, so
+    /// each word is quoted: spaces / metacharacters can't split or inject.
+    #[test]
+    fn jump_wrapped_remote_command_is_shell_quoted() {
+        let c = conn(
+            ConnectionKind::Clickhouse,
+            json!({"host":"ch.internal","user":"a b","db":"x;touch /tmp/p","jump":"bastion"}),
+        );
+        let (spec, warn) = build_command(&c, Some("p$w'd")).unwrap();
+        assert!(warn, "clickhouse password is still in argv");
+        let dash = spec.args.iter().position(|a| a == "--").unwrap();
+        let remote = &spec.args[dash + 1..];
+        assert_eq!(remote[0], "clickhouse-client");
+        // Failure messages never print `remote`: it carries the password.
+        assert!(remote.contains(&"'a b'".to_string()), "user not quoted");
+        assert!(
+            remote.contains(&"'x;touch /tmp/p'".to_string()),
+            "database not quoted"
+        );
+        // Re-parsing the joined command (what the remote shell does) yields
+        // the original argv exactly.
+        let reparsed = shell_words::split(&remote.join(" ")).unwrap();
+        assert_eq!(
+            reparsed,
+            vec![
+                "clickhouse-client",
+                "-h",
+                "ch.internal",
+                "-u",
+                "a b",
+                "--password",
+                "p$w'd",
+                "-d",
+                "x;touch /tmp/p"
+            ]
+        );
+        assert!(spec.env.is_empty());
     }
 
     #[test]

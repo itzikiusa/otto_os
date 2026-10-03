@@ -20,11 +20,11 @@ use otto_core::api::{
     ExecuteApiReq, ImportCurlReq, ParsedCurl, RunSavedRequestReq, RunSavedRequestResp,
     UpsertApiAutomationReq, UpsertApiCollectionReq, UpsertApiEnvironmentReq, UpsertApiRequestReq,
 };
+use otto_core::auth::AuthContext;
 use otto_core::domain::{
     ApiAutomation, ApiCollection, ApiEnvironment, ApiHistoryEntry, ApiHistorySummary, ApiRequest,
     Connection, ConnectionKind, WorkspaceRole,
 };
-use otto_core::auth::AuthContext;
 use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_ssh::{SshTunnel, SshTunnelConfig};
@@ -794,10 +794,8 @@ pub async fn create_environment(
     // The row never holds a value for a key marked secret; those arrive only
     // via the write-only `secret_values` and go straight to the Keychain.
     let secret_keys = req.secret_keys.clone().unwrap_or_default();
-    let variables = api_secrets::strip_secret_variables(
-        &normalize_json_object(req.variables),
-        &secret_keys,
-    );
+    let variables =
+        api_secrets::strip_secret_variables(&normalize_json_object(req.variables), &secret_keys);
     let env = repo(&ctx)
         .create_environment(NewApiEnvironment {
             workspace_id: wid,
@@ -832,21 +830,19 @@ pub async fn update_environment(
         .secret_keys
         .clone()
         .unwrap_or_else(|| existing.secret_keys.clone());
-    let vars = api_secrets::strip_secret_variables(
-        &normalize_json_object(req.variables),
-        &secret_keys,
-    );
+    let vars =
+        api_secrets::strip_secret_variables(&normalize_json_object(req.variables), &secret_keys);
     let sref = api_secrets::env_ref(&id);
     let mut blob = api_secrets::load_blob(ctx.secrets.as_ref(), &sref);
-    apply_secret_changes(&mut blob, &secret_keys, &req.secret_renames, req.secret_values);
+    apply_secret_changes(
+        &mut blob,
+        &secret_keys,
+        &req.secret_renames,
+        req.secret_values,
+    );
     api_secrets::store_blob(ctx.secrets.as_ref(), &sref, &blob)?;
     let env = repo
-        .update_environment(
-            &id,
-            Some(req.name.trim()),
-            Some(&vars),
-            Some(&secret_keys),
-        )
+        .update_environment(&id, Some(req.name.trim()), Some(&vars), Some(&secret_keys))
         .await?;
     Ok(Json(env))
 }
@@ -1346,31 +1342,99 @@ pub async fn oauth2_token(
         form.push(("client_secret", &client_secret));
     }
 
-    // SSRF guard: never let the token endpoint point at an internal address.
-    net_guard::check_url(&req.token_url)
-        .await
-        .map_err(|m| ApiError(Error::Invalid(m)))?;
+    // SSRF guard: never let the token endpoint point at an internal address —
+    // unless the workspace opted in to local/private targets, exactly like the
+    // requests the token is for (a dev Keycloak on localhost is the usual case).
+    let allow_local = workspace_allows_local(&ctx, &wid).await;
+    if !allow_local {
+        net_guard::check_url(&req.token_url)
+            .await
+            .map_err(|m| ApiError(Error::Invalid(m)))?;
+    }
 
-    let resp = http_client(&wid, false)
+    // A dedicated client: no redirects — a 307/308 would resend the form (the
+    // client secret / password) to wherever the endpoint points, around the
+    // host binding above — and the connect-time SSRF guard unless opted out.
+    let client = if allow_local {
+        reqwest::Client::builder()
+    } else {
+        net_guard::guarded_client_builder()
+    }
+    .user_agent("Otto-ApiClient/1.0")
+    .redirect(reqwest::redirect::Policy::none())
+    .build()
+    .map_err(|e| ApiError(Error::Internal(format!("http client: {e}"))))?;
+    let mut resp = client
         .post(&req.token_url)
         .header("Accept", "application/json")
+        .timeout(OAUTH_TOKEN_TIMEOUT)
         .form(&form)
         .send()
         .await
-        .map_err(|e| ApiError(Error::Upstream(describe_reqwest_error(&e))))?;
+        .map_err(|e| {
+            ApiError(Error::Upstream(describe_reqwest_error(
+                &e,
+                OAUTH_TOKEN_TIMEOUT,
+            )))
+        })?;
     let status = resp.status().as_u16();
-    let text = resp.text().await.unwrap_or_default();
+    // A token response is a small JSON document; read at most a bounded
+    // prefix so a misconfigured URL (a 50 MB download) can't balloon memory.
+    let mut raw = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        raw.extend_from_slice(&chunk[..chunk.len().min(OAUTH_TOKEN_BODY_MAX + 1 - raw.len())]);
+        if raw.len() > OAUTH_TOKEN_BODY_MAX {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&raw).into_owned();
     let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     if status >= 400 || parsed.get("access_token").is_none() {
-        let msg = parsed
-            .get("error_description")
-            .or_else(|| parsed.get("error"))
-            .and_then(Value::as_str)
-            .map(String::from)
-            .unwrap_or_else(|| format!("token endpoint returned {status}: {text}"));
-        return Err(ApiError(Error::Upstream(msg)));
+        // A misbehaving endpoint may echo the form back — never the secrets.
+        let message = api_secrets::scrub_str(
+            &oauth_error_message(status, &parsed, &text),
+            &[
+                client_secret.clone(),
+                password.clone(),
+                refresh_token.clone(),
+            ],
+        );
+        return Err(ApiError(Error::Upstream(message)));
     }
     Ok(Json(parsed))
+}
+
+/// Budget for one OAuth 2.0 token request (connect → full body).
+const OAUTH_TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Largest token-endpoint body read.
+const OAUTH_TOKEN_BODY_MAX: usize = 256 * 1024;
+/// Raw body excerpt quoted in a token error when the endpoint sent no
+/// `error` / `error_description` (an HTML login page, a proxy error).
+const OAUTH_ERROR_EXCERPT: usize = 300;
+
+/// The message for a failed token request: the endpoint's own
+/// `error_description` / `error` when present, else the status and a short
+/// excerpt of the body (never the whole page).
+pub(crate) fn oauth_error_message(status: u16, parsed: &Value, text: &str) -> String {
+    if let Some(msg) = parsed
+        .get("error_description")
+        .or_else(|| parsed.get("error"))
+        .and_then(Value::as_str)
+        .filter(|m| !m.trim().is_empty())
+    {
+        return msg.to_string();
+    }
+    let mut excerpt = text.trim().to_string();
+    let cut = excerpt.len() > OAUTH_ERROR_EXCERPT;
+    truncate_string(&mut excerpt, OAUTH_ERROR_EXCERPT);
+    if cut {
+        excerpt.push('…');
+    }
+    if status < 400 {
+        format!("token endpoint returned {status} without an access_token: {excerpt}")
+    } else {
+        format!("token endpoint returned {status}: {excerpt}")
+    }
 }
 
 /// Resolve one string-or-marker field (`oauth2/token`): plain strings pass
@@ -1640,6 +1704,7 @@ pub async fn run_saved_request(
     Path((wid, id)): Path<(Id, Id)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     headers: HeaderMap,
     Json(req): Json<RunSavedRequestReq>,
 ) -> ApiResult<Json<RunSavedRequestResp>> {
@@ -1666,6 +1731,7 @@ pub async fn run_saved_request(
         .map(|timeout| timeout.clamp(1, 60_000));
     let (mut vars, environment, env_blob) =
         resolve_environment(&ctx, &repo, &wid, req.environment_id.as_ref()).await?;
+    let env_vars = vars.clone();
     if let Some(overrides) = &req.vars {
         let overrides = overrides
             .as_object()
@@ -1736,6 +1802,31 @@ pub async fn run_saved_request(
                     "needs_confirm=new_host: host '{host}' is not used by any human-authored request or run in this workspace; re-send with confirm_new_host:true"
                 ))));
             }
+        }
+    }
+
+    // Secret ↔ host binding, exactly as ad-hoc execute: an agent can rewrite
+    // a saved request (upsert), override `{{base_url}}` (`vars`) or mutate the
+    // URL in a pre-request script, so a stored secret leaving its bound host
+    // needs a PERSON's confirmation here too — the agent-authored new-host
+    // speed bump above is self-confirmable and does not cover secrets.
+    if let Some(host) = unbound_secret_host(
+        &repo,
+        &wid,
+        &exec,
+        &vars,
+        &env_vars,
+        &env_blob,
+        environment
+            .as_ref()
+            .map(|env| env.secret_keys.as_slice())
+            .unwrap_or(&[]),
+    )
+    .await?
+    {
+        let agent = is_agent_caller(&headers, &auth);
+        if agent || !req.confirm_new_host {
+            return Err(new_host_conflict(&host, agent));
         }
     }
 
@@ -1944,6 +2035,7 @@ pub async fn execute(
     // then layer runtime overrides (from post-response scripts / chaining).
     let (mut vars, environment, env_blob) =
         resolve_environment(&ctx, &repo, &wid, req.environment_id.as_ref()).await?;
+    let env_vars = vars.clone();
     if let Some(Value::Object(overrides)) = &req.vars {
         for (k, v) in overrides {
             vars.insert(k.clone(), v.clone());
@@ -1959,6 +2051,7 @@ pub async fn execute(
         &wid,
         &req,
         &vars,
+        &env_vars,
         &env_blob,
         environment
             .as_ref()
@@ -2057,7 +2150,16 @@ pub async fn execute(
                 None,
             )
             .await;
-            attach_body(&mut resp, raw, Some((&wid, &user.id)));
+            if is_agent_caller(&headers, &auth) {
+                // An agent reads the response too: a bound host that echoes
+                // the request (a `/debug/headers` endpoint) must not hand it
+                // the Keychain value. No raw bytes either — neither inline
+                // base64 nor a `body_id` download — since those are unscrubbed.
+                api_secrets::scrub_secrets(&mut resp, &secret_values);
+                resp.body_base64.clear();
+            } else {
+                attach_body(&mut resp, raw, Some((&wid, &user.id)));
+            }
             Ok(Json(resp))
         }
         Err(err) => {
@@ -2227,8 +2329,14 @@ pub(crate) fn uses_env_secret(
     if !any {
         return false;
     }
-    let text = serde_json::to_string(&json!([req.url, req.query, req.headers, req.body, req.auth]))
-        .unwrap_or_default();
+    let text = serde_json::to_string(&json!([
+        req.url,
+        req.query,
+        req.headers,
+        req.body,
+        req.auth
+    ]))
+    .unwrap_or_default();
     substitute(&text, &probe).contains(SECRET_PROBE)
 }
 
@@ -2249,11 +2357,19 @@ pub(crate) fn env_secret_hosts(
 /// (see the section comment), or `None` when every secret stays home (or none
 /// is used). Marker refs that are malformed / foreign are skipped here —
 /// [`resolve_exec_auth`] rejects those outright.
-async fn unbound_secret_host(
+///
+/// `vars` is the EFFECTIVE map the send will use (environment + runtime
+/// overrides / dataset / chained values) — it decides the target host and
+/// which secrets are expanded. `bind_vars` is the environment's OWN map,
+/// without caller-supplied overrides: the binding side (a marker owner's host,
+/// the human-authored requests' hosts) is resolved with it, so overriding
+/// `{{base_url}}` can't move the binding along with the target.
+pub(crate) async fn unbound_secret_host(
     repo: &ApiClientRepo,
     wid: &Id,
     req: &ExecuteApiReq,
     vars: &serde_json::Map<String, Value>,
+    bind_vars: &serde_json::Map<String, Value>,
     env_blob: &BTreeMap<String, String>,
     secret_keys: &[String],
 ) -> ApiResult<Option<String>> {
@@ -2280,13 +2396,13 @@ async fn unbound_secret_host(
         if &owner.workspace_id != wid {
             continue;
         }
-        if host_of(&substitute(&owner.url, vars)).as_deref() != Some(target.as_str()) {
+        if host_of(&substitute(&owner.url, bind_vars)).as_deref() != Some(target.as_str()) {
             return Ok(Some(target));
         }
     }
     if uses_env_secret(req, vars, env_blob, secret_keys) {
         let requests = repo.list_requests(wid, None).await?;
-        if !env_secret_hosts(&requests, vars).contains(&target) {
+        if !env_secret_hosts(&requests, bind_vars).contains(&target) {
             return Ok(Some(target));
         }
     }
@@ -2456,6 +2572,7 @@ pub(crate) async fn prepare_stream(
         resolve_environment(ctx, &repo, wid, request.environment_id.as_ref())
             .await
             .map_err(|e| e.0.to_string())?;
+    let env_vars = vars.clone();
     if let Some(Value::Object(overrides)) = &request.vars {
         vars.extend(overrides.clone());
     }
@@ -2467,6 +2584,7 @@ pub(crate) async fn prepare_stream(
         wid,
         request,
         &vars,
+        &env_vars,
         &env_blob,
         environment
             .as_ref()
@@ -2496,18 +2614,24 @@ pub(crate) async fn prepare_stream(
                 .map(str::to_string),
         )
         .collect();
-    prepare_request(wid, &req, &vars, proxy.as_deref(), allow_local)
+    // No whole-body timeout: a stream's body never "finishes" — the caller
+    // bounds only the time to the response head.
+    prepare_request(wid, &req, &vars, proxy.as_deref(), allow_local, false)
         .await
         .map(|p| p.0)
         .map_err(|e| api_secrets::scrub_str(&e, &values))
 }
 
+/// Build the outbound request. `whole_body_timeout`: apply the request's
+/// timeout to connect → last body byte (one-shot sends); `false` for streams
+/// (SSE / WebSocket), whose callers bound only the wait for the response head.
 async fn prepare_request(
     wid: &Id,
     req: &ExecuteApiReq,
     vars: &serde_json::Map<String, Value>,
     proxy: Option<&str>,
     allow_local: bool,
+    whole_body_timeout: bool,
 ) -> Result<(reqwest::RequestBuilder, String, usize), String> {
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 
@@ -2543,7 +2667,9 @@ async fn prepare_request(
             .map_err(|_| format!("invalid header name '{name}'"))?;
         let hv = HeaderValue::from_str(&value)
             .map_err(|_| format!("invalid header value for '{name}'"))?;
-        headers.insert(hn, hv);
+        // `append`, not `insert`: two enabled rows with the same name (two
+        // `Accept`s, repeated `X-Forwarded-For`) are both sent, as written.
+        headers.append(hn, hv);
     }
 
     // --- auth ---
@@ -2554,11 +2680,10 @@ async fn prepare_request(
     let shared_client = http_client(wid, allow_local);
     let custom_client = build_settings_client(wid, req, proxy, allow_local);
     let client = custom_client.as_ref().unwrap_or(&shared_client);
-    let timeout = req
-        .timeout_ms
-        .map(Duration::from_millis)
-        .unwrap_or(EXECUTE_TIMEOUT);
-    let mut builder = client.request(method, &url).timeout(timeout);
+    let mut builder = client.request(method, &url);
+    if whole_body_timeout {
+        builder = builder.timeout(effective_timeout(req.timeout_ms));
+    }
 
     // --- body per body_mode ---
     match req.body_mode.as_str() {
@@ -2623,7 +2748,8 @@ async fn build_and_send(
     proxy: Option<&str>,
     allow_local: bool,
 ) -> Result<(ApiResponse, Vec<u8>), String> {
-    let (builder, url, header_count) = prepare_request(wid, req, vars, proxy, allow_local).await?;
+    let (builder, url, header_count) =
+        prepare_request(wid, req, vars, proxy, allow_local, true).await?;
     // Trace: resolved request + per-phase timing for the response "Trace" tab.
     let method_str = req.method.to_uppercase();
     let body_desc = match req.body_mode.as_str() {
@@ -2648,11 +2774,12 @@ async fn build_and_send(
         ));
     }
 
+    let timeout = effective_timeout(req.timeout_ms);
     let started = Instant::now();
     let resp = builder
         .send()
         .await
-        .map_err(|e| describe_reqwest_error(&e))?;
+        .map_err(|e| describe_reqwest_error(&e, timeout))?;
     let ttfb_ms = started.elapsed().as_millis() as i64;
     let final_url = resp.url().to_string();
     trace.push(trace_step(
@@ -2680,7 +2807,9 @@ async fn build_and_send(
         .map(|(k, v)| {
             json!({
                 "key": k.as_str(),
-                "value": v.to_str().unwrap_or("").to_string(),
+                // Lossy, not `to_str()`: a non-ASCII value (a UTF-8 filename
+                // in Content-Disposition) must not show up blank.
+                "value": header_value_text(v),
             })
         })
         .collect();
@@ -2702,7 +2831,7 @@ async fn build_and_send(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| describe_reqwest_error(&e))?
+        .map_err(|e| describe_reqwest_error(&e, timeout))?
     {
         let remaining = (MAX_INLINE + 1).saturating_sub(bytes.len());
         bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
@@ -2919,10 +3048,38 @@ fn apply_auth(
     Ok(())
 }
 
+/// The per-request timeout actually applied: the request's `timeout_ms`
+/// (0 = unset, never an instant failure), else [`EXECUTE_TIMEOUT`].
+pub(crate) fn effective_timeout(timeout_ms: Option<u64>) -> Duration {
+    timeout_ms
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(EXECUTE_TIMEOUT)
+}
+
+/// A response header value as display text (UTF-8, lossy).
+fn header_value_text(value: &reqwest::header::HeaderValue) -> String {
+    String::from_utf8_lossy(value.as_bytes()).into_owned()
+}
+
+/// "1.5s" / "60s" / "250ms" — a timeout as the user set it.
+fn human_duration(d: Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if ms.is_multiple_of(1000) {
+        format!("{}s", ms / 1000)
+    } else {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    }
+}
+
 /// Human-friendly message for a reqwest error (timeout / DNS / connect / …).
-fn describe_reqwest_error(e: &reqwest::Error) -> String {
+/// `timeout` is the limit that was applied to this request, so a timeout
+/// reports the user's own setting rather than the default.
+fn describe_reqwest_error(e: &reqwest::Error, timeout: Duration) -> String {
     if e.is_timeout() {
-        format!("request timed out after {}s", EXECUTE_TIMEOUT.as_secs())
+        format!("request timed out after {}", human_duration(timeout))
     } else if e.is_connect() {
         format!("connection failed: {e}")
     } else if e.is_request() {
@@ -3010,12 +3167,16 @@ pub async fn run_automation(
     Path((wid, id)): Path<(Id, Id)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
+    headers: HeaderMap,
     options: Option<Json<otto_core::api::StartApiAutomationRunReq>>,
 ) -> ApiResult<Json<ApiRunResult>> {
     let Json(run) = super::api_automation_runs::start(
         Path((wid.clone(), id)),
         State(ctx.clone()),
         CurrentUser(user),
+        CurrentAuthContext(auth),
+        headers,
         Json(options.map(|o| o.0).unwrap_or_default()),
     )
     .await?;
@@ -3032,9 +3193,20 @@ pub async fn run_automation(
     }
 }
 
+/// Secret ↔ host binding inputs for an automation run an AGENT started (see
+/// [`unbound_secret_host`]): the environment's own variables (no dataset rows,
+/// no chained extractions) and its Keychain blob. A person's run carries none —
+/// they chose the automation, its dataset and its targets themselves.
+pub(crate) struct StepSecretBinding {
+    pub env_vars: serde_json::Map<String, Value>,
+    pub env_blob: BTreeMap<String, String>,
+    pub secret_keys: Vec<String>,
+}
+
 /// Run one automation step against its saved request, evaluating assertions and
 /// applying extractions into `vars` for later steps. Resilient: any error is
 /// captured into the returned [`ApiRunStepResult`] rather than propagated.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_step(
     ctx: &ServerCtx,
     repo: &ApiClientRepo,
@@ -3043,6 +3215,7 @@ pub(crate) async fn run_step(
     vars: &mut serde_json::Map<String, Value>,
     pinned: Option<ApiRequest>,
     actor: &Id,
+    binding: Option<&StepSecretBinding>,
 ) -> ApiRunStepResult {
     let request_id = step
         .get("request_id")
@@ -3156,6 +3329,38 @@ pub(crate) async fn run_step(
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
             .unwrap_or_else(|| json!({}));
         exec.body = json!({ "query": exec.body, "variables": gql_vars }).to_string();
+    }
+
+    // Agent-started run: a stored secret must not leave its bound host (a
+    // rewritten request, a dataset row or a chained value can retarget the
+    // URL). The step fails instead of sending; a person can run it from the UI.
+    if let Some(binding) = binding {
+        let unbound = unbound_secret_host(
+            repo,
+            wid,
+            &exec,
+            vars,
+            &binding.env_vars,
+            &binding.env_blob,
+            &binding.secret_keys,
+        )
+        .await;
+        let error = match unbound {
+            Ok(None) => None,
+            Ok(Some(host)) => Some(new_host_conflict(&host, true).0.to_string()),
+            Err(error) => Some(error.0.to_string()),
+        };
+        if let Some(error) = error {
+            return ApiRunStepResult {
+                request_id,
+                name: request.name,
+                status: None,
+                duration_ms: 0,
+                ok: false,
+                assertions: Value::Array(Vec::new()),
+                error: Some(error),
+            };
+        }
     }
 
     // Resolve `$secret` auth markers (this stored request's own ref only).
@@ -3700,11 +3905,13 @@ mod tests {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
-        let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(opts)
-            .await
-            .unwrap());
+        let pool = otto_state::DbPool::from(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .unwrap(),
+        );
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await
@@ -4359,14 +4566,14 @@ mod tests {
         let mut exec = exec_req("https://api.test/other");
         exec.auth = json!({"type":"bearer","token": marker});
         assert_eq!(
-            unbound_secret_host(&repo, &ws, &exec, &none_vars, &no_blob, &[])
+            unbound_secret_host(&repo, &ws, &exec, &none_vars, &none_vars, &no_blob, &[])
                 .await
                 .unwrap(),
             None
         );
         exec.url = "https://attacker.example/x".into();
         assert_eq!(
-            unbound_secret_host(&repo, &ws, &exec, &none_vars, &no_blob, &[])
+            unbound_secret_host(&repo, &ws, &exec, &none_vars, &none_vars, &no_blob, &[])
                 .await
                 .unwrap()
                 .as_deref(),
@@ -4382,7 +4589,7 @@ mod tests {
         let mut exec = exec_req("https://attacker.example/x");
         exec.headers = json!([{"key":"Authorization","value":"Bearer {{TOKEN}}","enabled":true}]);
         assert_eq!(
-            unbound_secret_host(&repo, &ws, &exec, &vars, &blob, &keys)
+            unbound_secret_host(&repo, &ws, &exec, &vars, &vars, &blob, &keys)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -4390,7 +4597,7 @@ mod tests {
         );
         exec.url = "https://api.test/y".into();
         assert_eq!(
-            unbound_secret_host(&repo, &ws, &exec, &vars, &blob, &keys)
+            unbound_secret_host(&repo, &ws, &exec, &vars, &vars, &blob, &keys)
                 .await
                 .unwrap(),
             None
@@ -4398,7 +4605,7 @@ mod tests {
         // No secret referenced → any host is fine.
         let exec = exec_req("https://elsewhere.example/");
         assert_eq!(
-            unbound_secret_host(&repo, &ws, &exec, &vars, &blob, &keys)
+            unbound_secret_host(&repo, &ws, &exec, &vars, &vars, &blob, &keys)
                 .await
                 .unwrap(),
             None
@@ -4463,7 +4670,12 @@ mod tests {
 
         // A rename onto a key that is not secret moves nothing.
         let mut blob = stored(&[("A", "a")]);
-        apply_secret_changes(&mut blob, &keys(&[]), &stored(&[("A", "PLAIN")]), BTreeMap::new());
+        apply_secret_changes(
+            &mut blob,
+            &keys(&[]),
+            &stored(&[("A", "PLAIN")]),
+            BTreeMap::new(),
+        );
         assert!(blob.is_empty());
     }
 
@@ -4478,11 +4690,17 @@ mod tests {
 
         let mut exec = exec_req("https://x.example/");
         exec.body = "{\"t\":\"{{ALIAS}}\"}".into();
-        assert!(uses_env_secret(&exec, &vars, &blob, &keys), "nested reference");
+        assert!(
+            uses_env_secret(&exec, &vars, &blob, &keys),
+            "nested reference"
+        );
         exec.body = "{{OTHER}}".into();
         assert!(!uses_env_secret(&exec, &vars, &blob, &keys));
         exec.url = "https://x.example/?k={{ TOKEN }}".into();
-        assert!(uses_env_secret(&exec, &vars, &blob, &keys), "spaced placeholder");
+        assert!(
+            uses_env_secret(&exec, &vars, &blob, &keys),
+            "spaced placeholder"
+        );
         // A runtime override that REPLACED the secret carries no secret.
         vars.insert("TOKEN".into(), json!("public"));
         assert!(!uses_env_secret(&exec, &vars, &blob, &keys));
@@ -4537,5 +4755,173 @@ mod tests {
         let mut mcp = person;
         mcp.mcp_only = true;
         assert!(is_agent_caller(&empty, &mcp));
+    }
+
+    /// Overriding `{{base_url}}` must not drag the secret's binding along: the
+    /// bound hosts are resolved with the environment's own variables.
+    #[tokio::test]
+    async fn overriding_a_variable_does_not_rebind_secrets() {
+        let (_pool, repo, ws) = mk_repo().await;
+        let mut human = legacy_request(&ws, "users", json!({"type":"none"}));
+        human.url = "{{base_url}}/users".into();
+        repo.create_request(human).await.unwrap();
+
+        let mut env_vars = serde_json::Map::new();
+        env_vars.insert("base_url".into(), json!("https://api.test"));
+        env_vars.insert("TOKEN".into(), json!("s3cret-token"));
+        let mut blob = BTreeMap::new();
+        blob.insert("TOKEN".to_string(), "s3cret-token".to_string());
+        let keys = vec!["TOKEN".to_string()];
+        let mut exec = exec_req("{{base_url}}/anything");
+        exec.headers = json!([{"key":"Authorization","value":"Bearer {{TOKEN}}","enabled":true}]);
+
+        // Home host: fine.
+        assert_eq!(
+            unbound_secret_host(&repo, &ws, &exec, &env_vars, &env_vars, &blob, &keys)
+                .await
+                .unwrap(),
+            None
+        );
+        // Runtime override retargets the send — the binding stays put.
+        let mut overridden = env_vars.clone();
+        overridden.insert("base_url".into(), json!("https://attacker.example"));
+        assert_eq!(
+            unbound_secret_host(&repo, &ws, &exec, &overridden, &env_vars, &blob, &keys)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("attacker.example")
+        );
+
+        // Same for a `$secret` marker whose owner URL is variable-based.
+        let mut owner = legacy_request(&ws, "owner", json!({"type":"none"}));
+        owner.url = "{{base_url}}/me".into();
+        let owner = repo.create_request(owner).await.unwrap();
+        let mut marked = exec_req("{{base_url}}/me");
+        marked.auth =
+            json!({"type":"bearer","token": {"$secret": api_secrets::request_ref(&owner.id)}});
+        assert_eq!(
+            unbound_secret_host(
+                &repo,
+                &ws,
+                &marked,
+                &overridden,
+                &env_vars,
+                &BTreeMap::new(),
+                &[]
+            )
+            .await
+            .unwrap()
+            .as_deref(),
+            Some("attacker.example")
+        );
+    }
+
+    #[test]
+    fn timeouts_report_the_limit_that_applied() {
+        assert_eq!(effective_timeout(None), EXECUTE_TIMEOUT);
+        // 0 means "unset", never an instant failure.
+        assert_eq!(effective_timeout(Some(0)), EXECUTE_TIMEOUT);
+        assert_eq!(effective_timeout(Some(1500)), Duration::from_millis(1500));
+        assert_eq!(human_duration(Duration::from_millis(250)), "250ms");
+        assert_eq!(human_duration(Duration::from_secs(60)), "60s");
+        assert_eq!(human_duration(Duration::from_millis(1500)), "1.5s");
+    }
+
+    #[test]
+    fn oauth_errors_prefer_the_endpoint_message_and_bound_the_excerpt() {
+        let described = json!({"error":"invalid_client","error_description":"bad secret"});
+        assert_eq!(oauth_error_message(401, &described, ""), "bad secret");
+        let bare = json!({"error":"invalid_grant"});
+        assert_eq!(oauth_error_message(400, &bare, ""), "invalid_grant");
+        let page = format!("<html>{}</html>", "x".repeat(10_000));
+        let msg = oauth_error_message(502, &Value::Null, &page);
+        assert!(msg.starts_with("token endpoint returned 502: <html>"));
+        assert!(msg.ends_with('…'));
+        assert!(msg.len() < 400, "excerpt must stay short: {}", msg.len());
+        let msg = oauth_error_message(200, &json!({"ok":true}), r#"{"ok":true}"#);
+        assert!(msg.contains("without an access_token"));
+    }
+
+    #[tokio::test]
+    async fn repeated_request_headers_are_all_sent() {
+        let mut exec = exec_req("http://dup.example/x");
+        exec.headers = json!([
+            {"key":"Accept","value":"application/json","enabled":true},
+            {"key":"Accept","value":"text/plain","enabled":true},
+            {"key":"X-Off","value":"no","enabled":false}
+        ]);
+        let wid = otto_core::new_id();
+        let (builder, _, count) =
+            prepare_request(&wid, &exec, &serde_json::Map::new(), None, true, true)
+                .await
+                .unwrap();
+        let built = builder.build().unwrap();
+        let accepts: Vec<_> = built
+            .headers()
+            .get_all("accept")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(accepts, vec!["application/json", "text/plain"]);
+        assert!(built.headers().get("x-off").is_none());
+        assert_eq!(count, 2);
+    }
+
+    /// One-shot loopback HTTP server: answers the first request with `reply`
+    /// (or never answers when `None`) and returns its address.
+    async fn one_shot_server(reply: Option<Vec<u8>>) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            match reply {
+                Some(bytes) => {
+                    let _ = sock.write_all(&bytes).await;
+                    let _ = sock.shutdown().await;
+                }
+                None => tokio::time::sleep(Duration::from_secs(10)).await,
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn non_ascii_response_headers_are_kept() {
+        let mut reply =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Disposition: attachment; filename=\""
+                .to_vec();
+        reply.extend_from_slice("résumé.pdf".as_bytes());
+        reply.extend_from_slice(b"\"\r\n\r\nok");
+        let addr = one_shot_server(Some(reply)).await;
+        let exec = exec_req(&format!("http://{addr}/file"));
+        let wid = otto_core::new_id();
+        let (resp, raw) = build_and_send(&wid, &exec, &serde_json::Map::new(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(raw, b"ok");
+        let disposition = resp
+            .headers
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["key"] == "content-disposition")
+            .unwrap();
+        assert_eq!(disposition["value"], "attachment; filename=\"résumé.pdf\"");
+    }
+
+    #[tokio::test]
+    async fn a_timeout_names_the_requests_own_limit() {
+        let addr = one_shot_server(None).await;
+        let mut exec = exec_req(&format!("http://{addr}/slow"));
+        exec.timeout_ms = Some(200);
+        let wid = otto_core::new_id();
+        let err = build_and_send(&wid, &exec, &serde_json::Map::new(), None, true)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "request timed out after 200ms");
     }
 }

@@ -38,6 +38,18 @@ unsolicited `scrollback`, as on revival) and **does not deliver that
 keystroke** (the CLI is still starting). Emulator replies (`user: false`)
 never wake it. Read-only viewers never resume either way.
 
+**Daemon restarts.** A session running in a PTY holder (setting
+`session_persistence`, default on for sessions you start) keeps its process
+across a daemon restart: the socket drops, the client re-attaches (view-only,
+as for any dropped socket) and gets `status: running` plus a full `scrollback`
+snapshot with a NEW `epoch` (the re-adopted PTY is a new incarnation on this
+daemon), so it rebuilds from the snapshot exactly as after a respawn — same
+process, same screen and history. Other sessions report `reconnectable` /
+`exited` as before. A socket that drops right after an `exit` frame is the
+daemon going away (a live socket outlives its session's exit): clients should
+re-attach once view-only to learn the real state rather than stay on that
+exit.
+
 Role: workspace **viewer** may attach (read-only); **editor**+ may send input/resize.
 Input frames from viewers are silently dropped server-side (and a single JSON
 `{"type":"error","code":"forbidden"}` is sent once).
@@ -987,11 +999,11 @@ blind timer.
 
 ```json
 { "type": "scheduled_task_run_updated", "workspace_id": "<Id>", "task_id": "<Id>",
-  "run_id": "<Id>", "status": "running|ok|error" }
+  "run_id": "<Id>", "status": "running|ok|error|canceled" }
 ```
 
 - Emitted by `otto_server::scheduled_tasks_engine` when a scheduled-task run
-  starts, finishes (`ok`), or errors.
+  starts, finishes (`ok`), errors, or is stopped from Otto (`canceled`).
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Scheduled Tasks page re-fetches the task's run history on a matching tick
   instead of polling.
@@ -1050,8 +1062,10 @@ the committed answer.
 
 ### `api_history_appended`
 
-Workspace-scoped. Emitted after a human Send or agent saved-request execution
-successfully appends an API-client history row. It carries identifiers and
+Workspace-scoped. Emitted after a human Send, an agent saved-request execution
+or an automation-run step successfully appends an API-client history row (an
+automation step's row is filed `source: "human"` — its stored `request.source`
+is the `"automation_run"` marker). It carries identifiers and
 source metadata only — never request fields, responses, credentials, or other
 secret values.
 

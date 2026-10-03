@@ -913,17 +913,21 @@ impl super::GitProvider for Github {
     }
 
     async fn list_pr_commits(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCommit>> {
-        let v = self
+        // Paginated: a PR with more than 100 commits lost the rest silently
+        // (GitHub itself caps this list at 250).
+        let rows = self
             .http
-            .json(
+            .paginate_json(
                 self.req(
                     reqwest::Method::GET,
                     &format!("{}/{number}/commits", Self::prs_path(r)),
                 )
                 .query(&[("per_page", "100")]),
+                self.http.client(),
+                self.auth_header(),
             )
             .await?;
-        let commits = super::varr(&v, &[])
+        let commits = rows
             .iter()
             .map(|c| {
                 let sha = super::vstr(c, &["sha"]);
@@ -951,13 +955,21 @@ impl super::GitProvider for Github {
         r: &RemoteRef,
         q: &str,
     ) -> Result<Vec<otto_core::api::Collaborator>> {
-        let path = format!("/repos/{}/{}/collaborators?per_page=100", r.owner, r.repo);
-        let v = self
+        // Every page (Link-following, ≤ 20 × 100): one page silently dropped
+        // reviewers past the first 100 in large orgs — and that cut list is
+        // what the typeahead caches.
+        let path = format!("/repos/{}/{}/collaborators", r.owner, r.repo);
+        let rows = self
             .http
-            .json(self.req(reqwest::Method::GET, &path))
+            .paginate_json(
+                self.req(reqwest::Method::GET, &path)
+                    .query(&[("per_page", "100")]),
+                self.http.client(),
+                self.auth_header(),
+            )
             .await?;
         let needle = q.to_ascii_lowercase();
-        Ok(varr(&v, &[])
+        Ok(rows
             .iter()
             .map(collaborator_from)
             .filter(|c| {

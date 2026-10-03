@@ -73,6 +73,10 @@ pub fn router<S: ChannelsCtx>() -> Router<S> {
     Router::new()
         .route("/workspaces/{id}/integrations", get(list_integrations::<S>))
         .route(
+            "/workspaces/{id}/integrations/status",
+            get(integration_status::<S>),
+        )
+        .route(
             "/workspaces/{id}/integrations/{channel}",
             put(upsert_integration::<S>).delete(delete_integration::<S>),
         )
@@ -108,6 +112,21 @@ async fn list_integrations<S: ChannelsCtx>(
         .await?;
     let list = s.integrations().list(&ws_id).await?;
     Ok(Json(list))
+}
+
+/// `GET /api/v1/workspaces/{id}/integrations/status` — the live state of each
+/// enabled Slack / Telegram listener (connecting, connected, reconnecting with
+/// the last error, waiting for a token, …). In-memory; an integration that is
+/// disabled (or a webhook, which has no listener) has no entry.
+async fn integration_status<S: ChannelsCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+) -> ApiResult<Json<Vec<crate::health::ListenerStatus>>> {
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Viewer)
+        .await?;
+    Ok(Json(crate::health::snapshot(&ws_id)))
 }
 
 async fn upsert_integration<S: ChannelsCtx>(

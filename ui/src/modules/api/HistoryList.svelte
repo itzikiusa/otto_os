@@ -78,7 +78,7 @@
 
   async function clear(): Promise<void> {
     if (!(await confirmer.ask(
-      `Delete all ${apiClient.history.length} history entries in this workspace, including their stored responses? Saved requests are not affected.`,
+      'Delete all request history in this workspace, including the stored responses? Saved requests are not affected.',
       { title: 'Clear history', confirmLabel: 'Clear history' },
     ))) return;
     await apiClient.clearHistory();
@@ -132,7 +132,14 @@
 
   {#if apiClient.historyLoadingId}<div class="state" role="status">Loading request…</div>{/if}
 
-  {#if apiClient.history.length === 0}
+  {#if apiClient.history.length === 0 && apiClient.historyLoadError}
+    <div class="state err" role="alert">
+      <span>Couldn’t load history. {apiClient.historyLoadError}</span>
+      <button class="btn small" onclick={() => apiClient.retryHistory()}>Retry</button>
+    </div>
+  {:else if apiClient.history.length === 0 && !apiClient.historyLoaded}
+    <div class="state" role="status">Loading history…</div>
+  {:else if apiClient.history.length === 0}
     <EmptyState icon="clock" title="Nothing sent yet" body="Every request you send appears here, so you can open it again later." />
   {:else if filtered.length === 0}
     <div class="state">
@@ -233,6 +240,13 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 4px;
+  }
+  .state.err {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    color: var(--danger);
   }
   :global(.hist-vlist) {
     flex: 1;

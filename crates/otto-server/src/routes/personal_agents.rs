@@ -41,6 +41,23 @@ use crate::state::ServerCtx;
 
 /// Max bytes for one room message (agent AND user posts).
 pub const MAX_ROOM_POST_BYTES: usize = 16 * 1024;
+/// Max characters in a room name (it is shown in lists, headers and every
+/// member agent's instructions).
+pub const MAX_ROOM_NAME_CHARS: usize = 120;
+
+/// Trimmed, non-empty, length-capped room name.
+fn room_name(raw: &str) -> Result<&str, ApiError> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(ApiError(Error::Invalid("name is required".into())));
+    }
+    if name.chars().count() > MAX_ROOM_NAME_CHARS {
+        return Err(ApiError(Error::Invalid(format!(
+            "room name is longer than {MAX_ROOM_NAME_CHARS} characters"
+        ))));
+    }
+    Ok(name)
+}
 
 pub fn routes() -> Router<ServerCtx> {
     Router::new()
@@ -62,6 +79,7 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/personal-agents/{id}/run", post(run_now))
         .route("/personal-agents/{id}/runs", get(list_runs))
         .route("/personal-agents/runs/{run_id}/report", get(report))
+        .route("/personal-agents/runs/{run_id}/cancel", post(cancel_run))
         .route("/personal-agents/{id}/chat-session", post(chat_session))
         .route(
             "/workspaces/{id}/agent-rooms",
@@ -317,6 +335,9 @@ async fn update(
     if let Some(c) = req.cwd.as_deref() {
         personal_agents_engine::validate_agent_cwd(c).map_err(ApiError)?;
     }
+    // Resuming the agent resumes all its schedules: re-arm them so what they
+    // missed while it was paused is not fired (and delivered) at once.
+    let resumed = !agent.enabled && req.enabled == Some(true);
     let updated = repo
         .update(
             &id,
@@ -334,6 +355,16 @@ async fn update(
         )
         .await
         .map_err(ApiError)?;
+    if resumed {
+        let _ = repo
+            .rearm_agent_schedules(&id, &chrono::Utc::now().to_rfc3339())
+            .await;
+        if let Ok(schedules) = repo.list_schedules(&id).await {
+            for s in &schedules {
+                refresh_next_run(&repo, s).await;
+            }
+        }
+    }
     Ok(Json(updated))
 }
 
@@ -413,6 +444,18 @@ async fn update_schedule(
         check_timezone(tz)?;
     }
     let cadence_changed = req.schedule.is_some() || req.timezone.is_some();
+    // Resumed, or a really new cadence/timezone → re-arm; a re-timed `once`
+    // forgets it fired (the engine disables a spent once — editing its time
+    // and turning it back on must make it fire again).
+    let rearm = cadence::rearms(
+        schedule.enabled,
+        req.enabled,
+        &schedule.schedule,
+        req.schedule.as_ref(),
+        &schedule.timezone,
+        req.timezone.as_deref(),
+    );
+    let reset_once = cadence::rearms_once(&schedule.schedule, req.schedule.as_ref());
     let updated = repo
         .update_schedule(
             &schedule_id,
@@ -425,7 +468,12 @@ async fn update_schedule(
         )
         .await
         .map_err(ApiError)?;
-    if cadence_changed {
+    if rearm || reset_once {
+        let _ = repo
+            .rearm_schedule(&schedule_id, &chrono::Utc::now().to_rfc3339(), reset_once)
+            .await;
+    }
+    if cadence_changed || rearm {
         refresh_next_run(&repo, &updated).await;
     }
     repo.get_schedule(&schedule_id)
@@ -504,6 +552,21 @@ async fn list_runs(
 }
 
 /// `GET /personal-agents/runs/{run_id}/report` — the stored Markdown report.
+/// `POST /personal-agents/runs/{run_id}/cancel` — stop a running run (its
+/// session is killed, no retry); it settles as `canceled`. 409 once finished.
+async fn cancel_run(
+    Path(run_id): Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Value>> {
+    let run = agents(&ctx).get_run(&run_id).await.map_err(ApiError)?;
+    require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
+    if run.status != "running" || !personal_agents_engine::cancel_run(&run_id) {
+        return Err(ApiError(Error::Conflict("the run is not running".into())));
+    }
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn report(
     Path(run_id): Path<String>,
     State(ctx): State<ServerCtx>,
@@ -651,7 +714,9 @@ async fn chat_session(
 
 // --- Rooms ------------------------------------------------------------------
 
-/// `GET /workspaces/{id}/agent-rooms` — each room with its member agent ids.
+/// `GET /workspaces/{id}/agent-rooms` — each room with its member agent ids
+/// and its activity (`message_count`, `last_message_at`). Three queries for
+/// the whole list (rooms, members, activity), not one per room.
 async fn list_rooms(
     Path(ws_id): Path<String>,
     State(ctx): State<ServerCtx>,
@@ -659,11 +724,21 @@ async fn list_rooms(
 ) -> ApiResult<Json<Vec<Value>>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
     let repo = rooms(&ctx);
-    let mut out = Vec::new();
-    for room in repo.list_by_workspace(&ws_id).await.map_err(ApiError)? {
-        let members = repo.list_members(&room.id).await.unwrap_or_default();
-        out.push(json!({"room": room, "members": members}));
-    }
+    let list = repo.list_by_workspace(&ws_id).await.map_err(ApiError)?;
+    let mut members = repo.members_by_workspace(&ws_id).await.map_err(ApiError)?;
+    let activity = repo.activity_by_workspace(&ws_id).await.map_err(ApiError)?;
+    let out = list
+        .into_iter()
+        .map(|room| {
+            let act = activity.get(&room.id).cloned().unwrap_or_default();
+            json!({
+                "members": members.remove(&room.id).unwrap_or_default(),
+                "message_count": act.message_count,
+                "last_message_at": act.last_message_at,
+                "room": room,
+            })
+        })
+        .collect();
     Ok(Json(out))
 }
 
@@ -675,11 +750,9 @@ async fn create_room(
     Json(req): Json<RoomReq>,
 ) -> ApiResult<Json<AgentRoom>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-    if req.name.trim().is_empty() {
-        return Err(ApiError(Error::Invalid("name is required".into())));
-    }
+    let name = room_name(&req.name)?;
     rooms(&ctx)
-        .create(&ws_id, req.name.trim(), Some(&user.id))
+        .create(&ws_id, name, Some(&user.id))
         .await
         .map(Json)
         .map_err(ApiError)
@@ -708,13 +781,8 @@ async fn update_room(
     let repo = rooms(&ctx);
     let room = repo.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &room.workspace_id, WorkspaceRole::Editor).await?;
-    if req.name.trim().is_empty() {
-        return Err(ApiError(Error::Invalid("name is required".into())));
-    }
-    repo.rename(&id, req.name.trim())
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    let name = room_name(&req.name)?;
+    repo.rename(&id, name).await.map(Json).map_err(ApiError)
 }
 
 /// `DELETE /agent-rooms/{id}`
@@ -1059,5 +1127,14 @@ mod tests {
     #[test]
     fn room_post_cap_is_16k() {
         assert_eq!(MAX_ROOM_POST_BYTES, 16 * 1024);
+    }
+
+    #[test]
+    fn room_names_are_trimmed_required_and_capped() {
+        assert_eq!(room_name("  Standup  ").unwrap(), "Standup");
+        assert!(room_name("   ").is_err());
+        let max = "é".repeat(MAX_ROOM_NAME_CHARS);
+        assert_eq!(room_name(&max).unwrap(), max, "the cap counts characters");
+        assert!(room_name(&format!("{max}x")).is_err());
     }
 }

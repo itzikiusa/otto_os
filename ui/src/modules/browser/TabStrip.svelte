@@ -7,13 +7,16 @@
 
   import Icon from '../../lib/components/Icon.svelte';
   import { browser } from '../../lib/stores/browser.svelte';
+  import { toasts } from '../../lib/toast.svelte';
 
   // inbar: rendered inside the PageHeader bar (no own border row / padding).
   let { onnew, inbar = false }: { onnew: () => void; inbar?: boolean } = $props();
 
   function close(e: MouseEvent, id: string): void {
     e.stopPropagation();
-    void browser.closeTab(id);
+    browser.closeTab(id).catch((err: unknown) => {
+      toasts.error('Couldn’t close the tab', err instanceof Error ? err.message : String(err));
+    });
   }
 </script>
 

@@ -373,7 +373,7 @@ async fn provider_ctx_with_account<S: GitCtx>(
     })?;
     // Before the token is loaded: a GitHub Enterprise remote must never send
     // it to api.github.com.
-    crate::providers::check_remote_reachable(kind, remote)?;
+    crate::providers::check_remote_reachable(kind, remote, account.api_base_url.as_deref())?;
     let token = account_token(s, &account).await?;
     Ok((make_provider(&account, token), remote_ref, account.id))
 }
@@ -405,6 +405,17 @@ async fn adopt_account<S: GitCtx>(
             kind.as_str()
         )));
     };
+    // Binding is a SHARED repo setting (#36b: Editor + owner) — once bound,
+    // every push/fetch needs the binder's token. A Viewer merely opening the
+    // PR tab must not decide that for the workspace: use the account for this
+    // request only.
+    if s.roles()
+        .check(&user.0, &repo.workspace_id, WorkspaceRole::Editor)
+        .await
+        .is_err()
+    {
+        return Ok(account);
+    }
     s.store()
         .set_repo_account(&repo.id, Some(&account.id))
         .await?;
@@ -655,6 +666,10 @@ fn collaborators_cache() -> &'static CollaboratorsCache {
 
 const COLLABORATORS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+fn collaborators_key(repo: &Id, account: &Id) -> String {
+    format!("{repo}\u{1f}{account}")
+}
+
 /// `GET /repos/{id}/collaborators?q=` — provider-backed reviewer typeahead.
 /// ws viewer + S4 (the call uses the bound account's token via provider_ctx).
 /// Provider errors surface as-is; the UI degrades to a free-text input.
@@ -666,22 +681,32 @@ async fn repo_collaborators<S: GitCtx>(
 ) -> ApiResult<Json<Vec<Collaborator>>> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     let query = q.q.unwrap_or_default();
-    let cached = collaborators_cache()
-        .lock()
-        .expect("collaborators cache poisoned")
-        .get(id.as_str())
-        .filter(|(at, _)| at.elapsed() < COLLABORATORS_TTL)
-        .map(|(_, list)| list.clone());
+    // S4 on EVERY call, cache hit or not, and the slot is keyed by the account
+    // whose token fetched it: a hit used to hand a non-owner the list the
+    // owner's credential had fetched, without any ownership check.
+    let bound = authorized_repo_account(&s, &user, &repo).await?;
+    let cached = bound.as_ref().and_then(|a| {
+        collaborators_cache()
+            .lock()
+            .expect("collaborators cache poisoned")
+            .get(&collaborators_key(&id, &a.id))
+            .filter(|(at, _)| at.elapsed() < COLLABORATORS_TTL)
+            .map(|(_, list)| list.clone())
+    });
     let all = match cached {
         Some(list) => list,
         None => {
-            let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
+            let (provider, remote, account_id) =
+                provider_ctx_with_account(&s, &user, &repo).await?;
             // Fetch unfiltered so one provider call serves every keystroke.
             let list = provider.list_collaborators(&remote, "").await?;
             collaborators_cache()
                 .lock()
                 .expect("collaborators cache poisoned")
-                .insert(id.to_string(), (std::time::Instant::now(), list.clone()));
+                .insert(
+                    collaborators_key(&id, &account_id),
+                    (std::time::Instant::now(), list.clone()),
+                );
             list
         }
     };
@@ -1490,16 +1515,25 @@ async fn repo_unstage<S: GitCtx>(
     Ok(Json(git.status().await?))
 }
 
+/// `POST /repos/{id}/discard` body: [`StagePathsReq`] plus `keep_staged`,
+/// which discards only the unstaged side (the Unstaged list's Discard).
+#[derive(Debug, serde::Deserialize)]
+struct DiscardReq {
+    paths: Vec<String>,
+    #[serde(default)]
+    keep_staged: bool,
+}
+
 async fn repo_discard<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
-    Json(req): Json<StagePathsReq>,
+    Json(req): Json<DiscardReq>,
 ) -> ApiResult<Json<RepoStatusResp>> {
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    git.discard(&req.paths).await?;
+    git.discard_with(&req.paths, req.keep_staged).await?;
     Ok(Json(git.status().await?))
 }
 
@@ -1523,6 +1557,12 @@ async fn repo_commit<S: GitCtx>(
 struct PushReq {
     #[serde(default)]
     branch: Option<String>,
+    /// Overwrite the remote branch with `--force-with-lease --force-if-includes`
+    /// (never a bare `--force`). Only ever sent after the user confirmed it in
+    /// the UI; absent/false is a normal push that a diverged remote rejects
+    /// with a 409.
+    #[serde(default)]
+    force_with_lease: bool,
 }
 
 async fn repo_push<S: GitCtx>(
@@ -1537,7 +1577,12 @@ async fn repo_push<S: GitCtx>(
     let token = optional_token(&s, &user, &repo).await?;
     let branch = body.as_ref().and_then(|b| b.branch.clone());
     let branch = branch.as_deref().map(str::trim).filter(|b| !b.is_empty());
-    git.push_branch(token, branch).await?;
+    let force = body.as_ref().is_some_and(|b| b.force_with_lease);
+    if force {
+        // Rewriting shared history is rare and consequential — leave a trace.
+        tracing::info!(repo = %id, user = %user.0.username, branch = ?branch, "force push (with lease)");
+    }
+    git.push_with(token, branch, force).await?;
     // Return the FRESH status so the UI's ahead/behind chip updates after push.
     Ok(Json(git.status().await?))
 }
@@ -1601,6 +1646,8 @@ async fn repo_collections_pull<S: GitCtx>(
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
     let _ = git.pull(token).await; // best-effort; report read result regardless
@@ -1645,6 +1692,8 @@ async fn repo_collections_push<S: GitCtx>(
     Path(id): Path<Id>,
     Json(req): Json<PushCollectionsReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     if let Some(branch) = req.branch.as_deref().filter(|b| !b.is_empty()) {
         git.checkout(branch, true).await?;
@@ -1670,7 +1719,9 @@ async fn repo_collections_push<S: GitCtx>(
         staged.push(rel);
     }
     git.stage(&staged).await?;
-    let sha = git.commit(&req.message, false).await?;
+    // ONLY the collection files: a plain `commit` took the whole index, so
+    // the user's own staged work was committed and pushed as "collections".
+    let sha = git.commit_only(&req.message, &staged).await?;
     let token = optional_token(&s, &user, &repo).await?;
     let push_out = git.push(token).await?;
     Ok(Json(
@@ -1769,6 +1820,10 @@ async fn repo_branch_create<S: GitCtx>(
     if req.name.trim().is_empty() {
         return Err(Error::Invalid("branch name must not be empty".into()).into());
     }
+    // Same per-repo lock as stage/commit/merge: a concurrent checkout or
+    // merge must not interleave with this ref/worktree mutation.
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.create_branch(
         req.name.trim(),
@@ -1797,6 +1852,8 @@ async fn repo_branch_rename<S: GitCtx>(
     if req.from.trim().is_empty() || req.to.trim().is_empty() {
         return Err(Error::Invalid("from/to must not be empty".into()).into());
     }
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.rename_branch(req.from.trim(), req.to.trim()).await?;
     Ok(Json(git.status().await?))
@@ -1834,6 +1891,8 @@ async fn repo_branch_delete<S: GitCtx>(
     if !want_local && !want_remote {
         return Err(Error::Invalid("nothing to delete (set local and/or remote)".into()).into());
     }
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     if want_local {
         // Never delete the checked-out branch — git refuses, and a half-done
@@ -1878,6 +1937,8 @@ async fn repo_tag_create<S: GitCtx>(
     if req.sha.trim().is_empty() {
         return Err(Error::Invalid("tag sha must not be empty".into()).into());
     }
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.create_tag(
         name,
@@ -1934,6 +1995,8 @@ async fn repo_tag_delete<S: GitCtx>(
     if name.is_empty() {
         return Err(Error::Invalid("tag name must not be empty".into()).into());
     }
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.delete_tag(name).await?;
     if req.remote.unwrap_or(false) {
@@ -2012,6 +2075,8 @@ async fn repo_worktree_remove<S: GitCtx>(
     if path.is_empty() {
         return Err(Error::Invalid("worktree path must not be empty".into()).into());
     }
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     // Only paths this repo actually lists are removable — the path is caller
     // input, and `git worktree remove` on an arbitrary directory must never
@@ -2039,6 +2104,8 @@ async fn repo_worktree_prune<S: GitCtx>(
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Vec<WorktreeInfo>>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.worktree_prune().await?;
     Ok(Json(git.worktree_list().await?))
@@ -2066,6 +2133,8 @@ async fn repo_submodule_update<S: GitCtx>(
     Path(id): Path<Id>,
     Json(req): Json<SubmoduleUpdateReq>,
 ) -> ApiResult<Json<Vec<SubmoduleInfo>>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     if let Some(p) = req.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
         // Same containment rule as worktree remove: only known submodule paths.
@@ -3037,6 +3106,82 @@ mod tests {
             Some(&account.id),
             "the adopted account must be written back to the repo row"
         );
+    }
+
+    /// Grants Viewer and nothing above it.
+    struct ViewerOnly;
+    impl RoleChecker for ViewerOnly {
+        fn check<'a>(
+            &'a self,
+            _u: &'a User,
+            _w: &'a Id,
+            m: WorkspaceRole,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                match m {
+                    WorkspaceRole::Viewer => Ok(()),
+                    _ => Err(Error::Forbidden("viewer".into())),
+                }
+            })
+        }
+    }
+
+    /// A Viewer opening the PR tab may USE their own only account for that
+    /// request, but must not bind the shared repo to it (binding is Editor-
+    /// only, #36b — and once bound every push needs the binder's token).
+    #[tokio::test]
+    async fn viewer_adoption_is_per_request_and_never_persisted() {
+        let (_pool, mut ctx, user, ws) = fixture().await;
+        ctx.roles = Arc::new(ViewerOnly);
+        let repo = seed_repo(&ctx, &ws, "seen", Some("https://github.com/o/seen.git")).await;
+        seed_account(&ctx, &user, GitProviderKind::Github, "gh").await;
+
+        provider_ctx(&ctx, &auth(&user, false), &repo)
+            .await
+            .unwrap();
+
+        let stored = ctx.store.get_repo(&repo.id).await.unwrap();
+        assert_eq!(
+            stored.git_account_id, None,
+            "a viewer must not bind the repo"
+        );
+    }
+
+    /// The reviewer-typeahead cache must not let a non-owner read the list the
+    /// owner's credential fetched: S4 runs before the cache, every call.
+    #[tokio::test]
+    async fn collaborators_cache_hit_still_enforces_s4() {
+        let (pool, ctx, owner, ws) = fixture().await;
+        let other = seed_user(&pool, "other").await;
+        let account = seed_account(&ctx, &owner, GitProviderKind::Github, "gh").await;
+        let repo = seed_repo(&ctx, &ws, "collab", Some("https://github.com/o/collab.git")).await;
+        ctx.store
+            .set_repo_account(&repo.id, Some(&account.id))
+            .await
+            .unwrap();
+        collaborators_cache().lock().unwrap().insert(
+            collaborators_key(&repo.id, &account.id),
+            (std::time::Instant::now(), Vec::new()),
+        );
+
+        // Owner: served from the cache (no provider call in a unit test).
+        let ok = repo_collaborators(
+            State(ctx.clone()),
+            Extension(auth(&owner, false)),
+            Path(repo.id.clone()),
+            Query(CollaboratorsQuery { q: None }),
+        )
+        .await;
+        assert!(ok.is_ok());
+        // Non-owner: refused even though the slot is warm.
+        let denied = repo_collaborators(
+            State(ctx.clone()),
+            Extension(auth(&other, false)),
+            Path(repo.id.clone()),
+            Query(CollaboratorsQuery { q: None }),
+        )
+        .await;
+        assert!(denied.is_err(), "a cache hit must not bypass S4");
     }
 
     /// Two accounts on one provider is a real choice, not a coin flip: the call

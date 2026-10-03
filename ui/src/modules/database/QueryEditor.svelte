@@ -12,6 +12,7 @@
   import ResultsGrid from './ResultsGrid.svelte';
   import PlanView from './PlanView.svelte';
   import VarsPrompt from './VarsPrompt.svelte';
+  import MultiRunDialog from './MultiRunDialog.svelte';
   import { databaseAccessChild } from '../../lib/access-options';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -544,6 +545,14 @@
     execBase(tab.statement);
   }
 
+  // "Run on…": the selection (else the whole buffer) on several targets and/or
+  // once per placeholder value — MultiRunDialog owns the whole flow.
+  let multiRun = $state<{ statement: string } | null>(null);
+  function openMultiRun(): void {
+    if (!canQuery || !hasStatement) return;
+    multiRun = { statement: editorSel.text.trim() ? editorSel.text : tab.statement };
+  }
+
   // Draggable split between the editor and the results.
   //
   // The height is remembered PER TAB, not once for the whole view: a tab holding
@@ -1009,6 +1018,18 @@
           Run all
         </button>
       {/if}
+      <button
+        class="btn small ghost"
+        onclick={openMultiRun}
+        disabled={!canQuery || !hasStatement}
+        title={!canQuery
+          ? noQueryReason
+          : 'Run on… — the same script on several connections / databases, or once per parameter value (preview every final statement first)'}
+        aria-label="Run on multiple targets"
+        data-testid="multi-run-open"
+      >
+        <Icon name="layers" size={12} /><span class="btn-label">Run on…</span>
+      </button>
     {/if}
     <span class="qe-sep" aria-hidden="true"></span>
     {#if canEdit}
@@ -1355,6 +1376,10 @@
     />
   </div>
 </div>
+
+{#if multiRun}
+  <MultiRunDialog statement={multiRun.statement} onclose={() => (multiRun = null)} />
+{/if}
 
 {#if varsPrompt}
   <VarsPrompt

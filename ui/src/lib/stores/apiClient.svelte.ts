@@ -40,6 +40,7 @@ import {
   detectAndParse,
   collectionToPostman,
   isImportedEnvironment,
+  environmentUpsertFor,
   type ImportedDoc,
   type ImportedEnvironment,
 } from '../api/importers';
@@ -295,6 +296,12 @@ class ApiClientStore {
   environments: ApiEnvironment[] = $state([]);
   history: ApiHistorySummary[] = $state([]);
   historyLoadingId: string | null = $state(null);
+  /** The workspace's history list has loaded at least once (so an empty list
+   *  means "nothing sent yet", not "still loading"). */
+  historyLoaded = $state(false);
+  /** The list failed to load with nothing on screen — shown inline with Retry
+   *  (over live rows a failed refresh is a toast instead). */
+  historyLoadError: string | null = $state(null);
   historyAgentOnly = $state(false);
   automations: ApiAutomation[] = $state([]);
   /** Workspace `ssh`-kind connections, for the Settings-tab "SSH tunnel" picker. */
@@ -441,6 +448,8 @@ class ApiClientStore {
     this.historyRefresh.reset();
     this.historyDetail.cancel();
     this.history = [];
+    this.historyLoaded = false;
+    this.historyLoadError = null;
     this.flushTabsWrite();
     this.cancelExecute();
     this.running = false; this.lastRun = null; this.currentRun = null; this.automationRuns = [];
@@ -612,8 +621,11 @@ class ApiClientStore {
   private historyRefresh = new HistoryRefresh<ApiHistorySummary>({
     workspace: () => this.wsId(),
     fetch: (wid, signal) => api.get<ApiHistorySummary[]>(`/workspaces/${wid}/api-client/history/summaries`, signal),
-    publish: (rows) => { this.history = rows; },
-    error: (error) => toasts.error('Could not load history', errMsg(error)),
+    publish: (rows) => { this.history = rows; this.historyLoaded = true; this.historyLoadError = null; },
+    error: (error) => {
+      if (this.history.length === 0) this.historyLoadError = errMsg(error);
+      else toasts.error('Could not refresh history', errMsg(error));
+    },
   });
 
   private historyDetail = new HistoryDetail<ApiHistoryEntry>({
@@ -626,6 +638,12 @@ class ApiClientStore {
 
   async loadHistory(): Promise<void> {
     await this.historyRefresh.request();
+  }
+
+  /** Retry a failed history load from its inline error. */
+  retryHistory(): void {
+    this.historyLoadError = null;
+    void this.loadHistory();
   }
 
   /** Server-side history search — the sidebar list only holds the newest 100
@@ -774,14 +792,14 @@ class ApiClientStore {
 
   /** Import a Postman environment export as a new API environment. */
   async importEnvironment(env: ImportedEnvironment, quiet = false): Promise<void> {
-    const saved = await this.saveEnvironment({
-      name: env.name,
-      variables: env.variables,
-    });
+    // Secret variables go to the Keychain (write-only `secret_values`), never
+    // into the environment row.
+    const saved = await this.saveEnvironment(environmentUpsertFor(env));
     if (saved && !quiet) {
+      const secrets = env.secretKeys?.length ?? 0;
       toasts.success(
         'Environment imported',
-        `${env.name} · ${Object.keys(env.variables).length} variable(s)`,
+        `${env.name} · ${Object.keys(env.variables).length} variable(s)${secrets ? `, ${secrets} kept in the Keychain` : ''}`,
       );
     }
   }

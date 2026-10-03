@@ -197,6 +197,42 @@ pub struct GrpcInvokeReq {
     headers: Vec<KV>,
 }
 
+/// Budget for one gRPC call (unary answer, or the whole server stream).
+const GRPC_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Server-stream caps: messages kept, and their serialized JSON size.
+const GRPC_STREAM_MAX_MSGS: usize = 1000;
+const GRPC_STREAM_MAX_BYTES: usize = 5 * 1024 * 1024;
+
+fn deadline_status() -> Status {
+    Status::deadline_exceeded(format!(
+        "no response within {}s",
+        GRPC_CALL_TIMEOUT.as_secs()
+    ))
+}
+
+/// Bounded accumulator for server-streamed messages.
+#[derive(Default)]
+struct StreamCollector {
+    msgs: Vec<Value>,
+    bytes: usize,
+    truncated: bool,
+}
+
+impl StreamCollector {
+    /// Keep `msg` unless a cap is reached; `false` (and `truncated`) once the
+    /// stream should stop being read.
+    fn push(&mut self, msg: Value) -> bool {
+        let size = msg.to_string().len();
+        if self.msgs.len() >= GRPC_STREAM_MAX_MSGS || self.bytes + size > GRPC_STREAM_MAX_BYTES {
+            self.truncated = true;
+            return false;
+        }
+        self.bytes += size;
+        self.msgs.push(msg);
+        true
+    }
+}
+
 /// A `tonic::Codec` that encodes/decodes `prost-reflect` dynamic messages
 /// against a specific method's input/output descriptors.
 #[derive(Clone)]
@@ -338,19 +374,39 @@ pub async fn invoke(
     };
     let call_started = Instant::now();
 
-    // Unary → one message; server-streaming → a JSON array of messages.
-    let outcome: Result<(Vec<Value>, String), Status> = if server_streaming {
-        match client.server_streaming(request, path, codec).await {
+    // Unary → one message; server-streaming → a JSON array of messages. The
+    // whole call is bounded by GRPC_CALL_TIMEOUT: a unary call that never
+    // answers fails DEADLINE_EXCEEDED; a long-lived (watch-style) stream is
+    // cut there — or at the message / byte cap — and returns what arrived,
+    // flagged `truncated`.
+    let deadline = tokio::time::Instant::now() + GRPC_CALL_TIMEOUT;
+    let outcome: Result<(Vec<Value>, String, bool), Status> = if server_streaming {
+        let sent =
+            match tokio::time::timeout_at(deadline, client.server_streaming(request, path, codec))
+                .await
+            {
+                Err(_) => Err(deadline_status()),
+                Ok(sent) => sent,
+            };
+        match sent {
             Ok(response) => {
                 let meta = meta_to_json(response.metadata());
                 let mut stream = response.into_inner();
-                let mut msgs: Vec<Value> = Vec::new();
+                let mut collected = StreamCollector::default();
                 let mut err: Option<Status> = None;
                 loop {
-                    match stream.message().await {
-                        Ok(Some(m)) => msgs.push(dynamic_to_value(&m)),
-                        Ok(None) => break,
-                        Err(s) => {
+                    match tokio::time::timeout_at(deadline, stream.message()).await {
+                        Err(_) => {
+                            collected.truncated = true;
+                            break;
+                        }
+                        Ok(Ok(Some(m))) => {
+                            if !collected.push(dynamic_to_value(&m)) {
+                                break;
+                            }
+                        }
+                        Ok(Ok(None)) => break,
+                        Ok(Err(s)) => {
                             err = Some(s);
                             break;
                         }
@@ -360,18 +416,24 @@ pub async fn invoke(
                     Some(s) => Err(s),
                     None => Ok((
                         meta,
-                        serde_json::to_string_pretty(&Value::Array(msgs))
+                        serde_json::to_string_pretty(&Value::Array(collected.msgs))
                             .unwrap_or_else(|_| "[]".into()),
+                        collected.truncated,
                     )),
                 }
             }
             Err(s) => Err(s),
         }
     } else {
-        match client.unary(request, path, codec).await {
+        let sent = match tokio::time::timeout_at(deadline, client.unary(request, path, codec)).await
+        {
+            Err(_) => Err(deadline_status()),
+            Ok(sent) => sent,
+        };
+        match sent {
             Ok(response) => {
                 let meta = meta_to_json(response.metadata());
-                Ok((meta, dynamic_to_json(&response.into_inner())))
+                Ok((meta, dynamic_to_json(&response.into_inner()), false))
             }
             Err(s) => Err(s),
         }
@@ -381,8 +443,10 @@ pub async fn invoke(
     let duration_ms = started.elapsed().as_millis() as i64;
 
     match outcome {
-        Ok((meta_headers, json_body)) => {
-            let detail = if server_streaming {
+        Ok((meta_headers, json_body, truncated)) => {
+            let detail = if truncated {
+                "stream cut at the time / size limit (partial)"
+            } else if server_streaming {
                 "stream complete"
             } else {
                 "message received"
@@ -408,7 +472,7 @@ pub async fn invoke(
                 body_base64: String::new(),
                 body_id: None,
                 body: json_body,
-                truncated: false,
+                truncated,
                 too_large: false,
                 duration_ms,
                 size_bytes: size,
@@ -513,9 +577,7 @@ async fn grpc_endpoint(url: &str, allow_local: bool) -> Result<Endpoint, ApiErro
     let mut endpoint = if allow_local {
         Channel::builder(uri.clone())
     } else {
-        let (host, addrs) = otto_netguard::resolve_checked(url)
-            .await
-            .map_err(invalid)?;
+        let (host, addrs) = otto_netguard::resolve_checked(url).await.map_err(invalid)?;
         let mut addr = addrs
             .iter()
             .find(|a| a.is_ipv4())
@@ -740,6 +802,28 @@ fn dynamic_to_json(msg: &DynamicMessage) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn stream_collector_stops_at_the_message_and_byte_caps() {
+        let mut c = StreamCollector::default();
+        for i in 0..GRPC_STREAM_MAX_MSGS {
+            assert!(c.push(json!({ "i": i })));
+        }
+        assert!(!c.truncated);
+        assert!(!c.push(json!({ "i": "one too many" })));
+        assert!(c.truncated);
+        assert_eq!(c.msgs.len(), GRPC_STREAM_MAX_MSGS);
+
+        let mut c = StreamCollector::default();
+        let big = "x".repeat(GRPC_STREAM_MAX_BYTES / 2);
+        assert!(c.push(json!(big)));
+        assert!(
+            !c.push(json!(big)),
+            "second half-cap message overflows the byte cap"
+        );
+        assert!(c.truncated);
+        assert_eq!(c.msgs.len(), 1);
+    }
+
     const SAMPLE: &str = r#"
         syntax = "proto3";
         package demo;
@@ -779,7 +863,9 @@ mod tests {
         // install it itself (idempotent — `Err` just means it's already set).
         let _ = rustls::crypto::ring::default_provider().install_default();
         // Guarded: a loopback target is refused (reflection included).
-        assert!(grpc_endpoint("grpc://127.0.0.1:50051", false).await.is_err());
+        assert!(grpc_endpoint("grpc://127.0.0.1:50051", false)
+            .await
+            .is_err());
         assert!(grpc_endpoint("http://[::1]:50051", false).await.is_err());
         // allow_local: the workspace opt-in lets a local dev server through.
         assert!(grpc_endpoint("grpc://127.0.0.1:50051", true).await.is_ok());

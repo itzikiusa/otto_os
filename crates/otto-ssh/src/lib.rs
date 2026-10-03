@@ -27,7 +27,9 @@ use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
 
+pub mod diagnose;
 pub mod sftp;
+pub use diagnose::{diagnose as diagnose_ssh_stderr, SshDiagnosis};
 pub use sftp::{SftpEntry, SftpParams, SftpSession};
 
 /// SSH tunnel config. Auth uses the system ssh client, so it honours the
@@ -200,17 +202,7 @@ impl SshTunnel {
         loop {
             if let Ok(Some(status)) = child.try_wait() {
                 // ssh exited early — surface its stderr.
-                let mut msg = format!("ssh tunnel exited early ({status})");
-                if let Some(mut err) = child.stderr.take() {
-                    use tokio::io::AsyncReadExt;
-                    let mut buf = String::new();
-                    let _ = err.read_to_string(&mut buf).await;
-                    let first = buf.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-                    if !first.is_empty() {
-                        msg = format!("ssh tunnel failed: {}", first.trim());
-                    }
-                }
-                return Err(Error::Upstream(msg));
+                return Err(exit_error(&mut child, &format!("exited early ({status})")).await);
             }
             if TcpStream::connect(("127.0.0.1", local_port)).await.is_ok() {
                 // TOCTOU guard: the reserved port was released before ssh bound
@@ -220,17 +212,7 @@ impl SshTunnel {
                 // is still running after the probe; an exit here is a failure,
                 // never a live tunnel pointing at someone else's listener.
                 if let Ok(Some(status)) = child.try_wait() {
-                    let mut msg = format!("ssh tunnel exited early ({status})");
-                    if let Some(mut err) = child.stderr.take() {
-                        use tokio::io::AsyncReadExt;
-                        let mut buf = String::new();
-                        let _ = err.read_to_string(&mut buf).await;
-                        let first = buf.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-                        if !first.is_empty() {
-                            msg = format!("ssh tunnel failed: {}", first.trim());
-                        }
-                    }
-                    return Err(Error::Upstream(msg));
+                    return Err(exit_error(&mut child, &format!("exited early ({status})")).await);
                 }
                 // Drain stderr for the tunnel's lifetime: ssh warnings (rekey,
                 // keepalive, channel errors) otherwise fill the ~64 KiB pipe
@@ -261,13 +243,31 @@ impl SshTunnel {
                 });
             }
             if Instant::now() >= deadline {
+                // Killing ssh closes its stderr, so whatever it said about the
+                // stall (a hung jump host, an unanswered DNS lookup) is readable.
                 let _ = child.start_kill();
-                return Err(Error::Upstream(
-                    "ssh tunnel did not become ready within 12s".into(),
-                ));
+                return Err(exit_error(&mut child, "did not become ready within 12s").await);
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
+    }
+}
+
+/// The error for a tunnel whose `ssh` exited (or was killed) before the forward
+/// came up: ssh's own explanation, de-noised and with a fix hint
+/// ([`diagnose::diagnose`]), else `fallback`. Reading stderr is bounded — a
+/// grandchild (ProxyCommand) can keep the pipe open after ssh itself is gone.
+async fn exit_error(child: &mut Child, fallback: &str) -> Error {
+    let mut buf = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        use tokio::io::AsyncReadExt;
+        let _ = tokio::time::timeout(Duration::from_secs(2), err.read_to_string(&mut buf)).await;
+    }
+    let diagnosis = diagnose::diagnose(&buf);
+    if diagnosis.is_empty() {
+        Error::Upstream(format!("ssh tunnel {fallback}"))
+    } else {
+        Error::Upstream(format!("ssh tunnel failed: {diagnosis}"))
     }
 }
 
@@ -343,12 +343,25 @@ fn local_forward_args(
     let mut args = base_args(cfg);
     args.push("-L".into());
     args.push(format!(
-        "127.0.0.1:{local_port}:{remote_host}:{remote_port}"
+        "127.0.0.1:{local_port}:{}:{remote_port}",
+        forward_host(remote_host)
     ));
     // `--` ends option parsing: the destination is never read as an option.
     args.push("--".into());
     args.push(ssh_target(cfg));
     args
+}
+
+/// The remote host as ssh's `-L` spec needs it: an IPv6 literal must be
+/// bracketed (`[fd00::5]`), or its colons are read as field separators and the
+/// forward points at the wrong host/port. Already-bracketed and non-IPv6 hosts
+/// pass through unchanged.
+fn forward_host(host: &str) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
 }
 
 /// `ssh` args for a dynamic SOCKS5 forward: `… -D 127.0.0.1:<local> -- user@host`.
@@ -405,6 +418,37 @@ mod tests {
             args[args.iter().position(|a| a == "-i").unwrap() + 1],
             "/home/me/.ssh/id_rsa"
         );
+    }
+
+    #[test]
+    fn ipv6_forward_target_is_bracketed() {
+        let args = local_forward_args(&cfg(), 5000, "fd00::5", 5432);
+        let l = args.iter().position(|a| a == "-L").unwrap();
+        assert_eq!(args[l + 1], "127.0.0.1:5000:[fd00::5]:5432");
+        // Already bracketed / hostnames / IPv4 are left alone.
+        assert_eq!(forward_host("[fd00::5]"), "[fd00::5]");
+        assert_eq!(forward_host("db.internal"), "db.internal");
+        assert_eq!(forward_host("10.0.0.5"), "10.0.0.5");
+    }
+
+    /// A tunnel whose ssh dies before the forward is up reports ssh's real
+    /// reason (not the known_hosts notice that precedes it) plus a fix.
+    #[tokio::test]
+    async fn early_exit_reports_the_diagnosed_reason() {
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "echo \"Warning: Permanently added 'h' (ED25519) to the list of known hosts.\" >&2; \
+                 echo 'me@h: Permission denied (publickey).' >&2; exit 255",
+            ])
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let _ = child.wait().await;
+        let msg = exit_error(&mut child, "exited early").await.to_string();
+        assert!(msg.contains("Permission denied (publickey)"), "{msg}");
+        assert!(msg.contains("ssh-add"), "{msg}");
+        assert!(!msg.contains("Permanently added"), "{msg}");
     }
 
     #[test]

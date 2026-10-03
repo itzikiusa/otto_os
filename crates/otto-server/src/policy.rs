@@ -413,6 +413,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/db/mongosh" {
         return Require(Database, View);
     }
+    // Multi-target / parameterised runs ("Run on…", `/db/multi-run/plan`,
+    // `/db/multi-runs…`): listing / polling a job / reading one run = View
+    // (the item handler re-checks Editor on that run's connection); planning
+    // (it probes the targets), starting and cancelling = Edit. The handlers
+    // also require Editor on EVERY target connection.
+    if p.starts_with("/db/multi-run") {
+        return Require(Database, if get { View } else { Edit });
+    }
     if p.starts_with("/workspaces/{wid}/db/")
         || p.starts_with("/db/saved-queries")
         || p.starts_with("/db/dashboards")
@@ -440,6 +448,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Connections, if get { View } else { Edit });
     }
     if p == "/connections/{id}/open" || p == "/connections/{id}/test" {
+        return Require(Connections, Edit);
+    }
+    if p == "/connections/unsaved/test" {
+        // SSH test-before-save (form "Test"): dials the unsaved host, same trust
+        // as saving the profile; the handler additionally requires root.
         return Require(Connections, Edit);
     }
     if p == "/connections/{id}/pin" {
@@ -789,6 +802,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         if p == "/mcp/policies" || p.starts_with("/mcp/policies/") {
             return Require(Mcp, Admin);
         }
+        // Auto-approve rules loosen the approval posture: reading them is View,
+        // every change is Admin (like policy writes).
+        if p == "/mcp/auto-approve" || p == "/mcp/auto-approve/{id}" {
+            return Require(Mcp, if get { View } else { Admin });
+        }
         // Posture-changing routes → Admin: outward-server config, policy
         // create/update/delete/import, and approval decisions (separation of
         // duties is additionally enforced in the handler).
@@ -1061,6 +1079,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/scheduled-tasks/runs/{run_id}/report" {
         return Require(ScheduledTasks, View);
     }
+    if p == "/scheduled-tasks/runs/{run_id}/cancel" {
+        return Require(ScheduledTasks, Edit);
+    }
     if p == "/scheduled-tasks/{id}/convert-to-workflow" {
         return Require(ScheduledTasks, Edit);
     }
@@ -1084,6 +1105,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }
     if p == "/personal-agents/schedules/{schedule_id}" {
+        return Require(ScheduledTasks, Edit);
+    }
+    if p == "/personal-agents/runs/{run_id}/cancel" {
         return Require(ScheduledTasks, Edit);
     }
     if p == "/personal-agents/{id}/run" || p == "/personal-agents/{id}/chat-session" {
@@ -1703,6 +1727,35 @@ mod tests {
     }
 
     #[test]
+    fn db_multi_run_reads_are_view_runs_are_edit() {
+        assert_eq!(
+            pol(Method::POST, "/api/v1/db/multi-run/plan"),
+            Require(Database, Edit),
+            "planning probes every target — Edit"
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/db/multi-runs"),
+            Require(Database, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/db/multi-runs"),
+            Require(Database, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/db/multi-runs/{rid}"),
+            Require(Database, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/db/multi-runs/{rid}/items/{index}"),
+            Require(Database, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/db/multi-runs/{rid}/cancel"),
+            Require(Database, Edit)
+        );
+    }
+
+    #[test]
     fn db_assist_routes_are_connections_edit_query_is_exempt() {
         // Connection-scoped assist turns (start / summary / close) = Connections:Edit,
         // and must win over the generic `/connections/{id}/db/` Database prefix.
@@ -1743,6 +1796,10 @@ mod tests {
     fn connection_open_is_edit() {
         assert_eq!(
             pol(Method::POST, "/api/v1/connections/{id}/open"),
+            Require(Connections, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/connections/unsaved/test"),
             Require(Connections, Edit)
         );
         assert_eq!(
@@ -2000,6 +2057,22 @@ mod tests {
         );
         assert_eq!(
             pol(Method::PATCH, "/api/v1/mcp/otto-server"),
+            Require(Mcp, Admin)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/mcp/auto-approve"),
+            Require(Mcp, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/mcp/auto-approve"),
+            Require(Mcp, Admin)
+        );
+        assert_eq!(
+            pol(Method::PATCH, "/api/v1/mcp/auto-approve/{id}"),
+            Require(Mcp, Admin)
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/mcp/auto-approve/{id}"),
             Require(Mcp, Admin)
         );
         assert_eq!(

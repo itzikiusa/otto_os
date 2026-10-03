@@ -209,8 +209,26 @@ fn events_socket_serialization_of_big_frames_stays_under_budget() {
 /// worker (debug build); if a change drops or loosens it, this fails.
 /// Payloads are still built before the ticker starts (test-side copies are
 /// not product cost).
+///
+/// The lag is the single worst tick gap, so one OS preemption on a shared CI
+/// runner can exceed the budget by itself. A real regression (no pacer)
+/// blocks EVERY burst for ~200 ms; noise doesn't hit three in a row — so the
+/// gate is the best of three bursts.
 #[test]
 fn events_fanout_of_a_queued_burst_stays_under_budget() {
+    let lag = (0..3)
+        .map(|_| queued_burst_lag())
+        .min()
+        .expect("three bursts");
+    eprintln!("events burst (200 × 64 KB queued): best-of-3 worst worker lag {lag:?}");
+    assert!(
+        lag < budget(),
+        "an events burst stalled a worker for {lag:?} (best of 3)"
+    );
+}
+
+/// One queued burst; returns its worst worker lag.
+fn queued_burst_lag() -> Duration {
     let events: Vec<Event> = (0..200)
         .map(|i| Event::Notice {
             level: "info".into(),
@@ -240,10 +258,6 @@ fn events_fanout_of_a_queued_burst_stays_under_budget() {
         }
         bytes
     });
-    eprintln!("events burst (200 × 64 KB queued): worst worker lag {lag:?}");
     assert!(lag_items >= 200 * 64 * 1024);
-    assert!(
-        lag < budget(),
-        "an events burst stalled a worker for {lag:?}"
-    );
+    lag
 }

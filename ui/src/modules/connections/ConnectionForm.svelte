@@ -13,6 +13,8 @@
     ConnectionKind,
     ConnectionSection,
     Environment,
+    TestConnectionResp,
+    TestUnsavedConnectionReq,
     UpsertConnectionReq,
   } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -45,6 +47,9 @@
   const hasHostFields = new Set<ConnectionKind>(['ssh', 'mysql', 'postgres', 'redis', 'clickhouse']);
   // Which kinds can have a password (all except ssh by default)
   const hasPasswordField = new Set<ConnectionKind>(['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse', 'custom']);
+  // Kinds whose terminal client can run ON a jump host (`params.jump`). MongoDB
+  // and Custom terminals ignore it, so they don't offer the toggle.
+  const jumpKinds = new Set<ConnectionKind>(['mysql', 'postgres', 'redis', 'clickhouse']);
 
   // svelte-ignore state_referenced_locally
   let name = $state(existing?.name ?? '');
@@ -333,11 +338,15 @@
   }
 
   // ── Test-before-save ────────────────────────────────────────────────────
-  // Probes the CURRENT form values (unsaved) via /connections/unsaved/db/test —
-  // nothing is written to the DB or Keychain until Save. DB kinds only.
-  const testableKinds = new Set<ConnectionKind>(['mysql', 'postgres', 'clickhouse', 'redis', 'mongodb']);
+  // Probes the CURRENT form values (unsaved) — DB kinds via
+  // /connections/unsaved/db/test (driver), SSH via /connections/unsaved/test
+  // (`ssh … exit`). Nothing is written to the DB or Keychain until Save.
+  const testableKinds = new Set<ConnectionKind>(['ssh', 'mysql', 'postgres', 'clickhouse', 'redis', 'mongodb']);
   let testing = $state(false);
-  let testResult = $state<{ ok: boolean; detail: string } | null>(null);
+  /** `detail` is the full outcome line; `hint` says what to change on a
+   *  recognised failure; `warn` carries the key-permission warning. */
+  let testResult = $state<{ ok: boolean; detail: string; hint?: string; warn?: string } | null>(null);
+  let testPanel = $state<HTMLElement | null>(null);
 
   /** The settings the shown result was measured against — editing any field
    *  afterwards clears it, so a green "Connected" never vouches for values
@@ -357,27 +366,46 @@
     testResult = null;
     testedSig = formSig;
     try {
-      const body: Record<string, unknown> = {
-        workspace_id: ws.currentId,
-        kind,
-        params: buildParams(),
-      };
-      // The server resolves the saved credential after checking root/configure
-      // authority; it never returns the credential to this form.
-      if (existing) body.connection_id = existing.id;
-      if (auth.isRoot && secret !== '') body.secret = secret;
-      const res = await api.post<{ ok: boolean; latency_ms?: number; message: string; server_version?: string }>(
-        '/connections/unsaved/db/test',
-        body,
-      );
-      const bits = [res.server_version, res.latency_ms != null ? `${res.latency_ms}ms` : null]
-        .filter(Boolean)
-        .join(' · ');
-      testResult = { ok: res.ok, detail: bits ? `${res.message} (${bits})` : res.message };
+      if (kind === 'ssh') {
+        // SSH profiles hold no secret — the probe uses this Mac's keys / agent.
+        const req: TestUnsavedConnectionReq = { workspace_id: ws.currentId ?? '', kind: 'ssh', params: buildParams() };
+        const res = await api.post<TestConnectionResp>('/connections/unsaved/test', req);
+        testResult = {
+          ok: res.ok,
+          detail: res.ok
+            ? `Connected${res.latency_ms != null ? ` (${res.latency_ms}ms)` : ''}`
+            : res.message,
+          hint: res.hint ?? undefined,
+          warn: res.warn_key_perms ?? undefined,
+        };
+      } else {
+        const body: Record<string, unknown> = {
+          workspace_id: ws.currentId,
+          kind,
+          params: buildParams(),
+        };
+        // The server resolves the saved credential after checking root/configure
+        // authority; it never returns the credential to this form.
+        if (existing) body.connection_id = existing.id;
+        if (auth.isRoot && secret !== '') body.secret = secret;
+        const res = await api.post<{ ok: boolean; latency_ms?: number; message: string; server_version?: string }>(
+          '/connections/unsaved/db/test',
+          body,
+        );
+        const bits = [res.server_version, res.latency_ms != null ? `${res.latency_ms}ms` : null]
+          .filter(Boolean)
+          .join(' · ');
+        testResult = { ok: res.ok, detail: bits ? `${res.message} (${bits})` : res.message };
+      }
     } catch (e) {
       testResult = { ok: false, detail: e instanceof Error ? e.message : String(e) };
     } finally {
       testing = false;
+    }
+    // A failure's explanation lives at the end of the (scrollable) form body —
+    // bring it into view so the user sees what to fix without hunting.
+    if (testResult && (!testResult.ok || testResult.warn)) {
+      queueMicrotask(() => testPanel?.scrollIntoView({ block: 'nearest' }));
     }
   }
 
@@ -740,8 +768,9 @@
     {/if}
   {/if}
 
-  <!-- SSH toggle -->
-  {#if kind !== 'ssh'}
+  <!-- SSH toggle (kinds whose terminal can run on a jump host; an existing
+       jump on another kind stays visible so it can be cleared) -->
+  {#if kind !== 'ssh' && (jumpKinds.has(kind) || sshEnabled)}
     <div class="field ssh-toggle-row">
       <label class="toggle-label">
         <input type="checkbox" bind:checked={sshEnabled} />
@@ -781,6 +810,13 @@
         </div>
         <span class="hint">Leave empty to use ssh-agent / <span class="mono">~/.ssh/config</span>; otherwise ssh asks for a password in the terminal. Key file must be private (<span class="mono">chmod 600</span>) or ssh ignores it.</span>
       </div>
+      {#if kind !== 'ssh' && fJump && hasPasswordField.has(kind) && kind !== 'clickhouse'}
+        <span class="hint">
+          The saved password stays on this Mac — the terminal client on the jump host asks for it
+          ({kind === 'redis' ? 'run AUTH in redis-cli' : 'type it at the prompt'}). The Database Explorer
+          uses the SSH tunnel above instead and signs in automatically.
+        </span>
+      {/if}
     </div>
   {/if}
 
@@ -799,10 +835,24 @@
 
   </fieldset>
 
+  <!-- Test outcome: the full message (wrapping, selectable) plus what to fix.
+       The footer chip only summarises it. -->
+  {#if testResult && (!testResult.ok || testResult.hint || testResult.warn)}
+    <div class="test-panel {testResult.ok ? 'ok' : 'err'}" bind:this={testPanel} role="status" aria-live="polite">
+      <div class="test-panel-head">
+        <Icon name={testResult.ok ? 'check' : 'x'} size={12} />
+        <span>{testResult.ok ? 'Connected' : 'Test failed'}</span>
+      </div>
+      {#if !testResult.ok}<p class="test-panel-msg mono">{testResult.detail}</p>{/if}
+      {#if testResult.hint}<p class="test-panel-hint"><strong>What to check:</strong> {testResult.hint}</p>{/if}
+      {#if testResult.warn}<p class="test-panel-warn">{testResult.warn}</p>{/if}
+    </div>
+  {/if}
+
   {#snippet footer()}
     {#if testResult}
       <span class="test-result {testResult.ok ? 'ok' : 'err'}" title={testResult.detail} role="status">
-        <Icon name={testResult.ok ? 'check' : 'x'} size={12} /> {testResult.detail}
+        <Icon name={testResult.ok ? 'check' : 'x'} size={12} /> {testResult.ok ? testResult.detail : 'Test failed — see details above'}
       </span>
     {/if}
     <button class="btn" onclick={onclose}>Cancel</button>
@@ -1009,5 +1059,39 @@
   }
   .test-result.err {
     color: var(--danger);
+  }
+  .test-panel {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: var(--radius-m);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+    background: var(--danger-soft);
+    font-size: var(--fs-s);
+    line-height: 1.5;
+  }
+  .test-panel.ok {
+    border-color: color-mix(in srgb, var(--success) 40%, transparent);
+    background: var(--success-soft);
+  }
+  .test-panel-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+    color: var(--danger);
+  }
+  .test-panel.ok .test-panel-head {
+    color: var(--success);
+  }
+  .test-panel p {
+    margin: 6px 0 0;
+    overflow-wrap: anywhere;
+  }
+  .test-panel-msg {
+    user-select: text;
+    white-space: pre-wrap;
+  }
+  .test-panel-warn {
+    color: var(--warning);
   }
 </style>

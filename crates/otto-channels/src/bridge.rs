@@ -155,6 +155,26 @@ fn neutralize_markers(text: &str) -> String {
     text.replace('⟦', "[").replace('⟧', "]")
 }
 
+/// The allowed-users gate. `allowed_users` is the integration's comma-separated
+/// list of channel-native user ids; blank = everyone. Entries are trimmed and
+/// empty ones (a trailing comma) ignored, and ids compare case-insensitively —
+/// Slack ids are upper-case (`U0123ABC`) and a hand-typed `u0123abc` used to
+/// lock its owner out silently. A message with no sender id never passes a
+/// non-blank list. Shared by the bridge and the Slack listener, which checks it
+/// BEFORE downloading a message's attachments.
+pub fn user_allowed(allowed_users: &str, user: &str) -> bool {
+    let mut entries = allowed_users
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .peekable();
+    if entries.peek().is_none() {
+        return true;
+    }
+    let user = user.trim();
+    !user.is_empty() && entries.any(|a| a.eq_ignore_ascii_case(user))
+}
+
 /// Derive a session title from the first inbound message so the sidebar pane is
 /// searchable (e.g. "Investigate ticket XXX"). First non-empty line, trimmed
 /// and truncated; falls back to "<Channel> chat". Set once at creation and not
@@ -454,18 +474,15 @@ impl Bridge {
         );
 
         // --- 1. Allowed-users check ---
-        if !integ.allowed_users.trim().is_empty() {
-            let allowed: Vec<&str> = integ.allowed_users.split(',').map(|s| s.trim()).collect();
-            if !allowed.contains(&msg.user.as_str()) {
-                info!(
-                    channel = %adapter.channel().as_str(),
-                    workspace = %msg.workspace_id,
-                    chat = %msg.chat,
-                    user = %msg.user,
-                    "bridge: user not in allowed_users, dropping"
-                );
-                return;
-            }
+        if !user_allowed(&integ.allowed_users, &msg.user) {
+            info!(
+                channel = %adapter.channel().as_str(),
+                workspace = %msg.workspace_id,
+                chat = %msg.chat,
+                user = %msg.user,
+                "bridge: user not in allowed_users, dropping"
+            );
+            return;
         }
 
         // --- 2. Quick commands (intercepted before routing) ---
@@ -1135,6 +1152,23 @@ mod tests {
 
         assert_eq!(bytes, b"\x1b[200~line one\nline two\x1b[201~".to_vec());
         assert_eq!(AGENT_SUBMIT_KEY, b"\r");
+    }
+
+    #[test]
+    fn allowed_users_gate() {
+        // Blank (or only separators) = everyone.
+        assert!(user_allowed("", "U1"));
+        assert!(user_allowed(" , ", "U1"));
+        // Listed ids pass, trimmed, case-insensitively; others don't.
+        assert!(user_allowed("U0123ABC, U0456", "U0123ABC"));
+        assert!(user_allowed("u0123abc", "U0123ABC"));
+        assert!(!user_allowed("U0123ABC,", "U0456"));
+        assert!(!user_allowed("U0123ABC", "U0123AB"), "no prefix match");
+        // A sender-less event never passes a real list.
+        assert!(!user_allowed("U0123ABC", ""));
+        assert!(!user_allowed("U0123ABC,", "  "));
+        // Telegram numeric ids work the same way.
+        assert!(user_allowed("12345, 678", "678"));
     }
 
     #[test]

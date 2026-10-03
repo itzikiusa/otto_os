@@ -34,6 +34,8 @@ export const scheduledTasksApi = {
   remove: (id: string) => api.del<{ ok: boolean }>(`/scheduled-tasks/${id}`),
   run: (id: string) => api.post<ScheduledTaskRun>(`/scheduled-tasks/${id}/run`, {}),
   runs: (id: string) => api.get<ScheduledTaskRun[]>(`/scheduled-tasks/${id}/runs`),
+  /** Stop a running run (its session / shell / workflow run is stopped; it settles `canceled`). */
+  cancelRun: (runId: string) => api.post<{ ok: boolean }>(`/scheduled-tasks/runs/${runId}/cancel`, {}),
   presets: () => api.get<ScheduledTaskPreset[]>(`/scheduled-tasks/presets`),
   /** Materialize a scheduled task as a multi-step workflow (+ schedule trigger). */
   convertToWorkflow: (id: string, disable_task?: boolean) =>

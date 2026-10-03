@@ -87,10 +87,30 @@
     if (tab === 'runs') void personalAgents.loadRuns(agentId);
   });
 
+  /** Stop a running run — asks first: what it did so far is not reported. */
+  async function stopRun(r: PersonalAgentRun): Promise<void> {
+    const ok = await confirmer.ask(
+      'Stop this run? Its agent session is stopped and nothing is delivered. The agent’s schedules keep running.',
+      { title: 'Stop run', confirmLabel: 'Stop run' },
+    );
+    if (!ok) return;
+    try {
+      await personalAgentsApi.cancelRun(r.id);
+      toasts.info('Stopping the run…');
+    } catch (e) {
+      toasts.error('Couldn’t stop the run', loadErrorText(e));
+    }
+    void personalAgents.loadRuns(agentId);
+  }
+
   // --- Chat: one interactive session pinned to the agent's provider/model/cwd.
   let chatSessionId = $state('');
   let chatError = $state('');
+  // Bumped by Retry: clearing the (already empty) session id is no change, so
+  // the effect never re-ran and Retry left "Opening…" up forever.
+  let chatAttempt = $state(0);
   $effect(() => {
+    void chatAttempt;
     if (tab !== 'chat' || chatSessionId) return;
     chatError = '';
     personalAgentsApi
@@ -119,7 +139,7 @@
 
   function openSchedEdit(s: PersonalAgentSchedule): void {
     schedEditId = s.id;
-    sf = loadCadence(s.schedule);
+    sf = loadCadence(s.schedule, s.timezone || browserTz());
     sfTimezone = s.timezone || browserTz();
     sfDirective = s.directive;
     sfEnabled = s.enabled;
@@ -128,6 +148,10 @@
   }
 
   async function saveSchedule(): Promise<void> {
+    if (sf.cadence === 'once' && !sf.runAt) {
+      error = 'Pick the date and time it runs.';
+      return;
+    }
     busy = true;
     error = '';
     const body = {
@@ -381,12 +405,18 @@
               <option value="daily">Daily</option>
               <option value="weekly">Weekly</option>
               <option value="cron">Cron</option>
+              <option value="once">Once</option>
             </select>
           </label>
           {#if sf.cadence === 'interval'}
             <label class="fld">
               <span>Every (minutes, min 5)</span>
               <input type="number" min="5" bind:value={sf.everyMin} />
+            </label>
+          {:else if sf.cadence === 'once'}
+            <label class="fld">
+              <span>Runs once at (in the timezone)</span>
+              <input type="datetime-local" bind:value={sf.runAt} />
             </label>
           {:else if sf.cadence === 'cron'}
             <label class="fld">
@@ -495,6 +525,16 @@
             {#if r.session_id}
               <button class="btn small" title="Open the agent session this run drove" onclick={() => ws.navigateToSession(r.session_id ?? '')}>Open session</button>
             {/if}
+            {#if r.status === 'running'}
+              <button class="btn small danger" title="Stop this run (its agent session is stopped)" onclick={() => void stopRun(r)}>Stop…</button>
+            {/if}
+            <!-- Readable without hovering: the error used to hide behind a summary. -->
+            {#if r.status === 'error' && r.error && r.summary}
+              <p class="run-err" role="note">{r.error}</p>
+            {/if}
+            {#if r.delivery_error}
+              <p class="run-err warn" role="note">Not delivered: {r.delivery_error}</p>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -504,7 +544,7 @@
       <div class="err-block" role="alert">
         <Icon name="warning" size={14} />
         <div class="err-t"><strong>Couldn’t open the chat session.</strong><span class="muted">{chatError}</span></div>
-        <button class="btn small" onclick={() => { chatError = ''; chatSessionId = ''; }}>Retry</button>
+        <button class="btn small" onclick={() => { chatError = ''; chatSessionId = ''; chatAttempt += 1; }}>Retry</button>
       </div>
     {:else if chatSessionId}
       <div class="chatwrap">
@@ -599,6 +639,8 @@
   }
   .run-when { color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .run-sum { flex: 1; min-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .run-err { flex-basis: 100%; margin: 0; font-size: var(--fs-xs); color: var(--danger); overflow-wrap: anywhere; }
+  .run-err.warn { color: var(--warning); }
   .pa-warn { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
   .form { display: flex; flex-direction: column; gap: 12px; margin-bottom: 12px; }
   .form h2 { margin: 0; }

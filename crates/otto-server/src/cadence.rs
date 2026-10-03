@@ -161,6 +161,50 @@ pub fn is_due_since(
     }
 }
 
+/// The cursor the due check runs against: the last completed run or the
+/// instant the schedule was (re)armed — created, resumed, or given a new
+/// cadence/timezone — whichever is later. Without the arm instant a task
+/// resumed after a week fired its missed occurrence (and delivered it) within
+/// a minute, and a new `daily 09:00` created at 15:00 ran at once while its
+/// row said "next: tomorrow 09:00". A `once` schedule ignores it: its cursor
+/// is the "already fired" flag, so arming must never count as having fired.
+pub fn effective_cursor(
+    spec: &Value,
+    last_run: Option<DateTime<Utc>>,
+    armed: Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    if cadence(spec) == "once" {
+        return last_run;
+    }
+    match (last_run, armed) {
+        (Some(l), Some(a)) => Some(l.max(a)),
+        (l, a) => l.or(a),
+    }
+}
+
+/// Whether an edit re-arms the schedule (see [`effective_cursor`]): resumed
+/// after a pause, or its cadence / timezone really changed. Saving an edit
+/// form that re-sends the unchanged cadence must NOT push the next fire out.
+pub fn rearms(
+    was_enabled: bool,
+    enabled: Option<bool>,
+    old_spec: &Value,
+    new_spec: Option<&Value>,
+    old_tz: &str,
+    new_tz: Option<&str>,
+) -> bool {
+    let resumed = !was_enabled && enabled == Some(true);
+    let respec = new_spec.is_some_and(|s| s != old_spec);
+    let retz = new_tz.is_some_and(|t| t != old_tz);
+    resumed || respec || retz
+}
+
+/// A `once` schedule whose `run_at` an edit changed must forget that it fired,
+/// or it shows the new time as "next run" and never runs again.
+pub fn rearms_once(old_spec: &Value, new_spec: Option<&Value>) -> bool {
+    new_spec.is_some_and(|s| cadence(s) == "once" && s != old_spec)
+}
+
 /// The next time the task should fire after `from` (for display in `next_run_at`).
 pub fn next_run(spec: &Value, from: DateTime<Utc>, tz: Tz) -> Option<DateTime<Utc>> {
     match cadence(spec) {
@@ -225,10 +269,38 @@ pub fn once_at(spec: &Value, tz: Tz) -> Option<DateTime<Utc>> {
         .and_then(|naive| resolve_local(tz, naive))
 }
 
+/// The smallest gap (minutes) between the next few dozen fires of a cron
+/// after `from` (within ~a week) — enough to catch every sub-hour pattern and
+/// a pair of nearby minutes within a day. `None` when it fires fewer than
+/// twice in that window.
+fn min_cron_gap_min(sched: &cron::Schedule, from: DateTime<Utc>) -> Option<i64> {
+    let mut prev = sched.next_after(from, Tz::UTC)?;
+    let horizon = prev + Duration::days(8);
+    let mut min: Option<i64> = None;
+    for _ in 0..48 {
+        if prev > horizon {
+            break;
+        }
+        let Some(next) = sched.next_after(prev, Tz::UTC) else {
+            break;
+        };
+        let gap = (next - prev).num_minutes();
+        min = Some(min.map_or(gap, |m| m.min(gap)));
+        prev = next;
+    }
+    min
+}
+
 /// Validate a schedule spec at create/update time.
 pub fn validate(spec: &Value) -> Result<()> {
     match cadence(spec) {
         "interval" => {
+            // A non-integer `every_min` ("30", 7.5) silently ran every 60 min.
+            if spec.get("every_min").is_some_and(|v| v.as_i64().is_none()) {
+                return Err(Error::Invalid(
+                    "schedule.every_min must be a whole number of minutes".into(),
+                ));
+            }
             let raw = spec.get("every_min").and_then(Value::as_i64).unwrap_or(60);
             if raw < MIN_INTERVAL_MIN {
                 return Err(Error::Invalid(format!(
@@ -257,6 +329,16 @@ pub fn validate(spec: &Value) -> Result<()> {
                 return Err(Error::Invalid(format!(
                     "schedule.expr '{expr}' never fires (no matching date)"
                 )));
+            }
+            // The interval floor applies to cron too: `* * * * *` (or `0,1 9 …`)
+            // used to pass and run unattended agents back to back.
+            if let Some(gap) = min_cron_gap_min(&sched, Utc::now()) {
+                if gap < MIN_INTERVAL_MIN {
+                    return Err(Error::Invalid(format!(
+                        "schedule.expr '{expr}' fires {gap} minute(s) apart; scheduled runs \
+                         must be at least {MIN_INTERVAL_MIN} minutes apart"
+                    )));
+                }
             }
         }
         "once" => {
@@ -912,6 +994,80 @@ mod tests {
     }
 
     // ---- `once` (one-shot reminders / Personal Agent one-off runs) ----------
+
+    #[test]
+    fn arming_moves_the_cursor_but_never_marks_a_once_as_fired() {
+        let daily = json!({"cadence":"daily","at":"09:00"});
+        let created = utc(2026, 6, 1, 15, 0);
+        // A new daily created at 15:00 is NOT due at 15:01 (its 09:00 passed
+        // before it existed) and fires the next morning.
+        let cur = effective_cursor(&daily, None, Some(created));
+        assert!(!is_due(&daily, cur, utc(2026, 6, 1, 15, 1), Tz::UTC));
+        assert!(is_due(&daily, cur, utc(2026, 6, 2, 9, 0), Tz::UTC));
+        // Resumed after a week off: the missed occurrences are not caught up.
+        let last = Some(utc(2026, 6, 1, 9, 0));
+        let resumed = Some(utc(2026, 6, 8, 12, 0));
+        let cur = effective_cursor(&daily, last, resumed);
+        assert!(!is_due(&daily, cur, utc(2026, 6, 8, 12, 1), Tz::UTC));
+        assert!(is_due(&daily, cur, utc(2026, 6, 9, 9, 0), Tz::UTC));
+        // Interval: the first fire is one period after arming.
+        let every = json!({"cadence":"interval","every_min":60});
+        let cur = effective_cursor(&every, None, Some(created));
+        assert!(!is_due(&every, cur, utc(2026, 6, 1, 15, 30), Tz::UTC));
+        assert!(is_due(&every, cur, utc(2026, 6, 1, 16, 0), Tz::UTC));
+        // Cron: next fire after the arm instant.
+        let cron = json!({"cadence":"cron","expr":"0 9 * * *"});
+        let cur = effective_cursor(&cron, last, resumed);
+        assert!(!is_due(&cron, cur, utc(2026, 6, 8, 12, 1), Tz::UTC));
+        assert!(is_due(&cron, cur, utc(2026, 6, 9, 9, 0), Tz::UTC));
+        // Once: arming is not firing.
+        let once = json!({"cadence":"once","run_at":"2026-06-01T16:00:00Z"});
+        assert_eq!(effective_cursor(&once, None, Some(created)), None);
+        assert!(is_due(&once, None, utc(2026, 6, 1, 16, 0), Tz::UTC));
+        // No arm instant (pre-existing rows) → the old cursor, unchanged.
+        assert_eq!(effective_cursor(&daily, last, None), last);
+    }
+
+    #[test]
+    fn cron_and_interval_share_the_minimum_spacing() {
+        for bad in ["* * * * *", "*/2 * * * *", "0,1 9 * * *", "58,59 * * * *"] {
+            let e = validate(&json!({"cadence":"cron","expr":bad})).unwrap_err();
+            assert!(e.to_string().contains("apart"), "{bad}: {e}");
+        }
+        for ok in ["*/5 * * * *", "0 9 * * 1-5", "0,30 * * * *", "0 0 1 * *"] {
+            assert!(
+                validate(&json!({"cadence":"cron","expr":ok})).is_ok(),
+                "{ok}"
+            );
+        }
+        assert!(validate(&json!({"cadence":"interval","every_min":"30"})).is_err());
+        assert!(validate(&json!({"cadence":"interval","every_min":7.5})).is_err());
+        assert!(
+            validate(&json!({"cadence":"interval"})).is_ok(),
+            "defaults to 60"
+        );
+    }
+
+    #[test]
+    fn only_a_resume_or_a_real_cadence_change_rearms() {
+        let a = json!({"cadence":"daily","at":"09:00"});
+        let b = json!({"cadence":"daily","at":"10:00"});
+        // Saving the edit form with the same cadence/timezone: no re-arm.
+        assert!(!rearms(true, Some(true), &a, Some(&a), "UTC", Some("UTC")));
+        assert!(!rearms(true, None, &a, None, "UTC", None));
+        // Pausing never re-arms; resuming does.
+        assert!(!rearms(true, Some(false), &a, None, "UTC", None));
+        assert!(rearms(false, Some(true), &a, None, "UTC", None));
+        assert!(rearms(true, None, &a, Some(&b), "UTC", None));
+        assert!(rearms(true, None, &a, None, "UTC", Some("Asia/Jerusalem")));
+        // A once's cursor resets only when its own spec changes.
+        let o1 = json!({"cadence":"once","run_at":"2026-06-01T16:00:00Z"});
+        let o2 = json!({"cadence":"once","run_at":"2026-06-02T16:00:00Z"});
+        assert!(rearms_once(&o1, Some(&o2)));
+        assert!(!rearms_once(&o1, Some(&o1)));
+        assert!(!rearms_once(&o1, None));
+        assert!(!rearms_once(&o1, Some(&a)));
+    }
 
     #[test]
     fn once_fires_after_run_at_and_never_again() {

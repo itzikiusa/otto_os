@@ -469,6 +469,13 @@ impl Http {
     ) -> Result<Vec<Value>> {
         const MAX_PAGES: usize = 20;
         let mut all: Vec<Value> = Vec::new();
+        // Where the first page came from: a `Link: rel="next"` pointing at
+        // ANY other origin is not followed — the auth header rides on every
+        // page, and a redirect-to-elsewhere link must not carry the token.
+        let origin = first_rb
+            .try_clone()
+            .and_then(|b| b.build().ok())
+            .map(|r| r.url().clone());
         let resp = self.send(first_rb).await?;
         let next = parse_next_link(resp.headers());
         let page: Value = resp
@@ -482,6 +489,13 @@ impl Http {
         let mut pages = 1usize;
         while let Some(url) = next_url {
             if pages >= MAX_PAGES {
+                break;
+            }
+            if !same_origin(origin.as_ref(), &url) {
+                tracing::warn!(
+                    provider = self.provider,
+                    "pagination link leaves the API origin — not followed"
+                );
                 break;
             }
             let rb = client.get(&url).header(auth_header.0, &auth_header.1);
@@ -611,6 +625,18 @@ pub fn parse_next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
     None
 }
 
+/// True when `next` has the same scheme, host and port as the first page.
+/// An unknown origin (the first request couldn't be inspected) or an
+/// unparsable link follows nothing.
+fn same_origin(origin: Option<&reqwest::Url>, next: &str) -> bool {
+    let (Some(o), Ok(n)) = (origin, reqwest::Url::parse(next)) else {
+        return false;
+    };
+    o.scheme() == n.scheme()
+        && o.host_str() == n.host_str()
+        && o.port_or_known_default() == n.port_or_known_default()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -618,9 +644,24 @@ pub fn parse_next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_key, extract_auth, insert_into, rate_limit_wait, read_from, CachedGet, Http,
-        CACHE_MAX_ENTRIES, SHORT_TTL,
+        cache_key, extract_auth, insert_into, rate_limit_wait, read_from, same_origin, CachedGet,
+        Http, CACHE_MAX_ENTRIES, SHORT_TTL,
     };
+
+    #[test]
+    fn pagination_follows_only_same_origin_links() {
+        let o = reqwest::Url::parse("https://api.github.com/repos/o/r/pulls?per_page=100").unwrap();
+        assert!(same_origin(
+            Some(&o),
+            "https://api.github.com/repositories/1/pulls?page=2"
+        ));
+        assert!(same_origin(Some(&o), "https://api.github.com:443/x?page=2"));
+        assert!(!same_origin(Some(&o), "https://evil.example/x?page=2"));
+        assert!(!same_origin(Some(&o), "http://api.github.com/x?page=2"));
+        assert!(!same_origin(Some(&o), "https://api.github.com:8443/x"));
+        assert!(!same_origin(Some(&o), "not a url"));
+        assert!(!same_origin(None, "https://api.github.com/x"));
+    }
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 

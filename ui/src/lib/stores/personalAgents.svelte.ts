@@ -295,6 +295,13 @@ class PersonalAgentsStore {
   /** Live WS tick: fetch the room's messages after our cursor. */
   applyRoomEvent(ev: Extract<OttoEvent, { type: 'agent_room_message' }>): void {
     if (this.wsId && ev.workspace_id !== this.wsId) return;
+    // Keep the rooms list's activity line current without a list reload
+    // (one event per persisted message, so the count stays exact).
+    const r = this.rooms.find((x) => x.room.id === ev.room_id);
+    if (r) {
+      r.message_count = (r.message_count ?? 0) + 1;
+      r.last_message_at = new Date().toISOString();
+    }
     void this.loadMessages(ev.room_id);
   }
 }

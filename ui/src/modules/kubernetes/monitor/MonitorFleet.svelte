@@ -395,10 +395,14 @@
     void sel;
     if (activeTab === 'requests') untrack(() => void loadRequests());
   });
-  // Live refresh after any cluster's collection cycle.
+  // Live refresh after collection cycles — coalesced by the store (at most
+  // one per MONITOR_TICK_MIN_MS, none while hidden). Only a NEW tick: the
+  // effects above already load on mount.
+  let seenTick = untrack(() => k8s.monitorTick);
   $effect(() => {
     const tick = k8s.monitorTick;
-    if (tick > 0) {
+    if (tick !== seenTick) {
+      seenTick = tick;
       untrack(() => {
         if (activeTab === 'overview') {
           void loadTable(true);

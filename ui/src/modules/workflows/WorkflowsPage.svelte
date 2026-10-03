@@ -65,6 +65,10 @@
 
   let prompt = $state('');
   let generating = $state(false);
+  /** Only while the run POST is in flight (double-click guard). It used to stay
+   *  set until the started run finished — hours for agent steps — disabling Run
+   *  on EVERY workflow and pointing the header's Cancel at whatever run was on
+   *  screen. The header now follows the viewed run (`runActive`). */
   let running = $state(false);
   let run = $state<WorkflowRun | null>(null);
   let runs = $state<Pick<WorkflowRun, 'id' | 'workflow_id' | 'status' | 'started_at' | 'rev'>[]>([]);
@@ -763,7 +767,7 @@
 
   /** Validate, save, POST the run and show it. Null when it didn't start (the
    *  reason is on the page: validation issues inline, a failed POST toasted).
-   *  On success `running` stays set until {@link followRun} settles it. */
+   *  `running` covers only the POST; {@link followRun} just reports the end. */
   async function startRun(body: RunWorkflowReq): Promise<WorkflowRun | null> {
     if (!current || running) return null;
     if (!await validateGraph()) return null;
@@ -780,8 +784,9 @@
       return r;
     } catch (e) {
       toasts.error('Couldn’t start the run', e instanceof Error ? e.message : String(e));
-      running = false;
       return null;
+    } finally {
+      running = false;
     }
   }
 
@@ -794,9 +799,7 @@
       else toasts.error('Run finished with errors', done.error ?? '');
       void loadRuns();
     } catch (e) {
-      toasts.error('Couldn’t start the run', e instanceof Error ? e.message : String(e));
-    } finally {
-      running = false;
+      toasts.error('Couldn’t follow the run', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -1658,8 +1661,8 @@
       <button class="icon-btn" data-keep aria-haspopup="menu" aria-label="More actions" title="More actions" onclick={wfMenu}>
         <Icon name="more" size={14} />
       </button>
-      {#if running}
-        <!-- While a run is live its Cancel takes the primary's place (same word as
+      {#if runActive}
+        <!-- While the VIEWED run is live its Cancel takes the primary's place (same word as
              the inspector's "Cancel run" and the run's final "Cancelled"). -->
         <button class="btn small danger" data-keep onclick={stop} title="Cancel this run (finishes the current step, then halts)"><Icon name="square" size={11} /> Cancel run…</button>
       {:else}
@@ -2049,6 +2052,12 @@
                 <Icon name={runDetailMax ? 'minimize' : 'maximize'} size={13} />
               </button>
             </div>
+            <!-- The run-level reason (an invalid graph, an exhausted restart
+                 resume, a queued run that couldn't start) often has no step
+                 error to show — without this a failed run said only "Failed". -->
+            {#if run.status === 'error' && run.error}
+              <p class="run-error" role="alert" data-testid="run-error"><Icon name="warning" size={12} /> {run.error}</p>
+            {/if}
             <div class="timeline">
               {#each run.nodes as ns (ns.node_id)}
                 <button
@@ -3482,6 +3491,11 @@
     padding: 8px 6px;
   }
   /* "Running" sidebar list — in-flight runs across the workspace, live. */
+  .run-error {
+    margin: 0 0 6px; padding: 6px 10px; border-radius: var(--radius-s);
+    background: var(--danger-soft); color: var(--danger); font-size: var(--fs-s);
+    display: flex; gap: 6px; align-items: baseline; overflow-wrap: anywhere;
+  }
   .running {
     flex-shrink: 0;
     max-height: 38%;

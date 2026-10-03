@@ -8,6 +8,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { runPull } from './pullFlow';
+  import { runPush } from './pushFlow';
   import { gitBridge } from './gitBridge.svelte';
 
   interface Props {
@@ -26,6 +27,10 @@
   // Nothing to push: the branch tracks an upstream and has no local commits on
   // top of it. (No upstream → the button is Publish, always available.)
   const nothingToPush = $derived(status.upstream != null && status.ahead === 0);
+  // `git status` reports a detached HEAD as the branch "(detached)": there is
+  // no branch to push or pull, so both would only fail with git's
+  // "You are not currently on a branch".
+  const detached = $derived(status.branch === '(detached)');
   // Known-empty stash list → Pop can only fail, so say so up front. Unknown
   // (the graph hasn't reported yet) keeps it enabled.
   const stashCount = $derived(gitBridge.stashCount[repoId]);
@@ -98,14 +103,12 @@
     // No confirm: push is the most routine git action (the user asked for
     // fewer nag dialogs, and no git client asks before a plain push). The
     // button label already says Push vs Publish, and the toast reports it.
+    // A REJECTED push asks Pull vs Force-with-lease (runPush) — force is
+    // never sent without that explicit pick.
     busy = 'push';
     try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/push`, {});
-      onstatus(s);
+      await runPush(repoId, { branch: status.branch, upstream: status.upstream }, onstatus);
       onrefresh?.();
-      toasts.success(status.upstream ? 'Pushed' : 'Branch published', s.upstream ?? status.branch);
-    } catch (e) {
-      toasts.error('Push failed', e instanceof Error ? e.message : String(e));
     } finally {
       busy = '';
     }
@@ -199,16 +202,18 @@
   <span class="split">
     <button
       class="btn ghost tbtn"
-      disabled={busy !== ''}
+      disabled={busy !== '' || detached}
       onclick={() => void doPull()}
-      title="Pull from upstream using the repo's configured mode"
+      title={detached
+        ? 'HEAD is detached — check out a branch to pull'
+        : "Pull from upstream using the repo's configured mode"}
     >
       <Icon name="arrowDown" size={14} />
       {busy === 'pull' ? 'Pulling…' : `Pull (${MODE_LABEL[pullMode]})`}
     </button>
     <button
       class="btn ghost tbtn caret"
-      disabled={busy !== ''}
+      disabled={busy !== '' || detached}
       onclick={pullMenu}
       title="Pull with a different mode"
       aria-label="Pull options"
@@ -218,9 +223,11 @@
   <!-- Push -->
   <button
     class="btn ghost tbtn"
-    disabled={busy !== '' || nothingToPush}
+    disabled={busy !== '' || nothingToPush || detached}
     onclick={() => void doPush()}
-    title={status.upstream
+    title={detached
+      ? 'HEAD is detached — check out a branch to push'
+      : status.upstream
       ? status.ahead > 0
         ? `Push ${status.ahead} commit${status.ahead === 1 ? '' : 's'} to ${status.upstream}`
         : `Nothing to push — ${status.branch} has no commits that ${status.upstream} doesn’t`

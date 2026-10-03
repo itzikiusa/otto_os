@@ -44,6 +44,7 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/scheduled-tasks/{id}/run", post(run_now))
         .route("/scheduled-tasks/{id}/runs", get(list_runs))
         .route("/scheduled-tasks/runs/{run_id}/report", get(report))
+        .route("/scheduled-tasks/runs/{run_id}/cancel", post(cancel_run))
         .route(
             "/scheduled-tasks/{id}/convert-to-workflow",
             post(convert_to_workflow),
@@ -473,6 +474,13 @@ async fn update(
     // `kind` is fixed at create; if this is a workflow task, the (possibly new)
     // workflow_id must still name a workflow in this workspace.
     if task.kind == "workflow" {
+        // Clearing it validated the OLD id and then wrote NULL — every later
+        // run failed with "workflow task has no workflow_id".
+        if matches!(&req.workflow_id, Some(None)) {
+            return Err(ApiError(Error::Invalid(
+                "a workflow task needs a workflow_id; delete the task instead".into(),
+            )));
+        }
         let wf = req
             .workflow_id
             .clone()
@@ -482,6 +490,17 @@ async fn update(
     }
     let recompute_next = req.schedule.clone();
     let tz_changed = req.timezone.is_some();
+    // Resumed, or a really new cadence/timezone → re-arm (see
+    // `cadence::effective_cursor`); a re-timed `once` forgets it fired.
+    let rearm = cadence::rearms(
+        task.enabled,
+        req.enabled,
+        &task.schedule,
+        req.schedule.as_ref(),
+        &task.timezone,
+        req.timezone.as_deref(),
+    );
+    let reset_once = cadence::rearms_once(&task.schedule, req.schedule.as_ref());
     let updated = ctx
         .scheduled_tasks
         .update(
@@ -506,8 +525,15 @@ async fn update(
         )
         .await
         .map_err(ApiError)?;
-    // If the cadence/timezone changed, refresh next_run_at for display.
-    if recompute_next.is_some() || tz_changed {
+    if rearm || reset_once {
+        let _ = ctx
+            .scheduled_tasks
+            .rearm(&id, &chrono::Utc::now().to_rfc3339(), reset_once)
+            .await;
+    }
+    // If the cadence/timezone changed or the task resumed, refresh
+    // next_run_at for display (a resumed task's old value is in the past).
+    if recompute_next.is_some() || tz_changed || rearm {
         let tz = cadence::task_tz(&updated.timezone);
         let next =
             cadence::next_run(&updated.schedule, chrono::Utc::now(), tz).map(|d| d.to_rfc3339());
@@ -555,6 +581,27 @@ async fn run_now(
         .await
         .map(Json)
         .map_err(ApiError)
+}
+
+/// `POST /scheduled-tasks/runs/{run_id}/cancel` — stop a running run: its
+/// agent session is killed (no retry), a shell command's process group is
+/// killed, a workflow hand-off's workflow run is cancelled. The run settles as
+/// `canceled` (announced by `scheduled_task_run_updated`). 409 once it finished.
+async fn cancel_run(
+    Path(run_id): Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Value>> {
+    let run = ctx
+        .scheduled_tasks
+        .get_run(&run_id)
+        .await
+        .map_err(ApiError)?;
+    require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
+    if run.status != "running" || !scheduled_tasks_engine::cancel_run(&run_id) {
+        return Err(ApiError(Error::Conflict("the run is not running".into())));
+    }
+    Ok(Json(json!({"ok": true})))
 }
 
 /// `GET /scheduled-tasks/{id}/runs`

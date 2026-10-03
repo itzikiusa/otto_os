@@ -1238,7 +1238,7 @@ fn strip_ab_prefix(v: &str) -> Option<String> {
 /// patch headers (`diff --git`, `---`/`+++`, `rename from`) — while `-z`
 /// listings (the summary, `status`) print it raw. Unquoted, a per-file diff
 /// names the file exactly as the summary did. Unquoted input is returned as-is.
-fn unquote_c(v: &str) -> String {
+pub(crate) fn unquote_c(v: &str) -> String {
     let Some(inner) = v
         .strip_prefix('"')
         .and_then(|r| r.strip_suffix('"'))

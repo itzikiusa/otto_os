@@ -6,10 +6,11 @@
 //! skipped **without advancing the cursor**, so the occurrence is retried rather
 //! than lost. The engine advances the `last_run_at` cursor only on run completion.
 //! On startup we **reap** any `running` rows left by a previous daemon life
-//! (the in-flight guard is in-memory and resets empty across restarts).
+//! (the in-flight guard is in-memory and resets empty across restarts). The
+//! guard set is the engine's process-wide [`in_flight`] set, shared with the
+//! manual "Run now" path, so a due occurrence never starts on top of a manual
+//! run that is still going.
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -17,27 +18,10 @@ use tracing::{info, warn};
 
 use crate::cadence;
 use crate::cancel_signal::CancelSignal;
-use crate::scheduled_tasks_engine::run_task;
+use crate::scheduled_tasks_engine::{in_flight, run_task};
 use crate::state::ServerCtx;
 
 const SCAN: Duration = Duration::from_secs(60);
-
-/// Clears a task id from the in-flight set on drop, so the entry is released even
-/// if `run_task` panics — otherwise the task would be wedged "in-flight" until the
-/// next daemon restart. Poison-tolerant.
-struct InFlightGuard {
-    set: Arc<Mutex<HashSet<String>>>,
-    id: String,
-}
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        self.set
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.id);
-    }
-}
 
 /// Start the supervisor. Returns its cancel signal; `cancel()` stops the loop at once
 /// (mirrors the swarm / workflow-trigger / cli-update schedulers).
@@ -53,12 +37,11 @@ async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
         Ok(_) => {}
         Err(e) => warn!("scheduled tasks: startup reap failed: {e}"),
     }
-    let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     loop {
         if cancel.is_cancelled() {
             return;
         }
-        if let Err(e) = tick(&ctx, &in_flight).await {
+        if let Err(e) = tick(&ctx).await {
             warn!("scheduled tasks scheduler tick: {e}");
         }
         // One timer per scan; cancel() wakes it (no 500 ms polling slices).
@@ -68,33 +51,32 @@ async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
     }
 }
 
-async fn tick(ctx: &ServerCtx, in_flight: &Arc<Mutex<HashSet<String>>>) -> otto_core::Result<()> {
+async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
     let now = Utc::now();
     for task in ctx.scheduled_tasks.list_enabled().await? {
-        // Claim the in-flight guard FIRST. If busy or not due → skip, leaving the
-        // cursor untouched (the engine advances it only on completion).
-        {
-            let mut set = in_flight.lock().unwrap_or_else(|e| e.into_inner());
-            if set.contains(&task.id) {
-                continue;
-            }
-            let last = task.last_run_at.as_deref().and_then(parse_ts);
-            let tz = cadence::task_tz(&task.timezone);
-            // The creation time anchors a never-run cron, so its first fire is
-            // caught up when the Mac slept / the daemon was down at that minute.
-            let created = parse_ts(&task.created_at);
-            if !cadence::is_due_since(&task.schedule, last, created, now, tz) {
-                continue;
-            }
-            set.insert(task.id.clone());
+        // Not due → skip. Busy (a scheduled OR manual run in flight) → skip,
+        // leaving the cursor untouched (the engine advances it only on
+        // completion), so the occurrence is retried rather than lost.
+        // The cursor never predates the arm instant (created / resumed /
+        // re-timed), so a resumed task doesn't fire what it missed while off.
+        let last = cadence::effective_cursor(
+            &task.schedule,
+            task.last_run_at.as_deref().and_then(parse_ts),
+            task.armed_at.as_deref().and_then(parse_ts),
+        );
+        let tz = cadence::task_tz(&task.timezone);
+        // The creation time anchors a never-run cron, so its first fire is
+        // caught up when the Mac slept / the daemon was down at that minute.
+        let created = parse_ts(&task.created_at);
+        if !cadence::is_due_since(&task.schedule, last, created, now, tz) {
+            continue;
         }
+        let Some(guard) = in_flight().claim(&task.id) else {
+            continue;
+        };
 
         info!(task = %task.id, "scheduled tasks: firing due task");
         let ctx2 = ctx.clone();
-        let guard = InFlightGuard {
-            set: Arc::clone(in_flight),
-            id: task.id.clone(),
-        };
         tokio::spawn(async move {
             // The guard clears the in-flight entry on drop — including on panic.
             let _guard = guard;

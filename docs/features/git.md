@@ -226,6 +226,10 @@ graph** at each ref's tip. Right-clicking a commit, branch chip, or tag opens a
 context menu (see §[Context menus](#context-menus)). Removing a repo
 **unregisters** it only — `DELETE /repos/{id}` never touches the files on disk.
 
+Double-clicking a **remote** branch (`origin/x`, `upstream/x`) switches to the
+local `x` when it exists; otherwise it creates `x` at that remote ref with
+tracking (any remote, not just `origin`).
+
 **Linked git worktrees** are first-class in Graph:
 
 - Branches checked out in another worktree (not this tab's path) show a
@@ -290,9 +294,19 @@ The graph’s **WIP** panel is the working-tree view, backed by `git status`:
   reverts/removes working-tree changes, so it always confirms first. Offered at
   the same three levels as staging: the trash button (or context menu) on a
   **file**, on a **folder** (the whole subtree in one confirmed call), and
-  "Discard all" per section.
+  "Discard all" per section. In the **Unstaged** list it discards only the
+  unstaged side (`keep_staged:true` — the file goes back to its staged version,
+  so hunks you staged survive); in the **Staged** list it reverts the whole
+  change to the last commit.
+- A **partially staged** file (some hunks staged, some not) is listed in
+  **both** trees with a *partial* chip, so "Stage all" picks up its unstaged
+  rest; clicking it in either list opens that side's diff.
 - **Commit** the staged changes (`POST /repos/{id}/commit`, returns the new
-  `{sha}`); supports **amend**.
+  `{sha}`) — **⌘↵ / Ctrl+Enter** in the summary or description commits. Supports
+  **amend**: the previous subject shows as the placeholder and an empty summary
+  keeps the WHOLE previous message (subject and description); typing a summary
+  rewords it. When the commit is already on the upstream, the composer warns
+  that amending rewrites it and the next push needs a force push with lease.
 - **Draft a commit message with an agent** — `POST /repos/{id}/draft-commit-message`
   produces a Conventional-Commits-style message from the **staged** diff (falling
   back to the full working diff when nothing is staged). If the bundled
@@ -304,8 +318,15 @@ The graph’s **WIP** panel is the working-tree view, backed by `git status`:
   AI attribution** (no `Co-Authored-By` / "Generated with" footer). When a skill
   isn't installed, drafting behaves exactly as before.
 - **Push / pull / fetch** (`/push`, `/pull`, `/fetch`) — push auto-sets upstream
-  for a branch that has none; each returns fresh status so the ahead/behind chip
-  updates. A pull refused by a **dirty tree** comes back as a 409 with git's own
+  for a branch that has none (also when Create-PR pushes a named source
+  branch); each returns fresh status so the ahead/behind chip
+  updates. Push and Pull are disabled on a detached HEAD. A push the remote
+  **rejects** because it has commits your branch lacks is a 409, and the
+  toolbar asks: **Pull** (the usual fix) or **Force push with lease** — for a
+  branch you rewrote on purpose (amend, rebase). Force is never sent without
+  that explicit pick and is always `--force-with-lease --force-if-includes`:
+  it is refused (nothing overwritten) when someone pushed since you last
+  fetched and integrated. A pull refused by a **dirty tree** comes back as a 409 with git's own
   message, and the UI offers **"Stash, pull & restore"** — a retry with
   `{auto_stash:true}` that stashes (untracked included), pulls, and pops,
   reporting what happened to the stash in the response `note`. The same offer
@@ -634,13 +655,16 @@ in **[code-review.md](./code-review.md)**.
 | **"rate limited — retry in Ns"** | The forge throttled the token. Wait the stated time; the daemon already retried once for short waits. |
 | **"repo has no git account" (400) on PR routes** | The repo isn't bound to an account, or its provider doesn't match the account's. Bind a matching account (Add-Repository sheet or re-detect). |
 | **403 even though the token is fine** | You're not the account **owner**. A repo's credential is usable only by the owner or root (S4). Have the owner act, or bind your own account. |
-| **Push rejected / auth failed** | HTTPS token lacks write/Contents scope, or the token expired (check the expiry chip on the account). For SSH remotes, fix your SSH agent — no token is used. |
+| **"Push rejected" dialog** | The remote has commits your branch doesn't. Pick **Pull** to bring them in, then push. Only if you rewrote the branch on purpose (amend/rebase) pick **Force push with lease**. |
+| **"Force push refused"** | Someone pushed to the branch since you last fetched (or you fetched but didn't integrate it). Nothing was overwritten — fetch, look at their commits, then rebase onto them or pull. |
+| **Push/fetch auth failed** | The error now ends with the next step. HTTPS: the token lacks write/Contents scope or expired (check the expiry chip on the account). SSH: fix your SSH agent (`ssh-add -l`) — no token is used. |
 | **"failed to push … protected branch"** | The target branch is protected (e.g. `main`). Push a feature branch and **open a PR** instead. |
 | **Draft button errors with "no changes between …"** | The current branch has no diff vs the chosen target. Pick a different target or commit something first. |
 | **Clone "destination already exists" (409)** | The chosen folder already contains `<name>`. Pick a different clone directory or remove the existing one. |
 | **PRs/clone work but "Browse remote" is empty** | Set the account's **Organisation / Workspace / Group** namespace; the picker needs it. |
 | **Expiry shows "expired" but I rotated the token** | GitHub/GitLab auto-detect expiry; if a header isn't present (e.g. classic PAT without expiry) set/clear the date manually on the account. |
 | **Self-hosted GitLab not recognized** | Ensure the host name contains `gitlab`, or set the account's **API base URL** to the instance API root. |
+| **"… looks like a self-hosted GitLab: set this git account's API base URL"** | The remote isn't on gitlab.com but the bound GitLab account has no API base URL, so Otto would have called gitlab.com with your token. Set the account's **API base URL** (Settings → Git Accounts) to your instance. |
 | **"git … timed out after Ns"** | The spawn exceeded its budget (30 s local, 180 s remote — env-overridable via `OTTO_GIT_TIMEOUT_SECS` / `OTTO_GIT_REMOTE_TIMEOUT_SECS`). Check VPN/SSH agent for remote ops; for a local write, remove a leftover `.git/index.lock` once no git process is running. |
 
 ---

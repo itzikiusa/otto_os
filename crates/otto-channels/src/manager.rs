@@ -65,26 +65,35 @@ enum ListenerTokens {
 }
 
 /// Read one secret; a read error and "not saved" are both "not ready yet"
-/// (retried on the next rescan), but logged differently.
-fn read_secret(secrets: &dyn SecretStore, key: &str, ws: &str, what: &str) -> Option<String> {
+/// (retried on the next rescan), but logged differently. The `Err` is the
+/// user-facing reason shown on the Channels page (`health::waiting_for_token`).
+fn read_secret(
+    secrets: &dyn SecretStore,
+    key: &str,
+    ws: &str,
+    what: &str,
+) -> Result<String, String> {
     match secrets.get(key) {
-        Ok(Some(t)) if !t.is_empty() => Some(t),
+        Ok(Some(t)) if !t.is_empty() => Ok(t),
         Ok(_) => {
             warn!(workspace = %ws, "{what} missing — will retry on the next rescan");
-            None
+            Err(format!("{what} is not saved"))
         }
         Err(e) => {
             warn!(workspace = %ws, "{what} could not be read ({e}) — will retry on the next rescan");
-            None
+            Err(format!(
+                "{what} could not be read from the Keychain yet — retrying every {}s",
+                RESCAN_INTERVAL.as_secs()
+            ))
         }
     }
 }
 
-/// Resolve an integration's listener tokens. `None` = not ready yet.
+/// Resolve an integration's listener tokens. `Err` = not ready yet (why).
 fn resolve_tokens(
     secrets: &dyn SecretStore,
     integ: &otto_core::domain::Integration,
-) -> Option<ListenerTokens> {
+) -> Result<ListenerTokens, String> {
     let ws = integ.workspace_id.as_str();
     match integ.channel {
         Channel::Telegram => {
@@ -92,30 +101,40 @@ fn resolve_tokens(
                 secrets,
                 &format!("chan-bot-{ws}-telegram"),
                 ws,
-                "telegram: bot token",
+                "Telegram bot token",
             )?;
-            Some(ListenerTokens::Telegram { token })
+            Ok(ListenerTokens::Telegram { token })
         }
         Channel::Slack => {
             let bot_token = read_secret(
                 secrets,
                 &format!("chan-bot-{ws}-slack"),
                 ws,
-                "slack: bot token",
+                "Slack bot token (xoxb-…)",
             )?;
             let app_token = read_secret(
                 secrets,
                 &format!("chan-app-{ws}-slack"),
                 ws,
-                "slack: app token (needed for Socket Mode)",
+                "Slack app token (xapp-…, needed for Socket Mode)",
             )?;
-            Some(ListenerTokens::Slack {
+            Ok(ListenerTokens::Slack {
                 bot_token,
                 app_token,
             })
         }
-        Channel::Webhook => Some(ListenerTokens::None),
+        Channel::Webhook => Ok(ListenerTokens::None),
     }
+}
+
+/// The `(workspace, channel)` keys of the listener-backed integrations in
+/// `integrations` (webhooks have no listener, so no health entry).
+fn listener_keys(integrations: &[otto_core::domain::Integration]) -> Vec<(String, Channel)> {
+    integrations
+        .iter()
+        .filter(|i| i.channel != Channel::Webhook)
+        .map(|i| (i.workspace_id.clone(), i.channel))
+        .collect()
 }
 
 /// Handle returned by `ChannelManager::start`. Keep it alive for the process
@@ -274,6 +293,9 @@ impl ChannelManager {
         // and the tokens already listening in it (see `spawn_generation`).
         let mut pending: Vec<otto_core::domain::Integration> = Vec::new();
         let mut listening: HashSet<String> = HashSet::new();
+        // Listener keys of the running generation, so a disabled/removed
+        // integration's health entry is dropped on the next generation.
+        let mut live_keys: Vec<(String, Channel)> = Vec::new();
 
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -303,6 +325,11 @@ impl ChannelManager {
                 }
                 let g = Arc::new(AtomicBool::new(false));
                 listening.clear();
+                let keys = listener_keys(&integrations);
+                for (ws, ch) in live_keys.iter().filter(|k| !keys.contains(k)) {
+                    crate::health::remove(ws, *ch);
+                }
+                live_keys = keys;
                 let (count, waiting) =
                     self.spawn_generation(&integrations, &bridge, &g, &mut listening);
                 info!("channel manager: {count} adapter(s) active");
@@ -353,9 +380,13 @@ impl ChannelManager {
         let mut waiting = Vec::new();
         for integ in integrations {
             let ws_id = integ.workspace_id.clone();
-            let Some(tokens) = resolve_tokens(self.secrets.as_ref(), integ) else {
-                waiting.push(integ.clone());
-                continue;
+            let tokens = match resolve_tokens(self.secrets.as_ref(), integ) {
+                Ok(t) => t,
+                Err(why) => {
+                    crate::health::waiting_for_token(&ws_id, integ.channel, &why);
+                    waiting.push(integ.clone());
+                    continue;
+                }
             };
             let integ = integ.clone();
             match tokens {
@@ -365,14 +396,20 @@ impl ChannelManager {
                             workspace = %ws_id,
                             "telegram: bot token already polled by another enabled workspace, skipping (disable one of them)"
                         );
+                        crate::health::conflict(
+                            &ws_id,
+                            Channel::Telegram,
+                            "This bot token is already polled by another enabled workspace — disable one of them.",
+                        );
                         continue;
                     }
                     info!(workspace = %ws_id, "starting Telegram listener");
                     count += 1;
                     let c = Arc::clone(gen_cancel);
                     let b = Arc::clone(bridge);
+                    let h = crate::health::Health::begin(&ws_id, Channel::Telegram);
                     tokio::spawn(async move {
-                        crate::telegram::run(integ, token, b, c).await;
+                        crate::telegram::run(integ, token, b, c, h).await;
                     });
                 }
                 ListenerTokens::Slack {
@@ -384,14 +421,20 @@ impl ChannelManager {
                             workspace = %ws_id,
                             "slack: app token already connected for another enabled workspace, skipping (Slack would split events between them; disable one)"
                         );
+                        crate::health::conflict(
+                            &ws_id,
+                            Channel::Slack,
+                            "This Slack app token is already connected for another enabled workspace — Slack would split messages between them. Disable one of them.",
+                        );
                         continue;
                     }
                     info!(workspace = %ws_id, "starting Slack Socket Mode listener");
                     count += 1;
                     let c = Arc::clone(gen_cancel);
                     let b = Arc::clone(bridge);
+                    let h = crate::health::Health::begin(&ws_id, Channel::Slack);
                     tokio::spawn(async move {
-                        crate::slack::run(integ, bot_token, app_token, b, c).await;
+                        crate::slack::run(integ, bot_token, app_token, b, c, h).await;
                     });
                 }
                 // Webhooks are request-driven (the inbound HTTP route calls the
@@ -468,13 +511,15 @@ mod tests {
             Channel::Slack,
             Utc.with_ymd_and_hms(2026, 9, 29, 8, 0, 0).unwrap(),
         );
-        // First scan (daemon start, Keychain not ready): not ready → pending.
-        assert_eq!(resolve_tokens(&store, &slack), None);
+        // First scan (daemon start, Keychain not ready): not ready → pending,
+        // with a reason the Channels page can show.
+        let why = resolve_tokens(&store, &slack).unwrap_err();
+        assert!(why.contains("Keychain"), "{why}");
         // A later rescan: the same integration now resolves.
         store.ready.store(true, Ordering::Relaxed);
         assert_eq!(
             resolve_tokens(&store, &slack),
-            Some(ListenerTokens::Slack {
+            Ok(ListenerTokens::Slack {
                 bot_token: "tok-chan-bot-ws_1-slack".into(),
                 app_token: "tok-chan-app-ws_1-slack".into(),
             })
@@ -483,6 +528,11 @@ mod tests {
             Channel::Webhook,
             Utc.with_ymd_and_hms(2026, 9, 29, 8, 0, 0).unwrap(),
         );
-        assert_eq!(resolve_tokens(&store, &hook), Some(ListenerTokens::None));
+        assert_eq!(resolve_tokens(&store, &hook), Ok(ListenerTokens::None));
+        assert_eq!(
+            listener_keys(&[slack.clone(), hook]),
+            vec![("ws_1".to_string(), Channel::Slack)],
+            "webhooks have no listener health"
+        );
     }
 }

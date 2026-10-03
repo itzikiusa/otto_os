@@ -883,6 +883,26 @@ async fn decide_approval<S: McpCtx>(
     auth: Option<Extension<otto_core::auth::AuthContext>>,
     Json(req): Json<DecideReq>,
 ) -> ApiResult<Json<otto_state::McpApproval>> {
+    // Deciding is a PERSON's act. An agent session's managed token (which
+    // authorizes as its owner — often root), an internal/outward MCP token or
+    // a share token must never decide an approval: otherwise the agent that
+    // raised a request (agent-raised requests are exempt from approver ≠
+    // requester, so the human owner can approve their own agent) could
+    // approve itself. The owner signed in to Otto still decides normally.
+    if auth.as_ref().is_some_and(|a| {
+        a.0.managed_session_id.is_some()
+            || a.0.mcp_session_id.is_some()
+            || a.0.mcp_only
+            || a.0.mcp_scope.is_some()
+            || a.0.is_scoped()
+    }) {
+        return Err(Error::Forbidden(
+            "approvals can only be decided by a person signed in to Otto — an agent session's \
+             or MCP credential cannot approve requests"
+                .into(),
+        )
+        .into());
+    }
     let appr = ctx.mcp().approvals().get(&id).await.map_err(ApiErr)?;
     // Impersonation can't launder a self-approval: the REAL user behind an
     // impersonating token may not decide a request they themselves raised. A

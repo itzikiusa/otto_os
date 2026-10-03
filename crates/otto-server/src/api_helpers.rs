@@ -117,6 +117,149 @@ fn header_entry(key: &str, value: &str) -> Value {
     json!({ "key": key, "value": value, "enabled": true })
 }
 
+/// Short flags that take a value — the value may be attached (`-XPOST`,
+/// `-HAccept:x`, `-ualice:pw`), as curl itself allows.
+const SHORT_VALUE_FLAGS: &[&str] = &[
+    "-X", "-H", "-d", "-u", "-F", "-A", "-e", "-b", "-c", "-o", "-m", "-x", "-w", "-T", "-E", "-r",
+    "-K", "-U", "-y", "-Y", "-D", "-Q", "-z", "-P",
+];
+
+/// Long flags that take a value we don't model — consumed so the value isn't
+/// mistaken for the URL (`curl --cacert ca.pem https://x` must import
+/// `https://x`, not `ca.pem`).
+const IGNORED_VALUE_FLAGS: &[&str] = &[
+    "--output",
+    "--max-time",
+    "--connect-timeout",
+    "--proxy",
+    "--write-out",
+    "--upload-file",
+    "--cert",
+    "--key",
+    "--cookie-jar",
+    "--cacert",
+    "--capath",
+    "--resolve",
+    "--connect-to",
+    "--retry",
+    "--retry-delay",
+    "--retry-max-time",
+    "--max-redirs",
+    "--limit-rate",
+    "--interface",
+    "--local-port",
+    "--range",
+    "--proto",
+    "--proto-redir",
+    "--cert-type",
+    "--key-type",
+    "--pass",
+    "--dns-servers",
+    "--ciphers",
+    "--tls-max",
+    "--config",
+    "--unix-socket",
+    "--abstract-unix-socket",
+    "--noproxy",
+    "--proxy-user",
+    "--proxy-header",
+    "--expect100-timeout",
+    "--speed-time",
+    "--speed-limit",
+    "--keepalive-time",
+    "--trace",
+    "--trace-ascii",
+    "--stderr",
+    "--dump-header",
+    "--variable",
+    "--hsts",
+    "--alt-svc",
+    "--etag-save",
+    "--etag-compare",
+    "--aws-sigv4",
+    "--request-target",
+    "--quote",
+    "--time-cond",
+    "--ftp-port",
+    "--max-filesize",
+    "--happy-eyeballs-timeout-ms",
+    "--create-file-mode",
+    "--output-dir",
+    "--sasl-authzid",
+    "--login-options",
+    "--mail-from",
+    "--mail-rcpt",
+    "--krb",
+    "--delegation",
+    "--proxy-cacert",
+    "--proxy-cert",
+    "--proxy-key",
+];
+
+/// Split an attached short flag (`-XPOST` → `("-X", "POST")`). `None` for
+/// anything else — long flags, bundled booleans (`-sSL`), bare `-X`.
+fn split_attached_short(token: &str) -> Option<(&str, &str)> {
+    if token.starts_with("--") || token.len() <= 2 || !token.is_char_boundary(2) {
+        return None;
+    }
+    let (flag, value) = token.split_at(2);
+    SHORT_VALUE_FLAGS.contains(&flag).then_some((flag, value))
+}
+
+/// Percent-encode a `--data-urlencode` value the way curl does
+/// (RFC 3986 unreserved characters pass through; everything else is `%XX`).
+fn urlencode_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// One `--data-urlencode` argument, encoded per curl's rules: `content`
+/// and `=content` encode the whole content; `name=content` keeps `name` and
+/// encodes the content. `@file` / `name@file` read a file curl-side — we
+/// can't, so those stay verbatim for the user to fill in.
+fn encode_data_urlencode(arg: &str) -> String {
+    if let Some(rest) = arg.strip_prefix('=') {
+        return urlencode_component(rest);
+    }
+    match arg.split_once('=') {
+        Some((name, content)) if !name.contains('@') => {
+            format!("{name}={}", urlencode_component(content))
+        }
+        Some(_) => arg.to_string(),
+        None if arg.starts_with('@') || (arg.contains('@') && !arg.contains(' ')) => {
+            arg.to_string()
+        }
+        None => urlencode_component(arg),
+    }
+}
+
+/// One `-F` / `--form` field as a multipart row (`[{key,type,value,filename}]`,
+/// the shape the request editor stores). `name=@path[;type=…]` is a file
+/// upload: the row keeps the file NAME — the bytes live on the machine curl
+/// ran on, so the user re-picks the file. `name=<path` (file contents as a
+/// text value) is kept as written.
+fn form_field(arg: &str, literal: bool) -> Option<Value> {
+    let (key, value) = arg.split_once('=')?;
+    if key.trim().is_empty() {
+        return None;
+    }
+    if !literal {
+        if let Some(path) = value.strip_prefix('@') {
+            let path = path.split(';').next().unwrap_or(path).trim_matches('"');
+            let filename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+            return Some(json!({ "key": key, "type": "file", "value": "", "filename": filename }));
+        }
+    }
+    Some(json!({ "key": key, "type": "text", "value": value }))
+}
+
 /// Parse a curl command string into request fields. Tolerant of quotes, line
 /// continuations and `$'...'`; ignores unknown flags. Returns an `Invalid`
 /// error only when no URL can be found.
@@ -128,8 +271,11 @@ pub fn parse_curl(input: &str) -> Result<ParsedCurl> {
     let mut url: Option<String> = None;
     let mut headers: Vec<Value> = Vec::new();
     let mut data_parts: Vec<String> = Vec::new();
+    let mut form_fields: Vec<Value> = Vec::new();
     let mut is_urlencoded_data = false; // --data-urlencode used
+    let mut is_json_flag = false; // --json used
     let mut get_with_data = false; // -G / --get: send data as query
+    let mut head = false; // -I / --head
     let mut basic_user: Option<String> = None;
     let mut explicit_content_type: Option<String> = None;
     let mut auth: Value = json!({ "type": "none" });
@@ -142,12 +288,15 @@ pub fn parse_curl(input: &str) -> Result<ParsedCurl> {
     while let Some(tok) = iter.next() {
         let t = tok.as_str();
 
-        // Support --flag=value forms by splitting on the first '='.
+        // `--flag=value` splits on the first '='; `-XPOST` splits after the
+        // two-character flag.
         let (flag, inline_val): (&str, Option<&str>) = if t.starts_with("--") {
             match t.split_once('=') {
                 Some((f, v)) => (f, Some(v)),
                 None => (t, None),
             }
+        } else if let Some((f, v)) = split_attached_short(t) {
+            (f, Some(v))
         } else {
             (t, None)
         };
@@ -158,6 +307,15 @@ pub fn parse_curl(input: &str) -> Result<ParsedCurl> {
                 Some(v.to_string())
             } else {
                 iter.next().map(|s| s.to_string())
+            }
+        };
+        let mut push_header = |name: &str, value: &str| {
+            if !headers.iter().any(|h| {
+                h["key"]
+                    .as_str()
+                    .is_some_and(|k| k.eq_ignore_ascii_case(name))
+            }) {
+                headers.push(header_entry(name, value));
             }
         };
 
@@ -192,7 +350,21 @@ pub fn parse_curl(input: &str) -> Result<ParsedCurl> {
             "--data-urlencode" => {
                 if let Some(v) = take_val(inline_val) {
                     is_urlencoded_data = true;
+                    data_parts.push(encode_data_urlencode(&v));
+                }
+            }
+            // `--json <data>`: the data, plus JSON Content-Type and Accept.
+            "--json" => {
+                if let Some(v) = take_val(inline_val) {
+                    is_json_flag = true;
                     data_parts.push(v);
+                }
+            }
+            "-F" | "--form" | "--form-string" => {
+                if let Some(v) = take_val(inline_val) {
+                    if let Some(field) = form_field(&v, flag == "--form-string") {
+                        form_fields.push(field);
+                    }
                 }
             }
             "-u" | "--user" => {
@@ -200,20 +372,47 @@ pub fn parse_curl(input: &str) -> Result<ParsedCurl> {
                     basic_user = Some(v);
                 }
             }
+            "--oauth2-bearer" => {
+                if let Some(v) = take_val(inline_val) {
+                    auth = json!({ "type": "bearer", "token": v });
+                }
+            }
+            "-A" | "--user-agent" => {
+                if let Some(v) = take_val(inline_val) {
+                    push_header("User-Agent", &v);
+                }
+            }
+            "-e" | "--referer" => {
+                if let Some(v) = take_val(inline_val) {
+                    // `;auto` is curl's own redirect-referer switch, not a value.
+                    let v = v.trim_end_matches(";auto");
+                    if !v.is_empty() {
+                        push_header("Referer", v);
+                    }
+                }
+            }
+            // `-b name=value; other=x` is a cookie string; `-b file` reads a
+            // cookie jar from disk — only the former can be carried over.
+            "-b" | "--cookie" => {
+                if let Some(v) = take_val(inline_val) {
+                    if v.contains('=') {
+                        push_header("Cookie", &v);
+                    }
+                }
+            }
+            "-I" | "--head" => head = true,
             "-G" | "--get" => {
                 get_with_data = true;
             }
+            "--url" => {
+                if let Some(v) = take_val(inline_val) {
+                    url = Some(v);
+                }
+            }
             // Flags that take a value we don't model — consume the value so it
             // isn't mistaken for the URL.
-            "-A" | "--user-agent" | "-e" | "--referer" | "-b" | "--cookie" | "-o" | "--output"
-            | "--url" | "-m" | "--max-time" | "--connect-timeout" | "-x" | "--proxy" | "-w"
-            | "--write-out" | "-T" | "--upload-file" | "-E" | "--cert" | "--key" => {
-                let val = take_val(inline_val);
-                if flag == "--url" {
-                    if let Some(v) = val {
-                        url = Some(v);
-                    }
-                }
+            f if SHORT_VALUE_FLAGS.contains(&f) || IGNORED_VALUE_FLAGS.contains(&f) => {
+                let _ = take_val(inline_val);
             }
             // Boolean flags we ignore.
             _ if flag.starts_with('-') => {}
@@ -231,6 +430,21 @@ pub fn parse_curl(input: &str) -> Result<ParsedCurl> {
     // Combine data parts. For --data-urlencode each part may be `name=value`.
     let combined_data = data_parts.join("&");
     let has_data = !data_parts.is_empty();
+    let has_form = !form_fields.is_empty();
+
+    if is_json_flag {
+        if explicit_content_type.is_none() {
+            headers.push(header_entry("Content-Type", "application/json"));
+            explicit_content_type = Some("application/json".into());
+        }
+        if !headers.iter().any(|h| {
+            h["key"]
+                .as_str()
+                .is_some_and(|k| k.eq_ignore_ascii_case("accept"))
+        }) {
+            headers.push(header_entry("Accept", "application/json"));
+        }
+    }
 
     // Determine the basic auth from -u if present (overrides header-derived auth
     // only when no Authorization header set one).
@@ -247,7 +461,9 @@ pub fn parse_curl(input: &str) -> Result<ParsedCurl> {
 
     // Resolve method.
     let method = method.unwrap_or_else(|| {
-        if has_data && !get_with_data {
+        if head {
+            "HEAD".to_string()
+        } else if (has_data && !get_with_data) || has_form {
             "POST".to_string()
         } else {
             "GET".to_string()
@@ -257,7 +473,17 @@ pub fn parse_curl(input: &str) -> Result<ParsedCurl> {
     // Decide body vs query for the data.
     let mut body = String::new();
     let mut body_mode = "none".to_string();
-    if has_data {
+    if has_form {
+        // multipart/form-data: the editor's row array. reqwest writes the
+        // boundary Content-Type itself, so an explicit one is dropped.
+        headers.retain(|h| {
+            !h["key"]
+                .as_str()
+                .is_some_and(|k| k.eq_ignore_ascii_case("content-type"))
+        });
+        body_mode = "multipart".to_string();
+        body = Value::Array(form_fields).to_string();
+    } else if has_data {
         if get_with_data {
             // -G: data becomes query parameters.
             for part in parse_form_pairs(&combined_data) {
@@ -912,6 +1138,110 @@ mod tests {
         let p = parse_curl("curl https://x.test/ -H $'X-Token: a\\tb'").unwrap();
         let hdrs = keys(&p.headers);
         assert_eq!(hdrs, vec![("X-Token".into(), "a\tb".into())]);
+    }
+
+    #[test]
+    fn attached_short_flags_are_split() {
+        let p =
+            parse_curl("curl -XPUT -HAccept:text/plain -ualice:pw -d'{\"a\":1}' https://x.test/a")
+                .unwrap();
+        assert_eq!(p.method, "PUT");
+        assert_eq!(p.url, "https://x.test/a");
+        assert_eq!(
+            keys(&p.headers),
+            vec![("Accept".into(), "text/plain".into())]
+        );
+        assert_eq!(p.auth["username"], "alice");
+        assert_eq!(p.body_mode, "json");
+    }
+
+    #[test]
+    fn value_flags_never_become_the_url() {
+        let p = parse_curl(
+            "curl --cacert ca.pem --resolve x.test:443:1.2.3.4 --retry 3 -c jar.txt \
+             --max-redirs 5 -sSL --compressed https://x.test/ok",
+        )
+        .unwrap();
+        assert_eq!(p.url, "https://x.test/ok");
+        assert_eq!(p.method, "GET");
+    }
+
+    #[test]
+    fn form_flag_builds_a_multipart_body() {
+        let p = parse_curl(
+            "curl https://x.test/upload -H 'Content-Type: multipart/form-data' \
+             -F 'title=Hello world' -F 'file=@/tmp/pics/cat.png;type=image/png' \
+             --form-string 'raw=@not-a-file'",
+        )
+        .unwrap();
+        assert_eq!(p.method, "POST");
+        assert_eq!(p.body_mode, "multipart");
+        assert!(
+            keys(&p.headers).is_empty(),
+            "boundary content-type is reqwest's"
+        );
+        let rows: Value = serde_json::from_str(&p.body).unwrap();
+        assert_eq!(
+            rows[0],
+            json!({"key":"title","type":"text","value":"Hello world"})
+        );
+        assert_eq!(
+            rows[1],
+            json!({"key":"file","type":"file","value":"","filename":"cat.png"})
+        );
+        assert_eq!(
+            rows[2],
+            json!({"key":"raw","type":"text","value":"@not-a-file"})
+        );
+    }
+
+    #[test]
+    fn json_flag_sets_body_and_headers() {
+        let p = parse_curl(r#"curl --json '{"q":1}' https://x.test/j"#).unwrap();
+        assert_eq!(p.method, "POST");
+        assert_eq!(p.body_mode, "json");
+        assert_eq!(p.body, r#"{"q":1}"#);
+        assert_eq!(
+            keys(&p.headers),
+            vec![
+                ("Content-Type".into(), "application/json".into()),
+                ("Accept".into(), "application/json".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn data_urlencode_encodes_like_curl() {
+        let p = parse_curl(
+            "curl https://x.test/f --data-urlencode 'q=a b&c' --data-urlencode '=x/y' \
+             --data-urlencode 'plain text'",
+        )
+        .unwrap();
+        assert_eq!(p.body_mode, "form");
+        assert_eq!(p.body, "q=a%20b%26c&x%2Fy&plain%20text");
+    }
+
+    #[test]
+    fn convenience_flags_map_to_headers_auth_and_method() {
+        let p = parse_curl(
+            "curl -I -A 'otto/1' -e https://ref.test -b 'sid=1; theme=dark' \
+             --oauth2-bearer tok123 https://x.test/",
+        )
+        .unwrap();
+        assert_eq!(p.method, "HEAD");
+        assert_eq!(p.auth, json!({"type":"bearer","token":"tok123"}));
+        assert_eq!(
+            keys(&p.headers),
+            vec![
+                ("User-Agent".into(), "otto/1".into()),
+                ("Referer".into(), "https://ref.test".into()),
+                ("Cookie".into(), "sid=1; theme=dark".into())
+            ]
+        );
+        // `-b <file>` is a cookie jar on disk — dropped, not sent as a header.
+        let p = parse_curl("curl -b cookies.txt https://x.test/").unwrap();
+        assert!(keys(&p.headers).is_empty());
+        assert_eq!(p.url, "https://x.test/");
     }
 
     #[test]
