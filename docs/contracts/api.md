@@ -5838,3 +5838,47 @@ background poll or a slow call from queueing what the user just clicked:
 - **Events instead of polls.** New invalidation events `mcp_approval_changed`,
   `resource_access_changed`, `notifications_changed`, the `/ws/events`
   `subscribe` topic filter and `boot_id` (`ws.md`). No REST shape changed.
+
+## Workbench (per-user scratch files with full history)
+
+Notion/VS Code-style scratch files (scripts, JSON, Markdown, Mermaid, D2, …)
+with a FULL, append-only edit history. Workspace-scoped AND owner-scoped:
+every route answers only the caller's own docs (another user's id → `404`).
+Gated on **Agents** (`GET` = View, everything else = Edit) plus the workspace
+role (`viewer` for reads, `editor` for writes). Also served under the
+`scratch` workspace (owner-scoped, so nothing is shared). Types:
+`ui/src/lib/api/types.ts` "Workbench"; repo: `crates/otto-state/src/workbench.rs`;
+routes: `crates/otto-server/src/routes/workbench.rs` (migration 0165).
+
+History rules: every content change records a revision. Autosaves coalesce —
+a save within 60 s of an `auto` revision's first save overwrites that
+revision (`saves` += 1, so it always holds the newest content); later saves,
+`checkpoint: true` (⌘S) saves, creation (`create`) and revision restores
+(`restore`, with `restored_from`) append a new one. Saving identical content
+records nothing — except a `checkpoint` save of identical content while the
+newest revision is an open `auto` burst: that SEALS it (its kind becomes
+`checkpoint`), so the next autosave starts a new revision (⌘S always sends the
+buffer with `checkpoint: true`); metadata (name, language, pinned, folder, tags) never creates
+a revision. Content is stored content-addressed (sha256 blobs). Revisions are
+removed ONLY by the permanent delete of a trashed doc — no cascade and no
+retention job touches them. Doc content cap 5 MB; asset cap 20 MB.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{ws}/workbench/docs | member (Agents:View) | `?trash=true` lists the trash | `WorkbenchDoc[]` (no content) — live: pinned first then newest; trash: most recently trashed first |
+| POST /workspaces/{ws}/workbench/docs | member (Agents:Edit) | `WorkbenchCreateReq {name, language?='auto', content?='', folder?, tags?, pinned?}` | `201 WorkbenchDocFull` (rev 1, kind `create`) |
+| GET /workspaces/{ws}/workbench/docs/{id} | member (Agents:View) | — | `WorkbenchDocFull` (`content` = current text; for `language:"image"` the asset id) |
+| PATCH /workspaces/{ws}/workbench/docs/{id} | member (Agents:Edit) | `WorkbenchUpdateReq {content?, name?, language?, pinned?, folder?, tags?, checkpoint?, client_id?}` | `WorkbenchDoc`; `409` while trashed; `400` on validation (empty name, bad language, content > 5 MB) |
+| DELETE /workspaces/{ws}/workbench/docs/{id} | member (Agents:Edit) | `?permanent=true` = irreversible purge | soft: `200 WorkbenchDoc` (`deleted_at` set, history kept); permanent: `204` — only for a TRASHED doc (live doc → `409`), removes the doc, every revision and unreferenced blobs |
+| POST /workspaces/{ws}/workbench/docs/{id}/restore | member (Agents:Edit) | `{}` | `WorkbenchDoc` (out of the trash) |
+| GET /workspaces/{ws}/workbench/docs/{id}/revisions | member (Agents:View) | — | `WorkbenchRevision[]` newest first `{seq, kind, content_hash, size, created_at, updated_at, saves, restored_from}` |
+| GET /workspaces/{ws}/workbench/docs/{id}/revisions/{seq} | member (Agents:View) | — | `WorkbenchRevisionDetail` (revision + `doc_id` + `content`) |
+| POST /workspaces/{ws}/workbench/docs/{id}/revisions/{seq}/restore | member (Agents:Edit) | `{}` | `WorkbenchDocFull` — appends a `restore` revision; nothing is overwritten |
+| GET /workspaces/{ws}/workbench/docs/{id}/diff | member (Agents:View) | `?from=<seq>&to=<seq\|current>` (`to` omitted = current content) | `WorkbenchDiff {doc_id, from, to, added, removed, lines:[{op:eq\|add\|del, text, old_line?, new_line?}]}` — Myers line diff, exact up to 2 000 edits / 20 000 lines per side, else the changed middle as one delete + one add block |
+| POST /workspaces/{ws}/workbench/assets | member (Agents:Edit) | raw image body (PNG/JPEG/GIF/WebP by magic bytes; SVG when sent as `image/svg+xml`), ≤ 20 MB | `201 WorkbenchAsset {id, mime, size, sha256, created_at}` — identical bytes from the same owner return the existing asset |
+| GET /workspaces/{ws}/workbench/assets/{id} | member (Agents:View) | — | the image bytes with its `Content-Type`, `X-Content-Type-Options: nosniff`; SVG adds `Content-Security-Policy: sandbox` |
+
+Every mutation emits the owner-only WS event `workbench_doc_changed`
+(see ws.md). MCP (`ottod mcp-tools`): `workbench_list`, `workbench_get`
+(read-only) and `workbench_write` (MUTATING, Agents Edit — writes land as
+`checkpoint` revisions).

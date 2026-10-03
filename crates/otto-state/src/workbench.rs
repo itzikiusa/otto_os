@@ -307,6 +307,26 @@ async fn record_revision(
 ) -> Result<Option<i64>> {
     let hash = sha256_hex(content.as_bytes());
     if hash == doc.content_hash && kind != "restore" {
+        // ⌘S on already-autosaved content SEALS the open burst: the latest
+        // `auto` revision becomes a `checkpoint` (it already holds exactly
+        // this content), so the next autosave starts a fresh revision. On a
+        // non-`auto` latest (or a plain autosave) nothing is recorded.
+        if kind == "checkpoint" {
+            let sealed = sqlx::query(
+                "UPDATE workbench_revisions SET kind = 'checkpoint', updated_at = ?
+                 WHERE doc_id = ? AND kind = 'auto'
+                   AND seq = (SELECT MAX(seq) FROM workbench_revisions WHERE doc_id = ?)",
+            )
+            .bind(fmt(now))
+            .bind(&doc.id)
+            .bind(&doc.id)
+            .execute(&mut **tx)
+            .await
+            .map_err(dberr("seal workbench burst"))?;
+            if sealed.rows_affected() > 0 {
+                return Ok(Some(doc.rev));
+            }
+        }
         return Ok(None);
     }
     put_blob(tx, content).await?;
@@ -1142,6 +1162,54 @@ mod tests {
             (4, "renamed.sql", true)
         );
         assert_eq!(doc.tags, vec!["db".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn identical_checkpoint_seals_the_autosave_burst() {
+        let repo = WorkbenchRepo::new(mem_pool().await);
+        let (ws, u) = ids();
+        let t0 = Utc::now();
+        let d = new_doc(&repo, t0).await;
+        let doc = repo
+            .update_at(&ws, &u, &d.doc.id, content("draft"), t0)
+            .await
+            .unwrap();
+        assert_eq!(doc.rev, 2);
+        // ⌘S with the already-autosaved buffer: no new revision, burst sealed.
+        let mut p = content("draft");
+        p.checkpoint = true;
+        let doc = repo
+            .update_at(&ws, &u, &d.doc.id, p.clone(), t0 + Duration::seconds(5))
+            .await
+            .unwrap();
+        assert_eq!(doc.rev, 2);
+        let revs = repo.list_revisions(&ws, &u, &d.doc.id).await.unwrap();
+        assert_eq!(revs[0].kind, "checkpoint");
+        // A second identical ⌘S is a no-op.
+        let doc = repo
+            .update_at(&ws, &u, &d.doc.id, p, t0 + Duration::seconds(6))
+            .await
+            .unwrap();
+        assert_eq!(doc.rev, 2);
+        // The next autosave (still inside 60 s) starts a fresh revision.
+        let doc = repo
+            .update_at(
+                &ws,
+                &u,
+                &d.doc.id,
+                content("draft 2"),
+                t0 + Duration::seconds(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(doc.rev, 3);
+        assert_eq!(
+            repo.get_revision(&ws, &u, &d.doc.id, 2)
+                .await
+                .unwrap()
+                .content,
+            "draft"
+        );
     }
 
     #[tokio::test]
