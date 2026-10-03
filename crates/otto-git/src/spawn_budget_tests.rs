@@ -164,7 +164,7 @@ async fn commit_graph_seed_runs_once_while_in_flight() {
 
 /// Large-tree guard: 100k tracked files + 10k untracked, `status()` under a
 /// generous budget and the untracked rows capped. Slow to build (~20 s), so
-/// ignored by default; the nightly/`ci` nextest profile runs it.
+/// ignored per PR; `.github/workflows/nightly-bench.yml` runs it nightly.
 #[tokio::test]
 #[ignore]
 async fn large_tree_status_timing() {
