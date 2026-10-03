@@ -5,9 +5,12 @@ import type { WsTermFlowFrame } from '../api/types';
 
 /** xterm scrollback depth (lines) for a PRIMARY terminal — the one pane the
  *  user works in (SessionView: agents main/split panes, the maximized tile,
- *  swarm/loop session panes; the share page; the DB SSH shell). Each line
- *  costs ~12 B/cell, so 10k × 200 cols ≈ 24 MB of JS heap. */
-export const PRIMARY_SCROLLBACK = 10_000;
+ *  swarm/loop session panes; the share page; the DB SSH shell). Equal to the
+ *  daemon emulator's depth (otto-pty EMULATOR_SCROLLBACK_LINES, perf 01 N2):
+ *  every snapshot, resync or compact replaces the buffer with at most this
+ *  many rows, so rows past it only lived until the next rebuild while costing
+ *  ~12 B/cell (10k × 200 cols was ≈ 24 MB of JS heap; 4000 is ≈ 9.6 MB). */
+export const PRIMARY_SCROLLBACK = 4000;
 /** Default depth for every other Terminal: grid tiles and the embedded
  *  previews that mount several terminals at once (review/docs/analysis/run
  *  agents, assistant panels, docks, exec views). 10k there was 150–360 MB
@@ -102,9 +105,14 @@ export class TermFlow {
     }
   }
 
-  /** Ask the daemon for credit flow control (first frame on a new socket). */
-  offer(): void {
-    this.send({ type: 'credit', window: CREDIT_WINDOW });
+  /** Ask the daemon for credit flow control (first frame on a new socket).
+   *  `binarySnapshots` (perf 01 N3): also take snapshots as a JSON header +
+   *  ONE raw binary frame instead of base64 inside JSON. Only for a direct
+   *  `/ws/term` socket — the room relay rejects unknown fields. */
+  offer(binarySnapshots = false): void {
+    this.send(binarySnapshots
+      ? { type: 'credit', window: CREDIT_WINDOW, binary_snapshots: true }
+      : { type: 'credit', window: CREDIT_WINDOW });
   }
 
   /** The daemon's `credit` reply (its granted `window`): count this stream's

@@ -19,7 +19,7 @@ import { isWebkitProject, useDefaultTerminalRenderer, watchFatalUiErrors } from 
 //     `scrollback` request (no redundant rebuild requests);
 //   • ^C mid-flood is on screen in < 150 ms (A3: queue dropped + `resync`);
 //   • a 15-tile TiledView keeps ≤ 2k scrollback per tile, the maximized tile
-//     10k (A4).
+//     4000 = the daemon's depth (A4, perf 01 N2).
 // Numbers come from an in-page probe (`window.__ottoTermProbe`, installed
 // before load; Terminal.svelte registers into it only when present). The
 // screen is read through the probe too (the parsed buffer, `onRender` for
@@ -168,6 +168,8 @@ function mockDaemon(page: Page, opts: { totalBytes: number; onCtrlC?: string; bu
     clientFrames: [] as string[], sent: 0, snapshots: 0, creditResyncs: 0, interruptedAt: 0, floodFrom: -1, snapshotsBeforeCtrlC: 0,
     /** The grid the attach `scrollback` carried (perf F1), null if none. */
     attachGrid: null as { cols: number; rows: number } | null,
+    /** Snapshots sent in the binary form (N3). */
+    binarySnapshots: 0,
   };
   let screenTail = 'READY$ ';
   let paused = false;
@@ -175,9 +177,20 @@ function mockDaemon(page: Page, opts: { totalBytes: number; onCtrlC?: string; bu
   let interrupted = false;
   let flooding = false;
   let credit: MockCredit | null = null;
+  /** The client offered binary snapshots on `credit` (perf 01 N3). */
+  let binarySnapshots = false;
   const snapshot = (ws: WebSocketRoute): void => {
     stats.snapshots++;
     credit?.superseded();
+    if (binarySnapshots) {
+      // Header + ONE binary frame, exactly as ws.rs `Snap::Binary` sends it;
+      // the payload is not live output (outside the credit window).
+      const bytes = Buffer.from(screenTail);
+      stats.binarySnapshots++;
+      ws.send(JSON.stringify({ type: 'scrollback', epoch: 1, binary: true, len: bytes.byteLength }));
+      ws.send(bytes);
+      return;
+    }
     ws.send(JSON.stringify({ type: 'scrollback', data: Buffer.from(screenTail).toString('base64'), epoch: 1 }));
   };
   /** PTY output for this viewer: through the credit gate when granted. */
@@ -237,6 +250,7 @@ function mockDaemon(page: Page, opts: { totalBytes: number; onCtrlC?: string; bu
             case 'credit':
               if (opts.credit === false) break; // an older daemon: unknown frame
               credit = new MockCredit(Math.min(Math.max(frame.window || 1024 * 1024, 64 * 1024), 8 * 1024 * 1024));
+              binarySnapshots = frame.binary_snapshots === true;
               ws.send(JSON.stringify({ type: 'credit', window: credit.window }));
               break;
             case 'ack': {
@@ -300,6 +314,9 @@ for (const burst of [2, 8]) {
         `frames ${JSON.stringify(f.filter((t) => t !== 'ack'))}`,
     );
     expect(f[0], 'credit is offered first thing on the socket').toBe('credit');
+    // perf 01 N3: a direct /ws/term client takes snapshots as raw binary, and
+    // the flood still ends on the last line through that path.
+    expect(daemon.stats.binarySnapshots, 'snapshots use the binary form').toBeGreaterThanOrEqual(1);
     expect(acks, 'the client acknowledges as xterm consumes').toBeGreaterThan(0);
     expect(f.filter((t) => t === 'pause'), 'credit mode never pauses').toHaveLength(0);
     expect(f.slice(daemon.stats.floodFrom).filter((t) => t === 'scrollback'), 'the flood requests no rebuild').toHaveLength(0);
@@ -381,7 +398,7 @@ test.describe('tiled scrollback budget', () => {
     await ctx?.dispose();
   });
 
-  test('15 live tiles keep ≤ 2k scrollback each; the maximized tile gets 10k', async ({ page }) => {
+  test('15 live tiles keep ≤ 2k scrollback each; the maximized tile gets 4000', async ({ page }) => {
     const c = await apiCtx();
     ctx = c.ctx;
     base = c.base;
@@ -425,7 +442,7 @@ test.describe('tiled scrollback budget', () => {
       await page.getByRole('menuitem', { name: 'Zoom in on this session' }).click();
     }
     await expect(page.locator('.tiled.single .pane')).toHaveCount(1);
-    await expect.poll(async () => (await live()).includes(10_000), { timeout: 15_000 }).toBe(true);
+    await expect.poll(async () => (await live()).includes(4000), { timeout: 15_000 }).toBe(true);
     expect(fatal, 'no fatal UI error (the WebGL park/adopt effect loop reloaded the page)').toEqual([]);
   });
 });

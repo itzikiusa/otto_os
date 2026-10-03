@@ -313,6 +313,17 @@ authority has the PTY resized to that grid **before** the snapshot is taken,
 so opening a pane costs exactly one snapshot. The depth a client asked for is
 reused for every snapshot the daemon later pushes on its own (lag, flow-control
 recovery, a respawned process), so a 2000-row tile is never sent 4000 rows.
+The app's own terminal socket asks for snapshots as raw bytes (one binary
+frame behind a small JSON header) instead of base64 inside JSON: a 4000-row
+snapshot is a third smaller on the wire and the page no longer parses a
+multi-megabyte JSON string to show it. Other clients keep the JSON form.
+
+Widening an agent pane rebuilds it from one snapshot that **carries the new
+grid**: the daemon resizes the PTY and captures in one step, so there is no
+separate resize, no 900 ms wait and no second round trip. Only one pane in the
+window rebuilds at a time (the one you last focused first); a pane that is off
+screen or in a hidden window waits until it is visible again. Narrowing never
+rebuilds — the program's own redraw repaints it.
 
 **Memory.** The daemon's emulator keeps 4000 rows of formatted history per live
 session. Rows that scrolled off are stored trimmed of trailing blanks and shared
@@ -321,6 +332,16 @@ between snapshot copies, so a session of short lines at 200 columns holds about
 live terminal **nobody has viewed for 10 minutes** keeps only its newest 1000
 rows of emulator history; the next viewer restores the 4000-row cap and history
 grows again from there (the 10,000-line raw ring used by search is unaffected).
+For a session that survives daemon restarts, the PTY holder's own emulator (the
+copy a restarted daemon re-adopts) follows the same cap, and the holder keeps no
+raw ring of its own (search is daemon-side).
+
+In the app, a primary pane keeps **4000 rows** of xterm scrollback, the same as
+the daemon: a snapshot can never restore more, so deeper local history only cost
+memory until the next rebuild. Grid tiles and embedded previews keep 2000.
+Terminals parked while you are elsewhere in the app (so coming back needs no
+replay) are bounded by count (12) and by an estimated **48 MB** of buffer; the
+least recently parked go first.
 
 **Two searches:**
 - **In-viewport** — the xterm `SearchAddon` over the currently rendered buffer

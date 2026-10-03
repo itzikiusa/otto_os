@@ -38,8 +38,19 @@ impl RingBuffer {
         }
     }
 
+    /// A ring that keeps nothing: `push` returns at once. The PTY holder's
+    /// mirror uses it (perf 01 N1) — search and `tail` are daemon-side only,
+    /// so the holder never reads its ring and must not pay a line split +
+    /// allocation per chunk for one.
+    pub fn disabled() -> Self {
+        Self::new(0, 0)
+    }
+
     /// Append raw PTY output, splitting into lines on `\n`.
     pub fn push(&mut self, data: &[u8]) {
+        if self.max_lines == 0 {
+            return;
+        }
         for chunk in data.split_inclusive(|&b| b == b'\n') {
             let ends_line = chunk.ends_with(b"\n");
             if !self.last_complete {
@@ -223,6 +234,18 @@ impl Default for RingBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The holder's ring (perf 01 N1) keeps nothing and allocates nothing.
+    #[test]
+    fn a_disabled_ring_keeps_nothing() {
+        let mut ring = RingBuffer::disabled();
+        for _ in 0..100 {
+            ring.push(b"line one\nline two\npartial");
+        }
+        assert!(ring.is_empty());
+        assert!(ring.tail(10).is_empty());
+        assert!(ring.search("line", 10).is_empty());
+    }
 
     /// Output without a newline used to grow the last line without bound.
     #[test]

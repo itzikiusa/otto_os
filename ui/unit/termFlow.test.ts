@@ -200,9 +200,15 @@ test('input over a big queue sends resync BEFORE the resume its drop triggers, a
   assert.equal(q.queued, 1024);
 });
 
-test('scrollback depths: 2k default for embeds, 10k only where a primary pane asks for it', () => {
+test('scrollback depths: 2k default for embeds, 4000 (the daemon depth) only where a primary pane asks for it', () => {
   assert.equal(EMBED_SCROLLBACK, 2000);
-  assert.equal(PRIMARY_SCROLLBACK, 10_000);
+  // perf 01 N2: never more than the daemon emulator keeps (otto-pty
+  // EMULATOR_SCROLLBACK_LINES) — rows past it cannot survive a snapshot.
+  assert.equal(PRIMARY_SCROLLBACK, 4000);
+  assert.match(
+    readFileSync(new URL('../../crates/otto-pty/src/lib.rs', import.meta.url), 'utf8'),
+    /pub const EMULATOR_SCROLLBACK_LINES: usize = 4000;/,
+  );
   const src = (p: string) => readFileSync(new URL(p, import.meta.url), 'utf8');
   // The default in the props destructure (later props may follow it).
   assert.match(src('../src/lib/components/Terminal.svelte'), /scrollback = EMBED_SCROLLBACK(, \w+ = [^,}]+)* \}: Props = \$props\(\)/);
@@ -237,6 +243,30 @@ test('credit: offer, grant, then no pause frames however big the backlog', () =>
   for (let i = 0; i < 64; i++) q.push(new Uint8Array(64 * 1024), undefined, flow.credit);
   assert.ok(flow.pending > FLOW_HIGH);
   assert.deepEqual(sent.map((f) => f.type), ['credit'], 'the daemon bounds the stream; no pause/resume');
+});
+
+test('credit: binary snapshots are offered only on request (perf 01 N3: never to the room relay)', () => {
+  const direct = creditHarness();
+  direct.flow.offer(true);
+  assert.deepEqual(direct.sent, [{ type: 'credit', window: CREDIT_WINDOW, binary_snapshots: true }]);
+  const relay = creditHarness();
+  relay.flow.offer(false);
+  assert.deepEqual(relay.sent, [{ type: 'credit', window: CREDIT_WINDOW }], 'no unknown field for deny_unknown_fields');
+  // Terminal.svelte: only a direct socket (no socketFactory) asks for it, and a
+  // binary payload after a header is applied as the snapshot, never credited.
+  const src = readFileSync(new URL('../src/lib/components/Terminal.svelte', import.meta.url), 'utf8');
+  assert.match(src, /flow\.offer\(!socketFactory\)/);
+  assert.match(src, /const hdr = binarySnapHeaders\.get\(s\);\s*if \(hdr\) \{\s*binarySnapHeaders\.delete\(s\);\s*applySnapshot\(/);
+});
+
+test('resize-with-grid compact (perf 01 N6): a widened visible agent pane sends ONE grid-carrying scrollback', () => {
+  const src = readFileSync(new URL('../src/lib/components/Terminal.svelte', import.meta.url), 'utf8');
+  // The confirm step queues the compact WITH the grid instead of `resize`…
+  assert.match(src, /if \(d\.compact && preferDom && !readOnly && snapshotEpoch !== null && !compactPending && compactEligible\(\)\) \{\s*compactGrid = \{ cols: lastCols, rows: lastRows \};/);
+  // …the queued request carries it…
+  assert.match(src, /if \(compactGrid\) \{\s*req\.cols = compactGrid\.cols;\s*req\.rows = compactGrid\.rows;/);
+  // …and every way the compact does not run still delivers the size.
+  assert.equal((src.match(/flushCompactGrid\(\);/g) ?? []).length >= 4, true);
 });
 
 test('credit: acks are cumulative, every CREDIT_ACK_STEP consumed, credited bytes only', () => {

@@ -61,6 +61,10 @@ pub fn resolve_grid(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
 }
 /// Capacity of the output broadcast channel (chunks).
 const BROADCAST_CAPACITY: usize = 1024;
+/// Largest single PTY read (and the smallest block remainder worth reading into).
+const READ_CHUNK: usize = 8192;
+/// Read-buffer block the PTY reader splits chunks off (perf 01 N8).
+const READ_BLOCK: usize = 64 * 1024;
 
 /// Pause between kill-escalation steps: `SIGHUP` → grace → `SIGTERM` → grace
 /// → `SIGKILL`, each step skipped once the child has exited.
@@ -326,8 +330,16 @@ impl Mirror {
         }
     }
 
-    /// One chunk of child output → emulator + ring + broadcast.
+    /// One chunk of child output → emulator + ring + broadcast (borrowed;
+    /// the production readers own their chunks and use [`Self::feed_bytes`]).
+    #[cfg(test)]
     pub(crate) fn feed(&self, data: &[u8]) {
+        self.feed_bytes(Bytes::copy_from_slice(data));
+    }
+
+    /// [`Self::feed`] for a chunk already owned as `Bytes` (the PTY reader's
+    /// split-off block, a holder OUTPUT frame): published without a copy.
+    pub(crate) fn feed_bytes(&self, data: Bytes) {
         self.last_output_ms
             .store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
         self.echo.output();
@@ -335,15 +347,15 @@ impl Mirror {
         // snapshot_and_subscribe must never include a chunk in its replay and
         // then receive that chunk again.
         let mut parser = lock_unpoisoned(&self.parser);
-        parser.process(data);
+        parser.process(&data);
         // No receivers is fine — the screen state still records.
-        let _ = self.tx.send(Bytes::copy_from_slice(data));
+        let _ = self.tx.send(data.clone());
         drop(parser);
         // The raw ring is not part of the snapshot hand-over (only emulator
         // + broadcast must be atomic), so it is filled AFTER the parser lock
         // is released (perf 01 F3): its line split + allocations no longer
         // lengthen the window in which captures and resizes wait.
-        lock_unpoisoned(&self.ring).push(data);
+        lock_unpoisoned(&self.ring).push(&data);
     }
 
     /// Replace the emulator with one rebuilt from a holder snapshot (a fresh
@@ -485,11 +497,18 @@ impl PtyHandle {
         {
             let mirror = mirror.clone();
             std::thread::spawn(move || {
-                let mut buf = [0u8; 8192];
+                // Read straight into a shared block (perf 01 N8): each chunk
+                // is split off and frozen into the `Bytes` the broadcast
+                // carries — no per-chunk copy. A block is zeroed once (calloc)
+                // and replaced when less than one read's worth is left.
+                let mut buf = bytes::BytesMut::new();
                 loop {
-                    match reader.read(&mut buf) {
+                    if buf.len() < READ_CHUNK {
+                        buf = bytes::BytesMut::zeroed(READ_BLOCK);
+                    }
+                    match reader.read(&mut buf[..READ_CHUNK]) {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => mirror.feed(&buf[..n]),
+                        Ok(n) => mirror.feed_bytes(buf.split_to(n).freeze()),
                     }
                 }
                 let _ = done_tx.send(true);
@@ -764,11 +783,19 @@ impl PtyHandle {
     /// [`UNVIEWED_SCROLLBACK_LINES`]). Lowering drops the oldest rows now;
     /// raising lets history grow again. Clamped to
     /// `1..=`[`EMULATOR_SCROLLBACK_LINES`]; a no-op when unchanged.
+    ///
+    /// A held PTY forwards the cap to its holder too (perf 01 N1): the
+    /// holder's emulator is the copy future adoptions are rebuilt from, and
+    /// it used to keep the full history of every unviewed session forever.
     pub fn set_history_cap(&self, lines: usize) {
         let lines = lines.clamp(1, EMULATOR_SCROLLBACK_LINES);
         let mut parser = lock_unpoisoned(&self.mirror.parser);
         if parser.screen().scrollback_len() != lines {
             parser.screen_mut().set_scrollback_len(lines);
+        }
+        drop(parser);
+        if let Backend::Held(conn) = &self.backend {
+            conn.set_history_cap(lines);
         }
     }
 
@@ -1707,7 +1734,10 @@ mod tests {
 
     /// Daemon-side terminal budgets (perf 01 F7). Gated: `OTTO_PERF=1`
     /// (run with `--release` for the real budgets; debug builds get ×10).
-    /// CI: the perf-gates job runs it in release with a ×3 scale.
+    /// CI: the BLOCKING Rust job runs it in release with a ×3 scale (perf 01
+    /// N4). Every timing is the best of several rounds, so one scheduler
+    /// hiccup on a shared runner cannot fail a PR — a real regression moves
+    /// every round.
     /// Full 4000 × 200 history of attribute-dense TUI rows:
     /// - capture (the parser-lock hold of every snapshot) < 2 ms,
     /// - format (off the lock, blocking pool) < 40 ms,
@@ -1735,18 +1765,26 @@ mod tests {
         for i in 0..(EMULATOR_SCROLLBACK_LINES + 100) {
             parser.process(format!("{i:05} {row}\x1b[0m\r\n").as_bytes());
         }
-        let screen = parser.screen();
-        let t = Instant::now();
-        let capture = ScreenCapture {
-            screen: screen.clone(),
-        };
-        let capture_cost = t.elapsed();
-        let t = Instant::now();
-        let bytes = capture.format(EMULATOR_SCROLLBACK_LINES);
-        let format_cost = t.elapsed();
-        let t = Instant::now();
-        parser.screen_mut().set_size(50, 150);
-        let reflow_cost = t.elapsed();
+        const ROUNDS: usize = 5;
+        let (mut capture_cost, mut format_cost, mut reflow_cost) =
+            (Duration::MAX, Duration::MAX, Duration::MAX);
+        let mut bytes = Vec::new();
+        for round in 0..ROUNDS {
+            let t = Instant::now();
+            let capture = ScreenCapture {
+                screen: parser.screen().clone(),
+            };
+            capture_cost = capture_cost.min(t.elapsed());
+            let t = Instant::now();
+            bytes = capture.format(EMULATOR_SCROLLBACK_LINES);
+            format_cost = format_cost.min(t.elapsed());
+            drop(capture);
+            // Alternate narrow / wide: every round reflows the whole history.
+            let cols = if round % 2 == 0 { 150 } else { 200 };
+            let t = Instant::now();
+            parser.screen_mut().set_size(50, cols);
+            reflow_cost = reflow_cost.min(t.elapsed());
+        }
 
         let m = Mirror::new(200, 50, RingBuffer::default());
         let mut subs: Vec<_> = (0..3).map(|_| m.tx.subscribe()).collect();
@@ -1778,12 +1816,15 @@ mod tests {
                 }
             })
             .collect();
-        let total = 64 * 1024 * 1024;
-        let t = Instant::now();
-        for _ in 0..(total / chunk.len()) {
-            m.feed(&chunk);
+        let total = 32 * 1024 * 1024;
+        let mut feed_cost = Duration::MAX;
+        for _ in 0..3 {
+            let t = Instant::now();
+            for _ in 0..(total / chunk.len()) {
+                m.feed(&chunk);
+            }
+            feed_cost = feed_cost.min(t.elapsed());
         }
-        let feed_cost = t.elapsed();
         stop.store(true, Ordering::Relaxed);
         for d in drains {
             d.join().unwrap();

@@ -72,7 +72,7 @@ use crate::{CommandSpec, PtyHandle, EMULATOR_SCROLLBACK_LINES};
 /// Incompatible-layout version of the wire protocol (see the module docs).
 pub const PROTO_MAJOR: u32 = 1;
 /// Additive revision of the wire protocol.
-pub const PROTO_MINOR: u32 = 1;
+pub const PROTO_MINOR: u32 = 2;
 // 1.1: `HolderInfo::last_output_unix_ms` (additive; older holders send none).
 
 /// Environment marker the launcher sets on the holder process. A holder entry
@@ -124,6 +124,11 @@ pub(crate) mod frame {
     pub const INPUT_ACK: u8 = 0x11;
     /// client → holder: `[u16 cols][u16 rows]`.
     pub const RESIZE: u8 = 0x12;
+    /// client → holder: `[u32 lines]` — the emulator's scrollback cap (minor
+    /// 2, perf 01 N1). The daemon shrinks it for a long-unviewed session and
+    /// restores it on attach, so the holder's copy of the history is bounded
+    /// like the daemon's mirror. Older holders ignore it (unknown kind).
+    pub const HISTORY_CAP: u8 = 0x13;
     /// client → holder: no longer needed — exit once the child is gone. FROZEN.
     pub const RELEASE: u8 = 0x7E;
     /// client → holder: end the child (HUP → TERM → KILL escalation). FROZEN.
@@ -660,12 +665,12 @@ fn run(request: HolderSpawn) -> i32 {
     let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
 
     // The holder never reads its raw ring (attach snapshots come from the
-    // emulator), so it keeps a token one.
+    // emulator; search is daemon-side), so it keeps none at all (N1).
     let handle = match PtyHandle::spawn_local(
         &request.command,
         request.cols,
         request.rows,
-        RingBuffer::new(1, 1024),
+        RingBuffer::disabled(),
     ) {
         Ok(h) => Arc::new(h),
         Err(e) => return fail(Some(&socket), &e.to_string()),
@@ -1022,6 +1027,10 @@ async fn client_reader(
                 if let Some((cols, rows, _)) = frame::parse_grid(&payload) {
                     let _ = sh.handle.resize(cols, rows);
                 }
+            }
+            Ok((frame::HISTORY_CAP, payload)) if payload.len() >= 4 => {
+                let lines = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                sh.handle.set_history_cap(lines as usize);
             }
             // KILL / RELEASE; unknown kinds are ignored (forward compatibility).
             Ok((kind, _)) => control_frame(&sh, kind),

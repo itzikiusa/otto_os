@@ -81,6 +81,7 @@ below). Clients need no change: keep sending, and treat a dropped socket or a
 {"type":"resume"}                                   // flow control: send again (+ one snapshot if anything was held back)
 {"type":"resync","lines":2000}                      // (optional "cols"/"rows" as on scrollback) typed over a dropped local backlog: discard my queued output, send ONE snapshot (see below)
 {"type":"credit","window":1048576}                  // credit flow control: send me at most `window` unacknowledged binary bytes (see below)
+                                                    // optional "binary_snapshots":true → snapshots in the binary form (below)
 {"type":"ack","bytes":4194304}                      // credit: cumulative binary bytes consumed (parsed or dropped) since the grant
 {"type":"probe","id":7}                             // latency probe: answered at once with `probe_ack` (see below); read-only safe
 ```
@@ -226,6 +227,13 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
 ```json
 {"type":"credit","window":1048576}                  // grant for a client `credit` offer; binary frames after it count against `window`
 {"type":"scrollback","data":"<base64 bytes>","epoch":3}  // response to scrollback request; send BEFORE live bytes resume.
+{"type":"scrollback","epoch":3,"binary":true,"len":1834012}  // binary form (perf 01 N3), only to a client whose `credit`
+                                                    // offer carried "binary_snapshots":true and only for a non-empty
+                                                    // snapshot: the VERY NEXT frame is one binary frame of `len` bytes —
+                                                    // the snapshot payload, NOT live output: it is never counted against
+                                                    // the credit window. Saves the +33 % base64 and the client's
+                                                    // multi-MB JSON.parse. Applies to every snapshot on that socket
+                                                    // (reply, resync, lag/skip resync, revival).
                                                     // `data` is a FULL rebuild: formatted history rows + a coherent
                                                     // current-screen frame + input-mode restoration (bracketed paste,
                                                     // keypad). The client MUST reset its terminal and repaint from this
@@ -243,8 +251,11 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
 {"type":"terminated"}                               // session force-terminated (admin terminate / share-link revoke); socket closes immediately after
 {"type":"error","code":"forbidden","message":"..."}
 {"type":"error","code":"input_failed","message":"..."} // input not delivered: no live process, or the process is not reading
-                                                    // its terminal (queue full / not drained in 15 s — already-queued bytes
-                                                    // are still delivered in order). Sent once per failing stretch.
+                                                    // its terminal (not drained in 15 s — already-queued bytes are still
+                                                    // delivered in order). Sent once per failing stretch. Input is never
+                                                    // dropped for volume: past 1 MiB queued per socket the server stops
+                                                    // reading client frames until the PTY drains (TCP backpressure), and
+                                                    // consecutive queued frames are coalesced into one PTY write.
 {"type":"search_result","query":"foo","matches":[{"line":42,"text":"foo bar baz"},...]}  // up to 200 matches; always valid JSON
                                                     // (text is ANSI-stripped but may contain tabs/C0 bytes, JSON-escaped)
 {"type":"probe_ack","id":7,"echo":{"last_ms":3.2,"avg_ms":4.1,"max_ms":48.0,"samples":120}}  // reply to `probe`; `echo` null with no live PTY
