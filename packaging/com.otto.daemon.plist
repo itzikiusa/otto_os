@@ -15,8 +15,12 @@
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <!-- Interactive, not Background: Background (darwinbg, efficiency
+         cores, throttled I/O, timer coalescing) is inherited by every PTY
+         child and turns keystroke echo into second-scale lag. Keep in sync
+         with the plist apps/desktop/src-tauri/src/supervisor.rs installs. -->
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Interactive</string>
     <key>StandardOutPath</key>
     <string>/tmp/com.otto.daemon.stdout.log</string>
     <key>StandardErrorPath</key>
