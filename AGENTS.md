@@ -99,7 +99,7 @@ The repo has **no Makefile**. Use these directly:
 # Rust (run from repo root)
 cargo build --workspace          # build the daemon crates + ottod
 cargo test --workspace           # run all Rust tests
-cargo fmt --all --check          # formatting (CI: advisory for now — the tree predates rustfmt-in-CI and isn't fully formatted yet; a one-time repo-wide `cargo fmt --all` should land as its own commit before this is promoted to blocking)
+cargo fmt --all --check          # formatting (CI-enforced)
 cargo clippy --workspace --all-targets -- -D warnings   # lints (CI-enforced)
 
 # UI (run from ui/)

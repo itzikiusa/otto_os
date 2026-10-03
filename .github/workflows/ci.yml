@@ -39,7 +39,7 @@ jobs:
     env:
       NEXTEST_VERSION: 0.9.146
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
 
       # Older images had only ~14 GiB free and exhausted disk during linking.
       # Keep conservative headroom without paying for a blanket purge on larger
@@ -68,7 +68,7 @@ jobs:
 
       # Caches ~/.cargo registry/git + ./target, keyed on Cargo.lock.
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.2
 
       - name: Report restored cache disk usage
         run: |
@@ -105,14 +105,9 @@ jobs:
           sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
           sudo apt-get install -y cmake libcurl4-openssl-dev
 
-      # Advisory-only for now: the existing tree predates rustfmt-in-CI and is not
-      # yet fully formatted (a one-time repo-wide `cargo fmt --all` belongs in its
-      # own dedicated commit, separate from feature work, to avoid blast-radius
-      # churn over in-flight branches). Reports drift without blocking; promote to
-      # blocking by removing `continue-on-error` once that format pass has landed.
-      - name: cargo fmt --check (advisory)
+      # Blocking: the tree was formatted repo-wide once; keep it that way.
+      - name: cargo fmt --check
         run: cargo fmt --all --check
-        continue-on-error: true
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -139,7 +134,7 @@ jobs:
       run:
         working-directory: ui
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
 
       - name: Test deployment verification (mocked OS operations)
         working-directory: .
@@ -150,9 +145,9 @@ jobs:
         run: python3 -B -m unittest discover -s crates/otto-skills/assets/skills/insights/insights/scripts -p test_collect_window.py
 
       - name: Install Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7.0.0
         with:
-          node-version: 22
+          node-version: 26.10.0
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -187,13 +182,13 @@ jobs:
     continue-on-error: true
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           shared-key: perf-gates
 
@@ -208,9 +203,9 @@ jobs:
         run: cargo build -p ottod
 
       - name: Install Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7.0.0
         with:
-          node-version: 22
+          node-version: 26.10.0
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -236,7 +231,7 @@ jobs:
 
       - name: Upload the Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: perf-gates-report
           path: ui/e2e/.report-0
@@ -251,7 +246,7 @@ jobs:
     env:
       CARGO_AUDIT_VERSION: 0.22.2
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -260,7 +255,7 @@ jobs:
       # database. Every run still fetches current RustSec advisories below.
       - name: Cache cargo-audit
         id: cargo-audit-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.cache/otto-tools/cargo-audit/${{ env.CARGO_AUDIT_VERSION }}/bin/cargo-audit
           key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_AUDIT_VERSION }}-v1
@@ -279,7 +274,7 @@ jobs:
       # must not force the next run to compile the unchanged audit tool again.
       - name: Save cargo-audit cache
         if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6.1.0
         with:
           path: ~/.cache/otto-tools/cargo-audit/${{ env.CARGO_AUDIT_VERSION }}/bin/cargo-audit
           key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_AUDIT_VERSION }}-v1
