@@ -35,8 +35,11 @@ pub fn is_all(region: Option<&str>) -> bool {
     region.map(str::trim) == Some(ALL)
 }
 
-fn cache() -> &'static Mutex<HashMap<Id, (Instant, Vec<String>)>> {
-    static C: OnceLock<Mutex<HashMap<Id, (Instant, Vec<String>)>>> = OnceLock::new();
+/// account id → (fetched at, enabled regions).
+type RegionCache = Mutex<HashMap<Id, (Instant, Vec<String>)>>;
+
+fn cache() -> &'static RegionCache {
+    static C: OnceLock<RegionCache> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
