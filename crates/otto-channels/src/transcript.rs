@@ -33,6 +33,40 @@ pub enum TranscriptEvent {
     Final { text: String },
 }
 
+/// Poll interval while a turn is in flight (or no activity signal is wired).
+const ACTIVE_POLL: Duration = Duration::from_millis(300);
+/// Ceiling of the idle back-off: between turns the poll doubles from
+/// [`ACTIVE_POLL`] up to this, so a parked channel session costs one `fstat`
+/// every few seconds instead of an open+seek+read every 300 ms.
+const IDLE_POLL_MAX: Duration = Duration::from_secs(3);
+
+/// The tailer's poll timings (production: [`PROD_CADENCE`]; tests scale it
+/// down to run in real time).
+#[derive(Clone, Copy)]
+struct Cadence {
+    active: Duration,
+    idle_max: Duration,
+}
+
+const PROD_CADENCE: Cadence = Cadence {
+    active: ACTIVE_POLL,
+    idle_max: IDLE_POLL_MAX,
+};
+
+impl Cadence {
+    /// Delay before the next poll. `active` (a turn is in flight) keeps the
+    /// fast cadence; otherwise each consecutive empty poll doubles the delay
+    /// up to `idle_max` (`idle_polls` resets whenever new bytes arrive).
+    fn delay(self, active: bool, idle_polls: u32) -> Duration {
+        if active {
+            return self.active;
+        }
+        self.active
+            .saturating_mul(1u32 << idle_polls.min(8))
+            .min(self.idle_max)
+    }
+}
+
 /// Tail `path`, emitting events to `on_event` until `cancel` is set to `true`.
 ///
 /// Polls every 300 ms from a saved byte offset; lines that do not match the
@@ -50,10 +84,49 @@ pub enum TranscriptEvent {
 pub async fn tail(
     path: PathBuf,
     since: Option<DateTime<Utc>>,
-    mut on_event: impl FnMut(TranscriptEvent),
+    on_event: impl FnMut(TranscriptEvent),
     cancel: Arc<AtomicBool>,
 ) {
-    let poll = Duration::from_millis(300);
+    tail_inner(path, since, on_event, cancel, None, None, PROD_CADENCE).await
+}
+
+/// [`tail`] with an activity signal: while `active` reads `true` (a turn is in
+/// flight) the file is polled every 300 ms; between turns the poll backs off
+/// to [`IDLE_POLL_MAX`], and a flip back to `true` (`Mirror::begin_turn`)
+/// wakes the poller at once.
+pub async fn tail_adaptive(
+    path: PathBuf,
+    since: Option<DateTime<Utc>>,
+    on_event: impl FnMut(TranscriptEvent),
+    cancel: Arc<AtomicBool>,
+    active: tokio::sync::watch::Receiver<bool>,
+) {
+    tail_inner(
+        path,
+        since,
+        on_event,
+        cancel,
+        Some(active),
+        None,
+        PROD_CADENCE,
+    )
+    .await
+}
+
+/// The tail loop. The file handle stays open between polls: each poll is one
+/// `fstat` comparing the length against the consumed offset, and bytes are
+/// read only when the file grew. The handle is reopened only when the file
+/// shrank (truncated/replaced) or could not be stat'ed. `polls`, when set,
+/// counts poll iterations (the idle-wakeup test's probe).
+async fn tail_inner(
+    path: PathBuf,
+    since: Option<DateTime<Utc>>,
+    mut on_event: impl FnMut(TranscriptEvent),
+    cancel: Arc<AtomicBool>,
+    mut active: Option<tokio::sync::watch::Receiver<bool>>,
+    polls: Option<Arc<std::sync::atomic::AtomicU64>>,
+    cadence: Cadence,
+) {
     // Everything before this byte offset predates the tailer.
     let history_end: u64 = match since {
         Some(_) => tokio::fs::metadata(&path)
@@ -76,31 +149,80 @@ pub async fn tail(
         _ => 0,
     };
 
+    let mut file: Option<tokio::fs::File> = None;
+    let mut idle_polls: u32 = 0;
+    // The activity sender was dropped: no more turns are coming.
+    let mut orphaned = false;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
+        if let Some(p) = &polls {
+            p.fetch_add(1, Ordering::Relaxed);
+        }
 
-        // Try to read any new bytes appended since the last poll.
-        if let Ok(mut f) = tokio::fs::File::open(&path).await {
-            if f.seek(std::io::SeekFrom::Start(offset)).await.is_ok() {
-                let mut buf: Vec<u8> = Vec::new();
-                if f.read_to_end(&mut buf).await.is_ok() && !buf.is_empty() {
-                    let (consumed, lines) = complete_lines(&buf, offset);
-                    offset += consumed;
-                    for (line_start, line) in lines {
-                        if line_start < history_end && !line_at_or_after(line, since) {
-                            continue;
+        let mut got_bytes = false;
+        if file.is_none() {
+            file = tokio::fs::File::open(&path).await.ok();
+        }
+        if let Some(f) = file.as_mut() {
+            match f.metadata().await.map(|m| m.len()) {
+                Ok(len) if len > offset => {
+                    let mut buf: Vec<u8> = Vec::new();
+                    let read = f.seek(std::io::SeekFrom::Start(offset)).await.is_ok()
+                        && f.read_to_end(&mut buf).await.is_ok();
+                    if !read {
+                        file = None;
+                    } else if !buf.is_empty() {
+                        got_bytes = true;
+                        let (consumed, lines) = complete_lines(&buf, offset);
+                        offset += consumed;
+                        for (line_start, line) in lines {
+                            if line_start < history_end && !line_at_or_after(line, since) {
+                                continue;
+                            }
+                            if let Some(evt) = parse_line(line) {
+                                on_event(evt);
+                            }
                         }
-                        if let Some(evt) = parse_line(line) {
-                            on_event(evt);
+                    }
+                }
+                Ok(len) if len < offset => {
+                    // Truncated or replaced: start over on a fresh handle.
+                    offset = 0;
+                    file = None;
+                }
+                Ok(_) => {}
+                Err(_) => file = None,
+            }
+        }
+
+        idle_polls = if got_bytes {
+            0
+        } else {
+            idle_polls.saturating_add(1)
+        };
+        match active.as_mut() {
+            None if orphaned => tokio::time::sleep(cadence.idle_max).await,
+            None => tokio::time::sleep(cadence.active).await,
+            Some(rx) => {
+                let is_active = *rx.borrow_and_update();
+                let delay = cadence.delay(is_active, idle_polls);
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    changed = rx.changed() => {
+                        if changed.is_err() {
+                            // The mirror dropped its side: poll at the idle
+                            // ceiling until cancelled.
+                            active = None;
+                            orphaned = true;
+                        } else {
+                            idle_polls = 0;
                         }
                     }
                 }
             }
         }
-
-        tokio::time::sleep(poll).await;
     }
 }
 
@@ -722,6 +844,73 @@ mod tests {
         cancel.store(true, Ordering::Relaxed);
         let _ = task.await;
         assert!(rx.try_recv().is_err(), "the old answer was never replayed");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn poll_delay_backs_off_only_between_turns() {
+        assert_eq!(PROD_CADENCE.delay(true, 50), ACTIVE_POLL);
+        assert_eq!(PROD_CADENCE.delay(false, 0), ACTIVE_POLL);
+        assert_eq!(PROD_CADENCE.delay(false, 1), ACTIVE_POLL * 2);
+        assert_eq!(PROD_CADENCE.delay(false, 3), Duration::from_millis(2400));
+        assert_eq!(PROD_CADENCE.delay(false, 4), IDLE_POLL_MAX);
+        assert_eq!(PROD_CADENCE.delay(false, u32::MAX), IDLE_POLL_MAX);
+    }
+
+    /// M1 idle-wakeup guard: a parked tailer (no turn in flight, file static)
+    /// backs off to the idle ceiling — at production timings ≤1 poll per 3 s,
+    /// inside the ≤1-per-2 s budget — and a new turn restores the fast cadence
+    /// at once (no waiting out the back-off). Runs the production loop with
+    /// the cadence scaled down 30× so it finishes in real time.
+    #[tokio::test]
+    async fn idle_tailer_backs_off_and_wakes_on_a_new_turn() {
+        use std::sync::atomic::AtomicU64;
+        let cadence = Cadence {
+            active: Duration::from_millis(10),
+            idle_max: Duration::from_millis(100),
+        };
+        let path = std::env::temp_dir().join(format!(
+            "otto-tail-idle-{}-{}.jsonl",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::write(&path, "{}\n").unwrap();
+        let (active_tx, active_rx) = tokio::sync::watch::channel(false);
+        let polls = Arc::new(AtomicU64::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn(tail_inner(
+            path.clone(),
+            None,
+            |_| {},
+            Arc::clone(&cancel),
+            Some(active_rx),
+            Some(Arc::clone(&polls)),
+            cadence,
+        ));
+        // Let the back-off ramp up, then measure a 1 s idle window: at the
+        // 100 ms ceiling that is ~10 polls (the fast cadence would be ~100).
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let before = polls.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let idle = polls.load(Ordering::Relaxed) - before;
+        assert!(
+            idle <= 12,
+            "idle tailer polled {idle} times in 1 s (ceiling 100 ms)"
+        );
+
+        // A new turn: the poller wakes immediately and runs at the fast pace.
+        active_tx.send_replace(true);
+        let before = polls.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let busy = polls.load(Ordering::Relaxed) - before;
+        assert!(
+            busy >= 10,
+            "active tailer polled only {busy} times in 300 ms"
+        );
+
+        cancel.store(true, Ordering::Relaxed);
+        drop(active_tx);
+        let _ = task.await;
         let _ = std::fs::remove_file(&path);
     }
 

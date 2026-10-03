@@ -93,6 +93,9 @@ fn session_in_chat(s: &Session, channel: &str, chat: &str) -> bool {
         && m.get("chat").and_then(|v| v.as_str()) == Some(chat)
 }
 
+/// Cap on [`Bridge`]'s conversation → session map (see `Bridge::map_session`).
+const SESSION_MAP_CAP: usize = 1024;
+
 const PASTE_TO_ENTER: Duration = Duration::from_millis(200);
 // Submit the pasted prompt with a plain carriage return. A leading ESC was
 // tried (to "leave vim INSERT mode" first), but that drops claude to vim NORMAL
@@ -410,11 +413,17 @@ impl Bridge {
         if let Some(sid) = mapped {
             match self.manager.get(&sid).await {
                 Ok(s) if session_alive(&s) => return Some(sid),
-                _ => {}
+                // Dead mapping: drop it so the map only holds live threads.
+                _ => {
+                    let mut map = self.sessions.lock().await;
+                    if map.get(key) == Some(&sid) {
+                        map.remove(key);
+                    }
+                }
             }
         }
         let (ws_id, chat, thread) = key;
-        let list = self.manager.list_by_workspace(ws_id).await.ok()?;
+        let list = self.live_channel_sessions(ws_id).await.ok()?;
         let s = list
             .into_iter()
             .filter(|s| {
@@ -431,8 +440,39 @@ impl Bridge {
             session = %s.id,
             "bridge: recovered the thread's session from its meta (map miss)"
         );
-        self.sessions.lock().await.insert(key.clone(), s.id.clone());
+        self.map_session(key.clone(), s.id.clone()).await;
         Some(s.id)
+    }
+
+    /// Record `key → sid` in the conversation map. The map is only a cache in
+    /// front of the meta lookup ([`Self::lookup_live_session`] recovers a miss),
+    /// so past [`SESSION_MAP_CAP`] entries it is simply reset rather than
+    /// growing with every thread ever seen.
+    async fn map_session(&self, key: ConvKey, sid: Id) {
+        let mut map = self.sessions.lock().await;
+        if map.len() >= SESSION_MAP_CAP && !map.contains_key(&key) {
+            map.clear();
+        }
+        map.insert(key, sid);
+    }
+
+    /// The workspace's non-archived, channel-spawned (`meta.source ==
+    /// "channel"`) agent sessions, filtered in SQL. The map-miss recovery and
+    /// `/sessions` used to decode the workspace's WHOLE session history (every
+    /// archived row's `meta_json` too) per new thread; callers still apply the
+    /// exact conversation match on top.
+    async fn live_channel_sessions(&self, ws_id: &Id) -> otto_core::Result<Vec<Session>> {
+        let scope = otto_state::SessionScope {
+            workspace_id: ws_id.clone(),
+            owner: None,
+        };
+        let filter = otto_state::SessionListFilter {
+            archived: Some(false),
+            kind: Some(SessionKind::Agent.as_str().to_string()),
+            source: Some("channel".to_string()),
+            ..Default::default()
+        };
+        self.manager.list_filtered(&[scope], &filter).await
     }
 
     /// Unbind conversation `key` from its session so the next message starts a
@@ -729,10 +769,7 @@ impl Bridge {
                     session = %session.id,
                     "bridge: created new agent session"
                 );
-                self.sessions
-                    .lock()
-                    .await
-                    .insert(key.clone(), session.id.clone());
+                self.map_session(key.clone(), session.id.clone()).await;
                 session.id
             }
         };
@@ -863,7 +900,7 @@ impl Bridge {
                 // in the workspace would leak what else the user is working on.
                 let ws_id: Id = msg.workspace_id.clone();
                 let channel = adapter.channel().as_str();
-                let sessions = match self.manager.list_by_workspace(&ws_id).await {
+                let sessions = match self.live_channel_sessions(&ws_id).await {
                     Ok(list) => list,
                     Err(e) => {
                         warn!("bridge /sessions: {e}");

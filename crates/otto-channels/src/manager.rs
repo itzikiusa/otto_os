@@ -51,7 +51,7 @@ fn generation_signature(integrations: &[otto_core::domain::Integration]) -> Gene
 }
 
 /// Tokens an inbound listener needs, or why it can't start yet.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum ListenerTokens {
     Telegram {
         token: String,
@@ -125,6 +125,25 @@ fn resolve_tokens(
         }
         Channel::Webhook => Ok(ListenerTokens::None),
     }
+}
+
+/// [`resolve_tokens`] for every integration, off the runtime: Keychain reads
+/// can block (a locked keychain, a prompt), so the whole batch runs as ONE
+/// blocking-pool task instead of parking a tokio worker per secret.
+async fn resolve_all_tokens(
+    secrets: &Arc<dyn SecretStore>,
+    integrations: &[otto_core::domain::Integration],
+) -> Vec<Result<ListenerTokens, String>> {
+    let secrets = Arc::clone(secrets);
+    let list = integrations.to_vec();
+    let n = list.len();
+    tokio::task::spawn_blocking(move || {
+        list.iter()
+            .map(|i| resolve_tokens(secrets.as_ref(), i))
+            .collect()
+    })
+    .await
+    .unwrap_or_else(|e| vec![Err(format!("token read task failed: {e}")); n])
 }
 
 /// The `(workspace, channel)` keys of the listener-backed integrations in
@@ -330,8 +349,9 @@ impl ChannelManager {
                     crate::health::remove(ws, *ch);
                 }
                 live_keys = keys;
+                let tokens = resolve_all_tokens(&self.secrets, &integrations).await;
                 let (count, waiting) =
-                    self.spawn_generation(&integrations, &bridge, &g, &mut listening);
+                    self.spawn_generation(&integrations, tokens, &bridge, &g, &mut listening);
                 info!("channel manager: {count} adapter(s) active");
                 pending = waiting;
                 gen_cancel = Some(g);
@@ -341,8 +361,9 @@ impl ChannelManager {
                 // under the running generation (no restart of live listeners).
                 if let Some(g) = gen_cancel.clone() {
                     let retry = std::mem::take(&mut pending);
+                    let tokens = resolve_all_tokens(&self.secrets, &retry).await;
                     let (count, waiting) =
-                        self.spawn_generation(&retry, &bridge, &g, &mut listening);
+                        self.spawn_generation(&retry, tokens, &bridge, &g, &mut listening);
                     if count > 0 {
                         info!("channel manager: {count} waiting adapter(s) started");
                     }
@@ -372,15 +393,16 @@ impl ChannelManager {
     fn spawn_generation(
         &self,
         integrations: &[otto_core::domain::Integration],
+        resolved: Vec<Result<ListenerTokens, String>>,
         bridge: &Arc<Bridge>,
         gen_cancel: &Arc<AtomicBool>,
         listening: &mut HashSet<String>,
     ) -> (usize, Vec<otto_core::domain::Integration>) {
         let mut count = 0;
         let mut waiting = Vec::new();
-        for integ in integrations {
+        for (integ, tokens) in integrations.iter().zip(resolved) {
             let ws_id = integ.workspace_id.clone();
-            let tokens = match resolve_tokens(self.secrets.as_ref(), integ) {
+            let tokens = match tokens {
                 Ok(t) => t,
                 Err(why) => {
                     crate::health::waiting_for_token(&ws_id, integ.channel, &why);

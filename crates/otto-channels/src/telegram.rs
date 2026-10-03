@@ -30,33 +30,51 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 /// for updates) plus margin, or long-polling would be cut off mid-poll.
 const LONG_POLL_REQUEST_TIMEOUT: Duration = Duration::from_secs(LONG_POLL_TIMEOUT + 15);
 
-/// Build an HTTP client for ordinary Bot API calls (connect + overall timeouts).
-/// Falls back to a default client if the builder fails.
+/// The process-wide HTTP client for ordinary Bot API calls (connect + overall
+/// timeouts). Each timeout profile is built once and cloned (a cheap `Arc` bump
+/// sharing one connection pool), so `TelegramAdapter::new` per message or
+/// notification reuses warm connections. Falls back to a default client if the
+/// builder fails.
 fn build_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .unwrap_or_default()
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .unwrap_or_default()
+        })
+        .clone()
 }
 
 /// Build an HTTP client for the long-poll listener. Its overall timeout is sized
 /// to the long-poll interval plus margin so `getUpdates` is never cut short.
 fn build_long_poll_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(LONG_POLL_REQUEST_TIMEOUT)
-        .build()
-        .unwrap_or_default()
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(LONG_POLL_REQUEST_TIMEOUT)
+                .build()
+                .unwrap_or_default()
+        })
+        .clone()
 }
 
 /// Build an HTTP client for `sendDocument` uploads (larger overall budget).
 fn build_upload_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(UPLOAD_TIMEOUT)
-        .build()
-        .unwrap_or_default()
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(UPLOAD_TIMEOUT)
+                .build()
+                .unwrap_or_default()
+        })
+        .clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +296,10 @@ impl Adapter for TelegramAdapter {
             ));
         }
         Ok(())
+    }
+
+    fn supports_typing(&self) -> bool {
+        true
     }
 
     /// Send a "typing" chat action so Telegram shows "Bot is typing…".

@@ -309,7 +309,7 @@ async fn send_one(
         );
         return false;
     }
-    let Some(adapter) = build_adapter(secrets, integ) else {
+    let Some(adapter) = build_adapter(secrets, integ).await else {
         return false;
     };
     let chat = integ.channel_id.trim();
@@ -339,7 +339,7 @@ pub async fn send_to(
     if chat.trim().is_empty() {
         return false;
     }
-    let Some(adapter) = build_adapter(secrets, integ) else {
+    let Some(adapter) = build_adapter(secrets, integ).await else {
         return false;
     };
     adapter.send_formatted(chat, thread, text).await.is_ok()
@@ -347,16 +347,18 @@ pub async fn send_to(
 
 /// Build the outbound adapter for an integration, resolving its bot token from
 /// the secret store (same refs the channel manager uses). Returns `None` when the
-/// token is missing/empty (nothing to send with).
-pub fn build_adapter(
+/// token is missing/empty (nothing to send with). The Keychain read goes through
+/// `get_async` (cache hit inline, miss on the blocking pool) so a slow keychain
+/// never parks a runtime worker; adapters share the process-wide HTTP clients.
+pub async fn build_adapter(
     secrets: &Arc<dyn SecretStore>,
     integ: &Integration,
 ) -> Option<Arc<dyn Adapter>> {
     let ws = &integ.workspace_id;
     match integ.channel {
         Channel::Telegram => {
-            let token = secrets
-                .get(&format!("chan-bot-{ws}-telegram"))
+            let token = otto_core::secrets::get_async(secrets, &format!("chan-bot-{ws}-telegram"))
+                .await
                 .ok()
                 .flatten();
             match token {
@@ -368,7 +370,10 @@ pub fn build_adapter(
             }
         }
         Channel::Slack => {
-            let token = secrets.get(&format!("chan-bot-{ws}-slack")).ok().flatten();
+            let token = otto_core::secrets::get_async(secrets, &format!("chan-bot-{ws}-slack"))
+                .await
+                .ok()
+                .flatten();
             match token {
                 Some(t) if !t.is_empty() => Some(Arc::new(SlackAdapter::new(t))),
                 _ => {

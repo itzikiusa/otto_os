@@ -36,10 +36,17 @@ impl WebhookAdapter {
         // SSRF guard end to end: the guarded resolver re-vets the address at
         // connect time (no DNS rebinding after `check_url`), and the guarded
         // redirect policy stops a 3xx bouncing the POST to an internal address.
-        let http = otto_netguard::guarded_client_builder()
-            .timeout(CALLBACK_TIMEOUT)
-            .build()
-            .unwrap_or_default();
+        // One process-wide client (a new adapter per request clones it — a
+        // cheap `Arc` bump sharing the connection pool).
+        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let http = CLIENT
+            .get_or_init(|| {
+                otto_netguard::guarded_client_builder()
+                    .timeout(CALLBACK_TIMEOUT)
+                    .build()
+                    .unwrap_or_default()
+            })
+            .clone();
         Self {
             callback_url: callback_url.filter(|u| !u.trim().is_empty()),
             http,

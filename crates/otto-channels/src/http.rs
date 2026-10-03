@@ -367,11 +367,11 @@ async fn test_integration<S: ChannelsCtx>(
     // Resolve the bot token from the keychain and build an adapter.
     let adapter: Arc<dyn Adapter> = match channel {
         Channel::Slack => {
-            let token = s
-                .secrets()
-                .get(&format!("chan-bot-{ws_id}-slack"))
-                .ok()
-                .flatten();
+            let token =
+                otto_core::secrets::get_async(s.secrets(), &format!("chan-bot-{ws_id}-slack"))
+                    .await
+                    .ok()
+                    .flatten();
             match token {
                 Some(t) if !t.is_empty() => Arc::new(SlackAdapter::new(t)),
                 _ => {
@@ -383,11 +383,11 @@ async fn test_integration<S: ChannelsCtx>(
             }
         }
         Channel::Telegram => {
-            let token = s
-                .secrets()
-                .get(&format!("chan-bot-{ws_id}-telegram"))
-                .ok()
-                .flatten();
+            let token =
+                otto_core::secrets::get_async(s.secrets(), &format!("chan-bot-{ws_id}-telegram"))
+                    .await
+                    .ok()
+                    .flatten();
             match token {
                 Some(t) if !t.is_empty() => Arc::new(TelegramAdapter::new(t)),
                 _ => {

@@ -34,8 +34,34 @@ fn redact_url(s: impl std::fmt::Display, url: &str) -> String {
 }
 
 const CANCEL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-/// Cap on the dedup set size; cleared when exceeded to avoid unbounded growth.
+/// Cap on the dedup window; the OLDEST key is evicted past it (a wholesale
+/// clear let a Slack redelivery right after the wipe be processed twice).
 const DEDUP_CAP: usize = 2000;
+
+/// Bounded "seen" set with FIFO eviction: a `HashSet` for lookups plus a
+/// `VecDeque` remembering insertion order.
+#[derive(Default)]
+struct DedupWindow {
+    set: HashSet<String>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl DedupWindow {
+    /// `true` when `key` is new (and now remembered), `false` for a repeat.
+    fn insert(&mut self, key: String, cap: usize) -> bool {
+        if self.set.contains(&key) {
+            return false;
+        }
+        while self.order.len() >= cap.max(1) {
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+        self.set.insert(key.clone());
+        self.order.push_back(key);
+        true
+    }
+}
 
 /// Zombie-socket watchdog: Slack pings a Socket Mode connection every few
 /// seconds, so a healthy socket NEVER goes this long without a frame. When it
@@ -91,23 +117,75 @@ where
     }
 }
 
-/// Build an HTTP client for Slack Web API calls (connect + overall timeouts).
-/// Falls back to a default client if the builder fails.
+/// The process-wide HTTP client for Slack Web API calls (connect + overall
+/// timeouts). Built once and cloned (a cheap `Arc` bump sharing one connection
+/// pool), so a new adapter per inbound message / outbound notification reuses
+/// warm TLS connections instead of paying a fresh handshake every time. Falls
+/// back to a default client if the builder fails.
 fn build_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .unwrap_or_default()
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .unwrap_or_default()
+        })
+        .clone()
 }
 
-/// Build an HTTP client for downloading attachment files (larger overall budget).
+/// The process-wide HTTP client for downloading attachment files (larger
+/// overall budget); shared like [`build_http_client`].
 fn build_download_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(DOWNLOAD_TIMEOUT)
-        .build()
-        .unwrap_or_default()
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(DOWNLOAD_TIMEOUT)
+                .build()
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+/// Concurrent attachment downloads per inbound message.
+const ATTACHMENT_PARALLELISM: usize = 3;
+/// Temp-file prefix of downloaded Slack attachments (swept by
+/// [`sweep_stale_attachments`]).
+const ATTACHMENT_PREFIX: &str = "otto-slack-";
+/// Downloaded attachments older than this are deleted when a listener starts.
+const ATTACHMENT_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
+
+/// Delete downloaded attachments (`$TMPDIR/otto-slack-*`) older than
+/// [`ATTACHMENT_MAX_AGE`] — they were never cleaned up and piled up in the temp
+/// dir. Blocking IO; run off the runtime.
+fn sweep_stale_attachments(dir: &std::path::Path, max_age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for e in entries.flatten() {
+        if !e
+            .file_name()
+            .to_string_lossy()
+            .starts_with(ATTACHMENT_PREFIX)
+        {
+            continue;
+        }
+        let stale = e
+            .metadata()
+            .ok()
+            .filter(|m| m.is_file())
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > max_age);
+        if stale && std::fs::remove_file(e.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Longest `Retry-After` Otto honours from Slack before giving up on a call.
@@ -452,8 +530,16 @@ pub async fn run(
     health: Health,
 ) {
     let http = build_http_client();
+    // Downloaded attachments were never deleted; sweep day-old ones off the
+    // runtime whenever a listener (re)starts.
+    tokio::task::spawn_blocking(|| {
+        let n = sweep_stale_attachments(&std::env::temp_dir(), ATTACHMENT_MAX_AGE);
+        if n > 0 {
+            debug!("slack: removed {n} stale downloaded attachment(s)");
+        }
+    });
     // In-memory dedup set: keyed by "channel:ts".
-    let seen: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let seen: Arc<Mutex<DedupWindow>> = Arc::new(Mutex::new(DedupWindow::default()));
 
     let mut backoff_ms: u64 = 3_000;
     const BACKOFF_MAX_MS: u64 = 60_000;
@@ -649,14 +735,10 @@ pub async fn run(
                     };
                     {
                         let mut guard = seen.lock().await;
-                        if guard.contains(&dedup_key) {
+                        if !guard.insert(dedup_key.clone(), DEDUP_CAP) {
                             debug!("slack: duplicate event {dedup_key}, skipping");
                             continue 'inner;
                         }
-                        if guard.len() >= DEDUP_CAP {
-                            guard.clear();
-                        }
-                        guard.insert(dedup_key);
                     }
 
                     // Process the event payload OFF the read loop: attachment
@@ -911,27 +993,17 @@ async fn collect_attachments(content: &serde_json::Value, bot_token: &str) -> St
         _ => return String::new(),
     };
     let client = build_download_client();
-    let mut notes = Vec::new();
-    for f in files {
-        let name = f["name"].as_str().unwrap_or("file");
-        let id = f["id"].as_str().unwrap_or("nofileid");
-        let mimetype = f["mimetype"].as_str().unwrap_or("application/octet-stream");
-        let url = f["url_private_download"]
-            .as_str()
-            .or_else(|| f["url_private"].as_str());
-        match url {
-            Some(u) => match download_slack_file(&client, u, bot_token, id, name).await {
-                Ok(path) => notes.push(format!("• {name} ({mimetype}) — saved to: {path}")),
-                Err(e) => {
-                    warn!("slack: failed to download attachment {name}: {e}");
-                    let link = f["permalink"].as_str().unwrap_or(u);
-                    notes.push(format!(
-                        "• {name} ({mimetype}) — could not download automatically; URL: {link}"
-                    ));
-                }
-            },
-            None => notes.push(format!("• {name} ({mimetype}) — no download URL available")),
-        }
+    // Up to ATTACHMENT_PARALLELISM downloads at once (a multi-file message
+    // used to fetch them strictly one after another); notes keep the
+    // message's file order.
+    let mut notes: Vec<String> = Vec::with_capacity(files.len());
+    for batch in files.chunks(ATTACHMENT_PARALLELISM) {
+        notes.extend(
+            futures_util::future::join_all(
+                batch.iter().map(|f| attachment_note(&client, f, bot_token)),
+            )
+            .await,
+        );
     }
     if notes.is_empty() {
         return String::new();
@@ -940,6 +1012,32 @@ async fn collect_attachments(content: &serde_json::Value, bot_token: &str) -> St
         "[Attachment(s) from the user — read them from these local paths and act on them:]\n{}",
         notes.join("\n")
     )
+}
+
+/// Download one attached file and describe it for the agent: its saved path,
+/// or (download failed / no URL) its permalink so the agent knows it exists.
+async fn attachment_note(
+    client: &reqwest::Client,
+    f: &serde_json::Value,
+    bot_token: &str,
+) -> String {
+    let name = f["name"].as_str().unwrap_or("file");
+    let id = f["id"].as_str().unwrap_or("nofileid");
+    let mimetype = f["mimetype"].as_str().unwrap_or("application/octet-stream");
+    let url = f["url_private_download"]
+        .as_str()
+        .or_else(|| f["url_private"].as_str());
+    match url {
+        Some(u) => match download_slack_file(client, u, bot_token, id, name).await {
+            Ok(path) => format!("• {name} ({mimetype}) — saved to: {path}"),
+            Err(e) => {
+                warn!("slack: failed to download attachment {name}: {e}");
+                let link = f["permalink"].as_str().unwrap_or(u);
+                format!("• {name} ({mimetype}) — could not download automatically; URL: {link}")
+            }
+        },
+        None => format!("• {name} ({mimetype}) — no download URL available"),
+    }
 }
 
 /// GET a Slack `url_private` file (auth via the bot token) and save it under the
@@ -972,16 +1070,6 @@ async fn download_slack_file(
             MAX_DOWNLOAD_BYTES >> 20
         );
     }
-    let mut bytes: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp.chunk().await? {
-        if (bytes.len() + chunk.len()) as u64 > MAX_DOWNLOAD_BYTES {
-            anyhow::bail!(
-                "file is larger than the {} MB limit",
-                MAX_DOWNLOAD_BYTES >> 20
-            );
-        }
-        bytes.extend_from_slice(&chunk);
-    }
     let sanitize = |s: &str| -> String {
         s.chars()
             .map(|c| {
@@ -995,14 +1083,83 @@ async fn download_slack_file(
     };
     let safe_name = sanitize(name);
     let safe_id = sanitize(id);
-    let path = std::env::temp_dir().join(format!("otto-slack-{safe_id}-{safe_name}"));
-    tokio::fs::write(&path, &bytes).await?;
+    let path = std::env::temp_dir().join(format!("{ATTACHMENT_PREFIX}{safe_id}-{safe_name}"));
+    // Stream chunks straight to disk (a ≤50 MB upload is never buffered whole
+    // in daemon memory); a partial file from an oversize/failed stream is
+    // removed.
+    let mut file = tokio::fs::File::create(&path).await?;
+    let mut written: u64 = 0;
+    let streamed: anyhow::Result<()> = async {
+        use tokio::io::AsyncWriteExt;
+        while let Some(chunk) = resp.chunk().await? {
+            written += chunk.len() as u64;
+            if written > MAX_DOWNLOAD_BYTES {
+                anyhow::bail!(
+                    "file is larger than the {} MB limit",
+                    MAX_DOWNLOAD_BYTES >> 20
+                );
+            }
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = streamed {
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(e);
+    }
     Ok(path.to_string_lossy().to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sweep_removes_only_stale_slack_attachments() {
+        let dir = std::env::temp_dir().join(format!(
+            "otto-slack-sweep-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join(format!("{ATTACHMENT_PREFIX}F1-old.txt"));
+        let fresh = dir.join(format!("{ATTACHMENT_PREFIX}F2-new.txt"));
+        let other = dir.join("unrelated.txt");
+        for p in [&old, &fresh, &other] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        let two_days = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 3600);
+        for p in [&old, &other] {
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(two_days)
+                .unwrap();
+        }
+        assert_eq!(sweep_stale_attachments(&dir, ATTACHMENT_MAX_AGE), 1);
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        assert!(other.exists(), "only otto-slack-* files are swept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dedup_window_evicts_oldest_not_everything() {
+        let mut w = DedupWindow::default();
+        assert!(w.insert("a".into(), 3));
+        assert!(w.insert("b".into(), 3));
+        assert!(w.insert("c".into(), 3));
+        assert!(!w.insert("c".into(), 3), "repeat inside the window");
+        assert!(w.insert("d".into(), 3), "evicts a");
+        assert!(!w.insert("b".into(), 3), "b survived the eviction");
+        assert!(w.insert("a".into(), 3), "a was the one evicted");
+        assert_eq!(w.order.len(), 3);
+        assert_eq!(w.set.len(), 3);
+    }
 
     #[test]
     fn an_unfurl_is_not_a_user_edit_and_dedups_onto_the_original() {
