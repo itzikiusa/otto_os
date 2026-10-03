@@ -342,6 +342,12 @@ class WorkspaceStore {
   /** The current workspace (or scratch) has archived rows at all — a 1-row
    *  probe on every list load, so the folded header shows without paging. */
   hasArchived = $state(false);
+  /** The probe (or an archive from here) already found archived rows for this
+   *  selection (perf G7): they don't go away on their own, so later refreshes
+   *  skip the 1–2 probe requests. Only a positive answer is kept — "none yet"
+   *  is re-asked, so an archive from another client still shows the header.
+   *  Cleared on a workspace switch and on an unarchive. */
+  private archivedKnown = false;
   /** Per-scope paging cursor: the oldest loaded `created_at`, or null once
    *  that scope is exhausted. */
   private archivedCursor: Record<Id, string | null> = {};
@@ -678,6 +684,7 @@ class WorkspaceStore {
     this.archivedLoading = false;
     this.archivedHasMore = false;
     this.hasArchived = false;
+    this.archivedKnown = false;
     this.archivedCursor = {};
   }
 
@@ -802,7 +809,7 @@ class WorkspaceStore {
         ).then((pages) => pages.flat()),
         // Once a page is loaded the section knows on its own; until then a
         // 1-row probe decides whether the folded header shows at all.
-        this.archivedLoaded
+        this.archivedLoaded || this.archivedKnown
           ? Promise.resolve(false)
           : Promise.all([...(wsId ? [probe(wsId)] : []), probe(SCRATCH_WORKSPACE_ID)]).then((r) =>
               r.some(Boolean),
@@ -818,7 +825,8 @@ class WorkspaceStore {
         seen.add(s.id);
         all.push(s);
       }
-      this.hasArchived = archivedAny || this.archivedSessions.length > 0;
+      if (archivedAny) this.archivedKnown = true;
+      this.hasArchived = this.archivedKnown || this.archivedSessions.length > 0;
       // Background engine sessions that ARE here (open tabs, live ones this
       // document saw created, `includeSources` panels) stay in `this.sessions`
       // so their owning panels can look them up / open them; every
@@ -1427,6 +1435,7 @@ class WorkspaceStore {
     this.sessions = this.sessions.filter((x) => x.id !== s.id);
     this.otherWsSessions = this.otherWsSessions.filter((x) => x.id !== s.id);
     this.hasArchived = true;
+    this.archivedKnown = true;
     if (this.archivedLoaded) this.archivedSessions = [s, ...this.archivedSessions.filter((x) => x.id !== s.id)];
   }
 
@@ -1474,6 +1483,8 @@ class WorkspaceStore {
   async unarchiveSession(id: Id): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/unarchive`);
     this.dropArchived(id);
+    // Maybe that was the last one: the next refresh probes again.
+    this.archivedKnown = false;
     this.hasArchived = this.archivedSessions.length > 0 || this.archivedHasMore || !this.archivedLoaded;
     this.sessions = this.sessionById.has(id)
       ? this.sessions.map((x) => (x.id === id ? s : x))

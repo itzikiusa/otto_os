@@ -29,13 +29,17 @@ function workspace() {
 
 /** The store with a saved workspace id and a transport that logs every GET in
  *  order; `/workspaces` is held until the test releases it. */
-function bootWorkspace(saved: string, list: { id: string }[]) {
+function bootWorkspace(saved: string, list: { id: string }[], archivedIn: string[] = []) {
   const log: string[] = [];
   const held = deferred<any[]>();
   const api = { get: (path: string) => {
     log.push(path);
     if (path === '/workspaces') return held.promise;
     if (path === '/workspaces/scratch') return Promise.resolve({ id: 'scratch' });
+    if (path.includes('archived=true&limit=1')) {
+      const ws = path.split('/')[2];
+      return Promise.resolve(archivedIn.includes(ws) ? [{ id: `${ws}-old`, workspace_id: ws, archived: true }] : []);
+    }
     if (/^\/workspaces\/[^/]+\/sessions\?/.test(path) && !path.includes('archived=true')) {
       const ws = path.split('/')[2];
       return Promise.resolve(ws === 'scratch' ? [] : [{ id: `${ws}-session`, workspace_id: ws, kind: 'agent', status: 'running', last_active_at: 't' }]);
@@ -85,6 +89,31 @@ test('boot: a saved workspace that no longer exists drops its speculative list (
   assert.equal(ws.sessions[0]?.id, 'B-session', 'the fallback workspace\'s own list, not the stale one');
   assert.equal(shown(log, 'B').length, 1);
   assert.equal(shown(log, 'scratch').length, 2, 'the scratch list is fetched again with the real selection');
+});
+
+const probes = (log: string[]) => log.filter((p) => p.includes('archived=true&limit=1')).length;
+
+test('the archived probe stops once it found rows, and keeps asking while there are none (perf G7)', async () => {
+  const withRows = bootWorkspace('A', [{ id: 'A' }], ['A']);
+  const a = withRows.ws.load();
+  withRows.release();
+  await a;
+  const first = probes(withRows.log);
+  assert.ok(first >= 1, 'the first list load probes');
+  assert.equal(withRows.ws.hasArchived, true);
+  await withRows.ws.refreshSessions();
+  await withRows.ws.refreshSessions();
+  assert.equal(probes(withRows.log), first, 'known archived rows: no probe per refresh');
+  assert.equal(withRows.ws.hasArchived, true, 'the folded header stays');
+
+  const none = bootWorkspace('A', [{ id: 'A' }]);
+  const b = none.ws.load();
+  none.release();
+  await b;
+  const before = probes(none.log);
+  await none.ws.refreshSessions();
+  assert.ok(probes(none.log) > before, 'no archived rows yet: a refresh asks again (another client may archive)');
+  assert.equal(none.ws.hasArchived, false);
 });
 
 test('late workspace selection cannot publish sessions or restore the old layout', async () => {
