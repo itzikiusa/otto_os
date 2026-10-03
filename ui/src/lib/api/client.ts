@@ -134,7 +134,7 @@ export const LONG_PATHS: readonly RegExp[] = [
   /(^|\/)k8s\//,
   /(^|\/)aws\//,
   /^\/brokers\/clusters\/[^/]+\/[^?]/, // every sub-route dials Kafka
-  /^\/connections\/[^/]+\/db\/(query|nl-to-sql|assist|explain|test|search-objects|schema\/children|schema-graph|completion|query-status)([/?]|$)/,
+  /^\/connections\/[^/]+\/db\/(query|nl-to-sql|assist|explain|test|search-objects|schema|schema\/children|object|schema-graph|completion|query-status)([/?]|$)/,
   // SSH / DB dial on open or test.
   /^\/connections\/[^/]+\/(open|test)([/?]|$)/,
   // A DB dashboard widget runs its query.
