@@ -40,6 +40,8 @@ use crate::personal_agents_engine;
 use crate::state::ServerCtx;
 
 /// Max bytes for one room message (agent AND user posts).
+mod autonomy;
+
 pub const MAX_ROOM_POST_BYTES: usize = 16 * 1024;
 /// Max characters in a room name (it is shown in lists, headers and every
 /// member agent's instructions).
@@ -104,6 +106,7 @@ pub fn routes() -> Router<ServerCtx> {
             "/agent-rooms/{id}/messages",
             get(list_messages).post(post_message),
         )
+        .merge(autonomy::routes())
 }
 
 fn agents(ctx: &ServerCtx) -> PersonalAgentsRepo {
@@ -163,6 +166,9 @@ struct CreateScheduleReq {
     directive: String,
     #[serde(default = "default_true")]
     enabled: bool,
+    /// The schedule's own permission set: `read_only` | `directed` (default).
+    #[serde(default)]
+    permission: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -171,6 +177,16 @@ struct UpdateScheduleReq {
     timezone: Option<String>,
     directive: Option<String>,
     enabled: Option<bool>,
+    permission: Option<String>,
+}
+
+fn check_permission(p: Option<&str>) -> Result<(), ApiError> {
+    match p {
+        None | Some("read_only") | Some("directed") => Ok(()),
+        Some(other) => Err(ApiError(Error::Invalid(format!(
+            "schedule permission must be read_only or directed (got '{other}')"
+        )))),
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -415,6 +431,8 @@ async fn create_schedule(
     cadence::validate(&req.schedule).map_err(ApiError)?;
     let timezone = req.timezone.unwrap_or_else(|| "UTC".into());
     check_timezone(&timezone)?;
+    check_permission(req.permission.as_deref())?;
+    let permission = req.permission.clone();
     let schedule = repo
         .create_schedule(NewAgentSchedule {
             agent_id: id,
@@ -425,6 +443,11 @@ async fn create_schedule(
         })
         .await
         .map_err(ApiError)?;
+    if let Some(p) = permission.as_deref() {
+        repo.set_schedule_permission(&schedule.id, p)
+            .await
+            .map_err(ApiError)?;
+    }
     refresh_next_run(&repo, &schedule).await;
     repo.get_schedule(&schedule.id)
         .await
@@ -448,6 +471,12 @@ async fn update_schedule(
     }
     if let Some(tz) = req.timezone.as_deref() {
         check_timezone(tz)?;
+    }
+    check_permission(req.permission.as_deref())?;
+    if let Some(p) = req.permission.as_deref() {
+        repo.set_schedule_permission(&schedule_id, p)
+            .await
+            .map_err(ApiError)?;
     }
     let cadence_changed = req.schedule.is_some() || req.timezone.is_some();
     // Resumed, or a really new cadence/timezone → re-arm; a re-timed `once`
@@ -717,6 +746,7 @@ async fn chat_session(
         "source": "personal_agent",
         "personal_agent": agent.id,
         "personal_agent_chat": true,
+        "agent_mode": "directed",
         "personal_agent_context_version": context_version,
         "browser": agent.browser,
     });

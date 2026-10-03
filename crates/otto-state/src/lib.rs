@@ -141,6 +141,9 @@ pub use mcp_servers::{McpServersRepo, NewMcpServer};
 pub use memory::{GovernedImport, MemoriesRepo};
 pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};
 pub use personal_agents::{
+    AgentAutonomy, AgentRule, ProactiveConfig, RuleEnforcement, StandingGoal,
+};
+pub use personal_agents::{
     AgentRoom, AgentRoomMessage, AgentRoomsRepo, AgentSchedulePatch, FinishAgentRun, NewAgentRun,
     NewAgentSchedule, NewPersonalAgent, NewRoomMessage, PersonalAgent, PersonalAgentPatch,
     PersonalAgentRun, PersonalAgentSchedule, PersonalAgentsRepo, RoomActivity,

@@ -3976,14 +3976,99 @@ writes) + the workspace-role axis on the agent's workspace.
 | PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | any subset of the create body | PersonalAgent |
 | DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | GET /api/v1/personal-agents/{id}/schedules | scheduled_tasks view + ws viewer | — | `PersonalAgentSchedule[]` |
-| POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?}` (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
-| PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
+| POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?, permission?}` — `permission` = `read_only` \| `directed` (default): the schedule's own permission set (see "Personal agent autonomy") (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
+| PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?, permission?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent — manual, delegated or scheduled — is already in progress (one run per agent at a time: its runs share a folder and memory; a due schedule waits, cursor untouched) |
 | POST /api/v1/personal-agents/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run (its session is killed, no retry); it settles `canceled`. `409` when the run isn't running |
 | GET /api/v1/personal-agents/{id}/runs | scheduled_tasks view + ws viewer | — | `PersonalAgentRun[]` |
 | GET /api/v1/personal-agents/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report; served by run id, path-canonicalized) |
 | POST /api/v1/personal-agents/{id}/chat-session | scheduled_tasks edit + ws editor | — | `{session_id}` — returns (creating if absent) the agent's single interactive chat session, pinned to its provider/model/persona cwd |
+
+### Personal agent autonomy (permission modes, goals, rules, activity, memory inspector)
+
+Every run executes under a **permission mode**, recorded on the run
+(`PersonalAgentRun.mode` + `read_only` + `goal_id`):
+
+- **`proactive`** — the scheduler works the agent's standing goals in the
+  background (round-robin, oldest-worked first) at most `runs_per_day` times in
+  any rolling 24 h, spaced `24h / runs_per_day` apart, each capped at
+  `max_minutes`. ALWAYS read-only; the report lands in the run feed and is
+  never delivered.
+- **`directed`** — Run now, Assistant delegation, the chat session: normal
+  approval + auto-approve rules.
+- **`scheduled`** — a schedule's run under that schedule's own `permission`
+  (`read_only` | `directed`).
+
+**Read-only is enforced by the daemon, not the prompt.** The run's session
+carries `meta.read_only = true` and: (1) every governed `otto.*` call that is
+mutating, plus `room_post` / `ask_human_approval` / `assistant_remember` /
+`assistant_forget`, is denied (audited `denied`; auto-approve rules and token
+write grants do not apply); (2) every non-GET request made with the session's
+own token is `403` unless it is a listed read route (searches, schema/object
+introspection, the read-only DB query, SQS peek, browser summarize, the
+governed invoke); (3) claude sessions start with `--disallowed-tools "Bash
+NotebookEdit Task"`; (4) the session is always Seatbelt-confined (writes only
+in its folder + temp), whatever the `process_sandbox` setting says; (5) browser
+automation (Playwright MCP) is off.
+
+**Sensitive-action gate (every caller).** A MUTATING governed call that touches
+accounts, credentials or sharing — `test_integration`; `create_/update_scheduled_task`
+with a non-`none` `destination`; any argument key such as `password`, `secret`,
+`*_token`, `api_key`, `credentials`, `share`, `visibility`, `permissions`,
+`grant`, `invite`, `collaborators`, `acl`; or a URL/path value under
+`/password`, `/credentials`, `/share`, `/permissions`, `/collaborators`,
+`/invitations`, `/tokens`, `/oauth`, `/members`, `/grants`, `/api-keys` —
+ALWAYS files a human approval (`risk_label: "sensitive"`), even when an
+auto-approve rule or a token write grant covers the tool.
+
+**Custom rules.** Each rule is plain language, injected into the agent's
+persona file. When a rule both asks first / forbids ("ask before…", "get my
+approval…", "never…", "don't…") AND names a target (a quoted string, a
+`#channel`, or a known word: prod/production, staging, main, master, billing,
+payment, customer, finance, secret, slack, telegram, email, jira, confluence,
+k8s/kubernetes, database, merge, deploy, delete), the server derives `enforce =
+{kind: "approval"|"deny", terms}`: the agent's MUTATING calls whose tool name or
+arguments mention a term (word-boundary match) are denied, or file an approval
+(`risk_label: "agent_rule"`) that no auto-approve rule skips. `enforce` is
+server-derived; a client never sets it.
+
+| Method & path | Role | Body | Response |
+|---|---|---|---|
+| GET /api/v1/personal-agents/{id}/autonomy | scheduled_tasks view + ws viewer | — | `PersonalAgentAutonomy` (defaults when never saved) |
+| PUT /api/v1/personal-agents/{id}/autonomy | scheduled_tasks edit + ws editor | `{proactive?: {enabled, runs_per_day (1..24), max_minutes (1..60)}, goals?: [{id?, text, enabled?}], rules?: [{id?, text}], primary?}` — partial; omitted sections kept; ≤20 goals, ≤30 rules, ≤500 chars each; a goal keeps its `last_run_at` by id; making an agent `primary` clears it on every other agent of the workspace | `PersonalAgentAutonomy` |
+| POST /api/v1/personal-agents/{id}/goals/{goal_id}/run | scheduled_tasks edit + ws editor | — | `PersonalAgentRun` (`mode: "proactive"`, read-only) — work the goal now; 409 while a run is in progress; counts against the daily budget |
+| GET /api/v1/personal-agents/{id}/activity | scheduled_tasks view + ws viewer | — | `PersonalAgentActivity` |
+| GET /api/v1/personal-agents/{id}/memories | scheduled_tasks view + ws viewer | — | `PersonalAgentMemories` |
+| POST /api/v1/personal-agents/{id}/memories/edit | scheduled_tasks edit + ws editor | `{version, line, raw, text: string \| null}` — `text: null` forgets the item; `raw` must equal the line as listed | `PersonalAgentMemories`; 409 when the file or that line changed since it was listed |
+| POST /api/v1/personal-agents/{id}/reset | scheduled_tasks edit + ws editor | `{confirm}` — must equal the agent's name | `{ok:true}` — re-seeds `memory/notes.md`, stops + unpins the chat session, deletes schedules and run history (+ report files), clears goal cursors and live activity; keeps persona, rules, goals, model, delivery. 409 while a run is in progress |
+
+```ts
+PersonalAgentAutonomy = {
+  proactive: {enabled: boolean, runs_per_day: number, max_minutes: number}, // default off, 4, 15
+  goals: {id, text, enabled: boolean, last_run_at: string | null}[],
+  rules: {id, text, enforce: {kind: 'approval' | 'deny', terms: string[]} | null}[],
+  primary: boolean,
+}
+PersonalAgentActivity = {
+  now: {run: PersonalAgentRun | null, session_status: SessionStatus | null},
+  items: {seq, at, kind: 'tool_call' | 'blocked' | 'approval_required' | 'approval_waiting',
+          tool, detail, session_id: string | null, approval_id: string | null}[], // newest first, ≤100
+  approvals: {approval_id, tool, at, status, title, detail, risk_label}[],
+  runs: PersonalAgentRun[], // newest 20
+}
+PersonalAgentMemories = {version, exists, path, items: {line, text, source, section, raw}[]}
+// source: chat | slack | telegram | vault | run | user | notes (untagged)
+```
+
+`items` is an in-memory live view (newest 200 per agent; cleared on restart);
+`mcp_call_log` stays the durable audit. Memory items are the top-level bullets
+of `memory/notes.md`; agents are told to start each with its source tag
+(`- [run] …`, `- [chat] …`, `- [slack] …`, `- [telegram] …`, `- [vault] …`).
+
+**Primary assistant.** The `primary` agent ("your agent") gets a persona
+section listing the workspace's other enabled agents and is told to route
+specialist work to them through a shared room.
 
 ### Personal Agent Memory and Context
 

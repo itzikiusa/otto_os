@@ -103,6 +103,89 @@ Rooms (`agent_rooms` / `agent_room_members` / `agent_room_messages`) are the
 - The rooms list shows each room's member count and last activity; names are
   capped at 120 characters.
 
+## 4b. Autonomy — permission modes, standing goals, rules, activity, memory
+
+Named, always-on agents need to be safe to leave running. Every run says which
+**permission mode** it ran in (`PersonalAgentRun.mode`, `read_only`, `goal_id`;
+shown on Runs and Activity):
+
+| Mode | Started by | Permissions |
+|---|---|---|
+| **Proactive** | the scheduler, working the agent's **standing goals** within a daily budget | **Strictly read-only.** Findings land in Runs; never delivered. |
+| **Directed** | Run now, Assistant delegation, the Chat tab | Normal approvals + your auto-approve rules |
+| **Scheduled** | a schedule firing | That schedule's own permission set: `directed` or `read_only` |
+
+**Read-only is enforced at the tool layer, not just the prompt.** A read-only
+run's session carries `meta.read_only = true`, and:
+
+1. The daemon's governed tool path (`personal_agent_policy`, called from
+   `mcp_outward::governed_invoke`) **denies** every mutating `otto.*` tool plus
+   room posts, approval requests and memory writes — auto-approve rules and
+   token write grants don't apply.
+2. The feature guard refuses every **non-GET request made with that session's
+   own token** (the native stdio tools: canvas/swarm writes, PR comments, room
+   posts…) except a short list of read POSTs (searches, schema introspection,
+   the read-only DB query, SQS peek, browser summarize).
+3. Claude sessions start with `--disallowed-tools "Bash NotebookEdit Task"`
+   (no shell → no `git push`, `gh`, `curl -X POST`).
+4. The session is always Seatbelt-confined (writes only inside its folder and
+   temp dirs), whatever **Settings → Daemon → process sandbox** says.
+5. Browser automation (Playwright MCP) is off; the CLI's own web reading stays.
+
+**Standing goals + budget** (Autonomy tab): a list of goals and a Proactive
+switch with *runs per day* (1–24, any rolling 24 h, spaced evenly) and *minutes
+per run* (1–60; a run that exceeds it is stopped). Goals are worked round-robin,
+least-recently-worked first; **Work on it now** starts one read-only goal run.
+The run prompt asks for findings and *proposals* — never actions.
+
+**Custom rules**: plain language, added to the agent's persona file as "Your
+rules". When a rule asks first or forbids ("ask before…", "get my approval…",
+"never…", "don't…") **and** names a target — a quoted string, a `#channel`, or
+a known word (prod/production, staging, main, master, billing, payment,
+customer, finance, secret, slack, telegram, email, jira, confluence,
+k8s/kubernetes, database, merge, deploy, delete) — Otto also **enforces** it on
+the agent's mutating calls whose tool or arguments mention the target: an
+approval (`risk_label: agent_rule`, never skipped by auto-approve) or a deny.
+The Autonomy tab labels each rule *Enforced: …* or *Instructions only*.
+
+**Sensitive-action gate** (all callers, not just personal agents): a mutating
+call that touches accounts, credentials or sharing — `otto.test_integration`; a
+scheduled task with a real `destination`; a credential/sharing argument
+(`password`, `secret`, `*_token`, `api_key`, `credentials`, `share`,
+`visibility`, `permissions`, `grant`, `invite`, `collaborators`, `acl`); or a
+URL/path under `/password`, `/credentials`, `/share`, `/permissions`,
+`/collaborators`, `/invitations`, `/tokens`, `/oauth`, `/members`, `/grants`,
+`/api-keys` — **always** files a human approval (`risk_label: sensitive`), even
+when an auto-approve rule or a token write grant covers the tool.
+
+**Activity tab**: *Now* (the running run, its mode, read-only lock, session
+state, **Watch session**), *Waiting for you* (approvals the agent's calls filed,
+with Sensitive / Agent-rule labels and a link to MCP → Activity), and a
+timeline merging its tool calls (called / blocked / needs approval) with its
+runs. Live over the `personal_agent_activity` WS event. The tool-call list is an
+in-memory view (newest 200 per agent, cleared on daemon restart);
+`mcp_call_log` remains the durable audit.
+
+**Memory inspector** (Memory tab, above the raw editor): every top-level bullet
+of `memory/notes.md` as an item with its **source** — agents are told to start
+each bullet with `[run]`, `[chat]`, `[slack]`, `[telegram]` or `[vault]`;
+untagged bullets show as *Notes*. Filter by source, **Edit** or **Forget** one
+item (version- and content-checked: a concurrent agent rewrite is a conflict,
+never a wrong delete). Every run and chat session of the agent reads the same
+file.
+
+**Reset agent…** (header ⋯): re-seeds its memory, stops and unpins its chat,
+deletes its schedules and run history (and report files), and clears goal
+cursors and live activity. Persona, rules, goals, model and delivery stay.
+Confirmed by typing the agent's name (checked server-side too); refused while a
+run is in progress.
+
+**Your agent (primary)**: one agent per workspace can be marked primary
+(Autonomy tab). It leads the agents list with a **Chat** button and its persona
+gets a "You are the user's primary assistant" section listing the other enabled
+agents, with instructions to route specialist work to them through a shared
+room.
+
 ## 5. Per-session model pinning (foundation, applies everywhere)
 
 - `CreateSessionReq.model` pins the model for **that session only** (folded
@@ -135,8 +218,11 @@ skill-eval settings.
 ## 7. UI
 
 Sidebar → **Personal Agents**: agent cards (provider·model chip, next run, Run
-now) → agent page tabs **Overview / Schedules / Runs / Chat / Memory / Context**, plus a
-module-level **Rooms** view (live feed, membership editor, user post box).
+now, *Your agent* / *Proactive* badges; the primary agent first, with Chat) →
+agent page tabs **Overview / Activity / Autonomy / Schedules / Runs / Chat /
+Memory / Context**, plus a module-level **Rooms** view (live feed, membership
+editor, user post box). Schedules carry a *Read-only* chip when their
+permission set is read-only; runs show their mode and a read-only lock.
 
 ## 8. Capabilities & limits (v1)
 
@@ -168,7 +254,25 @@ module-level **Rooms** view (live feed, membership editor, user post box).
 - Panda browser (external, in progress) can replace the Playwright backend via
   the `OTTO_BROWSER_MCP` override — no code change needed.
 
+- Read-only confinement of the CLI's own tools is complete for **claude**
+  (shell removed). codex/agy rely on the forced Seatbelt profile (filesystem)
+  plus the daemon-side policy (Otto tools and the session token); their shell
+  can still reach the network.
+- Writes inside the agent's own working folder stay allowed in read-only runs
+  (memory + report). With a custom working directory that folder is writable.
+- Slack/Telegram conversations with a personal agent are not routed yet; the
+  memory sources `[slack]`/`[telegram]` are ready for when they are.
+- Rule enforcement is keyword-based (word-boundary match on the tool name and
+  arguments) — it over-asks rather than under-asks.
+
 ## 9. Troubleshooting
+
+- **"this agent session is read-only" in a run** — the run is Proactive or its
+  schedule's permission set is Read-only. Change the schedule to Directed, or
+  use Run now (Directed), to let it act.
+- **An action keeps asking even with an auto-approve rule** — it hit the
+  sensitive-action gate or one of the agent's enforced rules; the approval's
+  detail says which.
 
 - **Agent runs with the wrong model** — check the agent's model field and that
   the provider has a model template (Settings → Providers); a template-less

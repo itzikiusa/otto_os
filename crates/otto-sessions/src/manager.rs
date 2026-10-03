@@ -96,6 +96,24 @@ fn lean_turn_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
     ]
 }
 
+/// Extra argv for a **read-only** session (`meta.read_only = true` — a
+/// proactive personal-agent run, or a run of a read-only schedule). The CLI's
+/// own shell and sub-agents are removed so nothing can run `git push` / `gh` /
+/// `curl -X POST`; file edits stay (the agent writes its memory + report) and
+/// are confined to its folder by the forced Seatbelt profile
+/// ([`SessionManager::apply_sandbox`]). Otto's own tools are refused at the
+/// daemon (otto-server `personal_agent_policy`). Claude-only flag; other
+/// providers rely on the sandbox + the daemon-side policy.
+fn read_only_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
+    if provider != "claude" || meta.get("read_only").and_then(|v| v.as_bool()) != Some(true) {
+        return vec![];
+    }
+    vec![
+        "--disallowed-tools".to_string(),
+        "Bash NotebookEdit Task".to_string(),
+    ]
+}
+
 /// Per-session creds file for the Codex `otto` MCP server: a daemon-private temp
 /// path (`<tmp>/otto-mcp/<session_id>.json`, mode 0600). Holds the per-session
 /// token so it never appears on Codex's argv; removed when the session is removed.
@@ -2244,15 +2262,25 @@ impl SessionManager {
         if !otto_sandbox::is_supported() {
             return;
         }
-        let Some(sr) = &self.settings else {
-            return;
-        };
-        let cfg = match sr.get("process_sandbox").await {
-            Ok(Some(v)) => v,
-            _ => return,
-        };
-        let Some(network) = sandbox_decision(&cfg, session.kind, &session.provider) else {
-            return;
+        // A read-only session (`meta.read_only`) is ALWAYS confined, whatever
+        // the `process_sandbox` setting says: writes only inside its own
+        // folder (+ temp + the CLIs' config dirs). Network stays open so the
+        // CLI reaches its model API.
+        let forced = session.meta.get("read_only").and_then(|v| v.as_bool()) == Some(true);
+        let network = if forced {
+            otto_sandbox::NetworkPolicy::Full
+        } else {
+            let Some(sr) = &self.settings else {
+                return;
+            };
+            let cfg = match sr.get("process_sandbox").await {
+                Ok(Some(v)) => v,
+                _ => return,
+            };
+            let Some(network) = sandbox_decision(&cfg, session.kind, &session.provider) else {
+                return;
+            };
+            network
         };
 
         let cwd = std::path::PathBuf::from(&session.cwd);
@@ -2631,6 +2659,7 @@ impl SessionManager {
                     &meta_val,
                 ));
                 spec.args.extend(lean_turn_args(&provider, &meta_val));
+                spec.args.extend(read_only_args(&provider, &meta_val));
                 // Record the provider_session_id NOW only when Otto assigns it
                 // (claude, via `--session-id {sid}`). Providers that mint their
                 // own id (codex) start with None and have it captured from disk
@@ -5041,6 +5070,8 @@ impl SessionManager {
                         .as_deref(),
                     &session.meta,
                 ));
+                spec.args
+                    .extend(read_only_args(&session.provider, &session.meta));
                 spec
             }
         };
@@ -8095,6 +8126,19 @@ mod tests {
     }
 
     // ── model_args tests ────────────────────────────────────────────────────
+
+    /// A read-only claude session loses its shell and sub-agents.
+    #[test]
+    fn read_only_args_strip_the_shell_for_read_only_claude_sessions() {
+        let on = serde_json::json!({ "read_only": true });
+        let args = read_only_args("claude", &on);
+        assert_eq!(args[0], "--disallowed-tools");
+        assert!(args[1].split(' ').any(|t| t == "Bash"));
+        assert!(args[1].split(' ').any(|t| t == "Task"));
+        assert!(read_only_args("claude", &serde_json::json!({})).is_empty());
+        assert!(read_only_args("claude", &serde_json::json!({ "read_only": "yes" })).is_empty());
+        assert!(read_only_args("codex", &on).is_empty());
+    }
 
     /// claude with a model set → ["--model", name].
     #[test]
