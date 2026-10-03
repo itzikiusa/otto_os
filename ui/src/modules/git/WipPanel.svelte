@@ -47,6 +47,13 @@
   // skipped it and the commit silently left those edits out.
   const unstaged = $derived(status.changes.filter((c) => c.unstaged && c.kind !== 'conflicted'));
   const staged = $derived(status.changes.filter((c) => c.staged && c.kind !== 'conflicted'));
+  // The daemon caps untracked rows (a non-ignored build dir can hold 200k):
+  // say how many were left out instead of pretending the list is complete.
+  const hiddenUntracked = $derived(
+    status.untracked_truncated && status.untracked_total != null
+      ? Math.max(0, status.untracked_total - status.changes.filter((c) => c.kind === 'untracked').length)
+      : 0,
+  );
 
   /** Partially staged: porcelain `MM` — the index and the worktree BOTH differ.
    *  One `FileChange` carries both flags (`parse.rs` emits a single row per
@@ -754,6 +761,15 @@
         <div class="wp-list">
           {@render sectionRows(unstagedRows, 'unstaged', 'Nothing unstaged.')}
         </div>
+        {#if hiddenUntracked > 0}
+          <p class="wp-untracked-cap" role="note">
+            <Icon name="info" size={12} />
+            <span
+              >{hiddenUntracked.toLocaleString()} more untracked file{hiddenUntracked === 1 ? '' : 's'} not shown. If they're
+              build output or dependencies, add them to <code>.gitignore</code>.</span
+            >
+          </p>
+        {/if}
       {/if}
     </div>
 
@@ -1354,4 +1370,17 @@
       font-size: var(--fs-l);
     }
   }
+  .wp-untracked-cap {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 4px 10px 6px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--warning-soft);
+    color: var(--text);
+    font-size: var(--fs-xs);
+    line-height: 1.4;
+  }
+  .wp-untracked-cap code { font-size: var(--fs-xs); }
 </style>
