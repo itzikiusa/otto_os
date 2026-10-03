@@ -507,7 +507,13 @@ the live planning sessions as they spawn.
   encrypted store before the plaintext file is wiped and deleted, and the
   running daemon switches over without a restart. It never runs on its own — a
   Keychain prompt must not block an unattended deploy. A locked Keychain shows
-  as "locked" (bounded 8 s wait), never a hung request.
+  as "locked" (bounded 8 s wait, shared by all concurrent callers — the key is
+  fetched before the store's file lock), never a hung request. The plaintext
+  file is renamed aside before it is zeroed and unlinked, so a failed unlink
+  never leaves a zeroed `secrets.json` that would select plaintext mode; any
+  such residue is removed at the next start. If the final check fails AFTER
+  the switch, Settings says the secrets were encrypted and the backup
+  `secrets.migrate-backup.enc` was kept (not "nothing changed").
 - **Append-only audit log.** Security-relevant actions (login success/failure/
   lockout, token mint/revoke, settings change, listener toggle, confirmed guarded
   writes, grant changes, session terminate, impersonate start/stop) are written

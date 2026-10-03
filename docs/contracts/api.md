@@ -2535,19 +2535,35 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /admin/db/stats | root | — | `DbStatsResp {size_bytes, free_bytes, auto_vacuum: 0\|1\|2, compacting}` |
-| POST /admin/db/compact | root | `{confirm: true}` | `DbCompactReport {before_bytes, after_bytes, freed_bytes, duration_ms, auto_vacuum}` · 400 without `confirm` · 409 while one is running |
+| GET /admin/db/stats | root | — | `DbStatsResp {size_bytes, free_bytes, auto_vacuum: 0\|1\|2, compacting, compaction_scheduled, estimated_offline_ms}` |
+| POST /admin/db/compact | root | `{confirm: true, at?: "now"\|"next_restart"\|"cancel"}` (default `now`) | `now`: `DbCompactReport {before_bytes, after_bytes, freed_bytes, duration_ms, auto_vacuum}` · `next_restart`/`cancel`: `DbCompactScheduled {compaction_scheduled, estimated_offline_ms}` · 400 without `confirm` · 409 while one is running |
 
 - `compact` is the one-time `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;` rewrite
   of `otto.db`. It holds the SQLite write lock for the whole rewrite (tens of
   seconds on a large DB): the UI sends it only after a confirm dialog that
   says writes stall meanwhile. Audited as `db.compact` (`detail` = the
-  report). It also runs ONCE on its own when the file is not converted and
-  more than 20 % and 64 MiB of it are free pages: inline at boot (before the
-  listener) when the live data is ≤ 128 MiB, otherwise from the hourly pass
-  while no session is live. Once `auto_vacuum = 2`, the daemon's hourly
-  maintenance runs `PRAGMA incremental_vacuum(4000)` and the trigger never
-  fires again.
+  report).
+- **Offline compaction at start (no write stall).** `at: "next_restart"`
+  writes `otto.db.compact-requested`; at the next start, BEFORE the pool
+  opens, the daemon runs `VACUUM INTO 'otto.db.compact-tmp'` (with
+  `auto_vacuum = INCREMENTAL`), verifies the copy (`quick_check`, identical
+  schema, identical row count per table), then swaps: `otto.db` →
+  `otto.db.precompact`, the copy → `otto.db`. The old file is deleted only
+  after the new one opened and migrated; a start that dies first leaves
+  `otto.db.compact-swapped`, and the following start restores the old file
+  (WAL/SHM included) and writes `otto.db.compact-failed` (no further
+  automatic attempts; an explicit request clears it — `cancel` writes the same
+  marker, so it also opts out of the automatic pass). Any failure leaves the
+  original untouched and the start continues. Audited as
+  `db.compact_scheduled` / `db.compact_cancelled`. `estimated_offline_ms` ≈
+  live bytes ÷ 150 MB/s (VACUUM INTO of a 400 MB file measured 0.7 s).
+- **Automatic.** The same offline pass runs on its own at start when the file
+  is not converted and more than 20 % and 64 MiB of it are free pages (live
+  data ≤ 4 GiB; `compaction_scheduled` is then `true`). A running daemon only
+  rewrites a SMALL file in place (live ≤ 128 MiB, hourly pass, no live
+  session); a large one is never VACUUMed under a running daemon. Once
+  `auto_vacuum = 2`, the hourly maintenance runs
+  `PRAGMA incremental_vacuum(4000)` and the trigger never fires again.
 - Boot (no endpoint): `PRAGMA analysis_limit=1000; PRAGMA optimize=0x10002`
   right after migrations, so `sqlite_stat1` exists from the first query.
 - Hourly maintenance (no endpoint): `PRAGMA optimize`, then

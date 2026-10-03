@@ -2,12 +2,14 @@
   // Settings → Backup & restore → "Database storage" (root only).
   // Shows otto.db's size + reclaimable free space and runs the ONE-TIME
   // compaction (POST /admin/db/compact): auto_vacuum=INCREMENTAL + VACUUM.
-  // It rewrites the whole file and blocks every database write meanwhile, so
-  // it only runs after an explicit confirm. Afterwards the daemon's hourly
-  // maintenance gives free pages back on its own.
+  // "Compact now" rewrites the whole file and blocks every database write
+  // meanwhile, so it only runs after an explicit confirm. "Compact at next
+  // restart" (at: next_restart) copies + swaps the file offline before the
+  // daemon opens it — no write stall, the start takes a few seconds longer.
+  // Afterwards the daemon's hourly maintenance gives free pages back on its own.
   import { onMount } from 'svelte';
   import { api } from '../../lib/api/client';
-  import type { DbStatsResp, DbCompactReport } from '../../lib/api/types';
+  import type { DbStatsResp, DbCompactReport, DbCompactScheduled } from '../../lib/api/types';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { formatBytes } from '../../lib/metric-format';
@@ -34,6 +36,36 @@
   onMount(load);
 
   const compacted = $derived(stats?.auto_vacuum === 2);
+  let scheduling = $state(false);
+  const secs = (ms: number): string => (ms < 10_000 ? (ms / 1000).toFixed(1) : Math.round(ms / 1000).toString());
+
+  async function schedule(at: 'next_restart' | 'cancel') {
+    if (!stats) return;
+    if (at === 'next_restart') {
+      const ok = await confirmer.ask(
+        `Compact otto.db (${formatBytes(stats.size_bytes)}) the next time Otto’s daemon starts? ` +
+          `It makes a compacted, verified copy before anything opens the database, so no write waits; that start takes ` +
+          `about ${secs(stats.estimated_offline_ms)} s longer. The original file is kept until the new one opens cleanly. ` +
+          'Nothing is deleted.',
+        { title: 'Compact at next restart', confirmLabel: 'Schedule' },
+      );
+      if (!ok) return;
+    }
+    scheduling = true;
+    try {
+      const r = await api.post<DbCompactScheduled>('/admin/db/compact', { confirm: true, at });
+      if (at === 'next_restart') {
+        toasts.success('Compaction scheduled', `Runs at the next daemon start (≈${secs(r.estimated_offline_ms)} s).`);
+      } else {
+        toasts.success('Scheduled compaction cancelled');
+      }
+      await load();
+    } catch (e) {
+      toasts.error('Couldn’t schedule the compaction', msg(e));
+    } finally {
+      scheduling = false;
+    }
+  }
 
   async function compact() {
     if (!stats) return;
@@ -70,12 +102,28 @@
     <dl class="facts">
       <div><dt>Size</dt><dd>{formatBytes(stats.size_bytes)}</dd></div>
       <div><dt>Reclaimable</dt><dd>{formatBytes(stats.free_bytes)}</dd></div>
-      <div><dt>Compaction</dt><dd>{compacted ? 'Done — free space is returned hourly' : 'Not yet'}</dd></div>
+      <div>
+        <dt>Compaction</dt>
+        <dd>
+          {#if stats.compaction_scheduled}
+            Scheduled for the next restart (≈{secs(stats.estimated_offline_ms)} s)
+          {:else}
+            {compacted ? 'Done — free space is returned hourly' : 'Not yet'}
+          {/if}
+        </dd>
+      </div>
     </dl>
     <div class="controls">
+      {#if stats.compaction_scheduled}
+        <button class="btn" disabled={scheduling} onclick={() => schedule('cancel')}>Cancel scheduled compaction</button>
+      {:else}
+        <button class="btn" disabled={scheduling || compacting || stats.compacting} onclick={() => schedule('next_restart')}>
+          <Icon name="db" size={13} />
+          Compact at next restart…
+        </button>
+      {/if}
       <button class="btn" disabled={compacting || stats.compacting} onclick={compact}>
-        <Icon name="db" size={13} />
-        {compacting || stats.compacting ? 'Compacting…' : compacted ? 'Compact again…' : 'Compact database…'}
+        {compacting || stats.compacting ? 'Compacting…' : compacted ? 'Compact again now…' : 'Compact now…'}
       </button>
     </div>
     {#if last}
