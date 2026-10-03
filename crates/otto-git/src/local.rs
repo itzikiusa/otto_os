@@ -162,14 +162,13 @@ fn io_err(e: std::io::Error) -> Error {
     Error::Internal(format!("git io: {e}"))
 }
 
-/// The git subcommand in an argv, for error text: `args[0]`, or `args[2]` when
-/// the call is prefixed with `-c <key=value>` (the diff family does that).
 /// Top-level `-c` config Otto adds per subcommand (prepended before `args`):
 ///
 /// * `merge.conflictStyle=diff3` for every subcommand that can leave conflict
-///   markers. With git's default `merge` style the markers carry only
-///   ours/theirs, so the resolver had no BASE for rebase, cherry-pick,
-///   revert, pull or stash conflicts (only `merge_branch` set it). `diff3`,
+///   markers (for `stash`, only `pop` / `apply`). With git's default `merge`
+///   style the markers carry only ours/theirs, so the resolver had no BASE for
+///   rebase, cherry-pick, revert, pull or stash conflicts (only `merge_branch`
+///   set it). `diff3`,
 ///   not `zdiff3`, so older gits still work; `parse_conflict_segments` reads
 ///   it.
 /// * `fetch.writeCommitGraph=true` on fetch/pull: git keeps an incremental
@@ -191,7 +190,10 @@ pub(crate) fn implicit_config_args(args: &[&str]) -> &'static [&'static str] {
     match args.first() {
         Some(&"fetch") if cg => CG,
         Some(&"pull") if cg => DIFF3_CG,
-        Some(&("cherry-pick" | "revert" | "rebase" | "pull" | "stash" | "merge" | "am")) => DIFF3,
+        Some(&("cherry-pick" | "revert" | "rebase" | "pull" | "merge" | "am")) => DIFF3,
+        // Only the stash verbs that can conflict: `stash push` / `list` stay
+        // bare (and keep their argv shape for wrappers keyed on `$1`).
+        Some(&"stash") if matches!(args.get(1), Some(&("pop" | "apply"))) => DIFF3,
         _ => &[],
     }
 }
@@ -201,6 +203,8 @@ fn commit_graph_enabled() -> bool {
     std::env::var("OTTO_GIT_COMMIT_GRAPH").map_or(true, |v| v.trim() != "0")
 }
 
+/// The git subcommand in an argv, for error text: `args[0]`, or `args[2]` when
+/// the call is prefixed with `-c <key=value>` (the diff family does that).
 fn verb_of<'a>(args: &'a [&'a str]) -> &'a str {
     match args.first() {
         Some(&"-c") => args.get(2).copied().unwrap_or("command"),
