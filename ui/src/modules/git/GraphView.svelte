@@ -34,6 +34,7 @@
   import WipPanel from './WipPanel.svelte';
   import GraphCommitDiff, { prefetchCommitSummary } from './graph-commit-diff.svelte';
   import { graphCache, type GraphSnapshot } from './graph-cache';
+  import { spliceHistory } from './graph-splice';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { runPull } from './pullFlow';
   import { gitBridge } from './gitBridge.svelte';
@@ -344,8 +345,23 @@
   function setRefs(next: RefsResp): void {
     const key = JSON.stringify(next);
     if (refs !== null && key === refsKey) return;
+    if (refs !== null && !refRemoved) refRemoved = lostRef(refs, next);
     refsKey = key;
     refs = next;
+  }
+
+  /** A ref (branch/tag) disappeared since the history was last read in full:
+   *  commits only it reached may sit deep in the held tail, so the next reload
+   *  must not splice (graph-splice.ts) — it re-reads everything instead. */
+  let refRemoved = false;
+  function lostRef(prev: RefsResp, next: RefsResp): boolean {
+    const keys = (r: RefsResp) => [
+      ...r.local.map((b) => `l:${b.name}`),
+      ...r.remote.map((b) => `r:${b.name}`),
+      ...r.tags.map((t) => `t:${t.name}`),
+    ];
+    const have = new Set(keys(next));
+    return keys(prev).some((k) => !have.has(k));
   }
 
   /** Retry a failed first page (the inline error's Retry). */
@@ -468,7 +484,21 @@
 
   /** Pull the next page in as the user approaches the bottom, so history just
    *  keeps going instead of stopping at an arbitrary cutoff. */
+  let scrollFrame = 0;
   function onGraphScroll(): void {
+    // One state write per frame: scroll events fire several times a frame on
+    // trackpads, and each write re-derived the row window.
+    if (scrollFrame) return;
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0;
+      onGraphScrollFrame();
+    });
+  }
+  $effect(() => () => {
+    if (scrollFrame) cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
+  });
+  function onGraphScrollFrame(): void {
     syncViewport();
     const el = graphPanelEl;
     if (!el || loadingMore || !hasMore) return;
@@ -895,6 +925,8 @@
   interface GraphFetch {
     gen: number;
     want: number;
+    /** Set when the result was spliced: `hasMore` carries over from before. */
+    more: boolean | null;
     commits: CommitInfo[] | null;
     error: unknown;
     stashes: StashInfo[] | null;
@@ -903,34 +935,59 @@
 
   /** The EXPENSIVE half of a refresh: the `log --all` page plus stashes and
    *  worktrees. Fetch only — [`applyGraph`] assigns. */
-  async function fetchGraph(id: string): Promise<GraphFetch> {
-    // Re-read exactly as much history as the user had already paged in, so a
-    // refresh after a commit/pull doesn't yank the graph back to the first page
-    // and lose their place — and never MORE: the old `ceil((n + 1) / PAGE)`
-    // grew the request by a whole page on every refresh (10k → 20k → 30k…).
-    const want = Math.max(PAGE, commits.length);
+  async function fetchGraph(id: string, full = false): Promise<GraphFetch> {
+    // Read ONE page and splice it onto the history already held (older
+    // commits are immutable — see graph-splice.ts). Only when the splice
+    // can't be proven safe (rewritten/deleted history inside the page) does
+    // it re-read exactly as much as the user had paged in, so a refresh never
+    // yanks the graph back to the first page — and never MORE: the old
+    // `ceil((n + 1) / PAGE)` grew the request by a page per refresh.
+    const held = commits;
+    const heldMore = hasMore;
     loadGen++;
     loadingMore = false;
     inflight = null;
     const gen = loadGen;
-    const [c, st, wt] = await Promise.all([
+    const readLog = (limit: number) =>
       api
-        .get<CommitInfo[]>(`/repos/${id}/log?all=true&limit=${want}`)
+        .get<CommitInfo[]>(`/repos/${id}/log?all=true&limit=${limit}`)
         .then((v) => ({ v, e: null as unknown }))
-        .catch((e: unknown) => ({ v: null, e })),
+        .catch((e: unknown) => ({ v: null, e }));
+    if (full) refRemoved = false;
+    const [c0, st, wt] = await Promise.all([
+      readLog(full ? Math.max(PAGE, held.length) : PAGE),
       api.get<StashInfo[]>(`/repos/${id}/stashes`).catch(() => null),
       api.get<WorktreeInfo[]>(`/repos/${id}/worktrees`).catch(() => null),
     ]);
-    return { gen, want, commits: c.v, error: c.e, stashes: st, worktrees: wt };
+    let c = c0;
+    let want = full ? Math.max(PAGE, held.length) : PAGE;
+    let more: boolean | null = null;
+    if (!full && c.v && c.v.length >= PAGE && held.length > PAGE) {
+      const spliced = spliceHistory(held, c.v);
+      if (spliced) {
+        c = { v: spliced, e: null };
+        more = heldMore; // the tail (and whether more exists) is unchanged
+      } else if (gen === loadGen) {
+        want = held.length;
+        c = await readLog(want);
+      }
+    }
+    return { gen, want, more, commits: c.v, error: c.e, stashes: st, worktrees: wt };
   }
 
   function applyGraph(g: GraphFetch): void {
     if (g.gen !== loadGen) return; // a newer reload / repo switch owns the state
+    if (g.more !== null && refRemoved) {
+      // Spliced, but a ref vanished meanwhile (refs land beside the log in
+      // refreshAfter): the held tail may hold commits nothing reaches now.
+      void reloadGraph(true);
+      return;
+    }
     if (g.commits) {
       setCommits(g.commits);
       commitsError = null;
       skipCursor = g.commits.length;
-      hasMore = g.commits.length >= g.want;
+      hasMore = g.more ?? g.commits.length >= g.want;
     } else if (commits.length === 0) {
       commitsError = loadErrorText(g.error);
     }
@@ -941,9 +998,9 @@
     if (g.worktrees && !sameJson(worktrees, g.worktrees)) worktrees = g.worktrees;
   }
 
-  async function reloadGraph(): Promise<void> {
+  async function reloadGraph(full = false): Promise<void> {
     const id = repoId;
-    const g = await fetchGraph(id);
+    const g = await fetchGraph(id, full);
     if (id === repoId) applyGraph(g);
   }
 
@@ -1976,27 +2033,56 @@
     return m;
   });
 
+  // Resumable lane layout. The pass below is O(rows × lanes); a "load more"
+  // page used to re-run it over EVERY loaded row (50k rows for a 10k append).
+  // The lane state at the end of the last pass is kept here (plain, not
+  // $state — the derived owns it), and a pass whose `commits` merely EXTENDS
+  // the previous list (same first/last objects at the same positions — pages
+  // are appended with `concat`, so the objects are shared) resumes from there.
+  // Anything else (reload, splice, cache restore, new lane names) lays out
+  // from scratch.
+  interface LaneMemo {
+    names: Map<string, string>;
+    n: number;
+    first: CommitInfo | undefined;
+    last: CommitInfo | undefined;
+    rows: LaneRow[];
+    lanes: (string | null)[];
+    laneColors: number[];
+    laneBranch: (string | null)[];
+    colorIdx: number;
+    widest: number;
+  }
+  let laneMemo: LaneMemo | null = null;
+  /** Rows laid out by the most recent pass (perf probe for the E2E budget). */
+  let lastLayoutRows = 0;
+
   // The graph: rows + the widest lane count reached (drives the gutter width so
   // it reflects the real fan-out, not just node columns). Computed in one pass.
   const graph = $derived.by((): { rows: LaneRow[]; widest: number } => {
     const names = laneNames;
     if (commits.length === 0) {
+      laneMemo = null;
       return { rows: [], widest: 1 };
     }
+    const m = laneMemo;
+    const resume =
+      m !== null && m.names === names && m.n > 0 && m.n <= commits.length &&
+      commits[0] === m.first && commits[m.n - 1] === m.last;
 
     // lanes[i] = sha of the commit expected next in lane i (null = free).
     // laneColors[i] = palette index for lane i — kept index-aligned with lanes[]
     // through every push / pop / null so colors never drift off their lane.
-    const lanes: (string | null)[] = [];
-    const laneColors: number[] = [];
+    const lanes: (string | null)[] = resume ? m.lanes : [];
+    const laneColors: number[] = resume ? m.laneColors : [];
     // laneBranch[i] = branch name this lane is drawing, kept index-aligned with
     // lanes[] exactly like laneColors. A lane inherits its name from the branch
     // ref that starts it (its tip) and CARRIES IT DOWN through the lane's
     // commits, which is what makes hovering a line mid-history meaningful.
-    const laneBranch: (string | null)[] = [];
+    const laneBranch: (string | null)[] = resume ? m.laneBranch : [];
 
-    let colorIdx = 0;
-    let widest = 1;
+    let colorIdx = resume ? m.colorIdx : 0;
+    let widest = resume ? m.widest : 1;
 
     function laneColorAt(i: number): string {
       return PALETTE[(laneColors[i] ?? 0) % PALETTE.length];
@@ -2050,9 +2136,14 @@
       return names.get(commit.sha) ?? null;
     }
 
-    const rows: LaneRow[] = [];
+    // A copy: the previous `rows` array is what consumers hold — mutating it
+    // would hand them the same reference and skip their recompute.
+    const rows: LaneRow[] = resume ? m.rows.slice() : [];
+    const from = resume ? m.n : 0;
+    lastLayoutRows = commits.length - from;
 
-    for (const commit of commits) {
+    for (let ci = from; ci < commits.length; ci++) {
+      const commit = commits[ci];
       // Find this commit's column (which lane is "expecting" this sha)
       let col = lanes.indexOf(commit.sha);
       // A lane already awaiting this sha means the row above continues down into
@@ -2142,8 +2233,27 @@
       rows.push({ commit, col, lines, color, hasAbove, hasBelow: !!firstParent, branch });
     }
 
+    laneMemo = {
+      names,
+      n: commits.length,
+      first: commits[0],
+      last: commits[commits.length - 1],
+      rows,
+      lanes,
+      laneColors,
+      laneBranch,
+      colorIdx,
+      widest,
+    };
+    exposeLayoutProbe();
     return { rows, widest };
   });
+
+  /** E2E perf probe: how many rows the last layout pass computed. */
+  function exposeLayoutProbe(): void {
+    if (typeof window === 'undefined') return;
+    (window as unknown as { __ottoGraphLayoutRows?: number }).__ottoGraphLayoutRows = lastLayoutRows;
+  }
 
   const laneRows = $derived(graph.rows);
 
