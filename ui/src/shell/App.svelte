@@ -154,6 +154,14 @@
       ? (plugins.list.find((p) => p.slug === router.parts[1])?.name ?? 'Plugin')
       : moduleLabel(moduleName),
   );
+  // Browser/PWA tab, history entries and the window list name the page, not
+  // just "Otto". Not in a pop-out (its title comes from the shell) or the
+  // embedded side pane (its document title is never shown).
+  $effect(() => {
+    if (isEmbedded || isPopout) return;
+    const page = moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleTitle;
+    document.title = page ? `${page} — Otto` : 'Otto';
+  });
   // The phone Navigator drawer closes on every navigation (tapping a module or
   // a session row in it should land on that page, not leave it covered).
   $effect(() => {

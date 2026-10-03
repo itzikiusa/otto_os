@@ -863,6 +863,10 @@ class UiStore {
     el.setAttribute('data-ambient', this.ambient);
     if (this.reduceTransparency) el.setAttribute('data-transparency', 'reduced');
     else el.removeAttribute('data-transparency');
+    // The browser/PWA chrome colour follows the page (index.html ships a
+    // static dark one; public/theme-boot.js sets a first guess pre-paint).
+    const bg = colors.getPropertyValue('--bg').trim();
+    if (bg) document.querySelector('meta[name="theme-color"]')?.setAttribute('content', bg);
   }
 
   /**

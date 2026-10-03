@@ -691,7 +691,7 @@
       title="Back (⌘⇧←)"
       aria-label="Back"
     >
-      <Icon name="chevronRight" size={14} />
+      <Icon name="chevronLeft" size={14} />
     </button>
     <button
       class="icon-btn"
@@ -956,6 +956,7 @@
     <button
       class="nav-item"
       class:active={router.module === 'walkthroughs'}
+      aria-current={router.module === 'walkthroughs' ? 'page' : undefined}
       onclick={() => router.go('walkthroughs')}
     >
       <Icon name="info" size={14} />
@@ -964,6 +965,7 @@
     <button
       class="nav-item"
       class:active={router.module === 'settings'}
+      aria-current={router.module === 'settings' ? 'page' : undefined}
       onclick={() => router.go('settings/appearance')}
     >
       <Icon name="gear" size={14} />
@@ -1001,6 +1003,7 @@
   <button
     class="nav-item"
     class:active={isActive(m.id)}
+    aria-current={isActive(m.id) ? 'page' : undefined}
     class:drop-before={dragOverId === m.id && dropSide === 'before'}
     class:drop-after={dragOverId === m.id && dropSide === 'after'}
     class:dragging={dragId === m.id}
@@ -1104,6 +1107,7 @@
     <button
       class="nav-item"
       class:active={router.module === 'agents' || router.module === ''}
+      aria-current={router.module === 'agents' || router.module === '' ? 'page' : undefined}
       data-nav-id={m.id}
       title={sidePane.supported ? SPLIT_HINT : undefined}
       onclick={(e) => navClick(e, 'agents', m.label)}
@@ -1565,9 +1569,6 @@
     border-radius: 5px;
     display: block;
     flex-shrink: 0;
-  }
-  .nav-back :global(svg) {
-    transform: scaleX(-1);
   }
   .nav-head :global(.icon-btn:disabled) {
     opacity: 0.3;
