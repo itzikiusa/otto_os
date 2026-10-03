@@ -14,7 +14,15 @@
 //! seconds actually covered ([`Span::secs`]), so a snapped window never
 //! inflates a rate.
 //!
-//! Counters are stored raw; rates are `greatest(0, max − min) / seconds` per
+//! The dashboards (workloads, health, overview, sparklines, Fleet table and
+//! charts) read the **wide** tiers through a [`WSpan`] ([`wide_totals`],
+//! [`wide_spark_in`], [`wide_series_in`]): counters there are increments,
+//! window totals are stitched from closed coarse buckets + a fine edge
+//! ([`WSpan::plan_total`]) and closed spans are cached ([`query_span`]). The
+//! per-series builders below serve the generic per-metric chart and the
+//! per-path requests view.
+//!
+//! Per-series counters are stored raw; rates are `greatest(0, max − min) / seconds` per
 //! (pod, label-set) inside the window, summed up. A counter reset inside the
 //! window therefore under-counts that pod for the window rather than
 //! producing a negative spike. `min`/`max` compose across buckets, so the
@@ -729,9 +737,10 @@ pub fn parts_secs(parts: &[WSpan], now: i64) -> i64 {
 }
 
 /// Additive totals per `group` row over one wide span, read from the `src`
-/// level → `(group cols…, n, pods, mem_n, mem_sum, mem_max, mem_last_ts,
-/// mem_last, req, err, lat_sum, lat_cnt, hist)`. `filter` appends to the
-/// `WHERE` (leading ` AND …`).
+/// level → `(group cols…, n, pods, mem_n, mem_sum, mem_max, last_mem_ts,
+/// last_mem, req, err, lat_sum, lat_cnt, hist)` — `last_mem*` is the latest
+/// cycle's memory (an alias must not shadow the `mem_last` column it reads).
+/// `filter` appends to the `WHERE` (leading ` AND …`).
 pub fn wide_totals_in(span: &WSpan, src: Level, group: Level, filter: &str) -> String {
     let pods = match src {
         Level::Workload => "max(pods_max)",
@@ -740,8 +749,8 @@ pub fn wide_totals_in(span: &WSpan, src: Level, group: Level, filter: &str) -> S
     let cols = group.cols();
     format!(
         "SELECT {cols}, sum(n) AS n, {pods} AS pods, sum(mem_n) AS mem_n, sum(mem_sum) AS mem_sum,
-                max(mem_max) AS mem_max, toUnixTimestamp(tupleElement(max(mem_last), 1)) AS mem_last_ts,
-                tupleElement(max(mem_last), 2) AS mem_last, sum(req) AS req, sum(err) AS err,
+                max(mem_max) AS mem_max, toUnixTimestamp(tupleElement(max(mem_last), 1)) AS last_mem_ts,
+                tupleElement(max(mem_last), 2) AS last_mem, sum(req) AS req, sum(err) AS err,
                 sum(lat_sum) AS lat_sum, sum(lat_cnt) AS lat_cnt, sumMap(hist) AS hist
          FROM {table} WHERE {time}{filter}
          GROUP BY {cols}",
@@ -799,8 +808,8 @@ impl Totals {
             mem_n: num(r, "mem_n"),
             mem_sum: num(r, "mem_sum"),
             mem_max: num(r, "mem_max"),
-            mem_last_ts: num(r, "mem_last_ts"),
-            mem_last: num(r, "mem_last"),
+            mem_last_ts: num(r, "last_mem_ts"),
+            mem_last: num(r, "last_mem"),
             req: num(r, "req"),
             err: num(r, "err"),
             lat_sum: num(r, "lat_sum"),

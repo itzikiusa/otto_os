@@ -4936,7 +4936,7 @@ is View on GET, Edit on PUT/POST. Enabling requires the usage engine
 | POST /k8s/clusters/{id}/monitor/run | Edit | — | `MonitorStatus` — runs one cycle inline (schema ensured first) |
 | GET /k8s/monitor/overview?window=24h | View | — | `OverviewRow[]`, one per registered cluster (disabled clusters carry `enabled:false`, `health:"off"`) |
 | GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, namespaces: string[] /* all, unfiltered */, workloads: WorkloadRow[] }` |
-| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates; `step_secs` is rounded up to whole minutes / 5 minutes / hours (and ≥ 60 s for windows ≥ 24 min) so the chart reads a rollup |
+| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates; `step_secs` is rounded up to whole minutes / 5 minutes / hours (≥ 60 s for windows ≥ 24 min, whole hours for windows ≥ 24 h) so the chart reads a rollup |
 | GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
 | GET /k8s/clusters/{id}/monitor/health?window=1h | View + per-cluster `discover` grant | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
 
@@ -4963,15 +4963,15 @@ for windows ≥ 24 h); rates divide by the seconds actually covered.
 |---|---|---|
 | GET /k8s/monitor/fleet/filters | selection | `{ window, clusters: [{ id, name, environment, color, rows }] /* every registered cluster + any id with rows; rows = sample+event rows in the window (samples counted per hour bucket) */, namespaces: [{ cluster_id, namespace }], workloads: [{ cluster_id, namespace, workload }], pods: [{ cluster_id, namespace, workload, pod }] /* only for a narrowed selection (workload / pod, or one cluster + ns); ≤ 2000, newest first */ }` |
 | GET /k8s/monitor/fleet/table?group=workload\|pod&sort=restarts&dir=desc&limit=200&offset=0 | selection + grouping/order | `{ window, group, sort, dir, total, offset, rows: FleetRow[] }` — sorted server-side; `sort` ∈ `cluster\|namespace\|workload\|pod\|pods\|restarts\|oom\|crash\|probe\|churn\|mem_last\|mem_avg\|mem_max\|rps\|err_pct\|latency_ms` (400 otherwise); `limit` ≤ 2000 |
-| GET /k8s/monitor/fleet/series?metric=restarts&by=cluster&step= | selection + `metric` ∈ `restarts\|mem\|rps\|err\|latency`, `by` ∈ `cluster\|namespace\|workload\|pod` | `{ window, metric, unit: 'count'\|'bytes'\|'rate'\|'percent'\|'ms', by, step_secs, series: [{ key, label, points: [{ t, v }] }] }` — `restarts` is always one series per class (`by: "class"`); `step` defaults to ~60 buckets, floor 60 s, rounded up to whole minutes / 5 minutes / hours |
+| GET /k8s/monitor/fleet/series?metric=restarts&by=cluster&step= | selection + `metric` ∈ `restarts\|mem\|rps\|err\|latency`, `by` ∈ `cluster\|namespace\|workload\|pod` | `{ window, metric, unit: 'count'\|'bytes'\|'rate'\|'percent'\|'ms', by, step_secs, series: [{ key, label, points: [{ t, v }] }] }` — `restarts` is always one series per class (`by: "class"`); `step` defaults to ~60 buckets, floor 60 s, rounded up to whole minutes / 5 minutes / hours, and to whole hours (≥ 3600) for windows ≥ 24 h |
 | GET /k8s/monitor/fleet/events?class=&sort=ts&dir=desc&limit=200&offset=0 | selection + `class` (as the per-cluster events route, plus `churn` = churn only) | `{ window, sort, dir, total, offset, rows: (MonitorEvent & { cluster_id, cluster })[] }`; `sort` ∈ `ts\|cluster\|namespace\|workload\|pod\|kind\|class\|reason` |
 | GET /k8s/monitor/fleet/requests | selection | `{ window, enabled_on: [{ id, name }], disabled_on: [{ id, name }], rows: [{ path, method, rps, err_pct, avg_ms }] }` (≤ 500, by rps) — rows exist only for clusters with `request_labels` on |
 
 ```ts
 FleetRow { cluster: { id, name, environment, color }; cluster_id; namespace; workload; pod /* '' in workload grouping */;
-           pods /* distinct pods seen in the window */;
+           pods /* workload: most pods in one cycle (or pods with events, if more); pod: 1 */;
            restarts: { oom, crash, probe, unknown }; churn /* planned replacements */;
-           mem_last /* latest sample summed over pods */; mem_avg /* sum of per-pod averages */; mem_max /* hungriest pod sample */;
+           mem_last /* latest cycle's total over pods */; mem_avg /* workload: mean total per cycle; pod: the pod's mean */; mem_max /* hungriest pod sample */;
            rps; err_pct; latency_kind: 'p95'|'avg'|''; latency_ms }
 ```
 
@@ -5017,7 +5017,8 @@ WorkloadRow { namespace; workload; kind; pods; ready;
               mem_trend_pct?;
               restarts: { oom, crash, probe, unknown }; churn_planned; churn_unknown;
               rps; err_pct; err_pct_baseline; rps_baseline; latency_kind: 'p95'|'avg'|''; latency_ms; latency_baseline_ms;
-              versions: string[]; crashloop; spark: { mem: number[]; rps: number[] } }
+              versions: string[] /* from the pod snapshot */; crashloop;
+              spark: { mem: number[] /* mean workload total per cycle */; rps: number[] } /* per (namespace, workload) */ }
 MonitorEvent { ts; namespace; workload; pod; container; kind: 'restart'|'churn'|'version'|'k8s_event';
                class; reason; exit_code; detail: object; actor }
                // kind 'version' = the workload's dominant build version changed; reason "<from> → <to>",

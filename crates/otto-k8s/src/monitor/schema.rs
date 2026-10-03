@@ -13,6 +13,18 @@
 //! | `k8s_pods_1h` | AggregatingMergeTree | 1 h per pod (row count, last seen) | `retention_days` |
 //! | `k8s_events` | MergeTree | one row per event | `retention_days` |
 //!
+//! | `k8s_pod_cycle` | Null | one wide row per pod per cycle (collector) | — |
+//! | `k8s_wl_{1m,5m,1h}` | AggregatingMergeTree | 1 min / 5 min / 1 h per workload | 2 d / 14 d / `retention_days` |
+//! | `k8s_pod_{1m,5m,1h}` | AggregatingMergeTree | 1 min / 5 min / 1 h per pod | 2 d / 14 d / `retention_days` |
+//!
+//! The **wide** tiers are what the dashboards read: the collector writes
+//! counters as reset-aware increments (`wide`), so every column is additive
+//! and the pod / label dimensions fold away — a workload-hour is ONE row.
+//! They need no backfill (their source only exists from the upgrade on), so
+//! [`ensure`] creates their tables and views idempotently on every start.
+//! The per-series tiers below stay for the generic per-metric chart and the
+//! per-path requests view.
+//!
 //! A series is `(cluster, namespace, workload, metric, pod, labels)` —
 //! exactly the identity the raw counter math groups by — so every rollup
 //! keeps `min / max / sum / count / last` per series per bucket and stays
@@ -735,6 +747,43 @@ mod tests {
         }
         // A 90-day retention lets the hour tier keep 90 days.
         assert!(schema_sql(90).contains("TTL t + INTERVAL 90 DAY"));
+    }
+
+    #[test]
+    fn wide_tiers_are_small_granule_and_fed_from_the_cycle_table() {
+        let s = wide_schema_sql(30);
+        assert!(s.contains("CREATE TABLE IF NOT EXISTS k8s_pod_cycle ("));
+        assert!(s.contains(") ENGINE = Null"));
+        for t in wide_tables() {
+            assert!(
+                s.contains(&format!("CREATE TABLE IF NOT EXISTS {t} (")),
+                "{t}"
+            );
+        }
+        assert_eq!(s.matches("index_granularity = 1024").count(), 6);
+        assert!(s.contains("ORDER BY (cluster_id, toMonday(t), namespace, workload, t)"));
+        assert!(s.contains("ORDER BY (cluster_id, toStartOfHour(t), namespace, workload, pod, t)"));
+        assert!(s.contains("hist        SimpleAggregateFunction(sumMap, Map(String, Float64))"));
+        // 1m keeps 2 d, 5m 14 d, 1h the retention.
+        assert_eq!(s.matches("TTL t + INTERVAL 30 DAY").count(), 2);
+        for stmt in s.split(';') {
+            assert!(!stmt.contains('\''), "no string literals in DDL: {stmt}");
+        }
+        let v = wide_views_sql();
+        assert_eq!(
+            v.matches("CREATE MATERIALIZED VIEW IF NOT EXISTS").count(),
+            6
+        );
+        assert!(v.contains("k8s_wl_1h_mv TO k8s_wl_1h"));
+        assert!(
+            v.contains("GROUP BY ts, cluster_id, namespace, workload"),
+            "per cycle first"
+        );
+        assert_eq!(v.matches("FROM k8s_pod_cycle").count(), 6);
+        assert!(
+            !views().contains(&"k8s_wl_1m_mv"),
+            "wide views never trigger the backfill"
+        );
     }
 
     #[test]
