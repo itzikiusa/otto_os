@@ -1,11 +1,17 @@
 <script lang="ts">
   import { radioKey } from '../../../lib/radioKey';
-  // Per-cluster Monitor view. Tabs live in the URL
-  // (`#/kubernetes/monitor/<id>/<workloads|events|insights|settings>`):
+  // Per-cluster Monitor view — the Monitor half of the cluster workspace
+  // (Resources | Monitor switch). Tabs live in the URL
+  // (`#/kubernetes/<id>/monitor/<workloads|events|insights|settings>`):
   // Workloads = sortable table with sparklines + an expandable Trends row;
   // Events = classified restart / churn timeline; Insights = the watchdog
   // agent's latest report; Settings = the probe configuration. Re-fetches on
-  // WS `k8s_monitor_cycle` for this cluster.
+  // WS `k8s_monitor_cycle` for this cluster. Namespace, filter, sort, the
+  // expanded row, the events filter and the scroll offset live in the k8s
+  // store per cluster (persisted), so the view survives module switches,
+  // Resources ↔ Monitor and reloads; the namespace is shared with Resources.
+  // Cross-links: workload → its pods, a pod row → its drawer (Metrics), an
+  // event → the pod drawer's Events tab.
   import { untrack, onDestroy } from 'svelte';
   import { router } from '../../../lib/router.svelte';
   import { k8s } from '../../../lib/stores/k8s.svelte';
@@ -25,6 +31,9 @@
   import Sparkline from './Sparkline.svelte';
   import MonitorSettings from './MonitorSettings.svelte';
   import MonitorInsights from './MonitorInsights.svelte';
+  import K8sViewSwitch from '../K8sViewSwitch.svelte';
+  import { monitorPath, resourcesPath } from '../viewState';
+  import type { K8sDrawerTab } from '../../../lib/stores/k8s.svelte';
   import { WINDOWS, classColor, classLabel, collectorLine, fmtMs, fmtPct, fmtRate, isWindow, rbacMessage } from './monitor-util';
 
   interface Props {
@@ -57,11 +66,21 @@
   let allNamespaces = $state<string[]>([]);
   let loading = $state(true);
   let error = $state('');
-  let ns = $state('');
-  let filter = $state('');
-  let sortKey = $state<keyof K8sMonitorWorkloadRow | 'restarts_total'>('mem_max');
-  let sortDir = $state<1 | -1>(-1);
-  let expanded = $state<string | null>(null);
+  // Remembered view (K-1): seeded from the store, written back as it moves.
+  const saved = untrack(() => k8s.monitorUi(cluster.id));
+  const SORT_KEYS = ['workload', 'pods', 'mem_max', 'mem_pct', 'restarts_total', 'churn_planned', 'rps', 'err_pct', 'latency_ms'];
+  let ns = $state(saved.ns || untrack(() => (k8s.clusterId === cluster.id ? k8s.namespace : '')));
+  let filter = $state(saved.filter);
+  let sortKey = $state<keyof K8sMonitorWorkloadRow | 'restarts_total'>(
+    (SORT_KEYS.includes(saved.sortKey) ? saved.sortKey : 'mem_max') as keyof K8sMonitorWorkloadRow | 'restarts_total',
+  );
+  let sortDir = $state<1 | -1>(saved.sortDir);
+  let expanded = $state<string | null>(saved.expanded);
+  /** The restored expanded row still needs its trends once rows arrive. */
+  let trendsPending = saved.expanded !== null;
+  let scrollRestored = false;
+  let firstReset = true;
+  let monEl = $state<HTMLDivElement | null>(null);
   let series = $state<{ mem: K8sMonitorSeries | null; rps: K8sMonitorSeries | null; err: K8sMonitorSeries | null }>({ mem: null, rps: null, err: null });
   let seriesLoading = $state(false);
   let seriesError = $state('');
@@ -70,8 +89,60 @@
   let abort: AbortController | null = null;
 
   function goTab(id: string): void {
-    router.go(`kubernetes/monitor/${encodeURIComponent(cluster.id)}/${id}`);
+    router.go(monitorPath(cluster.id, id));
   }
+  /** Monitor → Resources: a workload's pods (namespace + filter set). */
+  function openPods(r: K8sMonitorWorkloadRow): void {
+    if (r.namespace && k8s.clusterId === cluster.id && k8s.namespace !== '') k8s.setNamespace(r.namespace);
+    k8s.presetFilter(cluster.id, 'pods', r.workload);
+    router.go(resourcesPath(cluster.id, 'pods'));
+  }
+  /** Monitor → a pod's drawer on the given tab. */
+  function openPod(podNs: string, pod: string, tab: K8sDrawerTab): void {
+    k8s.drawerTab = tab;
+    if (podNs && k8s.clusterId === cluster.id && k8s.namespace !== '' && k8s.namespace !== podNs) k8s.setNamespace(podNs);
+    router.go(resourcesPath(cluster.id, 'pods', podNs, pod));
+  }
+  function rowMenu(e: MouseEvent, r: K8sMonitorWorkloadRow): void {
+    e.preventDefault();
+    ctxMenu.show(e, [
+      { label: 'Open pods', icon: 'box', action: () => openPods(r) },
+      { label: 'Show trends', icon: 'chart', action: () => void toggle(r) },
+    ]);
+  }
+
+  // Persist the view + share the namespace with Resources.
+  $effect(() => {
+    const snap = { ns, filter, sortKey: String(sortKey), sortDir, expanded, classFilter };
+    untrack(() => {
+      k8s.saveMonitorUi(cluster.id, snap);
+      if (snap.ns && k8s.clusterId === cluster.id && k8s.namespace !== snap.ns) k8s.setNamespace(snap.ns);
+    });
+  });
+  function scrollHost(): HTMLElement | null {
+    return monEl?.closest<HTMLElement>('.page-body') ?? null;
+  }
+  function restoreScroll(): void {
+    if (scrollRestored) return;
+    scrollRestored = true;
+    const top = untrack(() => k8s.monitorUi(cluster.id).scrollTop);
+    const host = scrollHost();
+    if (host && top > 0) requestAnimationFrame(() => (host.scrollTop = top));
+  }
+  $effect(() => {
+    const host = scrollHost();
+    if (!host) return;
+    let t: ReturnType<typeof setTimeout> | null = null;
+    const onScroll = (): void => {
+      if (t) clearTimeout(t);
+      t = setTimeout(() => k8s.saveMonitorUi(cluster.id, { scrollTop: Math.round(host.scrollTop) }), 200);
+    };
+    host.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      host.removeEventListener('scroll', onScroll);
+      if (t) clearTimeout(t);
+    };
+  });
   function clusterMenu(e: MouseEvent): void {
     ctxMenu.show(
       e,
@@ -79,7 +150,7 @@
         label: `${c.name} · ${envTone(c.environment).label}`,
         icon: 'helm',
         disabled: c.id === cluster.id,
-        action: () => router.go(`kubernetes/monitor/${encodeURIComponent(c.id)}/${activeTab}`),
+        action: () => router.go(monitorPath(c.id, activeTab)),
       })),
     );
   }
@@ -95,6 +166,13 @@
       enabled = r.enabled;
       allNamespaces = r.namespaces ?? [];
       error = '';
+      if (trendsPending) {
+        trendsPending = false;
+        const row = expanded ? r.workloads.find((w) => `${w.namespace}/${w.workload}` === expanded) : undefined;
+        if (row) void loadTrends(row);
+        else expanded = null;
+      }
+      restoreScroll();
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
       error = e instanceof Error ? e.message : String(e);
@@ -118,6 +196,11 @@
     if (t === 'workloads') untrack(() => void loadWorkloads());
     if (t === 'events') untrack(() => void loadEvents());
     untrack(() => {
+      // The first run is the restored view — keep its expanded row.
+      if (firstReset) {
+        firstReset = false;
+        return;
+      }
       // A different cluster, namespace, window or section owns fresh detail.
       seriesRequest++;
       expanded = null;
@@ -202,7 +285,7 @@
   let events = $state<K8sMonitorEvent[]>([]);
   let eventsLoading = $state(false);
   let eventsError = $state('');
-  let classFilter = $state('');
+  let classFilter = $state(saved.classFilter);
   const CLASS_OPTIONS = ['', 'oom', 'crash', 'probe', 'unknown', 'planned', 'completed', 'version', 'k8s_event'];
 
   async function loadEvents(quiet = false): Promise<void> {
@@ -213,6 +296,7 @@
       if (request !== eventsRequest) return;
       events = next;
       eventsError = '';
+      restoreScroll();
     } catch (e) {
       if (request !== eventsRequest) return;
       eventsError = e instanceof Error ? e.message : String(e);
@@ -260,7 +344,7 @@
   title={cluster.name}
   crumbs={[
     { label: 'Kubernetes', onclick: () => router.go('kubernetes') },
-    { label: 'Monitor', onclick: () => router.go('kubernetes/monitor') },
+    { label: 'All clusters (Monitor)', onclick: () => router.go('kubernetes/monitor') },
   ]}
   subtitle={collectorLine(status, enabled)}
   tabsPlacement="below"
@@ -273,11 +357,13 @@
       <Icon name="chevronDown" size={12} />
     </button>
   {/snippet}
+  {#snippet badge()}
+    <K8sViewSwitch clusterId={cluster.id} view="monitor" />
+  {/snippet}
   {#snippet actions()}
     {#if !viewport.isPhone && (activeTab === 'workloads' || activeTab === 'events')}
       {@render windowPicker()}
     {/if}
-    <button class="btn small ghost" onclick={() => router.go(`kubernetes/${encodeURIComponent(cluster.id)}`)} title="Open the console for this cluster"><Icon name="helm" size={12} /> Console</button>
   {/snippet}
   {#snippet tabs()}
     <nav class="tabs" aria-label="Monitor sections">
@@ -288,7 +374,7 @@
   {/snippet}
 </PageHeader>
 <PageBody>
-<div class="mon">
+<div class="mon" bind:this={monEl}>
   {#if viewport.isPhone && (activeTab === 'workloads' || activeTab === 'events')}<div class="window-bar">{@render windowPicker()}</div>{/if}
 
   {#if activeTab === 'settings'}
@@ -317,7 +403,7 @@
             <span class="tdot" style="background: {classColor(e.class)}"></span>
             <span class="tts mono">{fmtTs(e.ts)}</span>
             <span class="tclass" style="color: {e.kind === 'version' ? 'var(--status-working)' : classColor(e.class)}">{e.kind === 'k8s_event' ? e.reason : e.kind === 'version' ? 'New version' : classLabel(e.class)}</span>
-            <span class="twl"><span class="dim">{e.namespace}/</span><b>{e.workload || e.pod}</b>{#if e.pod && e.pod !== e.workload}<span class="dim"> · {e.pod}</span>{/if}</span>
+            <span class="twl"><span class="dim">{e.namespace}/</span><b>{e.workload || e.pod}</b>{#if e.pod && e.pod !== e.workload}<span class="dim"> · </span><button class="linkish mono" onclick={() => openPod(e.namespace, e.pod, 'events')} title="Open this pod's Events in Resources">{e.pod}</button>{/if}</span>
             <span class="tmsg dim">{eventMsg(e)}</span>
           </li>
         {/each}
@@ -376,7 +462,7 @@
             {#each visible as r (`${r.namespace}/${r.workload}`)}
               {@const key = `${r.namespace}/${r.workload}`}
               {@const total = restartsTotal(r)}
-              <tr class="wl-row" class:open={expanded === key} onclick={() => void toggle(r)}>
+              <tr class="wl-row" class:open={expanded === key} onclick={() => void toggle(r)} oncontextmenu={(e) => rowMenu(e, r)}>
                 <td>
                   <div class="wlname"><button class="workload-toggle" aria-expanded={expanded === key} onclick={(e) => { e.stopPropagation(); void toggle(r); }}>{r.workload}</button><span class="dim small"> {r.kind}{namespaces.length > 1 ? ` · ${r.namespace}` : ''}</span></div>
                   {#if r.crashloop}<span class="chip bad">CrashLoopBackOff ×{r.crashloop}</span>{/if}
@@ -412,6 +498,10 @@
               {#if expanded === key}
                 <tr class="detail">
                   <td colspan="11">
+                    <div class="detail-tools">
+                      <span class="dim small">Pods behind {r.workload}</span>
+                      <button class="btn small" onclick={() => openPods(r)} data-testid="k8s-monitor-open-pods"><Icon name="box" size={12} /> Open pods in Resources</button>
+                    </div>
                     <table class="pods" data-testid="k8s-monitor-pods">
                       <thead>
                         <tr><th>Pod</th><th>Node</th><th>Status</th><th class="num">Memory</th><th class="num">Restarts ({window})</th><th class="num">Lifetime</th><th>Version</th><th class="num">Age</th></tr>
@@ -420,7 +510,7 @@
                         {#each r.pods_detail as p (p.pod)}
                           {@const pr = p.restarts.oom + p.restarts.crash + p.restarts.probe + p.restarts.unknown}
                           <tr class="pod-row" class:bad={p.crashloop || pr > 0 || (p.mem_pct >= 85)}>
-                            <td class="mono">{p.pod}</td>
+                            <td class="mono"><button class="linkish mono" onclick={() => openPod(r.namespace, p.pod, 'metrics')} title="Open this pod (Metrics) in Resources">{p.pod}</button></td>
                             <td class="mono dim">{p.node || '—'}</td>
                             <td>{#if p.crashloop}<span class="chip bad">CrashLoopBackOff</span>{:else}<span class="chip" class:ok={p.ready}>{p.ready ? 'Ready' : p.phase}</span>{/if}</td>
                             <td class="num mono">
@@ -594,7 +684,26 @@
     border-bottom: 1px solid var(--border);
     vertical-align: top;
   }
-  .wl-row {
+.linkish {
+    border: 0;
+    background: none;
+    padding: 0;
+    color: var(--accent-text);
+    cursor: pointer;
+    font: inherit;
+    text-align: start;
+  }
+  .linkish:hover {
+    text-decoration: underline;
+  }
+  .detail-tools {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-block-end: 6px;
+  }
+    .wl-row {
     cursor: pointer;
   }
   .wl-row:hover {

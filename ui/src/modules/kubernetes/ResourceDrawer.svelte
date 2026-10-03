@@ -31,6 +31,8 @@
   import ExecView from './ExecView.svelte';
   import MetricsView from './MetricsView.svelte';
   import WorkloadPods from './WorkloadPods.svelte';
+  import PodHttpPanel from './PodHttpPanel.svelte';
+  import { workloadKindFor } from './podHttp';
 
   interface Props {
     modal?: boolean;
@@ -50,8 +52,13 @@
     onaction: (def: ActionDef, row: K8sRow) => void;
     /** Workloads: jump to one of this object's pods (its own drawer). */
     onopenpod?: (ns: string, pod: string, tab?: K8sDrawerTab) => void;
+    /** Bumped by the workspace after an action on this object (KS-4): the
+     *  drawer re-reads its detail quietly. */
+    reloadNonce?: number;
+    /** Open this workload's row in the Monitor view (K-2). */
+    onmonitor?: (ns: string, workload: string) => void;
   }
-  let { modal = false, clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction, onopenpod }: Props = $props();
+  let { modal = false, clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction, onopenpod, reloadNonce = 0, onmonitor }: Props = $props();
 
   $effect(() => {
     void resourceAccess.load('k8s_cluster', clusterId);
@@ -65,6 +72,22 @@
   const canExec = $derived(canOperation('exec'));
   const isPod = $derived(kind === 'pods');
   const def = $derived(kindDef(kind));
+  /** The pod-http workload this drawer is, or — for a pod — the workload that
+   *  owns it (ReplicaSet → its Deployment by the pod-template-hash suffix). */
+  const httpWorkload = $derived.by((): { kind: string; name: string } | null => {
+    const wk = workloadKindFor(kind);
+    if (wk) return { kind: wk, name };
+    if (!isPod) return null;
+    const owner = (detail?.manifest as { metadata?: { ownerReferences?: { kind: string; name: string }[] } } | null)?.metadata?.ownerReferences?.[0];
+    if (!owner) return null;
+    if (owner.kind === 'ReplicaSet') {
+      const hash = (detail?.manifest as { metadata?: { labels?: Record<string, string> } }).metadata?.labels?.['pod-template-hash'];
+      return hash && owner.name.endsWith(`-${hash}`) ? { kind: 'deployment', name: owner.name.slice(0, -hash.length - 1) } : { kind: 'replicaset', name: owner.name };
+    }
+    const k = owner.kind.toLowerCase();
+    return ['statefulset', 'daemonset', 'job'].includes(k) ? { kind: k, name: owner.name } : null;
+  });
+  const canHttp = $derived((isPod || !!workloadKindFor(kind)) && canOperation('pod_http'));
   /** `spec.selector` of a workload (row extra, or the manifest when the row
    *  is gone) — unlocks the Pods + Logs tabs. */
   const selector = $derived.by((): string => {
@@ -91,6 +114,7 @@
           { id: 'metrics' as const, label: 'Metrics' },
         ]
       : []),
+    ...(canHttp ? [{ id: 'http' as const, label: 'HTTP' }] : []),
   ].filter(t => t.id === 'logs' ? canLogs : t.id === 'terminal' ? canExec : t.id === 'metrics' ? canOperation('metrics') : true));
   /** Container names across the workload's pod template (Logs container filter). */
   const templateContainers = $derived.by((): K8sContainer[] => {
@@ -110,13 +134,15 @@
   // `/containers` call → another `kubectl get pod -o json` per open).
   const containers = $derived<K8sContainer[]>(isPod && detail ? podContainers(detail.manifest) : []);
 
-  async function load(): Promise<void> {
+  async function load(quiet = false): Promise<void> {
     const ac = new AbortController();
     current = ac;
     const sig = ac.signal;
-    detail = null;
+    if (!quiet || !detail) {
+      detail = null;
+      detailLoading = true;
+    }
     detailError = '';
-    detailLoading = true;
     const cid = clusterId;
     const k = kind;
     const n = ns;
@@ -138,6 +164,25 @@
     current?.abort();
     void load();
   }
+
+  /** Header refresh button / `reloadNonce`: re-read without blanking the tab. */
+  let refreshing = $state(false);
+  async function refresh(): Promise<void> {
+    current?.abort();
+    refreshing = true;
+    try {
+      await load(true);
+    } finally {
+      refreshing = false;
+    }
+  }
+  let seenNonce = untrack(() => reloadNonce);
+  $effect(() => {
+    const n = reloadNonce;
+    if (n === seenNonce) return;
+    seenNonce = n;
+    untrack(() => void refresh());
+  });
 
   // Rapid target changes (j/k with the drawer open — ~30 Hz on key repeat,
   // each re-keying this drawer) settle for 150 ms before the get + describe +
@@ -241,6 +286,7 @@
       {#if ns}<span class="dr-ns mono">{ns}</span>{/if}
       {#if row}<span class="status-pill {healthClass(row.health, row.status)}"><span class="hdot"></span>{row.status}</span>{/if}
     </div>
+    <button class="icon-btn" onclick={() => void refresh()} disabled={refreshing} aria-label="Refresh details" title="Refresh details" data-testid="k8s-drawer-refresh"><Icon name="refresh" size={14} /></button>
     <button class="icon-btn dr-close" onclick={onclose} aria-label="Close details" title="Close (Esc)"><Icon name="x" size={14} /></button>
   </header>
 
@@ -271,6 +317,9 @@
               {:else if selector}
                 <button class="btn small" onclick={() => ontab('pods')}><Icon name="box" size={12} /> Pods</button>
                 <button class="btn small" disabled={!canLogs} title={canLogs ? undefined : "You don't have permission to read logs in this namespace"} onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
+              {/if}
+              {#if onmonitor && httpWorkload}
+                <button class="btn small" onclick={() => onmonitor(ns, httpWorkload.name)} title="Open {httpWorkload.name} in the Monitor (history, restarts, req/s)" data-testid="k8s-drawer-monitor"><Icon name="gauge" size={12} /> Monitor</button>
               {/if}
               {#if canEdit}
                 {#each actions as a (a.id + a.label)}
@@ -370,7 +419,12 @@
     {:else if tab === 'terminal' && canExec}
       <ExecView {clusterId} {ns} pod={name} {containers} autoOpen={autoExec} />
     {:else if tab === 'metrics' && canOperation('metrics')}
-      <MetricsView {clusterId} {ns} pod={name} />
+      <MetricsView {clusterId} {ns} pod={name} workload={httpWorkload?.name ?? ''} />
+    {:else if tab === 'http' && canHttp}
+      {#if detailLoading && !detail}<div class="pad"><Skeleton rows={4} height={22} /></div>
+      {:else}
+        <PodHttpPanel {clusterId} {ns} pod={isPod ? name : undefined} workload={httpWorkload} manifest={detail?.manifest ?? null} canMutate={canEdit && canOperation('pod_http')} />
+      {/if}
     {/if}
   </div>
 </aside>

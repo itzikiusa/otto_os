@@ -10847,3 +10847,79 @@ export interface UiControlGrant {
 export type * from './room-types';
 export type * from './room-recap-types';
 export type * from './db-multirun-types';
+
+// --- Kubernetes pod HTTP actions (K-3; docs/contracts/api.md "Pod HTTP actions") ---
+
+export type K8sPodHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+/** `POST /k8s/clusters/{id}/pod-http` — exactly one of `pod` / `workload`. */
+export interface K8sPodHttpReq {
+  namespace: string;
+  pod?: string;
+  /** kind: deployment | statefulset | daemonset | replicaset | job. */
+  workload?: { kind: string; name: string };
+  port: number;
+  method: K8sPodHttpMethod;
+  /** Starts with `/`; no `..`, no `://`, no whitespace. */
+  path: string;
+  headers?: Record<string, string>;
+  body?: string | null;
+  /** Default 10000, max 30000. */
+  timeout_ms?: number;
+  /** Default 4, max 8. */
+  max_concurrency?: number;
+  /** Prod / read-only clusters: a mutating call must echo the target name. */
+  confirm_name?: string;
+}
+
+export interface K8sPodHttpResult {
+  pod: string;
+  /** null when the request never got an HTTP response (`error` says why). */
+  status: number | null;
+  duration_ms: number;
+  /** Authorization / Cookie / Set-Cookie are redacted. */
+  headers: Record<string, string>;
+  /** Capped at 256 KB; base64 when the body isn't UTF-8. */
+  body: string;
+  body_base64: boolean;
+  truncated: boolean;
+  error: string | null;
+  via: 'proxy' | 'port_forward';
+}
+
+export interface K8sPodHttpResp {
+  results: K8sPodHttpResult[];
+  target_name: string;
+  mutating: boolean;
+}
+
+/** A saved per-workload pod HTTP action (`/k8s/clusters/{id}/pod-actions`).
+ *  `{{var}}` placeholders in path / body are filled in by the client. */
+export interface K8sPodAction {
+  id: string;
+  cluster_id: string;
+  namespace: string;
+  workload_kind: string;
+  workload: string;
+  name: string;
+  method: K8sPodHttpMethod;
+  port: number;
+  path: string;
+  headers: Record<string, string>;
+  body_template: string | null;
+  created_by: string | null;
+  updated_at: string;
+}
+
+export interface K8sPodActionInput {
+  id?: string;
+  namespace: string;
+  workload_kind: string;
+  workload: string;
+  name: string;
+  method: K8sPodHttpMethod;
+  port: number;
+  path: string;
+  headers?: Record<string, string>;
+  body_template?: string | null;
+}

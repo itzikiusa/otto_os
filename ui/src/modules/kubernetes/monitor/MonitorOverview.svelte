@@ -69,7 +69,7 @@
   });
 
   function open(row: K8sMonitorOverviewRow, tab = 'workloads'): void {
-    router.go(`kubernetes/monitor/${encodeURIComponent(row.cluster.id)}/${tab}`);
+    router.go(`kubernetes/${encodeURIComponent(row.cluster.id)}/monitor/${tab}`);
   }
 
   async function copy(text: string): Promise<void> {
