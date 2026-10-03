@@ -180,6 +180,12 @@ impl UsageEngine {
                                 if let Err(e) = ensure_ttl(&ch, config.retention_days).await {
                                     tracing::warn!("usage: modify ttl failed (non-fatal): {e}");
                                 }
+                                // One-time: tables created before the DDL had
+                                // PARTITION BY are rebuilt partitioned — BEFORE
+                                // the writer starts and before `available()`, so
+                                // nothing inserts mid-copy and the tailer's
+                                // rebuild purge only touches affected months.
+                                ensure_partitioned(&ch, config.retention_days).await;
                                 if let Err(e) = ch.exec(schema::parts_lifetime_sql()).await {
                                     tracing::warn!(
                                         "usage: old_parts_lifetime setting failed (non-fatal): {e}"
@@ -1245,6 +1251,65 @@ impl UsageEngine {
 /// engine's watcher restarts it. Failed flushes RETAIN their events (bounded)
 /// for the next tick; what's still unflushed when the reinit ends this writer
 /// is lost — a bounded, logged loss instead of the old drop-every-batch.
+/// Repartition any usage table whose live definition has no `PARTITION BY`
+/// (schema drift: `CREATE TABLE IF NOT EXISTS` never upgrades a table). Copy
+/// → verify row counts → atomic `EXCHANGE` → drop the old data. Idempotent
+/// (detected from `system.tables`, so it runs once) and non-fatal: on any
+/// error the original table stays as it was and the next start retries.
+async fn ensure_partitioned(ch: &ClickHouse, retention_days: u32) {
+    for (table, date_col, order_by) in schema::PARTITIONED_TABLES {
+        let key = match ch.query_rows(&schema::partition_key_sql(table)).await {
+            Ok(rows) => rows
+                .first()
+                .and_then(|r| r.get("partition_key"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            Err(e) => {
+                tracing::warn!("usage: partition check of {table} failed (non-fatal): {e}");
+                continue;
+            }
+        };
+        if key.as_deref().is_none_or(|k| !k.is_empty()) {
+            continue; // partitioned already (or no such table)
+        }
+        tracing::info!("usage: repartitioning {table} by month (one-time)");
+        let copy = schema::repartition_sql(table, date_col, order_by, retention_days);
+        if let Err(e) = ch.exec(&copy).await {
+            tracing::warn!("usage: repartition copy of {table} failed (non-fatal): {e}");
+            let _ = ch
+                .exec(&format!("DROP TABLE IF EXISTS {table}_repart SYNC"))
+                .await;
+            continue;
+        }
+        let count = |t: String| async move {
+            ch.query_rows(&format!("SELECT count() AS n FROM {t}"))
+                .await
+                .ok()
+                .and_then(|r| r.first().and_then(|v| v.get("n")).map(|n| n.to_string()))
+        };
+        let (old_n, new_n) = (
+            count(table.to_string()).await,
+            count(format!("{table}_repart")).await,
+        );
+        if old_n.is_none() || old_n != new_n {
+            tracing::warn!(
+                "usage: repartition of {table} aborted — row counts differ ({old_n:?} vs {new_n:?})"
+            );
+            let _ = ch
+                .exec(&format!("DROP TABLE IF EXISTS {table}_repart SYNC"))
+                .await;
+            continue;
+        }
+        match ch.exec(&schema::swap_sql(table)).await {
+            Ok(()) => tracing::info!(
+                "usage: {table} repartitioned ({} rows)",
+                old_n.unwrap_or_default()
+            ),
+            Err(e) => tracing::warn!("usage: repartition swap of {table} failed (non-fatal): {e}"),
+        }
+    }
+}
+
 fn spawn_writer(
     ch: Arc<ClickHouse>,
     mut rx: mpsc::UnboundedReceiver<UsageEvent>,
@@ -1252,8 +1317,16 @@ fn spawn_writer(
 ) {
     tokio::spawn(async move {
         let mut buf: Vec<UsageEvent> = Vec::new();
-        let mut ticker = tokio::time::interval(FLUSH_INTERVAL);
+        // The flush timer is armed only while events are buffered (from the
+        // first one): an idle daemon has no 15 s wake-up at all.
+        let mut deadline: Option<tokio::time::Instant> = None;
         loop {
+            let tick = async {
+                match deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 maybe = rx.recv() => match maybe {
                     Some(ev) => {
@@ -1267,8 +1340,14 @@ fn spawn_writer(
                         break;
                     }
                 },
-                _ = ticker.tick() => flush(&ch, &mut buf, &heal).await,
+                _ = tick => flush(&ch, &mut buf, &heal).await,
             }
+            deadline = match (buf.is_empty(), deadline) {
+                (true, _) => None,
+                // A failed flush keeps its events: retry a full interval later.
+                (false, Some(d)) if d > tokio::time::Instant::now() => Some(d),
+                (false, _) => Some(tokio::time::Instant::now() + FLUSH_INTERVAL),
+            };
         }
     });
 }
