@@ -136,16 +136,6 @@ test('2,000 background + 300 archived sessions: list, archive paging, event stor
   expect(unfiltered.map((l) => l.path), 'no unfiltered session list').toEqual([]);
   expect(await page.locator('.nav-item', { hasText: /^Review agent/ }).count()).toBe(0);
 
-  // F3 — Archived loads lazily, 100 at a time, with Load more.
-  expect(lists.some((l) => l.q.get('archived') === 'true' && l.q.get('limit') === '100')).toBe(false);
-  await page.getByTestId('archived-toggle').click();
-  await expect.poll(() => lists.some((l) => l.q.get('archived') === 'true' && l.q.get('limit') === '100')).toBe(true);
-  await expect(page.locator('.nested-item.archived')).toHaveCount(100);
-  await page.getByTestId('archived-load-more').click();
-  await expect(page.locator('.nested-item.archived')).toHaveCount(200);
-  expect(lists.some((l) => l.q.get('archived') === 'true' && l.q.has('before'))).toBe(true);
-  await page.getByTestId('archived-toggle').click();
-
   // R4 — the archived "any?" probe runs once per selection, not per refresh.
   const probes = () => lists.filter((l) => l.q.get('archived') === 'true' && l.q.get('limit') === '1').length;
   const probesBefore = probes();
@@ -155,7 +145,18 @@ test('2,000 background + 300 archived sessions: list, archive paging, event stor
     await ws.refreshSessions();
     await ws.refreshSessions();
   });
+  expect(probesBefore, 'the first load probed Archived').toBeGreaterThan(0);
   expect(probes(), 'archived probe re-ran on a plain refresh').toBe(probesBefore);
+
+  // F3 — Archived loads lazily, 100 at a time, with Load more.
+  expect(lists.some((l) => l.q.get('archived') === 'true' && l.q.get('limit') === '100')).toBe(false);
+  await page.getByTestId('archived-toggle').click();
+  await expect.poll(() => lists.some((l) => l.q.get('archived') === 'true' && l.q.get('limit') === '100')).toBe(true);
+  await expect(page.locator('.nested-item.archived')).toHaveCount(100);
+  await page.getByTestId('archived-load-more').click();
+  await expect(page.locator('.nested-item.archived')).toHaveCount(200);
+  expect(lists.some((l) => l.q.get('archived') === 'true' && l.q.has('before'))).toBe(true);
+  await page.getByTestId('archived-toggle').click();
 
   // F2/F5/R6 — 200 status events (background + shown ids) through the real
   // socket path: on Chromium no long task (the PerformanceObserver entry type
