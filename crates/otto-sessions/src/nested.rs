@@ -62,6 +62,7 @@ pub struct ProcInfo {
 /// exactly as before this existed).
 ///
 /// `args` is last on purpose — it is the only field that can contain spaces.
+#[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
 pub fn process_table() -> Vec<ProcInfo> {
     let out = match std::process::Command::new("ps")
         .args(["-axo", "pid=,ppid=,etime=,args="])
@@ -215,6 +216,7 @@ pub fn find_nested_agent(root: u32, table: &[ProcInfo]) -> Option<(ProcInfo, &'s
 ///
 /// This is the directory the agent CLI files its transcript under, which is NOT
 /// necessarily the session's cwd — `cd somewhere && claude` is normal.
+#[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
 pub fn process_cwd(pid: u32) -> Option<String> {
     let out = std::process::Command::new("lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
@@ -245,6 +247,7 @@ pub fn process_cwd(pid: u32) -> Option<String> {
 /// Returns `None` when nothing matches — and also when SEVERAL unclaimed
 /// candidates fall in the window (two agents launched in one directory within
 /// the same window): we never guess which conversation belongs to whom.
+#[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
 pub fn claude_transcript_in_window(
     home: &Path,
     cwd: &str,

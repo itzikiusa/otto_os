@@ -213,6 +213,18 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
     }
 }
 
+/// [`resolve_skill_source`] off the runtime worker: it reads skill files and
+/// may shell out to `unzip`/`tar` for an uploaded archive.
+async fn resolve_skill_source_async(
+    library: &otto_context::Library,
+    src: &SkillSourceReq,
+) -> Result<ResolvedSkill> {
+    let (library, src) = (library.clone(), src.clone());
+    tokio::task::spawn_blocking(move || resolve_skill_source(&library, &src))
+        .await
+        .map_err(|e| Error::Internal(format!("skill source task: {e}")))?
+}
+
 /// Resolve the skill under test to a `(name, body)` pair.
 fn resolve_skill_source(
     library: &otto_context::Library,
@@ -1152,7 +1164,7 @@ async fn run_skill_eval_core(
     if req.mode == "score_only" {
         return run_score_only_core(ctx, eval_id, ws, req).await;
     }
-    let resolved = resolve_skill_source(&ctx.context_library, &req.source)?;
+    let resolved = resolve_skill_source_async(&ctx.context_library, &req.source).await?;
     // Use the workspace repo when it's a git repo with commits; otherwise fall
     // back to a scratch repo (~/Otto/SkillsEvaluator), created + git-init'd on
     // demand, so the evaluator works even without a git workspace.
@@ -2057,7 +2069,7 @@ pub(crate) async fn launch_eval(
         if req.task.trim().is_empty() {
             return Err(Error::Invalid("task is required".into()));
         }
-        let resolved = resolve_skill_source(&ctx.context_library, &req.source)?;
+        let resolved = resolve_skill_source_async(&ctx.context_library, &req.source).await?;
         (resolved.name, req.task.trim().to_string())
     };
 

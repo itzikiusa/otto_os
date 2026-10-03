@@ -1,3 +1,5 @@
+// Integration test: sync process/fs calls are fine here.
+#![allow(clippy::disallowed_methods)]
 //! Sessions survive a daemon restart (setting `session_persistence`).
 //!
 //! One `SessionManager` creates a shell session the user started — it runs in

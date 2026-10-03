@@ -197,6 +197,7 @@ type ProcRow = (u32, u32, u64);
 /// Snapshot the OS process table via one `ps -axo pid=,ppid=,time=` pass.
 /// Used by the idle-suspend sweep; a failed/absent `ps` yields an empty table
 /// (the sweep then behaves exactly as before the guard existed).
+#[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
 fn process_table() -> Vec<ProcRow> {
     let out = match std::process::Command::new("ps")
         .args(["-axo", "pid=,ppid=,time="])
@@ -315,6 +316,7 @@ pub fn codex_rollout_path(psid: &str) -> Option<std::path::PathBuf> {
 
 /// [`codex_rollout_path`] under an explicit sessions root.
 pub fn codex_rollout_path_under(root: &std::path::Path, psid: &str) -> Option<std::path::PathBuf> {
+    #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
     fn walk(dir: &std::path::Path, suffix: &str, depth: usize) -> Option<std::path::PathBuf> {
         if depth > 5 {
             return None;
@@ -362,15 +364,27 @@ async fn persist_transcript_path(
     provider_home: Option<&std::path::Path>,
 ) {
     let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let resolved = match provider_home {
+    // Transcript resolution walks `~/.codex/sessions` / `~/.claude/projects`
+    // with sync fs calls — run it on the blocking pool, not a runtime worker.
+    let (provider_s, cwd_s, psid_s) = (provider.to_string(), cwd.to_string(), psid.to_string());
+    let provider_home = provider_home.map(std::path::Path::to_path_buf);
+    let resolved = match tokio::task::spawn_blocking(move || match provider_home {
         Some(root) => crate::lifecycle::transcript_path_in_roots(
             &root.join("projects"),
             &root.join("sessions"),
-            provider,
-            cwd,
-            Some(psid),
+            &provider_s,
+            &cwd_s,
+            Some(&psid_s),
         ),
-        None => crate::lifecycle::transcript_path(&home, provider, cwd, Some(psid)),
+        None => crate::lifecycle::transcript_path(&home, &provider_s, &cwd_s, Some(&psid_s)),
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!(session = %id, "transcript path resolve task failed: {e}");
+            return;
+        }
     };
     match resolved {
         Ok(path) => {
@@ -580,6 +594,7 @@ async fn rollout_actively_written(
     psid: &str,
     settle: Duration,
 ) -> bool {
+    #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
     fn find(dir: &std::path::Path, psid: &str, depth: usize) -> Option<std::path::PathBuf> {
         if depth > 5 {
             return None;
@@ -605,17 +620,25 @@ async fn rollout_actively_written(
         }
         None
     }
-    let Some(path) = find(sessions_root, psid, 0) else {
+    // The recursive walk (up to 5 levels of `~/.codex/sessions`) is sync fs
+    // work: keep it off the runtime worker.
+    let (root, id) = (sessions_root.to_path_buf(), psid.to_string());
+    let Some(path) = tokio::task::spawn_blocking(move || find(&root, &id, 0))
+        .await
+        .ok()
+        .flatten()
+    else {
         return false;
     };
-    let stat = |p: &std::path::Path| {
-        std::fs::metadata(p)
+    let stat = |p: std::path::PathBuf| async move {
+        tokio::fs::metadata(p)
+            .await
             .ok()
             .map(|m| (m.len(), m.modified().ok()))
     };
-    let before = stat(&path);
+    let before = stat(path.clone()).await;
     tokio::time::sleep(settle).await;
-    let after = stat(&path);
+    let after = stat(path).await;
     before != after
 }
 
@@ -626,6 +649,7 @@ fn recent_codex_rollouts(
     root: &std::path::Path,
     cutoff: std::time::SystemTime,
 ) -> Vec<std::path::PathBuf> {
+    #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
     fn walk(
         dir: &std::path::Path,
         cutoff: std::time::SystemTime,
