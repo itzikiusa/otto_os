@@ -829,6 +829,8 @@ released: the rows are dropped, columns and stats are kept, and the tab shows
 **"Result released to save memory"** with a **Re-run** button that runs the same
 statement, scope and page again. The tab on screen, running tabs and tabs with
 un-applied edits are never released; results under 1 MB are not worth it.
+An agent reading a released tab (`otto.ui_db_get_result`) gets `released: true`
+and no rows, with a note to run the tab again.
 
 ### View mode & auto-Vertical
 
