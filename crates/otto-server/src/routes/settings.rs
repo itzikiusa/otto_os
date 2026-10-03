@@ -184,3 +184,77 @@ pub async fn db_compact(
     .await;
     Ok(Json(report))
 }
+
+// --- Secret store status + "Secure secrets…" (p-daemon SEC-1) ---------------
+
+fn secrets_control() -> ApiResult<std::sync::Arc<otto_keychain::SecretsControl>> {
+    otto_keychain::control::global().ok_or_else(|| {
+        otto_core::Error::NotFound("this daemon has no managed secret store".into()).into()
+    })
+}
+
+/// `GET /admin/secrets/status` — active secret backend, whether plaintext
+/// `secrets.json` is in use (entry COUNT only) and the master-key state
+/// (`locked` while a Keychain prompt waits). Root only. Never returns values
+/// or key names.
+pub async fn secrets_status(
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<otto_keychain::SecretsStatus>> {
+    require_root(&user)?;
+    let c = secrets_control()?;
+    // Counting entries reads the plaintext file — keep it off the worker.
+    let st = tokio::task::spawn_blocking(move || c.status())
+        .await
+        .map_err(|e| otto_core::Error::Internal(format!("secrets status task: {e}")))?;
+    Ok(Json(st))
+}
+
+/// Body of `POST /admin/secrets/secure`: `confirm: true` is required — the UI
+/// sends it only after a `confirmer.ask` that explains the Keychain prompt.
+#[derive(serde::Deserialize)]
+pub struct SecureSecretsReq {
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+/// `POST /admin/secrets/secure` — migrate plaintext `secrets.json` into the
+/// encrypted store (master key in the Keychain): every entry is verified to
+/// read back before the plaintext is wiped and deleted; an encrypted backup is
+/// kept until then. Root only, explicit `confirm`, audited (counts only).
+/// NEVER run automatically — the Keychain may prompt, and an unattended boot
+/// must not block on that. 409 if already encrypted / running / the Keychain
+/// is locked (`502`, nothing changed).
+pub async fn secrets_secure(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<SecureSecretsReq>,
+) -> ApiResult<Json<otto_keychain::control::MigrationReport>> {
+    require_root(&user)?;
+    if !body.confirm {
+        return Err(otto_core::Error::Invalid(
+            "securing secrets requires an explicit confirm: true".into(),
+        )
+        .into());
+    }
+    let c = secrets_control()?;
+    let res = tokio::task::spawn_blocking(move || c.migrate_to_encrypted())
+        .await
+        .map_err(|e| otto_core::Error::Internal(format!("secrets migration task: {e}")))?;
+    let detail = match &res {
+        Ok(r) => serde_json::to_value(r).ok(),
+        Err(e) => Some(serde_json::json!({ "error": e.to_string() })),
+    };
+    ctx.audit(NewAuditEntry {
+        user_id: Some(user.id.clone()),
+        action: if res.is_ok() {
+            "secrets.secure".into()
+        } else {
+            "secrets.secure_failed".into()
+        },
+        target: None,
+        detail,
+        ip: None,
+    })
+    .await;
+    Ok(Json(res?))
+}

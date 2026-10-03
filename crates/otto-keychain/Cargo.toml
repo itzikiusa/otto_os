@@ -7,8 +7,12 @@ license.workspace = true
 [dependencies]
 otto-core.workspace = true
 keyring.workspace = true
+ring.workspace = true
+hex.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile.workspace = true
