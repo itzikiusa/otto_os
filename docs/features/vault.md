@@ -251,7 +251,13 @@ the editor are untouched. The panel holds:
   `dashboards`, plus a Service/Repository note's own title and file name.
   Names match after normalisation (`Orders-API` ≡ `orders_api`); hints under
   three characters never match. Sources the user can't access are simply
-  absent; other failures show inline with Retry. Reads are cached for 60 s.
+  absent; other failures show inline with Retry. Reads are cached per key
+  (repo directory / monitor overview / connections 60 s, a repo's `git
+  status` 15 s, the whole panel's result 15 s), so flipping between notes or
+  an Edit → Read re-mount renders with no requests. The panel loads only once
+  it is scrolled (near) into view, superseded loads are aborted, and the
+  open-PR count — a forge call — is opt-in (**Count open PRs** on the repo
+  card, cached 120 s).
 
 The layout button in the note header hides/shows the panels (a per-device
 preference).
