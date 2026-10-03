@@ -26,7 +26,7 @@ import { layout, type Axis } from './splitLayout.svelte';
 import { MAX_PANES, LS_PANES } from './splitLayout';
 import { isEmbedded } from '../desktop';
 import { SCRATCH_WORKSPACE_ID } from './sessionScope';
-import { patchSessionIn } from './sessionPatch';
+import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
 import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
 
 /** Archived rows per "Load more" page (per scope: workspace / scratch). */
@@ -107,6 +107,15 @@ class WorkspaceStore {
   private sessionsTrailing: Promise<void> | null = null;
   /** In-flight fetch-by-id per session id ({@link ensureSession}). */
   private ensuring = new Map<Id, Promise<Session | null>>();
+  /** `session_status` row stamps queued for the next frame (perf R6): a burst
+   *  of N events is ONE `sessions` write, not N id-map + bucket rebuilds.
+   *  `statusMap` is still written per event (dots / badges stay live). */
+  private pendingStatus = new Map<Id, StatusPatch>();
+  private statusFlushRaf: number | null = null;
+  private statusFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** `selectionGeneration` the archived "any?" probe last ran for (perf R4):
+   *  once per workspace switch, not on every refresh. */
+  private archivedProbedFor = -1;
 
   /** In-flight workflow runs (pending|running) in the current workspace, for the
    *  "Running" sidebar list + the Workflows nav count chip. Refreshed on each
@@ -285,10 +294,21 @@ class WorkspaceStore {
     for (const s of flat) if (!(s.id in this.statusMap)) this.statusMap[s.id] = s.status;
     // Prune statusMap entries for sessions no longer present anywhere (left
     // workspaces, reaped sessions) so the map doesn't grow without bound.
-    const known = new Set<Id>([...this.sessions.map((s) => s.id), ...flat.map((s) => s.id)]);
-    for (const id of Object.keys(this.statusMap)) {
-      if (!known.has(id)) delete this.statusMap[id];
-    }
+    this.pruneStatusMap();
+  }
+
+  /** Drop `statusMap` entries for sessions no loaded list holds (left
+   *  workspaces, reaped / exited background sessions) — after every list
+   *  load, so the map doesn't grow with every id an event ever named (R2).
+   *  Live (`working`/`running`) entries stay: a panel watching a background
+   *  session it fetched itself reads its dot from here. */
+  private pruneStatusMap(): void {
+    const known = new Set<Id>();
+    for (const s of this.sessions) known.add(s.id);
+    for (const s of this.otherWsSessions) known.add(s.id);
+    for (const s of this.archivedSessions) known.add(s.id);
+    for (const id of this.ensuring.keys()) known.add(id);
+    for (const id of staleStatusIds(this.statusMap, known)) delete this.statusMap[id];
   }
 
   /** Open a session that lives in another workspace: switch there, then focus
@@ -734,6 +754,7 @@ class WorkspaceStore {
       // id (in parallel), and anything else is fetched on demand
       // ({@link ensureSession}). Archived rows load lazily ({@link loadArchived}).
       const q = shownListQuery(this.extraSources.keys());
+      const probeArchived = !this.archivedLoaded && this.archivedProbedFor !== selection;
       const probe = (w: Id) =>
         api
           .get<Session[]>(`/workspaces/${w}/sessions?archived=true&limit=1`)
@@ -752,12 +773,14 @@ class WorkspaceStore {
           ),
         ).then((pages) => pages.flat()),
         // Once a page is loaded the section knows on its own; until then a
-        // 1-row probe decides whether the folded header shows at all.
-        this.archivedLoaded
-          ? Promise.resolve(false)
-          : Promise.all([...(wsId ? [probe(wsId)] : []), probe(SCRATCH_WORKSPACE_ID)]).then((r) =>
+        // 1-row probe decides whether the folded header shows at all — ONCE
+        // per selection (R4): reconnects, isolation flips and palette creates
+        // refresh too, and archiving here flips `hasArchived` locally.
+        probeArchived
+          ? Promise.all([...(wsId ? [probe(wsId)] : []), probe(SCRATCH_WORKSPACE_ID)]).then((r) =>
               r.some(Boolean),
-            ),
+            )
+          : Promise.resolve(false),
       ]);
       if (!current()) return;
       const seen = new Set<Id>();
@@ -769,7 +792,10 @@ class WorkspaceStore {
         seen.add(s.id);
         all.push(s);
       }
-      this.hasArchived = archivedAny || this.archivedSessions.length > 0;
+      if (probeArchived) {
+        this.archivedProbedFor = selection;
+        this.hasArchived = archivedAny || this.archivedSessions.length > 0;
+      }
       // Background engine sessions that ARE here (open tabs, live ones this
       // document saw created, `includeSources` panels) stay in `this.sessions`
       // so their owning panels can look them up / open them; every
@@ -781,8 +807,12 @@ class WorkspaceStore {
       // they all derive from `this.sessions`. The setter re-runs this so flips
       // apply live.
       const next = all.filter(visibleOnThisDevice);
+      // The fetched rows are the truth: a stamp queued before they arrived
+      // must not re-apply an older status over them on the next frame.
+      for (const s of next) this.pendingStatus.delete(s.id);
       this.sessions = next;
       for (const s of next) this.statusMap[s.id] = s.status;
+      this.pruneStatusMap();
       if (opts.reconcile !== false) this.reconcileTabs();
     } catch (e) {
       if (current()) throw e;
@@ -1485,6 +1515,31 @@ class WorkspaceStore {
     if (other !== this.otherWsSessions) this.otherWsSessions = other;
   }
 
+  /** Queue a row stamp for {@link flushStatus} (next animation frame, or a
+   *  100 ms timer when frames are paused — a hidden window). */
+  private queueStatus(id: Id, patch: StatusPatch): void {
+    this.pendingStatus.set(id, patch);
+    if (this.statusFlushTimer != null) return;
+    const flush = () => this.flushStatus();
+    this.statusFlushTimer = setTimeout(flush, 100);
+    if (typeof requestAnimationFrame === 'function') this.statusFlushRaf = requestAnimationFrame(flush);
+  }
+
+  /** Apply every queued `session_status` stamp to both lists in one write. */
+  flushStatus(): void {
+    if (this.statusFlushTimer != null) clearTimeout(this.statusFlushTimer);
+    if (this.statusFlushRaf != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.statusFlushRaf);
+    this.statusFlushTimer = null;
+    this.statusFlushRaf = null;
+    if (this.pendingStatus.size === 0) return;
+    const pending = this.pendingStatus;
+    this.pendingStatus = new Map();
+    const mine = applyStatusPatches(this.sessions, pending);
+    if (mine !== this.sessions) this.sessions = mine;
+    const other = applyStatusPatches(this.otherWsSessions, pending);
+    if (other !== this.otherWsSessions) this.otherWsSessions = other;
+  }
+
   /** Event-bus feed (WS /ws/events). */
   applyEvent(ev: OttoEvent): void {
     switch (ev.type) {
@@ -1505,9 +1560,8 @@ class WorkspaceStore {
         // the idle "suspends in N" countdown starts from THIS transition instead
         // of whatever the row said when the list loaded (a session that just
         // went working → idle showed "37m idle · suspending…").
-        const lastActiveAt = new Date().toISOString();
-        const stamp = (s: Session): Session => ({ ...s, status: ev.status, last_active_at: lastActiveAt });
-        this.patchSession(ev.session_id, stamp);
+        // Coalesced (R6): one `sessions` write per frame for a burst.
+        this.queueStatus(ev.session_id, { status: ev.status, at: new Date().toISOString() });
         // The agent resuming work means the operator already responded to
         // whatever it was blocked on — clear the sticky "needs you" flag. Also
         // clear it once the session exits or becomes reconnectable: a dead agent
@@ -1534,6 +1588,20 @@ class WorkspaceStore {
             this.closeTab(ev.session_id);
           }
         }
+        // R2: a background row this document picked up live (a review agent,
+        // a PR draft) leaves the list once it exits, unless something on
+        // screen holds it — they used to pile up until the next refresh.
+        if (ev.status === 'exited') {
+          const s = this.sessionById.get(ev.session_id);
+          if (
+            s &&
+            !isShownKind(s) &&
+            canDropExited(s.id, { tabs: [...this.openTabs, ...this.pendingTabs], panes: layout.panes, ensuring: new Set(this.ensuring.keys()) })
+          ) {
+            this.sessions = this.sessions.filter((x) => x.id !== s.id);
+            this.pendingStatus.delete(s.id);
+          }
+        }
         break;
       }
       case 'session_created': {
@@ -1542,8 +1610,17 @@ class WorkspaceStore {
         // Another device's session under isolation: not ours to list.
         if (!visibleOnThisDevice(s)) break;
         if (this.belongsHere(s.workspace_id)) {
+          // Background rows too: WipPanel / CreatePr watch their draft agent
+          // appear here (exited ones leave again — `session_status`).
           if (!this.sessionById.has(s.id)) this.sessions = [...this.sessions, s];
-        } else if (this.allWorkspaces && !this.otherWsSessions.some((x) => x.id === s.id)) {
+        } else if (
+          this.allWorkspaces &&
+          // The grouped view renders foreground agents only (R2): background
+          // review/workflow agents of other workspaces never belonged here.
+          s.kind === 'agent' &&
+          isForeground(s) &&
+          !this.otherWsSessions.some((x) => x.id === s.id)
+        ) {
           this.otherWsSessions = [...this.otherWsSessions, s];
         }
         break;
