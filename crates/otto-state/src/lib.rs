@@ -45,10 +45,10 @@ pub mod product_chat;
 pub mod product_discovery;
 pub mod product_mockup;
 pub mod product_refinement;
-pub mod proof;
 pub mod projects;
-pub mod provider_models;
+pub mod proof;
 pub mod provider_accounts;
+pub mod provider_models;
 pub mod repo_rules;
 pub mod resource_access;
 pub mod retention;
@@ -101,7 +101,6 @@ pub use connections::{ConnectionsRepo, NewConnection};
 pub use db::open;
 // Re-exported so daemon-side background tasks can name the pool type without
 // taking a direct sqlx dependency.
-pub use pool::DbPool;
 pub use db_explorer::{
     Dashboard, DbExplorerRepo, HistoryEntry, NewSavedQuery, NewWidget, SavedQuery, Widget,
 };
@@ -110,6 +109,7 @@ pub use git::{GitStore, NewGitAccount, NewRepo};
 pub use goal_loops::{GoalLoopsRepo, NewGoalLoop};
 pub use grants::{capability_for_role, GrantCache, GrantsRepo, GRANT_CACHE_TTL};
 pub use name_themes::{CustomTheme, NameThemesRepo};
+pub use pool::DbPool;
 pub use proof::{ProofBlob, ProofRepo, ProofSnapshotRow};
 pub use provider_models::{ProviderModel, ProviderModelsRepo};
 // The raw sqlx pool type, for callers that build their own (tests, tools);
@@ -132,10 +132,10 @@ pub use mcp_auto_approve::{
     AutoApproveRulePatch, McpAutoApproveRepo, McpAutoApproveRule, NewAutoApproveRule,
 };
 pub use mcp_control::{
-    set_approval_change_hook, ApprovalChange, CallLogQuery, DiscoveredTool, McpAllowlistEntry, McpAllowlistRepo, McpApproval,
-    McpApprovalRepo, McpCallLogRepo, McpCallLogRow, McpPolicy, McpPolicyRepo, McpRegistryRepo,
-    McpServerDetail, McpTool, McpToolStats, McpToolsRepo, NewAllowlistEntry, NewApproval,
-    NewCallLog, NewPolicy, NewServerRow,
+    set_approval_change_hook, ApprovalChange, CallLogQuery, DiscoveredTool, McpAllowlistEntry,
+    McpAllowlistRepo, McpApproval, McpApprovalRepo, McpCallLogRepo, McpCallLogRow, McpPolicy,
+    McpPolicyRepo, McpRegistryRepo, McpServerDetail, McpTool, McpToolStats, McpToolsRepo,
+    NewAllowlistEntry, NewApproval, NewCallLog, NewPolicy, NewServerRow,
 };
 pub use mcp_servers::{McpServersRepo, NewMcpServer};
 pub use memory::{GovernedImport, MemoriesRepo};
@@ -162,7 +162,7 @@ pub use product_refinement::{
 };
 pub use repo_rules::RepoRulesRepo;
 pub use resource_access::ResourceAccessRepo;
-pub use retention::{RetentionPolicy, RetentionReport, RetentionRepo};
+pub use retention::{RetentionPolicy, RetentionRepo, RetentionReport};
 pub use review_findings::{
     compute_fingerprint, FindingPatch, FindingState, NewFinding, ReviewFindingRow,
     ReviewFindingsRepo,

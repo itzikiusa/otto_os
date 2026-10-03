@@ -186,7 +186,10 @@ impl<'p> Executor<'p> for &'p DbPool {
         self.route(sql).prepare_with(sql, parameters)
     }
 
-    fn describe<'e, 'q: 'e>(self, sql: &'q str) -> BoxFuture<'e, Result<Describe<Sqlite>, sqlx::Error>>
+    fn describe<'e, 'q: 'e>(
+        self,
+        sql: &'q str,
+    ) -> BoxFuture<'e, Result<Describe<Sqlite>, sqlx::Error>>
     where
         'p: 'e,
     {

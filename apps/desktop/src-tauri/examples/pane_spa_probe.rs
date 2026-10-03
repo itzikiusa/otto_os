@@ -71,17 +71,26 @@ fn assert_host_fills_window(host: &Webview) {
     );
 }
 fn assert_native_content_filled(view: &Webview) {
-    let window=view.window();let native=window.ns_window().unwrap() as usize;
-    let (tx,rx)=std::sync::mpsc::channel();
-    window.run_on_main_thread(move || unsafe {
-        let window=&*(native as *mut objc2::runtime::AnyObject);
-        let content:*mut objc2::runtime::AnyObject=objc2::msg_send![window,contentView];
-        let bounds:objc2_foundation::NSRect=objc2::msg_send![content,bounds];
-        let _=tx.send((bounds.size.width,bounds.size.height));
-    }).unwrap();
-    let expected=rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-    let actual=view.size().unwrap().to_logical::<f64>(window.scale_factor().unwrap());
-    assert!((actual.width-expected.0).abs()<1.0 && (actual.height-expected.1).abs()<1.0,"native content {expected:?}, child {actual:?}");
+    let window = view.window();
+    let native = window.ns_window().unwrap() as usize;
+    let (tx, rx) = std::sync::mpsc::channel();
+    window
+        .run_on_main_thread(move || unsafe {
+            let window = &*(native as *mut objc2::runtime::AnyObject);
+            let content: *mut objc2::runtime::AnyObject = objc2::msg_send![window, contentView];
+            let bounds: objc2_foundation::NSRect = objc2::msg_send![content, bounds];
+            let _ = tx.send((bounds.size.width, bounds.size.height));
+        })
+        .unwrap();
+    let expected = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let actual = view
+        .size()
+        .unwrap()
+        .to_logical::<f64>(window.scale_factor().unwrap());
+    assert!(
+        (actual.width - expected.0).abs() < 1.0 && (actual.height - expected.1).abs() < 1.0,
+        "native content {expected:?}, child {actual:?}"
+    );
 }
 static PROBE_RESULT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(2);
 #[cfg(debug_assertions)]

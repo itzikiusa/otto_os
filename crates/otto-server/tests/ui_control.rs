@@ -23,9 +23,9 @@ use otto_rbac::{AuthRepo, RbacRoleChecker};
 use otto_server::ServerCtx;
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
-    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, GitStore, IntegrationsRepo,
-    IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, DbPool,
-    SwarmRepo, WorkspacesRepo,
+    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool, GitStore, IntegrationsRepo,
+    IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SwarmRepo,
+    WorkspacesRepo,
 };
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -110,12 +110,14 @@ async fn seed_workspace(pool: &DbPool, ws_id: &str, admin: &str) {
     .execute(pool)
     .await
     .expect("seed workspace");
-    sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'admin')")
-        .bind(ws_id)
-        .bind(admin)
-        .execute(pool)
-        .await
-        .expect("member");
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'admin')",
+    )
+    .bind(ws_id)
+    .bind(admin)
+    .execute(pool)
+    .await
+    .expect("member");
 }
 
 async fn test_ctx(pool: &DbPool, base_url: String, tmp: &std::path::Path) -> ServerCtx {
@@ -132,7 +134,9 @@ async fn test_ctx(pool: &DbPool, base_url: String, tmp: &std::path::Path) -> Ser
         improvements: otto_state::ImprovementsRepo::new(pool.clone()),
         sessions: SessionsRepo::new(pool.clone()),
         workspaces: WorkspacesRepo::new(pool.clone()),
-        producer: Arc::new(otto_improve::RealProposalProducer::new(orchestrator.clone())),
+        producer: Arc::new(otto_improve::RealProposalProducer::new(
+            orchestrator.clone(),
+        )),
         events: events.clone(),
         library_root: tmp.join("lib"),
     });
@@ -291,9 +295,18 @@ async fn boot() -> Daemon {
         .await
         .unwrap();
     let repo = AuthRepo::new(pool.clone());
-    let (human, _) = repo.issue_api_token(&"alice".to_string(), Some("ui")).await.unwrap();
-    let (agent, _) = repo.issue_session_api_token(&"alice".to_string(), &s.id).await.unwrap();
-    let (bob, _) = repo.issue_api_token(&"bob".to_string(), Some("ui")).await.unwrap();
+    let (human, _) = repo
+        .issue_api_token(&"alice".to_string(), Some("ui"))
+        .await
+        .unwrap();
+    let (agent, _) = repo
+        .issue_session_api_token(&"alice".to_string(), &s.id)
+        .await
+        .unwrap();
+    let (bob, _) = repo
+        .issue_api_token(&"bob".to_string(), Some("ui"))
+        .await
+        .unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -320,9 +333,10 @@ async fn boot() -> Daemon {
 
 impl Daemon {
     async fn ws(&self, token: &str) -> Ws {
-        let (ws, _) = tokio_tungstenite::connect_async(format!("{}/ws/events?token={token}", self.ws_base))
-            .await
-            .expect("ws connect");
+        let (ws, _) =
+            tokio_tungstenite::connect_async(format!("{}/ws/events?token={token}", self.ws_base))
+                .await
+                .expect("ws connect");
         ws
     }
 
@@ -374,7 +388,12 @@ impl Daemon {
 
     async fn grant(&self, enabled: bool) {
         let (st, body) = self
-            .post(&self.human, &format!("/sessions/{}/ui-control", self.sid), json!({"enabled": enabled}), None)
+            .post(
+                &self.human,
+                &format!("/sessions/{}/ui-control", self.sid),
+                json!({"enabled": enabled}),
+                None,
+            )
             .await;
         assert_eq!(st, 200, "grant({enabled}): {body}");
         assert_eq!(body["meta"]["ui_control"]["enabled"], json!(enabled));
@@ -407,7 +426,11 @@ async fn gets(ws: &mut Ws, ty: &str, wait: Duration) -> bool {
 }
 
 async fn hello(ws: &mut Ws, window: &str, pane: &str, module: &str, caps: &[&str]) -> String {
-    let host = if pane == "side" { json!(window) } else { Value::Null };
+    let host = if pane == "side" {
+        json!(window)
+    } else {
+        Value::Null
+    };
     ws.send(Message::Text(
         json!({"type":"hello","client_id":"dev1","window_id":window,"pane":pane,
                "host_window_id":host,"route":module,"module":module,
@@ -416,7 +439,10 @@ async fn hello(ws: &mut Ws, window: &str, pane: &str, module: &str, caps: &[&str
     ))
     .await
     .unwrap();
-    next_of(ws, "hello_ack").await["conn_id"].as_str().unwrap().to_string()
+    next_of(ws, "hello_ack").await["conn_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -439,7 +465,11 @@ async fn agent_drives_the_window_end_to_end() {
         .await
         .unwrap();
     assert_eq!(cat["version"], 1);
-    assert!(cat["commands"].as_array().unwrap().iter().any(|c| c["name"] == "db_run_query"));
+    assert!(cat["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["name"] == "db_run_query"));
 
     // An agent-session socket may connect (it gets events) but never becomes a window.
     let mut rogue = d.ws(&d.agent).await;
@@ -451,38 +481,73 @@ async fn agent_drives_the_window_end_to_end() {
         ))
         .await
         .unwrap();
-    assert!(!gets(&mut rogue, "hello_ack", Duration::from_millis(500)).await, "agent socket registered");
+    assert!(
+        !gets(&mut rogue, "hello_ack", Duration::from_millis(500)).await,
+        "agent socket registered"
+    );
 
     // The real main window (showing Agents).
     let mut main = d.ws(&d.human).await;
-    let main_conn = hello(&mut main, "w1", "main", "agents", &["open", "state", "focus"]).await;
+    let main_conn = hello(
+        &mut main,
+        "w1",
+        "main",
+        "agents",
+        &["open", "state", "focus"],
+    )
+    .await;
 
     // Ungranted call → the owner is asked; the agent cannot grant itself.
-    let call = d.invoke("ui_db_run_query", json!({"tab_id": "t1", "statement": "select 1"}));
+    let call = d.invoke(
+        "ui_db_run_query",
+        json!({"tab_id": "t1", "statement": "select 1"}),
+    );
     let ask = next_of(&mut main, "ui_control_requested").await;
     assert_eq!(ask["session_id"], json!(d.sid));
     assert_eq!(ask["session_title"], "Fix the report");
     assert_eq!(ask["module"], "connections");
     assert_eq!(ask["command"], "db_run_query");
     let (st, _) = d
-        .post(&d.agent, &format!("/sessions/{}/ui-control", d.sid), json!({"enabled": true}), None)
+        .post(
+            &d.agent,
+            &format!("/sessions/{}/ui-control", d.sid),
+            json!({"enabled": true}),
+            None,
+        )
         .await;
     assert_eq!(st, 403, "agent granted itself");
     assert_eq!(
-        d.patch(&d.agent, &format!("/sessions/{}", d.sid), json!({"meta":{"ui_control":{"enabled":true}}})).await,
+        d.patch(
+            &d.agent,
+            &format!("/sessions/{}", d.sid),
+            json!({"meta":{"ui_control":{"enabled":true}}})
+        )
+        .await,
         403,
         "PATCH set the grant"
     );
     assert_eq!(
-        d.patch(&d.agent, &format!("/sessions/{}", d.sid), json!({"meta":{"client_id":"other-device"}})).await,
+        d.patch(
+            &d.agent,
+            &format!("/sessions/{}", d.sid),
+            json!({"meta":{"client_id":"other-device"}})
+        )
+        .await,
         403,
         "PATCH moved the device"
     );
-    let (st, _) = d.post(&d.agent, "/auth/tokens", json!({"label": "escape"}), None).await;
+    let (st, _) = d
+        .post(&d.agent, "/auth/tokens", json!({"label": "escape"}), None)
+        .await;
     assert_eq!(st, 403, "agent minted a human PAT");
     // Another user cannot grant it either.
     let (st, _) = d
-        .post(&d.bob, &format!("/sessions/{}/ui-control", d.sid), json!({"enabled": true}), None)
+        .post(
+            &d.bob,
+            &format!("/sessions/{}/ui-control", d.sid),
+            json!({"enabled": true}),
+            None,
+        )
         .await;
     assert_eq!(st, 403);
     d.grant(true).await;
@@ -490,14 +555,21 @@ async fn agent_drives_the_window_end_to_end() {
     // Nothing shows Connections → the daemon opens it in the side pane first.
     let open = next_of(&mut main, "ui_command").await;
     assert_eq!(open["command"], "open");
-    assert_eq!(open["args"], json!({"module":"connections","route":"database","placement":"side"}));
+    assert_eq!(
+        open["args"],
+        json!({"module":"connections","route":"database","placement":"side"})
+    );
     assert_eq!(open["agent"]["title"], "Fix the report");
     assert_eq!(open["agent"]["provider"], "claude");
     let mut side = d.ws(&d.human).await;
     let side_conn = hello(&mut side, "w1", "side", "connections", &["db_run_query"]).await;
     let (st, _) = d
-        .post(&d.human, &format!("/ui/commands/{}/result", open["id"].as_str().unwrap()),
-              json!({"ok": true, "result": {"pane": "side"}}), Some(&main_conn))
+        .post(
+            &d.human,
+            &format!("/ui/commands/{}/result", open["id"].as_str().unwrap()),
+            json!({"ok": true, "result": {"pane": "side"}}),
+            Some(&main_conn),
+        )
         .await;
     assert_eq!(st, 204);
 
@@ -512,12 +584,43 @@ async fn agent_drives_the_window_end_to_end() {
     let rows: Vec<Value> = (0..250).map(|i| json!([i])).collect();
     let reply = json!({"ok": true, "result": {"rows": rows, "statement": "select 1", "hint": "key AKIAIOSFODNN7EXAMPLE"}});
     let path = format!("/ui/commands/{id}/result");
-    assert_eq!(d.post(&d.agent, &path, reply.clone(), Some(&side_conn)).await.0, 403, "agent forged a result");
-    assert_eq!(d.post(&d.bob, &path, reply.clone(), Some(&side_conn)).await.0, 403, "another user answered");
-    assert_eq!(d.post(&d.human, &path, reply.clone(), Some(&main_conn)).await.0, 403, "wrong window answered");
-    assert_eq!(d.post(&d.human, &path, reply.clone(), None).await.0, 403, "no connection header");
-    assert_eq!(d.post(&d.human, &path, reply.clone(), Some(&side_conn)).await.0, 204);
-    assert_eq!(d.post(&d.human, &path, reply, Some(&side_conn)).await.0, 404, "answered twice");
+    assert_eq!(
+        d.post(&d.agent, &path, reply.clone(), Some(&side_conn))
+            .await
+            .0,
+        403,
+        "agent forged a result"
+    );
+    assert_eq!(
+        d.post(&d.bob, &path, reply.clone(), Some(&side_conn))
+            .await
+            .0,
+        403,
+        "another user answered"
+    );
+    assert_eq!(
+        d.post(&d.human, &path, reply.clone(), Some(&main_conn))
+            .await
+            .0,
+        403,
+        "wrong window answered"
+    );
+    assert_eq!(
+        d.post(&d.human, &path, reply.clone(), None).await.0,
+        403,
+        "no connection header"
+    );
+    assert_eq!(
+        d.post(&d.human, &path, reply.clone(), Some(&side_conn))
+            .await
+            .0,
+        204
+    );
+    assert_eq!(
+        d.post(&d.human, &path, reply, Some(&side_conn)).await.0,
+        404,
+        "answered twice"
+    );
 
     let out = call.await.unwrap();
     assert_eq!(out["decision"], "allowed", "{out}");
@@ -525,24 +628,49 @@ async fn agent_drives_the_window_end_to_end() {
     assert_eq!(content["ui_visible"], true);
     assert_eq!(content["rows"].as_array().unwrap().len(), 200);
     assert_eq!(content["rows_truncated"], 250);
-    assert!(!content["hint"].as_str().unwrap().contains("AKIAIOSFODNN7EXAMPLE"), "{content}");
+    assert!(
+        !content["hint"]
+            .as_str()
+            .unwrap()
+            .contains("AKIAIOSFODNN7EXAMPLE"),
+        "{content}"
+    );
 
     // Now Connections shows → direct dispatch; a human-confirm progress + a
     // Cancel reach the agent as `cancelled_by_user`.
-    let call = d.invoke("ui_db_run_query", json!({"tab_id": "t1", "statement": "delete from t"}));
+    let call = d.invoke(
+        "ui_db_run_query",
+        json!({"tab_id": "t1", "statement": "delete from t"}),
+    );
     let cmd = next_of(&mut side, "ui_command").await;
     let id = cmd["id"].as_str().unwrap().to_string();
     let (st, _) = d
-        .post(&d.human, &format!("/ui/commands/{id}/progress"), json!({"note":"confirm write","awaiting_human":true}), Some(&side_conn))
+        .post(
+            &d.human,
+            &format!("/ui/commands/{id}/progress"),
+            json!({"note":"confirm write","awaiting_human":true}),
+            Some(&side_conn),
+        )
         .await;
     assert_eq!(st, 204);
     assert_eq!(
-        d.post(&d.agent, &format!("/ui/commands/{id}/progress"), json!({"note":"x"}), Some(&side_conn)).await.0,
+        d.post(
+            &d.agent,
+            &format!("/ui/commands/{id}/progress"),
+            json!({"note":"x"}),
+            Some(&side_conn)
+        )
+        .await
+        .0,
         403
     );
     let (st, _) = d
-        .post(&d.human, &format!("/ui/commands/{id}/result"),
-              json!({"ok": false, "error": {"code": "cancelled_by_user", "message": "Cancelled"}}), Some(&side_conn))
+        .post(
+            &d.human,
+            &format!("/ui/commands/{id}/result"),
+            json!({"ok": false, "error": {"code": "cancelled_by_user", "message": "Cancelled"}}),
+            Some(&side_conn),
+        )
         .await;
     assert_eq!(st, 204);
     let out = call.await.unwrap();
@@ -551,7 +679,10 @@ async fn agent_drives_the_window_end_to_end() {
     assert_eq!(out["executed"], true);
 
     // Bad arguments never leave the daemon.
-    let out = d.invoke("ui_db_run_query", json!({"sql": "x"})).await.unwrap();
+    let out = d
+        .invoke("ui_db_run_query", json!({"sql": "x"}))
+        .await
+        .unwrap();
     assert_eq!(out["code"], "invalid_args", "{out}");
     assert!(!gets(&mut side, "ui_command", Duration::from_millis(300)).await);
 
@@ -567,18 +698,39 @@ async fn agent_drives_the_window_end_to_end() {
 
     // Right after a Stop: pending_grant at once, without asking again.
     let started = std::time::Instant::now();
-    let out = d.invoke("ui_db_run_query", json!({"tab_id": "t1"})).await.unwrap();
+    let out = d
+        .invoke("ui_db_run_query", json!({"tab_id": "t1"}))
+        .await
+        .unwrap();
     assert_eq!(out["code"], "pending_grant", "{out}");
     assert_eq!(out["executed"], false);
-    assert!(out["content"]["error"].as_str().unwrap().contains("hasn't allowed UI control"));
-    assert!(started.elapsed() < Duration::from_secs(5), "quiet period re-asked / waited");
-    assert!(!gets(&mut main, "ui_control_requested", Duration::from_millis(300)).await);
+    assert!(out["content"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("hasn't allowed UI control"));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "quiet period re-asked / waited"
+    );
+    assert!(
+        !gets(
+            &mut main,
+            "ui_control_requested",
+            Duration::from_millis(300)
+        )
+        .await
+    );
     // …and the user can re-grant any time.
     d.grant(true).await;
 
     // An unchanged round-trip of the server-owned keys is accepted and dropped.
     assert_eq!(
-        d.patch(&d.human, &format!("/sessions/{}", d.sid), json!({"meta":{"client_id":"dev1","note":"x"}})).await,
+        d.patch(
+            &d.human,
+            &format!("/sessions/{}", d.sid),
+            json!({"meta":{"client_id":"dev1","note":"x"}})
+        )
+        .await,
         200
     );
 
@@ -592,7 +744,10 @@ async fn agent_drives_the_window_end_to_end() {
     assert!(out["content"]["documents"].as_array().unwrap().is_empty());
     let out = d.invoke("ui_focus", json!({})).await.unwrap();
     assert_eq!(out["code"], "no_ui_client", "{out}");
-    let out = d.invoke("ui_db_run_query", json!({"tab_id": "t1"})).await.unwrap();
+    let out = d
+        .invoke("ui_db_run_query", json!({"tab_id": "t1"}))
+        .await
+        .unwrap();
     assert_eq!(out["code"], "no_ui_client", "{out}");
     let out = d.invoke("ui_db_list_connections", json!({})).await.unwrap();
     assert_eq!(out["content"]["ui_visible"], false, "{out}");
@@ -620,9 +775,19 @@ async fn only_session_credentials_drive_and_only_their_owners_windows() {
 
     // Bob's window never receives alice's session's commands.
     let mut bobs = d.ws(&d.bob).await;
-    let _ = hello(&mut bobs, "wb", "main", "connections", &["db_run_query", "open", "state"]).await;
+    let _ = hello(
+        &mut bobs,
+        "wb",
+        "main",
+        "connections",
+        &["db_run_query", "open", "state"],
+    )
+    .await;
     d.grant(true).await;
-    let out = d.invoke("ui_db_run_query", json!({"tab_id": "t"})).await.unwrap();
+    let out = d
+        .invoke("ui_db_run_query", json!({"tab_id": "t"}))
+        .await
+        .unwrap();
     assert_eq!(out["code"], "no_ui_client", "{out}");
     assert!(!gets(&mut bobs, "ui_command", Duration::from_millis(300)).await);
 }

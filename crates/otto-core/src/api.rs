@@ -3,8 +3,8 @@
 //! These types are mirrored by `ui/src/lib/api/types.ts`. Endpoint shapes are
 //! documented in `docs/contracts/api.md`; the WS protocol in `docs/contracts/ws.md`.
 
-pub mod rooms;
 pub mod recap;
+pub mod rooms;
 pub use recap::*;
 pub use rooms::*;
 
@@ -2641,9 +2641,17 @@ impl Default for WorkspaceContextConfig {
 /// `PUT /workspaces/{id}/context`
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateWorkspaceContextReq {
-    #[serde(default, deserialize_with = "de_double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "de_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub skills: Option<Option<Vec<String>>>,
-    #[serde(default, deserialize_with = "de_double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "de_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub soul: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_context_md: Option<String>,

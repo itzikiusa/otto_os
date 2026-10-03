@@ -1,12 +1,12 @@
 //! Persistence for PR review runs and their draft comments.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{
     CommentSeverity, CommentState, Review, ReviewAgentState, ReviewComment, ReviewStatus,
 };
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, ts};
 
@@ -287,11 +287,12 @@ impl ReviewsRepo {
     /// click / retried request sees `false` and must not post again (the
     /// unconditional state update used to let both requests post).
     pub async fn claim_comment_post(&self, id: &Id) -> Result<bool> {
-        let res = sqlx::query("UPDATE pr_review_comments SET posted = 1 WHERE id = ? AND posted = 0")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("claim comment post"))?;
+        let res =
+            sqlx::query("UPDATE pr_review_comments SET posted = 1 WHERE id = ? AND posted = 0")
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("claim comment post"))?;
         Ok(res.rows_affected() == 1)
     }
 
@@ -524,7 +525,13 @@ mod tests {
         let repo = ReviewsRepo::new(mem_pool().await);
         let review = repo.create_review(&"r".to_string(), 7).await.unwrap();
         let c = repo
-            .add_comment(&review.id, Some("a.rs"), Some(3), CommentSeverity::Warn, "x")
+            .add_comment(
+                &review.id,
+                Some("a.rs"),
+                Some(3),
+                CommentSeverity::Warn,
+                "x",
+            )
             .await
             .unwrap();
         assert!(repo.claim_comment_post(&c.id).await.unwrap());
@@ -540,15 +547,34 @@ mod tests {
         let pool = mem_pool().await;
         let repo = ReviewsRepo::new(pool);
         let review = repo.create_review(&"r".to_string(), 7).await.unwrap();
-        repo.set_status(&review.id, ReviewStatus::Cancelled, None).await.unwrap();
-        repo.set_status(&review.id, ReviewStatus::Done, None).await.unwrap();
-        assert_eq!(repo.get_review(&review.id).await.unwrap().status, ReviewStatus::Cancelled);
-        repo.set_status(&review.id, ReviewStatus::Error, Some("late failure")).await.unwrap();
-        assert_eq!(repo.get_review(&review.id).await.unwrap().status, ReviewStatus::Cancelled);
+        repo.set_status(&review.id, ReviewStatus::Cancelled, None)
+            .await
+            .unwrap();
+        repo.set_status(&review.id, ReviewStatus::Done, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_review(&review.id).await.unwrap().status,
+            ReviewStatus::Cancelled
+        );
+        repo.set_status(&review.id, ReviewStatus::Error, Some("late failure"))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_review(&review.id).await.unwrap().status,
+            ReviewStatus::Cancelled
+        );
         // Explicit retries may start a fresh run, and subsequently complete it.
-        repo.set_status(&review.id, ReviewStatus::Running, None).await.unwrap();
-        repo.set_status(&review.id, ReviewStatus::Done, None).await.unwrap();
-        assert_eq!(repo.get_review(&review.id).await.unwrap().status, ReviewStatus::Done);
+        repo.set_status(&review.id, ReviewStatus::Running, None)
+            .await
+            .unwrap();
+        repo.set_status(&review.id, ReviewStatus::Done, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_review(&review.id).await.unwrap().status,
+            ReviewStatus::Done
+        );
     }
 
     /// Durable-retry storage: prompt + diff rows round-trip, upsert in place,

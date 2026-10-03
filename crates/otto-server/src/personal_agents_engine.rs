@@ -188,7 +188,9 @@ pub fn agent_directory(ctx: &ServerCtx, agent: &PersonalAgent) -> Result<std::pa
 }
 
 pub fn with_user_context(prompt: &str, context: &str) -> String {
-    if context.trim().is_empty() { return prompt.into(); }
+    if context.trim().is_empty() {
+        return prompt.into();
+    }
     format!("{prompt}\n\n## User-maintained context (snapshot for this session)\n\n{context}\n\nUse these background notes and selected references for this task. \
 This context is maintained by the user; do not prune or rewrite it when updating memory/notes.md.")
 }
@@ -412,8 +414,8 @@ pub async fn spawn_agent_run(
     );
     tokio::spawn(async move {
         let _guard = guard;
-        let _ = complete_agent_run(&ctx2, &agent2, schedule2.as_ref(), &run_id, &trigger2, None)
-            .await;
+        let _ =
+            complete_agent_run(&ctx2, &agent2, schedule2.as_ref(), &run_id, &trigger2, None).await;
     });
     Ok(run)
 }
@@ -885,7 +887,10 @@ mod tests {
     fn user_context_is_snapshotted_in_the_shared_prompt_for_every_provider() {
         let original = wrap_prompt("Helper", "scheduled or manual directive");
         assert_eq!(with_user_context(&original, ""), original);
-        let prompt = with_user_context(&original, "Pinned background\n[Reference](/workspace/context.md)");
+        let prompt = with_user_context(
+            &original,
+            "Pinned background\n[Reference](/workspace/context.md)",
+        );
         assert!(prompt.contains("scheduled or manual directive"));
         assert!(prompt.contains("Pinned background"));
         assert!(prompt.contains("/workspace/context.md"));

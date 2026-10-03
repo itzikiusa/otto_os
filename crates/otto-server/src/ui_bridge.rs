@@ -235,8 +235,7 @@ fn parse_client_frame(text: &str) -> Option<ClientFrame> {
                 && !h.window_id.is_empty()
                 && short_ok(&h.client_id, MAX_ID_LEN)
                 && short_ok(&h.window_id, MAX_ID_LEN)
-                && h
-                    .host_window_id
+                && h.host_window_id
                     .as_deref()
                     .is_none_or(|w| short_ok(w, MAX_ID_LEN))
                 && short_ok(&h.route, MAX_ROUTE_LEN)
@@ -279,7 +278,13 @@ pub enum Pick {
 /// 3. A document showing the module (`shell` = any document, main pane
 ///    preferred), ranked focused > visible > most recent.
 /// 4. None showing it: open it through the device's best MAIN document.
-pub fn pick(docs: &[DocInfo], user_id: &str, device: Option<&str>, module: &str, command: &str) -> Pick {
+pub fn pick(
+    docs: &[DocInfo],
+    user_id: &str,
+    device: Option<&str>,
+    module: &str,
+    command: &str,
+) -> Pick {
     let mine: Vec<&DocInfo> = docs.iter().filter(|d| d.user_id == user_id).collect();
     let on_device = |d: &&DocInfo| device.is_none_or(|dev| d.client_id == dev);
     let showing = |d: &&DocInfo| module == "shell" || d.module == module;
@@ -292,7 +297,11 @@ pub fn pick(docs: &[DocInfo], user_id: &str, device: Option<&str>, module: &str,
             d.activity,
         )
     };
-    let best = |it: Vec<&DocInfo>| it.into_iter().max_by_key(|d| rank(d)).map(|d| d.conn_id.clone());
+    let best = |it: Vec<&DocInfo>| {
+        it.into_iter()
+            .max_by_key(|d| rank(d))
+            .map(|d| d.conn_id.clone())
+    };
 
     let device_docs: Vec<&DocInfo> = mine.iter().copied().filter(on_device).collect();
     if device_docs.is_empty() {
@@ -330,7 +339,13 @@ pub fn pick(docs: &[DocInfo], user_id: &str, device: Option<&str>, module: &str,
 
 /// After an auto-open through window `window_id`: the document of that window
 /// (main or its side pane) now showing `module` and implementing `command`.
-fn opened_target(docs: &[DocInfo], user_id: &str, window_id: &str, module: &str, command: &str) -> Option<String> {
+fn opened_target(
+    docs: &[DocInfo],
+    user_id: &str,
+    window_id: &str,
+    module: &str,
+    command: &str,
+) -> Option<String> {
     docs.iter()
         .filter(|d| {
             d.user_id == user_id
@@ -443,7 +458,9 @@ pub fn deadline_for(spec: &UiCommandSpec, args: &Value) -> Duration {
 /// The deadline after a `progress {awaiting_human}` at `now`: now + 120 s,
 /// never past dispatch + 150 s, never earlier than the current one. Pure.
 fn extended_deadline(now: Instant, dispatched: Instant, current: Instant) -> Instant {
-    (now + HUMAN_WAIT).min(dispatched + HUMAN_WAIT_CAP).max(current)
+    (now + HUMAN_WAIT)
+        .min(dispatched + HUMAN_WAIT_CAP)
+        .max(current)
 }
 
 /// Normalize a UI-reported error code to the contract's set.
@@ -533,17 +550,15 @@ impl UiBridge {
                     capabilities: h.capabilities.into_iter().collect(),
                     activity,
                 });
-                let _ = entry
-                    .tx
-                    .try_send(
-                        json!({
-                            "type": "hello_ack",
-                            "conn_id": conn_id,
-                            // A changed boot id = the daemon restarted (ws.md).
-                            "boot_id": crate::transport::boot_id(),
-                        })
-                        .to_string(),
-                    );
+                let _ = entry.tx.try_send(
+                    json!({
+                        "type": "hello_ack",
+                        "conn_id": conn_id,
+                        // A changed boot id = the daemon restarted (ws.md).
+                        "boot_id": crate::transport::boot_id(),
+                    })
+                    .to_string(),
+                );
             }
             ClientFrame::Presence(p) => {
                 if let Some(info) = entry.info.as_mut() {
@@ -666,7 +681,11 @@ impl UiBridge {
 
     /// Wait for a pending command's outcome, honouring (extendable) deadlines.
     /// Dropping this future (the agent's call went away) cancels the command.
-    async fn await_outcome(&self, id: &Id, mut rx: oneshot::Receiver<Outcome>) -> Result<Value, UiError> {
+    async fn await_outcome(
+        &self,
+        id: &Id,
+        mut rx: oneshot::Receiver<Outcome>,
+    ) -> Result<Value, UiError> {
         struct Guard<'a> {
             bridge: &'a UiBridge,
             id: &'a Id,
@@ -753,10 +772,14 @@ impl UiBridge {
     fn authorize_reply(&self, id: &str, user_id: &str, conn_id: Option<&str>) -> Result<(), Error> {
         let p = self.pending.lock().unwrap();
         let Some(p) = p.get(id) else {
-            return Err(Error::NotFound("ui command (finished, cancelled or unknown)".into()));
+            return Err(Error::NotFound(
+                "ui command (finished, cancelled or unknown)".into(),
+            ));
         };
         if p.user_id != user_id {
-            return Err(Error::Forbidden("this UI command belongs to another user".into()));
+            return Err(Error::Forbidden(
+                "this UI command belongs to another user".into(),
+            ));
         }
         if conn_id != Some(p.conn_id.as_str()) {
             return Err(Error::Forbidden(
@@ -767,13 +790,21 @@ impl UiBridge {
     }
 
     /// `POST /ui/commands/{id}/result` — deliver the outcome.
-    pub fn complete(&self, id: &str, user_id: &str, conn_id: Option<&str>, reply: UiReply) -> Result<(), Error> {
+    pub fn complete(
+        &self,
+        id: &str,
+        user_id: &str,
+        conn_id: Option<&str>,
+        reply: UiReply,
+    ) -> Result<(), Error> {
         self.authorize_reply(id, user_id, conn_id)?;
         let Some(mut p) = self.pending.lock().unwrap().remove(id) else {
             return Err(Error::NotFound("ui command".into()));
         };
         let outcome = match reply {
-            UiReply { ok: true, result, .. } => Outcome::Ok(result.unwrap_or(Value::Null)),
+            UiReply {
+                ok: true, result, ..
+            } => Outcome::Ok(result.unwrap_or(Value::Null)),
             UiReply { error, .. } => {
                 let e = error.unwrap_or_default();
                 Outcome::Err(UiError::new(
@@ -794,7 +825,14 @@ impl UiBridge {
 
     /// `POST /ui/commands/{id}/progress` — record a note; `awaiting_human`
     /// extends the deadline (bounded, see [`HUMAN_WAIT`] / [`HUMAN_WAIT_CAP`]).
-    pub fn progress(&self, id: &str, user_id: &str, conn_id: Option<&str>, note: &str, awaiting_human: bool) -> Result<(), Error> {
+    pub fn progress(
+        &self,
+        id: &str,
+        user_id: &str,
+        conn_id: Option<&str>,
+        note: &str,
+        awaiting_human: bool,
+    ) -> Result<(), Error> {
         self.authorize_reply(id, user_id, conn_id)?;
         let mut all = self.pending.lock().unwrap();
         let Some(p) = all.get_mut(id) else {
@@ -829,7 +867,11 @@ impl UiBridge {
     }
 
     /// Wait up to `wait` for a document matching `f`.
-    async fn wait_for_doc(&self, wait: Duration, f: impl Fn(&[DocInfo]) -> Option<String>) -> Option<String> {
+    async fn wait_for_doc(
+        &self,
+        wait: Duration,
+        f: impl Fn(&[DocInfo]) -> Option<String>,
+    ) -> Option<String> {
         let until = Instant::now() + wait;
         loop {
             let notified = self.presence_changed.notified();
@@ -839,7 +881,11 @@ impl UiBridge {
             if Instant::now() >= until {
                 return None;
             }
-            let _ = tokio::time::timeout_at(until.min(Instant::now() + Duration::from_millis(250)), notified).await;
+            let _ = tokio::time::timeout_at(
+                until.min(Instant::now() + Duration::from_millis(250)),
+                notified,
+            )
+            .await;
         }
     }
 }
@@ -877,14 +923,22 @@ pub fn calling_session(auth: &AuthContext) -> Option<&Id> {
 /// an MCP-restricted one, not a share link) — the only kind allowed to act as
 /// "the UI" or to grant UI control.
 pub fn is_human(auth: &AuthContext) -> bool {
-    auth.managed_session_id.is_none() && auth.mcp_session_id.is_none() && !auth.mcp_only && !auth.is_scoped()
+    auth.managed_session_id.is_none()
+        && auth.mcp_session_id.is_none()
+        && !auth.mcp_only
+        && !auth.is_scoped()
 }
 
 /// The message the agent gets while the user has not allowed UI control.
 pub const PENDING_GRANT_MSG: &str = "The user hasn't allowed UI control for this session yet — they were asked in Otto; retry after they allow it";
 
 /// Run one `otto.ui_*` tool for `auth`. `tool` is the bare governed name.
-pub async fn run(ctx: &ServerCtx, auth: &AuthContext, tool: &str, args: &Value) -> Result<Value, UiError> {
+pub async fn run(
+    ctx: &ServerCtx,
+    auth: &AuthContext,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, UiError> {
     let spec = ui_commands::by_tool(tool)
         .ok_or_else(|| UiError::new("not_found", format!("unknown UI command '{tool}'")))?;
     let sid = calling_session(auth).ok_or_else(|| {
@@ -912,31 +966,58 @@ pub async fn run(ctx: &ServerCtx, auth: &AuthContext, tool: &str, args: &Value) 
             ));
         }
     }
-    let args = if args.is_null() { json!({}) } else { args.clone() };
-    ui_commands::validate_args(&spec.input_schema, &args).map_err(|m| UiError::new("invalid_args", m))?;
+    let args = if args.is_null() {
+        json!({})
+    } else {
+        args.clone()
+    };
+    ui_commands::validate_args(&spec.input_schema, &args)
+        .map_err(|m| UiError::new("invalid_args", m))?;
 
     let session = ensure_grant(ctx, session, spec).await?;
     let args = resolve_refs(ctx, auth, &session, args).await?;
 
     let bridge = &ctx.ui_bridge;
-    let device = session.meta.get("client_id").and_then(Value::as_str).map(str::to_string);
+    let device = session
+        .meta
+        .get("client_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let budget = deadline_for(spec, &args);
-    let target = match pick(&bridge.docs(), &session.created_by, device.as_deref(), &spec.module, &spec.name) {
+    let target = match pick(
+        &bridge.docs(),
+        &session.created_by,
+        device.as_deref(),
+        &spec.module,
+        &spec.name,
+    ) {
         Pick::Direct(conn) => Some(conn),
         Pick::Open { via, window_id } => {
-            let open_args = json!({"module": spec.module, "route": spec.route, "placement": "side"});
+            let open_args =
+                json!({"module": spec.module, "route": spec.route, "placement": "side"});
             let open_budget = ui_commands::get("open")
                 .map(|o| Duration::from_millis(o.timeout_ms))
                 .unwrap_or(Duration::from_secs(15));
-            bridge.dispatch(&via, &session, "open", &open_args, open_budget).await?;
-            let (user, module, command) = (session.created_by.clone(), spec.module.clone(), spec.name.clone());
+            bridge
+                .dispatch(&via, &session, "open", &open_args, open_budget)
+                .await?;
+            let (user, module, command) = (
+                session.created_by.clone(),
+                spec.module.clone(),
+                spec.name.clone(),
+            );
             let found = bridge
-                .wait_for_doc(OPEN_READY_WAIT, |docs| opened_target(docs, &user, &window_id, &module, &command))
+                .wait_for_doc(OPEN_READY_WAIT, |docs| {
+                    opened_target(docs, &user, &window_id, &module, &command)
+                })
                 .await;
             if found.is_none() {
                 return Err(UiError::new(
                     "no_ui_client",
-                    format!("opened {} in Otto, but it did not report ready in time — retry", spec.module),
+                    format!(
+                        "opened {} in Otto, but it did not report ready in time — retry",
+                        spec.module
+                    ),
                 ));
             }
             found
@@ -945,14 +1026,17 @@ pub async fn run(ctx: &ServerCtx, auth: &AuthContext, tool: &str, args: &Value) 
     };
     match target {
         Some(conn) => {
-            let v = bridge.dispatch(&conn, &session, &spec.name, &args, budget).await?;
+            let v = bridge
+                .dispatch(&conn, &session, &spec.name, &args, budget)
+                .await?;
             Ok(with_visibility(shape_result(v), true))
         }
         None => match spec.headless.as_deref() {
             Some(h) => {
                 let v = headless(ctx, auth, &session, h, &args).await?;
                 let mut v = with_visibility(shape_result(v), false);
-                v["note"] = json!("no Otto window can show this right now — ran it in the daemon instead");
+                v["note"] =
+                    json!("no Otto window can show this right now — ran it in the daemon instead");
                 Ok(v)
             }
             None => Err(UiError::new(
@@ -966,17 +1050,24 @@ pub async fn run(ctx: &ServerCtx, auth: &AuthContext, tool: &str, args: &Value) 
 
 /// Require the session's grant; raise the owner-scoped request and wait
 /// briefly when it is missing. Returns the (re-read) session on success.
-async fn ensure_grant(ctx: &ServerCtx, session: Session, spec: &UiCommandSpec) -> Result<Session, UiError> {
+async fn ensure_grant(
+    ctx: &ServerCtx,
+    session: Session,
+    spec: &UiCommandSpec,
+) -> Result<Session, UiError> {
     if grant_state(&session.meta) == Some(true) {
         return Ok(session);
     }
-    let pending = |extra: &str| UiError::new("pending_grant", format!("{PENDING_GRANT_MSG}{extra}"));
+    let pending =
+        |extra: &str| UiError::new("pending_grant", format!("{PENDING_GRANT_MSG}{extra}"));
     if recently_denied(&session.meta, chrono::Utc::now()) {
         return Err(pending(" (they declined or stopped it moments ago)."));
     }
     let bridge = &ctx.ui_bridge;
     if !bridge.user_has_docs(&session.created_by) {
-        return Err(pending(" (no Otto window is open right now, so they could not be asked)."));
+        return Err(pending(
+            " (no Otto window is open right now, so they could not be asked).",
+        ));
     }
     if bridge.should_request(&session.id) {
         let _ = ctx.events.send(Event::UiControlRequested {
@@ -992,7 +1083,11 @@ async fn ensure_grant(ctx: &ServerCtx, session: Session, spec: &UiCommandSpec) -
     let until = Instant::now() + GRANT_WAIT;
     loop {
         let notified = bridge.grant_changed.notified();
-        let _ = tokio::time::timeout_at(until.min(Instant::now() + Duration::from_millis(500)), notified).await;
+        let _ = tokio::time::timeout_at(
+            until.min(Instant::now() + Duration::from_millis(500)),
+            notified,
+        )
+        .await;
         let s = ctx
             .manager
             .get(&session.id)
@@ -1014,8 +1109,17 @@ async fn ensure_grant(ctx: &ServerCtx, session: Session, spec: &UiCommandSpec) -
 /// Resolve `connection_id` (id OR name) as the session owner — the daemon's
 /// RBAC pre-check: a connection the owner cannot list is `not_found` /
 /// `forbidden` before anything reaches the window.
-async fn resolve_refs(ctx: &ServerCtx, auth: &AuthContext, session: &Session, mut args: Value) -> Result<Value, UiError> {
-    let Some(reference) = args.get("connection_id").and_then(Value::as_str).map(str::to_string) else {
+async fn resolve_refs(
+    ctx: &ServerCtx,
+    auth: &AuthContext,
+    session: &Session,
+    mut args: Value,
+) -> Result<Value, UiError> {
+    let Some(reference) = args
+        .get("connection_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
         return Ok(args);
     };
     let kind = crate::agent_refs::kind_of("connection")
@@ -1034,19 +1138,31 @@ async fn resolve_refs(ctx: &ServerCtx, auth: &AuthContext, session: &Session, mu
         Error::NotFound(m) => UiError::new("not_found", m),
         Error::Forbidden(m) => UiError::new("forbidden", m),
         Error::Conflict(m) | Error::Invalid(m) => UiError::new("invalid_args", m),
-        other => UiError::new("failed", otto_core::redact::redact_text(&other.to_string()).value),
+        other => UiError::new(
+            "failed",
+            otto_core::redact::redact_text(&other.to_string()).value,
+        ),
     })?;
     args["connection_id"] = json!(c.id);
     Ok(args)
 }
 
 /// The daemon-side twin of a `read` command, used when no window can run it.
-async fn headless(ctx: &ServerCtx, auth: &AuthContext, session: &Session, which: &str, args: &Value) -> Result<Value, UiError> {
+async fn headless(
+    ctx: &ServerCtx,
+    auth: &AuthContext,
+    session: &Session,
+    which: &str,
+    args: &Value,
+) -> Result<Value, UiError> {
     let fail = |e: Error| match e {
         Error::NotFound(m) => UiError::new("not_found", m),
         Error::Forbidden(m) => UiError::new("forbidden", m),
         Error::Invalid(m) | Error::Conflict(m) => UiError::new("invalid_args", m),
-        other => UiError::new("failed", otto_core::redact::redact_text(&other.to_string()).value),
+        other => UiError::new(
+            "failed",
+            otto_core::redact::redact_text(&other.to_string()).value,
+        ),
     };
     match which {
         "presence" => {
@@ -1068,14 +1184,27 @@ async fn headless(ctx: &ServerCtx, auth: &AuthContext, session: &Session, which:
         "db_list_connections" => {
             let kind = crate::agent_refs::kind_of("connection")
                 .ok_or_else(|| UiError::new("failed", "connection directory unavailable"))?;
-            let mut v = crate::agent_refs::directory_json(ctx, auth, kind, None, Some(&session.workspace_id))
-                .await
-                .map_err(fail)?;
-            if let Some(q) = args.get("query").and_then(Value::as_str).map(str::to_lowercase).filter(|q| !q.is_empty()) {
+            let mut v = crate::agent_refs::directory_json(
+                ctx,
+                auth,
+                kind,
+                None,
+                Some(&session.workspace_id),
+            )
+            .await
+            .map_err(fail)?;
+            if let Some(q) = args
+                .get("query")
+                .and_then(Value::as_str)
+                .map(str::to_lowercase)
+                .filter(|q| !q.is_empty())
+            {
                 if let Some(items) = v.get_mut("items").and_then(Value::as_array_mut) {
                     items.retain(|it| {
                         ["name", "kind"].iter().any(|k| {
-                            it.get(*k).and_then(Value::as_str).is_some_and(|s| s.to_lowercase().contains(&q))
+                            it.get(*k)
+                                .and_then(Value::as_str)
+                                .is_some_and(|s| s.to_lowercase().contains(&q))
                         })
                     });
                 }
@@ -1084,7 +1213,10 @@ async fn headless(ctx: &ServerCtx, auth: &AuthContext, session: &Session, which:
         }
         "db_mcp_query" => {
             let conn = args.get("connection_id").and_then(Value::as_str);
-            let stmt = args.get("statement").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+            let stmt = args
+                .get("statement")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty());
             let (Some(conn), Some(stmt)) = (conn, stmt) else {
                 return Err(UiError::new(
                     "no_ui_client",
@@ -1098,7 +1230,11 @@ async fn headless(ctx: &ServerCtx, auth: &AuthContext, session: &Session, which:
             // `find` works headless too. `connection_id` was already resolved
             // (and RBAC pre-checked) as the owner; the route re-checks Viewer.
             let mut q = json!({"statement": stmt, "max_rows": MAX_AGENT_ROWS});
-            if let Some(db) = args.get("database").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if let Some(db) = args
+                .get("database")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 q["node"] = json!(format!("db:{db}"));
             }
             let path = format!(
@@ -1109,9 +1245,14 @@ async fn headless(ctx: &ServerCtx, auth: &AuthContext, session: &Session, which:
                 ui_commands::get("db_run_query").unwrap_or_else(|| &ui_commands::catalog()[0]),
                 args,
             );
-            self_post(ctx, &auth.effective_user, &path, &q, timeout).await.map_err(fail)
+            self_post(ctx, &auth.effective_user, &path, &q, timeout)
+                .await
+                .map_err(fail)
         }
-        other => Err(UiError::new("failed", format!("unknown headless fallback '{other}'"))),
+        other => Err(UiError::new(
+            "failed",
+            format!("unknown headless fallback '{other}'"),
+        )),
     }
 }
 
@@ -1156,7 +1297,9 @@ async fn self_post(
         Ok(crate::mcp_outward::parse_self_ok(&text))
     }
     .await;
-    let _ = otto_rbac::AuthRepo::new(ctx.pool.clone()).revoke(&token).await;
+    let _ = otto_rbac::AuthRepo::new(ctx.pool.clone())
+        .revoke(&token)
+        .await;
     result
 }
 
@@ -1182,7 +1325,14 @@ pub fn spawn_session_watch(ctx: ServerCtx) {
 mod tests {
     use super::*;
 
-    fn doc(conn: &str, user: &str, device: &str, window: &str, pane: Pane, module: &str) -> DocInfo {
+    fn doc(
+        conn: &str,
+        user: &str,
+        device: &str,
+        window: &str,
+        pane: Pane,
+        module: &str,
+    ) -> DocInfo {
         DocInfo {
             conn_id: conn.into(),
             user_id: user.into(),
@@ -1194,7 +1344,10 @@ mod tests {
             module: module.into(),
             focused: false,
             visible: true,
-            capabilities: ["open", "state", "db_run_query"].iter().map(|s| s.to_string()).collect(),
+            capabilities: ["open", "state", "db_run_query"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             activity: 0,
         }
     }
@@ -1207,7 +1360,10 @@ mod tests {
             doc("main", "u", "dev", "w1", Pane::Main, "agents"),
             doc("side", "u", "dev", "w1", Pane::Side, "connections"),
         ];
-        assert_eq!(pick(&docs, "u", Some("dev"), "connections", "db_run_query"), Pick::Direct("side".into()));
+        assert_eq!(
+            pick(&docs, "u", Some("dev"), "connections", "db_run_query"),
+            Pick::Direct("side".into())
+        );
     }
 
     #[test]
@@ -1219,7 +1375,10 @@ mod tests {
         let docs = vec![a, b];
         assert_eq!(
             pick(&docs, "u", Some("dev"), "connections", "db_run_query"),
-            Pick::Open { via: "main-b".into(), window_id: "wb".into() }
+            Pick::Open {
+                via: "main-b".into(),
+                window_id: "wb".into()
+            }
         );
     }
 
@@ -1233,17 +1392,36 @@ mod tests {
         b.activity = 1;
         c.activity = 2;
         let docs = vec![a.clone(), b.clone(), c.clone()];
-        assert_eq!(pick(&docs, "u", Some("dev"), "connections", "db_run_query"), Pick::Direct("c".into()));
+        assert_eq!(
+            pick(&docs, "u", Some("dev"), "connections", "db_run_query"),
+            Pick::Direct("c".into())
+        );
         b.focused = true;
         let docs = vec![a, b, c];
-        assert_eq!(pick(&docs, "u", Some("dev"), "connections", "db_run_query"), Pick::Direct("b".into()));
+        assert_eq!(
+            pick(&docs, "u", Some("dev"), "connections", "db_run_query"),
+            Pick::Direct("b".into())
+        );
     }
 
     #[test]
     fn pick_never_crosses_users() {
-        let docs = vec![doc("theirs", "other", "dev", "w", Pane::Main, "connections")];
-        assert_eq!(pick(&docs, "u", Some("dev"), "connections", "db_run_query"), Pick::None);
-        assert_eq!(pick(&docs, "u", None, "connections", "db_run_query"), Pick::None);
+        let docs = vec![doc(
+            "theirs",
+            "other",
+            "dev",
+            "w",
+            Pane::Main,
+            "connections",
+        )];
+        assert_eq!(
+            pick(&docs, "u", Some("dev"), "connections", "db_run_query"),
+            Pick::None
+        );
+        assert_eq!(
+            pick(&docs, "u", None, "connections", "db_run_query"),
+            Pick::None
+        );
     }
 
     #[test]
@@ -1252,22 +1430,49 @@ mod tests {
         // there, even though another device shows the module focused.
         let mut elsewhere = doc("phone", "u", "phone", "wp", Pane::Main, "connections");
         elsewhere.focused = true;
-        let docs = vec![doc("laptop", "u", "laptop", "wl", Pane::Main, "agents"), elsewhere.clone()];
+        let docs = vec![
+            doc("laptop", "u", "laptop", "wl", Pane::Main, "agents"),
+            elsewhere.clone(),
+        ];
         assert_eq!(
             pick(&docs, "u", Some("laptop"), "connections", "db_run_query"),
-            Pick::Open { via: "laptop".into(), window_id: "wl".into() }
+            Pick::Open {
+                via: "laptop".into(),
+                window_id: "wl".into()
+            }
         );
         // No window at all on the session's device: another device only when
         // it already shows the module AND is focused…
         let docs = vec![elsewhere.clone()];
-        assert_eq!(pick(&docs, "u", Some("laptop"), "connections", "db_run_query"), Pick::Direct("phone".into()));
+        assert_eq!(
+            pick(&docs, "u", Some("laptop"), "connections", "db_run_query"),
+            Pick::Direct("phone".into())
+        );
         // …never when merely visible, and never an auto-open there.
         let mut unfocused = elsewhere.clone();
         unfocused.focused = false;
-        assert_eq!(pick(&[unfocused], "u", Some("laptop"), "connections", "db_run_query"), Pick::None);
+        assert_eq!(
+            pick(
+                &[unfocused],
+                "u",
+                Some("laptop"),
+                "connections",
+                "db_run_query"
+            ),
+            Pick::None
+        );
         let mut other_module = elsewhere;
         other_module.module = "git".into();
-        assert_eq!(pick(&[other_module], "u", Some("laptop"), "connections", "db_run_query"), Pick::None);
+        assert_eq!(
+            pick(
+                &[other_module],
+                "u",
+                Some("laptop"),
+                "connections",
+                "db_run_query"
+            ),
+            Pick::None
+        );
     }
 
     #[test]
@@ -1278,12 +1483,27 @@ mod tests {
         // The side pane lacks the command; the main can open — but opening
         // would land on the same stale document, which `opened_target` skips.
         let docs = vec![old.clone(), main];
-        assert!(matches!(pick(&docs, "u", Some("dev"), "connections", "db_run_query"), Pick::Open { .. }));
-        assert_eq!(opened_target(&docs, "u", "w", "connections", "db_run_query"), None);
+        assert!(matches!(
+            pick(&docs, "u", Some("dev"), "connections", "db_run_query"),
+            Pick::Open { .. }
+        ));
+        assert_eq!(
+            opened_target(&docs, "u", "w", "connections", "db_run_query"),
+            None
+        );
         // Nothing can open either → None.
         let mut main = doc("main", "u", "dev", "w", Pane::Main, "agents");
         main.capabilities.clear();
-        assert_eq!(pick(&[old, main], "u", Some("dev"), "connections", "db_run_query"), Pick::None);
+        assert_eq!(
+            pick(
+                &[old, main],
+                "u",
+                Some("dev"),
+                "connections",
+                "db_run_query"
+            ),
+            Pick::None
+        );
     }
 
     #[test]
@@ -1292,10 +1512,16 @@ mod tests {
             doc("side", "u", "dev", "w", Pane::Side, "connections"),
             doc("main", "u", "dev", "w", Pane::Main, "agents"),
         ];
-        assert_eq!(pick(&docs, "u", Some("dev"), "shell", "state"), Pick::Direct("main".into()));
+        assert_eq!(
+            pick(&docs, "u", Some("dev"), "shell", "state"),
+            Pick::Direct("main".into())
+        );
         let mut side_focused = docs.clone();
         side_focused[0].focused = true;
-        assert_eq!(pick(&side_focused, "u", Some("dev"), "shell", "state"), Pick::Direct("side".into()));
+        assert_eq!(
+            pick(&side_focused, "u", Some("dev"), "shell", "state"),
+            Pick::Direct("side".into())
+        );
         // A shell command never auto-opens.
         let mut none = docs;
         for d in &mut none {
@@ -1307,7 +1533,10 @@ mod tests {
     #[test]
     fn pick_with_unknown_device_uses_any_of_the_owners_windows() {
         let docs = vec![doc("a", "u", "x", "w", Pane::Main, "agents")];
-        assert!(matches!(pick(&docs, "u", None, "connections", "db_run_query"), Pick::Open { .. }));
+        assert!(matches!(
+            pick(&docs, "u", None, "connections", "db_run_query"),
+            Pick::Open { .. }
+        ));
     }
 
     #[test]
@@ -1317,9 +1546,18 @@ mod tests {
             doc("side", "u", "dev", "w1", Pane::Side, "connections"),
             doc("other", "u", "dev", "w2", Pane::Main, "connections"),
         ];
-        assert_eq!(opened_target(&docs, "u", "w1", "connections", "db_run_query"), Some("side".into()));
-        assert_eq!(opened_target(&docs, "u", "w9", "connections", "db_run_query"), None);
-        assert_eq!(opened_target(&docs, "x", "w1", "connections", "db_run_query"), None);
+        assert_eq!(
+            opened_target(&docs, "u", "w1", "connections", "db_run_query"),
+            Some("side".into())
+        );
+        assert_eq!(
+            opened_target(&docs, "u", "w9", "connections", "db_run_query"),
+            None
+        );
+        assert_eq!(
+            opened_target(&docs, "x", "w1", "connections", "db_run_query"),
+            None
+        );
     }
 
     // ---- grants ------------------------------------------------------------
@@ -1328,10 +1566,19 @@ mod tests {
     fn grant_table() {
         assert_eq!(grant_state(&json!({})), None);
         assert_eq!(grant_state(&Value::Null), None);
-        assert_eq!(grant_state(&json!({"ui_control": {"enabled": true}})), Some(true));
-        assert_eq!(grant_state(&json!({"ui_control": {"enabled": false}})), Some(false));
+        assert_eq!(
+            grant_state(&json!({"ui_control": {"enabled": true}})),
+            Some(true)
+        );
+        assert_eq!(
+            grant_state(&json!({"ui_control": {"enabled": false}})),
+            Some(false)
+        );
         // Not a bool → not granted (fail closed).
-        assert_eq!(grant_state(&json!({"ui_control": {"enabled": "yes"}})), None);
+        assert_eq!(
+            grant_state(&json!({"ui_control": {"enabled": "yes"}})),
+            None
+        );
         assert_eq!(grant_state(&json!({"ui_control": true})), None);
         let rec = grant_record(true, "alice");
         assert_eq!(grant_state(&rec), Some(true));
@@ -1339,9 +1586,15 @@ mod tests {
         let now = chrono::Utc::now();
         let denied = grant_record(false, "alice");
         assert!(recently_denied(&denied, now));
-        assert!(!recently_denied(&denied, now + chrono::Duration::seconds(61)));
+        assert!(!recently_denied(
+            &denied,
+            now + chrono::Duration::seconds(61)
+        ));
         assert!(!recently_denied(&rec, now));
-        assert!(!recently_denied(&json!({"ui_control": {"enabled": false}}), now));
+        assert!(!recently_denied(
+            &json!({"ui_control": {"enabled": false}}),
+            now
+        ));
     }
 
     #[test]
@@ -1394,21 +1647,38 @@ mod tests {
     fn client_frames_parse_strictly() {
         let hello = r#"{"type":"hello","client_id":"c","window_id":"w","pane":"side","host_window_id":"h",
             "route":"database","module":"connections","focused":true,"visible":true,"capabilities":["db_run_query"]}"#;
-        assert!(matches!(parse_client_frame(hello), Some(ClientFrame::Hello(_))));
         assert!(matches!(
-            parse_client_frame(r#"{"type":"presence","route":"git","module":"git","focused":false,"visible":true}"#),
+            parse_client_frame(hello),
+            Some(ClientFrame::Hello(_))
+        ));
+        assert!(matches!(
+            parse_client_frame(
+                r#"{"type":"presence","route":"git","module":"git","focused":false,"visible":true}"#
+            ),
             Some(ClientFrame::Presence(_))
         ));
         // Unknown type, junk, wrong types, bad pane, missing ids → ignored.
         assert!(parse_client_frame(r#"{"type":"subscribe","x":1}"#).is_none());
         assert!(parse_client_frame("not json").is_none());
-        assert!(parse_client_frame(r#"{"type":"hello","client_id":"c","window_id":"w","pane":"top"}"#).is_none());
-        assert!(parse_client_frame(r#"{"type":"hello","client_id":"","window_id":"w","pane":"main"}"#).is_none());
+        assert!(parse_client_frame(
+            r#"{"type":"hello","client_id":"c","window_id":"w","pane":"top"}"#
+        )
+        .is_none());
+        assert!(parse_client_frame(
+            r#"{"type":"hello","client_id":"","window_id":"w","pane":"main"}"#
+        )
+        .is_none());
         assert!(parse_client_frame(r#"{"type":"presence","focused":"yes"}"#).is_none());
         // Oversized / out-of-bounds fields.
-        let big = format!(r#"{{"type":"presence","route":"{}"}}"#, "a".repeat(MAX_CLIENT_FRAME));
+        let big = format!(
+            r#"{{"type":"presence","route":"{}"}}"#,
+            "a".repeat(MAX_CLIENT_FRAME)
+        );
         assert!(parse_client_frame(&big).is_none());
-        let long_id = format!(r#"{{"type":"hello","client_id":"{}","window_id":"w","pane":"main"}}"#, "c".repeat(200));
+        let long_id = format!(
+            r#"{{"type":"hello","client_id":"{}","window_id":"w","pane":"main"}}"#,
+            "c".repeat(200)
+        );
         assert!(parse_client_frame(&long_id).is_none());
         let ctrl = r#"{"type":"hello","client_id":"c\n","window_id":"w","pane":"main"}"#;
         assert!(parse_client_frame(ctrl).is_none());
@@ -1422,28 +1692,57 @@ mod tests {
         let v = shape_result(json!({"rows": rows, "note": "key AKIAIOSFODNN7EXAMPLE"}));
         assert_eq!(v["rows"].as_array().unwrap().len(), MAX_AGENT_ROWS);
         assert_eq!(v["rows_truncated"], json!(250));
-        assert!(!v["note"].as_str().unwrap().contains("AKIAIOSFODNN7EXAMPLE"), "{v}");
+        assert!(
+            !v["note"].as_str().unwrap().contains("AKIAIOSFODNN7EXAMPLE"),
+            "{v}"
+        );
         let small = shape_result(json!({"rows": [[1]]}));
         assert!(small.get("rows_truncated").is_none());
-        assert_eq!(with_visibility(json!({"a":1}), true), json!({"a":1,"ui_visible":true}));
-        assert_eq!(with_visibility(json!(5), false), json!({"ui_visible":false,"result":5}));
+        assert_eq!(
+            with_visibility(json!({"a":1}), true),
+            json!({"a":1,"ui_visible":true})
+        );
+        assert_eq!(
+            with_visibility(json!(5), false),
+            json!({"ui_visible":false,"result":5})
+        );
     }
 
     #[test]
     fn deadlines_follow_the_catalog_and_the_statement_timeout() {
         let run = ui_commands::get("db_run_query").unwrap();
-        assert_eq!(deadline_for(run, &json!({})), Duration::from_millis(run.timeout_ms));
-        assert_eq!(deadline_for(run, &json!({"timeout_ms": 60_000})), Duration::from_millis(75_000));
-        assert_eq!(deadline_for(run, &json!({"timeout_ms": 1_000})), Duration::from_millis(run.timeout_ms));
-        assert_eq!(deadline_for(run, &json!({"timeout_ms": 105_000})), Duration::from_millis(120_000));
+        assert_eq!(
+            deadline_for(run, &json!({})),
+            Duration::from_millis(run.timeout_ms)
+        );
+        assert_eq!(
+            deadline_for(run, &json!({"timeout_ms": 60_000})),
+            Duration::from_millis(75_000)
+        );
+        assert_eq!(
+            deadline_for(run, &json!({"timeout_ms": 1_000})),
+            Duration::from_millis(run.timeout_ms)
+        );
+        assert_eq!(
+            deadline_for(run, &json!({"timeout_ms": 105_000})),
+            Duration::from_millis(120_000)
+        );
         // A command without a timeout_ms property ignores a stray one.
         let st = ui_commands::get("state").unwrap();
-        assert_eq!(deadline_for(st, &json!({"timeout_ms": 90_000})), Duration::from_millis(st.timeout_ms));
+        assert_eq!(
+            deadline_for(st, &json!({"timeout_ms": 90_000})),
+            Duration::from_millis(st.timeout_ms)
+        );
     }
 
     #[test]
     fn reply_codes_normalize_to_the_contract() {
-        for c in ["cancelled_by_user", "invalid_args", "not_found", "forbidden"] {
+        for c in [
+            "cancelled_by_user",
+            "invalid_args",
+            "not_found",
+            "forbidden",
+        ] {
             assert_eq!(normalize_code(c), c);
         }
         assert_eq!(normalize_code("pending_grant"), "failed");
@@ -1495,7 +1794,10 @@ mod tests {
         assert!(b.docs().is_empty(), "not a target before hello");
         hello(&b, &conn, &mut rx);
         assert_eq!(b.docs().len(), 1);
-        b.on_client_frame(&conn, r#"{"type":"presence","route":"git","module":"git","focused":false,"visible":true}"#);
+        b.on_client_frame(
+            &conn,
+            r#"{"type":"presence","route":"git","module":"git","focused":false,"visible":true}"#,
+        );
         assert_eq!(b.docs()[0].module, "git");
         assert!(b.user_has_docs("u"));
         b.unregister(&conn);
@@ -1512,23 +1814,48 @@ mod tests {
         hello(&b, &conn, &mut rx);
         let s = session("s1", "u");
         let (id, orx) = b
-            .send_command(&conn, &s, "db_run_query", &json!({"tab_id":"t"}), Duration::from_secs(5))
+            .send_command(
+                &conn,
+                &s,
+                "db_run_query",
+                &json!({"tab_id":"t"}),
+                Duration::from_secs(5),
+            )
             .unwrap();
         let f = next_frame(&mut rx);
         assert_eq!(f["type"], "ui_command");
         assert_eq!(f["id"], json!(id));
         assert_eq!(f["session_id"], "s1");
-        assert_eq!(f["agent"], json!({"session_id":"s1","title":"Fix the report","provider":"claude"}));
+        assert_eq!(
+            f["agent"],
+            json!({"session_id":"s1","title":"Fix the report","provider":"claude"})
+        );
         assert_eq!(f["command"], "db_run_query");
         assert_eq!(f["args"], json!({"tab_id":"t"}));
         assert_eq!(f["deadline_ms"], 5000);
 
-        let ok = || UiReply { ok: true, result: Some(json!({"rows":[[1]]})), error: None };
+        let ok = || UiReply {
+            ok: true,
+            result: Some(json!({"rows":[[1]]})),
+            error: None,
+        };
         // Wrong user, wrong / missing connection → refused, command still pending.
-        assert!(matches!(b.complete(&id, "mallory", Some(&conn), ok()), Err(Error::Forbidden(_))));
-        assert!(matches!(b.complete(&id, "u", Some("other-conn"), ok()), Err(Error::Forbidden(_))));
-        assert!(matches!(b.complete(&id, "u", None, ok()), Err(Error::Forbidden(_))));
-        assert!(matches!(b.progress(&id, "mallory", Some(&conn), "x", true), Err(Error::Forbidden(_))));
+        assert!(matches!(
+            b.complete(&id, "mallory", Some(&conn), ok()),
+            Err(Error::Forbidden(_))
+        ));
+        assert!(matches!(
+            b.complete(&id, "u", Some("other-conn"), ok()),
+            Err(Error::Forbidden(_))
+        ));
+        assert!(matches!(
+            b.complete(&id, "u", None, ok()),
+            Err(Error::Forbidden(_))
+        ));
+        assert!(matches!(
+            b.progress(&id, "mallory", Some(&conn), "x", true),
+            Err(Error::Forbidden(_))
+        ));
         // The right user + connection completes it.
         let waiter = {
             let b = b.clone();
@@ -1538,7 +1865,10 @@ mod tests {
         b.complete(&id, "u", Some(&conn), ok()).unwrap();
         assert_eq!(waiter.await.unwrap().unwrap(), json!({"rows":[[1]]}));
         // A second reply finds nothing.
-        assert!(matches!(b.complete(&id, "u", Some(&conn), ok()), Err(Error::NotFound(_))));
+        assert!(matches!(
+            b.complete(&id, "u", Some(&conn), ok()),
+            Err(Error::NotFound(_))
+        ));
     }
 
     #[tokio::test]
@@ -1547,7 +1877,13 @@ mod tests {
         let (conn, mut rx) = b.register(&"u".to_string());
         hello(&b, &conn, &mut rx);
         let (id, orx) = b
-            .send_command(&conn, &session("s", "u"), "db_run_query", &json!({}), Duration::from_secs(5))
+            .send_command(
+                &conn,
+                &session("s", "u"),
+                "db_run_query",
+                &json!({}),
+                Duration::from_secs(5),
+            )
             .unwrap();
         b.complete(
             &id,
@@ -1556,7 +1892,10 @@ mod tests {
             UiReply {
                 ok: false,
                 result: None,
-                error: Some(UiReplyError { code: "cancelled_by_user".into(), message: "Cancelled".into() }),
+                error: Some(UiReplyError {
+                    code: "cancelled_by_user".into(),
+                    message: "Cancelled".into(),
+                }),
             },
         )
         .unwrap();
@@ -1570,7 +1909,13 @@ mod tests {
         let (conn, mut rx) = b.register(&"u".to_string());
         hello(&b, &conn, &mut rx);
         let (id, orx) = b
-            .send_command(&conn, &session("s", "u"), "db_run_query", &json!({}), Duration::from_millis(300))
+            .send_command(
+                &conn,
+                &session("s", "u"),
+                "db_run_query",
+                &json!({}),
+                Duration::from_millis(300),
+            )
             .unwrap();
         let _cmd = next_frame(&mut rx);
         b.progress(&id, "u", Some(&conn), "running", false).unwrap();
@@ -1578,7 +1923,10 @@ mod tests {
         assert_eq!(e.code, "timeout");
         assert!(e.message.contains("running"), "{}", e.message);
         let cancel = next_frame(&mut rx);
-        assert_eq!(cancel, json!({"type":"ui_command_cancel","id":id,"reason":"timeout"}));
+        assert_eq!(
+            cancel,
+            json!({"type":"ui_command_cancel","id":id,"reason":"timeout"})
+        );
         assert!(b.pending.lock().unwrap().is_empty());
     }
 
@@ -1600,9 +1948,16 @@ mod tests {
         let (conn, mut rx) = b.register(&"u".to_string());
         hello(&b, &conn, &mut rx);
         let (id, orx) = b
-            .send_command(&conn, &session("s", "u"), "db_run_query", &json!({}), Duration::from_millis(200))
+            .send_command(
+                &conn,
+                &session("s", "u"),
+                "db_run_query",
+                &json!({}),
+                Duration::from_millis(200),
+            )
             .unwrap();
-        b.progress(&id, "u", Some(&conn), "confirm write", true).unwrap();
+        b.progress(&id, "u", Some(&conn), "confirm write", true)
+            .unwrap();
         let waiter = {
             let b = b.clone();
             let id = id.clone();
@@ -1611,8 +1966,17 @@ mod tests {
         // Well past the original 200 ms budget: still pending, then answered.
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert!(b.pending.lock().unwrap().contains_key(&id));
-        b.complete(&id, "u", Some(&conn), UiReply { ok: true, result: Some(json!({"done":true})), error: None })
-            .unwrap();
+        b.complete(
+            &id,
+            "u",
+            Some(&conn),
+            UiReply {
+                ok: true,
+                result: Some(json!({"done":true})),
+                error: None,
+            },
+        )
+        .unwrap();
         assert_eq!(waiter.await.unwrap().unwrap(), json!({"done":true}));
     }
 
@@ -1622,22 +1986,46 @@ mod tests {
         let (conn, mut rx) = b.register(&"u".to_string());
         hello(&b, &conn, &mut rx);
         let (id, orx) = b
-            .send_command(&conn, &session("s", "u"), "db_run_query", &json!({}), Duration::from_secs(30))
+            .send_command(
+                &conn,
+                &session("s", "u"),
+                "db_run_query",
+                &json!({}),
+                Duration::from_secs(30),
+            )
             .unwrap();
         let _ = next_frame(&mut rx);
         b.cancel_session("s", "revoked", UiError::new("cancelled_by_user", "stopped"));
-        assert_eq!(b.await_outcome(&id, orx).await.unwrap_err().code, "cancelled_by_user");
-        assert_eq!(next_frame(&mut rx), json!({"type":"ui_command_cancel","id":id,"reason":"revoked"}));
+        assert_eq!(
+            b.await_outcome(&id, orx).await.unwrap_err().code,
+            "cancelled_by_user"
+        );
+        assert_eq!(
+            next_frame(&mut rx),
+            json!({"type":"ui_command_cancel","id":id,"reason":"revoked"})
+        );
 
         let (id2, orx2) = b
-            .send_command(&conn, &session("s", "u"), "db_run_query", &json!({}), Duration::from_secs(30))
+            .send_command(
+                &conn,
+                &session("s", "u"),
+                "db_run_query",
+                &json!({}),
+                Duration::from_secs(30),
+            )
             .unwrap();
         b.unregister(&conn);
         let e = b.await_outcome(&id2, orx2).await.unwrap_err();
         assert_eq!(e.code, "no_ui_client");
         // Sending to a closed connection fails fast and leaves nothing pending.
         let e = b
-            .send_command(&conn, &session("s", "u"), "db_run_query", &json!({}), Duration::from_secs(30))
+            .send_command(
+                &conn,
+                &session("s", "u"),
+                "db_run_query",
+                &json!({}),
+                Duration::from_secs(30),
+            )
             .unwrap_err();
         assert_eq!(e.code, "no_ui_client");
         assert!(b.pending.lock().unwrap().is_empty());
@@ -1649,7 +2037,13 @@ mod tests {
         let (conn, mut rx) = b.register(&"u".to_string());
         hello(&b, &conn, &mut rx);
         let (id, orx) = b
-            .send_command(&conn, &session("s", "u"), "db_run_query", &json!({}), Duration::from_secs(30))
+            .send_command(
+                &conn,
+                &session("s", "u"),
+                "db_run_query",
+                &json!({}),
+                Duration::from_secs(30),
+            )
             .unwrap();
         let _ = next_frame(&mut rx);
         let task = {
@@ -1660,7 +2054,10 @@ mod tests {
         tokio::task::yield_now().await;
         task.abort();
         let _ = task.await;
-        assert_eq!(next_frame(&mut rx), json!({"type":"ui_command_cancel","id":id,"reason":"caller_gone"}));
+        assert_eq!(
+            next_frame(&mut rx),
+            json!({"type":"ui_command_cancel","id":id,"reason":"caller_gone"})
+        );
         assert!(b.pending.lock().unwrap().is_empty());
     }
 

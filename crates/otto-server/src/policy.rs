@@ -77,11 +77,24 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     //    it precedes the feature families below).
     // ----------------------------------------------------------------------
 
-    if p == "/room-join" { return Exempt; }
-    if p == "/room-recap-settings" { return Require(Settings, Admin); }
-    if p == "/room-recap-capabilities" || p.starts_with("/room-recaps") || p == "/rooms/{id}/recaps" { return Require(Agents, Edit); }
-    if p == "/room-settings" { return Require(Settings, Admin); }
-    if p == "/rooms" || p == "/rooms/{id}" || p == "/rooms/{id}/invites" || p == "/sessions/{id}/room" {
+    if p == "/room-join" {
+        return Exempt;
+    }
+    if p == "/room-recap-settings" {
+        return Require(Settings, Admin);
+    }
+    if p == "/room-recap-capabilities" || p.starts_with("/room-recaps") || p == "/rooms/{id}/recaps"
+    {
+        return Require(Agents, Edit);
+    }
+    if p == "/room-settings" {
+        return Require(Settings, Admin);
+    }
+    if p == "/rooms"
+        || p == "/rooms/{id}"
+        || p == "/rooms/{id}/invites"
+        || p == "/sessions/{id}/room"
+    {
         return Require(Agents, Edit);
     }
 
@@ -1363,7 +1376,10 @@ mod tests {
             ),
             Require(AwsS3, Edit)
         );
-        assert!(Capability::View < Capability::Edit, "a View grant never meets Edit");
+        assert!(
+            Capability::View < Capability::Edit,
+            "a View grant never meets Edit"
+        );
         // Reads stay View: listing, the streamed browser download, job status.
         for path in [
             "/api/v1/aws/accounts/{id}/s3/buckets",
@@ -1969,7 +1985,10 @@ mod tests {
         // Agent UI control: catalog + a window's own result / progress reports.
         assert_eq!(pol(Method::GET, "/api/v1/ui/commands/catalog"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/ui/commands/{id}/result"), Exempt);
-        assert_eq!(pol(Method::POST, "/api/v1/ui/commands/{id}/progress"), Exempt);
+        assert_eq!(
+            pol(Method::POST, "/api/v1/ui/commands/{id}/progress"),
+            Exempt
+        );
         // …but nothing else under /ui/ is.
         assert_eq!(pol(Method::POST, "/api/v1/ui/commands/{id}"), Deny);
         // The grant is a session-control write.
@@ -2366,7 +2385,10 @@ mod tests {
             Require(Agents, View)
         );
         assert_eq!(
-            pol(Method::GET, "/api/v1/sessions/{id}/transcript/tool/{tool_id}"),
+            pol(
+                Method::GET,
+                "/api/v1/sessions/{id}/transcript/tool/{tool_id}"
+            ),
             Require(Agents, View)
         );
         assert_eq!(

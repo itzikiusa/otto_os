@@ -226,7 +226,10 @@ pub(crate) fn normalize_remote(raw: &str) -> String {
     };
     let host = host.split(':').next().unwrap_or(host);
     let path = path.trim_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/');
+    let path = path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/');
     if path.is_empty() {
         host.to_string()
     } else {
@@ -783,7 +786,10 @@ mod tests {
     #[test]
     fn resolves_by_id_path_remote_and_name() {
         let es = fixture();
-        assert_eq!(one(match_repo_ref(&es, "r-otto", None)), ("r-otto".into(), MatchedBy::Id));
+        assert_eq!(
+            one(match_repo_ref(&es, "r-otto", None)),
+            ("r-otto".into(), MatchedBy::Id)
+        );
         // A path inside a repo resolves to it; the nested repo beats its parent.
         assert_eq!(
             one(match_repo_ref(&es, "/Users/me/otto_os/crates/x", None)),
@@ -827,7 +833,13 @@ mod tests {
             RefMatch::None
         ));
         // …but a checkout whose remote was never recorded still matches by name.
-        es.push(entry("r-local", "ws-a", "scratchpad", "/Users/me/scratchpad", None));
+        es.push(entry(
+            "r-local",
+            "ws-a",
+            "scratchpad",
+            "/Users/me/scratchpad",
+            None,
+        ));
         assert_eq!(
             one(match_repo_ref(&es, "acme/scratchpad", None)),
             ("r-local".into(), MatchedBy::Name)
@@ -843,7 +855,10 @@ mod tests {
                 ids.sort();
                 assert_eq!(ids, ["r-dup-a", "r-dup-b"]);
                 let msg = ambiguous_error("shared", &hits).to_string();
-                assert!(msg.contains("r-dup-a") && msg.contains("ws-b-name"), "{msg}");
+                assert!(
+                    msg.contains("r-dup-a") && msg.contains("ws-b-name"),
+                    "{msg}"
+                );
             }
             other => panic!("expected ambiguity, got {other:?}"),
         }
@@ -872,10 +887,19 @@ mod tests {
             RefMatch::None
         ));
         let near = not_found_error("no git repository matches 'games'", "games", &es).to_string();
-        assert!(near.contains("Closest matches") && near.contains("r-games"), "{near}");
-        assert!(!near.contains("r-otto"), "near-miss list stays focused: {near}");
+        assert!(
+            near.contains("Closest matches") && near.contains("r-games"),
+            "{near}"
+        );
+        assert!(
+            !near.contains("r-otto"),
+            "near-miss list stays focused: {near}"
+        );
         let all = not_found_error("x", "zz", &es).to_string();
-        assert!(all.contains("Repositories you can use") && all.contains("r-otto"), "{all}");
+        assert!(
+            all.contains("Repositories you can use") && all.contains("r-otto"),
+            "{all}"
+        );
         let none = not_found_error("x", "zz", &[]).to_string();
         assert!(none.contains("Add repository"), "{none}");
     }
@@ -883,9 +907,9 @@ mod tests {
     // ---- DB-backed: RBAC + token pin + session-cwd fallback ---------------
 
     use otto_core::auth::McpScope;
+    use otto_state::DbPool;
     use otto_state::NewRepo;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-    use otto_state::DbPool;
 
     struct World {
         pool: DbPool,
@@ -946,11 +970,13 @@ mod tests {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
-        let pool = otto_state::DbPool::from(SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(opts)
-            .await
-            .expect("in-memory sqlite"));
+        let pool = otto_state::DbPool::from(
+            SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .expect("in-memory sqlite"),
+        );
         sqlx::migrate!("../otto-state/migrations")
             .run(&pool)
             .await
@@ -970,8 +996,16 @@ mod tests {
         }
         let workspaces = WorkspacesRepo::new(pool.clone());
         let owner: Id = "owner".into();
-        let ws_a = workspaces.create("alpha", "/nonexistent/a", &owner).await.unwrap().id;
-        let ws_b = workspaces.create("beta", "/nonexistent/b", &owner).await.unwrap().id;
+        let ws_a = workspaces
+            .create("alpha", "/nonexistent/a", &owner)
+            .await
+            .unwrap()
+            .id;
+        let ws_b = workspaces
+            .create("beta", "/nonexistent/b", &owner)
+            .await
+            .unwrap()
+            .id;
         workspaces
             .set_member(&ws_a, &"alice".into(), WorkspaceRole::Viewer)
             .await
@@ -1026,15 +1060,27 @@ mod tests {
         let w = world().await;
         let owner = auth_for(user("owner", false), None);
         let session_in_a = Some(("/elsewhere".to_string(), w.ws_a.clone()));
-        for reference in ["games", "team/games", "https://bitbucket.org/team/games.git"] {
-            let r = resolve_repo_in(&w.src(), &owner, session_in_a.clone(), Some(reference), None)
-                .await
-                .unwrap_or_else(|e| panic!("{reference}: {e}"));
+        for reference in [
+            "games",
+            "team/games",
+            "https://bitbucket.org/team/games.git",
+        ] {
+            let r = resolve_repo_in(
+                &w.src(),
+                &owner,
+                session_in_a.clone(),
+                Some(reference),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{reference}: {e}"));
             assert_eq!(r.entry.repo.id, w.repo_b, "{reference}");
             assert_eq!(r.entry.workspace_name, "beta");
         }
         // The directory spans both workspaces.
-        let all = visible_repos(&w.src(), &owner.effective_user, None).await.unwrap();
+        let all = visible_repos(&w.src(), &owner.effective_user, None)
+            .await
+            .unwrap();
         assert_eq!(all.len(), 2);
         // A `workspace_id` filter keeps the old narrow behaviour.
         let err = resolve_repo_in(&w.src(), &owner, None, Some("games"), Some(&w.ws_a))
@@ -1046,12 +1092,22 @@ mod tests {
             "/nonexistent/otto-repo-dir-test/tools/src/deep".to_string(),
             w.ws_b.clone(),
         ));
-        let r = resolve_repo_in(&w.src(), &owner, cwd, None, None).await.unwrap();
-        assert_eq!((r.entry.repo.id.as_str(), r.matched_by), (w.repo_a.as_str(), MatchedBy::SessionCwd));
+        let r = resolve_repo_in(&w.src(), &owner, cwd, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            (r.entry.repo.id.as_str(), r.matched_by),
+            (w.repo_a.as_str(), MatchedBy::SessionCwd)
+        );
         // No reference and no session → an error that lists what IS available.
-        let err = resolve_repo_in(&w.src(), &owner, None, None, None).await.unwrap_err();
+        let err = resolve_repo_in(&w.src(), &owner, None, None, None)
+            .await
+            .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains(w.repo_a.as_str()) && msg.contains(w.repo_b.as_str()), "{msg}");
+        assert!(
+            msg.contains(w.repo_a.as_str()) && msg.contains(w.repo_b.as_str()),
+            "{msg}"
+        );
     }
 
     /// Resolution only ever sees workspaces the caller can READ: alice
@@ -1069,9 +1125,14 @@ mod tests {
             assert!(matches!(err, Error::NotFound(_)), "{reference}: {msg}");
             // The candidate listing (the `- ` rows) never names B's repo — only
             // the caller's own reference is echoed back.
-            assert!(!listed(&msg, w.repo_b.as_str()) && !msg.contains("beta"), "{msg}");
+            assert!(
+                !listed(&msg, w.repo_b.as_str()) && !msg.contains("beta"),
+                "{msg}"
+            );
         }
-        let visible = visible_repos(&w.src(), &alice.effective_user, None).await.unwrap();
+        let visible = visible_repos(&w.src(), &alice.effective_user, None)
+            .await
+            .unwrap();
         let ids: Vec<&str> = visible.iter().map(|e| e.repo.id.as_str()).collect();
         assert_eq!(ids, [w.repo_a.as_str()]);
         // No Git feature grant → no directory at all.
@@ -1117,7 +1178,10 @@ mod tests {
     fn listing_puts_the_current_workspace_first() {
         let mut es = fixture();
         sort_for_listing(&mut es, Some("ws-b"));
-        let first_a = es.iter().position(|e| e.repo.workspace_id == "ws-a").unwrap();
+        let first_a = es
+            .iter()
+            .position(|e| e.repo.workspace_id == "ws-a")
+            .unwrap();
         assert!(es[..first_a].iter().all(|e| e.repo.workspace_id == "ws-b"));
         assert_eq!(es[0].repo.name, "games_management");
         let row = es[0].to_json(Some("ws-b"));

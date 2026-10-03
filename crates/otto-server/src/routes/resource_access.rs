@@ -108,7 +108,7 @@ use otto_core::domain::{Capability, Feature, WorkspaceRole};
 use otto_rbac::resource_access::ResourceAccess;
 use otto_state::resource_access::ResourceAccessRepo;
 use otto_state::{
-    AwsAccountsRepo, ConnectionsRepo, GrantsRepo, K8sClustersRepo, McpRegistryRepo, DbPool,
+    AwsAccountsRepo, ConnectionsRepo, DbPool, GrantsRepo, K8sClustersRepo, McpRegistryRepo,
     UsersRepo, WorkspacesRepo,
 };
 use serde::{Deserialize, Serialize};

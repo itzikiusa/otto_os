@@ -1077,7 +1077,12 @@ mod tests {
         // A missed fire (daemon down / Mac asleep) catches up once.
         assert!(is_due(&s, None, utc(2026, 9, 25, 8, 0), Tz::UTC));
         // Spent after the first completed run.
-        assert!(!is_due(&s, Some(utc(2026, 9, 24, 17, 0)), utc(2026, 9, 25, 8, 0), Tz::UTC));
+        assert!(!is_due(
+            &s,
+            Some(utc(2026, 9, 24, 17, 0)),
+            utc(2026, 9, 25, 8, 0),
+            Tz::UTC
+        ));
         assert_eq!(
             next_run(&s, utc(2026, 9, 24, 12, 0), Tz::UTC),
             Some(utc(2026, 9, 24, 17, 0))
@@ -1125,7 +1130,10 @@ mod tests {
         assert!(validate(&json!({"cadence":"once","run_at":"2026-09-24T17:00:00Z"})).is_ok());
         assert!(validate(&json!({"cadence":"once"})).is_err());
         assert!(validate(&json!({"cadence":"once","run_at":"tomorrow at 5"})).is_err());
-        assert!(describe(&json!({"cadence":"once","run_at":"2026-09-24T17:00"}), Tz::UTC)
-            .starts_with("once at 2026-09-24T17:00"));
+        assert!(describe(
+            &json!({"cadence":"once","run_at":"2026-09-24T17:00"}),
+            Tz::UTC
+        )
+        .starts_with("once at 2026-09-24T17:00"));
     }
 }

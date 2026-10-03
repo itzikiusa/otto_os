@@ -1,10 +1,10 @@
 //! Sessions repository.
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::{Session, SessionKind, SessionStatus};
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json, ts};
 
@@ -134,20 +134,36 @@ impl SessionsRepo {
         Self { pool }
     }
 
-    pub fn pool(&self) -> DbPool { self.pool.clone() }
+    pub fn pool(&self) -> DbPool {
+        self.pool.clone()
+    }
 
-    pub async fn network_profile(&self, workspace: &Id, meta: &serde_json::Value) -> Result<Option<otto_core::network_profiles::NetworkProfile>> {
-        crate::network_profiles::NetworkProfilesRepo::new(self.pool.clone()).selected(workspace, meta).await
+    pub async fn network_profile(
+        &self,
+        workspace: &Id,
+        meta: &serde_json::Value,
+    ) -> Result<Option<otto_core::network_profiles::NetworkProfile>> {
+        crate::network_profiles::NetworkProfilesRepo::new(self.pool.clone())
+            .selected(workspace, meta)
+            .await
     }
 
     pub async fn workspace(&self, workspace_id: &Id) -> Result<otto_core::domain::Workspace> {
-        crate::WorkspacesRepo::new(self.pool.clone()).get(workspace_id).await
+        crate::WorkspacesRepo::new(self.pool.clone())
+            .get(workspace_id)
+            .await
     }
 
     /// Resolve curated project context with workspace validation, regardless of
     /// session provider. The launch layer decides how its adapter consumes it.
-    pub async fn project_context(&self, workspace_id: &Id, meta: &serde_json::Value) -> Result<Option<String>> {
-        crate::projects::ProjectsRepo::new(self.pool.clone()).context(workspace_id, meta).await
+    pub async fn project_context(
+        &self,
+        workspace_id: &Id,
+        meta: &serde_json::Value,
+    ) -> Result<Option<String>> {
+        crate::projects::ProjectsRepo::new(self.pool.clone())
+            .context(workspace_id, meta)
+            .await
     }
 
     pub async fn create(&self, s: NewSession) -> Result<Session> {
@@ -241,7 +257,8 @@ impl SessionsRepo {
             if i > 0 {
                 q.push(" OR ");
             }
-            q.push("(workspace_id = ").push_bind(scope.workspace_id.clone());
+            q.push("(workspace_id = ")
+                .push_bind(scope.workspace_id.clone());
             if let Some(owner) = &scope.owner {
                 q.push(" AND created_by = ").push_bind(owner.clone());
             }
@@ -495,7 +512,10 @@ impl SessionsRepo {
     /// intermediate state. Both merge patches belong to one atomic UPDATE.
     pub async fn replace_meta_keys(&self, id: &Id, patch: &serde_json::Value) -> Result<()> {
         if patch.get("account_id").is_some() || patch.get("account_label").is_some() {
-            return Err(Error::Invalid("session account is immutable; create a new session to choose another account".into()));
+            return Err(Error::Invalid(
+                "session account is immutable; create a new session to choose another account"
+                    .into(),
+            ));
         }
         if patch.get("project_id").is_some() {
             let session = self.get(id).await?;
@@ -1100,7 +1120,11 @@ mod tests {
             .filter(|s| {
                 f.source.as_deref().is_none_or(|want| {
                     let src = s.meta.get("source").and_then(|v| v.as_str());
-                    if want == "none" { src.is_none() } else { src == Some(want) }
+                    if want == "none" {
+                        src.is_none()
+                    } else {
+                        src == Some(want)
+                    }
                 })
             })
             .filter(|s| f.status.as_deref().is_none_or(|st| s.status.as_str() == st))
@@ -1149,17 +1173,38 @@ mod tests {
                             ..Default::default()
                         };
                         // Full scope (admin) and owner scope (non-admin).
-                        let full = [SessionScope { workspace_id: ws.clone(), owner: None }];
-                        let got: Vec<String> = repo.list_filtered(&full, &f).await.unwrap().into_iter().map(|s| s.id).collect();
+                        let full = [SessionScope {
+                            workspace_id: ws.clone(),
+                            owner: None,
+                        }];
+                        let got: Vec<String> = repo
+                            .list_filtered(&full, &f)
+                            .await
+                            .unwrap()
+                            .into_iter()
+                            .map(|s| s.id)
+                            .collect();
                         let want = rust_filter(repo.list_by_workspace(&ws).await.unwrap(), &f);
                         let mut got_sorted = got.clone();
                         got_sorted.sort();
                         let mut want_sorted = want.clone();
                         want_sorted.sort();
                         assert_eq!(got_sorted, want_sorted, "admin scope, filter {f:?}");
-                        let mine = [SessionScope { workspace_id: ws.clone(), owner: Some(alice.clone()) }];
-                        let got: Vec<String> = repo.list_filtered(&mine, &f).await.unwrap().into_iter().map(|s| s.id).collect();
-                        let want = rust_filter(repo.list_by_workspace_for_user(&ws, &alice).await.unwrap(), &f);
+                        let mine = [SessionScope {
+                            workspace_id: ws.clone(),
+                            owner: Some(alice.clone()),
+                        }];
+                        let got: Vec<String> = repo
+                            .list_filtered(&mine, &f)
+                            .await
+                            .unwrap()
+                            .into_iter()
+                            .map(|s| s.id)
+                            .collect();
+                        let want = rust_filter(
+                            repo.list_by_workspace_for_user(&ws, &alice).await.unwrap(),
+                            &f,
+                        );
                         assert_eq!(got, want, "owner scope (same order), filter {f:?}");
                         checked += 1;
                     }
@@ -1175,12 +1220,14 @@ mod tests {
         let (alice, ws1) = seed_user_ws(&pool).await;
         let bob = seed_extra_user(&pool, "bob").await;
         let ws2 = new_id();
-        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w2', '/tmp', ?)")
-            .bind(&ws2)
-            .bind(fmt(Utc::now()))
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w2', '/tmp', ?)",
+        )
+        .bind(&ws2)
+        .bind(fmt(Utc::now()))
+        .execute(&pool)
+        .await
+        .unwrap();
         let repo = SessionsRepo::new(pool.clone());
         let mut ids = Vec::new();
         for i in 0..6 {
@@ -1190,27 +1237,72 @@ mod tests {
             ids.push(insert_row(&pool, ws, user, "agent", "idle", 0, "{}", &at).await);
         }
         // An archived row the live-only listing must never return.
-        insert_row(&pool, &ws1, &alice, "agent", "idle", 1, "{}", "2026-01-01T00:00:09+00:00").await;
+        insert_row(
+            &pool,
+            &ws1,
+            &alice,
+            "agent",
+            "idle",
+            1,
+            "{}",
+            "2026-01-01T00:00:09+00:00",
+        )
+        .await;
         let scopes = [
-            SessionScope { workspace_id: ws1.clone(), owner: None },
+            SessionScope {
+                workspace_id: ws1.clone(),
+                owner: None,
+            },
             // ws2 owner-scoped to alice: bob's row (i = 5) is hidden.
-            SessionScope { workspace_id: ws2.clone(), owner: Some(alice.clone()) },
+            SessionScope {
+                workspace_id: ws2.clone(),
+                owner: Some(alice.clone()),
+            },
         ];
-        let live = SessionListFilter { archived: Some(false), ..Default::default() };
-        let got: Vec<String> = repo.list_filtered(&scopes, &live).await.unwrap().into_iter().map(|s| s.id).collect();
-        assert_eq!(got, ids[..5].to_vec(), "both workspaces, oldest first, owner scope honoured");
+        let live = SessionListFilter {
+            archived: Some(false),
+            ..Default::default()
+        };
+        let got: Vec<String> = repo
+            .list_filtered(&scopes, &live)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            got,
+            ids[..5].to_vec(),
+            "both workspaces, oldest first, owner scope honoured"
+        );
 
         // Page 1: the newest 2 (still oldest-first); page 2 via `before`.
-        let page1 = SessionListFilter { archived: Some(false), limit: Some(2), ..Default::default() };
+        let page1 = SessionListFilter {
+            archived: Some(false),
+            limit: Some(2),
+            ..Default::default()
+        };
         let p1 = repo.list_filtered(&scopes, &page1).await.unwrap();
-        assert_eq!(p1.iter().map(|s| s.id.clone()).collect::<Vec<_>>(), ids[3..5].to_vec());
+        assert_eq!(
+            p1.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+            ids[3..5].to_vec()
+        );
         let page2 = SessionListFilter {
             before: Some(fmt(p1[0].created_at)),
             ..page1.clone()
         };
-        let p2: Vec<String> = repo.list_filtered(&scopes, &page2).await.unwrap().into_iter().map(|s| s.id).collect();
+        let p2: Vec<String> = repo
+            .list_filtered(&scopes, &page2)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
         assert_eq!(p2, ids[1..3].to_vec());
-        assert!(repo.list_filtered(&[], &live).await.unwrap().is_empty(), "no scope, no rows");
+        assert!(
+            repo.list_filtered(&[], &live).await.unwrap().is_empty(),
+            "no scope, no rows"
+        );
     }
 
     #[tokio::test]
@@ -1220,17 +1312,31 @@ mod tests {
         let repo = SessionsRepo::new(pool.clone());
         let ok = insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p1"), 0).await;
         let codex = insert_session_full(&pool, &ws, &user, "codex", "working", Some("p2"), 0).await;
-        let _archived = insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p3"), 1).await;
-        let _exited = insert_session_full(&pool, &ws, &user, "claude", "exited", Some("p4"), 0).await;
+        let _archived =
+            insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p3"), 1).await;
+        let _exited =
+            insert_session_full(&pool, &ws, &user, "claude", "exited", Some("p4"), 0).await;
         let _shell = insert_session_full(&pool, &ws, &user, "shell", "idle", Some("p5"), 0).await;
         let _no_psid = insert_session_full(&pool, &ws, &user, "claude", "idle", None, 0).await;
         let named = insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p6"), 0).await;
-        repo.merge_meta(&named, &serde_json::json!({"title_source": "user"})).await.unwrap();
+        repo.merge_meta(&named, &serde_json::json!({"title_source": "user"}))
+            .await
+            .unwrap();
         let auto = insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p7"), 0).await;
-        repo.merge_meta(&auto, &serde_json::json!({"title_source": "provider"})).await.unwrap();
+        repo.merge_meta(&auto, &serde_json::json!({"title_source": "provider"}))
+            .await
+            .unwrap();
         let other = insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p8"), 0).await;
-        repo.merge_meta(&other, &serde_json::json!({"title_source": "first_prompt"})).await.unwrap();
-        let mut got: Vec<String> = repo.list_title_candidates().await.unwrap().into_iter().map(|s| s.id).collect();
+        repo.merge_meta(&other, &serde_json::json!({"title_source": "first_prompt"}))
+            .await
+            .unwrap();
+        let mut got: Vec<String> = repo
+            .list_title_candidates()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
         got.sort();
         let mut want = vec![ok, codex, other];
         want.sort();

@@ -11,9 +11,9 @@
 mod config;
 mod mcp_server;
 mod mcp_tools;
-mod usage_tailer;
 #[cfg(feature = "embed-ui")]
 mod ui_assets;
+mod usage_tailer;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -26,9 +26,9 @@ use otto_orchestrator::Orchestrator;
 use otto_rbac::{RbacAuthenticator, RbacRoleChecker};
 use otto_server::modules::{module_routers, PtySpawner};
 use otto_server::{
-    build_router_with_assets, spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
-    spawn_usage_recorder, spawn_workflow_event_trigger_listener, AuthScanner, CredentialMonitor,
-    ServerCtx,
+    build_router_with_assets, spawn_budget_sampler, spawn_metrics_sampler,
+    spawn_session_event_listener, spawn_usage_recorder, spawn_workflow_event_trigger_listener,
+    AuthScanner, CredentialMonitor, ServerCtx,
 };
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
@@ -233,7 +233,10 @@ async fn run(cfg: Config) -> Result<(), String> {
         match tokio::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, cfg.port)).await {
             Ok(l) => Some(l),
             Err(e) => {
-                tracing::warn!("alt loopback [::1]:{} not bound ({e}) — single-host transport", cfg.port);
+                tracing::warn!(
+                    "alt loopback [::1]:{} not bound ({e}) — single-host transport",
+                    cfg.port
+                );
                 None
             }
         }
@@ -248,7 +251,10 @@ async fn run(cfg: Config) -> Result<(), String> {
         .map_err(|e| format!("recover interrupted database changes: {e}"))?;
     // Self-improvement runs are in-process: nothing can still be running at
     // boot, and an orphaned `running` row blocks that workspace's runs forever.
-    match ImprovementsRepo::new(pool.clone()).fail_orphaned_runs().await {
+    match ImprovementsRepo::new(pool.clone())
+        .fail_orphaned_runs()
+        .await
+    {
         Ok(0) => {}
         Ok(n) => tracing::warn!("marked {n} interrupted self-improvement run(s) failed"),
         Err(e) => tracing::warn!("recover interrupted self-improvement runs: {e}"),
@@ -340,7 +346,10 @@ async fn run(cfg: Config) -> Result<(), String> {
         SessionManager::new(SessionsRepo::new(pool.clone()), events.clone(), providers)
             // Runtime-configurable idle-suspend grace + per-session keep-alive pin.
             .with_settings_repo(SettingsRepo::new(pool.clone()))
-            .with_provider_accounts(otto_state::provider_accounts::ProviderAccountsRepo::new(pool.clone()), cfg.data_dir.join("provider-accounts"))
+            .with_provider_accounts(
+                otto_state::provider_accounts::ProviderAccountsRepo::new(pool.clone()),
+                cfg.data_dir.join("provider-accounts"),
+            )
             // Auto-name new agent sessions from the creating user's active theme.
             .with_name_themes_repo(otto_state::NameThemesRepo::new(pool.clone()))
             .with_pre_spawn_hook(provisioner.clone())

@@ -11,6 +11,7 @@ pub mod api_client;
 pub(crate) mod api_oauth;
 pub(crate) mod api_response_cache;
 pub mod api_stream;
+pub mod assistant;
 pub mod audit;
 pub mod auth_routes;
 pub mod backup;
@@ -35,16 +36,15 @@ pub mod mcp_servers;
 pub mod meta;
 pub mod mission;
 pub mod name_themes;
+pub mod network_profiles;
 pub mod notifications;
 pub mod onboarding;
 pub mod personal_agents;
-pub mod assistant;
-pub mod provider_accounts;
 pub mod product_memory;
-pub mod proof;
 pub mod projects;
-pub mod network_profiles;
+pub mod proof;
 pub mod proof_pack;
+pub mod provider_accounts;
 pub mod repo_rules;
 pub mod runs;
 pub mod scheduled_tasks;
@@ -298,7 +298,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/git/repos/directory",
             get(crate::repo_directory::repo_directory),
         )
-        .route("/git/repos/resolve", get(crate::repo_directory::repo_resolve))
+        .route(
+            "/git/repos/resolve",
+            get(crate::repo_directory::repo_resolve),
+        )
         // --- The same discovery for every OTHER id an agent tool takes
         //     (workflows, connections, issue accounts, clusters, …):
         //     cross-workspace directory + friendly-reference resolution. -----

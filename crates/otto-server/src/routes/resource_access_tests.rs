@@ -91,11 +91,13 @@ impl AccessCtx for TestAccess {
     }
 }
 async fn setup() -> (TestAccess, User, User, Id) {
-    let pool = otto_state::DbPool::from(sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap());
+    let pool = otto_state::DbPool::from(
+        sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    );
     sqlx::migrate!("../otto-state/migrations")
         .run(&pool)
         .await
@@ -129,7 +131,7 @@ fn auth(user: &User) -> otto_core::auth::AuthContext {
         mcp_scope: None,
         mcp_internal: false,
         mcp_session_id: None,
-            managed_session_id: None,
+        managed_session_id: None,
     }
 }
 async fn request<S: AccessCtx>(

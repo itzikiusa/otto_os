@@ -241,7 +241,10 @@ impl SandboxPolicy {
         }
         if data_dir_set {
             // 1. Otto's data dir is read-only for the agent…
-            trailing.push(format!("(deny file-write* {})", filter("subpath", &data_dir)));
+            trailing.push(format!(
+                "(deny file-write* {})",
+                filter("subpath", &data_dir)
+            ));
             // 2. …except its agent work areas and the caller's in-data-dir
             //    extras (e.g. this session's provider-account home).
             let mut open: Vec<PathBuf> = AGENT_DATA_SUBDIRS
@@ -518,8 +521,14 @@ mod tests {
         let sbpl = pol.to_sbpl();
         let deny = at(&sbpl, &format!("(deny file-write* (subpath \"{data}\"))"));
         let reopen = at(&sbpl, &format!("(subpath \"{data}/workflow-context\")"));
-        let own_home = at(&sbpl, &format!("(subpath \"{data}/provider-accounts/acct1\")"));
-        assert!(deny < reopen && deny < own_home, "re-allows must follow the deny");
+        let own_home = at(
+            &sbpl,
+            &format!("(subpath \"{data}/provider-accounts/acct1\")"),
+        );
+        assert!(
+            deny < reopen && deny < own_home,
+            "re-allows must follow the deny"
+        );
         // Never re-opened: the daemon binary, the DB, the secrets.
         assert!(!sbpl.contains(&format!("(subpath \"{data}/bin\")")));
         assert!(!sbpl.contains(&format!("(subpath \"{data}/provider-accounts\")")));
@@ -562,7 +571,10 @@ mod tests {
     #[test]
     fn for_agent_mach_lookup_is_an_allow_list() {
         let sbpl = agent_policy("/nonexistent-otto-test/Otto").to_sbpl();
-        assert!(!sbpl.contains("(allow mach-lookup)\n"), "blanket mach-lookup");
+        assert!(
+            !sbpl.contains("(allow mach-lookup)\n"),
+            "blanket mach-lookup"
+        );
         assert!(sbpl.contains("(global-name \"com.apple.trustd.agent\")"));
         assert!(sbpl.contains("(global-name \"com.apple.SecurityServer\")"));
         for escape_hatch in [
@@ -570,7 +582,10 @@ mod tests {
             "com.apple.coreservices.appleevents",
             "com.apple.lsd.mapdb",
         ] {
-            assert!(!sbpl.contains(escape_hatch), "{escape_hatch} must not be reachable");
+            assert!(
+                !sbpl.contains(escape_hatch),
+                "{escape_hatch} must not be reachable"
+            );
         }
         assert!(sbpl.contains("(deny process-exec (literal \"/bin/launchctl\"))"));
     }
@@ -580,7 +595,10 @@ mod tests {
         let sbpl = agent_policy("/nonexistent-otto-test/Otto").to_sbpl();
         let grant = at(&sbpl, "(allow file-write* (subpath \"/home/u/.claude\"))");
         let deny = at(&sbpl, "(literal \"/home/u/.claude/settings.json\")");
-        assert!(deny > grant, "the settings deny must override the .claude grant");
+        assert!(
+            deny > grant,
+            "the settings deny must override the .claude grant"
+        );
         assert!(sbpl.contains("(literal \"/home/u/.codex/config.toml\")"));
         assert!(sbpl.contains("(subpath \"/home/u/.config/git\")"));
     }

@@ -1797,7 +1797,8 @@ impl LocalGit {
                 let upstream_raw = cols.next().unwrap_or("").trim().to_string();
                 let head = cols.next().unwrap_or("").trim();
                 let sha = cols.next().unwrap_or("").trim().to_string();
-                let (ahead, behind) = crate::parse::parse_upstream_tracking(cols.next().unwrap_or(""));
+                let (ahead, behind) =
+                    crate::parse::parse_upstream_tracking(cols.next().unwrap_or(""));
                 let merged =
                     base.as_deref() != Some(name.as_str()) && merged_local.contains(name.as_str());
                 RefBranch {
@@ -1830,7 +1831,10 @@ impl LocalGit {
             .map(|line| {
                 let mut cols = line.splitn(2, '\t');
                 let full = cols.next().unwrap_or("").trim();
-                let name = full.strip_prefix("refs/remotes/").unwrap_or(full).to_string();
+                let name = full
+                    .strip_prefix("refs/remotes/")
+                    .unwrap_or(full)
+                    .to_string();
                 let sha = cols.next().unwrap_or("").trim().to_string();
                 // Don't flag the base's own remote twin (origin/<base>) as safe.
                 let is_base_remote = base
@@ -1905,8 +1909,9 @@ impl LocalGit {
             std::collections::HashSet<String>,
             std::collections::HashSet<String>,
         );
-        static MEMO: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, Sets)>>> =
-            std::sync::OnceLock::new();
+        static MEMO: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, Sets)>>,
+        > = std::sync::OnceLock::new();
         let Some(b) = base else {
             return (Default::default(), Default::default());
         };
@@ -1971,10 +1976,7 @@ impl LocalGit {
             base,
             "--format=%(refname:lstrip=2)",
         ];
-        let (local, remote) = tokio::join!(
-            self.run_read(&local_args),
-            self.run_read(&remote_args)
-        );
+        let (local, remote) = tokio::join!(self.run_read(&local_args), self.run_read(&remote_args));
         let complete = local.is_ok() && remote.is_ok();
         (
             (
@@ -2060,11 +2062,7 @@ impl LocalGit {
                     let mut s = run(diff("diff", &["-U3", m, l, "--cached"]))
                         .await
                         .unwrap_or_default();
-                    s.extend(
-                        run(diff("diff", &["-U3", m, l]))
-                            .await
-                            .unwrap_or_default(),
-                    );
+                    s.extend(run(diff("diff", &["-U3", m, l])).await.unwrap_or_default());
                     s
                 };
                 // Untracked files: render each as a fully-added diff. Scope the
@@ -2083,10 +2081,7 @@ impl LocalGit {
                 }
                 out
             }
-            DiffTarget::Staged => {
-                run(diff("diff", &["-U3", m, l, "--cached"]))
-                    .await?
-            }
+            DiffTarget::Staged => run(diff("diff", &["-U3", m, l, "--cached"])).await?,
             DiffTarget::Commit(sha) => {
                 // `-m --first-parent`: a merge commit's default `git show`
                 // output is a combined (--cc) diff — files identical to any
@@ -2111,8 +2106,7 @@ impl LocalGit {
             }
             DiffTarget::Range(..) | DiffTarget::MergeBase(..) => {
                 let range = target.range_arg().unwrap_or_default();
-                run(diff("diff", &["-U3", m, l, "--end-of-options", &range]))
-                    .await?
+                run(diff("diff", &["-U3", m, l, "--end-of-options", &range])).await?
             }
         };
         Ok(out)
@@ -2141,15 +2135,14 @@ impl LocalGit {
             DiffTarget::Worktree => run(stat("diff", &[])).await?,
             DiffTarget::Staged => run(stat("diff", &["--cached"])).await?,
             DiffTarget::Working => {
-                let (head_ok, head_out, head_err, _) = self.exec(&stat("diff", &["HEAD"]), None).await?;
+                let (head_ok, head_out, head_err, _) =
+                    self.exec(&stat("diff", &["HEAD"]), None).await?;
                 note_renames(&head_err, &ri);
                 untracked = self.untracked(paths).await?;
                 if head_ok {
                     head_out
                 } else {
-                    let mut s = run(stat("diff", &["--cached"]))
-                        .await
-                        .unwrap_or_default();
+                    let mut s = run(stat("diff", &["--cached"])).await.unwrap_or_default();
                     s.extend(run(stat("diff", &[])).await.unwrap_or_default());
                     s
                 }
@@ -2163,8 +2156,7 @@ impl LocalGit {
             }
             DiffTarget::Range(..) | DiffTarget::MergeBase(..) => {
                 let range = target.range_arg().unwrap_or_default();
-                run(stat("diff", &["--end-of-options", &range]))
-                    .await?
+                run(stat("diff", &["--end-of-options", &range])).await?
             }
         };
         let mut resp = crate::parse::parse_raw_numstat(&out);
@@ -2173,7 +2165,8 @@ impl LocalGit {
         }
         if !untracked.is_empty() {
             let root = self.repo_path.clone();
-            let extra = off_runtime(usize::MAX, move || untracked_summary(&root, &untracked)).await?;
+            let extra =
+                off_runtime(usize::MAX, move || untracked_summary(&root, &untracked)).await?;
             resp.files.extend(extra);
             crate::parse::fill_totals(&mut resp);
         }
@@ -2183,8 +2176,8 @@ impl LocalGit {
     /// Untracked (not ignored) files, optionally limited to `paths`. `-z`:
     /// names arrive raw, never C-quoted.
     async fn untracked(&self, paths: &[&str]) -> Result<Vec<String>> {
-        let ls = GitCmd::read(&["ls-files", "-z", "--others", "--exclude-standard"])
-            .maybe_paths(paths);
+        let ls =
+            GitCmd::read(&["ls-files", "-z", "--others", "--exclude-standard"]).maybe_paths(paths);
         let (_, out, _, _) = self.exec(&ls, None).await?;
         let out = String::from_utf8_lossy(&out);
         Ok(nul_records(&out).map(str::to_string).collect())
@@ -2247,9 +2240,7 @@ impl LocalGit {
             }
             None => GitCmd::diff("diff").args(["-M"]),
         };
-        let (out, cut) = self
-            .exec_truncated(&cmd.truncate_stdout(max), None)
-            .await?;
+        let (out, cut) = self.exec_truncated(&cmd.truncate_stdout(max), None).await?;
         Ok((String::from_utf8_lossy(&out).into_owned(), cut))
     }
 
@@ -2455,8 +2446,11 @@ impl LocalGit {
     /// True once HEAD resolves to a commit (false on an unborn branch).
     pub(crate) async fn head_exists(&self) -> bool {
         matches!(
-            self.exec(&GitCmd::read(&["rev-parse", "-q", "--verify", "HEAD^{commit}"]), None)
-                .await,
+            self.exec(
+                &GitCmd::read(&["rev-parse", "-q", "--verify", "HEAD^{commit}"]),
+                None
+            )
+            .await,
             Ok((true, ..))
         )
     }
@@ -3247,7 +3241,9 @@ impl LocalGit {
             .trim()
             .to_string();
         if sha.is_empty() {
-            return Err(Error::Internal("stash saved but refs/stash is unreadable".into()));
+            return Err(Error::Internal(
+                "stash saved but refs/stash is unreadable".into(),
+            ));
         }
         Ok(sha)
     }
@@ -3405,7 +3401,9 @@ impl LocalGit {
 
         // Dirty-tree handling: either auto-stash, or refuse.
         if !self.working_dirty().await? {
-            return self.merge_branch_inner(source, target, strategy, None).await;
+            return self
+                .merge_branch_inner(source, target, strategy, None)
+                .await;
         }
         if !auto_stash {
             return Err(Error::Conflict(
@@ -3997,7 +3995,8 @@ impl LocalGit {
 /// `.git` as a path component, compared the way the default case-insensitive
 /// APFS/HFS+ volume resolves it: `.GIT/config` IS `.git/config` there.
 fn is_git_dir_name(name: &std::ffi::OsStr) -> bool {
-    name.to_str().is_some_and(|s| s.eq_ignore_ascii_case(".git"))
+    name.to_str()
+        .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
 }
 
 /// stderr lines that SSH/git emit as benign chatter — never the reason a command
@@ -6149,16 +6148,29 @@ mod tests {
     async fn refs_keep_local_names_when_remote_names_collide() {
         let (_tmp, dir) = fixture_n_commits(2);
         sh_git(&dir, &["branch", "origin/collision"]);
-        sh_git(&dir, &["update-ref", "refs/remotes/origin/collision", "HEAD~1"]);
+        sh_git(
+            &dir,
+            &["update-ref", "refs/remotes/origin/collision", "HEAD~1"],
+        );
         let git = LocalGit::new(&dir);
         let refs = git.refs().await.unwrap();
-        let local = refs.local.iter().find(|b| b.name == "origin/collision")
+        let local = refs
+            .local
+            .iter()
+            .find(|b| b.name == "origin/collision")
             .expect("local branch keeps its usable checkout name");
-        let remote = refs.remote.iter().find(|b| b.name == "origin/collision").unwrap();
+        let remote = refs
+            .remote
+            .iter()
+            .find(|b| b.name == "origin/collision")
+            .unwrap();
         assert!(!local.remote);
         assert!(remote.remote);
         assert_ne!(local.sha, remote.sha);
-        assert!(local.merged_into_base, "normalized names must still match cleanup membership");
+        assert!(
+            local.merged_into_base,
+            "normalized names must still match cleanup membership"
+        );
     }
 
     // ── R0: a branch switch never pulls ─────────────────────────────────────
@@ -6857,20 +6869,32 @@ mod tests {
         let git = LocalGit::new(&dir);
 
         git.stage(&paths).await.unwrap();
-        let staged = git.run(&["diff", "--cached", "--name-only", "-z"]).await.unwrap();
+        let staged = git
+            .run(&["diff", "--cached", "--name-only", "-z"])
+            .await
+            .unwrap();
         assert_eq!(nul_records(&staged).count(), paths.len());
 
         git.unstage(&paths).await.unwrap();
-        let staged = git.run(&["diff", "--cached", "--name-only", "-z"]).await.unwrap();
+        let staged = git
+            .run(&["diff", "--cached", "--name-only", "-z"])
+            .await
+            .unwrap();
         assert_eq!(nul_records(&staged).count(), 0);
 
         git.discard(&paths).await.unwrap();
-        assert!(paths.iter().all(|p| !dir.join(p).exists()), "every untracked file cleaned");
+        assert!(
+            paths.iter().all(|p| !dir.join(p).exists()),
+            "every untracked file cleaned"
+        );
     }
 
     #[test]
     fn argv_batches_split_by_bytes_and_keep_order() {
-        let paths: Vec<String> = ["aaaa", "bb", "cccccc", "d"].iter().map(|s| s.to_string()).collect();
+        let paths: Vec<String> = ["aaaa", "bb", "cccccc", "d"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let b = argv_batches(&paths, 8);
         assert_eq!(b, vec![&paths[0..2], &paths[2..3], &paths[3..4]]);
         // A single name over the budget still gets a batch of its own.
@@ -6900,7 +6924,10 @@ mod tests {
         git.unstage(&both).await.unwrap();
 
         git.discard(&["caf\u{e9}.txt".into()]).await.unwrap();
-        assert!(!dir.join("caf\u{e9}.txt").exists(), "the untracked file is gone");
+        assert!(
+            !dir.join("caf\u{e9}.txt").exists(),
+            "the untracked file is gone"
+        );
         assert!(dir.join("q\"uote.txt").exists());
         assert!(matches!(
             git.discard(&["caf\u{e9}.txt".into()]).await,
@@ -6976,8 +7003,14 @@ mod tests {
         ] {
             assert!(git.write_resolution(bad, payload).await.is_err(), "{bad}");
         }
-        assert_eq!(std::fs::read(dir.join(".git/config")).unwrap(), config_before);
-        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hello\n");
+        assert_eq!(
+            std::fs::read(dir.join(".git/config")).unwrap(),
+            config_before
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "hello\n"
+        );
 
         // The conflicted file itself swapped for a symlink to a file outside.
         let outside = tmp.path().join("outside.txt");
@@ -7009,7 +7042,9 @@ mod tests {
         std::fs::write(&conflicted, marked).unwrap();
 
         // The legitimate write still resolves and stages the file.
-        git.write_resolution("sub/c.txt", "resolved\n").await.unwrap();
+        git.write_resolution("sub/c.txt", "resolved\n")
+            .await
+            .unwrap();
         assert!(git.conflicted_paths().await.unwrap().is_empty());
         assert_eq!(std::fs::read_to_string(&conflicted).unwrap(), "resolved\n");
     }

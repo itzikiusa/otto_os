@@ -12,12 +12,12 @@
 
 use std::collections::HashMap;
 
+use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::Row;
-use crate::DbPool;
 
 use crate::convert::{dberr, fmt, json};
 
@@ -374,15 +374,24 @@ impl PersonalAgentsRepo {
 
     /// User-maintained context is independent of filesystem memory and persona.
     pub async fn context(&self, id: &str) -> Result<(String, String)> {
-        let row = sqlx::query("SELECT content, version FROM personal_agent_context WHERE agent_id = ?")
-            .bind(id).fetch_optional(&self.pool).await.map_err(dberr("get agent context"))?;
-        Ok(row.map(|r| (r.get("content"), r.get("version")))
+        let row =
+            sqlx::query("SELECT content, version FROM personal_agent_context WHERE agent_id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(dberr("get agent context"))?;
+        Ok(row
+            .map(|r| (r.get("content"), r.get("version")))
             .unwrap_or_else(|| (String::new(), "missing".into())))
     }
 
     /// One atomic compare-and-swap; concurrent editors never silently overwrite.
     pub async fn save_context(&self, id: &str, expected: &str, content: &str) -> Result<String> {
-        if content.len() > 1024 * 1024 { return Err(otto_core::Error::Invalid("agent context exceeds 1 MiB".into())); }
+        if content.len() > 1024 * 1024 {
+            return Err(otto_core::Error::Invalid(
+                "agent context exceeds 1 MiB".into(),
+            ));
+        }
         let version = new_id();
         let result = sqlx::query(
             "INSERT INTO personal_agent_context (agent_id, content, version, updated_at) \
@@ -393,7 +402,11 @@ impl PersonalAgentsRepo {
         ).bind(id).bind(content).bind(&version).bind(fmt(Utc::now()))
             .bind(expected).bind(id).bind(expected).bind(expected)
             .execute(&self.pool).await.map_err(dberr("save agent context"))?;
-        if result.rows_affected() == 0 { return Err(otto_core::Error::Conflict("Context changed since you opened it. Reload and reconcile your edits.".into())); }
+        if result.rows_affected() == 0 {
+            return Err(otto_core::Error::Conflict(
+                "Context changed since you opened it. Reload and reconcile your edits.".into(),
+            ));
+        }
         Ok(version)
     }
 
@@ -1058,11 +1071,26 @@ mod tests {
         let pool = pool().await;
         seed_ws(&pool, "w").await;
         let repo = PersonalAgentsRepo::new(pool);
-        let agent = repo.create(NewPersonalAgent::defaults("w".into(), "Context".into())).await.unwrap();
-        assert_eq!(repo.context(&agent.id).await.unwrap(), (String::new(), "missing".into()));
-        let version = repo.save_context(&agent.id, "missing", "user context").await.unwrap();
-        assert!(repo.save_context(&agent.id, "missing", "stale").await.is_err());
-        assert_eq!(repo.context(&agent.id).await.unwrap(), ("user context".into(), version));
+        let agent = repo
+            .create(NewPersonalAgent::defaults("w".into(), "Context".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.context(&agent.id).await.unwrap(),
+            (String::new(), "missing".into())
+        );
+        let version = repo
+            .save_context(&agent.id, "missing", "user context")
+            .await
+            .unwrap();
+        assert!(repo
+            .save_context(&agent.id, "missing", "stale")
+            .await
+            .is_err());
+        assert_eq!(
+            repo.context(&agent.id).await.unwrap(),
+            ("user context".into(), version)
+        );
     }
 
     #[tokio::test]
@@ -1319,13 +1347,22 @@ mod tests {
         // page before a cursor; an unknown cursor reads nothing.
         let tail = rooms.list_messages_before(&room.id, None, 1).await.unwrap();
         assert_eq!(tail.iter().map(|m| &m.id).collect::<Vec<_>>(), vec![&m2.id]);
-        let both = rooms.list_messages_before(&room.id, None, 50).await.unwrap();
-        assert_eq!(both.iter().map(|m| &m.id).collect::<Vec<_>>(), vec![&m1.id, &m2.id]);
+        let both = rooms
+            .list_messages_before(&room.id, None, 50)
+            .await
+            .unwrap();
+        assert_eq!(
+            both.iter().map(|m| &m.id).collect::<Vec<_>>(),
+            vec![&m1.id, &m2.id]
+        );
         let older = rooms
             .list_messages_before(&room.id, Some(&m2.id), 50)
             .await
             .unwrap();
-        assert_eq!(older.iter().map(|m| &m.id).collect::<Vec<_>>(), vec![&m1.id]);
+        assert_eq!(
+            older.iter().map(|m| &m.id).collect::<Vec<_>>(),
+            vec![&m1.id]
+        );
         assert!(rooms
             .list_messages_before(&room.id, Some(&m1.id), 50)
             .await

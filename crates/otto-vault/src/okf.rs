@@ -31,12 +31,20 @@ fn is_iso_date(s: &str) -> bool {
 /// valid knowledge unreadable. Trust declarations are not authenticated proofs.
 fn optional_metadata_warnings(fm: &serde_json::Value) -> Vec<String> {
     let mut warnings = Vec::new();
-    let nonempty = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_str()).is_some_and(|s| !s.trim().is_empty());
-    let datetime = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_str())
-        .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok());
+    let nonempty = |v: Option<&serde_json::Value>| {
+        v.and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty())
+    };
+    let datetime = |v: Option<&serde_json::Value>| {
+        v.and_then(|v| v.as_str())
+            .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
+    };
     if let Some(generated) = fm.get("generated") {
         if !nonempty(generated.get("by")) || !datetime(generated.get("at")) {
-            warnings.push("`generated` should carry nonempty `by` and an offset-bearing ISO datetime `at`".into());
+            warnings.push(
+                "`generated` should carry nonempty `by` and an offset-bearing ISO datetime `at`"
+                    .into(),
+            );
         }
     }
     if let Some(verified) = fm.get("verified") {
@@ -45,18 +53,29 @@ fn optional_metadata_warnings(fm: &serde_json::Value) -> Vec<String> {
             serde_json::Value::Object(_) => vec![verified],
             _ => vec![],
         };
-        if (!verified.is_array() && !verified.is_object()) || events.iter().any(|event| !nonempty(event.get("by")) || !datetime(event.get("at"))) {
-            warnings.push("`verified` should be a {by, at} mapping or list of verification mappings".into());
+        if (!verified.is_array() && !verified.is_object())
+            || events
+                .iter()
+                .any(|event| !nonempty(event.get("by")) || !datetime(event.get("at")))
+        {
+            warnings.push(
+                "`verified` should be a {by, at} mapping or list of verification mappings".into(),
+            );
         }
     }
     if let Some(sources) = fm.get("sources") {
-        if sources.as_array().is_none_or(|entries| entries.iter().any(|entry| !nonempty(entry.get("resource")))) {
+        if sources
+            .as_array()
+            .is_none_or(|entries| entries.iter().any(|entry| !nonempty(entry.get("resource"))))
+        {
             warnings.push("`sources` should be a list of mappings with a nonempty `resource` (path, URI or scope descriptor)".into());
         }
     }
     if let Some(status) = fm.get("status") {
         if !matches!(status.as_str(), Some("draft" | "stable" | "deprecated")) {
-            warnings.push("recommended lifecycle `status` values are draft, stable or deprecated".into());
+            warnings.push(
+                "recommended lifecycle `status` values are draft, stable or deprecated".into(),
+            );
         }
     }
     if fm.get("stale_after").is_some() && !datetime(fm.get("stale_after")) {
@@ -182,16 +201,27 @@ impl VaultEngine {
             // v0.2 generated.at takes precedence; timestamp is a v0.1 fallback.
             let changed_at = if fm.get("generated").is_some() {
                 fm.get("generated").and_then(|v| v.get("at"))
-            } else { fm.get("timestamp") };
-            if changed_at.and_then(serde_json::Value::as_str).is_none_or(|s| s.trim().is_empty()) {
+            } else {
+                fm.get("timestamp")
+            };
+            if changed_at
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|s| s.trim().is_empty())
+            {
                 warnings.push(OkfFinding {
                     rule: "W3".into(),
                     path: r.path.clone(),
-                    message: "missing `generated.at` (or legacy `timestamp`) for the last content change".into(),
+                    message:
+                        "missing `generated.at` (or legacy `timestamp`) for the last content change"
+                            .into(),
                 });
             }
             for message in optional_metadata_warnings(&fm) {
-                warnings.push(OkfFinding { rule: "W6".into(), path: r.path.clone(), message });
+                warnings.push(OkfFinding {
+                    rule: "W6".into(),
+                    path: r.path.clone(),
+                    message,
+                });
             }
         }
 
@@ -232,8 +262,12 @@ impl VaultEngine {
         let notes = self.store().all_notes(id).await?;
         // Existing bundles keep their declared version, including future ones.
         // Regenerating an index is not consent to migrate or downgrade a bundle.
-        let root = tokio::fs::read_to_string(std::path::Path::new(&v.root_path).join("index.md")).await.ok();
-        let version = root.as_deref().map(crate::parse::parse_note)
+        let root = tokio::fs::read_to_string(std::path::Path::new(&v.root_path).join("index.md"))
+            .await
+            .ok();
+        let version = root
+            .as_deref()
+            .map(crate::parse::parse_note)
             .and_then(|n| n.frontmatter.get("okf_version").cloned())
             .filter(|v| v.is_string() || v.is_number())
             .unwrap_or_else(|| serde_json::json!("0.2"));

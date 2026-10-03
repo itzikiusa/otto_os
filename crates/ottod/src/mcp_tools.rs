@@ -511,9 +511,8 @@ impl Ctx {
 
     /// Wait (bounded) for in-flight audit inserts — called when stdin closes.
     async fn drain_audit(&self) {
-        let mut tasks = std::mem::take(
-            &mut *self.audit_tasks.lock().unwrap_or_else(|p| p.into_inner()),
-        );
+        let mut tasks =
+            std::mem::take(&mut *self.audit_tasks.lock().unwrap_or_else(|p| p.into_inner()));
         let _ = tokio::time::timeout(std::time::Duration::from_secs(6), async {
             while tasks.join_next().await.is_some() {}
         })
@@ -2914,7 +2913,11 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
         // session binding wins) and refuses non-assistant sessions.
         name if assistant_segment(name).is_some() => {
             let seg_name = assistant_segment(name).unwrap_or_default();
-            let mut body = if args.is_object() { args.clone() } else { json!({}) };
+            let mut body = if args.is_object() {
+                args.clone()
+            } else {
+                json!({})
+            };
             if let Some(sid) = ctx.session_id.clone() {
                 body["session_id"] = json!(sid);
             }
@@ -5898,7 +5901,10 @@ mod tests {
         };
         let assistant = names(Some("assistant"));
         for (tool, _) in ASSISTANT_TOOLS {
-            assert!(assistant.contains(&tool.to_string()), "assistant catalog missing {tool}");
+            assert!(
+                assistant.contains(&tool.to_string()),
+                "assistant catalog missing {tool}"
+            );
         }
         // Everyone else keeps the normal catalog without them.
         for source in [None, Some("personal_agent"), Some("vault-docs")] {
@@ -5930,7 +5936,10 @@ mod tests {
         // The governed otto.assistant_* catalog entries are covered natively,
         // so `otto_assistant_remember` is never advertised twice.
         for n in ["assistant_remember", "assistant_forget", "assistant_recall"] {
-            assert!(governed_tool_for_stdio_name(&format!("otto_{n}")).is_none(), "{n}");
+            assert!(
+                governed_tool_for_stdio_name(&format!("otto_{n}")).is_none(),
+                "{n}"
+            );
         }
         let enabled = vec!["otto.assistant_recall".to_string()];
         assert!(governed_tools_for(&enabled).is_empty());

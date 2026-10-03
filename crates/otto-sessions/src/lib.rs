@@ -2,8 +2,8 @@
 //! `SessionManager` (PTY lifecycle + status detection), the sessions REST
 //! router and the terminal WebSocket.
 
-pub mod http;
 pub mod accounts;
+pub mod http;
 pub mod lifecycle;
 pub mod manager;
 pub mod mcp;
@@ -11,8 +11,8 @@ pub mod names;
 pub mod nested;
 pub mod prompt_guard;
 pub mod providers;
-pub mod share_throttle;
 pub mod room_authority;
+pub mod share_throttle;
 pub mod trust;
 pub mod ws;
 

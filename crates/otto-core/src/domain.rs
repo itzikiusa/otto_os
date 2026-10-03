@@ -1460,7 +1460,9 @@ pub struct GoalLoopConfig {
     pub definer: GoalLoopRoleCfg,
 }
 
-fn default_goal_mode() -> String { "build".into() }
+fn default_goal_mode() -> String {
+    "build".into()
+}
 
 impl Default for GoalLoopConfig {
     fn default() -> Self {
@@ -1600,8 +1602,11 @@ impl AcceptanceCriterion {
 
 impl GoalLoopLedger {
     pub fn verification(&self, criterion: &AcceptanceCriterion) -> Option<&GoalHumanVerification> {
-        self.verifications.iter().find(|v| v.criterion_id == criterion.id
-            && v.criterion_revision == criterion.revision() && !v.evidence.trim().is_empty())
+        self.verifications.iter().find(|v| {
+            v.criterion_id == criterion.id
+                && v.criterion_revision == criterion.revision()
+                && !v.evidence.trim().is_empty()
+        })
     }
 }
 
@@ -2720,7 +2725,6 @@ mod tests {
         assert_eq!(value["mode"], "build");
         assert_eq!(value["require_review"], false);
     }
-
 
     #[test]
     fn capability_orders_and_roundtrips() {

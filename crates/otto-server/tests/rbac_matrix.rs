@@ -37,7 +37,7 @@ use http_body_util::BodyExt;
 use otto_core::auth::AuthUser;
 use otto_core::domain::{Capability, Feature, User};
 use otto_server::feature_guard::feature_guard;
-use otto_state::{GrantsRepo, DbPool};
+use otto_state::{DbPool, GrantsRepo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::sync::Arc;
 use tower::ServiceExt; // for `oneshot`
@@ -358,9 +358,15 @@ async fn unknown_protected_route_403() {
 async fn personal_document_viewer_cannot_save() {
     let viewer = app_for(&[(Feature::ScheduledTasks, Capability::View)], false).await;
     let editor = app_for(&[(Feature::ScheduledTasks, Capability::Edit)], false).await;
-    for path in ["/api/v1/personal-agents/a/memory", "/api/v1/personal-agents/a/context"] {
+    for path in [
+        "/api/v1/personal-agents/a/memory",
+        "/api/v1/personal-agents/a/context",
+    ] {
         assert_eq!(status(&viewer, Method::GET, path).await, StatusCode::OK);
-        assert_eq!(status(&viewer, Method::PUT, path).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            status(&viewer, Method::PUT, path).await,
+            StatusCode::FORBIDDEN
+        );
         assert_eq!(status(&editor, Method::PUT, path).await, StatusCode::OK);
     }
 }

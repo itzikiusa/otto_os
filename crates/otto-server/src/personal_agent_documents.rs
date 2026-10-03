@@ -46,7 +46,9 @@ fn memory_version(path: &Path, content: Option<&[u8]>) -> String {
     let mut hash = Sha256::new();
     hash.update(path.as_os_str().as_encoded_bytes());
     hash.update([0, u8::from(content.is_some())]);
-    if let Some(bytes) = content { hash.update(bytes); }
+    if let Some(bytes) = content {
+        hash.update(bytes);
+    }
     format!("{:x}", hash.finalize())
 }
 
@@ -202,12 +204,18 @@ mod tests {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
         let original = read_memory(a.path()).await.unwrap();
-        assert!(matches!(save_memory(b.path(), &original.version, "old editor").await, Err(Error::Conflict(_))));
+        assert!(matches!(
+            save_memory(b.path(), &original.version, "old editor").await,
+            Err(Error::Conflict(_))
+        ));
         assert!(!b.path().join("memory/notes.md").exists());
         seed_memory(a.path(), "same notes").await.unwrap();
         seed_memory(b.path(), "same notes").await.unwrap();
         let original = read_memory(a.path()).await.unwrap();
-        assert!(matches!(save_memory(b.path(), &original.version, "old editor").await, Err(Error::Conflict(_))));
+        assert!(matches!(
+            save_memory(b.path(), &original.version, "old editor").await,
+            Err(Error::Conflict(_))
+        ));
         assert_eq!(read_memory(b.path()).await.unwrap().content, "same notes");
     }
 

@@ -74,8 +74,14 @@ pub fn routes() -> Router<ServerCtx> {
             "/personal-agents/schedules/{schedule_id}",
             axum::routing::patch(update_schedule).delete(delete_schedule),
         )
-        .route("/personal-agents/{id}/memory", get(read_memory).put(save_memory))
-        .route("/personal-agents/{id}/context", get(read_context).put(save_context))
+        .route(
+            "/personal-agents/{id}/memory",
+            get(read_memory).put(save_memory),
+        )
+        .route(
+            "/personal-agents/{id}/context",
+            get(read_context).put(save_context),
+        )
         .route("/personal-agents/{id}/run", post(run_now))
         .route("/personal-agents/{id}/runs", get(list_runs))
         .route("/personal-agents/runs/{run_id}/report", get(report))
@@ -602,40 +608,81 @@ async fn report(
 // --- User-editable documents ------------------------------------------------
 
 #[derive(Deserialize)]
-struct SaveDocumentReq { content: String, version: String }
+struct SaveDocumentReq {
+    content: String,
+    version: String,
+}
 
-async fn document_agent(ctx: &ServerCtx, user: &User, id: &str, role: WorkspaceRole) -> ApiResult<PersonalAgent> {
+async fn document_agent(
+    ctx: &ServerCtx,
+    user: &User,
+    id: &str,
+    role: WorkspaceRole,
+) -> ApiResult<PersonalAgent> {
     let agent = agents(ctx).get(id).await.map_err(ApiError)?;
     require_ws_role(ctx, user, &agent.workspace_id, role).await?;
     Ok(agent)
 }
 
-async fn read_memory(Path(id): Path<String>, State(ctx): State<ServerCtx>, CurrentUser(user): CurrentUser)
-    -> ApiResult<Json<crate::personal_agent_documents::AgentDocument>> {
+async fn read_memory(
+    Path(id): Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<crate::personal_agent_documents::AgentDocument>> {
     let agent = document_agent(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     let root = personal_agents_engine::agent_directory(&ctx, &agent).map_err(ApiError)?;
-    crate::personal_agent_documents::read_memory(&root).await.map(Json).map_err(ApiError)
+    crate::personal_agent_documents::read_memory(&root)
+        .await
+        .map(Json)
+        .map_err(ApiError)
 }
 
-async fn save_memory(Path(id): Path<String>, State(ctx): State<ServerCtx>, CurrentUser(user): CurrentUser,
-    Json(req): Json<SaveDocumentReq>) -> ApiResult<Json<crate::personal_agent_documents::AgentDocument>> {
+async fn save_memory(
+    Path(id): Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<SaveDocumentReq>,
+) -> ApiResult<Json<crate::personal_agent_documents::AgentDocument>> {
     let agent = document_agent(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     let root = personal_agents_engine::agent_directory(&ctx, &agent).map_err(ApiError)?;
-    crate::personal_agent_documents::save_memory(&root, &req.version, &req.content).await.map(Json).map_err(ApiError)
+    crate::personal_agent_documents::save_memory(&root, &req.version, &req.content)
+        .await
+        .map(Json)
+        .map_err(ApiError)
 }
 
-async fn read_context(Path(id): Path<String>, State(ctx): State<ServerCtx>, CurrentUser(user): CurrentUser)
-    -> ApiResult<Json<crate::personal_agent_documents::AgentDocument>> {
+async fn read_context(
+    Path(id): Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<crate::personal_agent_documents::AgentDocument>> {
     document_agent(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     let (content, version) = agents(&ctx).context(&id).await.map_err(ApiError)?;
-    Ok(Json(crate::personal_agent_documents::AgentDocument { exists: version != "missing", content, version, path: None }))
+    Ok(Json(crate::personal_agent_documents::AgentDocument {
+        exists: version != "missing",
+        content,
+        version,
+        path: None,
+    }))
 }
 
-async fn save_context(Path(id): Path<String>, State(ctx): State<ServerCtx>, CurrentUser(user): CurrentUser,
-    Json(req): Json<SaveDocumentReq>) -> ApiResult<Json<crate::personal_agent_documents::AgentDocument>> {
+async fn save_context(
+    Path(id): Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<SaveDocumentReq>,
+) -> ApiResult<Json<crate::personal_agent_documents::AgentDocument>> {
     document_agent(&ctx, &user, &id, WorkspaceRole::Editor).await?;
-    let version = agents(&ctx).save_context(&id, &req.version, &req.content).await.map_err(ApiError)?;
-    Ok(Json(crate::personal_agent_documents::AgentDocument { exists: true, content: req.content, version, path: None }))
+    let version = agents(&ctx)
+        .save_context(&id, &req.version, &req.content)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(crate::personal_agent_documents::AgentDocument {
+        exists: true,
+        content: req.content,
+        version,
+        path: None,
+    }))
 }
 
 // --- Chat -------------------------------------------------------------------
@@ -702,8 +749,14 @@ async fn chat_session(
         );
         let _hold = ctx.manager.hold_for_turn(&session.id);
         if !crate::review_session::submit_prompt(&ctx.manager, &session.id, &initial).await {
-            crate::review_session::stop_review_sessions(&ctx.manager, std::slice::from_ref(&session.id)).await;
-            return Err(ApiError(Error::Upstream("The chat session did not accept its context. Try opening it again.".into())));
+            crate::review_session::stop_review_sessions(
+                &ctx.manager,
+                std::slice::from_ref(&session.id),
+            )
+            .await;
+            return Err(ApiError(Error::Upstream(
+                "The chat session did not accept its context. Try opening it again.".into(),
+            )));
         }
     }
     repo.set_chat_session(&agent.id, Some(&session.id))

@@ -190,7 +190,10 @@ mod tests {
             remote_host("https://user:tok@GHE.corp.com:8443/o/r.git").as_deref(),
             Some("ghe.corp.com")
         );
-        assert_eq!(remote_host("git@github.com:o/r.git").as_deref(), Some("github.com"));
+        assert_eq!(
+            remote_host("git@github.com:o/r.git").as_deref(),
+            Some("github.com")
+        );
         assert_eq!(
             remote_host("https://ghe.corp.com/api/v3").as_deref(),
             Some("ghe.corp.com")

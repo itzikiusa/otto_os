@@ -624,7 +624,12 @@ impl PtyHandle {
     /// Carry revocable room authority through the queue to the actual writer.
     /// Timeout retains legacy delivery semantics, but an epoch change discards
     /// a queued job (or any unwritten tail) when the writer next makes progress.
-    pub async fn write_async_authorized(&self, data: &[u8], timeout: Duration, authorization: Option<InputAuthorization>) -> Result<()> {
+    pub async fn write_async_authorized(
+        &self,
+        data: &[u8],
+        timeout: Duration,
+        authorization: Option<InputAuthorization>,
+    ) -> Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         match self.input_tx.try_send(WriteJob {
             data: data.to_vec(),
@@ -643,7 +648,9 @@ impl PtyHandle {
             Ok(Ok(res)) => res.map_err(|e| {
                 if e.kind() == std::io::ErrorKind::PermissionDenied {
                     Error::Forbidden("terminal control changed".into())
-                } else { Error::Internal(format!("pty write: {e}")) }
+                } else {
+                    Error::Internal(format!("pty write: {e}"))
+                }
             }),
             Ok(Err(_)) => Err(input_closed()),
             Err(_) => Err(Error::Conflict(format!(
@@ -923,7 +930,8 @@ impl PtyHandle {
 
     /// Instant of the most recent output chunk (spawn time when none yet).
     pub fn last_output_at(&self) -> Instant {
-        self.mirror.epoch + Duration::from_millis(self.mirror.last_output_ms.load(Ordering::Relaxed))
+        self.mirror.epoch
+            + Duration::from_millis(self.mirror.last_output_ms.load(Ordering::Relaxed))
     }
 }
 
@@ -945,7 +953,11 @@ fn spawn_writer(writer: Box<dyn std::io::Write + Send>) -> SyncSender<WriteJob> 
     std::thread::spawn(move || {
         let mut writer = writer;
         while let Ok(job) = input_rx.recv() {
-            let res = input_authority::write_authorized(writer.as_mut(), &job.data, job.authorization.as_ref());
+            let res = input_authority::write_authorized(
+                writer.as_mut(),
+                &job.data,
+                job.authorization.as_ref(),
+            );
             let failed = res.as_ref().is_err_and(|e| {
                 !matches!(
                     e.kind(),
@@ -1201,11 +1213,9 @@ mod tests {
         assert!(exits_within(&handle, Duration::from_secs(10)).await);
         // The exit is published only after the child was marked exited.
         assert!(handle.has_exited());
-        assert!(!handle.child_state.signal(
-            handle.pid().expect("pid"),
-            None,
-            SIGHUP
-        ));
+        assert!(!handle
+            .child_state
+            .signal(handle.pid().expect("pid"), None, SIGHUP));
         handle.kill().expect("kill after exit is a no-op");
     }
 
@@ -1480,7 +1490,14 @@ mod tests {
         let mut parser = vt100::Parser::new(50, 160, EMULATOR_SCROLLBACK_LINES);
         // TUI-like rows: a colour/attribute change every 8 cells.
         let row: String = (0..19)
-            .map(|k| format!("\x1b[{};{}m{:<8}", 1 + (k % 2) * 21, 31 + (k % 7), format!("seg{k:02}")))
+            .map(|k| {
+                format!(
+                    "\x1b[{};{}m{:<8}",
+                    1 + (k % 2) * 21,
+                    31 + (k % 7),
+                    format!("seg{k:02}")
+                )
+            })
             .collect();
         for i in 0..(EMULATOR_SCROLLBACK_LINES + 200) {
             parser.process(format!("{i:05} {row}\x1b[0m\r\n").as_bytes());
@@ -1490,7 +1507,9 @@ mod tests {
         let direct = PtyHandle::format_snapshot(screen, EMULATOR_SCROLLBACK_LINES);
         let format_cost = t0.elapsed();
         let t1 = Instant::now();
-        let capture = ScreenCapture { screen: screen.clone() };
+        let capture = ScreenCapture {
+            screen: screen.clone(),
+        };
         let copy_cost = t1.elapsed();
         assert_eq!(capture.format(EMULATOR_SCROLLBACK_LINES), direct);
         assert_eq!(capture.size(), (160, 50));
@@ -1521,25 +1540,41 @@ mod tests {
         // publication boundary rather than relying on timing a live flood.
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            if handle.mirror.parser.try_lock().is_err() { break; }
-            assert!(Instant::now() < deadline, "reader did not retain emulator lock through publication");
+            if handle.mirror.parser.try_lock().is_err() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "reader did not retain emulator lock through publication"
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
         let copy = handle.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        let snapshot = std::thread::spawn(move || assert!(tx.send(copy.snapshot_and_subscribe(100)).is_ok()));
-        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err(), "snapshot overtook an unpublished emulator update");
+        let snapshot =
+            std::thread::spawn(move || assert!(tx.send(copy.snapshot_and_subscribe(100)).is_ok()));
+        assert!(
+            rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "snapshot overtook an unpublished emulator update"
+        );
         drop(ring);
         let mut replay = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         snapshot.join().unwrap();
         assert!(String::from_utf8_lossy(&replay.data).contains("SNAPSHOT-BARRIER"));
-        assert!(matches!(replay.output.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(
+            replay.output.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
         handle.write(b"-NEXT").unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut received = Vec::new();
         loop {
-            if let Ok(bytes) = replay.output.try_recv() { received.extend_from_slice(&bytes); }
-            if String::from_utf8_lossy(&received).contains("-NEXT") { break; }
+            if let Ok(bytes) = replay.output.try_recv() {
+                received.extend_from_slice(&bytes);
+            }
+            if String::from_utf8_lossy(&received).contains("-NEXT") {
+                break;
+            }
             assert!(Instant::now() < deadline, "post-snapshot output was lost");
             std::thread::sleep(Duration::from_millis(1));
         }

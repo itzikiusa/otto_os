@@ -11,13 +11,13 @@
 mod appkit_guard;
 mod bar;
 mod browser;
+mod host_rooms;
 mod panel;
-mod panic_guard;
 mod panes;
 mod panes_policy;
+mod panic_guard;
 mod popout;
 mod rooms;
-mod host_rooms;
 mod shortcuts;
 mod snip;
 mod supervisor;
@@ -47,50 +47,71 @@ fn main() {
         // Cmd+W would close a tab in EVERY window at once.
         .on_menu_event(|app, event| {
             panic_guard::guard("menu", || {
-            let id = event.id().0.as_str();
-            match id {
-                "new-window" => windows::create_new_window(app),
-                "quit" => {
-                    windows::mark_quitting();
-                    windows::snapshot_all(app);
-                    app.exit(0);
-                }
-                // Menu-bar item's right-click menu (tray.rs).
-                tray::MENU_OPEN => {
-                    let _ = popout::open_in_otto(app.clone(), None);
-                }
-                tray::MENU_ASK => tray::ask(app),
-                tray::MENU_SETTINGS => {
-                    let _ = popout::open_in_otto(app.clone(), Some("settings/appearance".into()));
-                }
-                _ => {
-                    // The bar / tray panels never take menu events (their
-                    // pages have no menu bridge) — only app windows do.
-                    let focused = app
-                        .windows()
-                        .into_iter()
-                        .find(|(l, w)| (windows::is_app_window(l) || l.starts_with(panes::PREFIX)) && w.is_focused().unwrap_or(false))
-                        .map(|(l, _)| l);
-                    match focused {
-                        // menu.ts listens per-webview-window, so a targeted
-                        // emit reaches exactly one window.
-                        Some(l) => {
-                            let host = panes::menu_host(app, &l);
-                            let _ = app.emit_to(tauri::EventTarget::webview(host), "otto://menu", id.to_string());
-                        }
-                        None => {
-                            if let Some(win) = windows::primary_window(app) {
-                                let _ = app.emit_to(tauri::EventTarget::webview(win.label()), "otto://menu", id.to_string());
+                let id = event.id().0.as_str();
+                match id {
+                    "new-window" => windows::create_new_window(app),
+                    "quit" => {
+                        windows::mark_quitting();
+                        windows::snapshot_all(app);
+                        app.exit(0);
+                    }
+                    // Menu-bar item's right-click menu (tray.rs).
+                    tray::MENU_OPEN => {
+                        let _ = popout::open_in_otto(app.clone(), None);
+                    }
+                    tray::MENU_ASK => tray::ask(app),
+                    tray::MENU_SETTINGS => {
+                        let _ =
+                            popout::open_in_otto(app.clone(), Some("settings/appearance".into()));
+                    }
+                    _ => {
+                        // The bar / tray panels never take menu events (their
+                        // pages have no menu bridge) — only app windows do.
+                        let focused = app
+                            .windows()
+                            .into_iter()
+                            .find(|(l, w)| {
+                                (windows::is_app_window(l) || l.starts_with(panes::PREFIX))
+                                    && w.is_focused().unwrap_or(false)
+                            })
+                            .map(|(l, _)| l);
+                        match focused {
+                            // menu.ts listens per-webview-window, so a targeted
+                            // emit reaches exactly one window.
+                            Some(l) => {
+                                let host = panes::menu_host(app, &l);
+                                let _ = app.emit_to(
+                                    tauri::EventTarget::webview(host),
+                                    "otto://menu",
+                                    id.to_string(),
+                                );
+                            }
+                            None => {
+                                if let Some(win) = windows::primary_window(app) {
+                                    let _ = app.emit_to(
+                                        tauri::EventTarget::webview(win.label()),
+                                        "otto://menu",
+                                        id.to_string(),
+                                    );
+                                }
                             }
                         }
                     }
                 }
-            }
             });
         })
         .invoke_handler(tauri::generate_handler![
-            panes::pane_open, panes::pane_layout, panes::pane_state, panes::pane_to_host, panes::pane_to_guest,
-            panes::pane_detach, panes::pane_return, panes::pane_window_action, panes::pane_monitors, panes::pane_close, panes::pane_focus,
+            panes::pane_open,
+            panes::pane_layout,
+            panes::pane_state,
+            panes::pane_to_host,
+            panes::pane_to_guest,
+            panes::pane_detach,
+            panes::pane_return,
+            panes::pane_window_action,
+            panes::pane_monitors,
+            panes::pane_close,
+            panes::pane_focus,
             supervisor::daemon_status,
             supervisor::daemon_start,
             supervisor::daemon_restart,
@@ -177,42 +198,47 @@ fn main() {
 /// event dispatch — keep it under `panic_guard::guard`.
 fn run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     match event {
-            // Cmd+Q (or last-window close) → snapshot the whole window set so
-            // the next launch restores it; a lone window close just forgets
-            // that window (handled in on_close_requested).
-            tauri::RunEvent::ExitRequested { .. } => {
-                windows::mark_quitting();
-                windows::snapshot_all(app);
-            }
-            tauri::RunEvent::WindowEvent { label, event, .. } => match event {
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    if panes::intercept_close(app, &label) { api.prevent_close(); return; }
-                    if windows::is_popout(&label) {
-                        popout::on_close_requested(app, &label);
-                    }
-                    windows::on_close_requested(app, &label);
-                }
-                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
-                    if matches!(event, tauri::WindowEvent::Resized(_)) { panes::resized(app, &label); }
-                    // Pop-outs remember frames per route; the bar/tray panels
-                    // are placed by code and never persisted.
-                    if windows::is_popout(&label) {
-                        popout::schedule_save(app, &label);
-                    } else if windows::is_app_window(&label) {
-                        windows::schedule_snapshot(app);
-                    }
-                }
-                tauri::WindowEvent::Destroyed => {
-                    panes::destroyed(app, &label);
-                    host_rooms::destroyed(&label);
-                }
-                tauri::WindowEvent::Focused(false) if label == tray::POPOVER_LABEL => {
-                    tray::on_blur(app);
-                }
-                _ => {}
-            },
-            _ => {}
+        // Cmd+Q (or last-window close) → snapshot the whole window set so
+        // the next launch restores it; a lone window close just forgets
+        // that window (handled in on_close_requested).
+        tauri::RunEvent::ExitRequested { .. } => {
+            windows::mark_quitting();
+            windows::snapshot_all(app);
         }
+        tauri::RunEvent::WindowEvent { label, event, .. } => match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                if panes::intercept_close(app, &label) {
+                    api.prevent_close();
+                    return;
+                }
+                if windows::is_popout(&label) {
+                    popout::on_close_requested(app, &label);
+                }
+                windows::on_close_requested(app, &label);
+            }
+            tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                if matches!(event, tauri::WindowEvent::Resized(_)) {
+                    panes::resized(app, &label);
+                }
+                // Pop-outs remember frames per route; the bar/tray panels
+                // are placed by code and never persisted.
+                if windows::is_popout(&label) {
+                    popout::schedule_save(app, &label);
+                } else if windows::is_app_window(&label) {
+                    windows::schedule_snapshot(app);
+                }
+            }
+            tauri::WindowEvent::Destroyed => {
+                panes::destroyed(app, &label);
+                host_rooms::destroyed(&label);
+            }
+            tauri::WindowEvent::Focused(false) if label == tray::POPOVER_LABEL => {
+                tray::on_blur(app);
+            }
+            _ => {}
+        },
+        _ => {}
+    }
 }
 
 /// Set the macOS dock badge to the number of working agents ("" clears).
@@ -223,7 +249,9 @@ fn set_badge_count(webview: tauri::Webview, count: u32) {
     if webview.label() != "main" {
         return;
     }
-    let _ = webview.window().set_badge_count(if count == 0 { None } else { Some(count as i64) });
+    let _ = webview
+        .window()
+        .set_badge_count(if count == 0 { None } else { Some(count as i64) });
 }
 
 fn build_menu(app: &tauri::App) -> tauri::Result<()> {

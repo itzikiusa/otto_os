@@ -1015,7 +1015,11 @@ async fn enabled_tools(ctx: &ServerCtx) -> Vec<String> {
 /// without the per-session human grant — so a list saved before a UI command
 /// shipped must not silently switch the new command off. A UI tool the
 /// operator saw and unchecked stays off. Pure.
-fn merge_enabled(stored: Option<Vec<String>>, ui_known: &[String], ui_tools: &[String]) -> Vec<String> {
+fn merge_enabled(
+    stored: Option<Vec<String>>,
+    ui_known: &[String],
+    ui_tools: &[String],
+) -> Vec<String> {
     match stored {
         None => DEFAULT_ENABLED
             .iter()
@@ -1753,7 +1757,9 @@ pub(crate) async fn governed_invoke(
         let latency = started.elapsed().as_millis() as i64;
         return Ok(match r {
             Ok(value) => {
-                let bytes = serde_json::to_vec(&value).map(|v| v.len() as i64).unwrap_or(0);
+                let bytes = serde_json::to_vec(&value)
+                    .map(|v| v.len() as i64)
+                    .unwrap_or(0);
                 let _ = ctx
                     .mcp
                     .call_log()
@@ -1766,7 +1772,14 @@ pub(crate) async fn governed_invoke(
                 let _ = ctx
                     .mcp
                     .call_log()
-                    .finalize(&audit_id, false, Some(&format!("{}: {msg}", e.code)), Some(latency), None, None)
+                    .finalize(
+                        &audit_id,
+                        false,
+                        Some(&format!("{}: {msg}", e.code)),
+                        Some(latency),
+                        None,
+                        None,
+                    )
                     .await;
                 ui_error_envelope(&e.code, &msg)
             }
@@ -2516,11 +2529,13 @@ fn match_transition(list: &Value, wanted: &str) -> Result<String, Error> {
         match hits.len() {
             0 => continue,
             1 => return Ok(id_of(hits[0])),
-            _ => return Err(Error::Conflict(format!(
+            _ => {
+                return Err(Error::Conflict(format!(
                 "transition '{wanted}' matches {} transitions — pass one id as transition_id:\n{}",
                 hits.len(),
                 listing()
-            ))),
+            )))
+            }
         }
     }
     Err(Error::NotFound(format!(
@@ -3148,7 +3163,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 ],
             );
             let base = format!("/api/v1/repos/{}/prs/{}/diff", seg(&repo), n);
-            SelfCall::get(if q.is_empty() { base } else { format!("{base}?{q}") })
+            SelfCall::get(if q.is_empty() {
+                base
+            } else {
+                format!("{base}?{q}")
+            })
         }
         "merge_pr" => {
             let repo = arg_str(args, "repo_id")?;
@@ -5058,8 +5077,20 @@ mod tests {
 
     #[test]
     fn internal_reviewer_scope_does_not_depend_on_outward_server_toggle() {
-        assert!(mcp_tool_enabled_for_token(true, false, false, &[], "vault_read"));
-        assert!(!mcp_tool_enabled_for_token(false, false, false, &[], "vault_read"));
+        assert!(mcp_tool_enabled_for_token(
+            true,
+            false,
+            false,
+            &[],
+            "vault_read"
+        ));
+        assert!(!mcp_tool_enabled_for_token(
+            false,
+            false,
+            false,
+            &[],
+            "vault_read"
+        ));
         assert!(mcp_tool_enabled_for_token(
             false,
             false,
@@ -5074,11 +5105,35 @@ mod tests {
     #[test]
     fn ui_tools_from_a_session_skip_only_the_master_switch() {
         let on = vec!["ui_db_run_query".to_string()];
-        assert!(mcp_tool_enabled_for_token(false, true, false, &on, "ui_db_run_query"));
-        assert!(!mcp_tool_enabled_for_token(false, true, false, &[], "ui_db_run_query"));
+        assert!(mcp_tool_enabled_for_token(
+            false,
+            true,
+            false,
+            &on,
+            "ui_db_run_query"
+        ));
+        assert!(!mcp_tool_enabled_for_token(
+            false,
+            true,
+            false,
+            &[],
+            "ui_db_run_query"
+        ));
         // Not from a session → the master switch still applies.
-        assert!(!mcp_tool_enabled_for_token(false, false, false, &on, "ui_db_run_query"));
-        assert!(mcp_tool_enabled_for_token(false, false, true, &on, "ui_db_run_query"));
+        assert!(!mcp_tool_enabled_for_token(
+            false,
+            false,
+            false,
+            &on,
+            "ui_db_run_query"
+        ));
+        assert!(mcp_tool_enabled_for_token(
+            false,
+            false,
+            true,
+            &on,
+            "ui_db_run_query"
+        ));
     }
 
     #[test]
@@ -5105,12 +5160,23 @@ mod tests {
     fn ui_tools_are_classified() {
         for t in crate::ui_commands::catalog() {
             let bare = t.tool();
-            assert!(!DANGEROUS.contains(&bare.as_str()), "{bare} must not be DANGEROUS");
+            assert!(
+                !DANGEROUS.contains(&bare.as_str()),
+                "{bare} must not be DANGEROUS"
+            );
             assert_eq!(tool_is_mutating(&bare), t.risk.mutating(), "{bare}");
             assert!(pin_global(&bare), "{bare}: pin story");
             // A read-only token scope refuses the mutating ones.
-            let ro = McpScope { tools: None, allow_writes: false, workspace_id: None };
-            assert_eq!(ro.deny_reason(&bare, tool_is_mutating(&bare), None).is_some(), t.risk.mutating());
+            let ro = McpScope {
+                tools: None,
+                allow_writes: false,
+                workspace_id: None,
+            };
+            assert_eq!(
+                ro.deny_reason(&bare, tool_is_mutating(&bare), None)
+                    .is_some(),
+                t.risk.mutating()
+            );
         }
         assert!(tool_is_mutating("ui_db_export"));
         assert!(!tool_is_mutating("ui_db_run_query"));
@@ -5125,7 +5191,10 @@ mod tests {
         assert_eq!(v["code"], "pending_grant");
         assert_eq!(v["content"], json!({"error":"ask","code":"pending_grant"}));
         assert_eq!(ui_error_envelope("timeout", "slow")["executed"], true);
-        assert_eq!(ui_error_envelope("cancelled_by_user", "no")["executed"], true);
+        assert_eq!(
+            ui_error_envelope("cancelled_by_user", "no")["executed"],
+            true
+        );
     }
 
     #[test]
@@ -6140,9 +6209,14 @@ mod tests {
         let body = c.body.unwrap();
         assert_eq!(body["text"], "prefers aisle seats");
         assert_eq!(body["session_id"], "s1");
-        assert!(body.get("bogus").is_none(), "only declared args are forwarded");
+        assert!(
+            body.get("bogus").is_none(),
+            "only declared args are forwarded"
+        );
         assert_eq!(
-            route_for("assistant_forget", &json!({"query":"seats"})).unwrap().path,
+            route_for("assistant_forget", &json!({"query":"seats"}))
+                .unwrap()
+                .path,
             "/api/v1/assistant/agent/forget"
         );
         assert_eq!(
@@ -6151,8 +6225,10 @@ mod tests {
         );
         assert!(route_for("assistant_remember", &json!({})).is_err());
         assert!(route_for("assistant_forget", &json!({})).is_err());
-        assert!(dangerous_detail("otto.assistant_remember", &json!({"text":"likes tea"}))
-            .contains("likes tea"));
+        assert!(
+            dangerous_detail("otto.assistant_remember", &json!({"text":"likes tea"}))
+                .contains("likes tea")
+        );
     }
 
     #[test]

@@ -345,7 +345,13 @@ async fn persist_transcript_path(
 ) {
     let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let resolved = match provider_home {
-        Some(root) => crate::lifecycle::transcript_path_in_roots(&root.join("projects"), &root.join("sessions"), provider, cwd, Some(psid)),
+        Some(root) => crate::lifecycle::transcript_path_in_roots(
+            &root.join("projects"),
+            &root.join("sessions"),
+            provider,
+            cwd,
+            Some(psid),
+        ),
         None => crate::lifecycle::transcript_path(&home, provider, cwd, Some(psid)),
     };
     match resolved {
@@ -768,8 +774,7 @@ fn nested_probe_missed(id: &Id, pid: u32) {
         + if extra == 0 {
             Duration::ZERO
         } else {
-            Duration::from_secs(60u64.saturating_mul(1 << extra.min(8)) / 2)
-                .min(NESTED_MAX_BACKOFF)
+            Duration::from_secs(60u64.saturating_mul(1 << extra.min(8)) / 2).min(NESTED_MAX_BACKOFF)
         };
 }
 
@@ -1621,7 +1626,10 @@ pub struct SessionManager {
     /// read-only MCP tool server (Task B2b) and injects the `otto` entry into
     /// `.mcp.json`. Absent ⇒ the feature is entirely off.
     auth: Option<AuthRepo>,
-    provider_accounts: Option<(otto_state::provider_accounts::ProviderAccountsRepo, std::path::PathBuf)>,
+    provider_accounts: Option<(
+        otto_state::provider_accounts::ProviderAccountsRepo,
+        std::path::PathBuf,
+    )>,
     /// Absolute path to the `ottod` binary that backs the `otto` MCP tool server
     /// (`<path> mcp-tools`). Defaults to the running executable's own path so the
     /// tools subcommand is always the same build as the daemon.
@@ -1825,7 +1833,11 @@ impl SessionManager {
         self
     }
 
-    pub fn with_provider_accounts(mut self, repo: otto_state::provider_accounts::ProviderAccountsRepo, root: std::path::PathBuf) -> Self {
+    pub fn with_provider_accounts(
+        mut self,
+        repo: otto_state::provider_accounts::ProviderAccountsRepo,
+        root: std::path::PathBuf,
+    ) -> Self {
         self.provider_accounts = Some((repo, root));
         self
     }
@@ -1838,18 +1850,38 @@ impl SessionManager {
     }
 
     fn codex_root_for(&self, session: &Session) -> std::path::PathBuf {
-        self.provider_home(session).map(|home| home.join("sessions")).unwrap_or_else(codex_sessions_root)
+        self.provider_home(session)
+            .map(|home| home.join("sessions"))
+            .unwrap_or_else(codex_sessions_root)
     }
 
-    async fn resolve_account(&self, owner: &Id, provider: &str, meta: &serde_json::Value)
-        -> Result<Option<(otto_core::provider_accounts::ProviderAccount, std::path::PathBuf)>> {
-        let Some(value) = meta.get("account_id").filter(|v| !v.is_null()) else { return Ok(None) };
-        let id = value.as_str().filter(|s| !s.is_empty())
-            .ok_or_else(|| Error::Invalid("account_id must be a nonempty profile ID or null".into()))?;
-        let (repo, root) = self.provider_accounts.as_ref()
+    async fn resolve_account(
+        &self,
+        owner: &Id,
+        provider: &str,
+        meta: &serde_json::Value,
+    ) -> Result<
+        Option<(
+            otto_core::provider_accounts::ProviderAccount,
+            std::path::PathBuf,
+        )>,
+    > {
+        let Some(value) = meta.get("account_id").filter(|v| !v.is_null()) else {
+            return Ok(None);
+        };
+        let id = value.as_str().filter(|s| !s.is_empty()).ok_or_else(|| {
+            Error::Invalid("account_id must be a nonempty profile ID or null".into())
+        })?;
+        let (repo, root) = self
+            .provider_accounts
+            .as_ref()
             .ok_or_else(|| Error::Invalid("provider account support is unavailable".into()))?;
         let account = repo.get(owner, &id.to_owned()).await?;
-        if account.provider != provider { return Err(Error::Invalid("selected account belongs to a different provider".into())); }
+        if account.provider != provider {
+            return Err(Error::Invalid(
+                "selected account belongs to a different provider".into(),
+            ));
+        }
         let home = crate::accounts::account_home(root, &account.id)?;
         crate::accounts::prepare_home(&home)?;
         Ok(Some((account, home)))
@@ -2293,7 +2325,10 @@ impl SessionManager {
         };
         // Durable session ownership survives daemon restarts. Do not mint a
         // replacement if revocation failed, or credentials would accumulate.
-        if let Err(e) = self.revoke_mcp_token(&session.created_by, &session.id).await {
+        if let Err(e) = self
+            .revoke_mcp_token(&session.created_by, &session.id)
+            .await
+        {
             tracing::warn!(session = %session.id, "otto MCP token rotation failed: {e}");
             return OttoToolsInjection::default();
         }
@@ -2504,7 +2539,10 @@ impl SessionManager {
     /// token's 10-year TTL. Every respawn mints a fresh one
     /// (`maybe_enable_otto_tools`). Best-effort, logged.
     async fn retire_credentials(&self, session: &Session) {
-        if let Err(e) = self.revoke_mcp_token(&session.created_by, &session.id).await {
+        if let Err(e) = self
+            .revoke_mcp_token(&session.created_by, &session.id)
+            .await
+        {
             tracing::warn!(session = %session.id, "revoke retired session credentials: {e}");
         }
     }
@@ -2688,7 +2726,9 @@ impl SessionManager {
         if session.kind == SessionKind::Agent {
             // The legacy trust helper writes default CLI homes. Named profiles
             // let their native CLI/prompt guard persist trust in their own home.
-            if account.is_none() { crate::trust::ensure_trusted(&session.provider, &session.cwd); }
+            if account.is_none() {
+                crate::trust::ensure_trusted(&session.provider, &session.cwd);
+            }
             // Otto's first-party read-only tool server: when the workspace has
             // opted in (`otto_mcp_enabled`), mint a per-session token; the
             // launcher entry itself lands via the reconcile below. Opt-in,
@@ -2724,16 +2764,16 @@ impl SessionManager {
                 let ws_owned = ws.clone();
                 let cwd = session.cwd.clone();
                 let prov = session.provider.clone();
-                let context = (account.is_some() || project_context.is_some()).then(|| otto_core::hooks::SessionSpawnContext {
-                    namespace: session.id.clone(),
-                    provider_home: account.as_ref().map(|(_, home)| home.clone()),
-                    extra_context_md: project_context.clone().unwrap_or_default(),
-                });
-                let injection = tokio::task::spawn_blocking(move || {
-                    match context {
-                        Some(context) => hook.before_spawn_session(&ws_owned, &cwd, &prov, &context),
-                        None => hook.before_spawn(&ws_owned, &cwd, &prov),
+                let context = (account.is_some() || project_context.is_some()).then(|| {
+                    otto_core::hooks::SessionSpawnContext {
+                        namespace: session.id.clone(),
+                        provider_home: account.as_ref().map(|(_, home)| home.clone()),
+                        extra_context_md: project_context.clone().unwrap_or_default(),
                     }
+                });
+                let injection = tokio::task::spawn_blocking(move || match context {
+                    Some(context) => hook.before_spawn_session(&ws_owned, &cwd, &prov, &context),
+                    None => hook.before_spawn(&ws_owned, &cwd, &prov),
                 })
                 .await
                 .unwrap_or_default();
@@ -2765,13 +2805,16 @@ impl SessionManager {
         // as the very last step before spawn so it wraps the fully-injected spec.
         if let Some((account, home)) = &account {
             if let Err(error) = crate::accounts::apply_account(&mut spec, account, home) {
-                let _ = self.revoke_mcp_token(&session.created_by, &session.id).await;
+                let _ = self
+                    .revoke_mcp_token(&session.created_by, &session.id)
+                    .await;
                 let _ = self.repo.delete(&session.id).await;
                 return Err(error);
             }
         }
         if let Some(network) = &network {
-            spec.env.retain(|(key, _)| !network.env.iter().any(|(mapped, _)| mapped == key));
+            spec.env
+                .retain(|(key, _)| !network.env.iter().any(|(mapped, _)| mapped == key));
             spec.env.extend(network.env.clone());
         }
         self.apply_sandbox(&mut spec, &session).await;
@@ -2786,13 +2829,16 @@ impl SessionManager {
         {
             Ok(h) => Arc::new(h),
             Err(e) => {
-                let _ = self.revoke_mcp_token(&session.created_by, &session.id).await;
+                let _ = self
+                    .revoke_mcp_token(&session.created_by, &session.id)
+                    .await;
                 let _ = self.repo.delete(&session.id).await;
                 return Err(e);
             }
         };
 
-        self.networks.activate(session.id.clone(), network, handle.on_exit());
+        self.networks
+            .activate(session.id.clone(), network, handle.on_exit());
         self.live.insert(session.id.clone(), Arc::clone(&handle));
         self.start_status_task(
             session.id.clone(),
@@ -2903,9 +2949,7 @@ impl SessionManager {
                 let claimed: std::collections::HashSet<&str> =
                     claimed_rows.iter().map(String::as_str).collect();
                 let pick = match provider.as_str() {
-                    "codex" => {
-                        pick_codex_rollout(&codex_root, &cwd, floor, &claimed, probe)
-                    }
+                    "codex" => pick_codex_rollout(&codex_root, &cwd, floor, &claimed, probe),
                     "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed)
                         .map(RolloutPick::Claim)
                         .unwrap_or(RolloutPick::Nothing),
@@ -2917,7 +2961,15 @@ impl SessionManager {
                         // set already contains this id.
                         match repo.set_provider_session(&id, &psid).await {
                             Ok(()) => {
-                                persist_transcript_path(&repo, &id, &provider, &cwd, &psid, provider_home.as_deref()).await;
+                                persist_transcript_path(
+                                    &repo,
+                                    &id,
+                                    &provider,
+                                    &cwd,
+                                    &psid,
+                                    provider_home.as_deref(),
+                                )
+                                .await;
                                 captured = Some(psid)
                             }
                             Err(e) => tracing::warn!(
@@ -3134,7 +3186,8 @@ impl SessionManager {
 
     /// Stamp `id` as used now (the live-session cap's LRU clock).
     fn touch(&self, id: &Id) {
-        self.last_touch.insert(id.clone(), std::time::Instant::now());
+        self.last_touch
+            .insert(id.clone(), std::time::Instant::now());
     }
 
     /// Real input reached `id` (a person typed, or automation sent a turn):
@@ -3189,7 +3242,11 @@ impl SessionManager {
     /// [`restart_would_interrupt`]. A session that is not live is never busy.
     /// Reads the provider transcript tail off the runtime (blocking hop).
     pub async fn busy_for_restart(&self, id: &Id) -> bool {
-        let Some(quiet_for) = self.live.get(id).map(|e| e.value().last_output_at().elapsed()) else {
+        let Some(quiet_for) = self
+            .live
+            .get(id)
+            .map(|e| e.value().last_output_at().elapsed())
+        else {
             return false;
         };
         let engine_open = self.engine_turn_open(id);
@@ -3216,7 +3273,13 @@ impl SessionManager {
             }
             None => (None, None),
         };
-        restart_would_interrupt(session.status, engine_open, quiet_for, turn_open, artifact_age)
+        restart_would_interrupt(
+            session.status,
+            engine_open,
+            quiet_for,
+            turn_open,
+            artifact_age,
+        )
     }
 
     fn release_turn(&self, id: &Id) {
@@ -3438,11 +3501,7 @@ impl SessionManager {
             let mut m = nested_misses().lock().unwrap_or_else(|p| p.into_inner());
             m.retain(|(sid, _), _| snapshot.iter().any(|(id, ..)| id == sid));
             let mut e = nested_eligible().lock().unwrap_or_else(|p| p.into_inner());
-            e.retain(|(sid, seq), _| {
-                snapshot
-                    .iter()
-                    .any(|(id, _, s)| id == sid && s == seq)
-            });
+            e.retain(|(sid, seq), _| snapshot.iter().any(|(id, _, s)| id == sid && s == seq));
         }
         // Only agent-kind shells can host a nested agent: learn each spawn's
         // kind once, and skip the whole-box `ps` when no live shell exists.
@@ -3568,7 +3627,15 @@ impl SessionManager {
                 tracing::warn!(session = %id, "nested-agent capture: persist failed: {e}");
                 continue;
             }
-            persist_transcript_path(&self.repo, &id, provider, &cwd, &psid, self.provider_home(&session).as_deref()).await;
+            persist_transcript_path(
+                &self.repo,
+                &id,
+                provider,
+                &cwd,
+                &psid,
+                self.provider_home(&session).as_deref(),
+            )
+            .await;
             let _ = self
                 .repo
                 .merge_meta(
@@ -3863,7 +3930,9 @@ impl SessionManager {
     /// `human_input` instead so guest credentials cannot impersonate automation.
     pub async fn input(&self, id: &Id, data: &[u8]) -> Result<()> {
         let mut permit = self.room_authority.entry(id).lock_owned().await;
-        let handle = self.live_handle(id).ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        let handle = self
+            .live_handle(id)
+            .ok_or_else(|| Error::Conflict("session is not live".into()))?;
         permit.automation(handle.spawn_seq())?;
         let authorization = permit.authorization();
         drop(permit);
@@ -3873,7 +3942,13 @@ impl SessionManager {
 
     /// The writer rechecks the captured epoch after queueing. Do not hold the
     /// async permit while a child is hung: the host must still be able to revoke.
-    async fn write_pty(&self, id: &Id, handle: &Arc<PtyHandle>, data: &[u8], authorization: Option<otto_pty::InputAuthorization>) -> Result<()> {
+    async fn write_pty(
+        &self,
+        id: &Id,
+        handle: &Arc<PtyHandle>,
+        data: &[u8],
+        authorization: Option<otto_pty::InputAuthorization>,
+    ) -> Result<()> {
         // Feed the pending provider-id capture's probe (absent for sessions
         // without one — the common case, a single map lookup).
         if let Some(mut probe) = self.capture_probes.get_mut(id) {
@@ -3888,13 +3963,17 @@ impl SessionManager {
         // Never a blocking `write_all` on a tokio worker: a child that stops
         // reading its tty used to park one worker per keystroke/paste until
         // the pool was exhausted and the whole daemon froze.
-        handle.write_async_authorized(data, INPUT_WRITE_TIMEOUT, authorization).await
+        handle
+            .write_async_authorized(data, INPUT_WRITE_TIMEOUT, authorization)
+            .await
     }
 
     /// Trusted internal terminal resize; normal viewers use `human_resize`.
     pub async fn resize(&self, id: &Id, cols: u16, rows: u16) -> Result<()> {
         let mut permit = self.room_authority.entry(id).lock_owned().await;
-        let handle = self.live_handle(id).ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        let handle = self
+            .live_handle(id)
+            .ok_or_else(|| Error::Conflict("session is not live".into()))?;
         permit.automation(handle.spawn_seq())?;
         self.resize_pty(id, &handle, cols, rows)
     }
@@ -3954,7 +4033,10 @@ impl SessionManager {
     /// keys and never exposing an absent object between removal and replacement.
     pub async fn update_meta(&self, id: &Id, patch: serde_json::Value) -> Result<Session> {
         if patch.get("account_id").is_some() || patch.get("account_label").is_some() {
-            return Err(Error::Invalid("a session keeps its original account; create a new session to choose another".into()));
+            return Err(Error::Invalid(
+                "a session keeps its original account; create a new session to choose another"
+                    .into(),
+            ));
         }
         let _ = self.repo.get(id).await?;
         self.repo.replace_meta_keys(id, &patch).await?;
@@ -4120,7 +4202,11 @@ impl SessionManager {
                     .chars()
                     .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
                     .collect();
-                provider_home.unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude"))
+                provider_home
+                    .unwrap_or_else(|| {
+                        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                            .join(".claude")
+                    })
                     .join("projects")
                     .join(enc)
                     .join(format!("{psid}.jsonl"))
@@ -4687,7 +4773,9 @@ impl SessionManager {
         for s in candidates {
             // Never use the default CLI's history to declare a named account's
             // conversation missing. Account sessions are retained explicitly.
-            if s.meta.get("account_id").and_then(|v| v.as_str()).is_some() { continue; }
+            if s.meta.get("account_id").and_then(|v| v.as_str()).is_some() {
+                continue;
+            }
             // Foreground (Agents-tab) sessions are durable — never auto-delete
             // them, whatever the transcript says (see the method doc).
             if s.is_foreground_agent() {
@@ -4913,11 +5001,18 @@ impl SessionManager {
     async fn restart_locked(&self, id: &Id, spec_override: Option<CommandSpec>) -> Result<Session> {
         let _mcp_activation = crate::mcp::activation_gate().read().await;
         let session = self.repo.get(id).await?;
-        let account = self.resolve_account(&session.created_by, &session.provider, &session.meta).await?;
-        let project_context = self.repo.project_context(&session.workspace_id, &session.meta).await?;
+        let account = self
+            .resolve_account(&session.created_by, &session.provider, &session.meta)
+            .await?;
+        let project_context = self
+            .repo
+            .project_context(&session.workspace_id, &session.meta)
+            .await?;
         let workspace = if session.kind == SessionKind::Agent {
             Some(self.repo.workspace(&session.workspace_id).await?)
-        } else { None };
+        } else {
+            None
+        };
         if session.archived {
             return Err(Error::Conflict(
                 "session is archived — unarchive it first".into(),
@@ -4957,27 +5052,37 @@ impl SessionManager {
             let hook = Arc::clone(hook);
             let cwd = session.cwd.clone();
             let provider = session.provider.clone();
-            let context = (account.is_some() || project_context.is_some()).then(|| otto_core::hooks::SessionSpawnContext {
-                namespace: session.id.clone(),
-                provider_home: account.as_ref().map(|(_, home)| home.clone()),
-                extra_context_md: project_context.clone().unwrap_or_default(),
+            let context = (account.is_some() || project_context.is_some()).then(|| {
+                otto_core::hooks::SessionSpawnContext {
+                    namespace: session.id.clone(),
+                    provider_home: account.as_ref().map(|(_, home)| home.clone()),
+                    extra_context_md: project_context.clone().unwrap_or_default(),
+                }
             });
             let injection = tokio::task::spawn_blocking(move || match context {
                 Some(context) => hook.before_spawn_session(&workspace, &cwd, &provider, &context),
                 None => hook.before_spawn(&workspace, &cwd, &provider),
-            }).await.unwrap_or_default();
+            })
+            .await
+            .unwrap_or_default();
             spec.args.extend(injection.args);
             spec.env.extend(injection.env);
         }
 
-        if let Some((account, _)) = &account { crate::accounts::validate_account(&spec, account)?; }
+        if let Some((account, _)) = &account {
+            crate::accounts::validate_account(&spec, account)?;
+        }
         // Keep an existing PTY/tunnel alive if replacement forwarding fails.
         let network = self.networks.prepare(&session).await?;
         self.networks.clear(id);
-        if let Some((_, handle)) = self.live.remove(id) { let _ = handle.kill(); }
+        if let Some((_, handle)) = self.live.remove(id) {
+            let _ = handle.kill();
+        }
         let _ = std::fs::create_dir_all(&session.cwd);
         if session.kind == SessionKind::Agent {
-            if account.is_none() { crate::trust::ensure_trusted(&session.provider, &session.cwd); }
+            if account.is_none() {
+                crate::trust::ensure_trusted(&session.provider, &session.cwd);
+            }
             let otto_tools = self.maybe_enable_otto_tools(&session).await;
             spec.args.extend(otto_tools.args);
             spec.env.extend(otto_tools.env);
@@ -5007,12 +5112,15 @@ impl SessionManager {
         // OS-level confinement on resume too (mirrors create()).
         if let Some((account, home)) = &account {
             if let Err(error) = crate::accounts::apply_account(&mut spec, account, home) {
-                let _ = self.revoke_mcp_token(&session.created_by, &session.id).await;
+                let _ = self
+                    .revoke_mcp_token(&session.created_by, &session.id)
+                    .await;
                 return Err(error);
             }
         }
         if let Some(network) = &network {
-            spec.env.retain(|(key, _)| !network.env.iter().any(|(mapped, _)| mapped == key));
+            spec.env
+                .retain(|(key, _)| !network.env.iter().any(|(mapped, _)| mapped == key));
             spec.env.extend(network.env.clone());
         }
         self.apply_sandbox(&mut spec, &session).await;
@@ -5024,11 +5132,14 @@ impl SessionManager {
         let handle = match spawned {
             Ok(handle) => Arc::new(handle),
             Err(e) => {
-                let _ = self.revoke_mcp_token(&session.created_by, &session.id).await;
+                let _ = self
+                    .revoke_mcp_token(&session.created_by, &session.id)
+                    .await;
                 return Err(e);
             }
         };
-        self.networks.activate(id.clone(), network, handle.on_exit());
+        self.networks
+            .activate(id.clone(), network, handle.on_exit());
         self.live.insert(id.clone(), Arc::clone(&handle));
         self.repo.update_status(id, SessionStatus::Running).await?;
         let _ = self.events.send(Event::SessionStatus {
@@ -5263,7 +5374,10 @@ impl SessionManager {
         let Some(auth) = &self.auth else { return };
         match auth.expire_managed_session_tokens_except(keep).await {
             Ok(0) => {}
-            Ok(n) => tracing::info!(count = n, "revoked per-session MCP credentials left over from the previous daemon run"),
+            Ok(n) => tracing::info!(
+                count = n,
+                "revoked per-session MCP credentials left over from the previous daemon run"
+            ),
             Err(e) => tracing::warn!("boot credential sweep (managed): {e}"),
         }
         match auth
@@ -5853,7 +5967,8 @@ mod tests {
         let repo = SessionsRepo::new(pool);
         let (events, _rx) = broadcast::channel(16);
         let providers = ProviderRegistry::new(None);
-        let mgr = Arc::new(SessionManager::new(repo.clone(), events, providers).with_auth_repo(auth));
+        let mgr =
+            Arc::new(SessionManager::new(repo.clone(), events, providers).with_auth_repo(auth));
         let ws = Workspace {
             id: ws_id,
             name: "w".into(),
@@ -5870,62 +5985,148 @@ mod tests {
         #[derive(Default)]
         struct RecordingHook(std::sync::Mutex<Vec<serde_json::Value>>);
         impl PreSpawnHook for RecordingHook {
-            fn before_spawn(&self, ws: &Workspace, _cwd: &str, _provider: &str) -> otto_core::hooks::SpawnInjection {
+            fn before_spawn(
+                &self,
+                ws: &Workspace,
+                _cwd: &str,
+                _provider: &str,
+            ) -> otto_core::hooks::SpawnInjection {
                 self.0.lock().unwrap().push(ws.settings.clone());
                 otto_core::hooks::SpawnInjection::default()
             }
-            fn resume_injection(&self, _cwd: &str, _provider: &str) -> otto_core::hooks::SpawnInjection {
+            fn resume_injection(
+                &self,
+                _cwd: &str,
+                _provider: &str,
+            ) -> otto_core::hooks::SpawnInjection {
                 panic!("restart must refresh workspace context, not reuse a stale bundle")
             }
         }
-        let (mut manager,repo,mut workspace,user)=test_manager().await;
-        let dir=tempfile::tempdir().unwrap();
-        workspace.root_path=dir.path().to_string_lossy().into_owned();
-        let workspaces=otto_state::WorkspacesRepo::new(repo.pool());
-        workspaces.update(&workspace.id,None,Some(&workspace.root_path),None,None).await.unwrap();
-        let first=serde_json::from_value(serde_json::json!({"context_version":0,"memory_md":"before"})).unwrap();
-        workspace=workspaces.update_context(&workspace.id,&first).await.unwrap();
-        let hook=Arc::new(RecordingHook::default());
-        Arc::get_mut(&mut manager).unwrap().pre_spawn_hook=Some(hook.clone());
-        let spec=|| CommandSpec { program:"/bin/sh".into(),args:vec!["-c".into(),"exec /bin/sleep 60".into()],cwd:Some(workspace.root_path.clone()),env:vec![] };
-        let mut sessions=Vec::new();
-        for meta in [serde_json::json!({}),serde_json::json!({"source":"review"})] {
-            let request=CreateSessionReq { kind:SessionKind::Agent,provider:Some("shell".into()),title:Some("Context fixture".into()),cwd:Some(workspace.root_path.clone()),connection_id:None,model:None,meta:Some(meta) };
-            sessions.push(manager.create(&workspace,&user,request,Some(spec())).await.unwrap());
+        let (mut manager, repo, mut workspace, user) = test_manager().await;
+        let dir = tempfile::tempdir().unwrap();
+        workspace.root_path = dir.path().to_string_lossy().into_owned();
+        let workspaces = otto_state::WorkspacesRepo::new(repo.pool());
+        workspaces
+            .update(&workspace.id, None, Some(&workspace.root_path), None, None)
+            .await
+            .unwrap();
+        let first =
+            serde_json::from_value(serde_json::json!({"context_version":0,"memory_md":"before"}))
+                .unwrap();
+        workspace = workspaces
+            .update_context(&workspace.id, &first)
+            .await
+            .unwrap();
+        let hook = Arc::new(RecordingHook::default());
+        Arc::get_mut(&mut manager).unwrap().pre_spawn_hook = Some(hook.clone());
+        let spec = || CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec /bin/sleep 60".into()],
+            cwd: Some(workspace.root_path.clone()),
+            env: vec![],
+        };
+        let mut sessions = Vec::new();
+        for meta in [
+            serde_json::json!({}),
+            serde_json::json!({"source":"review"}),
+        ] {
+            let request = CreateSessionReq {
+                kind: SessionKind::Agent,
+                provider: Some("shell".into()),
+                title: Some("Context fixture".into()),
+                cwd: Some(workspace.root_path.clone()),
+                connection_id: None,
+                model: None,
+                meta: Some(meta),
+            };
+            sessions.push(
+                manager
+                    .create(&workspace, &user, request, Some(spec()))
+                    .await
+                    .unwrap(),
+            );
         }
-        let next=serde_json::from_value(serde_json::json!({"context_version":1,"memory_md":"after"})).unwrap();
-        workspaces.update_context(&workspace.id,&next).await.unwrap();
+        let next =
+            serde_json::from_value(serde_json::json!({"context_version":1,"memory_md":"after"}))
+                .unwrap();
+        workspaces
+            .update_context(&workspace.id, &next)
+            .await
+            .unwrap();
         for session in &sessions {
-            manager.restart(&session.id,Some(spec())).await.unwrap();
+            manager.restart(&session.id, Some(spec())).await.unwrap();
             manager.remove(&session.id).await.unwrap();
         }
-        let calls=hook.0.lock().unwrap();
-        assert_eq!(calls.len(),4);
-        assert_eq!(calls[0]["context"]["memory_md"],"before");
-        assert_eq!(calls[1]["context"]["memory_md"],"before");
-        assert_eq!(calls[2]["context"]["memory_md"],"after");
-        assert_eq!(calls[3]["context"]["memory_md"],"after");
+        let calls = hook.0.lock().unwrap();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0]["context"]["memory_md"], "before");
+        assert_eq!(calls[1]["context"]["memory_md"], "before");
+        assert_eq!(calls[2]["context"]["memory_md"], "after");
+        assert_eq!(calls[3]["context"]["memory_md"], "after");
     }
 
     #[tokio::test]
     async fn network_prepare_failure_removes_new_row_and_preserves_existing_pty() {
-        let (manager,repo,workspace,user)=test_manager().await;
-        let pool=repo.pool();
-        sqlx::query("UPDATE users SET is_root=1 WHERE id=?").bind(&user).execute(&pool).await.unwrap();
+        let (manager, repo, workspace, user) = test_manager().await;
+        let pool = repo.pool();
+        sqlx::query("UPDATE users SET is_root=1 WHERE id=?")
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO connections(id,workspace_id,name,kind,params_json,created_by,created_at) VALUES('network-fixture',?,'Invalid host fixture','ssh','{}',?,'2026-01-01T00:00:00Z')").bind(&workspace.id).bind(&user).execute(&pool).await.unwrap();
         let profile=otto_state::network_profiles::NetworkProfilesRepo::new(pool).create(&workspace.id,&user,
             serde_json::from_value(serde_json::json!({"name":"Broken network","ssh_connection_id":"network-fixture","endpoints":[{"name":"db","remote_host":"internal","remote_port":5432}]})).unwrap()).await.unwrap();
-        let meta=serde_json::json!({"network_profile_id":profile.id});
-        let request=CreateSessionReq { kind:SessionKind::Agent,provider:Some("shell".into()),title:Some("Network fixture".into()),cwd:Some("/tmp".into()),connection_id:None,model:None,meta:Some(meta.clone()) };
-        let error=manager.create(&workspace,&user,request,None).await.unwrap_err();
+        let meta = serde_json::json!({"network_profile_id":profile.id});
+        let request = CreateSessionReq {
+            kind: SessionKind::Agent,
+            provider: Some("shell".into()),
+            title: Some("Network fixture".into()),
+            cwd: Some("/tmp".into()),
+            connection_id: None,
+            model: None,
+            meta: Some(meta.clone()),
+        };
+        let error = manager
+            .create(&workspace, &user, request, None)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("valid host"));
-        assert!(repo.list_by_workspace(&workspace.id).await.unwrap().is_empty());
-        assert_eq!(manager.live_count(),0);
-        let session=repo.create(NewSession { workspace_id:workspace.id.clone(),kind:SessionKind::Agent,provider:"shell".into(),title:"Existing fixture".into(),cwd:"/tmp".into(),provider_session_id:None,connection_id:None,created_by:user,meta }).await.unwrap();
-        let handle=Arc::new(PtyHandle::spawn(&CommandSpec { program:"/bin/sh".into(),args:vec!["-c".into(),"sleep 10".into()],cwd:Some("/tmp".into()),env:vec![] }).unwrap());
-        manager.live.insert(session.id.clone(),handle.clone());
-        assert!(manager.restart(&session.id,None).await.is_err());
-        assert!(Arc::ptr_eq(&manager.live_handle(&session.id).unwrap(),&handle));
+        assert!(repo
+            .list_by_workspace(&workspace.id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(manager.live_count(), 0);
+        let session = repo
+            .create(NewSession {
+                workspace_id: workspace.id.clone(),
+                kind: SessionKind::Agent,
+                provider: "shell".into(),
+                title: "Existing fixture".into(),
+                cwd: "/tmp".into(),
+                provider_session_id: None,
+                connection_id: None,
+                created_by: user,
+                meta,
+            })
+            .await
+            .unwrap();
+        let handle = Arc::new(
+            PtyHandle::spawn(&CommandSpec {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "sleep 10".into()],
+                cwd: Some("/tmp".into()),
+                env: vec![],
+            })
+            .unwrap(),
+        );
+        manager.live.insert(session.id.clone(), handle.clone());
+        assert!(manager.restart(&session.id, None).await.is_err());
+        assert!(Arc::ptr_eq(
+            &manager.live_handle(&session.id).unwrap(),
+            &handle
+        ));
         assert!(handle.on_exit().borrow().is_none());
         manager.kill_session(&session.id).await.unwrap();
     }
@@ -5994,7 +6195,10 @@ mod tests {
                 auth.authenticate(&token).await.is_err(),
                 "{operation} left the session's MCP credential valid"
             );
-            assert!(repo.get(&id).await.is_ok(), "{operation} must keep the session row");
+            assert!(
+                repo.get(&id).await.is_ok(),
+                "{operation} must keep the session row"
+            );
         }
     }
 
@@ -6008,14 +6212,20 @@ mod tests {
         let (token, _) = auth.issue_session_api_token(&user, &id).await.unwrap();
         mgr.restore_all(&|_| None).await.unwrap();
         assert!(auth.authenticate(&token).await.is_err());
-        assert_eq!(repo.get(&id).await.unwrap().status, SessionStatus::Reconnectable);
+        assert_eq!(
+            repo.get(&id).await.unwrap().status,
+            SessionStatus::Reconnectable
+        );
     }
 
     #[tokio::test]
-    async fn named_account_fake_cli_keeps_home_after_manager_restart_and_rejects_foreign_profiles() {
+    async fn named_account_fake_cli_keeps_home_after_manager_restart_and_rejects_foreign_profiles()
+    {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let pool = otto_state::open(&dir.path().join("fixture.db")).await.unwrap();
+        let pool = otto_state::open(&dir.path().join("fixture.db"))
+            .await
+            .unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         for owner in ["owner", "other"] {
             sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, ?, 'x', 'Fixture', 0, ?)")
@@ -6023,37 +6233,80 @@ mod tests {
         }
         sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES ('ws', 'Fixture', ?, ?)")
             .bind(dir.path().to_str().unwrap()).bind(&now).execute(&pool).await.unwrap();
-        let ws = Workspace { id: "ws".into(), name: "Fixture".into(), root_path: dir.path().to_str().unwrap().into(),
-            settings: serde_json::json!({"otto_mcp_enabled":false}), archived:false, created_at:chrono::Utc::now() };
+        let ws = Workspace {
+            id: "ws".into(),
+            name: "Fixture".into(),
+            root_path: dir.path().to_str().unwrap().into(),
+            settings: serde_json::json!({"otto_mcp_enabled":false}),
+            archived: false,
+            created_at: chrono::Utc::now(),
+        };
         let profiles = otto_state::provider_accounts::ProviderAccountsRepo::new(pool.clone());
-        let a = profiles.create(&"owner".into(), "claude", "A").await.unwrap();
-        let b = profiles.create(&"owner".into(), "claude", "B").await.unwrap();
-        let foreign = profiles.create(&"other".into(), "claude", "Foreign").await.unwrap();
-        let wrong_provider = profiles.create(&"owner".into(), "codex", "Codex").await.unwrap();
+        let a = profiles
+            .create(&"owner".into(), "claude", "A")
+            .await
+            .unwrap();
+        let b = profiles
+            .create(&"owner".into(), "claude", "B")
+            .await
+            .unwrap();
+        let foreign = profiles
+            .create(&"other".into(), "claude", "Foreign")
+            .await
+            .unwrap();
+        let wrong_provider = profiles
+            .create(&"owner".into(), "codex", "Codex")
+            .await
+            .unwrap();
         let program = dir.path().join("fake-cli");
         std::fs::write(&program, "#!/bin/sh\nprintf '%s\\n' \"$CLAUDE_CONFIG_DIR\" >> \"$CLAUDE_CONFIG_DIR/observed\"\nprintf 'fixture ready\\n'\nexec /bin/sleep 60\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let config = serde_json::json!({"claude":{"cmd":program,"args":[],"resume_args":["--resume","{session_id}"]}});
         let make_manager = || {
             let (events, _) = broadcast::channel(16);
-            SessionManager::new(SessionsRepo::new(pool.clone()), events, ProviderRegistry::new(Some(&config)))
-                .with_auth_repo(AuthRepo::new(pool.clone()))
-                .with_provider_accounts(profiles.clone(), dir.path().join("accounts"))
+            SessionManager::new(
+                SessionsRepo::new(pool.clone()),
+                events,
+                ProviderRegistry::new(Some(&config)),
+            )
+            .with_auth_repo(AuthRepo::new(pool.clone()))
+            .with_provider_accounts(profiles.clone(), dir.path().join("accounts"))
         };
-        let request = |id: &str| CreateSessionReq { kind:SessionKind::Agent, provider:Some("claude".into()), title:Some("Fixture".into()),
-            cwd:Some(ws.root_path.clone()), connection_id:None, model:None, meta:Some(serde_json::json!({"account_id":id})) };
+        let request = |id: &str| CreateSessionReq {
+            kind: SessionKind::Agent,
+            provider: Some("claude".into()),
+            title: Some("Fixture".into()),
+            cwd: Some(ws.root_path.clone()),
+            connection_id: None,
+            model: None,
+            meta: Some(serde_json::json!({"account_id":id})),
+        };
         let manager = make_manager();
         for id in [&foreign.id, &wrong_provider.id, &"missing".to_string()] {
-            assert!(manager.create(&ws, &"owner".into(), request(id), None).await.is_err());
+            assert!(manager
+                .create(&ws, &"owner".into(), request(id), None)
+                .await
+                .is_err());
         }
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions").fetch_one(&pool).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(count, 0, "invalid accounts must not create a session");
-        let sa = manager.create(&ws, &"owner".into(), request(&a.id), None).await.unwrap();
-        let sb = manager.create(&ws, &"owner".into(), request(&b.id), None).await.unwrap();
+        let sa = manager
+            .create(&ws, &"owner".into(), request(&a.id), None)
+            .await
+            .unwrap();
+        let sb = manager
+            .create(&ws, &"owner".into(), request(&b.id), None)
+            .await
+            .unwrap();
         async fn wait_lines(path: &std::path::Path, count: usize) -> String {
             for _ in 0..100 {
                 if let Ok(text) = std::fs::read_to_string(path) {
-                    if text.lines().count() >= count { return text; }
+                    if text.lines().count() >= count {
+                        return text;
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -6061,29 +6314,85 @@ mod tests {
         }
         let ahome = dir.path().join("accounts").join(&a.id);
         let bhome = dir.path().join("accounts").join(&b.id);
-        assert_eq!(wait_lines(&ahome.join("observed"), 1).await.trim(), ahome.to_str().unwrap());
-        assert_eq!(wait_lines(&bhome.join("observed"), 1).await.trim(), bhome.to_str().unwrap());
+        assert_eq!(
+            wait_lines(&ahome.join("observed"), 1).await.trim(),
+            ahome.to_str().unwrap()
+        );
+        assert_eq!(
+            wait_lines(&bhome.join("observed"), 1).await.trim(),
+            bhome.to_str().unwrap()
+        );
         manager.kill_session(&sa.id).await.unwrap();
         manager.kill_session(&sb.id).await.unwrap();
         let restarted = make_manager();
         restarted.restart(&sa.id, None).await.unwrap();
-        assert!(wait_lines(&ahome.join("observed"), 2).await.lines().all(|line| line == ahome.to_str().unwrap()));
-        assert_eq!(std::fs::read_to_string(bhome.join("observed")).unwrap().lines().count(), 1);
+        assert!(wait_lines(&ahome.join("observed"), 2)
+            .await
+            .lines()
+            .all(|line| line == ahome.to_str().unwrap()));
+        assert_eq!(
+            std::fs::read_to_string(bhome.join("observed"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
         restarted.remove(&sa.id).await.unwrap();
         restarted.remove(&sb.id).await.unwrap();
 
         // Failure after token minting must release the durable credential and row.
-        let mut token_ws = ws.clone(); token_ws.settings = serde_json::json!({"otto_mcp_enabled":true});
-        let conflicting_spec = CommandSpec { program:program.to_string_lossy().into_owned(), args:vec![], cwd:Some(ws.root_path.clone()),
-            env:vec![("CLAUDE_CODE_USE_BEDROCK".into(), "1".into())] };
-        assert!(restarted.create(&token_ws, &"owner".into(), request(&a.id), Some(conflicting_spec)).await.is_err());
-        let rejected_tokens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_sessions WHERE session_scope IS NOT NULL").fetch_one(&pool).await.unwrap();
-        let rejected_sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions").fetch_one(&pool).await.unwrap();
-        assert_eq!((rejected_tokens, rejected_sessions), (0, 0), "policy mismatch must leave no session or credential");
-        let bad_spec = CommandSpec { program:program.to_string_lossy().into_owned(), args:vec!["\0".into()], cwd:Some(ws.root_path.clone()), env:vec![] };
-        assert!(restarted.create(&token_ws, &"owner".into(), request(&a.id), Some(bad_spec)).await.is_err());
-        let tokens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_sessions WHERE session_scope IS NOT NULL").fetch_one(&pool).await.unwrap();
-        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions").fetch_one(&pool).await.unwrap();
+        let mut token_ws = ws.clone();
+        token_ws.settings = serde_json::json!({"otto_mcp_enabled":true});
+        let conflicting_spec = CommandSpec {
+            program: program.to_string_lossy().into_owned(),
+            args: vec![],
+            cwd: Some(ws.root_path.clone()),
+            env: vec![("CLAUDE_CODE_USE_BEDROCK".into(), "1".into())],
+        };
+        assert!(restarted
+            .create(
+                &token_ws,
+                &"owner".into(),
+                request(&a.id),
+                Some(conflicting_spec)
+            )
+            .await
+            .is_err());
+        let rejected_tokens: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM auth_sessions WHERE session_scope IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let rejected_sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            (rejected_tokens, rejected_sessions),
+            (0, 0),
+            "policy mismatch must leave no session or credential"
+        );
+        let bad_spec = CommandSpec {
+            program: program.to_string_lossy().into_owned(),
+            args: vec!["\0".into()],
+            cwd: Some(ws.root_path.clone()),
+            env: vec![],
+        };
+        assert!(restarted
+            .create(&token_ws, &"owner".into(), request(&a.id), Some(bad_spec))
+            .await
+            .is_err());
+        let tokens: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM auth_sessions WHERE session_scope IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!((tokens, sessions), (0, 0));
     }
 
@@ -6534,7 +6843,9 @@ mod tests {
         }
         {
             let m = nested_misses().lock().unwrap();
-            let gap = m[&(id.clone(), 42)].1.saturating_duration_since(std::time::Instant::now());
+            let gap = m[&(id.clone(), 42)]
+                .1
+                .saturating_duration_since(std::time::Instant::now());
             assert!(gap <= NESTED_MAX_BACKOFF);
         }
         // A new launch (other pid) in the same terminal starts from zero.
@@ -6744,11 +7055,19 @@ mod tests {
         let id = seed_session(&repo, &ws, &user, Some("sid-late")).await;
         let handle = Arc::new(PtyHandle::spawn(&slow_hup_spec()).expect("spawn"));
         mgr.live.insert(id.clone(), Arc::clone(&handle));
-        mgr.start_status_task(id.clone(), ws.id.clone(), "claude".into(), Arc::clone(&handle));
+        mgr.start_status_task(
+            id.clone(),
+            ws.id.clone(),
+            "claude".into(),
+            Arc::clone(&handle),
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         mgr.suspend(&id).await.unwrap();
-        assert_eq!(repo.get(&id).await.unwrap().status, SessionStatus::Reconnectable);
+        assert_eq!(
+            repo.get(&id).await.unwrap().status,
+            SessionStatus::Reconnectable
+        );
 
         wait_child_exit_and_settle(&handle).await;
         assert_eq!(
@@ -6776,7 +7095,9 @@ mod tests {
         mgr.live.remove(&id);
         let _ = old.kill();
         mgr.live.insert(id.clone(), Arc::clone(&fresh));
-        repo.update_status(&id, SessionStatus::Running).await.unwrap();
+        repo.update_status(&id, SessionStatus::Running)
+            .await
+            .unwrap();
 
         wait_child_exit_and_settle(&old).await;
         assert_eq!(
@@ -6800,7 +7121,12 @@ mod tests {
         };
         let handle = Arc::new(PtyHandle::spawn(&spec).expect("spawn"));
         mgr.live.insert(id.clone(), Arc::clone(&handle));
-        mgr.start_status_task(id.clone(), ws.id.clone(), "claude".into(), Arc::clone(&handle));
+        mgr.start_status_task(
+            id.clone(),
+            ws.id.clone(),
+            "claude".into(),
+            Arc::clone(&handle),
+        );
 
         wait_child_exit_and_settle(&handle).await;
         assert_eq!(repo.get(&id).await.unwrap().status, SessionStatus::Exited);
@@ -7035,7 +7361,10 @@ mod tests {
             ..RECENT
         };
         // Inside the grace: held, even with a closed turn.
-        assert_eq!(sweep_hold(&manual, Some(false), fresh, RECENT), Some("origin=manual"));
+        assert_eq!(
+            sweep_hold(&manual, Some(false), fresh, RECENT),
+            Some("origin=manual")
+        );
         // Just inside the boundary still holds.
         let edge = ManualIdle {
             quiet_for: MANUAL_IDLE_SUSPEND - Duration::from_secs(1),
@@ -7046,7 +7375,10 @@ mod tests {
         assert_eq!(sweep_hold(&manual, None, None, past), None);
         assert_eq!(sweep_hold(&manual, Some(false), fresh, past), None);
         // …but never mid-turn (a quiet agent `sleep`-polling a watcher).
-        assert_eq!(sweep_hold(&manual, Some(true), fresh, past), Some("turn open"));
+        assert_eq!(
+            sweep_hold(&manual, Some(true), fresh, past),
+            Some("turn open")
+        );
         // A stuck "open" tail does not pin it forever.
         assert_eq!(
             sweep_hold(&manual, Some(true), Some(REAP_UNRESUMABLE_GRACE), past),
@@ -7063,7 +7395,10 @@ mod tests {
             grace: None,
             passive_resume: false,
         };
-        assert_eq!(sweep_hold(&manual, None, None, never), Some("origin=manual"));
+        assert_eq!(
+            sweep_hold(&manual, None, None, never),
+            Some("origin=manual")
+        );
     }
 
     /// r3-05-01 root cause: opening a suspended session (terminal attach or
@@ -7078,9 +7413,15 @@ mod tests {
             ..RECENT
         };
         assert_eq!(sweep_hold(&manual, None, None, passive), None);
-        assert_eq!(sweep_hold(&manual, Some(false), Some(Duration::from_secs(5)), passive), None);
+        assert_eq!(
+            sweep_hold(&manual, Some(false), Some(Duration::from_secs(5)), passive),
+            None
+        );
         // Even the "never" setting does not pin a passive resume.
-        let never = ManualIdle { grace: None, ..passive };
+        let never = ManualIdle {
+            grace: None,
+            ..passive
+        };
         assert_eq!(sweep_hold(&manual, None, None, never), None);
         // Pins and open turns still hold it.
         let pinned = guard_session(serde_json::json!({
@@ -7100,7 +7441,10 @@ mod tests {
             s.status = status;
             s
         };
-        let idle = s(serde_json::json!({ "work": { "origin": "manual" } }), SessionStatus::Idle);
+        let idle = s(
+            serde_json::json!({ "work": { "origin": "manual" } }),
+            SessionStatus::Idle,
+        );
         let fresh = Some(Duration::from_secs(5));
         // The cap overrides the manual grace: an idle manual session is fair game.
         assert_eq!(cap_hold(&idle, true, Some(false), fresh), None);
@@ -7109,7 +7453,10 @@ mod tests {
         assert_eq!(cap_hold(&idle, true, Some(true), fresh), Some("turn open"));
         let working = s(serde_json::json!({}), SessionStatus::Working);
         assert_eq!(cap_hold(&working, true, None, None), Some("working"));
-        let pinned = s(serde_json::json!({ "keep_alive": true }), SessionStatus::Idle);
+        let pinned = s(
+            serde_json::json!({ "keep_alive": true }),
+            SessionStatus::Idle,
+        );
         assert_eq!(cap_hold(&pinned, true, None, None), Some("keep_alive"));
         assert_eq!(cap_hold(&idle, false, None, None), Some("not resumable"));
         // Only agent CLIs count toward the cap.
@@ -7135,9 +7482,18 @@ mod tests {
     async fn live_cap_suspends_least_recently_used_unwatched_sessions() {
         let (mgr0, repo, ws, user) = test_manager().await;
         let settings = otto_state::SettingsRepo::new(repo.pool());
-        settings.put("idle_suspend_grace_secs", &serde_json::json!(0)).await.unwrap();
-        settings.put("manual_idle_suspend_secs", &serde_json::json!(0)).await.unwrap();
-        settings.put("max_live_agent_sessions", &serde_json::json!(2)).await.unwrap();
+        settings
+            .put("idle_suspend_grace_secs", &serde_json::json!(0))
+            .await
+            .unwrap();
+        settings
+            .put("manual_idle_suspend_secs", &serde_json::json!(0))
+            .await
+            .unwrap();
+        settings
+            .put("max_live_agent_sessions", &serde_json::json!(2))
+            .await
+            .unwrap();
         let mgr = Arc::new(
             Arc::try_unwrap(mgr0)
                 .ok()
@@ -7153,7 +7509,8 @@ mod tests {
         let mut ids = Vec::new();
         for n in 0..4 {
             let id = seed_session(&repo, &ws, &user, Some(&format!("psid-cap-{n}"))).await;
-            mgr.live.insert(id.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
+            mgr.live
+                .insert(id.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
             tokio::time::sleep(Duration::from_millis(20)).await;
             ids.push(id);
         }
@@ -7172,7 +7529,10 @@ mod tests {
         assert!(!mgr.is_live(&ids[1]), "next LRU after the skipped viewer");
         assert!(mgr.is_live(&ids[2]), "most recently used survives");
         for id in [&ids[1], &ids[3]] {
-            assert_eq!(repo.get(id).await.unwrap().status, SessionStatus::Reconnectable);
+            assert_eq!(
+                repo.get(id).await.unwrap().status,
+                SessionStatus::Reconnectable
+            );
         }
         // At the cap now: a second sweep frees nothing.
         assert_eq!(mgr.suspend_idle_unattached().await, 0);
@@ -7195,12 +7555,20 @@ mod tests {
             cwd: None,
             env: vec![],
         };
-        mgr.live.insert(id.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
+        mgr.live
+            .insert(id.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
         mgr.passive_resume.insert(id.clone(), ());
         // A DA reply the attach's emulator produced on its own.
-        mgr.human_input(&id, &user, false, false, b"\x1b[?1;2c").await.unwrap();
-        assert!(mgr.is_passive_resume(&id), "emulator reply is not engagement");
-        mgr.human_input(&id, &user, false, true, b"hi").await.unwrap();
+        mgr.human_input(&id, &user, false, false, b"\x1b[?1;2c")
+            .await
+            .unwrap();
+        assert!(
+            mgr.is_passive_resume(&id),
+            "emulator reply is not engagement"
+        );
+        mgr.human_input(&id, &user, false, true, b"hi")
+            .await
+            .unwrap();
         assert!(!mgr.is_passive_resume(&id), "typing engages the session");
         // Automation input engages too; teardown forgets the mark.
         mgr.passive_resume.insert(id.clone(), ());
@@ -7383,11 +7751,35 @@ mod tests {
         let fresh = Some(Duration::from_secs(10));
         let stale = Some(REAP_UNRESUMABLE_GRACE + Duration::from_secs(1));
         // Idle, quiet, closed turn → safe to restart.
-        assert!(!restart_would_interrupt(SessionStatus::Idle, false, quiet, Some(false), fresh));
-        assert!(!restart_would_interrupt(SessionStatus::Idle, false, quiet, None, None));
+        assert!(!restart_would_interrupt(
+            SessionStatus::Idle,
+            false,
+            quiet,
+            Some(false),
+            fresh
+        ));
+        assert!(!restart_would_interrupt(
+            SessionStatus::Idle,
+            false,
+            quiet,
+            None,
+            None
+        ));
         // Each guard alone holds it.
-        assert!(restart_would_interrupt(SessionStatus::Working, false, quiet, None, None));
-        assert!(restart_would_interrupt(SessionStatus::Idle, true, quiet, None, None));
+        assert!(restart_would_interrupt(
+            SessionStatus::Working,
+            false,
+            quiet,
+            None,
+            None
+        ));
+        assert!(restart_would_interrupt(
+            SessionStatus::Idle,
+            true,
+            quiet,
+            None,
+            None
+        ));
         assert!(restart_would_interrupt(
             SessionStatus::Idle,
             false,
@@ -7395,9 +7787,21 @@ mod tests {
             None,
             None
         ));
-        assert!(restart_would_interrupt(SessionStatus::Idle, false, quiet, Some(true), fresh));
+        assert!(restart_would_interrupt(
+            SessionStatus::Idle,
+            false,
+            quiet,
+            Some(true),
+            fresh
+        ));
         // A stuck (stale) open turn does not pin the session forever.
-        assert!(!restart_would_interrupt(SessionStatus::Idle, false, quiet, Some(true), stale));
+        assert!(!restart_would_interrupt(
+            SessionStatus::Idle,
+            false,
+            quiet,
+            Some(true),
+            stale
+        ));
     }
 
     /// The sweep's whole per-session hold decision, in one place: delete a
@@ -7419,19 +7823,28 @@ mod tests {
             "source": "review", "keep_alive": true
         }));
         assert_eq!(sweep_hold(&pinned, None, None, RECENT), Some("keep_alive"));
-        assert_eq!(sweep_hold(&pinned, Some(false), fresh, RECENT), Some("keep_alive"));
+        assert_eq!(
+            sweep_hold(&pinned, Some(false), fresh, RECENT),
+            Some("keep_alive")
+        );
 
         // Started from the Agents page — never auto-suspended, whatever the
         // transcript says.
         let manual = guard_session(serde_json::json!({ "work": { "origin": "manual" } }));
-        assert_eq!(sweep_hold(&manual, None, None, RECENT), Some("origin=manual"));
+        assert_eq!(
+            sweep_hold(&manual, None, None, RECENT),
+            Some("origin=manual")
+        );
         assert_eq!(
             sweep_hold(&manual, Some(false), fresh, RECENT),
             Some("origin=manual")
         );
 
         // An engine session mid-turn, on a transcript that is still moving.
-        assert_eq!(sweep_hold(&bg(), Some(true), fresh, RECENT), Some("turn open"));
+        assert_eq!(
+            sweep_hold(&bg(), Some(true), fresh, RECENT),
+            Some("turn open")
+        );
 
         // …but an "open" turn on a transcript that has not moved for the full
         // reap grace is STUCK, not live: it must not hold the session, or a
@@ -7483,7 +7896,12 @@ mod tests {
 
         // Fresh → held.
         assert_eq!(
-            sweep_hold(&session, agent_turn_open("claude", &path), age(&path), RECENT),
+            sweep_hold(
+                &session,
+                agent_turn_open("claude", &path),
+                age(&path),
+                RECENT
+            ),
             Some("turn open")
         );
 
@@ -7497,7 +7915,12 @@ mod tests {
             .unwrap();
         assert!(age(&path).unwrap() >= REAP_UNRESUMABLE_GRACE);
         assert_eq!(
-            sweep_hold(&session, agent_turn_open("claude", &path), age(&path), RECENT),
+            sweep_hold(
+                &session,
+                agent_turn_open("claude", &path),
+                age(&path),
+                RECENT
+            ),
             None,
             "a 31-minute-old 'open turn' tail must not hold the session"
         );
