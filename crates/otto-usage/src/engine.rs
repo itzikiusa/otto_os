@@ -7,7 +7,7 @@
 //! installs or updates the `clickhouse` binary — without a daemon restart.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
@@ -34,7 +34,29 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(15);
 /// than the writer's flush interval, so it never hides a flush for long.
 const SESSION_TOTALS_TTL: Duration = Duration::from_secs(5);
 
-type SessionTotalsMemo = ((u32, bool), std::time::Instant, Vec<SessionTotals>);
+type SessionTotalsMemo = ((u32, bool), std::time::Instant, Arc<Vec<SessionTotals>>);
+
+/// `system_metrics` samples are buffered in memory and inserted together this
+/// often (R1a): one part per 5 min instead of one per sample (+ its merges).
+/// `metrics()` serves the unflushed tail from memory, so sparklines stay live.
+const METRICS_FLUSH_EVERY: Duration = Duration::from_secs(300);
+/// Cap on buffered samples across failed flushes (oldest dropped first).
+const METRICS_BUF_MAX: usize = 2_000;
+/// The sampler runs only while something needs it (R1b): a live session, a
+/// recent `/usage/metrics` reader, or usage recorded within this window.
+const SAMPLER_WANTED_FOR: Duration = Duration::from_secs(600);
+/// Idle-stop the ClickHouse server after this long with no request (R1d).
+const IDLE_STOP_AFTER: Duration = Duration::from_secs(15 * 60);
+/// How often the idle-stop check runs (a cheap lock + clock read).
+const IDLE_CHECK_EVERY: Duration = Duration::from_secs(60);
+
+/// Buffered metrics samples awaiting their batched insert.
+#[derive(Default)]
+struct MetricsBuf {
+    rows: Vec<(chrono::DateTime<chrono::Utc>, Metric)>,
+    /// When the oldest buffered sample arrived (the flush clock).
+    since: Option<std::time::Instant>,
+}
 /// …or sooner once this many events are buffered.
 const FLUSH_BATCH: usize = 200;
 /// Default cap on the session leaderboard.
@@ -73,9 +95,28 @@ pub struct UsageEngine {
     /// Last measured ClickHouse on-disk size + when (see [`DISK_SIZE_TTL`]).
     disk_cache: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
     /// Last `session_totals(days, otto_only)` result for SESSION_TOTALS_TTL:
-    /// one Usage page open runs it for the summary's feature breakdown and
-    /// again for budgets a few ms later — the same full scan twice.
-    totals_cache: std::sync::Mutex<Option<SessionTotalsMemo>>,
+    /// one Usage page open runs it for the summary's top sessions + feature
+    /// breakdown and again for budgets a few ms later. An async mutex held
+    /// across the uncached query makes it SINGLE-FLIGHT (R5): budgets racing
+    /// the summary wait for the one scan instead of starting a second.
+    totals_cache: tokio::sync::Mutex<Option<SessionTotalsMemo>>,
+    /// `system_metrics` samples not yet inserted (see METRICS_FLUSH_EVERY).
+    metrics_buf: std::sync::Mutex<MetricsBuf>,
+    /// Unix seconds of the last `metrics()` read / `record()` — gates the
+    /// sampler (see [`Self::sampler_wanted`]).
+    last_metrics_read: AtomicU64,
+    last_record: AtomicU64,
+    /// Idle-stop window in seconds (0 = never stop); tests shorten it.
+    idle_stop_secs: Arc<AtomicU64>,
+    /// Wakes the idle-stop task when the window changes.
+    idle_stop_changed: Arc<tokio::sync::Notify>,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Which sessions a read covers: every recorded session (root), or only the
@@ -123,7 +164,12 @@ impl UsageEngine {
             reinit_lock: tokio::sync::Mutex::new(()),
             heal: Arc::new(AtomicBool::new(false)),
             disk_cache: std::sync::Mutex::new(None),
-            totals_cache: std::sync::Mutex::new(None),
+            totals_cache: tokio::sync::Mutex::new(None),
+            metrics_buf: std::sync::Mutex::new(MetricsBuf::default()),
+            last_metrics_read: AtomicU64::new(0),
+            last_record: AtomicU64::new(0),
+            idle_stop_secs: Arc::new(AtomicU64::new(IDLE_STOP_AFTER.as_secs())),
+            idle_stop_changed: Arc::new(tokio::sync::Notify::new()),
         });
         let bg = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -204,6 +250,11 @@ impl UsageEngine {
                                 }
                                 let (tx, rx) = mpsc::unbounded_channel();
                                 spawn_writer(Arc::clone(&ch), rx, Arc::clone(&self.heal));
+                                spawn_idle_stopper(
+                                    Arc::downgrade(&ch),
+                                    Arc::clone(&self.idle_stop_secs),
+                                    Arc::clone(&self.idle_stop_changed),
+                                );
                                 tracing::info!(
                                     "usage: clickhouse server ready at {} (binary {})",
                                     ch.data_dir().display(),
@@ -254,6 +305,10 @@ impl UsageEngine {
     /// daemon's graceful-shutdown path so the dir lock is released and the next
     /// daemon start doesn't have to reclaim an orphan.
     pub async fn shutdown(&self) {
+        // Buffered metric samples go in before the server stops.
+        if let Err(e) = self.flush_metrics().await {
+            tracing::debug!("usage: final metrics flush failed: {e}");
+        }
         let ch = {
             let mut inner = self.inner.write().expect("usage inner lock");
             inner.tx = None;
@@ -298,6 +353,7 @@ impl UsageEngine {
     /// Queue one event for buffered insertion (fire-and-forget; dropped if the
     /// engine is disabled).
     pub fn record(&self, ev: UsageEvent) {
+        self.last_record.store(unix_now(), Ordering::Relaxed);
         let tx = self.inner.read().expect("usage inner lock").tx.clone();
         if let Some(tx) = tx {
             let _ = tx.send(ev);
@@ -350,27 +406,100 @@ impl UsageEngine {
         .await
     }
 
-    /// Persist one metrics sample. No-op when disabled.
+    /// Record one metrics sample. Buffered in memory and inserted with the
+    /// others every METRICS_FLUSH_EVERY (and on shutdown) — `metrics()` reads
+    /// the unflushed tail from memory. No-op when disabled.
     pub async fn store_metric(&self, m: &Metric) -> Result<()> {
-        let Some(ch) = self.ch() else { return Ok(()) };
-        let row = serde_json::json!({
-            "host": MetricsSampler::host(),
-            "cpu_pct": m.cpu_pct,
-            "mem_used_mb": m.mem_used_mb,
-            "mem_total_mb": m.mem_total_mb,
-            "mem_pct": m.mem_pct,
-            "load_avg_1": m.load_avg_1,
-            "process_rss_mb": m.process_rss_mb,
-            "process_cpu_pct": m.process_cpu_pct,
-            "active_sessions": m.active_sessions,
-        });
-        let res = ch
-            .insert_ndjson("system_metrics", &format!("{row}\n"))
-            .await;
-        if res.is_err() && !ch.server_alive() {
-            self.heal.store(true, Ordering::SeqCst);
+        if self.ch().is_none() {
+            return Ok(());
         }
-        res
+        let due = {
+            let mut b = self.metrics_buf.lock().expect("metrics buf lock");
+            b.rows.push((chrono::Utc::now(), m.clone()));
+            if b.rows.len() > METRICS_BUF_MAX {
+                let n = b.rows.len() - METRICS_BUF_MAX;
+                b.rows.drain(..n);
+            }
+            let since = *b.since.get_or_insert_with(std::time::Instant::now);
+            since.elapsed() >= METRICS_FLUSH_EVERY
+        };
+        if due {
+            self.flush_metrics().await?;
+        }
+        Ok(())
+    }
+
+    /// Insert every buffered metrics sample as ONE batch. A failed insert keeps
+    /// them (bounded) for the next attempt. Returns the rows written.
+    pub async fn flush_metrics(&self) -> Result<usize> {
+        let Some(ch) = self.ch() else { return Ok(0) };
+        let rows = {
+            let mut b = self.metrics_buf.lock().expect("metrics buf lock");
+            b.since = None;
+            std::mem::take(&mut b.rows)
+        };
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let host = MetricsSampler::host();
+        let mut payload = String::new();
+        for (ts, m) in &rows {
+            let row = serde_json::json!({
+                "ts": ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                "host": host,
+                "cpu_pct": m.cpu_pct,
+                "mem_used_mb": m.mem_used_mb,
+                "mem_total_mb": m.mem_total_mb,
+                "mem_pct": m.mem_pct,
+                "load_avg_1": m.load_avg_1,
+                "process_rss_mb": m.process_rss_mb,
+                "process_cpu_pct": m.process_cpu_pct,
+                "active_sessions": m.active_sessions,
+            });
+            payload.push_str(&row.to_string());
+            payload.push('\n');
+        }
+        match ch.insert_ndjson("system_metrics", &payload).await {
+            Ok(()) => Ok(rows.len()),
+            Err(e) => {
+                if !ch.server_alive() {
+                    self.heal.store(true, Ordering::SeqCst);
+                }
+                let mut b = self.metrics_buf.lock().expect("metrics buf lock");
+                let newer = std::mem::replace(&mut b.rows, rows);
+                b.rows.extend(newer);
+                if b.rows.len() > METRICS_BUF_MAX {
+                    let n = b.rows.len() - METRICS_BUF_MAX;
+                    b.rows.drain(..n);
+                }
+                b.since.get_or_insert_with(std::time::Instant::now);
+                Err(e)
+            }
+        }
+    }
+
+    /// Whether the metrics sampler (and its `UsageMetricsTick`, which also
+    /// drives budget checks) should run this tick: something is live, a UI
+    /// read `/usage/metrics` recently, or usage was recorded recently. An idle
+    /// daemon nobody is watching samples nothing and wakes no WS client.
+    pub fn sampler_wanted(&self, live_sessions: usize) -> bool {
+        let fresh = |stamp: &AtomicU64| {
+            unix_now().saturating_sub(stamp.load(Ordering::Relaxed)) < SAMPLER_WANTED_FOR.as_secs()
+        };
+        live_sessions > 0 || fresh(&self.last_metrics_read) || fresh(&self.last_record)
+    }
+
+    /// Override the ClickHouse idle-stop window (`None` = never stop). The
+    /// running stopper task reads it each check.
+    pub fn set_idle_stop(&self, after: Option<Duration>) {
+        self.idle_stop_secs
+            .store(after.map_or(0, |d| d.as_secs().max(1)), Ordering::Relaxed);
+        self.idle_stop_changed.notify_waiters();
+    }
+
+    /// The live ClickHouse handle (perf probes / tests: pid, park state).
+    pub fn clickhouse(&self) -> Option<Arc<ClickHouse>> {
+        self.ch()
     }
 
     // ── Raw passthroughs (sibling stores: k8s monitor) ──────────────────────
@@ -567,14 +696,29 @@ impl UsageEngine {
     /// unenriched. The server classifies these into per-feature buckets for the
     /// by-kind rollup (see [`Self::feature_usage`]).
     pub async fn session_totals(&self, days: u32, otto_only: bool) -> Result<Vec<SessionTotals>> {
-        if let Some((key, at, rows)) = &*self.totals_cache.lock().expect("totals cache lock") {
+        Ok(self.session_totals_shared(days, otto_only).await?.to_vec())
+    }
+
+    /// [`Self::session_totals`] without the copy: memoised for
+    /// SESSION_TOTALS_TTL and single-flight — the lock is held across the
+    /// uncached scan, so concurrent callers share ONE query.
+    pub async fn session_totals_shared(
+        &self,
+        days: u32,
+        otto_only: bool,
+    ) -> Result<Arc<Vec<SessionTotals>>> {
+        let mut memo = self.totals_cache.lock().await;
+        if let Some((key, at, rows)) = &*memo {
             if *key == (days, otto_only) && at.elapsed() < SESSION_TOTALS_TTL {
-                return Ok(rows.clone());
+                return Ok(Arc::clone(rows));
             }
         }
-        let rows = self.session_totals_uncached(days, otto_only).await?;
-        *self.totals_cache.lock().expect("totals cache lock") =
-            Some(((days, otto_only), std::time::Instant::now(), rows.clone()));
+        let rows = Arc::new(self.session_totals_uncached(days, otto_only).await?);
+        *memo = Some((
+            (days, otto_only),
+            std::time::Instant::now(),
+            Arc::clone(&rows),
+        ));
         Ok(rows)
     }
 
@@ -593,7 +737,9 @@ impl UsageEngine {
                     sum(cache_read_tokens) AS cache_read_tokens,
                     sum(cache_write_tokens) AS cache_write_tokens,
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
-                    round(sum(cost_usd), 6) AS cost_usd
+                    round(sum(cost_usd), 6) AS cost_usd,
+                    topK(1)(model)[1] AS model,
+                    toString(max(ts)) AS last_active
              FROM usage_events
              WHERE event_date >= today() - {since} {ws}
              GROUP BY session_id",
@@ -615,10 +761,10 @@ impl UsageEngine {
         otto_only: bool,
         classify: impl Fn(&SessionTotals) -> String,
     ) -> Result<Vec<FeatureUsage>> {
-        let totals = self.session_totals(days, otto_only).await?;
+        let totals = self.session_totals_shared(days, otto_only).await?;
         let mut buckets: std::collections::HashMap<String, FeatureUsage> =
             std::collections::HashMap::new();
-        for t in &totals {
+        for t in totals.iter() {
             let feature = classify(t);
             let b = buckets
                 .entry(feature.clone())
@@ -913,29 +1059,31 @@ impl UsageEngine {
         // the provider, daily, model and day×model rollups — they are pure
         // re-aggregations of it, done in Rust (`summary_rollups`). With the
         // top-sessions query that is 2 scans per summary instead of 5.
-        let q_daily_models = format!(
-            "SELECT toString(event_date) AS day, provider, model,
-                    count() AS events,
-                    sum(input_tokens) AS input_tokens,
-                    sum(output_tokens) AS output_tokens,
-                    sum(cache_read_tokens) AS cache_read_tokens,
-                    sum(cache_write_tokens) AS cache_write_tokens,
-                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
-                    sum(cost_usd) AS cost_usd
-             FROM usage_events
-             WHERE event_date >= today() - {since} {ws}
-             GROUP BY event_date, provider, model
-             ORDER BY event_date, total_tokens DESC"
-        );
+        let q_daily_models = grouped_sql(&format!("event_date >= today() - {since} {ws}"));
 
         // All-or-nothing: a failed read is an error, never zero totals (U1).
-        let mut batches = ch
-            .query_batch(&[q_sessions, q_daily_models])
-            .await
-            .map_err(|e| {
-                tracing::warn!("usage: summary batch failed: {e}");
-                e
-            })?;
+        // Root scope (R4): the top sessions are the head of the memoised,
+        // single-flight `session_totals` rollup — the same scan the by-kind
+        // breakdown and budgets reuse — so a summary is 2 scans in total.
+        let mut batches = if matches!(scope, UsageScope::All) {
+            let (totals, grouped) = tokio::join!(
+                self.session_totals_shared(days, otto_only),
+                ch.query_rows(&q_daily_models)
+            );
+            totals.and_then(|t| {
+                let top = serde_json::to_value(top_sessions(&t, limit as usize))
+                    .ok()
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default();
+                Ok(vec![top, grouped?])
+            })
+        } else {
+            ch.query_batch(&[q_sessions, q_daily_models]).await
+        }
+        .map_err(|e| {
+            tracing::warn!("usage: summary batch failed: {e}");
+            e
+        })?;
 
         // Deserialize each result set into its typed Vec (same decoding as `rows()`).
         fn decode<T: serde::de::DeserializeOwned>(raw: Vec<serde_json::Value>) -> Vec<T> {
@@ -986,11 +1134,28 @@ impl UsageEngine {
     /// The ccusage-style report over the window: daily, monthly, per-model,
     /// per-(day, model) and per-session tables. Errors propagate (no zeros).
     /// Sessions are raw; the server enriches titles/kinds like the summary's.
+    /// Full shape (the export's): every table, up to REPORT_SESSION_LIMIT
+    /// sessions — see [`Self::report_with`] for the page's slimmer read.
     pub async fn report(
         &self,
         days: u32,
         otto_only: bool,
         scope: UsageScope<'_>,
+    ) -> Result<UsageReport> {
+        self.report_with(days, otto_only, scope, ReportOptions::default())
+            .await
+    }
+
+    /// [`Self::report`] with the session cap / `daily_models` opt-in (R3).
+    /// TWO scans: the summary's single `(day, provider, model)` grouped scan
+    /// (daily, monthly, models and day×model are re-aggregations of it, done
+    /// in Rust) plus the capped per-session leaderboard.
+    pub async fn report_with(
+        &self,
+        days: u32,
+        otto_only: bool,
+        scope: UsageScope<'_>,
+        opts: ReportOptions,
     ) -> Result<UsageReport> {
         let generated_at = chrono::Utc::now().to_rfc3339();
         let mut report = UsageReport {
@@ -1010,52 +1175,36 @@ impl UsageEngine {
             ws_filter(otto_only),
             scope.filter()
         );
-        let buckets = "count() AS events,
-                    sum(input_tokens) AS input_tokens,
-                    sum(output_tokens) AS output_tokens,
-                    sum(cache_read_tokens) AS cache_read_tokens,
-                    sum(cache_write_tokens) AS cache_write_tokens,
-                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
-                    round(sum(cost_usd), 6) AS cost_usd";
-        let q_daily = format!(
-            "SELECT toString(event_date) AS day, {buckets}
-             FROM usage_events WHERE {cond}
-             GROUP BY event_date ORDER BY event_date"
-        );
-        let q_monthly = format!(
-            "SELECT formatDateTime(event_date, '%Y-%m') AS month, {buckets}
-             FROM usage_events WHERE {cond}
-             GROUP BY month ORDER BY month"
-        );
-        let limit = crate::REPORT_SESSION_LIMIT;
+        let limit = opts.sessions_limit.clamp(1, crate::REPORT_SESSION_LIMIT);
         let q_sessions = format!(
             "SELECT session_id,
                     any(workspace_id) AS workspace_id,
                     any(provider) AS provider,
                     topK(1)(model)[1] AS model,
-                    {buckets},
+                    count() AS events,
+                    sum(input_tokens) AS input_tokens,
+                    sum(output_tokens) AS output_tokens,
+                    sum(cache_read_tokens) AS cache_read_tokens,
+                    sum(cache_write_tokens) AS cache_write_tokens,
+                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                    round(sum(cost_usd), 6) AS cost_usd,
                     toString(max(ts)) AS last_active
              FROM usage_events WHERE {cond}
              GROUP BY session_id
              ORDER BY total_tokens DESC, events DESC
              LIMIT {limit}"
         );
-        let batches = ch
-            .query_batch(&[
-                q_daily,
-                q_monthly,
-                models_sql(&cond),
-                daily_models_sql(&cond),
-                q_sessions,
-            ])
-            .await?;
+        let batches = ch.query_batch(&[grouped_sql(&cond), q_sessions]).await?;
         let mut it = batches.into_iter();
-        let mut next = || it.next().unwrap_or_default();
-        report.daily = decode_rows(next())?;
-        report.monthly = decode_rows::<MonthlyUsage>(next())?;
-        report.models = decode_rows(next())?;
-        report.daily_models = decode_rows(next())?;
-        report.sessions = decode_rows(next())?;
+        let grouped: Vec<DayModelRow> = decode_rows(it.next().unwrap_or_default())?;
+        report.sessions = decode_rows(it.next().unwrap_or_default())?;
+        report.monthly = monthly_rollup(&grouped);
+        let (_, daily, models, daily_models) = summary_rollups(grouped);
+        report.daily = daily;
+        report.models = models;
+        if opts.daily_models {
+            report.daily_models = daily_models;
+        }
         for d in &report.daily {
             report.totals.add(&TokenTotals {
                 input_tokens: d.input_tokens,
@@ -1066,6 +1215,7 @@ impl UsageEngine {
                 cost_usd: d.cost_usd,
             });
         }
+        report.totals.cost_usd = round6(report.totals.cost_usd);
         Ok(report)
     }
 
@@ -1134,17 +1284,44 @@ impl UsageEngine {
         decode_rows(ch.query_rows(&daily_models_sql(&cond)).await?)
     }
 
-    /// System-metrics time series for the last `minutes`.
+    /// System-metrics time series for the last `minutes`: the stored rows
+    /// plus the not-yet-flushed tail from memory (same `ts` text shape as
+    /// ClickHouse's `toString(DateTime64(3))` in local time). Reading also
+    /// keeps the sampler awake (see [`Self::sampler_wanted`]).
     pub async fn metrics(&self, minutes: u32) -> Result<Vec<MetricPoint>> {
-        self.rows(&format!(
-            "SELECT toString(ts) AS ts, cpu_pct, mem_used_mb, mem_total_mb, mem_pct,
+        self.last_metrics_read.store(unix_now(), Ordering::Relaxed);
+        let minutes = minutes.max(1);
+        let mut out: Vec<MetricPoint> = self
+            .rows(&format!(
+                "SELECT toString(ts) AS ts, cpu_pct, mem_used_mb, mem_total_mb, mem_pct,
                     load_avg_1, process_rss_mb, process_cpu_pct, active_sessions
              FROM system_metrics
              WHERE ts >= now() - INTERVAL {minutes} MINUTE
-             ORDER BY ts",
-            minutes = minutes.max(1)
-        ))
-        .await
+             ORDER BY ts"
+            ))
+            .await?;
+        let cutoff = chrono::Utc::now() - chrono::Duration::minutes(i64::from(minutes));
+        let b = self.metrics_buf.lock().expect("metrics buf lock");
+        out.extend(
+            b.rows
+                .iter()
+                .filter(|(ts, _)| *ts >= cutoff)
+                .map(|(ts, m)| MetricPoint {
+                    ts: ts
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S%.3f")
+                        .to_string(),
+                    cpu_pct: m.cpu_pct,
+                    mem_used_mb: m.mem_used_mb,
+                    mem_total_mb: m.mem_total_mb,
+                    mem_pct: m.mem_pct,
+                    load_avg_1: m.load_avg_1,
+                    process_rss_mb: m.process_rss_mb,
+                    process_cpu_pct: m.process_cpu_pct,
+                    active_sessions: m.active_sessions,
+                }),
+        );
+        Ok(out)
     }
 
     /// Engine + ClickHouse status for the settings/wizard panel.
@@ -1176,7 +1353,13 @@ impl UsageEngine {
                     .unwrap_or(0)
             };
             let usage_rows = count_of("u");
-            let metric_rows = count_of("m");
+            let buffered = self
+                .metrics_buf
+                .lock()
+                .expect("metrics buf lock")
+                .rows
+                .len() as u64;
+            let metric_rows = count_of("m") + buffered;
             let disk_bytes = self.disk_bytes(&ch).await;
             UsageStatus {
                 available: true,
@@ -1323,6 +1506,36 @@ async fn ensure_partitioned(ch: &ClickHouse, retention_days: u32) {
     }
 }
 
+/// Idle-stop loop (R1d): every IDLE_CHECK_EVERY, park the server if it served
+/// nothing for the configured window. Weak, so a replaced/dropped handle ends
+/// the task; the handle restarts itself on the next request.
+fn spawn_idle_stopper(
+    ch: Weak<ClickHouse>,
+    idle_secs: Arc<AtomicU64>,
+    changed: Arc<tokio::sync::Notify>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let secs = idle_secs.load(Ordering::Relaxed);
+            let every = if secs == 0 {
+                IDLE_CHECK_EVERY
+            } else {
+                IDLE_CHECK_EVERY.min(Duration::from_secs(secs))
+            };
+            tokio::select! {
+                _ = tokio::time::sleep(every) => {}
+                // A new window applies now, not after the old sleep.
+                _ = changed.notified() => continue,
+            }
+            let Some(ch) = ch.upgrade() else { break };
+            let secs = idle_secs.load(Ordering::Relaxed);
+            if secs > 0 {
+                ch.maybe_park(Duration::from_secs(secs)).await;
+            }
+        }
+    });
+}
+
 fn spawn_writer(
     ch: Arc<ClickHouse>,
     mut rx: mpsc::UnboundedReceiver<UsageEvent>,
@@ -1416,22 +1629,95 @@ fn decode_rows<T: serde::de::DeserializeOwned>(raw: Vec<serde_json::Value>) -> R
         .collect()
 }
 
-/// Per-(provider, model) token rollup under `cond` (a WHERE body).
-fn models_sql(cond: &str) -> String {
+/// The single `(day, provider, model)` grouped scan behind the summary AND the
+/// report (unrounded cost: the Rust rollups round once, like the old SQL).
+fn grouped_sql(cond: &str) -> String {
     format!(
-        "SELECT provider, model,
+        "SELECT toString(event_date) AS day, provider, model,
                 count() AS events,
                 sum(input_tokens) AS input_tokens,
                 sum(output_tokens) AS output_tokens,
                 sum(cache_read_tokens) AS cache_read_tokens,
                 sum(cache_write_tokens) AS cache_write_tokens,
                 sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
-                round(sum(cost_usd), 6) AS cost_usd
+                sum(cost_usd) AS cost_usd
          FROM usage_events
          WHERE {cond}
-         GROUP BY provider, model
-         ORDER BY total_tokens DESC, events DESC"
+         GROUP BY event_date, provider, model
+         ORDER BY event_date, total_tokens DESC"
     )
+}
+
+/// What a report includes beyond the always-present tables (R3).
+#[derive(Debug, Clone, Copy)]
+pub struct ReportOptions {
+    /// Session leaderboard cap (clamped to REPORT_SESSION_LIMIT).
+    pub sessions_limit: u32,
+    /// Ship the per-(day, model) table — only the export renders it.
+    pub daily_models: bool,
+}
+
+impl Default for ReportOptions {
+    /// The full export shape (back-compatible with the old report).
+    fn default() -> Self {
+        Self {
+            sessions_limit: crate::REPORT_SESSION_LIMIT,
+            daily_models: true,
+        }
+    }
+}
+
+/// Per-month rollup of the grouped scan, ordered by month (`YYYY-MM`).
+fn monthly_rollup(rows: &[DayModelRow]) -> Vec<MonthlyUsage> {
+    let mut months: std::collections::BTreeMap<&str, MonthlyUsage> = Default::default();
+    for r in rows {
+        let key = r.day.get(..7).unwrap_or(&r.day);
+        let m = months.entry(key).or_insert_with(|| MonthlyUsage {
+            month: key.to_string(),
+            ..Default::default()
+        });
+        m.events += r.events;
+        m.input_tokens += r.input_tokens;
+        m.output_tokens += r.output_tokens;
+        m.cache_read_tokens += r.cache_read_tokens;
+        m.cache_write_tokens += r.cache_write_tokens;
+        m.total_tokens += r.total_tokens;
+        m.cost_usd += r.cost_usd;
+    }
+    let mut out: Vec<MonthlyUsage> = months.into_values().collect();
+    for m in &mut out {
+        m.cost_usd = round6(m.cost_usd);
+    }
+    out
+}
+
+/// The summary's top-`limit` session rows from the full per-session rollup,
+/// ordered like the old `ORDER BY total_tokens DESC, events DESC LIMIT n`.
+fn top_sessions(totals: &[SessionTotals], limit: usize) -> Vec<SessionUsage> {
+    let mut idx: Vec<&SessionTotals> = totals.iter().collect();
+    idx.sort_by(|a, b| {
+        b.total_tokens
+            .cmp(&a.total_tokens)
+            .then(b.events.cmp(&a.events))
+    });
+    idx.into_iter()
+        .take(limit)
+        .map(|t| SessionUsage {
+            session_id: t.session_id.clone(),
+            workspace_id: t.workspace_id.clone(),
+            provider: t.provider.clone(),
+            model: t.model.clone(),
+            events: t.events,
+            input_tokens: t.input_tokens,
+            output_tokens: t.output_tokens,
+            cache_read_tokens: t.cache_read_tokens,
+            cache_write_tokens: t.cache_write_tokens,
+            total_tokens: t.total_tokens,
+            cost_usd: t.cost_usd,
+            last_active: t.last_active.clone(),
+            ..Default::default()
+        })
+        .collect()
 }
 
 /// One `(day, provider, model)` group of the summary's single scan.
@@ -1714,10 +2000,68 @@ mod scope_tests {
 
     #[test]
     fn model_rollups_group_by_model() {
-        let sql = models_sql("event_date >= today() - 6");
-        assert!(sql.contains("GROUP BY provider, model"));
+        let sql = grouped_sql("event_date >= today() - 6");
+        assert!(sql.contains("GROUP BY event_date, provider, model"));
+        assert!(sql.contains("count() AS events"));
         let sql = daily_models_sql("1");
         assert!(sql.contains("GROUP BY event_date, provider, model"));
+    }
+
+    fn dm(day: &str, model: &str, tokens: u64, cost: f64) -> DayModelRow {
+        DayModelRow {
+            day: day.into(),
+            provider: "claude".into(),
+            model: model.into(),
+            events: 1,
+            input_tokens: tokens,
+            total_tokens: tokens,
+            cost_usd: cost,
+            ..Default::default()
+        }
+    }
+
+    /// R3: the report's monthly table is a re-aggregation of the grouped
+    /// scan (what the old `GROUP BY month` query returned), months ordered.
+    #[test]
+    fn monthly_rollup_groups_days_by_month() {
+        let rows = vec![
+            dm("2026-09-30", "a", 5, 0.1000004),
+            dm("2026-10-01", "a", 7, 0.2),
+            dm("2026-10-01", "b", 3, 0.3),
+            dm("2026-09-02", "b", 1, 0.0000004),
+        ];
+        let m = monthly_rollup(&rows);
+        assert_eq!(m.len(), 2);
+        assert_eq!(
+            (m[0].month.as_str(), m[0].total_tokens, m[0].events),
+            ("2026-09", 6, 2)
+        );
+        assert_eq!(
+            (m[1].month.as_str(), m[1].total_tokens, m[1].events),
+            ("2026-10", 10, 2)
+        );
+        assert_eq!(m[0].cost_usd, 0.100001, "rounded once, after summing");
+        assert_eq!(m[1].cost_usd, 0.5);
+    }
+
+    /// R4: the summary's top sessions come from the per-session totals,
+    /// ordered like `ORDER BY total_tokens DESC, events DESC LIMIT n`.
+    #[test]
+    fn top_sessions_orders_and_caps_the_totals() {
+        let t = |id: &str, tokens: u64, events: u64| SessionTotals {
+            session_id: id.into(),
+            total_tokens: tokens,
+            events,
+            model: format!("m-{id}"),
+            last_active: "2026-10-03 10:00:00.000".into(),
+            ..Default::default()
+        };
+        let rows = vec![t("a", 10, 1), t("b", 30, 1), t("c", 10, 5), t("d", 1, 1)];
+        let top = top_sessions(&rows, 3);
+        let ids: Vec<&str> = top.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, ["b", "c", "a"]);
+        assert_eq!(top[0].model, "m-b");
+        assert_eq!(top[0].last_active, "2026-10-03 10:00:00.000");
     }
 
     #[test]

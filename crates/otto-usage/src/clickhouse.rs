@@ -30,15 +30,55 @@ const QUERY_SETTINGS: &str =
     "output_format_json_quote_64bit_integers=0&prefer_column_name_to_alias=1";
 
 /// Handle to a persistent ClickHouse server backing an on-disk `--path` dataset.
+///
+/// **Idle-stop (R1d).** The server is ~70 threads / ~135 MB RSS even when
+/// nothing reads or writes a few MB of usage data. [`Self::maybe_park`] stops
+/// it (SIGTERM → clean flush) once no request has run for an idle window and
+/// none is in flight; the next query / insert / DDL transparently restarts it
+/// ([`Self::ensure_running`], ~0.5 s on a small dir) on a fresh port. Callers
+/// never see the difference: the usage writer and the metrics batch keep
+/// buffering in memory while the request that woke the server waits.
 pub struct ClickHouse {
     bin: PathBuf,
     data_dir: PathBuf,
     http: reqwest::Client,
-    base_url: String,
-    #[allow(dead_code)]
-    port: u16,
+    /// The CURRENT server process — the port changes across idle restarts.
+    proc: Mutex<Proc>,
+    /// Serializes park / unpark so two waking requests start one server.
+    life: tokio::sync::Mutex<()>,
+    /// How many idle-stops / lazy restarts happened (status + perf tests).
+    parks: std::sync::atomic::AtomicU64,
+    restarts: std::sync::atomic::AtomicU64,
+    /// Statements sent + rows they read (from `X-ClickHouse-Summary`) — the
+    /// per-summary / per-report query budget guards (R6) read these.
+    queries: std::sync::atomic::AtomicU64,
+    rows_read: std::sync::atomic::AtomicU64,
+}
+
+/// Process state behind [`ClickHouse::proc`]. `inflight` lives here (not in
+/// an atomic) so "check idle + park" is atomic with "a request begins".
+struct Proc {
     /// The server child process. Killed on `shutdown()`/`Drop`.
-    child: Mutex<Option<Child>>,
+    child: Option<Child>,
+    base_url: String,
+    /// Deliberately stopped for idleness — restarts on the next request, and
+    /// counts as alive for the self-heal check (it did not crash).
+    parked: bool,
+    inflight: usize,
+    last_use: std::time::Instant,
+}
+
+/// RAII marker for one in-flight request: blocks parking while it runs and
+/// stamps the idle clock when it ends.
+struct Busy<'a>(&'a ClickHouse);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut p) = self.0.proc.lock() {
+            p.inflight = p.inflight.saturating_sub(1);
+            p.last_use = std::time::Instant::now();
+        }
+    }
 }
 
 impl ClickHouse {
@@ -108,92 +148,159 @@ impl ClickHouse {
             .build()
             .map_err(|e| Error::Internal(format!("http client: {e}")))?;
 
-        let mut last_err = String::new();
-        for attempt in 0..3 {
-            let port =
-                free_loopback_port().map_err(|e| Error::Internal(format!("pick port: {e}")))?;
-            let cfg = write_server_config(&data_dir, port)?;
-            let base_url = format!("http://127.0.0.1:{port}");
-            tracing::info!(
-                "usage: starting clickhouse server (binary {}, data {}, port {})",
-                bin.display(),
-                data_dir.display(),
-                port
-            );
-            let child = Command::new(&bin)
-                .arg("server")
-                .arg(format!("--config-file={}", cfg.display()))
-                // No watchdog parent (a second 32 MB process whose only job is
-                // restarting a crashed server): the engine's self-heal already
-                // restarts a dead child, and the child we hold IS the server.
-                .env("CLICKHOUSE_WATCHDOG_ENABLE", "0")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|e| Error::Internal(format!("spawn clickhouse server: {e}")))?;
-
-            let ch = Self {
-                bin: bin.clone(),
-                data_dir: data_dir.clone(),
-                http: http.clone(),
+        let (child, base_url) = spawn_server(&bin, &data_dir, &http).await?;
+        Ok(Self {
+            bin,
+            data_dir,
+            http,
+            proc: Mutex::new(Proc {
+                child: Some(child),
                 base_url,
-                port,
-                child: Mutex::new(Some(child)),
-            };
-            if ch.wait_ping(Duration::from_secs(45)).await {
-                return Ok(ch);
-            }
-            last_err = format!(
-                "server did not answer /ping on port {port} (attempt {})",
-                attempt + 1
-            );
-            tracing::warn!("usage: {last_err} — retrying");
-            ch.shutdown().await; // kill the failed child before retrying
-        }
-        Err(Error::Internal(format!(
-            "clickhouse server failed to start: {last_err}"
-        )))
+                parked: false,
+                inflight: 0,
+                last_use: std::time::Instant::now(),
+            }),
+            life: tokio::sync::Mutex::new(()),
+            parks: Default::default(),
+            restarts: Default::default(),
+            queries: Default::default(),
+            rows_read: Default::default(),
+        })
     }
 
     /// Whether the spawned `clickhouse server` child is still running. `false`
     /// once it exited (crashed, or killed — e.g. by another process reclaiming
     /// the data dir). This is the engine's self-heal signal: a dead child with
     /// failing inserts means "restart the server", not "keep warning forever".
+    /// An idle-PARKED server counts as alive: it stopped on purpose and the
+    /// next request restarts it (a failed restart clears `parked`, so a server
+    /// that cannot come back still trips the heal).
     pub fn server_alive(&self) -> bool {
-        match self.child.lock().unwrap().as_mut() {
+        let mut p = self.proc.lock().unwrap();
+        if p.parked {
+            return true;
+        }
+        match p.child.as_mut() {
             Some(c) => matches!(c.try_wait(), Ok(None)),
             None => false,
         }
     }
 
-    async fn wait_ping(&self, timeout: Duration) -> bool {
-        let deadline = std::time::Instant::now() + timeout;
-        let url = format!("{}/ping", self.base_url);
-        while std::time::Instant::now() < deadline {
-            if let Ok(resp) = self.http.get(&url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(body) = resp.text().await {
-                        if body.trim() == "Ok." {
-                            return true;
-                        }
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(300)).await;
+    /// Whether the server is currently idle-stopped (no process running).
+    pub fn is_parked(&self) -> bool {
+        self.proc.lock().unwrap().parked
+    }
+
+    /// `(idle-stops, lazy restarts)` since this handle was created.
+    pub fn park_stats(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.parks.load(Relaxed), self.restarts.load(Relaxed))
+    }
+
+    /// `(statements sent, rows read)` since this handle was created. Rows come
+    /// from each response's `X-ClickHouse-Summary` header.
+    pub fn query_stats(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.queries.load(Relaxed), self.rows_read.load(Relaxed))
+    }
+
+    /// The server's OS pid, when one is running (perf probes).
+    pub fn server_pid(&self) -> Option<u32> {
+        self.proc
+            .lock()
+            .unwrap()
+            .child
+            .as_ref()
+            .and_then(|c| c.id())
+    }
+
+    /// Mark one request in flight and return the server URL to send it to,
+    /// restarting a parked server first. The in-flight mark is taken BEFORE
+    /// the parked check (under the same lock `maybe_park` decides under), so a
+    /// request can never race onto a server that is being stopped.
+    async fn begin(&self) -> Result<(Busy<'_>, String)> {
+        let parked = {
+            let mut p = self.proc.lock().unwrap();
+            p.inflight += 1;
+            p.parked
+        };
+        let busy = Busy(self);
+        if parked {
+            self.unpark().await?;
         }
-        false
+        let url = self.proc.lock().unwrap().base_url.clone();
+        Ok((busy, url))
+    }
+
+    /// Restart a parked server (serialized; a no-op if another request
+    /// already did). A failed restart leaves `parked = false` with no child,
+    /// so [`Self::server_alive`] reports dead and the engine's heal reinits.
+    async fn unpark(&self) -> Result<()> {
+        let _g = self.life.lock().await;
+        if !self.proc.lock().unwrap().parked {
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        let res = spawn_server(&self.bin, &self.data_dir, &self.http).await;
+        let mut p = self.proc.lock().unwrap();
+        p.parked = false;
+        match res {
+            Ok((child, base_url)) => {
+                p.child = Some(child);
+                p.base_url = base_url;
+                self.restarts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(
+                    "usage: clickhouse woke from idle-stop in {} ms",
+                    started.elapsed().as_millis()
+                );
+                Ok(())
+            }
+            Err(e) => {
+                p.child = None;
+                Err(e)
+            }
+        }
+    }
+
+    /// Idle-stop the server when nothing is in flight and the last request
+    /// ended at least `idle_after` ago. Returns whether it parked. The SIGTERM
+    /// path flushes cleanly; the data dir lock is released, so the lazy
+    /// restart re-attaches the same dataset.
+    pub async fn maybe_park(&self, idle_after: Duration) -> bool {
+        let _g = self.life.lock().await;
+        let child = {
+            let mut p = self.proc.lock().unwrap();
+            if p.parked || p.child.is_none() || p.inflight > 0 {
+                return false;
+            }
+            if p.last_use.elapsed() < idle_after {
+                return false;
+            }
+            p.parked = true;
+            p.child.take()
+        };
+        if let Some(child) = child {
+            stop_child(child).await;
+        }
+        self.parks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            "usage: clickhouse idle for {}s — stopped until the next query",
+            idle_after.as_secs()
+        );
+        true
     }
 
     /// POST `sql` (with `settings`) and return the raw response body, erroring on
     /// a non-2xx (ClickHouse returns a readable message in the body). `timeout`
     /// bounds the request — short for queries, long for DDL/OPTIMIZE.
     async fn post(&self, sql: String, settings: &str, timeout: Duration) -> Result<String> {
+        let (_busy, base_url) = self.begin().await?;
         let url = if settings.is_empty() {
-            format!("{}/", self.base_url)
+            format!("{base_url}/")
         } else {
-            format!("{}/?{settings}", self.base_url)
+            format!("{base_url}/?{settings}")
         };
         let resp = self
             .http
@@ -203,6 +310,17 @@ impl ClickHouse {
             .send()
             .await
             .map_err(|e| Error::Internal(format!("clickhouse http: {e}")))?;
+        self.queries
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(n) = resp
+            .headers()
+            .get("x-clickhouse-summary")
+            .and_then(|v| v.to_str().ok())
+            .and_then(summary_read_rows)
+        {
+            self.rows_read
+                .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        }
         let ok = resp.status().is_success();
         let body = resp.text().await.unwrap_or_default();
         if ok {
@@ -297,11 +415,10 @@ impl ClickHouse {
         if ndjson.trim().is_empty() {
             return Ok(());
         }
+        let (_busy, base_url) = self.begin().await?;
         let q = urlencode(&format!("INSERT INTO {table} FORMAT JSONEachRow"));
-        let url = format!(
-            "{}/?query={q}&date_time_input_format=best_effort{INSERT_SETTINGS}",
-            self.base_url
-        );
+        let url =
+            format!("{base_url}/?query={q}&date_time_input_format=best_effort{INSERT_SETTINGS}");
         let resp = self
             .http
             .post(&url)
@@ -323,33 +440,127 @@ impl ClickHouse {
     }
 
     /// Stop the server: SIGTERM (clean flush), bounded wait, SIGKILL fallback.
+    /// Final — a shut-down handle is not restarted by later requests.
     pub async fn shutdown(&self) {
-        let child = self.child.lock().ok().and_then(|mut g| g.take());
-        let Some(mut child) = child else { return };
-        if let Some(pid) = child.id() {
-            // SIGTERM for a clean shutdown (flush in-flight inserts + merges).
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .output()
-                .await;
-        }
-        match tokio::time::timeout(Duration::from_secs(6), child.wait()).await {
-            Ok(_) => {}
-            Err(_) => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-            }
+        let child = self.proc.lock().ok().and_then(|mut g| {
+            g.parked = false;
+            g.child.take()
+        });
+        if let Some(child) = child {
+            stop_child(child).await;
         }
     }
+}
+
+/// SIGTERM (clean flush of in-flight inserts + merges), bounded wait, SIGKILL.
+async fn stop_child(mut child: Child) {
+    if let Some(pid) = child.id() {
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .output()
+            .await;
+    }
+    match tokio::time::timeout(Duration::from_secs(6), child.wait()).await {
+        Ok(_) => {}
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+    }
+}
+
+/// Spawn `clickhouse server` over `data_dir` on a fresh loopback port and wait
+/// for `/ping`; retries a transient port race. Returns the child + its URL.
+async fn spawn_server(
+    bin: &Path,
+    data_dir: &Path,
+    http: &reqwest::Client,
+) -> Result<(Child, String)> {
+    let mut last_err = String::new();
+    for attempt in 0..3 {
+        let port = free_loopback_port().map_err(|e| Error::Internal(format!("pick port: {e}")))?;
+        let cfg = write_server_config(data_dir, port)?;
+        let base_url = format!("http://127.0.0.1:{port}");
+        tracing::info!(
+            "usage: starting clickhouse server (binary {}, data {}, port {})",
+            bin.display(),
+            data_dir.display(),
+            port
+        );
+        let mut child = Command::new(bin)
+            .arg("server")
+            .arg(format!("--config-file={}", cfg.display()))
+            // No watchdog parent (a second 32 MB process whose only job is
+            // restarting a crashed server): the engine's self-heal already
+            // restarts a dead child, and the child we hold IS the server.
+            .env("CLICKHOUSE_WATCHDOG_ENABLE", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| Error::Internal(format!("spawn clickhouse server: {e}")))?;
+
+        if wait_ping(http, &base_url, &mut child, Duration::from_secs(45)).await {
+            return Ok((child, base_url));
+        }
+        last_err = format!(
+            "server did not answer /ping on port {port} (attempt {})",
+            attempt + 1
+        );
+        tracing::warn!("usage: {last_err} — retrying");
+        stop_child(child).await; // kill the failed child before retrying
+    }
+    Err(Error::Internal(format!(
+        "clickhouse server failed to start: {last_err}"
+    )))
+}
+
+/// `read_rows` from an `X-ClickHouse-Summary` header (`{"read_rows":"12",…}`).
+fn summary_read_rows(h: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(h).ok()?;
+    let r = v.get("read_rows")?;
+    r.as_u64().or_else(|| r.as_str()?.parse().ok())
+}
+
+/// Poll `/ping` until "Ok." or `timeout`; gives up early if the child exits.
+async fn wait_ping(
+    http: &reqwest::Client,
+    base_url: &str,
+    child: &mut Child,
+    timeout: Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    let url = format!("{base_url}/ping");
+    // Fast first polls: a small dir answers in ~0.3-0.6 s, and a lazy
+    // restart (idle-stop wake) has a request waiting on it.
+    let mut delay = Duration::from_millis(50);
+    while std::time::Instant::now() < deadline {
+        if let Ok(resp) = http.get(&url).send().await {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.text().await {
+                    if body.trim() == "Ok." {
+                        return true;
+                    }
+                }
+            }
+        }
+        if !matches!(child.try_wait(), Ok(None)) {
+            return false;
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_millis(300));
+    }
+    false
 }
 
 impl Drop for ClickHouse {
     fn drop(&mut self) {
         // Safety net if `shutdown()` wasn't called (e.g. a panic). `kill_on_drop`
         // already arms SIGKILL; this makes it explicit while the runtime is alive.
-        if let Ok(mut g) = self.child.lock() {
-            if let Some(mut child) = g.take() {
+        if let Ok(mut g) = self.proc.lock() {
+            if let Some(mut child) = g.child.take() {
                 let _ = child.start_kill();
             }
         }
@@ -425,10 +636,11 @@ fn free_loopback_port() -> std::io::Result<u16> {
 /// global pool no longer parks up to 1000 idle threads, the schedule pools
 /// (engines Otto doesn't use: Kafka, Distributed, Buffer) are shrunk, the mark
 /// cache is 64 MB, and async metrics refresh every 60 s instead of 1 s.
-/// Deliberately NOT touched: `background_pool_size` / merge pools — MergeTree
-/// validates its `number_of_free_entries_in_pool_*` settings against them and
-/// refuses to attach tables when the pool is smaller; and `max_thread_pool_size`
-/// (a hard cap makes queries fail with "no free thread" instead of waiting).
+/// `background_pool_size` is only lowered TOGETHER with MergeTree's
+/// `number_of_free_entries_in_pool_*` settings (see R1c below) — it validates
+/// them against the pool and refuses to attach tables when the pool is
+/// smaller. Deliberately NOT touched: `max_thread_pool_size` (a hard cap makes
+/// queries fail with "no free thread" instead of waiting).
 ///
 /// Round 3 (r3-08-04 / r3-12-03; measured on a scratch data dir with the
 /// bundled 26.7 build: attach, lightweight DELETE, mutation, OPTIMIZE FINAL and
@@ -456,6 +668,15 @@ fn free_loopback_port() -> std::io::Result<u16> {
 /// of threads (a few MB of data never needs more), and the merge selector
 /// sleeps 30 s backing off to 5 min instead of polling every few seconds —
 /// with ~1 insert per 15 s there is never a merge to pick sooner.
+///
+/// Perf wave 2 (R1c): `background_pool_size` 16 → 4 (merges + mutations;
+/// × the concurrency ratio 2 = 8 slots), PAIRED with the MergeTree
+/// `number_of_free_entries_in_pool_*` thresholds lowered to 2 — the defaults
+/// (8 / 20 / 25) exceed a 4-thread pool and MergeTree would refuse to attach
+/// the tables. Measured on a scratch dir with the bundled build (attach,
+/// `ALTER … DELETE` mutation, `OPTIMIZE FINAL`, restart re-attach all pass):
+/// idle threads 70 → 58, idle CPU 0.47 % → 0.40 %, restart to `/ping` ~0.5 s.
+/// Idle-stop ([`ClickHouse::maybe_park`]) takes it to 0 when nothing reads.
 fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
     let server_dir = data_dir.join("server");
     std::fs::create_dir_all(&server_dir)
@@ -501,8 +722,14 @@ fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
          <max_parts_cleaning_thread_pool_size>2</max_parts_cleaning_thread_pool_size>\n\
          <tables_loader_foreground_pool_size>2</tables_loader_foreground_pool_size>\n\
          <tables_loader_background_pool_size>2</tables_loader_background_pool_size>\n\
+         <background_pool_size>4</background_pool_size>\n\
+         <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>\n\
          <merge_tree><merge_selecting_sleep_ms>30000</merge_selecting_sleep_ms>\
-<max_merge_selecting_sleep_ms>300000</max_merge_selecting_sleep_ms></merge_tree>\n\
+<max_merge_selecting_sleep_ms>300000</max_merge_selecting_sleep_ms>\
+<number_of_free_entries_in_pool_to_execute_mutation>2</number_of_free_entries_in_pool_to_execute_mutation>\
+<number_of_free_entries_in_pool_to_lower_max_size_of_merge>2</number_of_free_entries_in_pool_to_lower_max_size_of_merge>\
+<number_of_free_entries_in_pool_to_execute_optimize_entire_partition>2</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>\
+</merge_tree>\n\
          <compiled_expression_cache_size>16777216</compiled_expression_cache_size>\n\
          <background_message_broker_schedule_pool_size>2</background_message_broker_schedule_pool_size>\n\
          <background_distributed_schedule_pool_size>2</background_distributed_schedule_pool_size>\n\
@@ -692,6 +919,16 @@ mod tests {
     }
 
     #[test]
+    fn summary_header_read_rows() {
+        assert_eq!(
+            summary_read_rows(r#"{"read_rows":"244","read_bytes":"9"}"#),
+            Some(244)
+        );
+        assert_eq!(summary_read_rows(r#"{"read_rows":7}"#), Some(7));
+        assert_eq!(summary_read_rows("nope"), None);
+    }
+
+    #[test]
     fn config_xml_well_formed_and_escaped() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = write_server_config(dir.path(), 18999).unwrap();
@@ -703,9 +940,19 @@ mod tests {
         assert!(xml.contains("max_server_memory_usage_to_ram_ratio"));
         assert!(xml.contains("<max_server_memory_usage>1073741824</max_server_memory_usage>"));
         assert!(xml.contains("<background_schedule_pool_size>4</background_schedule_pool_size>"));
-        // Merge pools stay at their defaults (tables refuse to attach below
-        // MergeTree's free-entry thresholds).
-        assert!(!xml.contains("<background_pool_size>"));
+        // The merge pool is lowered ONLY with every MergeTree free-entry
+        // threshold below it (else tables refuse to attach).
+        assert!(xml.contains("<background_pool_size>4</background_pool_size>"));
+        for t in [
+            "number_of_free_entries_in_pool_to_execute_mutation",
+            "number_of_free_entries_in_pool_to_lower_max_size_of_merge",
+            "number_of_free_entries_in_pool_to_execute_optimize_entire_partition",
+        ] {
+            assert!(
+                xml.contains(&format!("<{t}>2</{t}>")),
+                "{t} must pair the pool"
+            );
+        }
         // No system log section at all: in a standalone config even an empty
         // (or `remove="1"`) one would enable that log.
         for tag in xml
