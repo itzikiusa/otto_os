@@ -215,6 +215,17 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
+      # Daemon budgets (perf/03 F8): boot-to-healthy, idle CPU, idle wakeups,
+      # threads, WAL size and freelist share on an isolated throwaway daemon.
+      # Debug build on a shared runner → time/CPU budgets scaled ×3.
+      - name: Daemon perf budget
+        # Report-only for now (like this job): the Playwright gates below must
+        # still run when a budget trips; the step summary shows the table.
+        continue-on-error: true
+        env:
+          OTTO_PERF_BUDGET_SCALE: '3'
+        run: node scripts/perf/daemon-budget.mjs target/debug/ottod
+
       - name: npm ci
         working-directory: ui
         run: npm ci
