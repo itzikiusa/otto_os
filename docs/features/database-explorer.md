@@ -912,7 +912,9 @@ none** (type-aware: numeric vs string; nulls sort last). Header right-click adds
 cell edits** are kept **per query tab** (`grid-tab-state.ts`): switching tabs
 no longer carries one tab's sort onto another with the same columns, or
 silently discards pending edits — they are back when you return (edits only
-onto the same result they were made on). A cell right-click offers **Filter: col = value** /
+onto the same result they were made on). Closing a query tab (×, ⌥⌘W, Close
+others / Close all) that still holds un-applied edits asks **"Discard N
+changes?"** first. A cell right-click offers **Filter: col = value** /
 **Exclude: col ≠ value**, **Expand value**, and **Copy value**. (Column filters
 that *re-shape the query* show as chips with a "press Run to apply" hint —
 distinct from the client-side row search.)

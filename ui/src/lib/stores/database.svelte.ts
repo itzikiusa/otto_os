@@ -2214,6 +2214,10 @@ class DatabaseStore {
   /** In-flight background warm-ups, one per connection (dedupe + cancel). */
   private warming = new Map<Id, { promise: Promise<void>; ctl: AbortController }>();
 
+  /** Un-applied cell edits in the results grid of the ACTIVE query tab
+   *  (written by ResultsGrid) — a tab close asks before discarding them. */
+  livePendingEdits = $state(0);
+
   /** Whether `id` is being connected in the background right now. */
   isWarming(id: Id): boolean {
     return this.warming.has(id);

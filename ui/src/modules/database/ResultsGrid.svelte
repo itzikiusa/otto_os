@@ -311,6 +311,16 @@
     shownResult = resultProp;
   });
 
+  // Tell the store how many un-applied edits the active tab holds (a tab
+  // close asks before discarding them). Explorer grids only.
+  $effect(() => {
+    if (!hosted || mini) return;
+    database.livePendingEdits = flow.pendingCells;
+    return () => {
+      database.livePendingEdits = 0;
+    };
+  });
+
   // Engine behind this result (drives dialect for inline edits).
   const engine = $derived(hosted ? (database.capabilities?.engine ?? null) : null);
 

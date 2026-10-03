@@ -32,6 +32,8 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { clipHistory } from '../../lib/stores/clipHistory.svelte';
   import { unpersistEditorState } from '../../lib/editor-history';
+  import { parkedEditCount } from './grid-tab-state';
+  import { confirmer } from '../../lib/confirm.svelte';
   import type { DbCompletionKind } from '../../lib/api/types';
   import {
     statementAtCursor,
@@ -297,19 +299,45 @@
       }));
     if (worth.length) closedTabs = [...closedTabs, ...worth].slice(-MAX_CLOSED);
   }
-  function closeTabAt(i: number): void {
+  /** Un-applied grid edits a closing tab would lose: the live grid's for the
+   *  active tab, the parked ones (grid-tab-state) for the others. */
+  function unappliedEdits(closing: QueryTab[]): number {
+    const active = database.tab;
+    return closing.reduce(
+      (n, t) => n + (t === active ? database.livePendingEdits : parkedEditCount(t.uid)),
+      0,
+    );
+  }
+  /** Ask before a close throws away un-applied cell edits. */
+  async function okToDiscard(closing: QueryTab[]): Promise<boolean> {
+    const n = unappliedEdits(closing);
+    if (n === 0) return true;
+    return confirmer.ask(
+      `${n} un-applied change${n === 1 ? '' : 's'} in the results ${n === 1 ? 'is' : 'are'} not saved to the database and will be lost.`,
+      { title: `Discard ${n} change${n === 1 ? '' : 's'}?`, confirmLabel: 'Discard', danger: true },
+    );
+  }
+  async function closeTabAt(i: number): Promise<void> {
     const t = database.tabs[i];
+    if (t && !t.pinned && !(await okToDiscard([t]))) return;
+    if (database.tabs[i] !== t) return; // the strip changed while asking
     // A pinned tab doesn't close (the store toasts "Unpin to close") — so it
     // must not land on the reopen stack as if it had.
     if (t && !t.pinned) rememberClosed([t]);
     database.closeTab(i);
   }
   // Bulk closes from the tab strip menu: pinned tabs always survive.
-  function closeOthersAt(i: number): void {
-    rememberClosed(database.tabs.filter((x, idx) => idx !== i && !x.pinned));
-    database.closeOtherTabs(i);
+  async function closeOthersAt(i: number): Promise<void> {
+    const keep = database.tabs[i];
+    const closing = database.tabs.filter((x, idx) => idx !== i && !x.pinned);
+    if (!(await okToDiscard(closing))) return;
+    const at = database.tabs.indexOf(keep);
+    if (at < 0) return;
+    rememberClosed(database.tabs.filter((x, idx) => idx !== at && !x.pinned));
+    database.closeOtherTabs(at);
   }
-  function closeAll(): void {
+  async function closeAll(): Promise<void> {
+    if (!(await okToDiscard(database.tabs.filter((x) => !x.pinned)))) return;
     rememberClosed(database.tabs.filter((x) => !x.pinned));
     database.closeAllTabs();
   }
@@ -352,8 +380,8 @@
           ]
         : []),
       { separator: true },
-      { label: `Close others${keeps}`, disabled: others === 0, action: () => closeOthersAt(i) },
-      { label: `Close all${keeps}`, action: () => closeAll() },
+      { label: `Close others${keeps}`, disabled: others === 0, action: () => void closeOthersAt(i) },
+      { label: `Close all${keeps}`, action: () => void closeAll() },
     ]);
   }
 
@@ -888,7 +916,7 @@
     }
     if (e.metaKey && e.altKey && !e.shiftKey && e.code === 'KeyW') {
       e.preventDefault();
-      if (database.tabs.length > 1) closeTabAt(database.activeTab);
+      if (database.tabs.length > 1) void closeTabAt(database.activeTab);
       return;
     }
     // ⇧⌥⌘W — reopen the most recently closed query tab.
@@ -1020,7 +1048,7 @@
               aria-label="Close tab"
               onclick={(e) => {
                 e.stopPropagation();
-                closeTabAt(i);
+                void closeTabAt(i);
               }}
             >
               <Icon name="x" size={10} />
