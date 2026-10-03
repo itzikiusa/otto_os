@@ -245,6 +245,20 @@ test('credit: offer, grant, then no pause frames however big the backlog', () =>
   assert.deepEqual(sent.map((f) => f.type), ['credit'], 'the daemon bounds the stream; no pause/resume');
 });
 
+test('credit: binary snapshots are offered only on request (perf 01 N3: never to the room relay)', () => {
+  const direct = creditHarness();
+  direct.flow.offer(true);
+  assert.deepEqual(direct.sent, [{ type: 'credit', window: CREDIT_WINDOW, binary_snapshots: true }]);
+  const relay = creditHarness();
+  relay.flow.offer(false);
+  assert.deepEqual(relay.sent, [{ type: 'credit', window: CREDIT_WINDOW }], 'no unknown field for deny_unknown_fields');
+  // Terminal.svelte: only a direct socket (no socketFactory) asks for it, and a
+  // binary payload after a header is applied as the snapshot, never credited.
+  const src = readFileSync(new URL('../src/lib/components/Terminal.svelte', import.meta.url), 'utf8');
+  assert.match(src, /flow\.offer\(!socketFactory\)/);
+  assert.match(src, /const hdr = binarySnapHeaders\.get\(s\);\s*if \(hdr\) \{\s*binarySnapHeaders\.delete\(s\);\s*applySnapshot\(/);
+});
+
 test('credit: acks are cumulative, every CREDIT_ACK_STEP consumed, credited bytes only', () => {
   const { flow, q, parse, acks } = creditHarness();
   flow.granted();

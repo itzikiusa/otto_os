@@ -68,6 +68,21 @@ export interface WsTermPauseFrame {
 export interface WsTermCreditFrame {
   type: 'credit';
   window: number;
+  /** Client → server only (perf 01 N3): send snapshots in the binary form
+   *  (`WsTermBinarySnapshotHeader` + one binary frame). Absent = base64 JSON. */
+  binary_snapshots?: boolean;
+}
+
+/** Server → client `/ws/term` (perf 01 N3), only to a client that offered
+ *  `binary_snapshots`: a `scrollback` snapshot whose bytes follow as the very
+ *  NEXT frame — one binary frame of `len` bytes. That frame is the snapshot,
+ *  not live output: it is never counted against the credit window. An empty
+ *  snapshot still uses the JSON form (`data: ""`). */
+export interface WsTermBinarySnapshotHeader {
+  type: 'scrollback';
+  epoch: number;
+  binary: true;
+  len: number;
 }
 
 /** Client → server: cumulative credited binary bytes consumed (parsed or

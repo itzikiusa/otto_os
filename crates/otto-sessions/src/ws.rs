@@ -195,6 +195,10 @@ enum ClientFrame {
     Credit {
         #[serde(default)]
         window: u64,
+        /// The client takes snapshots as a header + ONE binary frame (perf
+        /// 01 N3, [`Snap`]). Absent (older clients) = base64-in-JSON.
+        #[serde(default)]
+        binary_snapshots: bool,
     },
     // Cumulative binary bytes (since the `credit` reply) the client's emulator
     // has parsed OR the client dropped. Sent every ~64 KB consumed.
@@ -280,6 +284,64 @@ fn scrollback_frame(data: &[u8], epoch: u64) -> String {
     )
 }
 
+/// A built `scrollback` reply (perf 01 N3). A client that offered
+/// `binary_snapshots` on its `credit` frame gets the bytes as ONE binary WS
+/// frame behind a small JSON header — no +33 % base64, no `format!` copy, and
+/// no multi-MB `JSON.parse` on the client's main thread. Everyone else (and an
+/// empty snapshot) gets the original base64-in-JSON frame.
+enum Snap {
+    Json(String),
+    Binary { data: Bytes, epoch: u64 },
+}
+
+impl Snap {
+    /// Encode `data` for this connection. Runs inside [`off_worker`] so the
+    /// base64 pass of the JSON form stays off the async workers.
+    fn build(data: Vec<u8>, epoch: u64, binary: bool) -> Self {
+        if binary && !data.is_empty() {
+            Snap::Binary {
+                data: Bytes::from(data),
+                epoch,
+            }
+        } else {
+            Snap::Json(scrollback_frame(&data, epoch))
+        }
+    }
+
+    /// The binary form's header: `{"type":"scrollback","epoch":E,"binary":true,"len":L}`.
+    /// The very next frame on the socket is the binary payload of `len` bytes;
+    /// the client must not count it against the credit window (it never went
+    /// through the [`CreditGate`]).
+    fn header(len: usize, epoch: u64) -> String {
+        format!(r#"{{"type":"scrollback","epoch":{epoch},"binary":true,"len":{len}}}"#)
+    }
+
+    /// Send it. Header and payload go out back to back from the socket's own
+    /// loop, so no live output can land between them. `Err` = socket gone.
+    async fn send(self, socket: &mut WebSocket) -> std::result::Result<(), ()> {
+        match self {
+            Snap::Json(frame) => socket.send(Message::Text(frame.into())).await,
+            Snap::Binary { data, epoch } => {
+                let header = Self::header(data.len(), epoch);
+                if socket.send(Message::Text(header.into())).await.is_err() {
+                    return Err(());
+                }
+                socket.send(Message::Binary(data)).await
+            }
+        }
+        .map_err(|_| ())
+    }
+
+    /// The JSON form (tests that inspect a reply built without the capability).
+    #[cfg(test)]
+    fn json(&self) -> &str {
+        match self {
+            Snap::Json(frame) => frame,
+            Snap::Binary { .. } => panic!("binary snapshot"),
+        }
+    }
+}
+
 /// Snapshot builds allowed at once (r3-06-02). Each copies the emulator
 /// state (up to ~25 MB for 4000 × 200 cells) and formats + base64-encodes it
 /// on the blocking pool; a tiled overview attaching 15 terminals at once must
@@ -314,12 +376,12 @@ fn pty_capture(h: &Arc<PtyHandle>, lines: usize) -> impl FnOnce() -> Capture + S
 
 /// A `scrollback` reply built off the async worker. The live stream is left
 /// untouched (the client may skip an optional compact and keep streaming).
-async fn snapshot_frame(h: &Arc<PtyHandle>, lines: usize) -> String {
+async fn snapshot_frame(h: &Arc<PtyHandle>, lines: usize, binary: bool) -> Snap {
     let h = Arc::clone(h);
     let epoch = h.spawn_seq();
-    off_worker(move || scrollback_frame(&h.snapshot_with_history(lines), epoch))
+    off_worker(move || Snap::build(h.snapshot_with_history(lines), epoch, binary))
         .await
-        .unwrap_or_else(|| scrollback_frame(&[], epoch))
+        .unwrap_or_else(|| Snap::build(Vec::new(), epoch, false))
 }
 
 /// Replace this viewer's backlog with a fresh full snapshot. The capture
@@ -333,10 +395,11 @@ async fn snapshot_frame(h: &Arc<PtyHandle>, lines: usize) -> String {
 async fn resync_frame(
     rx: &mut broadcast::Receiver<Bytes>,
     capture: impl FnOnce() -> Capture + Send + 'static,
-) -> String {
+    binary: bool,
+) -> Snap {
     let built = off_worker(move || {
         let (data, epoch, output) = capture();
-        (scrollback_frame(&data, epoch), output)
+        (Snap::build(data, epoch, binary), output)
     })
     .await;
     match built {
@@ -348,7 +411,7 @@ async fn resync_frame(
         // is ignored by the client, which keeps its screen.
         None => {
             drain_backlog(rx);
-            scrollback_frame(&[], 0)
+            Snap::build(Vec::new(), 0, false)
         }
     }
 }
@@ -359,9 +422,10 @@ async fn resync_frame(
 async fn resume_frame(
     rx: &mut broadcast::Receiver<Bytes>,
     capture: impl FnOnce() -> Capture + Send + 'static,
-) -> Option<String> {
+    binary: bool,
+) -> Option<Snap> {
     if drain_backlog(rx) {
-        Some(resync_frame(rx, capture).await)
+        Some(resync_frame(rx, capture, binary).await)
     } else {
         None
     }
@@ -374,9 +438,10 @@ async fn client_resync_frame(
     flow: &mut FlowGate,
     rx: &mut broadcast::Receiver<Bytes>,
     capture: impl FnOnce() -> Capture + Send + 'static,
-) -> String {
+    binary: bool,
+) -> Snap {
     flow.resume();
-    resync_frame(rx, capture).await
+    resync_frame(rx, capture, binary).await
 }
 
 /// Default / bounds for a client-proposed credit window (`credit` frame).
@@ -598,19 +663,21 @@ async fn apply_credit_step(
     out_rx: &mut Option<broadcast::Receiver<Bytes>>,
     handle: Option<&Arc<PtyHandle>>,
     history: usize,
+    binary: bool,
 ) -> std::result::Result<(), ()> {
-    let msg = match step {
-        CreditStep::Idle => return Ok(()),
-        CreditStep::Send(bytes) => Message::Binary(bytes),
+    match step {
+        CreditStep::Idle => Ok(()),
+        CreditStep::Send(bytes) => socket.send(Message::Binary(bytes)).await.map_err(|_| ()),
         CreditStep::Resync => {
             let (Some(rx), Some(h)) = (out_rx.as_mut(), handle) else {
                 return Ok(());
             };
-            let frame = resync_frame(rx, pty_capture(h, history)).await;
-            Message::Text(frame.into())
+            resync_frame(rx, pty_capture(h, history), binary)
+                .await
+                .send(socket)
+                .await
         }
-    };
-    socket.send(msg).await.map_err(|_| ())
+    }
 }
 
 /// The `search_result` reply. Built with serde_json: matched lines are
@@ -1000,6 +1067,7 @@ async fn next_exit(rx: &mut Option<watch::Receiver<Option<i32>>>) -> i32 {
 ///
 /// `Ok(true)` = swapped, `Ok(false)` = nothing newer is live, `Err(())` = the
 /// socket is gone.
+#[allow(clippy::too_many_arguments)]
 async fn revive_viewer<S: SessionsCtx>(
     ctx: &S,
     session_id: &Id,
@@ -1008,6 +1076,7 @@ async fn revive_viewer<S: SessionsCtx>(
     out_rx: &mut Option<broadcast::Receiver<Bytes>>,
     exit_rx: &mut Option<watch::Receiver<Option<i32>>>,
     history: usize,
+    binary: bool,
 ) -> std::result::Result<bool, ()> {
     let Some(fresh) = ctx.manager().live_handle(session_id) else {
         return Ok(false);
@@ -1022,12 +1091,15 @@ async fn revive_viewer<S: SessionsCtx>(
     let capture = pty_capture(&fresh, history);
     let (frame, output) = match off_worker(move || {
         let (data, epoch, output) = capture();
-        (scrollback_frame(&data, epoch), output)
+        (Snap::build(data, epoch, binary), output)
     })
     .await
     {
         Some(built) => built,
-        None => (scrollback_frame(&[], fresh.spawn_seq()), fresh.subscribe()),
+        None => (
+            Snap::build(Vec::new(), fresh.spawn_seq(), false),
+            fresh.subscribe(),
+        ),
     };
     *out_rx = Some(output);
     *exit_rx = Some(fresh.on_exit());
@@ -1035,9 +1107,7 @@ async fn revive_viewer<S: SessionsCtx>(
     if socket.send(Message::Text(status.into())).await.is_err() {
         return Err(());
     }
-    if socket.send(Message::Text(frame.into())).await.is_err() {
-        return Err(());
-    }
+    frame.send(socket).await?;
     *handle = Some(fresh);
     Ok(true)
 }
@@ -1486,6 +1556,8 @@ async fn serve_terminal<S: SessionsCtx>(
     // Credit-based flow control, once the client sends `credit` (else the
     // legacy pause gate above is all there is).
     let mut credit: Option<CreditGate> = None;
+    // Snapshot encoding this client asked for on its `credit` frame (N3).
+    let mut binary_snapshots = false;
     // History depth this client asked for in its last `scrollback`/`resync`
     // (perf 01 F4): every server-initiated snapshot (credit skip, lag,
     // resume, revive) honours it instead of always sending the full 4000
@@ -1561,8 +1633,8 @@ async fn serve_terminal<S: SessionsCtx>(
                 flow.resume();
                 tracing::debug!(session = %session_id, "terminal ws flow auto-resume (no resume within {FLOW_AUTO_RESUME:?})");
                 if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                    if let Some(frame) = resume_frame(rx, pty_capture(h, history)).await {
-                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                    if let Some(frame) = resume_frame(rx, pty_capture(h, history), binary_snapshots).await {
+                        if frame.send(&mut socket).await.is_err() {
                             return;
                         }
                         if let Some(c) = credit.as_mut() {
@@ -1614,7 +1686,7 @@ async fn serve_terminal<S: SessionsCtx>(
                             Some(c) => c.push(out, tokio::time::Instant::now()),
                             None => CreditStep::Send(out),
                         };
-                        if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref(), history).await.is_err() {
+                        if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref(), history, binary_snapshots).await.is_err() {
                             return;
                         }
                     }
@@ -1628,8 +1700,8 @@ async fn serve_terminal<S: SessionsCtx>(
                         // fresh full snapshot; the client rebuilds from it.
                         tracing::debug!(session = %session_id, "terminal ws lagged by {n} chunks; resyncing from snapshot");
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                            let frame = resync_frame(rx, pty_capture(h, history)).await;
-                            if socket.send(Message::Text(frame.into())).await.is_err() {
+                            let frame = resync_frame(rx, pty_capture(h, history), binary_snapshots).await;
+                            if frame.send(&mut socket).await.is_err() {
                                 return;
                             }
                             if let Some(c) = credit.as_mut() {
@@ -1662,7 +1734,7 @@ async fn serve_terminal<S: SessionsCtx>(
             // happens while this loop holds the dead handle — `exit_rx` is the
             // reliable "my process is gone" signal.) Armed only while dead.
             _ = revive_tick.tick(), if exit_rx.is_none() || out_rx.is_none() => {
-                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx, history).await {
+                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx, history, binary_snapshots).await {
                     Err(()) => return,
                     Ok(true) => {
                         if let Some(c) = credit.as_mut() {
@@ -1725,7 +1797,7 @@ async fn serve_terminal<S: SessionsCtx>(
                             // keystroke lands); with nothing live, `input`
                             // fails and the notice below says so.
                             if exit_rx.is_none() {
-                                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx, history).await {
+                                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx, history, binary_snapshots).await {
                                     Err(()) => return,
                                     Ok(true) => {
                                         if let Some(c) = credit.as_mut() {
@@ -1743,7 +1815,7 @@ async fn serve_terminal<S: SessionsCtx>(
                             // its startup, not in the prompt the user saw).
                             if wakes_on_input(view_only, user, exit_rx.is_some()) {
                                 match ctx.manager().ensure_live(&session_id).await {
-                                    Ok(()) => match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx, history).await {
+                                    Ok(()) => match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx, history, binary_snapshots).await {
                                         Err(()) => return,
                                         Ok(true) => {
                                             warned_input = false;
@@ -1811,8 +1883,8 @@ async fn serve_terminal<S: SessionsCtx>(
                     ClientFrame::Resume => {
                         if flow.resume() {
                             if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                                if let Some(frame) = resume_frame(rx, pty_capture(h, history)).await {
-                                    if socket.send(Message::Text(frame.into())).await.is_err() {
+                                if let Some(frame) = resume_frame(rx, pty_capture(h, history), binary_snapshots).await {
+                                    if frame.send(&mut socket).await.is_err() {
                                         return;
                                     }
                                     if let Some(c) = credit.as_mut() {
@@ -1831,8 +1903,8 @@ async fn serve_terminal<S: SessionsCtx>(
                             }
                         }
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                            let frame = client_resync_frame(&mut flow, rx, pty_capture(h, want)).await;
-                            if socket.send(Message::Text(frame.into())).await.is_err() {
+                            let frame = client_resync_frame(&mut flow, rx, pty_capture(h, want), binary_snapshots).await;
+                            if frame.send(&mut socket).await.is_err() {
                                 return;
                             }
                             if let Some(c) = credit.as_mut() {
@@ -1842,7 +1914,8 @@ async fn serve_terminal<S: SessionsCtx>(
                             flow.resume();
                         }
                     }
-                    ClientFrame::Credit { window } => {
+                    ClientFrame::Credit { window, binary_snapshots: bin } => {
+                        binary_snapshots = bin;
                         let gate = CreditGate::new(window);
                         if socket.send(Message::Text(gate.grant_frame().into())).await.is_err() {
                             return;
@@ -1852,7 +1925,7 @@ async fn serve_terminal<S: SessionsCtx>(
                     ClientFrame::Ack { bytes } => {
                         if let Some(c) = credit.as_mut() {
                             let step = c.ack(bytes, tokio::time::Instant::now());
-                            if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref(), history).await.is_err() {
+                            if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref(), history, binary_snapshots).await.is_err() {
                                 return;
                             }
                         }
@@ -1883,11 +1956,11 @@ async fn serve_terminal<S: SessionsCtx>(
                         // history. Omitted (0) when no live handle exists.
                         // Built off the async worker (r3-06-02).
                         let frame = match handle.as_ref() {
-                            Some(h) => snapshot_frame(h, want).await,
-                            None => scrollback_frame(&[], 0),
+                            Some(h) => snapshot_frame(h, want, binary_snapshots).await,
+                            None => Snap::build(Vec::new(), 0, false),
                         };
                         // Sent inline, i.e. before any subsequent live bytes.
-                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                        if frame.send(&mut socket).await.is_err() {
                             return;
                         }
                         // Output held for credit is already in this snapshot.
@@ -2685,11 +2758,15 @@ mod tests {
         }
         assert!(gate.resume());
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let frame = resume_frame(&mut rx, test_capture(&tx, b"\x1b[Hsnapshot", 3, &calls))
-            .await
-            .expect("skipped output must be replaced by a snapshot");
+        let frame = resume_frame(
+            &mut rx,
+            test_capture(&tx, b"\x1b[Hsnapshot", 3, &calls),
+            false,
+        )
+        .await
+        .expect("skipped output must be replaced by a snapshot");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let v: serde_json::Value = serde_json::from_str(frame.json()).unwrap();
         assert_eq!(v["type"], "scrollback");
         assert_eq!(v["epoch"], 3);
         assert_eq!(
@@ -2731,12 +2808,17 @@ mod tests {
             tx.send(Bytes::from(format!("flood{i}\n"))).unwrap();
         }
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let frame =
-            client_resync_frame(&mut gate, &mut rx, test_capture(&tx, b"screen", 9, &calls)).await;
+        let frame = client_resync_frame(
+            &mut gate,
+            &mut rx,
+            test_capture(&tx, b"screen", 9, &calls),
+            false,
+        )
+        .await;
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(!gate.is_paused(), "resync leaves the paused state");
         assert!(!gate.resume(), "a trailing resume finds the gate open");
-        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let v: serde_json::Value = serde_json::from_str(frame.json()).unwrap();
         assert_eq!(v["type"], "scrollback");
         assert_eq!(v["epoch"], 9);
         assert!(matches!(
@@ -2744,9 +2826,14 @@ mod tests {
             Err(broadcast::error::TryRecvError::Empty)
         ));
         // Nothing queued and not paused: still answers with a snapshot.
-        let frame =
-            client_resync_frame(&mut gate, &mut rx, test_capture(&tx, b"s2", 9, &calls)).await;
-        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let frame = client_resync_frame(
+            &mut gate,
+            &mut rx,
+            test_capture(&tx, b"s2", 9, &calls),
+            false,
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(frame.json()).unwrap();
         assert_eq!(B64.decode(v["data"].as_str().unwrap()).unwrap(), b"s2");
         tx.send(Bytes::from_static(b"live")).unwrap();
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"live"));
@@ -2758,9 +2845,11 @@ mod tests {
     async fn resume_without_skipped_output_sends_nothing() {
         let (tx, mut rx) = broadcast::channel::<Bytes>(8);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        assert!(resume_frame(&mut rx, test_capture(&tx, b"", 0, &calls))
-            .await
-            .is_none());
+        assert!(
+            resume_frame(&mut rx, test_capture(&tx, b"", 0, &calls), false)
+                .await
+                .is_none()
+        );
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
@@ -2776,8 +2865,8 @@ mod tests {
         let (tx, mut rx) = broadcast::channel::<Bytes>(64);
         tx.send(Bytes::from_static(b"before")).unwrap();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let frame = resync_frame(&mut rx, test_capture(&tx, b"snap", 4, &calls)).await;
-        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let frame = resync_frame(&mut rx, test_capture(&tx, b"snap", 4, &calls), false).await;
+        let v: serde_json::Value = serde_json::from_str(frame.json()).unwrap();
         assert_eq!(v["epoch"], 4);
         assert!(matches!(
             rx.try_recv(),
@@ -2802,11 +2891,26 @@ mod tests {
     fn credit_and_ack_frames_parse_and_the_window_is_clamped() {
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"credit","window":1048576}"#),
-            Ok(ClientFrame::Credit { window: 1_048_576 })
+            Ok(ClientFrame::Credit {
+                window: 1_048_576,
+                binary_snapshots: false
+            })
         ));
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"credit"}"#),
-            Ok(ClientFrame::Credit { window: 0 })
+            Ok(ClientFrame::Credit {
+                window: 0,
+                binary_snapshots: false
+            })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(
+                r#"{"type":"credit","window":1048576,"binary_snapshots":true}"#
+            ),
+            Ok(ClientFrame::Credit {
+                binary_snapshots: true,
+                ..
+            })
         ));
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"ack","bytes":65536}"#),
@@ -3305,5 +3409,57 @@ mod input_queue_tests {
         }
         // Only the three failed TYPING writes revert the size claim.
         assert_eq!(*reverts.lock().unwrap(), vec![Some(7); 3]);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_encoding_tests {
+    //! Perf 01 N3: snapshots as a header + ONE binary frame for clients that
+    //! offered `binary_snapshots`; the base64-in-JSON form otherwise.
+
+    use super::*;
+
+    #[test]
+    fn a_binary_capable_client_gets_raw_bytes_behind_a_header() {
+        let data = b"\x1b[2J\x1b[Hhello \xff\x00 world".to_vec();
+        let Snap::Binary { data: raw, epoch } = Snap::build(data.clone(), 7, true) else {
+            panic!("binary form expected");
+        };
+        assert_eq!(&raw[..], &data[..], "bytes travel unencoded");
+        assert_eq!(epoch, 7);
+        let v: serde_json::Value = serde_json::from_str(&Snap::header(raw.len(), epoch)).unwrap();
+        assert_eq!(v["type"], "scrollback");
+        assert_eq!(v["binary"], true);
+        assert_eq!(v["len"], data.len());
+        assert_eq!(v["epoch"], 7);
+        assert!(v.get("data").is_none(), "no base64 copy in the header");
+    }
+
+    #[test]
+    fn older_clients_and_empty_snapshots_keep_the_json_form() {
+        let v: serde_json::Value =
+            serde_json::from_str(Snap::build(b"abc".to_vec(), 2, false).json()).unwrap();
+        assert_eq!(B64.decode(v["data"].as_str().unwrap()).unwrap(), b"abc");
+        // An empty snapshot (no live PTY) is ignored by clients: no payload frame.
+        let v: serde_json::Value =
+            serde_json::from_str(Snap::build(Vec::new(), 0, true).json()).unwrap();
+        assert_eq!(v["data"], "");
+    }
+
+    /// The point of N3: a 4000-row snapshot costs its own size on the wire,
+    /// not +33 % of base64 inside a JSON string the client must parse.
+    #[test]
+    fn the_binary_form_saves_the_base64_overhead() {
+        let data = vec![b'x'; 1_500_000];
+        let json = Snap::build(data.clone(), 1, false).json().len();
+        let Snap::Binary { data: raw, epoch } = Snap::build(data, 1, true) else {
+            panic!("binary form expected");
+        };
+        let binary = raw.len() + Snap::header(raw.len(), epoch).len();
+        let ratio = json as f64 / binary as f64;
+        assert!(
+            ratio > 1.33,
+            "base64-in-JSON is {ratio:.3}× the binary form (binary {binary} B, json {json} B)"
+        );
     }
 }

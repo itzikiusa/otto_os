@@ -105,9 +105,14 @@ export class TermFlow {
     }
   }
 
-  /** Ask the daemon for credit flow control (first frame on a new socket). */
-  offer(): void {
-    this.send({ type: 'credit', window: CREDIT_WINDOW });
+  /** Ask the daemon for credit flow control (first frame on a new socket).
+   *  `binarySnapshots` (perf 01 N3): also take snapshots as a JSON header +
+   *  ONE raw binary frame instead of base64 inside JSON. Only for a direct
+   *  `/ws/term` socket — the room relay rejects unknown fields. */
+  offer(binarySnapshots = false): void {
+    this.send(binarySnapshots
+      ? { type: 'credit', window: CREDIT_WINDOW, binary_snapshots: true }
+      : { type: 'credit', window: CREDIT_WINDOW });
   }
 
   /** The daemon's `credit` reply (its granted `window`): count this stream's

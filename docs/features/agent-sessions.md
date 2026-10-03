@@ -313,6 +313,10 @@ authority has the PTY resized to that grid **before** the snapshot is taken,
 so opening a pane costs exactly one snapshot. The depth a client asked for is
 reused for every snapshot the daemon later pushes on its own (lag, flow-control
 recovery, a respawned process), so a 2000-row tile is never sent 4000 rows.
+The app's own terminal socket asks for snapshots as raw bytes (one binary
+frame behind a small JSON header) instead of base64 inside JSON: a 4000-row
+snapshot is a third smaller on the wire and the page no longer parses a
+multi-megabyte JSON string to show it. Other clients keep the JSON form.
 
 **Memory.** The daemon's emulator keeps 4000 rows of formatted history per live
 session. Rows that scrolled off are stored trimmed of trailing blanks and shared

@@ -126,6 +126,11 @@
     }
   }
 
+  /** Binary snapshot headers (perf 01 N3) waiting for their payload — the
+   *  NEXT binary frame on that socket. Keyed by socket, not by component: a
+   *  park/adopt can swap the handler between the header and its payload. */
+  const binarySnapHeaders = new WeakMap<WebSocket, { epoch?: number }>();
+
   const termPark = new TermPark<ParkedEngine>(disposeParked, undefined, undefined, undefined, undefined, parkedBytes);
 
   /** While parked the engine keeps up with its session on its own: bytes
@@ -142,13 +147,33 @@
     e.sock.onopen = null;
     e.sock.onerror = null;
     e.sock.onclose = () => termPark.evict(key, e);
+    const applyParkedSnapshot = (epoch: number | null, snap: Uint8Array | null): void => {
+      const buffer = e.term.buffer.active;
+      const holds = () => e.term.hasSelection() || buffer.baseY - buffer.viewportY > 3;
+      if (!snapshotApplies(e, epoch, holds) || !snap?.length) return;
+      e.writes.dropQueued();
+      e.resyncPending = false;
+      if (e.writes.inflight === 0) {
+        e.term.reset();
+        e.writes.push(snap);
+      } else {
+        e.writes.push(parkedRis(snap));
+      }
+    };
     e.sock.onmessage = (ev: MessageEvent) => {
       if (ev.data instanceof ArrayBuffer) {
+        // A binary snapshot's payload (N3): not live output, never credited.
+        const hdr = binarySnapHeaders.get(e.sock);
+        if (hdr) {
+          binarySnapHeaders.delete(e.sock);
+          applyParkedSnapshot(hdr.epoch ?? null, new Uint8Array(ev.data));
+          return;
+        }
         e.writes.push(new Uint8Array(ev.data), undefined, e.flow.credit);
         return;
       }
       if (typeof ev.data !== 'string') return;
-      let msg: { type?: string; window?: unknown; epoch?: number; data?: string; status?: ParkedStatus; code?: number; message?: string };
+      let msg: { type?: string; window?: unknown; epoch?: number; data?: string; binary?: boolean; status?: ParkedStatus; code?: number; message?: string };
       try {
         msg = JSON.parse(ev.data);
       } catch {
@@ -159,18 +184,11 @@
           e.flow.granted(typeof msg.window === 'number' ? msg.window : undefined);
           break;
         case 'scrollback': {
-          const buffer = e.term.buffer.active;
-          const holds = () => e.term.hasSelection() || buffer.baseY - buffer.viewportY > 3;
-          if (!snapshotApplies(e, msg.epoch ?? null, holds) || !msg.data) break;
-          const snap = parkedB64(msg.data);
-          e.writes.dropQueued();
-          e.resyncPending = false;
-          if (e.writes.inflight === 0) {
-            e.term.reset();
-            e.writes.push(snap);
-          } else {
-            e.writes.push(parkedRis(snap));
+          if (msg.binary) {
+            binarySnapHeaders.set(e.sock, { epoch: msg.epoch });
+            break;
           }
+          applyParkedSnapshot(msg.epoch ?? null, msg.data ? parkedB64(msg.data) : null);
           break;
         }
         case 'status':
@@ -816,6 +834,51 @@
     wireSocket(sock);
   }
 
+  /** Apply a `scrollback` snapshot (JSON or binary form, perf 01 N3). */
+  function applySnapshot(epoch: number | null, snap: Uint8Array | null): void {
+    compactQueue.done(compactClient);
+    // A delayed optional compact must not erase a selection or reading
+    // position established after its request. A new process/connection still rebuilds: its
+    // epoch differs (or was cleared on connect).
+    // A `resync` reply always rebuilds: its request already dropped
+    // the queued bytes this snapshot replaces.
+    const buffer = term?.buffer.active;
+    const st = { compactPending, resyncPending, snapshotEpoch };
+    const applies = snapshotApplies(st, epoch, () =>
+      !!term?.hasSelection() || (!!buffer && buffer.baseY - buffer.viewportY > 3));
+    compactPending = st.compactPending;
+    snapshotEpoch = st.snapshotEpoch;
+    if (!applies) return;
+    // A snapshot fully reconstructs terminal state: history rows +
+    // coherent current-screen frame + input modes (bracketed paste,
+    // keypad). ALWAYS reset and rebuild from it — appending under the
+    // locally-kept scrollback stacked a duplicate copy of the whole
+    // transcript on every reconnect (the "scroll up and see the
+    // conversation N times" bug), and preserved history could belong
+    // to a dead process painted at a stale width. Deterministic
+    // rebuild keeps the buffer identical to what a fresh attach sees.
+    if (snap?.length) {
+      // Everything received before this frame is already in it: the
+      // queued part never needs to parse (A3).
+      writes.dropQueued();
+      resyncPending = false;
+      if (writes.inflight === 0) {
+        term?.reset();
+        // Snapshot is a full-screen paint already; still force a clean
+        // redraw so nothing from the previous process lingers.
+        paintPtyBytes(snap, /* alwaysRedraw */ true);
+      } else {
+        // Output is still queued inside xterm (a flow-control resume
+        // or lag resync mid-flood). term.reset() is synchronous but
+        // the queue is not cleared, so those stale bytes would parse
+        // AFTER the reset, above the rebuilt history. Reset in-order
+        // instead: RIS (ESC c) makes xterm call the same reset() when
+        // the parser reaches it, i.e. after the backlog.
+        paintPtyBytes(withInOrderReset(snap), /* alwaysRedraw */ true);
+      }
+    }
+  }
+
   /** This component's handlers on `s` — a socket it just opened, or one it
    *  adopted from the parking lot (already open: onopen never fires). */
   function wireSocket(s: WebSocket): void {
@@ -826,7 +889,9 @@
       // Credit flow control first: frames sent after the daemon's `credit`
       // reply count against the window (an older daemon ignores the offer
       // and this socket stays on pause/resume).
-      flow.offer();
+      // Binary snapshots (N3) only on a direct /ws/term socket: the room relay
+      // (socketFactory) rejects unknown fields on its `credit` frame.
+      flow.offer(!socketFactory);
       // Primary pane: take size authority BEFORE pushing our grid, so a
       // passive viewer attaching later can't stomp it (see claimOnAttach doc).
       if (claimOnAttach && !readOnly) sendJson({ type: 'claim' });
@@ -860,6 +925,14 @@
     s.onmessage = (ev: MessageEvent) => {
       if (ev.data instanceof ArrayBuffer) {
         const bytes = new Uint8Array(ev.data);
+        // The payload of a binary snapshot header (perf 01 N3): a snapshot,
+        // not live output — never credited, never painted as a PTY burst.
+        const hdr = binarySnapHeaders.get(s);
+        if (hdr) {
+          binarySnapHeaders.delete(s);
+          applySnapshot(hdr.epoch ?? null, bytes);
+          return;
+        }
         // write() only updates the buffer + marks dirty cells; the renderer then
         // paints *those* cells. Agent TUIs rewrite status/prompt rows in place —
         // if a cell is no longer dirty, the previous frame stays (cursor ghosts,
@@ -876,51 +949,14 @@
           case 'credit':
             flow.granted(typeof msg.window === 'number' ? msg.window : undefined);
             break;
-          case 'scrollback': {
-            compactQueue.done(compactClient);
-            // A delayed optional compact must not erase a selection or reading
-            // position established after its request. A new process/connection still rebuilds: its
-            // epoch differs (or was cleared on connect).
-            // A `resync` reply always rebuilds: its request already dropped
-            // the queued bytes this snapshot replaces.
-            const buffer = term?.buffer.active;
-            const st = { compactPending, resyncPending, snapshotEpoch };
-            const applies = snapshotApplies(st, msg.epoch ?? null, () =>
-              !!term?.hasSelection() || (!!buffer && buffer.baseY - buffer.viewportY > 3));
-            compactPending = st.compactPending;
-            snapshotEpoch = st.snapshotEpoch;
-            if (!applies) break;
-            // A snapshot fully reconstructs terminal state: history rows +
-            // coherent current-screen frame + input modes (bracketed paste,
-            // keypad). ALWAYS reset and rebuild from it — appending under the
-            // locally-kept scrollback stacked a duplicate copy of the whole
-            // transcript on every reconnect (the "scroll up and see the
-            // conversation N times" bug), and preserved history could belong
-            // to a dead process painted at a stale width. Deterministic
-            // rebuild keeps the buffer identical to what a fresh attach sees.
-            if (msg.data) {
-              const snap = base64ToBytes(msg.data);
-              // Everything received before this frame is already in it: the
-              // queued part never needs to parse (A3).
-              writes.dropQueued();
-              resyncPending = false;
-              if (writes.inflight === 0) {
-                term?.reset();
-                // Snapshot is a full-screen paint already; still force a clean
-                // redraw so nothing from the previous process lingers.
-                paintPtyBytes(snap, /* alwaysRedraw */ true);
-              } else {
-                // Output is still queued inside xterm (a flow-control resume
-                // or lag resync mid-flood). term.reset() is synchronous but
-                // the queue is not cleared, so those stale bytes would parse
-                // AFTER the reset, above the rebuilt history. Reset in-order
-                // instead: RIS (ESC c) makes xterm call the same reset() when
-                // the parser reaches it, i.e. after the backlog.
-                paintPtyBytes(withInOrderReset(snap), /* alwaysRedraw */ true);
-              }
+          case 'scrollback':
+            if (msg.binary) {
+              // Header only; the bytes are the next (binary) frame.
+              binarySnapHeaders.set(s, { epoch: msg.epoch });
+              break;
             }
+            applySnapshot(msg.epoch ?? null, msg.data ? base64ToBytes(msg.data) : null);
             break;
-          }
           case 'status':
             // A live status after an `exit` means the server moved this
             // socket onto a respawned process (chat send, channel follow-up,

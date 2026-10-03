@@ -81,6 +81,7 @@ below). Clients need no change: keep sending, and treat a dropped socket or a
 {"type":"resume"}                                   // flow control: send again (+ one snapshot if anything was held back)
 {"type":"resync","lines":2000}                      // (optional "cols"/"rows" as on scrollback) typed over a dropped local backlog: discard my queued output, send ONE snapshot (see below)
 {"type":"credit","window":1048576}                  // credit flow control: send me at most `window` unacknowledged binary bytes (see below)
+                                                    // optional "binary_snapshots":true → snapshots in the binary form (below)
 {"type":"ack","bytes":4194304}                      // credit: cumulative binary bytes consumed (parsed or dropped) since the grant
 {"type":"probe","id":7}                             // latency probe: answered at once with `probe_ack` (see below); read-only safe
 ```
@@ -226,6 +227,13 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
 ```json
 {"type":"credit","window":1048576}                  // grant for a client `credit` offer; binary frames after it count against `window`
 {"type":"scrollback","data":"<base64 bytes>","epoch":3}  // response to scrollback request; send BEFORE live bytes resume.
+{"type":"scrollback","epoch":3,"binary":true,"len":1834012}  // binary form (perf 01 N3), only to a client whose `credit`
+                                                    // offer carried "binary_snapshots":true and only for a non-empty
+                                                    // snapshot: the VERY NEXT frame is one binary frame of `len` bytes —
+                                                    // the snapshot payload, NOT live output: it is never counted against
+                                                    // the credit window. Saves the +33 % base64 and the client's
+                                                    // multi-MB JSON.parse. Applies to every snapshot on that socket
+                                                    // (reply, resync, lag/skip resync, revival).
                                                     // `data` is a FULL rebuild: formatted history rows + a coherent
                                                     // current-screen frame + input-mode restoration (bracketed paste,
                                                     // keypad). The client MUST reset its terminal and repaint from this
