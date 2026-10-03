@@ -71,6 +71,32 @@ pub struct SessionListFilter {
     /// Paging cursor: only rows created strictly before this RFC 3339 instant
     /// (pass the `created_at` of the oldest row of the previous page).
     pub before: Option<String>,
+    /// `Some(true)` → only the rows the sidebar lists: every connection
+    /// session plus the agent sessions [`Session::is_foreground_agent`]
+    /// accepts (no `meta.source` in `BACKGROUND_SESSION_SOURCES`), plus any
+    /// background source named in [`Self::with_sources`]. `Some(false)` → the
+    /// complement (background agents only). The same rule, in SQL — a main
+    /// workspace with 1.9 k hidden review agents used to ship them all.
+    pub foreground: Option<bool>,
+    /// With `foreground = Some(true)`: background sources to keep anyway
+    /// (e.g. `channel` for the sidebar's Slack/Telegram groups).
+    pub with_sources: Vec<String>,
+    /// Only these ids (fetch-by-id for open tabs). `Some(empty)` → no rows.
+    pub ids: Option<Vec<Id>>,
+}
+
+/// Push the SQL form of [`Session::is_foreground_agent`] for an agent row:
+/// `meta.source` is absent / not a JSON string / not a background source.
+fn push_foreground_agent(q: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+    q.push(
+        "(COALESCE(json_type(meta_json, '$.source'), '') <> 'text' \
+          OR json_extract(meta_json, '$.source') NOT IN (",
+    );
+    let mut sep = q.separated(", ");
+    for src in otto_core::domain::BACKGROUND_SESSION_SOURCES {
+        sep.push_bind(src);
+    }
+    q.push("))");
 }
 
 /// Insert payload for a new session row.
@@ -255,7 +281,10 @@ impl SessionsRepo {
         scopes: &[SessionScope],
         filter: &SessionListFilter,
     ) -> Result<Vec<Session>> {
-        if scopes.is_empty() || filter.limit == Some(0) {
+        if scopes.is_empty()
+            || filter.limit == Some(0)
+            || filter.ids.as_ref().is_some_and(|ids| ids.is_empty())
+        {
             return Ok(Vec::new());
         }
         // With a limit: the newest `limit` rows in a subquery, re-sorted
@@ -299,6 +328,32 @@ impl SessionsRepo {
         if let Some(before) = &filter.before {
             q.push(" AND created_at < ").push_bind(before.clone());
         }
+        if let Some(fg) = filter.foreground {
+            if fg {
+                q.push(" AND (kind <> 'agent' OR ");
+                push_foreground_agent(&mut q);
+                if !filter.with_sources.is_empty() {
+                    q.push(" OR (json_type(meta_json, '$.source') = 'text' AND json_extract(meta_json, '$.source') IN (");
+                    let mut sep = q.separated(", ");
+                    for src in &filter.with_sources {
+                        sep.push_bind(src.clone());
+                    }
+                    q.push("))");
+                }
+                q.push(")");
+            } else {
+                q.push(" AND kind = 'agent' AND NOT ");
+                push_foreground_agent(&mut q);
+            }
+        }
+        if let Some(ids) = &filter.ids {
+            q.push(" AND id IN (");
+            let mut sep = q.separated(", ");
+            for id in ids {
+                sep.push_bind(id.clone());
+            }
+            q.push(")");
+        }
         if let Some(limit) = filter.limit {
             q.push(" ORDER BY created_at DESC, id DESC LIMIT ")
                 .push_bind(limit as i64)
@@ -312,6 +367,30 @@ impl SessionsRepo {
             .await
             .map_err(dberr("sessions"))?;
         rows.iter().map(row_to_session).collect()
+    }
+
+    /// Ids of the sessions the sidebar shows in `ws` (non-archived,
+    /// [`SessionListFilter::foreground`] rule incl. channel rows), optionally
+    /// owner-scoped — the id set the workspace usage rollup is filtered by.
+    /// Selects only `id`: the rollup used to decode every row (meta included)
+    /// of a 2 k-session workspace just to build this set.
+    pub async fn visible_ids(&self, ws: &Id, owner: Option<&Id>) -> Result<Vec<Id>> {
+        let mut q = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT id FROM sessions WHERE workspace_id = ",
+        );
+        q.push_bind(ws.clone());
+        if let Some(o) = owner {
+            q.push(" AND created_by = ").push_bind(o.clone());
+        }
+        q.push(" AND archived = 0 AND (kind <> 'agent' OR ");
+        push_foreground_agent(&mut q);
+        q.push(" OR (json_type(meta_json, '$.source') = 'text' AND json_extract(meta_json, '$.source') = 'channel'))");
+        let rows = q
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("session ids"))?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
     /// Pre-filtered candidates for the provider-title auto-namer: live-ish
@@ -1428,6 +1507,135 @@ mod tests {
             repo.list_filtered(&[], &live).await.unwrap().is_empty(),
             "no scope, no rows"
         );
+    }
+
+    /// F1 parity: `foreground` in SQL is exactly `Session::is_foreground_agent`
+    /// (plus every connection row), across every background source, odd
+    /// `meta.source` shapes, `with_sources` and the `ids` filter.
+    #[tokio::test]
+    async fn foreground_filter_matches_is_foreground_agent() {
+        let pool = mem_pool().await;
+        let (alice, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let mut metas: Vec<String> = otto_core::domain::BACKGROUND_SESSION_SOURCES
+            .iter()
+            .map(|s| format!(r#"{{"source":"{s}"}}"#))
+            .collect();
+        metas.extend(
+            [
+                "{}",
+                r#"{"source":7}"#,
+                r#"{"source":null}"#,
+                r#"{"source":""}"#,
+                r#"{"source":"manual"}"#,
+                r#"{"source":"Review"}"#,
+                r#"{"source":["review"]}"#,
+                r#"{"other":"review"}"#,
+            ]
+            .map(String::from),
+        );
+        let mut n = 0;
+        for kind in ["agent", "connection"] {
+            for archived in [0, 1] {
+                for meta in &metas {
+                    let at = format!("2026-01-01T00:{:02}:{:02}+00:00", n / 60, n % 60);
+                    insert_row(&pool, &ws, &alice, kind, "idle", archived, meta, &at).await;
+                    n += 1;
+                }
+            }
+        }
+        let all = repo.list_by_workspace(&ws).await.unwrap();
+        let scope = [SessionScope {
+            workspace_id: ws.clone(),
+            owner: None,
+        }];
+        let ids_of = |v: Vec<Session>| {
+            let mut v: Vec<String> = v.into_iter().map(|s| s.id).collect();
+            v.sort();
+            v
+        };
+        let src = |s: &Session| {
+            s.meta
+                .get("source")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        };
+        for with in [
+            vec![],
+            vec!["channel".to_string()],
+            vec!["channel".into(), "swarm".into()],
+        ] {
+            for archived in [None, Some(false)] {
+                let f = SessionListFilter {
+                    archived,
+                    foreground: Some(true),
+                    with_sources: with.clone(),
+                    ..Default::default()
+                };
+                let want = ids_of(
+                    all.iter()
+                        .filter(|s| archived.is_none_or(|a| s.archived == a))
+                        .filter(|s| {
+                            s.kind != SessionKind::Agent
+                                || s.is_foreground_agent()
+                                || src(s).is_some_and(|x| with.contains(&x))
+                        })
+                        .cloned()
+                        .collect(),
+                );
+                let got = ids_of(repo.list_filtered(&scope, &f).await.unwrap());
+                assert_eq!(got, want, "foreground=true {f:?}");
+            }
+        }
+        let bg = SessionListFilter {
+            foreground: Some(false),
+            ..Default::default()
+        };
+        let want = ids_of(
+            all.iter()
+                .filter(|s| s.kind == SessionKind::Agent && !s.is_foreground_agent())
+                .cloned()
+                .collect(),
+        );
+        assert_eq!(
+            want.len(),
+            2 * otto_core::domain::BACKGROUND_SESSION_SOURCES.len()
+        );
+        assert_eq!(ids_of(repo.list_filtered(&scope, &bg).await.unwrap()), want);
+
+        // visible_ids = non-archived foreground + channel rows.
+        let mut vis = repo.visible_ids(&ws, None).await.unwrap();
+        vis.sort();
+        let want = ids_of(
+            all.iter()
+                .filter(|s| !s.archived)
+                .filter(|s| {
+                    s.kind != SessionKind::Agent
+                        || s.is_foreground_agent()
+                        || src(s).as_deref() == Some("channel")
+                })
+                .cloned()
+                .collect(),
+        );
+        assert_eq!(vis, want);
+
+        // ids: exact subset; empty → nothing.
+        let pick: Vec<String> = all.iter().step_by(7).map(|s| s.id.clone()).collect();
+        let f = SessionListFilter {
+            ids: Some(pick.clone()),
+            ..Default::default()
+        };
+        let mut pick_sorted = pick.clone();
+        pick_sorted.sort();
+        assert_eq!(
+            ids_of(repo.list_filtered(&scope, &f).await.unwrap()),
+            pick_sorted
+        );
+        let none = SessionListFilter {
+            ids: Some(vec![]),
+            ..Default::default()
+        };
+        assert!(repo.list_filtered(&scope, &none).await.unwrap().is_empty());
     }
 
     #[tokio::test]

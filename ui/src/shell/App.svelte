@@ -846,9 +846,7 @@
    *  so the route→store sync can open its tab. */
   async function openInMain(route: string): Promise<void> {
     const m = /^agents\/([^/?]+)/.exec(route);
-    if (m && !ws.sessions.some((s) => s.id === m[1])) {
-      await ws.refreshSessions().catch(() => {});
-    }
+    if (m && !ws.getSession(m[1])) await ws.ensureSession(m[1]);
     router.go(route);
   }
 

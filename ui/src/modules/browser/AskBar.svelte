@@ -32,7 +32,7 @@
 
   const url = $derived(browser.activeTab?.url ?? '');
   const marks = $derived(browser.annotations.filter((a) => a.url === url));
-  const session = $derived(sessionId ? (ws.sessions.find((s) => s.id === sessionId) ?? null) : null);
+  const session = $derived(sessionId ? (ws.getSession(sessionId) ?? null) : null);
   const status = $derived(sessionId ? (ws.statusMap[sessionId] ?? session?.status ?? null) : null);
   const live = $derived(status === 'running' || status === 'working' || status === 'idle');
   const canSend = $derived(!!sessionId && live && !!url && text.trim() !== '' && !sending);

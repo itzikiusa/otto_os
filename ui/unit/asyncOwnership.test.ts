@@ -3,13 +3,16 @@ import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
 import * as sessionScope from '../src/lib/stores/sessionScope.ts';
 import * as sessionPatch from '../src/lib/stores/sessionPatch.ts';
+import * as sessionBuckets from '../src/lib/stores/sessionBuckets.ts';
 
 function workspace() {
   const requests: { path: string; result: ReturnType<typeof deferred<any[]>> }[] = [];
   const restored: string[] = [];
   const layout = { panes: [], focusedIndex: 0, bindKey() {}, restore: (id: string) => restored.push(id), retain() {} };
   const api = { get: (path: string) => {
-    if (path.includes('/scratch/')) return Promise.resolve([]);
+    // Scratch, the archived probe and fetch-by-id answer at once; the main
+    // (shown) list of the selected workspace is the deferred under test.
+    if (path.includes('/scratch/') || path.includes('archived=true') || path.startsWith('/sessions?ids=')) return Promise.resolve([]);
     const result = deferred<any[]>(); requests.push({ path, result }); return result.promise;
   } };
   const { ws } = loadSource(new URL('../src/lib/stores/workspace.svelte.ts', import.meta.url), {
@@ -18,7 +21,7 @@ function workspace() {
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
-    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch,
+    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
   });
   ws.refreshOtherSessions = async () => {};
   return { ws, requests, restored };
@@ -34,12 +37,17 @@ test('late workspace selection cannot publish sessions or restore the old layout
   assert.deepEqual(restored, ['B']);
 });
 
-test('older refresh cannot overwrite a newer refresh in the same workspace', async () => {
+test('concurrent refreshes in one workspace coalesce into one trailing load', async () => {
   const { ws, requests } = workspace();
   ws.currentId = 'A';
-  const older = ws.refreshSessions(); const newer = ws.refreshSessions();
-  requests[1].result.resolve([{ id: 'new' }]); await newer;
-  requests[0].result.resolve([{ id: 'old' }]); await older;
+  const first = ws.refreshSessions(); const second = ws.refreshSessions(); const third = ws.refreshSessions();
+  assert.equal(requests.length, 1, 'one request in flight, the rest queue behind it');
+  assert.equal(second, third, 'every caller during the flight shares the ONE trailing load');
+  assert.match(requests[0].path, /foreground=true/, 'the main list asks for shown sessions only');
+  requests[0].result.resolve([{ id: 'old' }]); await first;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 2, 'the trailing load starts after the first settles');
+  requests[1].result.resolve([{ id: 'new' }]); await second;
   assert.equal(ws.sessions[0].id, 'new');
 });
 

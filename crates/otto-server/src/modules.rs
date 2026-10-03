@@ -165,6 +165,14 @@ impl otto_sessions::SessionsCtx for ServerCtx {
         Box::pin(crate::resource_sessions::check(self, user, session))
     }
 
+    fn check_resources<'a>(
+        &'a self,
+        user: &'a otto_core::domain::User,
+        sessions: Vec<otto_core::domain::Session>,
+    ) -> BoxFuture<'a, Vec<otto_core::domain::Session>> {
+        Box::pin(crate::resource_sessions::check_many(self, user, sessions))
+    }
+
     fn resource_bound(&self, session: &otto_core::domain::Session) -> bool {
         crate::resource_sessions::binding(session).is_some()
     }

@@ -7,6 +7,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
+  import { onMount } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { now } from '../../lib/stores/now.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -77,6 +78,10 @@
   }
 
   // ── Per-agent derivations (sessions / activity / counts) ────────────────────
+  // Swarm role sessions are background (`meta.source = 'swarm'`): the main
+  // session list carries them only while a swarm view asks for them.
+  onMount(() => ws.includeSources('swarm'));
+
   function agentSessions(agentId: string) {
     const sid = swarm.detail?.id;
     return ws.sessions.filter((s) => {

@@ -26,7 +26,7 @@ import { router } from '../../lib/router.svelte';
 import { auth } from '../../lib/stores/auth.svelte';
 import { assistant } from '../../lib/stores/assistant.svelte';
 import { notifications } from '../../lib/stores/notifications.svelte';
-import { isForeground, ws } from '../../lib/stores/workspace.svelte';
+import { ws } from '../../lib/stores/workspace.svelte';
 import { livePoll, type Poller } from './boxes/poll';
 
 /** One glance row. `open` runs on click; `live` pulses its dot. */
@@ -103,7 +103,7 @@ class TodayStore {
   private seq = 0;
 
   /** Sessions blocked on the operator (foreground only, like the sidebar). */
-  waiting = $derived(ws.sessions.filter((s) => !s.archived && ws.needsYou[s.id] === true && isForeground(s)));
+  waiting = $derived(ws.foregroundActive.filter((s) => ws.needsYou[s.id] === true));
 
   needs: TodayRow[] = $derived.by(() => {
     const rows: TodayRow[] = [];
@@ -180,8 +180,8 @@ class TodayStore {
         at: t.updated_at,
         open: () => openAssistant(t),
       }));
-    const rows: TodayRow[] = ws.sessions
-      .filter((s) => !s.archived && ws.statusMap[s.id] === 'working' && isForeground(s))
+    const rows: TodayRow[] = ws.foregroundActive
+      .filter((s) => ws.statusMap[s.id] === 'working')
       .map((s) => ({
         id: `session:${s.id}`,
         title: s.title,

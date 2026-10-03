@@ -52,7 +52,7 @@
   const canAlwaysAllow = (a: McpApproval): boolean =>
     a.kind === 'tool_call' && !a.server_id && !!a.tool?.startsWith('otto.') && canDecide(a);
   const sessionTitle = (id: string): string | null =>
-    ws.sessions.find((s) => s.id === id)?.title ?? null;
+    ws.getSession(id)?.title ?? null;
   const requesterLabel = (a: McpApproval): string =>
     a.requested_by === auth.me?.id ? 'you' : (a.requested_by ?? 'unknown');
 

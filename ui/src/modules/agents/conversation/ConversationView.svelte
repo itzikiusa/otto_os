@@ -81,7 +81,7 @@
     ctx.provider = conv.transcript?.provider ?? 'claude';
     // Where the agent actually ran (the transcript's own cwd) resolves its
     // relative file references; the session's launch dir is the fallback.
-    ctx.cwd = conv.transcript?.cwd || (sessionId ? ws.sessions.find((s) => s.id === sessionId)?.cwd : null) || null;
+    ctx.cwd = conv.transcript?.cwd || (sessionId ? ws.getSession(sessionId)?.cwd : null) || null;
     ctx.reusePrompt = canCompose && sessionId ? reusePrompt : null;
     // "Queued: …" chips survive only until a later dequeue/remove of that text.
     // Compare before assigning: a fresh array on every delta would re-run
@@ -175,7 +175,7 @@
     else manualStart = next;
   }
   const status = $derived<SessionStatus>(
-    sessionId ? (ws.statusMap[sessionId] ?? ws.sessions.find((s) => s.id === sessionId)?.status ?? 'idle') : 'exited',
+    sessionId ? (ws.statusMap[sessionId] ?? ws.getSession(sessionId)?.status ?? 'idle') : 'exited',
   );
   const live = $derived(!!sessionId && (status === 'working' || status === 'running'));
   const canCompose = $derived(!!sessionId && !readonly && ws.myRole !== 'viewer');
@@ -296,7 +296,7 @@
   const suspended = $derived(
     !!sessionId &&
       status === 'reconnectable' &&
-      ws.sessions.find((s) => s.id === sessionId)?.provider_session_id != null,
+      ws.getSession(sessionId)?.provider_session_id != null,
   );
 
   // ---- live state at the foot of the chat -------------------------------------
@@ -875,7 +875,7 @@
       {status}
       {agentName}
       onresume={() => void resume()}
-      cwd={ws.sessions.find((s) => s.id === sessionId)?.cwd ?? ''}
+      cwd={ws.getSession(sessionId)?.cwd ?? ''}
       branch={conv.liveBranch}
       model={t?.model ?? null}
       termStatus={conv.liveStatus}

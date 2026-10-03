@@ -72,7 +72,7 @@
   // and pane header use — a resumable session is "Suspended", not "ended".
   const st = $derived(
     sessionState(
-      ws.sessions.find((s) => s.id === sessionId),
+      ws.getSession(sessionId),
       status,
       ws.needsYou[sessionId] === true,
       { stale: events.state !== 'connected' },

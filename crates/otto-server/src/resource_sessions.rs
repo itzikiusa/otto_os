@@ -90,9 +90,73 @@ pub(crate) async fn check_with_pool(
     let current = otto_state::UsersRepo::new(pool.clone())
         .get(&user.id)
         .await?;
+    check_bound(pool, &current, &resource, op).await
+}
+
+/// Batched [`check`] for a session LIST: keeps the admitted rows in order.
+/// The caller is loaded at most once (only when some row is resource-bound)
+/// and each distinct (resource, op) is decided once — the list used to reload
+/// the user and the page grants for every k8s/aws/db row (F9).
+pub async fn check_many(ctx: &ServerCtx, user: &User, sessions: Vec<Session>) -> Vec<Session> {
+    let pool = &ctx.pool;
+    let mut current: Option<Option<User>> = None;
+    let mut memo: std::collections::HashMap<
+        (ResourceKind, String, Option<String>, &'static str),
+        bool,
+    > = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        let ok = match binding(&session) {
+            None => check_with_pool(pool, user, &session).await.is_ok(),
+            Some((resource, op)) => {
+                if current.is_none() {
+                    current = Some(
+                        otto_state::UsersRepo::new(pool.clone())
+                            .get(&user.id)
+                            .await
+                            .ok(),
+                    );
+                }
+                match current.as_ref().and_then(|c| c.as_ref()) {
+                    None => false,
+                    Some(cur) => {
+                        let key = (
+                            resource.kind,
+                            resource.id.clone(),
+                            resource.child.clone(),
+                            op,
+                        );
+                        match memo.get(&key) {
+                            Some(&v) => v,
+                            None => {
+                                let v = check_bound(pool, cur, &resource, op).await.is_ok();
+                                memo.insert(key, v);
+                                v
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        if ok {
+            out.push(session);
+        }
+    }
+    out
+}
+
+/// The resource-bound half of [`check_with_pool`], for an already-loaded user.
+async fn check_bound(
+    pool: &otto_state::DbPool,
+    current: &User,
+    resource: &ResourceRef,
+    op: &'static str,
+) -> Result<()> {
     if current.disabled {
         return Err(Error::Forbidden("account disabled".into()));
     }
+    let current = current.clone();
+    let resource = resource.clone();
     check_page(pool, &current, &resource, op).await?;
     if op == "db_query" {
         otto_state::GrantsRepo::new(pool.clone())

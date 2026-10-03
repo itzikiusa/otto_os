@@ -61,7 +61,7 @@
   function callTitle(r: McpCallLogRow): string {
     const sid = r.caller_session_id;
     if (!sid) return r.tool;
-    const title = ws.sessions.find((s) => s.id === sid)?.title;
+    const title = ws.getSession(sid)?.title;
     return `${r.tool} — from session ${title ?? `${sid.slice(0, 8)}…`}`;
   }
 </script>
