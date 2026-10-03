@@ -38,6 +38,12 @@ const QUERY_SETTINGS: &str =
 /// ([`Self::ensure_running`], ~0.5 s on a small dir) on a fresh port. Callers
 /// never see the difference: the usage writer and the metrics batch keep
 /// buffering in memory while the request that woke the server waits.
+///
+/// Only FOREGROUND requests (queries, usage-event inserts, DDL) count as
+/// activity. Background writes ([`Self::insert_ndjson_background`] — the
+/// system-metrics batch) neither wake a parked server nor reset the idle
+/// clock, or a live session's 5-minute metrics flush would keep the server
+/// up forever (perf3 N1/G2).
 pub struct ClickHouse {
     bin: PathBuf,
     data_dir: PathBuf,
@@ -53,6 +59,9 @@ pub struct ClickHouse {
     /// per-summary / per-report query budget guards (R6) read these.
     queries: std::sync::atomic::AtomicU64,
     rows_read: std::sync::atomic::AtomicU64,
+    /// Signalled after every successful lazy restart, so the engine can
+    /// write the background rows it held back while the server was parked.
+    wake_hook: std::sync::OnceLock<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 /// Process state behind [`ClickHouse::proc`]. `inflight` lives here (not in
@@ -68,15 +77,20 @@ struct Proc {
     last_use: std::time::Instant,
 }
 
-/// RAII marker for one in-flight request: blocks parking while it runs and
-/// stamps the idle clock when it ends.
-struct Busy<'a>(&'a ClickHouse);
+/// RAII marker for one in-flight request: blocks parking while it runs and,
+/// for a foreground request (`stamp`), resets the idle clock when it ends.
+struct Busy<'a> {
+    ch: &'a ClickHouse,
+    stamp: bool,
+}
 
 impl Drop for Busy<'_> {
     fn drop(&mut self) {
-        if let Ok(mut p) = self.0.proc.lock() {
+        if let Ok(mut p) = self.ch.proc.lock() {
             p.inflight = p.inflight.saturating_sub(1);
-            p.last_use = std::time::Instant::now();
+            if self.stamp {
+                p.last_use = std::time::Instant::now();
+            }
         }
     }
 }
@@ -165,7 +179,14 @@ impl ClickHouse {
             restarts: Default::default(),
             queries: Default::default(),
             rows_read: Default::default(),
+            wake_hook: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Register the `Notify` signalled after each lazy restart (first call
+    /// wins). A permit is kept when nobody waits, so a wake is never missed.
+    pub fn set_wake_hook(&self, hook: std::sync::Arc<tokio::sync::Notify>) {
+        let _ = self.wake_hook.set(hook);
     }
 
     /// Whether the spawned `clickhouse server` child is still running. `false`
@@ -224,7 +245,10 @@ impl ClickHouse {
             p.inflight += 1;
             p.parked
         };
-        let busy = Busy(self);
+        let busy = Busy {
+            ch: self,
+            stamp: true,
+        };
         if parked {
             self.unpark().await?;
         }
@@ -254,6 +278,9 @@ impl ClickHouse {
                     "usage: clickhouse woke from idle-stop in {} ms",
                     started.elapsed().as_millis()
                 );
+                if let Some(hook) = self.wake_hook.get() {
+                    hook.notify_one();
+                }
                 Ok(())
             }
             Err(e) => {
@@ -415,7 +442,45 @@ impl ClickHouse {
         if ndjson.trim().is_empty() {
             return Ok(());
         }
-        let (_busy, base_url) = self.begin().await?;
+        let (busy, base_url) = self.begin().await?;
+        self.send_insert(busy, &base_url, table, ndjson).await
+    }
+
+    /// [`Self::insert_ndjson`] for BACKGROUND rows (system metrics): never
+    /// wakes a parked server and never resets the idle clock. Returns
+    /// `Ok(false)` without sending when the server is parked — the caller
+    /// keeps the rows and writes them after the next foreground wake. The
+    /// parked check and the in-flight mark share the lock `maybe_park`
+    /// decides under, so the server cannot stop mid-insert.
+    pub async fn insert_ndjson_background(&self, table: &str, ndjson: &str) -> Result<bool> {
+        if ndjson.trim().is_empty() {
+            return Ok(true);
+        }
+        let base_url = {
+            let mut p = self.proc.lock().unwrap();
+            if p.parked {
+                return Ok(false);
+            }
+            p.inflight += 1;
+            p.base_url.clone()
+        };
+        let busy = Busy {
+            ch: self,
+            stamp: false,
+        };
+        self.send_insert(busy, &base_url, table, ndjson)
+            .await
+            .map(|()| true)
+    }
+
+    /// POST one `JSONEachRow` insert; `_busy` is held until the reply is in.
+    async fn send_insert(
+        &self,
+        _busy: Busy<'_>,
+        base_url: &str,
+        table: &str,
+        ndjson: &str,
+    ) -> Result<()> {
         let q = urlencode(&format!("INSERT INTO {table} FORMAT JSONEachRow"));
         let url =
             format!("{base_url}/?query={q}&date_time_input_format=best_effort{INSERT_SETTINGS}");

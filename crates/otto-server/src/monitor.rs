@@ -912,7 +912,18 @@ async fn check_budgets(ctx: &ServerCtx, dedup: &mut otto_usage::BudgetDedup) {
         dedup.clear();
         return;
     }
+    // Spend only moves when usage is written (or the window rolls / config
+    // changes): skip the scan otherwise, so a metrics tick never wakes an
+    // idle-stopped ClickHouse (perf3 N1). Stamped BEFORE the scan.
+    let stamp = otto_usage::BudgetCheckStamp::now(
+        ctx.usage.usage_generation(),
+        serde_json::to_string(&cfg).unwrap_or_default(),
+    );
+    if dedup.unchanged_since_last_check(&stamp) {
+        return;
+    }
     let status = crate::routes::usage::budget_status_pub(ctx, cfg).await;
+    dedup.mark_checked(stamp);
     for row in &status.rows {
         let signal = dedup.apply(&row.scope, &row.key, row.exceeded);
         let direction = match signal {

@@ -34,11 +34,20 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(15);
 /// than the writer's flush interval, so it never hides a flush for long.
 const SESSION_TOTALS_TTL: Duration = Duration::from_secs(5);
 
-type SessionTotalsMemo = ((u32, bool), std::time::Instant, Arc<Vec<SessionTotals>>);
+/// `((days, otto_only), usage generation, computed at, rows)`.
+type SessionTotalsMemo = (
+    (u32, bool),
+    u64,
+    std::time::Instant,
+    Arc<Vec<SessionTotals>>,
+);
 
 /// `system_metrics` samples are buffered in memory and inserted together this
 /// often (R1a): one part per 5 min instead of one per sample (+ its merges).
 /// `metrics()` serves the unflushed tail from memory, so sparklines stay live.
+/// The insert is BACKGROUND work: it never wakes an idle-stopped server nor
+/// resets its idle clock — while parked the samples stay buffered (bounded by
+/// METRICS_BUF_MAX) and go in right after the next foreground wake.
 const METRICS_FLUSH_EVERY: Duration = Duration::from_secs(300);
 /// Cap on buffered samples across failed flushes (oldest dropped first).
 const METRICS_BUF_MAX: usize = 2_000;
@@ -131,6 +140,14 @@ pub struct UsageEngine {
     idle_stop_secs: Arc<AtomicU64>,
     /// Wakes the idle-stop task when the window changes.
     idle_stop_changed: Arc<tokio::sync::Notify>,
+    /// Signalled by the ClickHouse handle after a lazy restart: the wake
+    /// flusher then writes the metrics held back while it was parked.
+    ch_woke: Arc<tokio::sync::Notify>,
+    /// Bumped after every successful usage-event insert. Spend only changes
+    /// when it moves, so budget checks with an unchanged generation can be
+    /// skipped (see [`Self::usage_generation`]) and the totals memo never
+    /// serves a rollup computed before a flush.
+    usage_gen: Arc<AtomicU64>,
 }
 
 fn unix_now() -> u64 {
@@ -140,10 +157,12 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Wake the heal watcher so it sees the engine is gone and exits.
+/// Wake the heal watcher and wake flusher so they see the engine is gone and exit.
 impl Drop for UsageEngine {
     fn drop(&mut self) {
         self.heal.notify.notify_one();
+        // Ends the wake flusher too (its upgrade fails).
+        self.ch_woke.notify_one();
     }
 }
 
@@ -198,6 +217,8 @@ impl UsageEngine {
             last_record: AtomicU64::new(0),
             idle_stop_secs: Arc::new(AtomicU64::new(IDLE_STOP_AFTER.as_secs())),
             idle_stop_changed: Arc::new(tokio::sync::Notify::new()),
+            ch_woke: Arc::new(tokio::sync::Notify::new()),
+            usage_gen: Arc::new(AtomicU64::new(0)),
         });
         let bg = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -219,6 +240,22 @@ impl UsageEngine {
                     );
                     let cfg = engine.config();
                     engine.reinit(cfg).await;
+                }
+            }
+        });
+        // Wake flusher: metrics are background writes that never wake a parked
+        // server, so they wait for a foreground request to wake it and go in
+        // right after. No timer — sleeps until a wake (or exits with the engine).
+        let weak: Weak<Self> = Arc::downgrade(&engine);
+        let woke = Arc::clone(&engine.ch_woke);
+        tokio::spawn(async move {
+            loop {
+                woke.notified().await;
+                let Some(engine) = weak.upgrade() else { break };
+                match engine.flush_metrics().await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::debug!("usage: wrote {n} metrics held while idle-stopped"),
+                    Err(e) => tracing::debug!("usage: post-wake metrics flush failed: {e}"),
                 }
             }
         });
@@ -278,8 +315,14 @@ impl UsageEngine {
                                         "usage: old_parts_lifetime setting failed (non-fatal): {e}"
                                     );
                                 }
+                                ch.set_wake_hook(Arc::clone(&self.ch_woke));
                                 let (tx, rx) = mpsc::unbounded_channel();
-                                spawn_writer(Arc::clone(&ch), rx, Arc::clone(&self.heal));
+                                spawn_writer(
+                                    Arc::clone(&ch),
+                                    rx,
+                                    Arc::clone(&self.heal),
+                                    Arc::clone(&self.usage_gen),
+                                );
                                 spawn_idle_stopper(
                                     Arc::downgrade(&ch),
                                     Arc::clone(&self.idle_stop_secs),
@@ -341,8 +384,9 @@ impl UsageEngine {
     /// daemon's graceful-shutdown path so the dir lock is released and the next
     /// daemon start doesn't have to reclaim an orphan.
     pub async fn shutdown(&self) {
-        // Buffered metric samples go in before the server stops.
-        if let Err(e) = self.flush_metrics().await {
+        // Buffered metric samples go in before the server stops — even when
+        // it is idle-stopped (the one place a metrics write may wake it).
+        if let Err(e) = self.flush_metrics_with(true).await {
             tracing::debug!("usage: final metrics flush failed: {e}");
         }
         let ch = {
@@ -400,7 +444,19 @@ impl UsageEngine {
     /// when disabled.
     pub async fn insert_events(&self, events: &[UsageEvent]) -> Result<()> {
         let Some(ch) = self.ch() else { return Ok(()) };
-        ch.insert_ndjson("usage_events", &ndjson(events)).await
+        ch.insert_ndjson("usage_events", &ndjson(events)).await?;
+        if !events.is_empty() {
+            self.usage_gen.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Changes whenever usage events were written (writer flush or
+    /// [`Self::insert_events`]). Spend cannot move while it stays the same,
+    /// so the budget sampler skips its scan (perf3 N1) — which would
+    /// otherwise wake an idle-stopped server every metrics tick.
+    pub fn usage_generation(&self) -> u64 {
+        self.usage_gen.load(Ordering::SeqCst)
     }
 
     /// Delete the transcript-tailer's claude `completion` rows on or after
@@ -439,7 +495,10 @@ impl UsageEngine {
              AND event_date >= '{min_event_date}' \
              SETTINGS mutations_sync = 2"
         ))
-        .await
+        .await?;
+        // Spend moved: budgets and the totals memo must not reuse old sums.
+        self.usage_gen.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Record one metrics sample. Buffered in memory and inserted with the
@@ -465,10 +524,23 @@ impl UsageEngine {
         Ok(())
     }
 
-    /// Insert every buffered metrics sample as ONE batch. A failed insert keeps
-    /// them (bounded) for the next attempt. Returns the rows written.
+    /// Insert every buffered metrics sample as ONE batch. A BACKGROUND write:
+    /// while the server is idle-stopped it sends nothing and keeps the rows
+    /// (returns `Ok(0)`) — the wake flusher writes them after the next
+    /// foreground request restarts the server — and it never resets the idle
+    /// clock. A failed insert keeps them (bounded) for the next attempt.
+    /// Returns the rows written.
     pub async fn flush_metrics(&self) -> Result<usize> {
+        self.flush_metrics_with(false).await
+    }
+
+    /// [`Self::flush_metrics`]; `wake` also restarts a parked server first
+    /// (shutdown only, so nothing buffered is lost).
+    async fn flush_metrics_with(&self, wake: bool) -> Result<usize> {
         let Some(ch) = self.ch() else { return Ok(0) };
+        if !wake && ch.is_parked() {
+            return Ok(0);
+        }
         let rows = {
             let mut b = self.metrics_buf.lock().expect("metrics buf lock");
             b.since = None;
@@ -495,23 +567,42 @@ impl UsageEngine {
             payload.push_str(&row.to_string());
             payload.push('\n');
         }
-        match ch.insert_ndjson("system_metrics", &payload).await {
-            Ok(()) => Ok(rows.len()),
+        let res = if wake {
+            ch.insert_ndjson("system_metrics", &payload)
+                .await
+                .map(|()| true)
+        } else {
+            ch.insert_ndjson_background("system_metrics", &payload)
+                .await
+        };
+        match res {
+            Ok(true) => Ok(rows.len()),
+            // Parked between the check and the insert: hold them for the wake.
+            Ok(false) => {
+                self.requeue_metrics(rows);
+                Ok(0)
+            }
             Err(e) => {
                 if !ch.server_alive() {
                     self.heal.store(true, Ordering::SeqCst);
                 }
-                let mut b = self.metrics_buf.lock().expect("metrics buf lock");
-                let newer = std::mem::replace(&mut b.rows, rows);
-                b.rows.extend(newer);
-                if b.rows.len() > METRICS_BUF_MAX {
-                    let n = b.rows.len() - METRICS_BUF_MAX;
-                    b.rows.drain(..n);
-                }
-                b.since.get_or_insert_with(std::time::Instant::now);
+                self.requeue_metrics(rows);
                 Err(e)
             }
         }
+    }
+
+    /// Put unwritten samples back IN FRONT of any that arrived meanwhile
+    /// (oldest dropped past METRICS_BUF_MAX).
+    fn requeue_metrics(&self, rows: Vec<(chrono::DateTime<chrono::Utc>, Metric)>) {
+        let mut b = self.metrics_buf.lock().expect("metrics buf lock");
+        let newer = std::mem::replace(&mut b.rows, rows);
+        b.rows.extend(newer);
+        if b.rows.len() > METRICS_BUF_MAX {
+            let n = b.rows.len() - METRICS_BUF_MAX;
+            b.rows.drain(..n);
+        }
+        b.since.get_or_insert_with(std::time::Instant::now);
     }
 
     /// Whether the metrics sampler (and its `UsageMetricsTick`, which also
@@ -744,14 +835,18 @@ impl UsageEngine {
         otto_only: bool,
     ) -> Result<Arc<Vec<SessionTotals>>> {
         let mut memo = self.totals_cache.lock().await;
-        if let Some((key, at, rows)) = &*memo {
-            if *key == (days, otto_only) && at.elapsed() < SESSION_TOTALS_TTL {
+        // Read BEFORE the scan: a flush landing mid-scan leaves the memo on
+        // the older generation, so the next caller re-scans.
+        let gen = self.usage_generation();
+        if let Some((key, at_gen, at, rows)) = &*memo {
+            if *key == (days, otto_only) && *at_gen == gen && at.elapsed() < SESSION_TOTALS_TTL {
                 return Ok(Arc::clone(rows));
             }
         }
         let rows = Arc::new(self.session_totals_uncached(days, otto_only).await?);
         *memo = Some((
             (days, otto_only),
+            gen,
             std::time::Instant::now(),
             Arc::clone(&rows),
         ));
@@ -1576,6 +1671,7 @@ fn spawn_writer(
     ch: Arc<ClickHouse>,
     mut rx: mpsc::UnboundedReceiver<UsageEvent>,
     heal: Arc<HealSignal>,
+    usage_gen: Arc<AtomicU64>,
 ) {
     tokio::spawn(async move {
         let mut buf: Vec<UsageEvent> = Vec::new();
@@ -1594,15 +1690,15 @@ fn spawn_writer(
                     Some(ev) => {
                         buf.push(ev);
                         if buf.len() >= FLUSH_BATCH {
-                            flush(&ch, &mut buf, &heal).await;
+                            flush(&ch, &mut buf, &heal, &usage_gen).await;
                         }
                     }
                     None => {
-                        flush(&ch, &mut buf, &heal).await;
+                        flush(&ch, &mut buf, &heal, &usage_gen).await;
                         break;
                     }
                 },
-                _ = tick => flush(&ch, &mut buf, &heal).await,
+                _ = tick => flush(&ch, &mut buf, &heal, &usage_gen).await,
             }
             deadline = match (buf.is_empty(), deadline) {
                 (true, _) => None,
@@ -1614,7 +1710,12 @@ fn spawn_writer(
     });
 }
 
-async fn flush(ch: &ClickHouse, buf: &mut Vec<UsageEvent>, heal: &HealSignal) {
+async fn flush(
+    ch: &ClickHouse,
+    buf: &mut Vec<UsageEvent>,
+    heal: &HealSignal,
+    usage_gen: &AtomicU64,
+) {
     if buf.is_empty() {
         return;
     }
@@ -1634,6 +1735,7 @@ async fn flush(ch: &ClickHouse, buf: &mut Vec<UsageEvent>, heal: &HealSignal) {
         return;
     }
     buf.clear();
+    usage_gen.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Serialize events to newline-delimited JSON for `JSONEachRow` insertion.

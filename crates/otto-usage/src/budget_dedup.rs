@@ -31,6 +31,42 @@ pub enum BudgetSignal {
 #[derive(Default)]
 pub struct BudgetDedup {
     alerted: HashSet<String>,
+    /// What the last completed check saw (see [`BudgetCheckStamp`]).
+    checked: Option<BudgetCheckStamp>,
+}
+
+/// Everything a budget check's outcome depends on besides the stored spend:
+/// the usage generation (bumped per usage-event write,
+/// [`crate::UsageEngine::usage_generation`]), the budget config, and the
+/// calendar day (the `today() - N` window rolls daily, so a capped key can
+/// recover with no new usage). An unchanged stamp means the previous result
+/// still holds, so the sampler skips the spend scan — which would otherwise
+/// wake an idle-stopped ClickHouse on every metrics tick (perf3 N1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetCheckStamp {
+    usage_gen: u64,
+    config: String,
+    /// Local and UTC dates — the window rolls on the server's `today()`.
+    days: (chrono::NaiveDate, chrono::NaiveDate),
+}
+
+impl BudgetCheckStamp {
+    /// Stamp for a check now. `config` is any stable rendering of the budget
+    /// config (its JSON), so an edited cap or window re-checks immediately.
+    pub fn now(usage_gen: u64, config: String) -> Self {
+        Self::at(usage_gen, config, chrono::Utc::now())
+    }
+
+    fn at(usage_gen: u64, config: String, now: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            usage_gen,
+            config,
+            days: (
+                now.with_timezone(&chrono::Local).date_naive(),
+                now.date_naive(),
+            ),
+        }
+    }
 }
 
 impl BudgetDedup {
@@ -68,12 +104,48 @@ impl BudgetDedup {
     /// Clear all alerts (called when enforcement is turned off mid-session).
     pub fn clear(&mut self) {
         self.alerted.clear();
+        self.checked = None;
+    }
+
+    /// True when a check with `stamp` would only repeat the last one: no
+    /// usage written, same config, same day. Take the stamp BEFORE the
+    /// check, so usage landing mid-check re-checks on the next tick.
+    pub fn unchanged_since_last_check(&self, stamp: &BudgetCheckStamp) -> bool {
+        self.checked.as_ref() == Some(stamp)
+    }
+
+    /// Record that a check with `stamp` completed.
+    pub fn mark_checked(&mut self, stamp: BudgetCheckStamp) {
+        self.checked = Some(stamp);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// perf3 N1: the sampler re-checks only when usage was written, the
+    /// config changed, or the day rolled — otherwise every metrics tick ran
+    /// a spend scan that woke an idle-stopped ClickHouse.
+    #[test]
+    fn budget_check_skips_until_usage_config_or_day_changes() {
+        let t0 = chrono::Utc::now();
+        let mut dd = BudgetDedup::new();
+        let first = BudgetCheckStamp::at(3, "{cap:10}".into(), t0);
+        assert!(!dd.unchanged_since_last_check(&first), "first check runs");
+        dd.mark_checked(first.clone());
+        let tick = BudgetCheckStamp::at(3, "{cap:10}".into(), t0 + chrono::Duration::seconds(60));
+        assert!(dd.unchanged_since_last_check(&tick), "idle tick skips");
+        assert!(!dd.unchanged_since_last_check(&BudgetCheckStamp::at(4, "{cap:10}".into(), t0)));
+        assert!(!dd.unchanged_since_last_check(&BudgetCheckStamp::at(3, "{cap:5}".into(), t0)));
+        let tomorrow = BudgetCheckStamp::at(3, "{cap:10}".into(), t0 + chrono::Duration::days(1));
+        assert!(!dd.unchanged_since_last_check(&tomorrow), "window rolled");
+        dd.clear();
+        assert!(
+            !dd.unchanged_since_last_check(&first),
+            "re-enable re-checks"
+        );
+    }
 
     #[test]
     fn first_crossing_emits_exceeded_once() {

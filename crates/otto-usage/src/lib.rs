@@ -35,7 +35,7 @@ mod types;
 /// view filter (see `UsageEngine::summary(_, otto_only)`).
 pub const EXTERNAL_WORKSPACE: &str = "external";
 
-pub use budget_dedup::{BudgetDedup, BudgetSignal};
+pub use budget_dedup::{BudgetCheckStamp, BudgetDedup, BudgetSignal};
 pub use clickhouse::ClickHouse;
 pub use engine::{ReportOptions, UsageEngine, UsageScope};
 pub use metrics::{Metric, MetricsSampler};

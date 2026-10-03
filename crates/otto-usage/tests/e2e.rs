@@ -727,6 +727,122 @@ async fn idle_stop_parks_and_wakes_on_demand() {
     engine.shutdown().await;
 }
 
+/// perf3 N1/G2: background metrics writes must not keep the server up. With
+/// samples stored + flushed every 300 ms (a live session's cadence, sped up)
+/// and no real query, the server still idle-stops; samples taken while it is
+/// parked stay buffered without waking it, and the next real request wakes it
+/// and writes them — every sample lands exactly once.
+#[tokio::test]
+async fn idle_stop_fires_under_a_metrics_cadence_and_keeps_every_sample() {
+    if ClickHouse::locate(None).is_none() {
+        eprintln!("SKIP: no `clickhouse` binary found on this machine");
+        return;
+    }
+    let _serial = serial().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let engine = UsageEngine::start(test_config(), tmp.path().to_path_buf()).await;
+    assert!(engine.wait_ready(Duration::from_secs(30)).await);
+    let gen0 = engine.usage_generation();
+    engine
+        .insert_events(&[event(
+            "claude",
+            "s1",
+            "claude-opus-4",
+            "prompt",
+            10,
+            5,
+            0.01,
+        )])
+        .await
+        .expect("insert");
+    assert_eq!(
+        engine.usage_generation(),
+        gen0 + 1,
+        "usage write bumps the generation"
+    );
+    let ch = engine.clickhouse().expect("clickhouse handle");
+
+    let mut stored: u32 = 0;
+    let store = |n: u32| {
+        let engine = std::sync::Arc::clone(&engine);
+        async move {
+            let m = otto_usage::Metric {
+                mem_total_mb: 1.0,
+                active_sessions: n,
+                ..Default::default()
+            };
+            engine.store_metric(&m).await.expect("store metric");
+            engine.flush_metrics().await.expect("background flush")
+        }
+    };
+
+    engine.set_idle_stop(Some(Duration::from_secs(2)));
+    let mut written = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !ch.is_parked() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "metrics writes kept clickhouse awake ({stored} samples, {written} written)"
+        );
+        written += store(stored).await;
+        stored += 1;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(written > 0, "samples were written while the server ran");
+
+    // Parked: more samples buffer without waking it.
+    for _ in 0..5 {
+        assert_eq!(store(stored).await, 0, "nothing written while parked");
+        stored += 1;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(ch.is_parked(), "a metrics write woke the server");
+    assert_eq!(ch.park_stats(), (1, 0));
+    engine.set_idle_stop(None);
+
+    // A real request wakes it; the held samples follow right after.
+    let s = engine.summary(30, false).await.expect("summary after wake");
+    assert_eq!(s.total_events, 1);
+    assert!(!ch.is_parked());
+    assert_eq!(ch.park_stats(), (1, 1));
+    assert_eq!(
+        engine.usage_generation(),
+        gen0 + 1,
+        "a read is not a usage write"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let n = engine
+            .query_rows("SELECT count() AS n FROM system_metrics")
+            .await
+            .expect("count")[0]["n"]
+            .as_u64()
+            .unwrap();
+        if n == u64::from(stored) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "held samples never written after wake ({n}/{stored})"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut seen: Vec<u32> = engine
+        .metrics(5)
+        .await
+        .expect("metrics after wake")
+        .iter()
+        .map(|p| p.active_sessions)
+        .collect();
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        (0..stored).collect::<Vec<_>>(),
+        "every sample exactly once"
+    );
+    engine.shutdown().await;
+}
+
 /// `OTTO_PERF=1` budget (R6): the embedded server's idle thread count with
 /// Otto's config. Measured 58 on macOS with the bundled build (70 before the
 /// R1c pool cut); budget 62, override with `OTTO_PERF_CH_THREADS`. Prints
