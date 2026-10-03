@@ -198,3 +198,73 @@ test('import creates every item in order and reloads the lists once', async () =
   assert.equal(gets.filter((g) => g === '/requests').length, 1);
   assert.equal(gets.filter((g) => g === '/collections').length, 1);
 });
+
+// ── Per-tab response slots ─────────────────────────────────────────────────
+
+const okResp = (status: number, body = '') => ({status,status_text:'',headers:[],body,body_base64:'',truncated:false,too_large:false,duration_ms:1,size_bytes:body.length,content_type:null,trace:[]});
+
+test('switching tabs keeps each tab its own response', async () => {
+  let n = 0;
+  const {v} = setup({post: async () => okResp(200 + n++)});
+  v.draft = {...v.draft, url: 'https://a.test'};
+  await v.execute();
+  const first = v.draft.tabId;
+  assert.equal(v.lastResponse.status, 200);
+  v.openTab({...v.draft, url: 'https://b.test'});
+  assert.equal(v.lastResponse, null, 'a new tab starts empty');
+  await v.execute();
+  assert.equal(v.lastResponse.status, 201);
+  v.switchTab(0);
+  assert.equal(v.draft.tabId, first);
+  assert.equal(v.lastResponse.status, 200, 'switching back shows tab A’s response again');
+  assert.equal(v.tabStatus(first), 'ok');
+});
+
+test('two tabs send concurrently; a background tab’s response is kept, never cancelled', async () => {
+  const pending: Record<string, (r: unknown) => void> = {};
+  const {v} = setup({post: (_u: string, body: any) => new Promise(r => { pending[body.url] = r; })});
+  v.draft = {...v.draft, url: 'https://a.test'};
+  const a = v.execute();
+  const tabA = v.draft.tabId;
+  v.openTab({...v.draft, url: 'https://b.test'});
+  const b = v.execute();
+  assert.equal(v.tabStatus(tabA), 'sending', 'sending in B did not cancel A');
+  assert.equal(v.sending, true);
+  pending['https://a.test'](okResp(404));   // A lands while B is in front
+  await a;
+  assert.equal(v.responses.get(tabA).resp.status, 404, 'background response kept');
+  assert.equal(v.tabStatus(tabA), 'fail');
+  pending['https://b.test'](okResp(200));
+  await b;
+  assert.equal(v.lastResponse.status, 200);
+  v.switchTab(0);
+  assert.equal(v.lastResponse.status, 404);
+});
+
+test('cancel only stops the active tab’s send', async () => {
+  const signals: AbortSignal[] = [];
+  const {v} = setup({post: (_u: string, _b: unknown, s: AbortSignal) => { signals.push(s); return new Promise(() => {}); }});
+  v.draft = {...v.draft, url: 'https://a.test'};
+  void v.execute();
+  const tabA = v.draft.tabId;
+  v.openTab({...v.draft, url: 'https://b.test'});
+  void v.execute();
+  await Promise.resolve();
+  v.cancelExecute();
+  assert.equal(v.sending, false);
+  assert.equal(v.tabStatus(tabA), 'sending');
+  assert.equal(signals[0].aborted, false);
+});
+
+test('opening a history entry shows its stored response, flagged as from history', () => {
+  const {v} = setup();
+  v.loadHistoryIntoDraft({id:'h1',method:'POST',url:'https://r.test/x',status:201,duration_ms:12,executed_at:'2026-10-01T10:00:00Z',
+    request:{method:'POST',url:'https://r.test/x',headers:[],query:[],auth:{type:'none'}},
+    response:{status:201,status_text:'Created',headers:[{key:'Content-Type',value:'application/json'}],body:'{"id":1}',truncated:true,body_id:'stale'}});
+  assert.equal(v.lastResponse.status, 201);
+  assert.equal(v.lastResponse.body, '{"id":1}');
+  assert.equal(v.lastResponse.body_id, null, 'the expired raw-body id is not reused');
+  assert.equal(v.lastResponse.content_type, 'application/json');
+  assert.equal(v.responseFromHistory.at, '2026-10-01T10:00:00Z');
+  assert.equal(v.responseFromHistory.truncated, true);
+});

@@ -68,6 +68,13 @@ Main area (full page):
   label (the saved name, else `METHOD /path`, else `New Request`) and a dot
   while it has unsaved changes. The Environments editor and an open automation
   appear as an extra tab; clicking a request tab returns to it.
+  **Each tab keeps its own response** (and error, test results and script
+  logs): switching tabs shows that tab's last response, a send in one tab never
+  cancels another's (Stop cancels only the tab in front), and a response that
+  arrives while its tab is in the background is kept. A spinner on the chip
+  marks a send in flight; afterwards a green/red dot shows how the last send
+  went. Responses live in memory only (up to 20 idle tabs, least-recently-used
+  first out) — they are not persisted with the tabs.
   Open tabs **persist across app restarts**: the full drafts (method, URL,
   headers, query, body, auth, scripts, settings) + the active index are saved
   per-workspace in the browser's localStorage (`otto_api_tabs_v1:<workspace>`,
@@ -314,7 +321,9 @@ operation `description` / Postman request description.
   callers. The picker lists your SSH connections (add bastions in the
   **Connections** section); auth reuses the system `ssh` client (ssh-agent /
   `~/.ssh/config` / the connection's identity file). The bastion tunnel is
-  opened on first use and cached/reused (idle-evicted after 10 min). Unlike the
+  opened on first use and cached/reused (idle-evicted after 10 min). If the
+  tunnel can't be used, the send **fails** (*Couldn't route through the SSH
+  tunnel …*) — it never falls back to going out directly. Unlike the
   other Settings, this choice **is persisted on the saved request**. The SSRF
   guard still applies — the target is a public, IP-restricted host, not a
   private one only reachable through the bastion.
@@ -450,7 +459,10 @@ recorded per-workspace.
   the list is virtualized.
 - **Click a row** to open its request snapshot in a tab — it is not re-sent
   (`loadHistoryIntoDraft`). The snapshot captures method/url/headers/query/
-  body_mode/body/auth as executed.
+  body_mode/body/auth as executed. The response pane shows the **stored
+  response** (status, headers, body, timing) under a *From history · <time> ·
+  Send to run it again* banner — history keeps the first 64 KB of a body, and
+  the banner says so when it was cut.
 - **⋯ → Retention…** opens a sheet (keep the newest N / delete after D days; 0 =
   no limit); the current policy is shown under the search. **⋯ → Clear
   history…** empties the workspace's history (`DELETE …/history`, Editor).
@@ -489,12 +501,20 @@ variables for later steps (request chaining).
 - **Check that** (assertions) — each is `kind` + `op` + `value` (+ a `path` for
   `json_path`), shown in words:
   - **kind**: *Status code* (`status`), *JSON value at* (`json_path`),
-    *Response time (ms)* (`duration_ms`)
+    *Response header* (`header`, `path` = the header name, case-insensitive),
+    *Response body text* (`body_text`), *Response time (ms)* (`duration_ms`)
   - **op**: *equals*, *does not equal*, *contains*, *is less than*, *is greater
-    than* (`eq`, `ne`, `contains`, `lt`, `gt`)
+    than*, *is at most*, *is at least*, *exists*, *does not exist*, *matches
+    regex* (`eq`, `ne`, `contains`, `lt`, `gt`, `lte`, `gte`, `exists`,
+    `not_exists`, `matches` — the regex is capped at 1000 characters)
+  - A **missing** target (absent JSON field or header, no response) fails
+    every op except *does not exist* — `ne` on a missing field no longer
+    passes silently.
   - With **no checks**, the step passes on any successful (2xx) response.
 - **Save for later steps** (extracts) — *Take `$.path` as `{{name}}`*: pull a
-  value from the response body into a `{{var}}` available to subsequent steps.
+  value from the response body (or `header:Name`, or `status`) into a `{{var}}`
+  available to subsequent steps. A value that isn't there **fails the step**
+  with a report line (*Save {{token}} from $.data.token: not found*).
   (Incomplete rows — missing path or name — are dropped on save.)
 - After **Run**, the page scrolls to the report; a *Last run passed / failed ·
   n/m* chip next to Run jumps back to it.
@@ -505,10 +525,15 @@ variables for later steps (request chaining).
 
 - Seeds variables from the explicitly selected environment (or the active environment at start).
 - Pins the saved request definitions and runs steps in order through the shared HTTP send path. **Stop at the first failed step** is optional; otherwise all steps run. Errors are retained in the report.
-- Evaluates assertions against status / duration / the JSON body, then applies
-  extractions into the chained map for later steps.
+- Refuses to send a step whose URL, enabled query/headers, body or auth still
+  contains a `{{var}}` nothing defines — the step fails with *Not sent: no
+  value for {{token}}* instead of sending the literal placeholder.
+- Evaluates assertions against status / duration / headers / the body, then
+  applies extractions into the chained map for later steps.
 - Returns a report: an overall pass/fail banner (`passed = every step ok`),
-  plus per-step status, duration, error, and per-assertion `✓/✕`.
+  plus per-step status, duration, error, and per-assertion `✓/✕`. Each line
+  carries the actual value (*Status code is less than 400: got 500*, *$.data.id
+  equals 7: field missing*).
 
 Extracted variables are local to the run; saved environment values are not modified.
 

@@ -230,6 +230,14 @@ Double-clicking a **remote** branch (`origin/x`, `upstream/x`) switches to the
 local `x` when it exists; otherwise it creates `x` at that remote ref with
 tracking (any remote, not just `origin`).
 
+The graph reads `log --all --date-order`, so a parent never appears before all
+of its children even with clock skew or rewritten committer dates (which used to
+open phantom lanes). To keep that walk cheap on big histories Otto passes
+`-c fetch.writeCommitGraph=true` on its fetch/pull and, after the first fetch of a
+repo that has no commit-graph, writes one in the background
+(`commit-graph write --reachable --changed-paths`, which also speeds up file
+history and blame). Set `OTTO_GIT_COMMIT_GRAPH=0` on the daemon to opt out.
+
 **Linked git worktrees** are first-class in Graph:
 
 - Branches checked out in another worktree (not this tab's path) show a
@@ -262,9 +270,13 @@ The ⋯ menu on any diff's file header opens:
 - **History** — that file's commits (`log --follow --all -- <path>`), walking
   **through renames**; clicking a commit selects it in the graph.
 - **Blame** — `git blame --porcelain <rev> -- <path>`, grouped into runs: one
-  row per consecutive block of lines from the same commit, showing
-  `author · short sha · date` and the commit's subject. Clicking a row selects
-  that commit in the graph.
+  run per consecutive block of lines from the same commit, rendered next to
+  **the code itself** (one row per source line, syntax-highlighted lazily; the
+  run's `author · short sha · date` shows on its first line, the subject on
+  hover). Clicking the commit selects it in the graph. The clock button on a
+  run is **Blame before this change**: it re-blames the file at that commit's
+  parent using porcelain `previous <sha> <path>`, so it follows renames;
+  **Back** walks the trail back. Lines longer than 1000 characters are cut.
 
 Both open as a right-side drawer over the graph and close with the ✕. The
 revision blamed defaults to `HEAD`; a `-`-leading filename is handled (the path
@@ -402,6 +414,11 @@ markers is no longer one careless checkbox away.
    - `GET /repos/{id}/merge/status` reports the in-progress state (`merging`,
      `op`, `conflicted_files`; used to restore the resolver after a reload).
 
+> **Every conflict has a base.** Otto runs merge, rebase (plain and
+> interactive), cherry-pick, revert, pull and stash apply/pop with
+> `-c merge.conflictStyle=diff3`, so each conflict hunk carries the common
+> ancestor's lines and the resolver shows **Base** next to Ours/Theirs.
+
 > All mutating merge/conflict operations on a given repo are **serialized** by a
 > per-repo lock in the daemon, so concurrent requests can't corrupt an in-progress
 > merge.
@@ -472,6 +489,17 @@ The sheet also carries:
 **After creation**, the PR appears in the **Pull Requests** list. From PR detail
 you can read the diff, comments (inline + general, threaded), reviewers/approvals,
 CI status, and mergeability; comment; approve; request changes; merge; or decline.
+
+Inline comments carry the **diff side**: clicking a deleted line's gutter posts on
+the old side with its old line number (GitHub `side: LEFT`, GitLab `old_line`,
+Bitbucket `from`); a context line sends both numbers (GitLab requires it). The
+head sha of the diff you are looking at goes with it, so the comment anchors to
+that diff. Read back, each comment renders under exactly one row; comments the
+forge reports as **outdated** are listed under *File comments* with an
+"Outdated · line N" chip. A posted comment appears immediately and the PR then
+refreshes quietly. On GitHub the PR detail's comment lists, reviews, review-thread
+state and CI are fetched in parallel (Bitbucket fetches the PR and its comments
+in parallel too).
 
 ### Merge strategies
 

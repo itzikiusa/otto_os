@@ -397,8 +397,10 @@ sha256 and run the install):
   found/started; plain-fetch (no JS) is being used for everything. Check the
   daemon log for a `browser: lightpanda sidecar failed to start` warning.
 - **One host always comes back `degraded:true` even though others don't** — it
-  failed against the primary engine 3 times in a row and is denylisted; it clears
-  automatically on the next success.
+  failed against the primary engine 3 times in a row and is denylisted. Ten
+  minutes after its last failure it gets one primary-engine try again: a success
+  clears it, a failure denylists it for another ten minutes (no daemon restart
+  needed).
 - **`browser_login` (or `POST /browser/login`) returns 502** — no working
   Lightpanda sidecar: login needs JS execution, so a fallback-only daemon can
   never satisfy it. Fix the engine per the `degraded:true` bullets above.

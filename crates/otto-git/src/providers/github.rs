@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use otto_core::api::{
-    CreatePrReq, DiffResp, MergeStrategy, NewPrCommentReq, PrComment, PrCommit, PrDetail,
-    PrReviewer, PrState, PrSummary, UpdatePrReq,
+    CreatePrReq, DiffResp, MergeStrategy, NewPrCommentReq, PrComment, PrCommentSide, PrCommit,
+    PrDetail, PrReviewer, PrState, PrSummary, UpdatePrReq,
 };
 use otto_core::{Error, Result};
 use serde_json::{json, Value};
@@ -171,7 +171,14 @@ impl Github {
             Ok(v) => v,
             Err(_) => return CiStatus::none(),
         };
-        let sha = vstr(&pr, &["head", "sha"]);
+        self.fetch_ci_status_for_sha(r, &vstr(&pr, &["head", "sha"]))
+            .await
+    }
+
+    /// [`Self::fetch_ci_status`] for a head sha already in hand — `get_pr`
+    /// holds the PR, so it skips the second `pr_raw` round-trip.
+    pub async fn fetch_ci_status_for_sha(&self, r: &RemoteRef, sha: &str) -> CiStatus {
+        let sha = sha.to_string();
         if sha.is_empty() {
             return CiStatus::none();
         }
@@ -443,6 +450,56 @@ fn create_pr_body(req: &CreatePrReq) -> Value {
     body
 }
 
+/// Body of `POST /pulls/{n}/comments` for an inline comment. A comment on a
+/// deleted line goes on the LEFT side with its OLD line number — sending it
+/// as RIGHT either lands it on an unrelated line or 422s.
+pub(crate) fn inline_comment_body(
+    c: &NewPrCommentReq,
+    path: &str,
+    line: u32,
+    commit_id: &str,
+) -> Value {
+    let side = match c.side.unwrap_or_default() {
+        PrCommentSide::Old => "LEFT",
+        PrCommentSide::New => "RIGHT",
+    };
+    json!({
+        "body": c.body,
+        "commit_id": commit_id,
+        "path": path,
+        "line": line,
+        "side": side,
+    })
+}
+
+/// Read a review comment's anchor: (line, side, outdated). GitHub nulls
+/// `line` once the diff moves past the comment; `original_line` then keeps
+/// the historical anchor and the comment is outdated.
+fn review_anchor(c: &Value) -> (Option<u32>, Option<PrCommentSide>, bool) {
+    let side = match c.get("side").and_then(Value::as_str) {
+        Some("LEFT") => Some(PrCommentSide::Old),
+        Some("RIGHT") => Some(PrCommentSide::New),
+        _ => None,
+    };
+    match c.get("line").and_then(Value::as_u64) {
+        Some(l) => (Some(l as u32), side, false),
+        None => {
+            let orig = c
+                .get("original_line")
+                .and_then(Value::as_u64)
+                .map(|l| l as u32);
+            let side = match c.get("original_side").and_then(Value::as_str) {
+                Some("LEFT") => Some(PrCommentSide::Old),
+                Some("RIGHT") => Some(PrCommentSide::New),
+                _ => side,
+            };
+            // A file-level comment (`subject_type: file`) has neither number and
+            // is not outdated.
+            (orig, side, orig.is_some())
+        }
+    }
+}
+
 fn comment_from(v: &Value, path: Option<String>, line: Option<u32>) -> PrComment {
     PrComment {
         id: super::vu64(v, &["id"]).to_string(),
@@ -454,6 +511,8 @@ fn comment_from(v: &Value, path: Option<String>, line: Option<u32>) -> PrComment
         replies: Vec::new(),
         resolved: false,
         thread_id: None, // stamped from GraphQL reviewThreads in get_pr
+        side: None,
+        outdated: false,
     }
 }
 
@@ -523,55 +582,45 @@ impl super::GitProvider for Github {
 
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {
         let pr = self.pr_raw(r, number).await?;
+        let head_sha = vstr(&pr, &["head", "sha"]);
 
         // A PR detail must be WHOLE, so every comment list follows `Link
         // rel="next"` (capped at 20 pages inside `paginate_json`) instead of
-        // silently stopping at 100.
-        //
-        // General (issue) comments — flat thread.
-        let issue_comments = Value::Array(
-            self.http
-                .paginate_json(
-                    self.req(
-                        reqwest::Method::GET,
-                        &format!("{}/{number}/comments", Self::issues_path(r)),
-                    )
+        // silently stopping at 100. The lists, the reviews, the GraphQL
+        // thread-resolution probe and CI are independent once the PR is in
+        // hand, so they run together (≈1 forge RTT instead of 5–6 in a row).
+        let list = |p: String| {
+            self.http.paginate_json(
+                self.req(reqwest::Method::GET, &p)
                     .query(&[("per_page", "100")]),
-                    self.http.client(),
-                    self.auth_header(),
-                )
-                .await?,
+                self.http.client(),
+                self.auth_header(),
+            )
+        };
+        // Inline review comments — threaded via in_reply_to_id — then, only
+        // when there are any, the best-effort GraphQL resolution state.
+        let review_and_threads = async {
+            let rc = list(format!("{}/{number}/comments", Self::prs_path(r))).await?;
+            let threads = if rc.is_empty() {
+                Ok(Vec::new())
+            } else {
+                self.fetch_review_threads(r, number).await
+            };
+            Ok::<_, otto_core::Error>((rc, threads))
+        };
+        let (issue_comments, review_and_threads, reviews, ci) = tokio::join!(
+            // General (issue) comments — flat thread.
+            list(format!("{}/{number}/comments", Self::issues_path(r))),
+            review_and_threads,
+            // Reviews → approvals.
+            list(format!("{}/{number}/reviews", Self::prs_path(r))),
+            // Best-effort CI status — never fails the PR fetch.
+            self.fetch_ci_status_for_sha(r, &head_sha),
         );
-
-        // Inline review comments — threaded via in_reply_to_id.
-        let review_comments = Value::Array(
-            self.http
-                .paginate_json(
-                    self.req(
-                        reqwest::Method::GET,
-                        &format!("{}/{number}/comments", Self::prs_path(r)),
-                    )
-                    .query(&[("per_page", "100")]),
-                    self.http.client(),
-                    self.auth_header(),
-                )
-                .await?,
-        );
-
-        // Reviews → approvals.
-        let reviews = Value::Array(
-            self.http
-                .paginate_json(
-                    self.req(
-                        reqwest::Method::GET,
-                        &format!("{}/{number}/reviews", Self::prs_path(r)),
-                    )
-                    .query(&[("per_page", "100")]),
-                    self.http.client(),
-                    self.auth_header(),
-                )
-                .await?,
-        );
+        let issue_comments = Value::Array(issue_comments?);
+        let (review_comments, threads) = review_and_threads?;
+        let review_comments = Value::Array(review_comments);
+        let reviews = Value::Array(reviews?);
 
         let mut comments: Vec<PrComment> = varr(&issue_comments, &[])
             .iter()
@@ -583,12 +632,10 @@ impl super::GitProvider for Github {
         let mut replies: Vec<(u64, PrComment)> = Vec::new();
         for c in varr(&review_comments, &[]) {
             let path = vstr_opt(c, &["path"]);
-            let line = c
-                .get("line")
-                .and_then(Value::as_u64)
-                .or_else(|| c.get("original_line").and_then(Value::as_u64))
-                .map(|l| l as u32);
-            let pc = comment_from(c, path, line);
+            let (line, side, outdated) = review_anchor(c);
+            let mut pc = comment_from(c, path, line);
+            pc.side = side;
+            pc.outdated = outdated;
             match c.get("in_reply_to_id").and_then(Value::as_u64) {
                 Some(parent) => replies.push((parent, pc)),
                 None => top.push(pc),
@@ -601,10 +648,10 @@ impl super::GitProvider for Github {
                 top.push(reply); // orphan — surface as top-level
             }
         }
-        // Best-effort resolution state (GraphQL only) — a missing scope or a
-        // network hiccup must never fail the PR fetch.
+        // Resolution state — a missing scope or a network hiccup must never
+        // fail the PR fetch.
         if !top.is_empty() {
-            match self.fetch_review_threads(r, number).await {
+            match threads {
                 Ok(nodes) => apply_thread_resolution(&mut top, &nodes),
                 Err(e) => {
                     tracing::debug!("github review-thread resolution unavailable: {e}")
@@ -639,8 +686,6 @@ impl super::GitProvider for Github {
             }
         }
 
-        // Best-effort CI status — never fails the PR fetch.
-        let ci = self.fetch_ci_status(r, number).await;
         let mut summary = summary_from(&pr);
         summary.ci_status = Some(ci.state.clone());
 
@@ -764,13 +809,19 @@ impl super::GitProvider for Github {
                 )
                 .await?;
             let path = vstr_opt(&v, &["path"]);
-            let line = v.get("line").and_then(Value::as_u64).map(|l| l as u32);
-            return Ok(comment_from(&v, path, line));
+            let (line, side, outdated) = review_anchor(&v);
+            let mut pc = comment_from(&v, path, line);
+            pc.side = side;
+            pc.outdated = outdated;
+            return Ok(pc);
         }
-        // Inline comment: needs the head commit sha.
+        // Inline comment: needs the head commit sha — the one the reviewer
+        // saw when the client sends it, else the PR's current head.
         if let (Some(path), Some(line)) = (&c.path, c.line) {
-            let pr = self.pr_raw(r, number).await?;
-            let commit_id = vstr(&pr, &["head", "sha"]);
+            let commit_id = match c.commit_id.as_deref().filter(|s| !s.trim().is_empty()) {
+                Some(sha) => sha.to_string(),
+                None => vstr(&self.pr_raw(r, number).await?, &["head", "sha"]),
+            };
             let v = self
                 .http
                 .json(
@@ -778,16 +829,12 @@ impl super::GitProvider for Github {
                         reqwest::Method::POST,
                         &format!("{}/{number}/comments", Self::prs_path(r)),
                     )
-                    .json(&json!({
-                        "body": c.body,
-                        "commit_id": commit_id,
-                        "path": path,
-                        "line": line,
-                        "side": "RIGHT",
-                    })),
+                    .json(&inline_comment_body(c, path, line, &commit_id)),
                 )
                 .await?;
-            return Ok(comment_from(&v, Some(path.clone()), Some(line)));
+            let mut pc = comment_from(&v, Some(path.clone()), Some(line));
+            pc.side = Some(c.side.unwrap_or_default());
+            return Ok(pc);
         }
         // General comment → issue comment.
         let v = self

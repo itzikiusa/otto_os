@@ -2916,6 +2916,12 @@ export interface BlameLine {
   line_start: number;
   count: number;
   summary: string;
+  /** The run's source lines (`count` of them, each capped at 1000 chars). */
+  text: string[];
+  /** Porcelain `previous`: the parent commit + the file's path there —
+   *  "Blame before this change" re-blames `previous.path` at `previous.sha`.
+   *  Absent for a root commit. */
+  previous?: { sha: string; path: string } | null;
 }
 
 export interface BlameResp {
@@ -3255,7 +3261,16 @@ export interface PrComment {
   /** Id for the resolve/unresolve endpoint (thread heads only) — Bitbucket
    *  comment id, GitLab discussion id, GitHub GraphQL reviewThread node id. */
   thread_id?: string | null;
+  /** Diff side `line` counts on: `old` = a deleted line (old number); absent
+   *  or `new` = the head side. The UI renders the comment under one row. */
+  side?: PrCommentSide | null;
+  /** The forge no longer maps the comment onto the current diff; `line` is
+   *  the original line. Rendered under "File comments" with a chip. */
+  outdated?: boolean;
 }
+
+/** Side of a unified diff an inline PR comment anchors to. */
+export type PrCommentSide = 'old' | 'new';
 
 /** A PR reviewer with approval state; avatar/timestamp are best-effort. */
 export interface PrReviewer {
@@ -3320,6 +3335,15 @@ export interface NewPrCommentReq {
   path?: string | null;
   line?: number | null;
   in_reply_to?: string | null;
+  /** Diff side `line` counts on (default `new`); a deleted line sends `old`
+   *  with its OLD number. */
+  side?: PrCommentSide | null;
+  /** The anchored row's old number when it has one (GitLab needs both
+   *  numbers for an unchanged context line). */
+  old_line?: number | null;
+  /** Head sha of the diff the reviewer saw (anchors the comment; GitHub
+   *  skips a PR round-trip). */
+  commit_id?: string | null;
 }
 
 /** Body for POST /repos/{id}/prs/{number}/comments/{cid}/resolve — `{cid}` is
@@ -4943,15 +4967,21 @@ export interface ParsedCurl {
 }
 
 export interface ApiAssertion {
-  kind: 'status' | 'json_path' | 'duration_ms';
-  /** JSON path into the response body, for kind='json_path'. */
+  kind: 'status' | 'json_path' | 'header' | 'body_text' | 'duration_ms';
+  /** JSON path into the response body (kind='json_path'), or the header name
+   *  (kind='header', case-insensitive). */
   path?: string;
-  op: 'eq' | 'ne' | 'contains' | 'lt' | 'gt';
+  /** A missing target (absent field/header, no response) fails every op
+   *  except `not_exists`. `matches` is a regex (≤1000 chars). */
+  op: 'eq' | 'ne' | 'contains' | 'lt' | 'gt' | 'lte' | 'gte' | 'exists' | 'not_exists' | 'matches';
+  /** Ignored for `exists` / `not_exists`. */
   value: string;
 }
 
 export interface ApiExtract {
-  /** JSON path into the response body. */
+  /** JSON path into the response body, `header:<name>` for a response
+   *  header, or `status`. A miss fails the step ("Save {{var}} from …: not
+   *  found"). */
   path: string;
   /** Environment variable to set from the extracted value (used by later steps). */
   var: string;
@@ -4982,7 +5012,10 @@ export interface ApiRunStepResult {
   status: number | null;
   duration_ms: number;
   ok: boolean;
-  assertions: { desc: string; passed: boolean }[];
+  /** `desc` is worded with the actual value ("Status code is less than 400:
+   *  got 500"); `actual` is that value (null when missing). Extraction misses
+   *  and script tests appear here too. */
+  assertions: { desc: string; passed: boolean; actual?: unknown }[];
   error: string | null;
 }
 

@@ -4233,6 +4233,7 @@ dependencies = [
  "prost-types",
  "protox",
  "rand 0.10.3",
+ "regex",
  "reqwest",
  "reqwest_cookie_store",
  "rustix",

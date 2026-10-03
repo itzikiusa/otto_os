@@ -243,14 +243,16 @@ registerUiCommands('api', {
     if (!ok) throw new UiCommandError('cancelled_by_user', 'The user declined to send the request.');
     const tabId = d.tabId;
     const stop = (): void => {
-      if (apiClient.sending && apiClient.draft.tabId === tabId) apiClient.cancelExecute();
+      apiClient.cancelExecute(tabId);
     };
     ctx.signal.addEventListener('abort', stop, { once: true });
     ctx.progress(`Sending ${d.method} ${host || url}`);
     try {
       const resp = await apiClient.execute();
       if (!resp) {
-        if (apiClient.lastError) throw new UiCommandError('failed', apiClient.lastError);
+        // Read the initiating tab's slot — the user may have switched tabs.
+        const failed = tabId ? apiClient.responses.get(tabId)?.error : apiClient.lastError;
+        if (failed) throw new UiCommandError('failed', failed);
         throw new UiCommandError('cancelled_by_user', 'The send was cancelled (a new-host secret confirm was declined, or it was stopped).');
       }
       return responseResult(resp);
