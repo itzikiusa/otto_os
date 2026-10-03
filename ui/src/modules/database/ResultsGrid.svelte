@@ -29,19 +29,15 @@
   import { databaseAccessChild } from '../../lib/access-options';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import type { QueryResult, DbForeignKey } from '../../lib/api/types';
-  import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
   import ErrorPanel from './ErrorPanel.svelte';
   import GridView from './GridView.svelte';
   import VerticalView from './VerticalView.svelte';
   import JsonView from './JsonView.svelte';
   import CellViewer from './CellViewer.svelte';
-  import DocEditor from './DocEditor.svelte';
-  import RawDocViewer from './RawDocViewer.svelte';
-  import ReviewModal from './ReviewModal.svelte';
-  import ExportDialog from './ExportDialog.svelte';
+  // Modal-only children (DocEditor / RawDocViewer reach CodeEditor, the rest
+  // are dialogs) load on first open via `{#await import()}` below, so the grid
+  // — and Home's DB widget that embeds it — doesn't carry them up front.
   import MongoFilterBar from './MongoFilterBar.svelte';
-  import AggregateBuilder from './AggregateBuilder.svelte';
-  import RecordDiff from './RecordDiff.svelte';
   import { EditFlow, SET_EMPTY, SET_NULL, type RowPatch } from './EditFlow.svelte';
   import { qid, valueLiteral } from './edit-sql';
   import { ALT_BATCH, cellStr, copyText, fmtBytes, isComplex } from './results-format';
@@ -67,6 +63,12 @@
   let sendToAgentPayload = $state<unknown>(null);
   // ── WP4: aggregate pipeline builder + compare-two-records ───────────────────
   let pipelineOpen = $state(false);
+  // AggregateBuilder stays mounted once opened (it keeps its draft pipeline
+  // across close/reopen) but isn't loaded until the first open.
+  let pipelineMounted = $state(false);
+  $effect(() => {
+    if (pipelineOpen) pipelineMounted = true;
+  });
   /** liveRows indices of the two records being compared (null = closed). */
   let compare = $state<[number, number] | null>(null);
   /** A record exactly as the Vertical/JSON views build it (uniqueColNames-keyed). */
@@ -1563,29 +1565,32 @@
 {/if}
 
 {#if flow.docEditor}
-  <DocEditor {flow} />
+  {#await import('./DocEditor.svelte') then m}<m.default {flow} />{/await}
 {/if}
 
 {#if flow.rawDoc}
-  <RawDocViewer {flow} />
+  {#await import('./RawDocViewer.svelte') then m}<m.default {flow} />{/await}
 {/if}
 
 {#if showExportDialog && connectionId && statement}
-  <ExportDialog {statement} {connectionId} node={ranNode} {canExport} onclose={() => (showExportDialog = false)} />
+  {#await import('./ExportDialog.svelte') then m}<m.default {statement} {connectionId} node={ranNode} {canExport} onclose={() => (showExportDialog = false)} />{/await}
 {/if}
 
 {#if compare && result}
-  <RecordDiff
+  {#await import('./RecordDiff.svelte') then m}
+  <m.default
     left={objRowAt(compare[0])}
     right={objRowAt(compare[1])}
     leftLabel={`#${compare[0] + 1}`}
     rightLabel={`#${compare[1] + 1}`}
     onclose={() => (compare = null)}
   />
+  {/await}
 {/if}
 
-{#if connectionId}
-  <AggregateBuilder
+{#if connectionId && pipelineMounted}
+  {#await import('./AggregateBuilder.svelte') then m}
+  <m.default
     collection={engine === 'mongodb' ? flow.editTable : null}
     open={pipelineOpen}
     connId={connectionId}
@@ -1593,10 +1598,12 @@
     oninsert={(stmt) => database.setStatement(stmt)}
     onrun={(stmt) => { database.setStatement(stmt); void database.runQuery(stmt); }}
   />
+  {/await}
 {/if}
 
 {#if flow.reviewSql}
-  <ReviewModal
+  {#await import('./ReviewModal.svelte') then m}
+  <m.default
     title={flow.reviewSql.title}
     sql={flow.reviewSql.sql}
     diff={flow.reviewSql.diff}
@@ -1605,16 +1612,19 @@
     onrun={() => void flow.runReview()}
     onclose={() => flow.closeReview()}
   />
+  {/await}
 {/if}
 
 {#if sendToAgentOpen && ws.current && sendToAgentPayload !== null}
-  <ContextPacketDialog
+  {#await import('../../lib/components/ContextPacketDialog.svelte') then m}
+  <m.default
     workspaceId={ws.current.id}
     sessionId={ws.targetAgentId}
     kind="db"
     payload={sendToAgentPayload}
     onclose={() => (sendToAgentOpen = false)}
   />
+  {/await}
 {/if}
 
 <style>

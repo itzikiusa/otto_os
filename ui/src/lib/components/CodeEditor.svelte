@@ -34,23 +34,14 @@
   import { oneDark, oneDarkTheme } from '@codemirror/theme-one-dark';
   import type { Extension } from '@codemirror/state';
 
-  // Language packages
-  import { javascript } from '@codemirror/lang-javascript';
-  import { python } from '@codemirror/lang-python';
-  import { go } from '@codemirror/lang-go';
-  import { rust } from '@codemirror/lang-rust';
-  import { json } from '@codemirror/lang-json';
-  import { html } from '@codemirror/lang-html';
-  import { css } from '@codemirror/lang-css';
-  import { markdown } from '@codemirror/lang-markdown';
-  import { java } from '@codemirror/lang-java';
-  import { sql } from '@codemirror/lang-sql';
-  import { sqlDialect as dialectFor, type SqlDialectName } from '../sql-dialects';
-  import { redisLang } from './redis-lang';
+  // Language packages load on demand (cm-langs.ts); SQL/Redis are static there.
+  import { cmLangNow, cmLangPending, loadCmLang } from './cm-langs';
+  import type { SqlDialectName } from '../sql-dialects';
   import { createChangeEmitter } from './changeEmitter';
 
-  // LSP — use the all-in-one factory that manages the WS transport internally
-  import { languageServer } from '@marimo-team/codemirror-languageserver';
+  // LSP — `@marimo-team/codemirror-languageserver` (the all-in-one factory that
+  // manages the WS transport) is imported in attachLsp, only once the daemon
+  // reports an available server for the doc's language.
 
   import { api, baseUrl } from '../api/client';
   import type { LspCapabilities } from '../api/types';
@@ -316,37 +307,14 @@
 
   // ── Language extension map ─────────────────────────────────────────────────
 
-  type AnyLangExtension = ReturnType<typeof javascript>;
-
   /** The dialect the live view's language was built with (plain field). */
   let appliedDialect: SqlDialectName = 'standard';
   /** Holds the language extension so a dialect change reaches a live view. */
   let langCompartment = new Compartment();
 
-  const EXT_TO_CM_LANG: Record<string, () => AnyLangExtension> = {
-    js:   () => javascript(),
-    jsx:  () => javascript({ jsx: true }),
-    ts:   () => javascript({ typescript: true }),
-    tsx:  () => javascript({ jsx: true, typescript: true }),
-    mjs:  () => javascript(),
-    cjs:  () => javascript(),
-    py:   () => python(),
-    go:   () => go(),
-    rs:   () => rust(),
-    json: () => json(),
-    jsonc:() => json(),
-    html: () => html(),
-    htm:  () => html(),
-    xml:  () => html(),
-    css:  () => css(),
-    scss: () => css(),
-    less: () => css(),
-    md:   () => markdown(),
-    mdx:  () => markdown(),
-    java: () => java(),
-    sql:  () => sql({ dialect: dialectFor(appliedDialect) }),
-    redis: () => redisLang() as AnyLangExtension,
-  };
+  /** False while the live doc's language pack is still loading (the view
+   *  shows plain text until `ensureLang` reconfigures it). Plain field. */
+  let appliedLangReady = true;
 
   // LSP language IDs (maps file extension → LSP lang id)
   const EXT_TO_LSP_LANG: Record<string, string> = {
@@ -496,9 +464,32 @@
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  function cmLangFor(filePath: string, hint?: string): AnyLangExtension | null {
-    const ext = extOf(filePath) || (hint ?? '');
-    return EXT_TO_CM_LANG[ext]?.() ?? null;
+  function langExtOf(filePath: string, hint?: string): string {
+    return extOf(filePath) || (hint ?? '');
+  }
+
+  function cmLangFor(filePath: string, hint?: string): Extension | null {
+    return cmLangNow(langExtOf(filePath, hint), appliedDialect);
+  }
+
+  /** The live doc started without its (not yet loaded) language: load the pack
+   *  and apply it — unless the view was rebuilt or switched docs meanwhile
+   *  (a parked doc catches up in swapState). */
+  function ensureLang(filePath: string): void {
+    if (appliedLangReady) return;
+    const target = view;
+    loadCmLang(langExtOf(filePath, language)).then(
+      () => {
+        if (!view || view !== target || livePath !== filePath || appliedLangReady) return;
+        const langExt = cmLangFor(filePath, language);
+        if (!langExt) return;
+        appliedLangReady = true;
+        view.dispatch({ effects: langCompartment.reconfigure(langExt) });
+      },
+      () => {
+        /* chunk failed to load — the doc stays plain text */
+      },
+    );
   }
 
   function lspLangFor(filePath: string): string | null {
@@ -544,6 +535,9 @@
       if (!lspLang) return;
       const server = caps.servers.find((s) => s.lang === lspLang && s.available);
       if (!server) return;
+      const { languageServer } = await import('@marimo-team/codemirror-languageserver');
+      // The view may have been rebuilt / destroyed while the client loaded.
+      if (view !== editorView) return;
 
       const wsUri = lspWsUrl(lspLang, rootPath);
       // `languageServer` from marimo accepts serverUri and creates the WS transport
@@ -727,6 +721,7 @@
     const doc = limit > 0 ? Text.of(fileContent.split(/\r\n?|\n/)) : null;
     appliedPlain = !!doc && hasLongLine(doc, limit);
     const langExt = cmLangFor(filePath, language);
+    appliedLangReady = langExt != null || !cmLangPending(langExtOf(filePath, language));
     const baseExtensions: Extension[] = [
       ...(minimal ? [] : [lineNumbers(), foldGutter()]),
       indentOnInput(),
@@ -902,6 +897,7 @@
     view = new EditorView({ state: createState(filePath, fileContent), parent: el });
     livePath = filePath;
     applyPendingScroll();
+    ensureLang(filePath);
 
     // A caller-supplied completion source replaces LSP for this doc; only attach
     // the language server when no custom source is wired.
@@ -922,7 +918,7 @@
   /** Parked EditorStates by path, oldest first (Map order = LRU order). */
   const keptStates = new Map<
     string,
-    { state: EditorState; scroll: StateEffect<unknown>; dialect: SqlDialectName }
+    { state: EditorState; scroll: StateEffect<unknown>; dialect: SqlDialectName; langReady: boolean }
   >();
   const MAX_KEPT_STATES = 24;
 
@@ -942,6 +938,7 @@
       state: view.state,
       scroll: view.scrollSnapshot(),
       dialect: appliedDialect,
+      langReady: appliedLangReady,
     });
     while (keptStates.size > MAX_KEPT_STATES) {
       const oldest = keptStates.keys().next().value;
@@ -957,6 +954,7 @@
     if (!kept) {
       view.setState(createState(toPath, toContent));
       applyPendingScroll();
+      ensureLang(toPath);
     } else {
       view.setState(kept.state);
       if (plainRecheck) clearTimeout(plainRecheck);
@@ -974,9 +972,13 @@
       // Re-parse only when the dialect changed while parked (a connection
       // switch) — a plain tab switch keeps the parked tree.
       appliedDialect = kept.dialect;
-      if (sqlDialect !== kept.dialect) {
+      appliedLangReady = kept.langReady;
+      if (sqlDialect !== kept.dialect || !kept.langReady) {
         appliedDialect = sqlDialect;
-        effects.push(langCompartment.reconfigure(cmLangFor(toPath, language) ?? []));
+        const langExt = cmLangFor(toPath, language);
+        // Parked before its pack loaded: apply it now if it has since.
+        if (langExt) appliedLangReady = true;
+        effects.push(langCompartment.reconfigure(langExt ?? []));
       }
       const doc = view.state.doc;
       const stale = doc.length !== toContent.length || doc.toString() !== toContent;
@@ -984,6 +986,7 @@
         effects,
         ...(stale ? { changes: { from: 0, to: doc.length, insert: toContent } } : {}),
       });
+      ensureLang(toPath);
     }
     prevCompletion = completionSource;
     // setState fires no update listeners — re-announce the restored selection.

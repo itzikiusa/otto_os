@@ -1,3 +1,41 @@
+<script module lang="ts">
+  // Box bodies load on demand, one chunk per kind: the Home chunk no longer
+  // carries every kind's dependencies (the DB box alone reaches ResultsGrid →
+  // CodeMirror). One promise per kind, shared by every tile on every space;
+  // `bodies` is reactive so a tile renders the moment its kind resolves and a
+  // second tile of a loaded kind renders synchronously (no skeleton flash).
+  import type { Component } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
+  // Bodies take different subsets of { box, viewId, zoomed, tick, active }.
+  type BoxBody = Component<any>;
+  const BODY_LOADERS: Record<string, () => Promise<{ default: BoxBody }>> = {
+    sessions: () => import('./boxes/SessionsBox.svelte'),
+    'mission-control': () => import('./boxes/MissionControlBox.svelte'),
+    'db-dashboard': () => import('./boxes/DbDashboardBox.svelte'),
+    k8s: () => import('./boxes/K8sBox.svelte'),
+    insights: () => import('./boxes/InsightsBox.svelte'),
+    usage: () => import('./boxes/UsageBox.svelte'),
+  };
+  const bodies = new SvelteMap<string, BoxBody>();
+  const inflight = new Map<string, Promise<void>>();
+  function loadBody(kind: string): Promise<void> {
+    const load = BODY_LOADERS[kind];
+    if (!load) return Promise.resolve();
+    let p = inflight.get(kind);
+    if (!p) {
+      p = load().then(
+        (m) => void bodies.set(kind, m.default),
+        (e: unknown) => {
+          inflight.delete(kind); // let Retry re-import
+          throw e;
+        },
+      );
+      inflight.set(kind, p);
+    }
+    return p;
+  }
+</script>
+
 <script lang="ts">
   // One widget on the Home desktop: a quiet header (kind icon + title; the
   // refresh / zoom / menu controls surface on hover or focus), the kind's live
@@ -11,12 +49,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { home, COLS, GAP_PX, MIN_H, MAX_H, MIN_W, ROW_PX, type HomeBox } from './home.svelte';
   import { kindDef } from './kinds';
-  import SessionsBox from './boxes/SessionsBox.svelte';
-  import MissionControlBox from './boxes/MissionControlBox.svelte';
-  import DbDashboardBox from './boxes/DbDashboardBox.svelte';
-  import K8sBox from './boxes/K8sBox.svelte';
-  import InsightsBox from './boxes/InsightsBox.svelte';
-  import UsageBox from './boxes/UsageBox.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
 
   interface Props {
     box: HomeBox;
@@ -35,6 +68,26 @@
   let { box, viewId, zoomed = false, index = 0, count = 1, ondragbox, ondropon, active = true }: Props = $props();
 
   const def = $derived(kindDef(box.kind));
+  const Body = $derived(bodies.get(box.kind) ?? null);
+  const hasLoader = $derived(box.kind in BODY_LOADERS);
+  let loadFailed = $state(false);
+  let loadAttempt = $state(0);
+  $effect(() => {
+    const kind = box.kind;
+    void loadAttempt;
+    if (bodies.has(kind)) return;
+    let live = true;
+    loadFailed = false;
+    loadBody(kind).catch(() => {
+      if (live) loadFailed = true;
+    });
+    return () => {
+      live = false;
+    };
+  });
+  function retryLoad(): void {
+    loadAttempt += 1;
+  }
   // Bumped by the header's refresh button; each box body re-fetches on change.
   let tick = $state(0);
 
@@ -164,18 +217,15 @@
     <button class="icon-btn" onclick={menu} title="Widget options" aria-label="{def.label} widget options" aria-haspopup="menu"><Icon name="more" size={14} /></button>
   </header>
   <div class="hb-body">
-    {#if box.kind === 'sessions'}
-      <SessionsBox {box} {zoomed} {tick} />
-    {:else if box.kind === 'mission-control'}
-      <MissionControlBox {box} {zoomed} {tick} {active} />
-    {:else if box.kind === 'db-dashboard'}
-      <DbDashboardBox {box} {viewId} {zoomed} {tick} {active} />
-    {:else if box.kind === 'k8s'}
-      <K8sBox {box} {viewId} {zoomed} {tick} {active} />
-    {:else if box.kind === 'insights'}
-      <InsightsBox {box} {zoomed} {tick} {active} />
-    {:else if box.kind === 'usage'}
-      <UsageBox {box} {viewId} {zoomed} {tick} {active} />
+    {#if Body}
+      <Body {box} {viewId} {zoomed} {tick} {active} />
+    {:else if loadFailed}
+      <div class="hb-fail" role="alert">
+        <span>Couldn't load this widget.</span>
+        <button class="btn small" onclick={retryLoad}>Retry</button>
+      </div>
+    {:else if hasLoader}
+      <Skeleton rows={3} />
     {/if}
   </div>
   {#if !zoomed && !viewport.isPhone}
@@ -286,6 +336,15 @@
   .hb-body > :global(*) {
     flex: 1;
     min-height: 0;
+  }
+  .hb-fail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
   }
   .resize {
     position: absolute;
