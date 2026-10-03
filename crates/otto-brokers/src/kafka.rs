@@ -47,7 +47,13 @@ pub const WATERMARK_WORKERS: usize = 16;
 pub const MAX_CONSUME_BYTES: usize = 16 * 1024 * 1024;
 
 fn kerr(e: KafkaError) -> Error {
-    match e.rdkafka_error_code().and_then(kafka_headline) {
+    // `rdkafka_error_code()` is None for admin operations, which carry their
+    // code directly — and are exactly the topic/config toasts this is for.
+    let code = match &e {
+        KafkaError::AdminOp(code) => Some(*code),
+        other => other.rdkafka_error_code(),
+    };
+    match code.and_then(kafka_headline) {
         Some(headline) => Error::Upstream(format!("kafka: {headline}")),
         None => Error::Upstream(format!("kafka: {e}")),
     }
@@ -87,8 +93,17 @@ fn kafka_headline(code: RDKafkaErrorCode) -> Option<&'static str> {
 }
 
 /// [`kafka_headline`] or librdkafka's own description (`Display`, never `Debug`).
+/// librdkafka's `Display` is `InvalidMessage (Broker: Invalid message)` — keep
+/// only the human description in the parentheses.
 fn kafka_code_text(code: RDKafkaErrorCode) -> String {
-    kafka_headline(code).map_or_else(|| code.to_string(), str::to_string)
+    if let Some(h) = kafka_headline(code) {
+        return h.to_string();
+    }
+    let text = code.to_string();
+    match text.find(" (") {
+        Some(i) if text.ends_with(')') => text[i + 2..text.len() - 1].to_string(),
+        _ => text,
+    }
 }
 
 /// Returned as `Error::Forbidden` when the broker's ACLs deny this principal
@@ -1433,8 +1448,10 @@ mod tests {
             "upstream: create topic orders: the broker's topic policy rejected this change"
         );
         // No fixed headline → librdkafka's description, still not Debug.
-        let text = super::kafka_code_text(C::InvalidMessage);
-        assert!(!text.contains("InvalidMessage"), "{text}");
+        assert_eq!(
+            super::kafka_code_text(C::InvalidMessage),
+            "Broker: Invalid message"
+        );
     }
 
     use super::*;
