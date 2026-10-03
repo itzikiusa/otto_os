@@ -44,6 +44,8 @@
     /** Per-column filter text, keyed by ORIGINAL column index. */
     colFilters?: Record<number, string>;
     oncolfilter?: (ci: number, text: string) => void;
+    /** A filter box gained (column index) or lost (null) focus. */
+    oncolfocus?: (ci: number | null) => void;
     /** The keyboard/click cursor moved onto a row (its liveRows index). */
     onfocusrow?: (idx: number | null) => void;
     oncellmenu: (e: MouseEvent, ci: number, v: unknown, rowIdx: number) => void;
@@ -65,6 +67,7 @@
     filterRow = false,
     colFilters = {},
     oncolfilter,
+    oncolfocus,
     onfocusrow,
     oncellmenu,
     onheadermenu,
@@ -861,6 +864,8 @@
                 aria-label="Filter {c.name}"
                 title="Contains · =exact · >n <n · NULL · !NULL"
                 oninput={(e) => oncolfilter?.(ci, e.currentTarget.value)}
+                onfocus={() => oncolfocus?.(ci)}
+                onblur={() => oncolfocus?.(null)}
               />
             </td>
           {/each}

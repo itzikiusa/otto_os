@@ -15,6 +15,8 @@ import { budgetMs, isDesktopProject, isWebkitProject, percentile, scrollFrameWor
 //        key → next frame < 50 ms · key → filtered < 700 ms
 //   3. result memory budget across tabs (F1)
 //        background results are released past the budget; Re-run restores them
+//  3b. switch back to a string-sorted 100k tab (R2) · search text pre-built on focus (R3)
+//        switch back < 90 ms (cached view) · key → filtered < 250 ms
 //   4. schema tree, 20 schemas × 1,000 tables expanded
 //        tree DOM < 1,500 nodes · filter key → frame < 50 ms · scroll step p95 < 16 ms
 //   5. restore 15 open connections with 300 ms dials
@@ -322,6 +324,61 @@ test('background results are released past the memory budget and re-run on deman
   await page.getByTestId('db-result-released').getByRole('button', { name: 'Re-run' }).click();
   await expect(page.locator('.grid-scroll tbody td.cell').first()).toBeVisible({ timeout: 20_000 });
   expect(seen.length).toBe(before + 1);
+});
+
+// ── 3b. tab switch back to a sorted result; search text pre-built on focus ────
+test('switching back to a string-sorted 100k tab reuses its view; search text pre-builds on focus', async ({ page }, info) => {
+  webkitOnly(info.project.name);
+  test.setTimeout(180_000);
+  await routeQueries(page);
+  await openConn(page);
+  await run(page, 'SELECT * FROM big');
+  const cellSel = '.grid-scroll tbody tr:not(.spacer) td.cell';
+  const firstCell = `document.querySelector('${cellSel}')?.textContent ?? ''`;
+  // c_1 (strings) descending: a 100k-string collator sort.
+  const th = page.locator('.grid-scroll thead .th-sort').nth(1);
+  await th.click();
+  await th.click();
+  await expect(page.locator(cellSel).first()).not.toHaveText('1');
+  const shown = String(await page.evaluate(firstCell));
+  // Another tab, then back: the sorted view is served from the per-result cache.
+  await page.getByRole('button', { name: 'New query tab' }).click();
+  await run(page, 'SELECT * FROM mid');
+  const backMs: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    const ms = await page.evaluate(
+      async ({ firstCell, shown }) => {
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval
+        const cellNow = new Function(`return (${firstCell});`) as () => string;
+        const tabs = document.querySelectorAll<HTMLElement>('.qe-tab');
+        const t0 = performance.now();
+        tabs[0].click();
+        for (let k = 0; k < 600 && cellNow() !== shown; k++) await new Promise((r) => requestAnimationFrame(() => r(null)));
+        return performance.now() - t0;
+      },
+      { firstCell, shown },
+    );
+    backMs.push(ms);
+    if (i < 2) {
+      await page.locator('.qe-tab').nth(1).click();
+      await expect(page.locator(cellSel).first()).not.toHaveText(shown);
+    }
+  }
+  // Focus the search box and let the idle slices pre-build the search text;
+  // the first key then only runs the filter pass.
+  await page.locator('.gt-search-input').focus();
+  await page.waitForTimeout(2_500);
+  const key = await keyToFrame(page, '.gt-search-input', 'b12345', `(${firstCell}) !== ${JSON.stringify(shown)}`);
+  perfLine(
+    `string-sorted 100k tab: switch back ${backMs.map((t) => t.toFixed(0)).join(' / ')} ms; ` +
+      `search key→frame ${key.frame.toFixed(1)} ms, key→filtered ${key.applied.toFixed(0)} ms (pre-built)`,
+  );
+  // Measured (WebKit, load avg ~10): switch back 45–58 ms with the cached view
+  // vs 98–126 ms re-sorting; key→filtered 135–141 ms pre-built (120 ms of it is
+  // the debounce) vs 174–184 ms building the text on the key.
+  expect(Math.min(...backMs), 'switch back to the sorted tab').toBeLessThan(budgetMs(90));
+  expect(key.frame, 'search key → frame').toBeLessThan(budgetMs(50));
+  expect(key.applied, 'search key → filtered (text pre-built)').toBeLessThan(budgetMs(250));
 });
 
 // ── 4. schema tree ───────────────────────────────────────────────────────────
