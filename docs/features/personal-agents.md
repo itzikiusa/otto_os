@@ -171,6 +171,10 @@ module-level **Rooms** view (live feed, membership editor, user post box).
 - Panda browser (external, in progress) can replace the Playwright backend via
   the `OTTO_BROWSER_MCP` override — no code change needed.
 
+**Failure notices.** The first failed run (or failed delivery) of a streak
+posts one notification-center notice to the agent's creator; clicking it opens
+the agent's Runs tab. A clean run ends the streak.
+
 ## 9. Troubleshooting
 
 - **Agent runs with the wrong model** — check the agent's model field and that

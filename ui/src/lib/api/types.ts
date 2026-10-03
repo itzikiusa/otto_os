@@ -1779,7 +1779,12 @@ export type NoticeAction =
   | { type: 'open_url'; url: string }
   | { type: 'open_session'; session_id: Id }
   /** `target` e.g. "claude" | "codex" | "git:<id>" | "issue:<id>". */
-  | { type: 'reauth'; target: string };
+  | { type: 'reauth'; target: string }
+  /** In-app route (hash path without `#/`) — automation notices:
+   *  `workflows/<wf>/runs/<run>`, `scheduled-tasks/<task>/runs/<run>`,
+   *  `loops/<loop>`, `personal-agents/<agent>/runs`. `workspace_id` is the
+   *  workspace the target lives in (the UI switches to it first). */
+  | { type: 'open_route'; route: string; workspace_id?: Id };
 
 /** A persisted notification shown in the notification center. */
 export interface Notice {

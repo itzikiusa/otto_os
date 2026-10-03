@@ -543,6 +543,15 @@ pub enum NoticeAction {
     /// Prompt the user to re-authenticate. `target` is e.g. "claude", "codex",
     /// `git:<account_id>`, or `issue:<account_id>`.
     Reauth { target: String },
+    /// Open an in-app route (hash path without `#/`), e.g.
+    /// `workflows/<wf>/runs/<run>`, `scheduled-tasks/<task>`, `loops/<loop>`,
+    /// `personal-agents/<agent>/runs`. `workspace_id` names the workspace the
+    /// target lives in (the UI switches to it first). Automation notices.
+    OpenRoute {
+        route: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<Id>,
+    },
 }
 
 /// One append-only entry in the security audit log, listed (root only) at

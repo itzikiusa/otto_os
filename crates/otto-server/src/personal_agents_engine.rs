@@ -578,7 +578,7 @@ async fn complete_agent_run(
                     report_path,
                     report_rel: report_rel_opt,
                     delivered,
-                    delivery_error: derr,
+                    delivery_error: derr.clone(),
                     session_id: out.session_id.clone(),
                     report_hash: Some(hash),
                     attempts: out.attempts,
@@ -590,6 +590,7 @@ async fn complete_agent_run(
             advance_cursor(ctx, schedule, trigger, now).await;
             prune(ctx, &agent.id).await;
             emit(ctx, agent, &run_id, "ok");
+            agent_notice(ctx, agent, None, derr.as_deref()).await;
             Ok(run_id)
         }
         Err(e) => {
@@ -600,7 +601,7 @@ async fn complete_agent_run(
                     &run_id,
                     FinishAgentRun {
                         status: "error".into(),
-                        error: Some(msg),
+                        error: Some(msg.clone()),
                         ..Default::default()
                     },
                 )
@@ -610,9 +611,46 @@ async fn complete_agent_run(
             // agent used to grow its run list without bound).
             prune(ctx, &agent.id).await;
             emit(ctx, agent, &run_id, "error");
+            agent_notice(ctx, agent, Some(&msg), None).await;
             Ok(run_id)
         }
     }
+}
+
+/// Notification-center notice for an unattended agent run (review 08 · N1):
+/// once per failure streak (a failed run or a failed delivery); a clean run
+/// ends the streak. Clicking it opens the agent's Runs tab.
+async fn agent_notice(
+    ctx: &ServerCtx,
+    agent: &PersonalAgent,
+    error: Option<&str>,
+    delivery_error: Option<&str>,
+) {
+    let key = crate::run_notices::streak_key("personal_agent", &agent.id);
+    let (title, body) = match (error, delivery_error) {
+        (Some(e), _) => (format!("{}’s run failed", agent.name), e.to_string()),
+        (None, Some(d)) => (
+            format!("{} couldn’t deliver its report", agent.name),
+            d.to_string(),
+        ),
+        (None, None) => {
+            crate::run_notices::clear_streak(&key);
+            return;
+        }
+    };
+    crate::run_notices::notify_failure(
+        ctx,
+        crate::run_notices::RunNotice {
+            key,
+            severity: otto_core::domain::NoticeSeverity::Error,
+            title,
+            body,
+            route: format!("personal-agents/{}/runs", agent.id),
+            workspace_id: Some(agent.workspace_id.clone()),
+            user_id: agent.created_by.clone(),
+        },
+    )
+    .await;
 }
 
 /// Advance the fired schedule's cursor on completion — only for scheduled

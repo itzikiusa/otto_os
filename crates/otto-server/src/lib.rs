@@ -80,6 +80,7 @@ pub mod run_callback;
 pub mod run_channels;
 pub mod run_context;
 pub mod run_engine;
+pub mod run_notices;
 pub mod run_scheduler;
 pub mod run_service;
 pub mod run_sources;
