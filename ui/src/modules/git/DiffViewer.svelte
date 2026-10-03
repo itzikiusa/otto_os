@@ -45,6 +45,7 @@
     fileStat,
     inHunk,
     indexComments,
+    lineAnchor,
     isGenerated,
     type ComposerAt,
     type Row,
@@ -60,7 +61,15 @@
     prMode?: boolean;
     showNav?: boolean;
     comments?: PrComment[];
-    onAddComment?: (path: string, line: number, body: string) => Promise<void>;
+    /** Post an inline comment. `side` is the diff side `line` counts on
+     *  (`old` for a deleted row); `oldLine` is the row's old number when it
+     *  has one (GitLab needs both for a context line). */
+    onAddComment?: (
+      path: string,
+      line: number,
+      body: string,
+      anchor: { side: 'old' | 'new'; oldLine: number | null },
+    ) => Promise<void>;
     /** Reply to an existing thread (works on resolved threads too). */
     onReplyComment?: (parentId: string, body: string) => Promise<void>;
     /** Resolve/reopen a thread on the provider. */
@@ -822,11 +831,16 @@
   // added) stay distinct. `line` is the number we post to.
   function gutterClick(path: string, line: DiffLine | null): void {
     if (!prMode || !onAddComment || !line) return;
-    const n = line.new_line ?? line.old_line;
-    if (n === null) return;
+    // A deleted row comments on the OLD side with its old number; every
+    // other row on the new side (posting a deleted row's old number as a
+    // new-side line landed on an unrelated line or 422'd).
+    const a = lineAnchor(line);
+    if (!a) return;
     const c = vs.composer;
     const same = c?.path === path && c.oldLine === line.old_line && c.newLine === line.new_line;
-    patchVs({ composer: same ? null : { path, oldLine: line.old_line, newLine: line.new_line, line: n } });
+    patchVs({
+      composer: same ? null : { path, oldLine: line.old_line, newLine: line.new_line, line: a.line, side: a.side },
+    });
     composerText = '';
   }
   async function submitComment(): Promise<void> {
@@ -835,7 +849,7 @@
     const d = diff;
     composerBusy = true;
     try {
-      await onAddComment(c.path, c.line, composerText.trim());
+      await onAddComment(c.path, c.line, composerText.trim(), { side: c.side, oldLine: c.oldLine });
       patchVs({ composer: null }, d);
       composerText = '';
     } finally {
@@ -1225,7 +1239,7 @@
         rows="2"
         bind:value={composerText}
         onfocus={composerFocus}
-        placeholder="Comment on line {vs.composer?.line}…"
+        placeholder="Comment on {vs.composer?.side === 'old' ? 'old ' : ''}line {vs.composer?.line}…"
       ></textarea>
       <div class="composer-actions">
         <button class="btn small" onclick={() => patchVs({ composer: null })}>Cancel</button>
@@ -1364,6 +1378,11 @@
       <div class="file-comments-block" data-rk={r.key} use:measure={[r.key, i]}>
         <div class="file-comments-label dim">File comments</div>
         {#each r.comments as c (c.id)}
+          {#if c.outdated}
+            <span class="chip outdated-chip" title="The code this comment was on has changed since">
+              Outdated{c.line !== null ? ` · ${c.side === 'old' ? 'old ' : ''}line ${c.line}` : ''}
+            </span>
+          {/if}
           <CommentThread comment={c} onreply={onReplyComment} onresolve={onResolveComment} />
         {/each}
       </div>
@@ -1842,6 +1861,13 @@
     flex-shrink: 0;
   }
 
+  .outdated-chip {
+    display: inline-block;
+    margin-block-end: 4px;
+    font-size: var(--fs-xs);
+    color: var(--warning);
+    background: var(--warning-soft);
+  }
   /* File-level unanchored comments */
   .file-comments-block {
     border-inline: 1px solid var(--border);

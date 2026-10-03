@@ -117,11 +117,20 @@ export function splitRowsOf(h: Hunk): SplitRow[] {
 // ── PR comments ───────────────────────────────────────────────────────────
 export interface FileComments {
   /** Keyed by line number: a comment matches a row by new_line, else old_line. */
-  anchored: Map<number, PrComment[]>;
+  /** Keyed by {@link anchorKey} (`side:line`). */
+  anchored: Map<string, PrComment[]>;
   unanchored: PrComment[];
 }
+/** Key of an inline anchor: the SIDE plus the line number on that side. A
+ *  deleted row (old 15) and an added row (new 15) share a displayed number,
+ *  so keying by number alone rendered such a comment under both rows. */
+export function anchorKey(side: 'old' | 'new', line: number): string {
+  return `${side}:${line}`;
+}
 /** Index every comment by path once (the old renderer re-filtered the whole
- *  comment list for every file on every render). */
+ *  comment list for every file on every render). Inline comments key by
+ *  `side:line` (no side ⇒ `new`, the forge default); comments with no line
+ *  or that the forge marks outdated go to the file-level block. */
 export function indexComments(comments: PrComment[]): Map<string, FileComments> {
   const m = new Map<string, FileComments>();
   for (const c of comments) {
@@ -131,26 +140,27 @@ export function indexComments(comments: PrComment[]): Map<string, FileComments> 
       fc = { anchored: new Map(), unanchored: [] };
       m.set(c.path, fc);
     }
-    if (c.line === null) fc.unanchored.push(c);
+    if (c.line === null || c.outdated) fc.unanchored.push(c);
     else {
-      const arr = fc.anchored.get(c.line);
+      const k = anchorKey(c.side ?? 'new', c.line);
+      const arr = fc.anchored.get(k);
       if (arr) arr.push(c);
-      else fc.anchored.set(c.line, [c]);
+      else fc.anchored.set(k, [c]);
     }
   }
   return m;
 }
+/** The side a diff row comments on: a deleted row (no new number) is the
+ *  old side; added and context rows are the new side. */
+export function lineAnchor(l: DiffLine): { side: 'old' | 'new'; line: number } | null {
+  if (l.new_line !== null) return { side: 'new', line: l.new_line };
+  if (l.old_line !== null) return { side: 'old', line: l.old_line };
+  return null;
+}
 export function commentsForLine(fc: FileComments | undefined, l: DiffLine): PrComment[] | null {
   if (!fc || fc.anchored.size === 0) return null;
-  if (l.new_line !== null) {
-    const r = fc.anchored.get(l.new_line);
-    if (r) return r;
-  }
-  if (l.old_line !== null) {
-    const r = fc.anchored.get(l.old_line);
-    if (r) return r;
-  }
-  return null;
+  const a = lineAnchor(l);
+  return a ? (fc.anchored.get(anchorKey(a.side, a.line)) ?? null) : null;
 }
 
 // ── Row model ─────────────────────────────────────────────────────────────
@@ -158,7 +168,9 @@ export interface ComposerAt {
   path: string;
   oldLine: number | null;
   newLine: number | null;
+  /** The number we post — on `side`. */
   line: number;
+  side: 'old' | 'new';
 }
 
 interface RowBase {
@@ -287,7 +299,10 @@ export function buildFileRows(i: FileRowsInput): Row[] {
         const sr = src[j] as SplitRow;
         rows.push({ kind: 'split', key: `${k}s${hi}:${j}`, file, hi, sr });
         const lc = sr.left ? commentsForLine(i.fc, sr.left) : null;
-        cs = lc ?? (sr.right ? commentsForLine(i.fc, sr.right) : null);
+        // A context row puts the same line on both halves — count it once;
+        // a del/add pair can carry threads on each side.
+        const rc = sr.right && sr.right !== sr.left ? commentsForLine(i.fc, sr.right) : null;
+        cs = lc && rc && lc !== rc ? [...lc, ...rc] : (lc ?? rc);
         comp = composerOn(i.composer, sr.left) || composerOn(i.composer, sr.right);
       } else {
         const line = src[j] as DiffLine;

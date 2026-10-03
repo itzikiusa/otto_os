@@ -6624,6 +6624,9 @@ async fn post_review_comment(
         path: comment.path.clone(),
         line: comment.line,
         in_reply_to: None,
+        side: None,
+        old_line: None,
+        commit_id: None,
     };
     let err = match provider.comment(&remote, pr_number, &req).await {
         Ok(_) => return true,
@@ -6640,6 +6643,9 @@ async fn post_review_comment(
         path: None,
         line: None,
         in_reply_to: None,
+        side: None,
+        old_line: None,
+        commit_id: None,
     };
     match provider.comment(&remote, pr_number, &general).await {
         Ok(_) => true,

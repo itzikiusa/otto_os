@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use otto_core::api::{
     CreatePrReq, DiffResp, FileChangeStatus, FileDiff, MergeStrategy, NewPrCommentReq, PrComment,
-    PrCommit, PrDetail, PrReviewer, PrState, PrSummary, UpdatePrReq,
+    PrCommentSide, PrCommit, PrDetail, PrReviewer, PrState, PrSummary, UpdatePrReq,
 };
 use otto_core::Result;
 use serde_json::{json, Value};
@@ -225,14 +225,45 @@ fn create_mr_body(req: &CreatePrReq, reviewer_ids: &[u64]) -> Value {
     body
 }
 
+/// `position` of a GitLab inline discussion. A deleted line carries only
+/// `old_line`, an added line only `new_line`, and an unchanged context line
+/// BOTH — GitLab 400s a context-line note that has just one of them.
+pub(crate) fn text_position(c: &NewPrCommentReq, path: &str, line: u32, mr: &Value) -> Value {
+    let mut pos = json!({
+        "position_type": "text",
+        "base_sha": vstr(mr, &["diff_refs", "base_sha"]),
+        "start_sha": vstr(mr, &["diff_refs", "start_sha"]),
+        "head_sha": vstr(mr, &["diff_refs", "head_sha"]),
+        "old_path": path,
+        "new_path": path,
+    });
+    match c.side.unwrap_or_default() {
+        PrCommentSide::Old => pos["old_line"] = json!(line),
+        PrCommentSide::New => {
+            pos["new_line"] = json!(line);
+            if let Some(old) = c.old_line {
+                pos["old_line"] = json!(old);
+            }
+        }
+    }
+    pos
+}
+
 fn note_to_comment(note: &Value, id_override: Option<String>) -> PrComment {
     let path = vstr_opt(note, &["position", "new_path"])
         .or_else(|| vstr_opt(note, &["position", "old_path"]));
-    let line = note
-        .get("position")
-        .and_then(|p| p.get("new_line"))
-        .and_then(Value::as_u64)
-        .map(|l| l as u32);
+    let pos_num = |k: &str| {
+        note.get("position")
+            .and_then(|p| p.get(k))
+            .and_then(Value::as_u64)
+            .map(|l| l as u32)
+    };
+    // Only `old_line` ⇒ the note sits on a deleted line.
+    let (line, side) = match (pos_num("new_line"), pos_num("old_line")) {
+        (Some(n), _) => (Some(n), Some(PrCommentSide::New)),
+        (None, Some(o)) => (Some(o), Some(PrCommentSide::Old)),
+        (None, None) => (None, None),
+    };
     // Notes carry `resolvable` + `resolved` booleans; the head note's state is
     // the thread's state.
     let resolved = note
@@ -249,6 +280,8 @@ fn note_to_comment(note: &Value, id_override: Option<String>) -> PrComment {
         replies: Vec::new(),
         resolved,
         thread_id: None, // stamped on resolvable thread heads in get_pr
+        side,
+        outdated: false,
     }
 }
 
@@ -539,14 +572,7 @@ impl super::GitProvider for Gitlab {
                     )
                     .json(&json!({
                         "body": c.body,
-                        "position": {
-                            "position_type": "text",
-                            "base_sha": vstr(&mr, &["diff_refs", "base_sha"]),
-                            "start_sha": vstr(&mr, &["diff_refs", "start_sha"]),
-                            "head_sha": vstr(&mr, &["diff_refs", "head_sha"]),
-                            "new_path": path,
-                            "new_line": line,
-                        },
+                        "position": text_position(c, path, line, &mr),
                     })),
                 )
                 .await?;

@@ -1812,6 +1812,30 @@ pub struct PrComment {
     /// on non-resolvable comments.
     #[serde(default)]
     pub thread_id: Option<String>,
+    /// Which side of the diff `line` counts on — `old` for a comment on a
+    /// deleted line, `new` (or absent) otherwise. Lets the UI render the
+    /// comment under exactly one row instead of every row whose old OR new
+    /// number happens to match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<PrCommentSide>,
+    /// The forge no longer maps the comment onto the current diff (GitHub
+    /// `line: null`, GitLab/Bitbucket outdated positions). `line` then holds
+    /// the original line; the UI lists it under "File comments" with an
+    /// "outdated" chip rather than pinning it to an unrelated row.
+    #[serde(default)]
+    pub outdated: bool,
+}
+
+/// Side of a unified diff an inline PR comment anchors to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PrCommentSide {
+    /// The base (left) side — a deleted line; `line` is the OLD line number.
+    Old,
+    /// The head (right) side — an added or unchanged line; `line` is the NEW
+    /// line number.
+    #[default]
+    New,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1992,6 +2016,20 @@ pub struct NewPrCommentReq {
     pub line: Option<u32>,
     /// Reply to an existing comment id, if any.
     pub in_reply_to: Option<String>,
+    /// Diff side `line` counts on (default `new`). A comment on a deleted
+    /// line sends `old` with `line` = its OLD line number.
+    #[serde(default)]
+    pub side: Option<PrCommentSide>,
+    /// The OLD line number of the anchored row when it has one (deleted and
+    /// unchanged rows). GitLab requires both `old_line` and `new_line` for a
+    /// comment on an unchanged context line.
+    #[serde(default)]
+    pub old_line: Option<u32>,
+    /// Head commit the reviewer was looking at. Anchors the inline comment
+    /// to that diff and saves the daemon a PR round-trip for the head sha
+    /// (GitHub); ignored by forges that don't need it.
+    #[serde(default)]
+    pub commit_id: Option<String>,
 }
 
 /// Body for `POST /repos/{id}/prs/{number}/comments/{cid}/resolve` — `{cid}`

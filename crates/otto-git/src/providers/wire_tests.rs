@@ -765,3 +765,132 @@ mod client {
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Inline-comment anchors: every forge gets the diff SIDE, not just a number.
+// ---------------------------------------------------------------------------
+
+mod inline_anchors {
+    use otto_core::api::{NewPrCommentReq, PrCommentSide};
+    use serde_json::json;
+
+    fn req(line: u32, side: Option<PrCommentSide>, old_line: Option<u32>) -> NewPrCommentReq {
+        NewPrCommentReq {
+            body: "nit".into(),
+            path: Some("src/a.rs".into()),
+            line: Some(line),
+            in_reply_to: None,
+            side,
+            old_line,
+            commit_id: None,
+        }
+    }
+
+    #[test]
+    fn github_deleted_line_goes_left_with_the_old_number() {
+        let b = crate::providers::github::inline_comment_body(
+            &req(12, Some(PrCommentSide::Old), Some(12)),
+            "src/a.rs",
+            12,
+            "abc",
+        );
+        assert_eq!(b["side"], "LEFT");
+        assert_eq!(b["line"], 12);
+        assert_eq!(b["commit_id"], "abc");
+        // Absent side stays RIGHT — old MCP/agent callers keep working.
+        let b = crate::providers::github::inline_comment_body(&req(3, None, None), "p", 3, "abc");
+        assert_eq!(b["side"], "RIGHT");
+    }
+
+    #[test]
+    fn gitlab_sends_old_line_for_deletions_and_both_for_context() {
+        let mr = json!({"diff_refs": {"base_sha": "b", "start_sha": "s", "head_sha": "h"}});
+        let del = crate::providers::gitlab::text_position(
+            &req(7, Some(PrCommentSide::Old), Some(7)),
+            "src/a.rs",
+            7,
+            &mr,
+        );
+        assert_eq!(del["old_line"], 7);
+        assert!(del.get("new_line").is_none());
+        let ctx = crate::providers::gitlab::text_position(
+            &req(9, Some(PrCommentSide::New), Some(8)),
+            "src/a.rs",
+            9,
+            &mr,
+        );
+        assert_eq!(ctx["new_line"], 9);
+        assert_eq!(ctx["old_line"], 8);
+        let add = crate::providers::gitlab::text_position(&req(4, None, None), "src/a.rs", 4, &mr);
+        assert_eq!(add["new_line"], 4);
+        assert!(add.get("old_line").is_none());
+        assert_eq!(add["head_sha"], "h");
+    }
+
+    #[test]
+    fn bitbucket_deleted_line_uses_from() {
+        let del = crate::providers::bitbucket::inline_anchor(
+            &req(5, Some(PrCommentSide::Old), Some(5)),
+            "src/a.rs",
+        );
+        assert_eq!(del["from"], 5);
+        assert!(del.get("to").is_none());
+        let add = crate::providers::bitbucket::inline_anchor(&req(6, None, None), "src/a.rs");
+        assert_eq!(add["to"], 6);
+    }
+}
+
+mod github_read_back {
+    use super::*;
+    use crate::providers::github::Github;
+    use otto_core::api::PrCommentSide;
+
+    /// A LEFT-side comment reads back as `side: old`; an outdated one
+    /// (`line: null`) keeps its original line and is flagged outdated.
+    #[tokio::test]
+    async fn get_pr_reads_side_and_outdated() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "number": 3, "title": "t", "state": "open", "user": {"login": "d"},
+                "head": {"ref": "f", "sha": "h1"}, "base": {"ref": "main"},
+                "updated_at": "2026-09-01T10:00:00Z", "html_url": "u",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/3/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"id": 1, "user": {"login": "a"}, "body": "x", "path": "f.rs",
+                 "line": 10, "side": "LEFT", "created_at": "2026-09-01T10:00:00Z"},
+                {"id": 2, "user": {"login": "a"}, "body": "y", "path": "f.rs",
+                 "line": null, "original_line": 4, "original_side": "RIGHT",
+                 "created_at": "2026-09-01T10:00:00Z"},
+            ])))
+            .mount(&server)
+            .await;
+        for p in [
+            "/repos/acme/app/issues/3/comments",
+            "/repos/acme/app/pulls/3/reviews",
+        ] {
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+                .mount(&server)
+                .await;
+        }
+        let d = gh.get_pr(&rr(), 3).await.unwrap();
+        let c1 = d.comments.iter().find(|c| c.id == "1").unwrap();
+        assert_eq!(
+            (c1.line, c1.side, c1.outdated),
+            (Some(10), Some(PrCommentSide::Old), false)
+        );
+        let c2 = d.comments.iter().find(|c| c.id == "2").unwrap();
+        assert_eq!(
+            (c2.line, c2.side, c2.outdated),
+            (Some(4), Some(PrCommentSide::New), true)
+        );
+    }
+}
