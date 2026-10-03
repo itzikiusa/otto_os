@@ -252,7 +252,7 @@
       search: searchInput,
       sortCol,
       sortDir,
-      colFilters,
+      colFilters: colFiltersInput,
       pending: flow.pending,
     };
   }
@@ -276,7 +276,7 @@
         setSearch(saved.search);
         sortCol = saved.sortCol;
         sortDir = saved.sortDir;
-        colFilters = saved.colFilters;
+        setColFilters(saved.colFilters);
         detailIdx = null;
         expansion = newExpansionState();
         prevColKey = colKey;
@@ -297,7 +297,7 @@
       setSearch('');
       sortCol = null;
       sortDir = null;
-      colFilters = {};
+      setColFilters({});
       detailIdx = null;
       // A different result shape invalidates every per-path toggle.
       expansion = newExpansionState();
@@ -477,23 +477,92 @@
   // >n / <n, NULL, !NULL). Keyed by ORIGINAL column index; cleared when the
   // result's shape changes.
   let filterRow = $state(false);
-  let colFilters = $state<Record<number, string>>({});
+  // `colFiltersInput` is what the boxes show; `colFilters` is what filters —
+  // the same split (and the same SEARCH_DEBOUNCE_ROWS rule) as the toolbar
+  // search, so typing into a header box over 100k rows doesn't run a full
+  // filter pass per key.
+  let colFiltersInput = $state.raw<Record<number, string>>({});
+  let colFilters = $state.raw<Record<number, string>>({});
+  let colFilterTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Replace BOTH maps at once (reset / tab restore) — never debounced. */
+  function setColFilters(next: Record<number, string>): void {
+    if (colFilterTimer !== null) clearTimeout(colFilterTimer);
+    colFilterTimer = null;
+    colFiltersInput = next;
+    colFilters = next;
+  }
+  function setColFilter(ci: number, text: string): void {
+    colFiltersInput = { ...colFiltersInput, [ci]: text };
+    if (colFilterTimer !== null) clearTimeout(colFilterTimer);
+    colFilterTimer = null;
+    // Clearing a box (or a small result) applies at once.
+    if (text.trim() === '' || liveRows.length <= SEARCH_DEBOUNCE_ROWS) {
+      colFilters = colFiltersInput;
+      return;
+    }
+    colFilterTimer = setTimeout(() => {
+      colFilterTimer = null;
+      colFilters = colFiltersInput;
+    }, SEARCH_DEBOUNCE_MS);
+  }
+  $effect(() => () => {
+    if (colFilterTimer !== null) clearTimeout(colFilterTimer);
+  });
   const activeColFilters = $derived(
     Object.entries(colFilters)
       .filter(([, t]) => t.trim() !== '')
       .map(([ci, t]) => [Number(ci), t] as const),
   );
-  function colFilterMatches(row: unknown[]): boolean {
+  // Per-column display text, built lazily on a column's FIRST filtered key and
+  // reused for every following key (and every other box) until the rows
+  // change. For a JSON column `cellStr` is a full `JSON.stringify` per document
+  // — doing that per row per keystroke is what made the filter row stutter.
+  // Non-reactive on purpose: keyed by the `liveRows` array identity.
+  let colScanRows: unknown[][] | null = null;
+  const colScan = new Map<number, (string | null)[]>();
+  function colScanFor(ci: number): (string | null)[] {
+    if (colScanRows !== liveRows) {
+      colScan.clear();
+      colScanRows = liveRows;
+    }
+    let col = colScan.get(ci);
+    if (!col) {
+      col = new Array<string | null>(liveRows.length);
+      for (let i = 0; i < liveRows.length; i++) {
+        const v = liveRows[i][ci];
+        // null = SQL NULL; strings past SCAN_MAX are clipped like scanRows.
+        col[i] = v === null || v === undefined ? null : clipScan(cellStr(v));
+      }
+      colScan.set(ci, col);
+    }
+    return col;
+  }
+  function clipScan(s: string): string {
+    return s.length > SCAN_MAX ? s.slice(0, SCAN_MAX) : s;
+  }
+  function colFilterMatches(idx: number): boolean {
     for (const [ci, text] of activeColFilters) {
-      const v = row[ci];
-      const isNull = v === null || v === undefined;
-      if (!cellMatchesFilter(isNull ? '' : cellStr(v), isNull, text)) return false;
+      const s = colScanFor(ci)[idx];
+      const isNull = s === null || s === undefined;
+      if (!cellMatchesFilter(isNull ? '' : s, isNull, text)) return false;
     }
     return true;
   }
   function toggleFilterRow(): void {
     filterRow = !filterRow;
-    if (!filterRow) colFilters = {};
+    if (!filterRow) setColFilters({});
+  }
+
+  // The unfiltered `{row, idx}` wrappers, memoised per rows array: switching
+  // back to a 100k-row tab used to re-allocate 100k wrappers every time.
+  const unfilteredMemo = new WeakMap<unknown[][], { row: unknown[]; idx: number }[]>();
+  function unfilteredView(rows: unknown[][]): { row: unknown[]; idx: number }[] {
+    let v = unfilteredMemo.get(rows);
+    if (!v) {
+      v = rows.map((row, idx) => ({ row, idx }));
+      unfilteredMemo.set(rows, v);
+    }
+    return v;
   }
 
   // Rows passing the filter, carrying their original index so edits target the
@@ -501,12 +570,12 @@
   const filteredRows = $derived.by<{ row: unknown[]; idx: number }[]>(() => {
     const hasChips = activeChips.length > 0;
     const hasCols = activeColFilters.length > 0;
-    if (!filtering && !hasChips && !hasCols) return liveRows.map((row, idx) => ({ row, idx }));
+    if (!filtering && !hasChips && !hasCols) return unfilteredView(liveRows);
     const out: { row: unknown[]; idx: number }[] = [];
     for (let idx = 0; idx < liveRows.length; idx++) {
       const row = liveRows[idx];
       if (hasChips && !chipMatches(row)) continue;
-      if (hasCols && !colFilterMatches(row)) continue;
+      if (hasCols && !colFilterMatches(idx)) continue;
       if (filtering && !rowMatches(idx)) continue;
       out.push({ row, idx });
     }
@@ -693,6 +762,17 @@
   $effect(()=>{if(connectionId)void resourceAccess.load('connection',connectionId,accessChild);});
   $effect(()=>{if(connectionId&&editAccessChild!==accessChild)void resourceAccess.load('connection',connectionId,editAccessChild);});
 
+  // `viewOrder` per view array (memoised like `unfilteredView`): a tab switch
+  // back to an unchanged 100k-row view reuses it instead of re-mapping.
+  const viewOrderMemo = new WeakMap<{ row: unknown[]; idx: number }[], number[]>();
+  function viewOrderOf(view: { row: unknown[]; idx: number }[]): number[] {
+    let o = viewOrderMemo.get(view);
+    if (!o) {
+      o = view.map((r) => r.idx);
+      viewOrderMemo.set(view, o);
+    }
+    return o;
+  }
   const flow = new EditFlow();
   // While an error is shown, `result` is still the PREVIOUS run's while
   // `statement` is the failed one — never pair them (BUG-7: the edit flow and
@@ -710,7 +790,7 @@
       canModify,
       uniqueColNames,
       mini,
-      viewOrder: viewRows.map((r) => r.idx),
+      viewOrder: viewOrderOf(viewRows),
       resultCount: resultSets.length,
     });
   });
@@ -1436,8 +1516,8 @@
           {sortDir}
           resetToken={colKey}
           filterRow={filterRow && !mini}
-          {colFilters}
-          oncolfilter={(ci, t) => (colFilters = { ...colFilters, [ci]: t })}
+          colFilters={colFiltersInput}
+          oncolfilter={setColFilter}
           onfocusrow={(i) => { if (i !== null) detailIdx = i; }}
           oncellmenu={cellMenu}
           onheadermenu={headerMenu}
