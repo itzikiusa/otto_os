@@ -405,3 +405,47 @@ test('tui clean-up: a never-quiet spinner is cleaned ~1×/s (was 5×/s)', () => 
   r.cancel();
   assert.equal(t.live(), 0);
 });
+
+// ── perf F9: parked / hidden panes withhold acks ───────────────────────────
+
+test('hold: consumed bytes are not acked while held; release acks the total once', () => {
+  const { flow, q, parse, acks } = creditHarness();
+  flow.offer();
+  flow.granted();
+  flow.hold(true);
+  for (let i = 0; i < 8; i++) q.push(new Uint8Array(CREDIT_ACK_STEP), undefined, flow.credit);
+  while (parse() > 0) { /* drain */ }
+  assert.deepEqual(acks(), [], 'a parked engine parses but reports nothing');
+  flow.hold(false);
+  assert.deepEqual(acks(), [8 * CREDIT_ACK_STEP], 'one cumulative ack on return');
+  flow.hold(false);
+  assert.deepEqual(acks(), [8 * CREDIT_ACK_STEP], 'releasing twice sends nothing more');
+  // Normal stepping resumes.
+  q.push(new Uint8Array(CREDIT_ACK_STEP), undefined, flow.credit);
+  parse();
+  assert.deepEqual(acks(), [8 * CREDIT_ACK_STEP, 9 * CREDIT_ACK_STEP]);
+});
+
+test('hold: release with nothing consumed, or before a grant, sends no ack', () => {
+  const { flow, acks } = creditHarness();
+  flow.hold(true);
+  flow.hold(false);
+  flow.offer();
+  flow.granted();
+  flow.hold(true);
+  flow.hold(false);
+  assert.deepEqual(acks(), []);
+});
+
+test('hold: a dropped queue while held is acked on release (the daemon owes one snapshot)', () => {
+  const { flow, q, acks } = creditHarness();
+  flow.offer();
+  flow.granted();
+  flow.hold(true);
+  for (let i = 0; i < 8; i++) q.push(new Uint8Array(CREDIT_ACK_STEP), undefined, flow.credit);
+  q.dropQueued();
+  assert.deepEqual(acks(), []);
+  flow.hold(false);
+  assert.equal(acks().length, 1);
+  assert.ok(acks()[0] >= 6 * CREDIT_ACK_STEP);
+});

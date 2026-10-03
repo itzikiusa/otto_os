@@ -4,6 +4,7 @@
 //! lines from the front when either the line cap or the byte cap is exceeded.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 /// Default maximum number of retained lines.
 pub const DEFAULT_MAX_LINES: usize = 10_000;
@@ -11,8 +12,13 @@ pub const DEFAULT_MAX_LINES: usize = 10_000;
 pub const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// Line-aware byte ring buffer.
+///
+/// Lines are `Arc`-shared so a search can take a consistent copy of the whole
+/// ring under the lock in O(lines) refcount bumps and scan it AFTER releasing
+/// the lock (perf 01 F3) — the PTY reader pushes into this ring for every
+/// chunk, so a scan under the lock stalled that session's output.
 pub struct RingBuffer {
-    lines: VecDeque<Vec<u8>>,
+    lines: VecDeque<Arc<Vec<u8>>>,
     bytes: usize,
     max_lines: usize,
     max_bytes: usize,
@@ -38,12 +44,13 @@ impl RingBuffer {
             let ends_line = chunk.ends_with(b"\n");
             if !self.last_complete {
                 if let Some(last) = self.lines.back_mut() {
-                    last.extend_from_slice(chunk);
+                    // Copy-on-write: only clones if a search copy holds it.
+                    Arc::make_mut(last).extend_from_slice(chunk);
                 } else {
-                    self.lines.push_back(chunk.to_vec());
+                    self.lines.push_back(Arc::new(chunk.to_vec()));
                 }
             } else {
-                self.lines.push_back(chunk.to_vec());
+                self.lines.push_back(Arc::new(chunk.to_vec()));
             }
             self.bytes += chunk.len();
             self.last_complete = ends_line;
@@ -66,6 +73,7 @@ impl RingBuffer {
         if self.bytes > self.max_bytes {
             if let Some(only) = self.lines.front_mut() {
                 let excess = (self.bytes - self.max_bytes).min(only.len());
+                let only = Arc::make_mut(only);
                 *only = only.split_off(excess);
                 self.bytes -= excess;
             }
@@ -78,7 +86,7 @@ impl RingBuffer {
         let start = self.lines.len() - n;
         let mut out = Vec::new();
         for line in self.lines.iter().skip(start) {
-            out.extend_from_slice(line);
+            out.extend_from_slice(line.as_slice());
         }
         out
     }
@@ -98,22 +106,63 @@ impl RingBuffer {
     /// Returns up to `limit` matching lines in buffer order (oldest → newest),
     /// each as a `(line_index, text)` pair where `line_index` is 0-based from
     /// the oldest retained line. `text` is the stripped (plain-text) content.
+    /// When more than `limit` lines match, the NEWEST `limit` are returned
+    /// (the find bar jumps to the newest hit first).
     pub fn search(&self, query: &str, limit: usize) -> Vec<(usize, String)> {
-        let needle = query.to_lowercase();
-        let mut results = Vec::new();
-        for (idx, raw) in self.lines.iter().enumerate() {
-            if results.len() >= limit {
-                break;
-            }
-            // Strip ANSI escape sequences: sequences starting with ESC [ and
-            // ending with a letter (CSI), OSC (ESC ]), and plain ESC X runs.
-            let text = strip_ansi(raw);
-            if text.to_lowercase().contains(&needle) {
-                results.push((idx, text));
-            }
-        }
-        results
+        search_lines(&self.lines(), query, limit)
     }
+
+    /// A consistent copy of every retained line (refcount bumps, no byte
+    /// copies) to scan after the ring's lock is released ([`search_lines`]).
+    pub fn lines(&self) -> Vec<Arc<Vec<u8>>> {
+        self.lines.iter().cloned().collect()
+    }
+}
+
+/// [`RingBuffer::search`] over a copy taken with [`RingBuffer::lines`]: scans
+/// newest → oldest and stops at `limit` hits, then returns them oldest →
+/// newest. CPU-bound for a full ring: run it off the async workers.
+pub fn search_lines(lines: &[Arc<Vec<u8>>], query: &str, limit: usize) -> Vec<(usize, String)> {
+    let needle = query.to_lowercase();
+    let ascii = needle.is_ascii();
+    let mut results = Vec::new();
+    if needle.is_empty() || limit == 0 {
+        return results;
+    }
+    for (idx, raw) in lines.iter().enumerate().rev() {
+        if results.len() >= limit {
+            break;
+        }
+        // Strip ANSI escape sequences: sequences starting with ESC [ and
+        // ending with a letter (CSI), OSC (ESC ]), and plain ESC X runs.
+        let text = strip_ansi(raw);
+        let hit = if ascii {
+            contains_ascii_ci(text.as_bytes(), needle.as_bytes())
+        } else {
+            text.to_lowercase().contains(&needle)
+        };
+        if hit {
+            results.push((idx, text));
+        }
+    }
+    results.reverse();
+    results
+}
+
+/// ASCII case-insensitive substring test; `needle` is already lowercase.
+/// No allocation (the old path lowercased every line into a new String).
+pub fn contains_ascii_ci(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > hay.len() {
+        return false;
+    }
+    hay.windows(needle.len()).any(|w| {
+        w.iter()
+            .zip(needle)
+            .all(|(a, b)| a.to_ascii_lowercase() == *b)
+    })
 }
 
 /// Strip ANSI/VT escape sequences from a raw PTY byte slice, returning plain
@@ -201,5 +250,31 @@ mod tests {
         ring.push(b"a\nb\nc\nd\n");
         assert_eq!(ring.len(), 3);
         assert_eq!(ring.tail(10), b"b\nc\nd\n".to_vec());
+    }
+
+    /// Search returns the NEWEST `limit` hits (in buffer order), matches
+    /// case-insensitively through colour codes, and a held line copy is not
+    /// disturbed by later pushes (copy-on-write).
+    #[test]
+    fn search_is_newest_first_and_ansi_aware() {
+        let mut ring = RingBuffer::new(100, 1 << 20);
+        for i in 0..10 {
+            ring.push(format!("line {i} \x1b[31mERROR\x1b[0m here\n").as_bytes());
+        }
+        ring.push(b"partial Err");
+        let snapshot = ring.lines();
+        ring.push(b"or tail\n");
+        let hits = search_lines(&snapshot, "error", 3);
+        assert_eq!(hits.iter().map(|h| h.0).collect::<Vec<_>>(), vec![7, 8, 9]);
+        assert!(hits[0].1.contains("line 7 ERROR here"));
+        // The copy kept the pre-push partial line; the ring itself moved on.
+        assert_eq!(snapshot.last().unwrap().as_slice(), b"partial Err");
+        assert_eq!(ring.search("ERROR TAIL", 10).len(), 1);
+        let all = ring.search("err", 100);
+        assert_eq!(all.len(), 11, "the completed partial line matches too");
+        assert!(ring.search("", 10).is_empty());
+        // Non-ASCII needles still match case-insensitively.
+        ring.push("Ünïcode Straße\n".as_bytes());
+        assert_eq!(ring.search("ÜNÏCODE", 5).len(), 1);
     }
 }

@@ -164,7 +164,11 @@ async function fixturePage(page: Page): Promise<void> {
  *  older daemon that ignores `credit` (the client stays in pause mode). */
 function mockDaemon(page: Page, opts: { totalBytes: number; onCtrlC?: string; burst?: number; credit?: boolean }) {
   const burst = opts.burst ?? BURST;
-  const stats = { clientFrames: [] as string[], sent: 0, snapshots: 0, creditResyncs: 0, interruptedAt: 0, floodFrom: -1, snapshotsBeforeCtrlC: 0 };
+  const stats = {
+    clientFrames: [] as string[], sent: 0, snapshots: 0, creditResyncs: 0, interruptedAt: 0, floodFrom: -1, snapshotsBeforeCtrlC: 0,
+    /** The grid the attach `scrollback` carried (perf F1), null if none. */
+    attachGrid: null as { cols: number; rows: number } | null,
+  };
   let screenTail = 'READY$ ';
   let paused = false;
   let skipped = false;
@@ -220,11 +224,14 @@ function mockDaemon(page: Page, opts: { totalBytes: number; onCtrlC?: string; bu
           stats.clientFrames.push(frame.type);
           switch (frame.type) {
             case 'scrollback':
+              if (stats.clientFrames.filter((t) => t === 'scrollback').length === 1) {
+                stats.attachGrid = frame.cols > 0 && frame.rows > 0 ? { cols: frame.cols, rows: frame.rows } : null;
+              }
               snapshot(ws);
-              // Start once the attach has settled: READY$ painted AND the
-              // one post-attach resize compaction (Terminal.svelte: confirm
-              // 150 ms + RESIZE_COMPACT_MS 900 ms → a 2nd `scrollback`) is
-              // done, so the flood's own rebuild requests can be counted.
+              // Start once the attach has settled (READY$ painted, the forced
+              // resize confirmed — settle 150 ms — and past where a resize
+              // compaction would fire, RESIZE_COMPACT_MS 900 ms), so any
+              // rebuild request the client makes can be counted.
               setTimeout(() => void flood(ws), 1500);
               break;
             case 'credit':
@@ -296,7 +303,10 @@ for (const burst of [2, 8]) {
     expect(acks, 'the client acknowledges as xterm consumes').toBeGreaterThan(0);
     expect(f.filter((t) => t === 'pause'), 'credit mode never pauses').toHaveLength(0);
     expect(f.slice(daemon.stats.floodFrom).filter((t) => t === 'scrollback'), 'the flood requests no rebuild').toHaveLength(0);
-    expect(f.filter((t) => t === 'scrollback').length, 'attach + at most the resize compaction').toBeLessThanOrEqual(2);
+    // perf F1: the attach carries the grid, so the forced resize confirms
+    // with nothing changed — ONE snapshot per attach, no follow-up compact.
+    expect(f.filter((t) => t === 'scrollback').length, 'one snapshot per attach').toBe(1);
+    expect(daemon.stats.attachGrid, 'the attach scrollback carries the measured grid').not.toBeNull();
     expect(f.filter((t) => t === 'resync'), 'no input → no resync').toHaveLength(0);
     expect(peak, `peak backlog ${(peak / MB).toFixed(2)} MB`).toBeLessThanOrEqual(2.5 * MB);
     // Every snapshot is a requested one or one skip-resync, and a skip needs

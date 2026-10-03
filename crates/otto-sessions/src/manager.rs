@@ -1068,6 +1068,13 @@ const WORKING_WINDOW: Duration = Duration::from_secs(5);
 /// Status poll interval.
 const STATUS_TICK: Duration = Duration::from_secs(2);
 
+/// A live terminal nobody has viewed for this long keeps only
+/// [`otto_pty::UNVIEWED_SCROLLBACK_LINES`] of emulator history (daemon-core
+/// perf F9): with 12 live agents the full 4000-row histories were the
+/// biggest steady memory term. The next attach restores the full cap (older
+/// rows dropped meanwhile are gone; history regrows from there).
+const UNVIEWED_HISTORY_AFTER: Duration = Duration::from_secs(10 * 60);
+
 /// How long [`SessionManager::input`] waits for its bytes to drain into the
 /// PTY before reporting "not accepting input". The write itself runs on the
 /// PTY's own writer thread (never a tokio worker) and stays queued in order,
@@ -3189,7 +3196,18 @@ impl SessionManager {
         static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
         let conn_id = CONN_SEQ.fetch_add(1, Ordering::Relaxed);
         self.touch(id);
-        *self.attached.entry(id.clone()).or_insert(0) += 1;
+        let first = {
+            let mut n = self.attached.entry(id.clone()).or_insert(0);
+            *n += 1;
+            *n == 1
+        };
+        if first {
+            // A long-unviewed session may run with a shallow history cap
+            // (see UNVIEWED_HISTORY_AFTER): let it grow again from now.
+            if let Some(h) = self.live_handle(id) {
+                h.set_history_cap(otto_pty::EMULATOR_SCROLLBACK_LINES);
+            }
+        }
         self.attached_conns
             .entry(id.clone())
             .or_default()
@@ -5602,14 +5620,26 @@ impl SessionManager {
         let passive_resume = Arc::clone(&self.passive_resume);
         let auth = self.auth.clone();
         let mcp_tokens = Arc::clone(&self.mcp_tokens);
+        let attached = Arc::clone(&self.attached);
         tokio::spawn(async move {
             let mut exit_rx = handle.on_exit();
             let mut current = SessionStatus::Running;
+            // Unviewed-history cap (UNVIEWED_HISTORY_AFTER): one in-memory map
+            // read per tick; `attach` restores the full cap.
+            let mut unviewed_since: Option<std::time::Instant> = None;
             let mut interval = tokio::time::interval(STATUS_TICK);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
+                        if attached.get(&id).is_some_and(|n| *n > 0) {
+                            unviewed_since = None;
+                        } else {
+                            let since = *unviewed_since.get_or_insert_with(std::time::Instant::now);
+                            if since.elapsed() >= UNVIEWED_HISTORY_AFTER {
+                                handle.set_history_cap(otto_pty::UNVIEWED_SCROLLBACK_LINES);
+                            }
+                        }
                         let next = if handle.last_output_at().elapsed() < WORKING_WINDOW {
                             SessionStatus::Working
                         } else {

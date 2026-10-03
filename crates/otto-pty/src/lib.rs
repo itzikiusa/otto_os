@@ -198,6 +198,24 @@ struct WriteJob {
 /// [`PtyHandle::spawn_sized`] for the memory tradeoff.
 pub const EMULATOR_SCROLLBACK_LINES: usize = 4000;
 
+/// Scrollback rows kept while NOBODY has viewed a terminal for a while
+/// (daemon-core perf F9): the session manager lowers the emulator's cap to
+/// this for long-unviewed sessions ([`PtyHandle::set_history_cap`]) and
+/// restores [`EMULATOR_SCROLLBACK_LINES`] on the next attach. Rows beyond it
+/// are dropped (the raw ring still holds recent bytes for search).
+pub const UNVIEWED_SCROLLBACK_LINES: usize = 1000;
+
+/// Emulator memory accounting ([`PtyHandle::emulator_stats`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct EmulatorStats {
+    /// Scrollback rows retained.
+    pub scrollback_rows: usize,
+    /// The current scrollback cap.
+    pub scrollback_cap: usize,
+    /// Approximate heap held by scrollback cells, in bytes.
+    pub scrollback_bytes: usize,
+}
+
 /// A fully-resolved command to run inside a PTY.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {
@@ -318,9 +336,14 @@ impl Mirror {
         // then receive that chunk again.
         let mut parser = lock_unpoisoned(&self.parser);
         parser.process(data);
-        lock_unpoisoned(&self.ring).push(data);
         // No receivers is fine — the screen state still records.
         let _ = self.tx.send(Bytes::copy_from_slice(data));
+        drop(parser);
+        // The raw ring is not part of the snapshot hand-over (only emulator
+        // + broadcast must be atomic), so it is filled AFTER the parser lock
+        // is released (perf 01 F3): its line split + allocations no longer
+        // lengthen the window in which captures and resizes wait.
+        lock_unpoisoned(&self.ring).push(data);
     }
 
     /// Replace the emulator with one rebuilt from a holder snapshot (a fresh
@@ -737,6 +760,30 @@ impl PtyHandle {
         }
     }
 
+    /// Change the emulator's scrollback cap (see
+    /// [`UNVIEWED_SCROLLBACK_LINES`]). Lowering drops the oldest rows now;
+    /// raising lets history grow again. Clamped to
+    /// `1..=`[`EMULATOR_SCROLLBACK_LINES`]; a no-op when unchanged.
+    pub fn set_history_cap(&self, lines: usize) {
+        let lines = lines.clamp(1, EMULATOR_SCROLLBACK_LINES);
+        let mut parser = lock_unpoisoned(&self.mirror.parser);
+        if parser.screen().scrollback_len() != lines {
+            parser.screen_mut().set_scrollback_len(lines);
+        }
+    }
+
+    /// Scrollback rows / cap / approximate cell heap of the emulator.
+    pub fn emulator_stats(&self) -> EmulatorStats {
+        let parser = lock_unpoisoned(&self.mirror.parser);
+        let screen = parser.screen();
+        let (rows, cells) = screen.scrollback_stats();
+        EmulatorStats {
+            scrollback_rows: rows,
+            scrollback_cap: screen.scrollback_len(),
+            scrollback_bytes: cells * std::mem::size_of::<vt100::Cell>(),
+        }
+    }
+
     /// Kill the child process and its process group: `SIGHUP` now (to the
     /// child's group and the terminal's foreground job), then — on a helper
     /// thread, only while the child is still alive — `SIGTERM` after
@@ -805,8 +852,18 @@ impl PtyHandle {
 
     /// Search the scrollback ring for `query` (plain substring, case-insensitive).
     /// Returns up to `limit` `(line_index, plain_text)` pairs in buffer order.
+    /// The scan runs after the ring lock is released (it would otherwise
+    /// stall the PTY reader, which pushes into the ring for every chunk);
+    /// async callers should use [`Self::search_lines`] + [`ring::search_lines`]
+    /// on the blocking pool instead.
     pub fn search(&self, query: &str, limit: usize) -> Vec<(usize, String)> {
-        lock_unpoisoned(&self.mirror.ring).search(query, limit)
+        ring::search_lines(&self.search_lines(), query, limit)
+    }
+
+    /// A consistent copy of the ring's lines (refcount bumps under a brief
+    /// lock) for [`ring::search_lines`].
+    pub fn search_lines(&self) -> Vec<Arc<Vec<u8>>> {
+        lock_unpoisoned(&self.mirror.ring).lines()
     }
 
     /// A coherent snapshot of the CURRENT screen as escape sequences. Writing
@@ -1566,9 +1623,197 @@ mod tests {
         );
     }
 
-    /// Hold publication between the emulator update and broadcast. A snapshot
-    /// must wait for that chunk to be published, then exclude it from its new
-    /// receiver; otherwise clients apply the same output twice.
+    /// OTTO PATCH 5 (perf 01 F2): scrollback rows shed trailing blanks, so a
+    /// full 4000-row history of 20-char lines at 200 cols holds ~2.6 MB of
+    /// cells instead of 25.6 MB — and the snapshot of it is unchanged.
+    #[test]
+    fn short_lines_at_wide_grid_keep_a_small_scrollback() {
+        let mut parser = vt100::Parser::new(50, 200, EMULATOR_SCROLLBACK_LINES);
+        for i in 0..(EMULATOR_SCROLLBACK_LINES + 100) {
+            parser.process(format!("line {i:014}\r\n").as_bytes());
+        }
+        let (rows, cells) = parser.screen().scrollback_stats();
+        let bytes = cells * std::mem::size_of::<vt100::Cell>();
+        eprintln!("scrollback: {rows} rows, {cells} cells, {bytes} bytes");
+        assert_eq!(rows, EMULATOR_SCROLLBACK_LINES);
+        assert!(bytes < 3 * 1024 * 1024, "scrollback holds {bytes} bytes");
+        let snap = String::from_utf8_lossy(&PtyHandle::format_snapshot(
+            parser.screen(),
+            EMULATOR_SCROLLBACK_LINES,
+        ))
+        .into_owned();
+        assert!(snap.contains("line 00000000000100\x1b[0m\r\n"));
+        assert!(snap.contains("line 00000000004099"));
+    }
+
+    /// A trimmed scrollback row pulled back onto a taller grid is full width
+    /// again (cursor writes index cells by column), and a narrowing +
+    /// widening reflow round-trips the text.
+    #[test]
+    fn trimmed_rows_survive_height_growth_and_reflow() {
+        let mut parser = vt100::Parser::new(10, 120, EMULATOR_SCROLLBACK_LINES);
+        for i in 0..60 {
+            parser.process(format!("row-{i:03}\r\n").as_bytes());
+        }
+        parser.screen_mut().set_size(40, 120); // pulls 30 rows back
+        parser.process(b"\x1b[1;100Hedge");
+        assert!(parser.screen().contents().contains("edge"));
+        parser.screen_mut().set_size(40, 30);
+        parser.screen_mut().set_size(40, 160);
+        let text = String::from_utf8_lossy(&PtyHandle::format_snapshot(parser.screen(), 4000))
+            .into_owned();
+        for i in [0, 29, 30, 59] {
+            assert!(text.contains(&format!("row-{i:03}")), "row-{i:03} lost");
+        }
+    }
+
+    /// The unviewed-session cap drops old rows and restoring it lets history
+    /// grow again (daemon-core perf F9).
+    #[test]
+    fn history_cap_shrinks_and_regrows() {
+        let handle = spawn_ready("echo READY; exec cat");
+        handle.set_history_cap(UNVIEWED_SCROLLBACK_LINES);
+        assert_eq!(
+            handle.emulator_stats().scrollback_cap,
+            UNVIEWED_SCROLLBACK_LINES
+        );
+        handle.set_history_cap(usize::MAX);
+        assert_eq!(
+            handle.emulator_stats().scrollback_cap,
+            EMULATOR_SCROLLBACK_LINES
+        );
+        let mut parser = vt100::Parser::new(24, 80, EMULATOR_SCROLLBACK_LINES);
+        for i in 0..3000 {
+            parser.process(format!("{i}\r\n").as_bytes());
+        }
+        parser
+            .screen_mut()
+            .set_scrollback_len(UNVIEWED_SCROLLBACK_LINES);
+        assert_eq!(
+            parser.screen().scrollback_stats().0,
+            UNVIEWED_SCROLLBACK_LINES
+        );
+        parser
+            .screen_mut()
+            .set_scrollback_len(EMULATOR_SCROLLBACK_LINES);
+        for i in 0..500 {
+            parser.process(format!("more {i}\r\n").as_bytes());
+        }
+        assert_eq!(
+            parser.screen().scrollback_stats().0,
+            UNVIEWED_SCROLLBACK_LINES + 500
+        );
+    }
+
+    /// Daemon-side terminal budgets (perf 01 F7). Gated: `OTTO_PERF=1`
+    /// (run with `--release` for the real budgets; debug builds get ×10).
+    /// CI: the perf-gates job runs it in release with a ×3 scale.
+    /// Full 4000 × 200 history of attribute-dense TUI rows:
+    /// - capture (the parser-lock hold of every snapshot) < 2 ms,
+    /// - format (off the lock, blocking pool) < 40 ms,
+    /// - resize reflow of the whole history < 50 ms,
+    /// - feed throughput ≥ 50 MB/s through the emulator + ring + broadcast
+    ///   with 3 subscribers draining.
+    #[test]
+    fn perf_budgets_capture_format_reflow_feed() {
+        if std::env::var("OTTO_PERF").ok().as_deref() != Some("1") {
+            eprintln!("skipped: set OTTO_PERF=1 to enforce terminal perf budgets");
+            return;
+        }
+        // Debug builds ×10; CI runners scale further with the same knob as
+        // the Playwright perf gates (`OTTO_PERF_BUDGET_SCALE`, default 1).
+        let scale: u32 = std::env::var("OTTO_PERF_BUDGET_SCALE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1)
+            .max(1);
+        let k: u32 = scale * if cfg!(debug_assertions) { 10 } else { 1 };
+        let row: String = (0..24)
+            .map(|j| format!("\x1b[{}m{:<8}", 31 + (j % 7), format!("seg{j:02}")))
+            .collect();
+        let mut parser = vt100::Parser::new(50, 200, EMULATOR_SCROLLBACK_LINES);
+        for i in 0..(EMULATOR_SCROLLBACK_LINES + 100) {
+            parser.process(format!("{i:05} {row}\x1b[0m\r\n").as_bytes());
+        }
+        let screen = parser.screen();
+        let t = Instant::now();
+        let capture = ScreenCapture {
+            screen: screen.clone(),
+        };
+        let capture_cost = t.elapsed();
+        let t = Instant::now();
+        let bytes = capture.format(EMULATOR_SCROLLBACK_LINES);
+        let format_cost = t.elapsed();
+        let t = Instant::now();
+        parser.screen_mut().set_size(50, 150);
+        let reflow_cost = t.elapsed();
+
+        let m = Mirror::new(200, 50, RingBuffer::default());
+        let mut subs: Vec<_> = (0..3).map(|_| m.tx.subscribe()).collect();
+        let drained = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drains: Vec<_> = subs
+            .drain(..)
+            .map(|mut rx| {
+                let (drained, stop) = (Arc::clone(&drained), Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        match rx.try_recv() {
+                            Ok(b) => {
+                                drained.fetch_add(b.len() as u64, Ordering::Relaxed);
+                            }
+                            Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                            Err(_) => std::thread::yield_now(),
+                        }
+                    }
+                })
+            })
+            .collect();
+        let chunk: Vec<u8> = (0..8192)
+            .map(|i| {
+                if i % 120 == 119 {
+                    b'\n'
+                } else {
+                    b'a' + (i % 26) as u8
+                }
+            })
+            .collect();
+        let total = 64 * 1024 * 1024;
+        let t = Instant::now();
+        for _ in 0..(total / chunk.len()) {
+            m.feed(&chunk);
+        }
+        let feed_cost = t.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        for d in drains {
+            d.join().unwrap();
+        }
+        let mbps = total as f64 / feed_cost.as_secs_f64() / 1e6;
+        eprintln!(
+            "terminal budgets: capture {capture_cost:?}, format {format_cost:?} ({} bytes), reflow {reflow_cost:?}, feed {mbps:.0} MB/s",
+            bytes.len()
+        );
+        assert!(
+            capture_cost < Duration::from_millis(2) * k,
+            "capture {capture_cost:?}"
+        );
+        assert!(
+            format_cost < Duration::from_millis(40) * k,
+            "format {format_cost:?}"
+        );
+        assert!(
+            reflow_cost < Duration::from_millis(50) * k,
+            "reflow {reflow_cost:?}"
+        );
+        assert!(mbps * f64::from(k) >= 50.0, "feed {mbps:.0} MB/s");
+    }
+
+    /// Emulator update and broadcast publication are one atomic step under
+    /// the parser lock: a snapshot either includes a chunk or its new
+    /// receiver gets it — never both. The raw ring is filled AFTER that lock
+    /// is released (perf 01 F3), so a ring held busy (a search copy, a slow
+    /// push) must not block the snapshot either: hold the ring lock while the
+    /// reader parses + publishes, then snapshot.
     #[test]
     fn snapshot_subscription_waits_for_output_publication() {
         let spec = CommandSpec {
@@ -1580,30 +1825,31 @@ mod tests {
         let handle = Arc::new(PtyHandle::spawn(&spec).unwrap());
         let ring = lock_unpoisoned(&handle.mirror.ring);
         handle.write(b"SNAPSHOT-BARRIER").unwrap();
-        // The reader takes parser before ring. Blocking ring holds it at the
-        // publication boundary rather than relying on timing a live flood.
+        // The reader parses + publishes, releases the parser lock, then parks
+        // on the ring lock we hold.
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            if handle.mirror.parser.try_lock().is_err() {
+            let parsed = handle
+                .mirror
+                .parser
+                .try_lock()
+                .is_ok_and(|p| p.screen().contents().contains("SNAPSHOT-BARRIER"));
+            if parsed {
                 break;
             }
-            assert!(
-                Instant::now() < deadline,
-                "reader did not retain emulator lock through publication"
-            );
+            assert!(Instant::now() < deadline, "reader never parsed the chunk");
             std::thread::sleep(Duration::from_millis(1));
         }
         let copy = handle.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let snapshot =
             std::thread::spawn(move || assert!(tx.send(copy.snapshot_and_subscribe(100)).is_ok()));
-        assert!(
-            rx.recv_timeout(Duration::from_millis(50)).is_err(),
-            "snapshot overtook an unpublished emulator update"
-        );
-        drop(ring);
-        let mut replay = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Not blocked by the ring.
+        let mut replay = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a busy ring must not block a snapshot");
         snapshot.join().unwrap();
+        drop(ring);
         assert!(String::from_utf8_lossy(&replay.data).contains("SNAPSHOT-BARRIER"));
         assert!(matches!(
             replay.output.try_recv(),

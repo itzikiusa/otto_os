@@ -208,8 +208,9 @@ jobs:
   # (ui/e2e/global-setup.ts: temp data dir, own port, file secret store).
   # Chosen for stability: bounded-DOM counts (git sidebar, file viewer,
   # insights, Kafka/K8s lists, a 100k-row grid) plus the grid's scroll/paint
-  # timings, which run with OTTO_PERF_BUDGET_SCALE=3 (budgets were measured on
-  # a Mac; counts are never scaled). The full perf set runs locally with
+  # timings, the terminal flood/^C and park-redraw budgets, and the daemon's
+  # terminal emulator budgets (otto-pty, gated by OTTO_PERF), which run with
+  # OTTO_PERF_BUDGET_SCALE=3 (budgets were measured on a Mac; counts are never scaled). The full perf set runs locally with
   # `npx playwright test --project=desktop-webkit` (docs/testing/ci-performance.md).
   # Advisory until it has a green history: this is the first job to run the
   # daemon + Playwright WebKit on the Linux runner.
@@ -238,6 +239,14 @@ jobs:
 
       - name: Build the test daemon
         run: cargo build -p ottod
+
+      # Daemon-side terminal budgets (snapshot capture / format / reflow /
+      # feed throughput), release profile, same scale as the Playwright set.
+      - name: Terminal emulator budgets (otto-pty, release)
+        env:
+          OTTO_PERF: '1'
+          OTTO_PERF_BUDGET_SCALE: '3'
+        run: cargo test -p otto-pty --release --lib perf_budgets -- --nocapture
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
@@ -278,6 +287,8 @@ jobs:
           e2e/desktop-db-results-perf.spec.ts
           e2e/desktop-nav-smooth-perf.spec.ts
           e2e/desktop-boot-perf.spec.ts
+          e2e/desktop-terminal-flood-perf.spec.ts
+          e2e/desktop-terminal-park-redraw.spec.ts
 
       - name: Upload the Playwright report
         if: failure()

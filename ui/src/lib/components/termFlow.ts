@@ -67,6 +67,13 @@ export class TermFlow {
   /** Ack step for the granted window (≤ window/4, per the contract). */
   private ackStep = CREDIT_ACK_STEP;
   private lastPauseAt = 0;
+  /** Acks withheld (perf F9): a parked engine or a non-focused pane in a
+   *  hidden window keeps parsing what already arrived but stops reporting
+   *  it, so the daemon stops sending after one window and — only if output
+   *  overflowed meanwhile — owes ONE snapshot. `hold(false)` reports the
+   *  withheld total at once, which brings that snapshot (or the held bytes)
+   *  on return. */
+  held = false;
   private send: (frame: WsTermFlowFrame) => void;
   private readonly now: () => number;
 
@@ -81,6 +88,18 @@ export class TermFlow {
    *  sink so acks keep flowing on the same credit stream. */
   setSink(send: (frame: WsTermFlowFrame) => void): void {
     this.send = send;
+  }
+
+  /** Withhold (`true`) or resume (`false`) credit acks — see `held`.
+   *  Releasing sends one cumulative ack for everything consumed meanwhile.
+   *  Pause-mode streams (no grant) are unaffected. */
+  hold(on: boolean): void {
+    if (this.held === on) return;
+    this.held = on;
+    if (!on && this.credit && this.consumed > this.reported) {
+      this.reported = this.consumed;
+      this.send({ type: 'ack', bytes: this.consumed });
+    }
   }
 
   /** Ask the daemon for credit flow control (first frame on a new socket). */
@@ -122,7 +141,7 @@ export class TermFlow {
     if (this.credit) {
       if (stream !== this.credit) return;
       this.consumed += n;
-      if (this.consumed - this.reported >= this.ackStep) {
+      if (!this.held && this.consumed - this.reported >= this.ackStep) {
         this.reported = this.consumed;
         this.send({ type: 'ack', bytes: this.consumed });
       }
@@ -438,9 +457,23 @@ export function resizeDecision(o: {
   localReflowed: boolean;
   force: boolean;
   preferDom: boolean;
+  /** The grid last sent / the grid about to be sent (perf F1). When given, a
+   *  CHANGED grid compacts only when it is a meaningful change for a
+   *  bottom-anchored TUI: wider (the widen-leaves-a-void case), or more than
+   *  `COMPACT_ROW_DELTA` rows taller/shorter. A narrower grid is repainted by
+   *  the TUI's own SIGWINCH redraw. An unknown previous grid (0) compacts. */
+  prev?: { cols: number; rows: number };
+  next?: { cols: number; rows: number };
 }): { send: boolean; compact: boolean } {
+  let significant = true;
+  if (o.sentChanged && o.prev && o.next && o.prev.cols > 0 && o.prev.rows > 0) {
+    significant = o.next.cols > o.prev.cols || Math.abs(o.next.rows - o.prev.rows) > COMPACT_ROW_DELTA;
+  }
   return {
     send: o.sentChanged || o.force,
-    compact: o.preferDom && (o.sentChanged || o.localReflowed),
+    compact: o.preferDom && (o.sentChanged ? significant : o.localReflowed),
   };
 }
+
+/** Row change (either way) below which a confirmed resize does not compact. */
+export const COMPACT_ROW_DELTA = 2;

@@ -114,6 +114,26 @@ impl Screen {
         self.grid_mut().set_scrollback(rows);
     }
 
+    /// OTTO PATCH 5 (vendor/vt100/README-OTTO.md): change the PRIMARY
+    /// screen's scrollback cap at runtime. Lowering it drops the oldest rows
+    /// immediately; raising it only lets history grow again.
+    pub fn set_scrollback_len(&mut self, rows: usize) {
+        self.grid.set_scrollback_len(rows);
+    }
+
+    /// OTTO PATCH 5: the primary screen's scrollback cap.
+    #[must_use]
+    pub fn scrollback_len(&self) -> usize {
+        self.grid.scrollback_len()
+    }
+
+    /// OTTO PATCH 5: `(rows, cells)` retained in the primary screen's
+    /// scrollback — `cells × size_of::<Cell>()` approximates its heap.
+    #[must_use]
+    pub fn scrollback_stats(&self) -> (usize, usize) {
+        self.grid.scrollback_stats()
+    }
+
     /// Returns the current position in the scrollback.
     ///
     /// This position indicates the offset from the top of the screen, and is

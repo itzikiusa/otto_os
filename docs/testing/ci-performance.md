@@ -83,8 +83,13 @@ style, layout and paint dominate, so the gates could not see its regressions.
   `/meta`, and that the scratch workspace overlaps `/workspaces`.
 - **CI.** The `perf-gates` job runs a small subset on the Ubuntu runner:
   `desktop-git-sidebar-perf`, `desktop-docs-orch-perf`, `desktop-infra-perf`,
-  `desktop-db-results-perf`, `desktop-nav-smooth-perf` and
-  `desktop-boot-perf`, with `OTTO_PERF_BUDGET_SCALE=3`. It is
+  `desktop-db-results-perf`, `desktop-nav-smooth-perf`, `desktop-boot-perf`,
+  `desktop-terminal-flood-perf` (flood backlog, ^C latency, one snapshot per
+  attach) and `desktop-terminal-park-redraw`, with `OTTO_PERF_BUDGET_SCALE=3`,
+  plus the daemon's terminal emulator budgets
+  (`OTTO_PERF=1 cargo test -p otto-pty --release --lib perf_budgets`: snapshot
+  capture < 2 ms, format < 40 ms, 4000-row reflow < 50 ms, feed ≥ 50 MB/s with
+  3 subscribers, all ×scale). It is
   advisory (`continue-on-error`) until it has a green history: it is the first
   job to run the daemon and Playwright WebKit on Linux. Promote it by removing
   `continue-on-error`.

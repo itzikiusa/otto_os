@@ -109,6 +109,21 @@ impl Row {
         len
     }
 
+    // OTTO PATCH 5: shrink a row that is entering scrollback to its content.
+    // Trailing default cells of a NON-wrapped row are padding (every reader
+    // treats a missing cell like a default blank: the formatters emit
+    // nothing for either, reflow drops them, height growth re-pads), so a
+    // short line at 200 cols costs ~its text instead of 6.4 KB. Wrapped rows
+    // stay full (their blanks are real positions inside a logical line).
+    // At least one cell is kept: formatters index `cells[0]`.
+    pub(crate) fn trim_for_scrollback(&mut self) {
+        if !self.wrapped {
+            let len = self.content_len().max(1).min(self.cells.len());
+            self.cells.truncate(len);
+        }
+        self.cells.shrink_to_fit();
+    }
+
     // OTTO PATCH: a row is droppable padding when it holds no content at all.
     pub(crate) fn is_blank(&self) -> bool {
         self.content_len() == 0

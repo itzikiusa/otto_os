@@ -88,6 +88,23 @@ export type WsTermFlowFrame = WsTermPauseFrame | WsTermCreditFrame | WsTermAckFr
 export interface WsTermResyncFrame {
   type: 'resync';
   lines: number;
+  /** The client's grid (perf F1): with both set, a viewer that may resize
+   *  has the PTY + emulator resized to it BEFORE the snapshot is captured. */
+  cols?: number;
+  rows?: number;
+}
+
+/** Client → server `/ws/term` snapshot request (docs/contracts/ws.md §1):
+ *  up to `lines` rows of history + the current screen, answered with one
+ *  `scrollback`. Its `lines` is also the depth of every later server-pushed
+ *  snapshot on this socket. Sent on open WITH the measured grid (`cols` /
+ *  `rows`, perf F1) so a viewer that may resize gets the snapshot already at
+ *  its own grid — one snapshot per attach, no follow-up compact. */
+export interface WsTermScrollbackRequestFrame {
+  type: 'scrollback';
+  lines: number;
+  cols?: number;
+  rows?: number;
 }
 
 /** Client → server `/ws/term` latency probe (docs/contracts/ws.md §1
