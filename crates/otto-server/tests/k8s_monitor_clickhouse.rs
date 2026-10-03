@@ -1251,7 +1251,16 @@ async fn rows_read(sink: &EngineSink, sql: &str) -> u64 {
 async fn rows_read_all(sink: &EngineSink, sqls: &[String]) -> u64 {
     let mut n = 0;
     for q in sqls {
-        n += rows_read(sink, q).await;
+        let r = rows_read(sink, q).await;
+        // Per-query breakdown: rows + the tables it reads.
+        let tables: Vec<&str> = q
+            .split("FROM ")
+            .skip(1)
+            .filter_map(|t| t.split_whitespace().next())
+            .filter(|t| t.starts_with("k8s_"))
+            .collect();
+        eprintln!("    {r:>9} rows  {}", tables.join(" + "));
+        n += r;
     }
     n
 }
@@ -1268,8 +1277,11 @@ fn old_versions_sql(cid: &str) -> String {
 
 /// `[(metric, labels, base, rate)]` per pod: memory, request counters by
 /// code, an 11-bucket histogram by code, sum/count by code, status series.
-fn measure_series() -> Vec<(String, Vec<(String, String)>, f64, f64)> {
-    let mut v: Vec<(String, Vec<(String, String)>, f64, f64)> = Vec::new();
+/// `(metric, labels, base, rate)` — a generated series.
+type SeriesSpec = (String, Vec<(String, String)>, f64, f64);
+
+fn measure_series() -> Vec<SeriesSpec> {
+    let mut v: Vec<SeriesSpec> = Vec::new();
     let l = |kv: &[(&str, &str)]| -> Vec<(String, String)> {
         kv.iter()
             .map(|(k, x)| (k.to_string(), x.to_string()))
@@ -1502,7 +1514,9 @@ async fn rows_read_per_refresh_before_and_after() {
         ("fleet table 24h", &before_table, &after_table),
         ("fleet chart rps 24h", &before_chart, &after_chart),
     ] {
+        eprintln!("  {what} — before:");
         let b = rows_read_all(&sink, before).await;
+        eprintln!("  {what} — after:");
         let a = rows_read_all(&sink, after).await;
         // Every new query runs (and is valid SQL), not just EXPLAINs.
         for q in after {
