@@ -434,3 +434,45 @@ async fn postgres_import_inserts_rows() {
         .await
         .ok();
 }
+
+/// DB2-01: an auto-limited read that hits the row cap keeps its pooled
+/// session — the next Run reuses the SAME backend instead of reconnecting.
+#[tokio::test]
+#[ignore]
+async fn postgres_truncated_read_keeps_its_session() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+
+    let d = PostgresDriver::default();
+    let cfg = cfg();
+    let pid = |r: &otto_dbviewer::types::QueryResult| r.rows[0][0].to_string();
+    let first = d
+        .run(&cfg, &query("SELECT pg_backend_pid()"))
+        .await
+        .expect("backend pid");
+    for _ in 0..5 {
+        let res = d
+            .run(
+                &cfg,
+                &QueryRequest {
+                    statement: "SELECT id FROM customers".into(),
+                    max_rows: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("truncated read");
+        assert!(res.truncated, "max_rows 1 over a multi-row table truncates");
+        assert_eq!(res.auto_limited, Some(1));
+    }
+    let after = d
+        .run(&cfg, &query("SELECT pg_backend_pid()"))
+        .await
+        .expect("backend pid");
+    assert_eq!(
+        pid(&first),
+        pid(&after),
+        "a truncated, server-bounded read must not close its pooled session"
+    );
+}
