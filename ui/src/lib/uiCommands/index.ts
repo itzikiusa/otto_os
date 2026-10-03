@@ -10,7 +10,7 @@
 // unit/uiCommands.test.ts fails when a file's registered names and its entry
 // below disagree, and on catalog drift.
 
-import { registerLazyUiCommands } from '../uiCommands';
+import { describeDocument, ensureUiModuleState, registerLazyUiCommands } from '../uiCommands';
 
 // ── Shell: state / open / focus (Agent 3) ──
 import './nav';
@@ -95,6 +95,20 @@ registerLazyUiCommands(
   () => import('./loops'),
   'loops',
 );
+
+// The module on screen gets its handler file shortly after it shows (its
+// store is already loaded by the page, so this is one small chunk): its
+// `registerUiState` must answer SYNCHRONOUSLY when the host window reads a
+// side pane's `__ottoUiState`, and the first command then runs at once.
+if (typeof window !== 'undefined') {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const warm = (): void => {
+    clearTimeout(timer);
+    timer = setTimeout(() => void ensureUiModuleState(describeDocument().module), 1_500);
+  };
+  window.addEventListener('hashchange', warm);
+  warm();
+}
 
 // The catalog JSON (55 KB) is a dev-time cross-check only — never in the
 // production shell chunk.
