@@ -745,20 +745,41 @@ async fn quiet_rescan_writes_no_scan_state() {
     assert_eq!(e.store.get_vault(id).await.unwrap().scan_state, "idle");
 }
 
-/// SD-15 (listing half): history for one note in a vault with 50k revisions
-/// reads the index, not 50k `meta.json` files — and the index is a cache that
-/// learns revisions it doesn't know (older history, other writers) once.
+/// SD-15 (listing half): history for one note in a vault with many revisions
+/// reads the index, not every `meta.json` — and the index is a cache that
+/// learns revisions it doesn't know (older history, other writers) once. The
+/// meta-read counter is the load-bearing check and is size-independent, so the
+/// everyday run uses 5k revisions; the 50k-scale timing budget is the ignored
+/// variant below (CI runs it in its own step).
 #[tokio::test(flavor = "multi_thread")]
+async fn revision_listing_reads_only_the_path_index() {
+    revision_listing_reads_only_the_path_index_at(5_000).await;
+}
+
+/// The SD-15 scale gate: the same scenario at 50k revisions (~40 s of file
+/// creation in a debug build). `cargo nextest run --run-ignored only -E
+/// 'test(/at_50k_revisions/)'` — CI runs it in a dedicated step.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "50k-scale perf gate; run with --run-ignored (CI: dedicated step)"]
 async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
+    revision_listing_reads_only_the_path_index_at(50_000).await;
+}
+
+async fn revision_listing_reads_only_the_path_index_at(n: usize) {
     use crate::recovery::INDEX_META_READS;
+    // INDEX_META_READS is process-global: keep the two sizes from interleaving
+    // under `cargo test --include-ignored` (threads in one process).
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _serial = SERIAL.lock().await;
     let (e, dir, id) = fixture().await;
     let hist = dir.path().join(".otto-history");
     std::fs::create_dir_all(&hist).unwrap();
-    const N: usize = 50_000;
-    for i in 0..N {
-        // Time-sortable ids like `new_id()`; every 1000th revision is `a.md`.
+    // Every `stride`-th revision is `a.md`: always 50 hits, whatever the size.
+    let stride = n / 50;
+    for i in 0..n {
+        // Time-sortable ids like `new_id()`.
         let rid = format!("r{i:08}");
-        let path = if i % 1000 == 0 { "a.md" } else { "other.md" };
+        let path = if i % stride == 0 { "a.md" } else { "other.md" };
         let rdir = hist.join(&rid);
         std::fs::create_dir(&rdir).unwrap();
         let rev = VaultRevision {
@@ -776,8 +797,8 @@ async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
     // First listing learns every revision once (pre-index history) and
     // persists the index.
     let first = e.revisions("ws", id, Some("a.md")).await.unwrap();
-    assert_eq!(first.len(), N / 1000);
-    assert_eq!(first[0].id, format!("r{:08}", N - 1000), "newest first");
+    assert_eq!(first.len(), n / stride);
+    assert_eq!(first[0].id, format!("r{:08}", n - stride), "newest first");
     assert!(hist.join(".path-index.jsonl").is_file());
 
     // Warm: no meta read beyond the 50 hits themselves, well under 50 ms.
@@ -785,7 +806,7 @@ async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
     let t = std::time::Instant::now();
     let warm = e.revisions("ws", id, Some("a.md")).await.unwrap();
     let warm_ms = t.elapsed().as_millis();
-    assert_eq!(warm.len(), N / 1000);
+    assert_eq!(warm.len(), n / stride);
     assert_eq!(
         INDEX_META_READS.load(Relaxed),
         reads,
@@ -796,11 +817,11 @@ async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
     let budget = if cfg!(debug_assertions) { 250 } else { 50 };
     assert!(
         warm_ms < budget,
-        "warm 50k-revision listing took {warm_ms} ms"
+        "warm {n}-revision listing took {warm_ms} ms"
     );
 
     // A revision the index has never seen (another writer) is learned once.
-    let rid = format!("r{:08}", N);
+    let rid = format!("r{:08}", n);
     std::fs::create_dir(hist.join(&rid)).unwrap();
     let rev = VaultRevision {
         id: rid.clone(),
@@ -825,5 +846,5 @@ async fn revision_listing_at_50k_revisions_reads_only_the_path_index() {
         .revisions_page("ws", id, Some("a.md"), Some(&next[1].id))
         .await
         .unwrap();
-    assert_eq!(older.len(), N / 1000 - 1);
+    assert_eq!(older.len(), n / stride - 1);
 }

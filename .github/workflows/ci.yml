@@ -117,6 +117,12 @@ jobs:
       - name: cargo nextest
         run: cargo nextest run --workspace --profile ci --no-fail-fast
 
+      # Scale gates kept out of the everyday run (#[ignore], e.g. the 50k-revision
+      # vault listing, ~40 s of fixture creation) still gate every PR here. Same
+      # build as above (--workspace), so this only lists + runs; no recompile.
+      - name: cargo nextest (ignored scale gates)
+        run: cargo nextest run --workspace --profile ci --run-ignored only -E 'test(/_at_50k_revisions_/)'
+
       # nextest does not execute doctests, so retain Cargo's separate gate.
       - name: cargo test (doctests)
         run: cargo test --workspace --doc

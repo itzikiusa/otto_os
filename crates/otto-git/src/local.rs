@@ -6855,12 +6855,15 @@ mod tests {
     /// SH-08: "Stage all" / "Unstage all" / "Discard all" over a list whose
     /// argv would exceed ARG_MAX (1 MB on macOS; ~1.3 MB here) — the names go
     /// over stdin (`clean` in bounded argv batches) instead of dying E2BIG.
+    /// The byte count is what matters, not the file count: ~725-byte paths
+    /// (three long components, still under macOS's 1024-byte PATH_MAX with the
+    /// temp-dir prefix) reach it with 1,800 files instead of 14,000 short ones.
     #[tokio::test]
     async fn stage_unstage_discard_a_path_list_past_arg_max() {
         let (_tmp, dir) = fixture_on_branch("main");
-        let pad = "x".repeat(90);
-        let paths: Vec<String> = (0..14_000)
-            .map(|i| format!("gen/{:02}/{pad}_{i:05}.txt", i % 50))
+        let pad = "x".repeat(235);
+        let paths: Vec<String> = (0..1_800)
+            .map(|i| format!("gen/{:02}/{pad}/{pad}/{pad}_{i:05}.txt", i % 50))
             .collect();
         for p in &paths {
             write(&dir, p, "g\n");
