@@ -314,20 +314,18 @@ fn spawn_progress_pump(
                 return;
             }
         };
-        // One adapter for file uploads, built once (send_to builds its own).
+        // One adapter for the whole run (texts + file uploads), built once: one
+        // Keychain read and the shared HTTP pool, not one per progress line.
         let adapter = otto_channels::improve_notify::build_adapter(&ctx.secrets, &integ).await;
         while let Some(item) = rx.recv().await {
             match item {
                 ProgressItem::Text(msg) => {
                     let msg = otto_core::redact::redact_text(&msg).value;
-                    let _ = otto_channels::improve_notify::send_to(
-                        &ctx.secrets,
-                        &integ,
-                        &target.chat,
-                        target.thread.as_deref(),
-                        &msg,
-                    )
-                    .await;
+                    if let Some(a) = adapter.as_ref().filter(|_| !target.chat.trim().is_empty()) {
+                        let _ = a
+                            .send_formatted(&target.chat, target.thread.as_deref(), &msg)
+                            .await;
+                    }
                 }
                 ProgressItem::File { name, text } => {
                     // Same discipline as summary.md: redact before it leaves
@@ -4160,12 +4158,8 @@ async fn execute_node(
                 let send_result = match integ.channel {
                     Channel::Telegram => {
                         let key = format!("chan-bot-{ws_id}-telegram");
-                        match otto_core::secrets::get_async(secrets, &key)
-                            .await
-                            .ok()
-                            .flatten()
-                            .filter(|t| !t.is_empty())
-                        {
+                        let token = otto_core::secrets::get_async(secrets, &key).await;
+                        match token.ok().flatten().filter(|t| !t.is_empty()) {
                             Some(token) => {
                                 let adapter = otto_channels::telegram::TelegramAdapter::new(token);
                                 adapter.send(chat, thread, &message).await.map(|_| ())
@@ -4178,12 +4172,8 @@ async fn execute_node(
                     }
                     Channel::Slack => {
                         let key = format!("chan-bot-{ws_id}-slack");
-                        match otto_core::secrets::get_async(secrets, &key)
-                            .await
-                            .ok()
-                            .flatten()
-                            .filter(|t| !t.is_empty())
-                        {
+                        let token = otto_core::secrets::get_async(secrets, &key).await;
+                        match token.ok().flatten().filter(|t| !t.is_empty()) {
                             Some(token) => {
                                 let adapter = otto_channels::slack::SlackAdapter::new(token);
                                 adapter.send(chat, thread, &message).await.map(|_| ())

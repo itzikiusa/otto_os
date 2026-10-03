@@ -57,6 +57,31 @@ test('rooms: a pending send neither duplicates nor clears newer text', async ({ 
   await expect(composer).toHaveValue('New text typed while sending');
 });
 
+test('rooms: live messages append from the WS event without a refetch (perf R2/R3)', async ({ page }) => {
+  const { ctx, base, ws } = await setup(page);
+  const room = await (await ctx.post(`${base}/api/v1/workspaces/${ws}/agent-rooms`, { data: { name: 'Live room' } })).json();
+  const gets: string[] = [];
+  page.on('request', r => {
+    if (r.method() === 'GET' && r.url().includes(`/agent-rooms/${room.id}/messages`)) gets.push(r.url());
+  });
+  await page.goto('/#/personal-agents/rooms');
+  await page.getByRole('button', { name: 'Live room 0 agents' }).click();
+  await expect.poll(() => gets.length).toBeGreaterThan(0);
+  await expect(page.getByRole('log', { name: 'Room messages' })).toBeVisible();
+  const before = gets.length;
+  // Another author posts (REST as the same user stands in for an agent).
+  await ctx.post(`${base}/api/v1/agent-rooms/${room.id}/messages`, { data: { text: 'Pushed over the event stream' } });
+  await expect(page.getByText('Pushed over the event stream', { exact: true })).toBeVisible();
+  // Our own post appends the POST's returned row, deduped against its echo.
+  await page.getByLabel('Message to the room').fill('Sent from the composer');
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await expect(page.getByText('Sent from the composer', { exact: true })).toHaveCount(1);
+  await page.waitForTimeout(300);
+  await expect(page.getByText('Sent from the composer', { exact: true })).toHaveCount(1);
+  expect(gets.length).toBe(before);
+  await ctx.dispose();
+});
+
 test('swarm feed: failed refresh retains posts and offers Retry', async ({ page }) => {
   const { ctx, base, ws } = await setup(page);
   const { swarmId } = await seedSwarm(ctx, base, ws);

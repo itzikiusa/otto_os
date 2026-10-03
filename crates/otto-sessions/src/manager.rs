@@ -3163,6 +3163,19 @@ impl SessionManager {
         self.repo.list_filtered(scopes, filter).await
     }
 
+    /// Live (non-archived, non-exited) sessions whose `meta.<meta_key>`
+    /// equals `value`, filtered in SQL (see
+    /// [`otto_state::SessionsRepo::list_live_by_meta`]).
+    pub async fn list_live_by_meta(
+        &self,
+        ws: &Id,
+        kind: Option<&str>,
+        meta_key: &'static str,
+        value: &str,
+    ) -> Result<Vec<Session>> {
+        self.repo.list_live_by_meta(ws, kind, meta_key, value).await
+    }
+
     /// True when the session has a live PTY in this daemon process.
     pub fn is_live(&self, id: &Id) -> bool {
         self.live.contains_key(id)

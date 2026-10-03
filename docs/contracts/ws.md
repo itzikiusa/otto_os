@@ -613,7 +613,9 @@ otto-state, so the row is embedded as `serde_json::Value`):
 ```
 
 - `swarm_status` — a swarm's lifecycle status changed (`active|paused|aborted`).
-- `swarm_run_updated` — a swarm run was created or changed.
+- `swarm_run_updated` — a swarm run was created or changed. `run` is lite like
+  `GET /swarm/runs`: `result` is `null` unless `kind = 'recruit'`; read one run's
+  result with `GET /swarm/runs/{rid}`.
 - `swarm_task_updated` — a swarm task was created or changed.
 - `swarm_project_cleared` — a project's board was cleared (all tasks + project-scoped
   feed deleted, in-flight runs stopped). Clients drop local task/board state for the
@@ -1059,6 +1061,28 @@ blind timer.
 - Ids only: the agent page's **Activity** tab re-fetches
   `GET /personal-agents/{id}/activity` on a matching tick.
 - TypeScript type: `{ type: 'personal_agent_activity'; workspace_id: Id; agent_id: Id; kind: string }`.
+
+---
+
+### `agent_room_message`
+
+```json
+{ "type": "agent_room_message", "workspace_id": "<Id>", "room_id": "<Id>",
+  "message_id": "<Id>", "author_kind": "agent|user", "author_id": "<Id>",
+  "text": "…", "created_at": "<RFC3339>" }
+```
+
+- Emitted by `POST /agent-rooms/{id}/messages` (a user post, or an agent post
+  over the room MCP tools) after the message is persisted.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- Carries the **whole message** (`message_id` is the `AgentRoomMessage.id`;
+  `text` ≤ 16 KB): an open Rooms view appends it to a held feed with no GET
+  (deduped by id). With no Rooms view mounted, or for a room never opened, the
+  client only bumps the rooms list's `message_count` / `last_message_at`. After
+  a WS gap (reconnect / lag `resync`) the shown room re-reads its tail
+  (`GET /agent-rooms/{id}/messages?tail=true`). Before 2026-10 the event was
+  ids only and every event forced a GET.
+- TypeScript type: `{ type: 'agent_room_message'; workspace_id: Id; room_id: Id; message_id: Id; author_kind: string; author_id: Id; text: string; created_at: string }`.
 
 ---
 

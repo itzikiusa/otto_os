@@ -347,7 +347,9 @@ pub async fn send_to(
 
 /// Build the outbound adapter for an integration, resolving its bot token from
 /// the secret store (same refs the channel manager uses). Returns `None` when the
-/// token is missing/empty (nothing to send with).
+/// token is missing/empty (nothing to send with). The Keychain read goes through
+/// `get_async` (cache hit inline, miss on the blocking pool) so a slow keychain
+/// never parks a runtime worker; adapters share the process-wide HTTP clients.
 pub async fn build_adapter(
     secrets: &Arc<dyn SecretStore>,
     integ: &Integration,

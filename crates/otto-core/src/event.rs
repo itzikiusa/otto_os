@@ -489,14 +489,18 @@ pub enum Event {
         kind: String,
     },
     /// A message was appended to an agent room (by an agent over the room MCP
-    /// tools, or by the user over REST). Carries ids only — clients re-fetch the
-    /// room's messages after their cursor. `author_kind` is "agent" | "user".
+    /// tools, or by the user over REST). Carries the whole message (`text`,
+    /// `created_at`) so an open room appends it without a GET; a client only
+    /// re-fetches after its cursor when it detects a gap. `author_kind` is
+    /// "agent" | "user".
     AgentRoomMessage {
         workspace_id: Id,
         room_id: Id,
         message_id: Id,
         author_kind: String,
         author_id: Id,
+        text: String,
+        created_at: String,
     },
     /// A Run with Otto run advanced a stage, errored, or finished. The Run with
     /// Otto page re-fetches the run + its timeline on a matching tick. `status` is

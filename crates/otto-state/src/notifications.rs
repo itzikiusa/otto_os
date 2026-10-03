@@ -214,12 +214,20 @@ impl NotificationsRepo {
                 .await
             }
             NoticeAccess::User(uid) => {
+                // Two LIMITed range reads over `(user_id, created_at, id)`
+                // merged, instead of an OR filter (MULTI-INDEX OR + temp
+                // B-tree sort over every visible row).
                 sqlx::query(
-                    "SELECT * FROM notifications
-                     WHERE user_id IS NULL OR user_id = ?
+                    "SELECT * FROM (SELECT * FROM notifications WHERE user_id IS NULL
+                                    ORDER BY created_at DESC, id DESC LIMIT ?)
+                     UNION ALL
+                     SELECT * FROM (SELECT * FROM notifications WHERE user_id = ?
+                                    ORDER BY created_at DESC, id DESC LIMIT ?)
                      ORDER BY created_at DESC, id DESC LIMIT ?",
                 )
+                .bind(limit)
                 .bind(uid)
+                .bind(limit)
                 .bind(limit)
                 .fetch_all(&self.pool)
                 .await
@@ -370,5 +378,136 @@ impl NotificationsRepo {
         .await
         .map_err(dberr("put notification settings"))?;
         self.get_settings().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    async fn repo() -> NotificationsRepo {
+        let opts = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(false);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        NotificationsRepo::new(pool)
+    }
+
+    fn notice(title: &str, key: Option<&str>, user: Option<&str>) -> NewNotice {
+        NewNotice {
+            kind: NoticeKind::System,
+            severity: NoticeSeverity::Info,
+            title: title.into(),
+            body: format!("body of {title}"),
+            source_key: key.map(Into::into),
+            action: None,
+            user_id: user.map(Into::into),
+        }
+    }
+
+    async fn plan(r: &NotificationsRepo, sql: &str) -> String {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")))
+            .fetch_all(&r.pool)
+            .await
+            .unwrap();
+        rows.iter()
+            .map(|r| r.get::<String, _>("detail"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    #[tokio::test]
+    async fn dedupe_is_per_owner_and_refresh_resets_read() {
+        let r = repo().await;
+        let a = r.create(notice("a", Some("k"), None)).await.unwrap();
+        r.mark_read(&a.id, &NoticeAccess::All).await.unwrap();
+        let again = r.create(notice("a2", Some("k"), None)).await.unwrap();
+        assert_eq!(again.id, a.id, "global key refreshed in place");
+        assert!(!again.read, "refresh resets read");
+        assert_eq!(again.title, "a2");
+        let mine = r.create(notice("m", Some("k"), Some("u1"))).await.unwrap();
+        assert_ne!(mine.id, a.id, "same key, different owner → new row");
+        let fresh = r.create(notice("n", None, None)).await.unwrap();
+        let fresh2 = r.create(notice("n", None, None)).await.unwrap();
+        assert_ne!(fresh.id, fresh2.id, "no key → always a new row");
+    }
+
+    #[tokio::test]
+    async fn list_scopes_and_orders_newest_first() {
+        let r = repo().await;
+        let g1 = r.create(notice("g1", None, None)).await.unwrap();
+        let u1 = r.create(notice("u1", None, Some("u1"))).await.unwrap();
+        let _u2 = r.create(notice("u2", None, Some("u2"))).await.unwrap();
+        let g2 = r.create(notice("g2", None, None)).await.unwrap();
+        let u1b = r.create(notice("u1b", None, Some("u1"))).await.unwrap();
+
+        let ids = |v: Vec<Notice>| v.into_iter().map(|n| n.id).collect::<Vec<_>>();
+        let mine = ids(r.list(10, &NoticeAccess::User("u1".into())).await.unwrap());
+        assert_eq!(
+            mine,
+            vec![u1b.id.clone(), g2.id.clone(), u1.id.clone(), g1.id.clone()]
+        );
+        // The UNION's outer LIMIT applies across both branches.
+        let top2 = ids(r.list(2, &NoticeAccess::User("u1".into())).await.unwrap());
+        assert_eq!(top2, vec![u1b.id.clone(), g2.id.clone()]);
+        assert_eq!(r.list(10, &NoticeAccess::All).await.unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn unread_and_mutations_respect_ownership() {
+        let r = repo().await;
+        let g = r.create(notice("g", None, None)).await.unwrap();
+        let m = r.create(notice("m", None, Some("u1"))).await.unwrap();
+        let other = r.create(notice("o", None, Some("u2"))).await.unwrap();
+        let u1 = NoticeAccess::User("u1".into());
+        assert_eq!(r.unread_count(&u1).await.unwrap(), 1, "global excluded");
+        assert_eq!(r.unread_count(&NoticeAccess::All).await.unwrap(), 3);
+
+        // A user can't flip a global or someone else's notice.
+        r.mark_read(&g.id, &u1).await.unwrap();
+        r.mark_read(&other.id, &u1).await.unwrap();
+        assert!(!r.get(&g.id).await.unwrap().read);
+        assert!(!r.get(&other.id).await.unwrap().read);
+        r.mark_all_read(&u1).await.unwrap();
+        assert!(r.get(&m.id).await.unwrap().read);
+        assert_eq!(r.unread_count(&NoticeAccess::All).await.unwrap(), 2);
+
+        r.dismiss(&g.id, &u1).await.unwrap();
+        assert!(r.get(&g.id).await.is_ok(), "user can't dismiss a global");
+        r.clear(&u1).await.unwrap();
+        assert!(r.get(&m.id).await.is_err());
+        assert!(r.get(&other.id).await.is_ok());
+    }
+
+    /// Perf §15 R6/M1: the per-user list is two index range reads (no
+    /// MULTI-INDEX OR, no full scan) and the unread badge reads the partial
+    /// unread index.
+    #[tokio::test]
+    async fn hot_queries_use_indexes() {
+        let r = repo().await;
+        let p = plan(
+            &r,
+            "SELECT * FROM (SELECT * FROM notifications WHERE user_id IS NULL \
+             ORDER BY created_at DESC, id DESC LIMIT 300) UNION ALL \
+             SELECT * FROM (SELECT * FROM notifications WHERE user_id = 'u1' \
+             ORDER BY created_at DESC, id DESC LIMIT 300) \
+             ORDER BY created_at DESC, id DESC LIMIT 300",
+        )
+        .await;
+        assert!(p.contains("idx_notifications_user_created"), "{p}");
+        assert!(!p.contains("MULTI-INDEX OR"), "{p}");
+        assert!(!p.contains("SCAN notifications"), "{p}");
+        let p = plan(
+            &r,
+            "SELECT COUNT(*) FROM notifications WHERE read = 0 AND user_id = 'u1'",
+        )
+        .await;
+        assert!(p.contains("idx_notifications_unread"), "{p}");
     }
 }

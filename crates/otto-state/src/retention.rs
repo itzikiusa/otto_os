@@ -53,6 +53,10 @@ pub const DEFAULT_REVIEW_RETRY_DAYS: i64 = 14;
 /// Smallest `review_retry_days`: a finished review keeps its retry artifacts
 /// at least this long.
 pub const MIN_REVIEW_RETRY_DAYS: i64 = 3;
+/// Smallest `notifications_max_rows` (perf §15 R4).
+pub const MIN_NOTIFICATIONS_MAX_ROWS: i64 = 500;
+/// Smallest `room_messages_keep_per_room` (perf §15 R4).
+pub const MIN_ROOM_MESSAGES_KEEP: i64 = 500;
 
 /// Retention windows. Defaults are conservative; see
 /// `docs/features/backup-restore.md` ("Data retention").
@@ -78,6 +82,16 @@ pub struct RetentionPolicy {
     /// whose review row is gone) older than this are pruned. A running
     /// review's artifacts are never touched.
     pub review_retry_days: i64,
+    /// `notifications`: READ notices older than this are pruned.
+    pub notifications_read_days: i64,
+    /// `notifications`: UNREAD notices older than this are pruned too (a badge
+    /// nobody cleared in this long is noise). Never below the read window.
+    pub notifications_unread_days: i64,
+    /// `notifications`: hard row cap — only the newest N survive, whatever
+    /// their age.
+    pub notifications_max_rows: i64,
+    /// `agent_room_messages`: each room keeps its newest N messages.
+    pub room_messages_keep_per_room: i64,
 }
 
 impl Default for RetentionPolicy {
@@ -90,6 +104,10 @@ impl Default for RetentionPolicy {
             mcp_audit_days: 90,
             audit_log_days: 90,
             review_retry_days: DEFAULT_REVIEW_RETRY_DAYS,
+            notifications_read_days: 30,
+            notifications_unread_days: 90,
+            notifications_max_rows: 5_000,
+            room_messages_keep_per_room: 5_000,
         }
     }
 }
@@ -112,6 +130,13 @@ impl RetentionPolicy {
         self.mcp_audit_days = self.mcp_audit_days.max(MIN_DAYS);
         self.audit_log_days = self.audit_log_days.max(MIN_AUDIT_LOG_DAYS);
         self.review_retry_days = self.review_retry_days.max(MIN_REVIEW_RETRY_DAYS);
+        self.notifications_read_days = self.notifications_read_days.max(MIN_DAYS);
+        self.notifications_unread_days = self
+            .notifications_unread_days
+            .max(self.notifications_read_days);
+        self.notifications_max_rows = self.notifications_max_rows.max(MIN_NOTIFICATIONS_MAX_ROWS);
+        self.room_messages_keep_per_room =
+            self.room_messages_keep_per_room.max(MIN_ROOM_MESSAGES_KEEP);
         self
     }
 }
@@ -125,6 +150,8 @@ pub struct RetentionReport {
     pub audit_log: u64,
     pub review_agent_prompts: u64,
     pub review_diffs: u64,
+    pub notifications: u64,
+    pub room_messages: u64,
 }
 
 impl RetentionReport {
@@ -135,6 +162,8 @@ impl RetentionReport {
             + self.audit_log
             + self.review_agent_prompts
             + self.review_diffs
+            + self.notifications
+            + self.room_messages
     }
 }
 
@@ -184,7 +213,110 @@ impl RetentionRepo {
         report.review_diffs = self
             .delete_review_artifacts("review_diffs", &review_cut)
             .await?;
+        report.notifications = self
+            .prune_notifications(
+                &cutoff(p.notifications_read_days),
+                &cutoff(p.notifications_unread_days),
+                p.notifications_max_rows,
+            )
+            .await?;
+        report.room_messages = self
+            .prune_room_messages(p.room_messages_keep_per_room)
+            .await?;
         Ok(report)
+    }
+
+    /// Run a batched `DELETE … WHERE rowid IN (<select> LIMIT BATCH)` until a
+    /// batch comes back short. `q` must carry its own `LIMIT {BATCH}`.
+    async fn delete_batched(&self, q: &str, binds: &[&str], what: &'static str) -> Result<u64> {
+        let mut total = 0u64;
+        loop {
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(q));
+            for b in binds {
+                query = query.bind(*b);
+            }
+            let n = query
+                .execute(&self.pool)
+                .await
+                .map_err(dberr(what))?
+                .rows_affected();
+            total += n;
+            if n < BATCH as u64 {
+                return Ok(total);
+            }
+            tokio::time::sleep(BATCH_PAUSE).await;
+        }
+    }
+
+    /// `notifications` (perf §15 R4): read notices past `read_cutoff`, unread
+    /// ones past `unread_cutoff`, then everything beyond the newest
+    /// `max_rows`. Producers de-dupe per session/run, so without this the
+    /// table grew for the life of the install.
+    async fn prune_notifications(
+        &self,
+        read_cutoff: &str,
+        unread_cutoff: &str,
+        max_rows: i64,
+    ) -> Result<u64> {
+        let aged = self
+            .delete_batched(
+                &format!(
+                    "DELETE FROM notifications WHERE rowid IN \
+                     (SELECT rowid FROM notifications \
+                      WHERE created_at < ? AND (read = 1 OR created_at < ?) LIMIT {BATCH})"
+                ),
+                &[read_cutoff, unread_cutoff],
+                "retention: notifications",
+            )
+            .await?;
+        let capped = self
+            .delete_batched(
+                &format!(
+                    "DELETE FROM notifications WHERE rowid IN \
+                     (SELECT rowid FROM notifications \
+                      ORDER BY created_at DESC, id DESC LIMIT {BATCH} OFFSET {max_rows})"
+                ),
+                &[],
+                "retention: notifications cap",
+            )
+            .await?;
+        Ok(aged + capped)
+    }
+
+    /// `agent_room_messages` (perf §15 R4): each room keeps its newest `keep`
+    /// messages (by insertion order, `rowid`). Rooms over the cap are found on
+    /// the `(room_id, …)` index by a read; each trimmed room's denormalized
+    /// `agent_rooms.message_count` is recomputed (`last_message_at` is
+    /// unaffected — only the oldest rows go).
+    async fn prune_room_messages(&self, keep: i64) -> Result<u64> {
+        let rooms: Vec<String> = sqlx::query_scalar(
+            "SELECT room_id FROM agent_room_messages GROUP BY room_id HAVING COUNT(*) > ?",
+        )
+        .bind(keep)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("retention: room candidates"))?;
+        let q = format!(
+            "DELETE FROM agent_room_messages WHERE rowid IN \
+             (SELECT rowid FROM agent_room_messages WHERE room_id = ? \
+              ORDER BY rowid DESC LIMIT {BATCH} OFFSET {keep})"
+        );
+        let mut total = 0u64;
+        for room in &rooms {
+            total += self
+                .delete_batched(&q, &[room.as_str()], "retention: room messages")
+                .await?;
+            sqlx::query(
+                "UPDATE agent_rooms SET message_count = \
+                 (SELECT COUNT(*) FROM agent_room_messages m WHERE m.room_id = agent_rooms.id) \
+                 WHERE id = ?",
+            )
+            .bind(room)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("retention: room message count"))?;
+        }
+        Ok(total)
     }
 
     /// Batched delete of a review retry-artifact table's rows older than
@@ -605,5 +737,130 @@ mod tests {
             .unwrap();
         ids.sort();
         assert_eq!(ids, vec!["d1", "d4", "d5"]);
+    }
+
+    /// Perf §15 R4: read notices age out at 30 d, unread at 90 d, and the
+    /// table is capped at the newest `notifications_max_rows`.
+    #[tokio::test]
+    async fn notifications_age_windows_and_row_cap() {
+        let pool = mem_pool().await;
+        for (id, days, read) in [
+            ("read-old", 40, 1),
+            ("read-young", 5, 1),
+            ("unread-mid", 40, 0),
+            ("unread-ancient", 120, 0),
+        ] {
+            sqlx::query(
+                "INSERT INTO notifications (id, created_at, read, kind, severity, title, body) \
+                 VALUES (?, ?, ?, 'system', 'info', 't', 'b')",
+            )
+            .bind(id)
+            .bind(ago(days))
+            .bind(read)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let repo = RetentionRepo::new(pool.clone());
+        let r = repo.prune(&RetentionPolicy::default()).await.unwrap();
+        assert_eq!(r.notifications, 2);
+        let mut ids: Vec<String> = sqlx::query_scalar("SELECT id FROM notifications")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["read-young", "unread-mid"]);
+
+        // Row cap: 1 200 fresh unread rows, cap 500 → the newest 500 stay.
+        sqlx::query(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1200) \
+             INSERT INTO notifications (id, created_at, read, kind, severity, title, body) \
+             SELECT printf('cap-%05d', i), strftime('%Y-%m-%dT%H:%M:%S', 'now', printf('-%d seconds', 1200 - i)) || 'Z', \
+                    0, 'system', 'info', 't', 'b' FROM n",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let policy = RetentionPolicy {
+            notifications_max_rows: 1,
+            ..Default::default()
+        };
+        repo.prune(&policy).await.unwrap();
+        assert_eq!(
+            count(&pool, "SELECT COUNT(*) FROM notifications").await,
+            500
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM notifications WHERE id >= 'cap-00701'"
+            )
+            .await,
+            500,
+            "the newest rows survive"
+        );
+    }
+
+    /// Perf §15 R4: each room keeps its newest N messages; the room's
+    /// denormalized `message_count` follows the trim.
+    #[tokio::test]
+    async fn room_messages_capped_per_room() {
+        let pool = mem_pool().await;
+        for room in ["big", "small"] {
+            sqlx::query(
+                "INSERT INTO agent_rooms (id, workspace_id, name, created_at, updated_at) \
+                 VALUES (?, 'w', ?, 'x', 'x')",
+            )
+            .bind(room)
+            .bind(room)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for (room, n) in [("big", 1300), ("small", 20)] {
+            sqlx::query(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) \
+                 INSERT INTO agent_room_messages (id, room_id, author_kind, author_id, text, created_at) \
+                 SELECT printf('%s-%05d', ?, i), ?, 'user', 'u', 'hi', 'x' FROM n",
+            )
+            .bind(n)
+            .bind(room)
+            .bind(room)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let r = RetentionRepo::new(pool.clone())
+            .prune(&RetentionPolicy {
+                room_messages_keep_per_room: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(r.room_messages, 800);
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM agent_room_messages WHERE room_id='big' AND id >= 'big-00801'"
+            )
+            .await,
+            500
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM agent_room_messages WHERE room_id='small'"
+            )
+            .await,
+            20
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT message_count FROM agent_rooms WHERE id='big'"
+            )
+            .await,
+            500
+        );
     }
 }

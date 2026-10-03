@@ -1437,14 +1437,17 @@ export type OttoEvent =
     }
   | {
       /** A message was appended to an agent room (agent via the room MCP tools,
-       *  or the user over REST). Ids only — clients re-fetch the room's messages
-       *  after their cursor. */
+       *  or the user over REST). Carries the whole message (`text`,
+       *  `created_at`), so an open room appends it with no GET; a client
+       *  re-reads the room only after a gap (reconnect / lag). */
       type: 'agent_room_message';
       workspace_id: Id;
       room_id: Id;
       message_id: Id;
       author_kind: string;
       author_id: Id;
+      text: string;
+      created_at: string;
     }
   | {
       /** A Kubernetes cluster row was created/updated/deleted — the Kubernetes

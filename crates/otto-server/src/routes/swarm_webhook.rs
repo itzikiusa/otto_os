@@ -121,6 +121,8 @@ pub async fn trigger(
     Json(req): Json<SwarmTriggerReq>,
 ) -> Response {
     // 1. Auth against the per-workspace webhook key.
+    // Unauthenticated route: the Keychain read must not park a runtime worker
+    // (cache hit inline, miss on the blocking pool).
     let expected = match otto_core::secrets::get_async(
         &ctx.secrets,
         &format!("chan-bot-{ws}-webhook"),

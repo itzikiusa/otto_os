@@ -108,13 +108,14 @@ impl SwarmService {
         let swarm = self.repo.get_swarm(id).await?;
         let agents = self.repo.list_agents(id).await?;
         let projects = self.repo.list_projects(id).await?;
-        let tasks = self.repo.list_tasks_for_swarm(id).await?;
+        // Counted, not decoded — the detail only reports how many (perf §15 F4).
+        let tasks = self.repo.count_tasks(id).await?;
         let running_runs = self.repo.running_count(id).await?;
         let spend = self.repo.swarm_spend(id).await?;
         let counts = SwarmCounts {
             agents: agents.len(),
             projects: projects.len(),
-            tasks: tasks.len(),
+            tasks: tasks as usize,
             running_runs,
             total_runs: spend.total_runs,
             cost_usd: spend.cost_usd,

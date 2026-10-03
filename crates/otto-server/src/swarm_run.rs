@@ -226,7 +226,12 @@ const RESULT_SCHEMA: &str = r#"{
 
 /// Find a reusable live/resumable session for this agent, or `None`.
 async fn find_agent_session(ctx: &ServerCtx, ws: &Id, agent_id: &str) -> Option<Id> {
-    let sessions = ctx.manager.list_by_workspace(ws).await.ok()?;
+    // Targeted SQL lookup (perf §15 F7) — not the workspace's full history.
+    let sessions = ctx
+        .manager
+        .list_live_by_meta(ws, Some("agent"), "agent_id", agent_id)
+        .await
+        .ok()?;
     sessions.into_iter().find_map(|s| {
         let is_agent = s.kind == SessionKind::Agent && !s.archived;
         let mine = s.meta.get("agent_id").and_then(|v| v.as_str()) == Some(agent_id);
@@ -881,9 +886,15 @@ async fn mark_run_error(ctx: &ServerCtx, run: &SwarmRun, msg: &str) {
     emit_run(ctx, &run.id).await;
 }
 
-/// Re-read a run and broadcast `SwarmRunUpdated`.
+/// Re-read a run and broadcast `SwarmRunUpdated`. The event is "lite" like
+/// the run list (perf §15 F8): `result` (~8 KB parsed turn JSON) is dropped
+/// except for `kind = 'recruit'` (the Runs list's Hire button reads it);
+/// the inspector fetches `GET /swarm/runs/{rid}` for one run's result.
 pub async fn emit_run(ctx: &ServerCtx, run_id: &str) {
-    if let Ok(run) = ctx.swarm_repo.get_run(&run_id.to_string()).await {
+    if let Ok(mut run) = ctx.swarm_repo.get_run(&run_id.to_string()).await {
+        if run.kind != "recruit" {
+            run.result = None;
+        }
         let _ = ctx.events.send(Event::SwarmRunUpdated {
             workspace_id: run.workspace_id.clone(),
             swarm_id: run.swarm_id.clone(),

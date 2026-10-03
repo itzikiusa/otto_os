@@ -76,6 +76,10 @@ const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 /// [`STATUS_TICK`]). A tailer whose session was deleted/archived/exited must
 /// wind down instead of posting (and retrying) forever as a zombie.
 const LIVENESS_EVERY_TICKS: u32 = 8;
+/// Between turns the status ticker is paused; this slower timer keeps the
+/// session-liveness probe running so a parked tailer still winds down when its
+/// session is deleted/archived/exited.
+const IDLE_LIVENESS: Duration = Duration::from_secs(30);
 /// How often the rolling feed's header advances to the next liveness phrase
 /// while a turn is in progress. Kept above [`EDIT_THROTTLE`] so a status tick is
 /// always a legitimate (non-throttled) edit. Slack has no typing indicator, so
@@ -102,9 +106,10 @@ struct SessionEntry {
     /// the tailer then resets the feed (a fresh "working…" message) for the new
     /// turn instead of editing the previous turn's (now scrolled-up) message.
     new_turn: Arc<AtomicBool>,
-    /// Whether the typing indicator should be sent right now (on while a turn is
-    /// in progress, off after its Final).
-    typing_active: Arc<AtomicBool>,
+    /// Whether a turn is in flight (on from `begin_turn`, off after its Final).
+    /// Drives the typing indicator, the status ticker and the transcript poll
+    /// cadence; a `watch` so all three sleep between turns and wake on the flip.
+    typing_active: Arc<tokio::sync::watch::Sender<bool>>,
     /// Where the feed + reply go. Replaced by every `attach`, so the LATEST
     /// turn's destination wins: a webhook caller's own callback URL (a new
     /// `WebhookAdapter` per request — two automations sharing a conversation
@@ -189,7 +194,7 @@ impl Mirror {
 
         let cancel = Arc::new(AtomicBool::new(false));
         let new_turn = Arc::new(AtomicBool::new(false));
-        let typing_active = Arc::new(AtomicBool::new(true));
+        let typing_active = Arc::new(tokio::sync::watch::Sender::new(true));
         let dest = Arc::new(StdMutex::new(destination));
         guard.insert(
             session_id.clone(),
@@ -221,7 +226,7 @@ impl Mirror {
     pub async fn begin_turn(&self, session_id: &Id) {
         if let Some(e) = self.sessions.lock().await.get(session_id) {
             e.new_turn.store(true, Ordering::Relaxed);
-            e.typing_active.store(true, Ordering::Relaxed);
+            e.typing_active.send_replace(true);
         }
     }
 
@@ -233,7 +238,7 @@ impl Mirror {
         since: chrono::DateTime<chrono::Utc>,
         cancel: Arc<AtomicBool>,
         new_turn: Arc<AtomicBool>,
-        typing_active: Arc<AtomicBool>,
+        typing_active: Arc<tokio::sync::watch::Sender<bool>>,
     ) {
         // --- Step 1: wait for provider_session_id and cwd ---
         let (cwd, psid) = match self.wait_for_psid(&session_id, &cancel).await {
@@ -254,37 +259,49 @@ impl Mirror {
         // a channel to pass events to an async task).
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TranscriptEvent>();
         let cancel_clone = Arc::clone(&cancel);
+        let poll_active = typing_active.subscribe();
 
         tokio::spawn(async move {
-            transcript::tail(
+            transcript::tail_adaptive(
                 path,
                 Some(since),
                 move |evt| {
                     let _ = tx.send(evt);
                 },
                 cancel_clone,
+                poll_active,
             )
             .await;
         });
 
         // --- Step 3: spawn the typing indicator task ---
-        // Persistent across turns: sends the typing action only while
-        // `typing_active` is set (on during a turn, off after its Final), and
-        // exits when `typing_stop` is set as the tailer winds down.
+        // Persistent across turns: sends the typing action every
+        // TYPING_INTERVAL while a turn is in flight, and between turns sleeps
+        // on the `typing_active` watch instead of waking every few seconds.
+        // Adapters whose `typing` is the no-op default (Slack) never get a
+        // call — the task just waits for the turn to end. Exits when
+        // `typing_stop` is set or the watch's senders are gone.
         let typing_stop = Arc::new(AtomicBool::new(false));
         {
             let stop = Arc::clone(&typing_stop);
-            let active = Arc::clone(&typing_active);
+            let mut active = typing_active.subscribe();
             let dest = Arc::clone(&dest);
             tokio::spawn(async move {
                 loop {
                     if stop.load(Ordering::Relaxed) {
                         return;
                     }
-                    if active.load(Ordering::Relaxed) {
-                        let d = current_dest(&dest);
-                        let _ = d.adapter.typing(&d.chat).await;
+                    if active.wait_for(|on| *on).await.is_err() {
+                        return;
                     }
+                    let d = current_dest(&dest);
+                    if !d.adapter.supports_typing() {
+                        if active.wait_for(|on| !*on).await.is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                    let _ = d.adapter.typing(&d.chat).await;
                     tokio::time::sleep(TYPING_INTERVAL).await;
                 }
             });
@@ -321,8 +338,11 @@ impl Mirror {
         let mut code_blocks = matches!(adapter.channel(), Channel::Slack);
 
         // Liveness ticker: advances the header phrase while a turn is in flight.
+        // Paused between turns (see the select below), where only the slower
+        // IDLE_LIVENESS probe runs.
         let mut status_ticker = tokio::time::interval(STATUS_TICK);
         status_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut turn_rx = typing_active.subscribe();
 
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -338,7 +358,7 @@ impl Mirror {
                 status_idx = 0;
                 last_edit = Instant::now() - EDIT_THROTTLE * 2; // post the new turn's first update at once
                 feed = FeedHealth::new();
-                typing_active.store(true, Ordering::Relaxed);
+                typing_active.send_replace(true);
                 let d = current_dest(&dest);
                 adapter = d.adapter;
                 chat = d.chat;
@@ -347,6 +367,9 @@ impl Mirror {
                 code_blocks = matches!(adapter.channel(), Channel::Slack);
             }
 
+            // Seen-mark the current turn state so `changed()` below only fires
+            // on a flip that happened after this point.
+            let turn_live = *turn_rx.borrow_and_update();
             tokio::select! {
                 maybe_evt = rx.recv() => {
                     let Some(evt) = maybe_evt else { break; };
@@ -381,7 +404,7 @@ impl Mirror {
                             );
                             // Turn finished — pause typing + status rotation until
                             // the next comment resumes it (via begin_turn).
-                            typing_active.store(false, Ordering::Relaxed);
+                            typing_active.send_replace(false);
 
                             // Freeze the rolling feed to a final "done — N steps".
                             let n = activity_lines.len();
@@ -449,7 +472,22 @@ impl Mirror {
                         }
                     }
                 }
-                _ = status_ticker.tick() => {
+                // A turn flip (begin_turn / our own Final) — loop round so a
+                // new turn is picked up at once even while the ticker is paused.
+                changed = turn_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+                idle = async {
+                    if turn_live {
+                        status_ticker.tick().await;
+                        false
+                    } else {
+                        tokio::time::sleep(IDLE_LIVENESS).await;
+                        true
+                    }
+                } => {
                     if cancel.load(Ordering::Relaxed) {
                         break;
                     }
@@ -457,9 +495,10 @@ impl Mirror {
                     // task is a detached spawn whose cancel flag is only set on
                     // shutdown, so without this check a deleted/archived/exited
                     // session leaves a zombie tailer posting (and retrying) into
-                    // the channel forever.
+                    // the channel forever. Every IDLE_LIVENESS tick between turns;
+                    // every LIVENESS_EVERY_TICKS status ticks during one.
                     ticks_since_liveness += 1;
-                    if ticks_since_liveness >= LIVENESS_EVERY_TICKS {
+                    if idle || ticks_since_liveness >= LIVENESS_EVERY_TICKS {
                         ticks_since_liveness = 0;
                         match self.manager.get(&session_id).await {
                             Ok(s) if !s.archived && s.status != SessionStatus::Exited => {}
@@ -474,7 +513,7 @@ impl Mirror {
                     // shows "Analyzing…"), then advance the phrase for next time.
                     // `interval`'s first tick fires immediately, so rendering before
                     // the increment makes "Analyzing…" (idx 0) the opening phrase.
-                    if typing_active.load(Ordering::Relaxed) {
+                    if !idle {
                         if feed.can_send() && last_edit.elapsed() >= EDIT_THROTTLE {
                             last_edit = Instant::now();
                             let body = render_feed(&status_header(status_idx), &activity_lines);

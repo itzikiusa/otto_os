@@ -1101,13 +1101,13 @@ impl AgentRoomsRepo {
     }
 
     /// Message count + newest message time of every room in workspace `ws`
-    /// that has messages, keyed by room id (rides `idx_arm_room`).
+    /// that has messages, keyed by room id. Reads the activity denormalized
+    /// onto `agent_rooms` (migration 0165, kept by [`Self::add_message`]) —
+    /// one indexed pass over the workspace's rooms, never over their messages.
     pub async fn activity_by_workspace(&self, ws: &str) -> Result<HashMap<String, RoomActivity>> {
         let rows = sqlx::query(
-            "SELECT m.room_id, COUNT(*) AS n, MAX(m.created_at) AS last_at \
-               FROM agent_room_messages m \
-              WHERE m.room_id IN (SELECT id FROM agent_rooms WHERE workspace_id = ?) \
-              GROUP BY m.room_id",
+            "SELECT id, message_count, last_message_at FROM agent_rooms \
+              WHERE workspace_id = ? AND message_count > 0",
         )
         .bind(ws)
         .fetch_all(&self.pool)
@@ -1117,14 +1117,34 @@ impl AgentRoomsRepo {
             .iter()
             .map(|r| {
                 (
-                    r.get::<String, _>("room_id"),
+                    r.get::<String, _>("id"),
                     RoomActivity {
-                        message_count: r.get("n"),
-                        last_message_at: r.get("last_at"),
+                        message_count: r.get("message_count"),
+                        last_message_at: r.get("last_message_at"),
                     },
                 )
             })
             .collect())
+    }
+
+    /// Re-derive the denormalized `message_count` / `last_message_at` of every
+    /// room whose stored count drifted from its rows — call after deleting
+    /// messages outside [`Self::add_message`] (retention pruning). Returns the
+    /// number of rooms corrected.
+    pub async fn recount_activity(&self) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE agent_rooms \
+                SET message_count = (SELECT COUNT(*) FROM agent_room_messages m \
+                                      WHERE m.room_id = agent_rooms.id), \
+                    last_message_at = (SELECT MAX(m.created_at) FROM agent_room_messages m \
+                                        WHERE m.room_id = agent_rooms.id) \
+              WHERE message_count != (SELECT COUNT(*) FROM agent_room_messages m \
+                                       WHERE m.room_id = agent_rooms.id)",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("recount agent room activity"))?;
+        Ok(res.rows_affected())
     }
 
     pub async fn rename(&self, id: &str, name: &str) -> Result<AgentRoom> {
@@ -1198,9 +1218,17 @@ impl AgentRoomsRepo {
 
     // -- Messages ------------------------------------------------------------
 
+    /// Append a message and bump the room's denormalized activity in the same
+    /// transaction (the rooms list reads `agent_rooms.message_count` /
+    /// `last_message_at` instead of scanning messages).
     pub async fn add_message(&self, m: NewRoomMessage) -> Result<AgentRoomMessage> {
         let id = new_id();
         let now = fmt(Utc::now());
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("add agent room message tx"))?;
         sqlx::query(
             "INSERT INTO agent_room_messages (id, room_id, author_kind, author_id, text, created_at) \
              VALUES (?, ?, ?, ?, ?, ?)",
@@ -1211,15 +1239,44 @@ impl AgentRoomsRepo {
         .bind(&m.author_id)
         .bind(&m.text)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("add agent room message"))?;
-        let row = sqlx::query("SELECT * FROM agent_room_messages WHERE id = ?")
-            .bind(&id)
-            .fetch_one(&self.pool)
+        sqlx::query(
+            "UPDATE agent_rooms SET message_count = message_count + 1, last_message_at = ? \
+              WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(&m.room_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(dberr("bump agent room activity"))?;
+        tx.commit()
             .await
-            .map_err(dberr("agent room message not found"))?;
-        row_to_message(&row)
+            .map_err(dberr("add agent room message commit"))?;
+        Ok(AgentRoomMessage {
+            id,
+            room_id: m.room_id,
+            author_kind: m.author_kind,
+            author_id: m.author_id,
+            text: m.text,
+            created_at: now,
+        })
+    }
+
+    /// The insertion `rowid` of message `id` IN room `room_id` (`None` when
+    /// unknown here) — the paging cursor, resolved once so the page read is
+    /// a plain `(room_id, rowid)` range scan on `idx_arm_room_seq`.
+    async fn cursor_seq(&self, room_id: &str, id: &str) -> Result<Option<i64>> {
+        let row = sqlx::query(
+            "SELECT rowid AS seq FROM agent_room_messages WHERE id = ? AND room_id = ?",
+        )
+        .bind(id)
+        .bind(room_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("agent room message cursor"))?;
+        Ok(row.map(|r| r.get("seq")))
     }
 
     /// Chronological page: messages after the `after` message, oldest first,
@@ -1236,16 +1293,17 @@ impl AgentRoomsRepo {
         after: Option<&str>,
         limit: i64,
     ) -> Result<Vec<AgentRoomMessage>> {
+        let from = match after {
+            Some(a) => self.cursor_seq(room_id, a).await?.unwrap_or(0),
+            None => 0,
+        };
         let rows = sqlx::query(
             "SELECT * FROM agent_room_messages \
-             WHERE room_id = ? \
-               AND rowid > COALESCE((SELECT rowid FROM agent_room_messages \
-                                      WHERE id = ? AND room_id = ?), 0) \
+             WHERE room_id = ? AND rowid > ? \
              ORDER BY rowid ASC LIMIT ?",
         )
         .bind(room_id)
-        .bind(after.unwrap_or(""))
-        .bind(room_id)
+        .bind(from)
         .bind(limit.clamp(1, 500))
         .fetch_all(&self.pool)
         .await
@@ -1263,23 +1321,29 @@ impl AgentRoomsRepo {
         before: Option<&str>,
         limit: i64,
     ) -> Result<Vec<AgentRoomMessage>> {
-        let rows = sqlx::query(
-            "SELECT * FROM (SELECT m.*, m.rowid AS seq FROM agent_room_messages m \
-               WHERE m.room_id = ? \
-                 AND (? IS NULL OR m.rowid < \
-                      COALESCE((SELECT rowid FROM agent_room_messages \
-                                WHERE id = ? AND room_id = ?), 0)) \
-               ORDER BY m.rowid DESC LIMIT ?) \
-             ORDER BY seq ASC",
+        // Two plain statements instead of one `? IS NULL OR …` predicate, so
+        // the planner sees a bound range and walks `idx_arm_room_seq`
+        // backwards from the cursor (no temp B-tree over the whole room).
+        let upto = match before {
+            // An unknown cursor reads nothing (it is not in this room).
+            Some(b) => match self.cursor_seq(room_id, b).await? {
+                Some(seq) => seq,
+                None => return Ok(Vec::new()),
+            },
+            None => i64::MAX,
+        };
+        let mut rows = sqlx::query(
+            "SELECT * FROM agent_room_messages \
+              WHERE room_id = ? AND rowid < ? \
+              ORDER BY rowid DESC LIMIT ?",
         )
         .bind(room_id)
-        .bind(before)
-        .bind(before.unwrap_or(""))
-        .bind(room_id)
+        .bind(upto)
         .bind(limit.clamp(1, 500))
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list agent room messages before"))?;
+        rows.reverse();
         rows.iter().map(row_to_message).collect()
     }
 }
@@ -1772,5 +1836,102 @@ mod tests {
         assert!(repo.list_runs(&a.id, 10).await.unwrap().is_empty());
         assert!(repo.list_schedules(&a.id).await.unwrap().is_empty());
         assert!(repo.get(&a.id).await.unwrap().chat_session_id.is_none());
+    }
+
+    /// R5: the denormalized room activity tracks `add_message`, and
+    /// `recount_activity` heals drift after an out-of-band delete (retention).
+    #[tokio::test]
+    async fn room_activity_is_denormalized_and_recountable() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let rooms = AgentRoomsRepo::new(p.clone());
+        let room = rooms.create("ws1", "r", None).await.unwrap();
+        let empty = rooms.create("ws1", "empty", None).await.unwrap();
+        let mut last = None;
+        for i in 0..3 {
+            last = Some(
+                rooms
+                    .add_message(NewRoomMessage {
+                        room_id: room.id.clone(),
+                        author_kind: "user".into(),
+                        author_id: "u1".into(),
+                        text: format!("m{i}"),
+                    })
+                    .await
+                    .unwrap(),
+            );
+        }
+        let last = last.unwrap();
+        // The returned message is the stored row.
+        let stored = rooms.list_messages_before(&room.id, None, 1).await.unwrap();
+        assert_eq!(stored[0].id, last.id);
+        assert_eq!(stored[0].created_at, last.created_at);
+        let act = rooms.activity_by_workspace("ws1").await.unwrap();
+        assert_eq!(act[&room.id].message_count, 3);
+        assert_eq!(
+            act[&room.id].last_message_at.as_deref(),
+            Some(&*last.created_at)
+        );
+        assert!(!act.contains_key(&empty.id), "empty rooms are omitted");
+        assert_eq!(rooms.recount_activity().await.unwrap(), 0, "no drift");
+
+        sqlx::query("DELETE FROM agent_room_messages WHERE text = 'm0'")
+            .execute(p.writer())
+            .await
+            .unwrap();
+        assert_eq!(rooms.recount_activity().await.unwrap(), 1);
+        let act = rooms.activity_by_workspace("ws1").await.unwrap();
+        assert_eq!(act[&room.id].message_count, 2);
+        assert_eq!(
+            act[&room.id].last_message_at.as_deref(),
+            Some(&*last.created_at)
+        );
+    }
+
+    async fn plan(p: &DbPool, sql: &str) -> String {
+        let rows: Vec<(i64, i64, i64, String)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")))
+                .fetch_all(p.writer())
+                .await
+                .unwrap();
+        rows.into_iter()
+            .map(|r| r.3)
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// R1 / M1: the room tail, the before-cursor page and the after-cursor
+    /// page are range scans on `idx_arm_room_seq` — no temp B-tree sort over
+    /// the room — and the rooms-list activity never touches the messages.
+    #[tokio::test]
+    async fn room_reads_use_the_rowid_index() {
+        let p = pool().await;
+        for sql in [
+            "SELECT * FROM agent_room_messages WHERE room_id = 'r' AND rowid > 5 \
+             ORDER BY rowid ASC LIMIT 100",
+            "SELECT * FROM agent_room_messages WHERE room_id = 'r' AND rowid < 9223372036854775807 \
+             ORDER BY rowid DESC LIMIT 100",
+        ] {
+            let got = plan(&p, sql).await;
+            assert!(got.contains("idx_arm_room_seq"), "{sql}: {got}");
+            assert!(!got.contains("TEMP B-TREE"), "{sql}: {got}");
+        }
+        let cursor = plan(
+            &p,
+            "SELECT rowid AS seq FROM agent_room_messages WHERE id = 'x' AND room_id = 'r'",
+        )
+        .await;
+        assert!(
+            cursor.contains("INDEX") || cursor.contains("PRIMARY KEY"),
+            "{cursor}"
+        );
+        let act = plan(
+            &p,
+            "SELECT id, message_count, last_message_at FROM agent_rooms \
+              WHERE workspace_id = 'w' AND message_count > 0",
+        )
+        .await;
+        assert!(act.contains("idx_agent_rooms_ws"), "{act}");
+        assert!(!act.contains("agent_room_messages"), "{act}");
     }
 }

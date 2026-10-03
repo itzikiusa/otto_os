@@ -510,3 +510,10 @@ export interface SwarmUtilization {
   ready_tasks: number;
   waiting?: Record<string, TaskWaiting>;
 }
+
+/** `GET /swarm/swarms/{sid}/waiting` — just the coordinator's in-memory
+ *  waiting reasons (no DB work), what the Kanban polls. */
+export interface SwarmWaiting {
+  swarm_id: string;
+  waiting: Record<string, TaskWaiting>;
+}

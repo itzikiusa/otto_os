@@ -82,8 +82,12 @@
       selectedId = rooms[0].room.id;
     }
   });
+  // Room events touch message feeds only while this view is mounted; on
+  // unmount every feed but the selected room's is evicted.
+  $effect(() => personalAgents.watchRooms());
   $effect(() => {
     const id = selectedId;
+    untrack(() => personalAgents.setActiveRoom(id));
     if (id) untrack(() => void personalAgents.loadMessages(id));
   });
   // Keep the feed pinned to the latest message — on a NEW newest message

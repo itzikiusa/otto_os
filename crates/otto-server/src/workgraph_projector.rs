@@ -136,7 +136,16 @@ pub fn spawn(ctx: ServerCtx) -> tokio::task::JoinHandle<()> {
         let mut live = LiveState::default();
         loop {
             match rx.recv().await {
-                Ok(ev) => handle_event(&ctx, &mut live, ev).await,
+                Ok(ev) => {
+                    // Perf §15 M1: surface slow projections (one per event,
+                    // serial — a slow one delays every later event).
+                    let started = std::time::Instant::now();
+                    handle_event(&ctx, &mut live, ev).await;
+                    let ms = started.elapsed().as_millis() as u64;
+                    if ms >= 25 {
+                        tracing::debug!(elapsed_ms = ms, "workgraph projector: slow event");
+                    }
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!("workgraph projector lagged {n} events; reconcile will heal");
                 }

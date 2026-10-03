@@ -189,11 +189,11 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
     }
 
     let agents = repo.list_agents(&swarm.id).await?;
+    // One busy-agents read, not a COUNT per agent (perf §15 F3).
+    let busy = repo.busy_agents(&swarm.id).await.unwrap_or_default();
     let mut idle: Vec<otto_state::SwarmAgent> = Vec::new();
     for a in agents.iter().filter(|a| a.status == "active") {
-        if !repo.agent_has_active_run(&a.id).await.unwrap_or(false)
-            && !crate::swarm_verify::agent_under_verification(&a.id)
-        {
+        if !busy.contains(&a.id) && !crate::swarm_verify::agent_under_verification(&a.id) {
             idle.push(a.clone());
         }
     }
