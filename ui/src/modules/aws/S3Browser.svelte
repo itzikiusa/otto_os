@@ -1,13 +1,19 @@
 <script lang="ts">
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
-  // S3 (read-only): bucket list → object browser with breadcrumb prefixes
-  // (folder rows first), a preview drawer (text / pretty JSON / CSV table) and
-  // a streamed Download. The current bucket + prefix live in the route
+  // S3: bucket list → object browser with breadcrumb prefixes (folder rows
+  // first), a server-side prefix search past the loaded pages, a preview drawer
+  // (text / pretty JSON / CSV table / image / PDF — S3Preview) and a streamed
+  // Download. Writes (upload incl. drag-and-drop, delete) and presigned links
+  // are confirmed in-app and gated server-side (s3_write / s3_delete / s3_read)
+  // + audited. The current bucket + prefix live in the route
   // (`#/aws/<id>/s3/<bucket>?prefix=<encoded>`) so it's deep-linkable.
   import { untrack } from 'svelte';
   import { aws } from '../../lib/stores/aws.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { awsApi, awsDownloadBlob, isLoginRequired, saveBlob } from '../../lib/api/aws';
+  import { awsApi, awsDownloadBlob, awsS3Upload, isLoginRequired, saveBlob } from '../../lib/api/aws';
+  import { ApiError } from '../../lib/api/client';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import S3Preview from './S3Preview.svelte';
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -18,7 +24,6 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
-  import JsonTree from '../database/JsonTree.svelte';
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import { fmtAgo, fmtBytes, fmtDate, splitBucketSegment, awsErrorText, mergeS3Head } from './util';
@@ -36,6 +41,13 @@
   const prefix = $derived(splitBucketSegment(routeSeg)[1]);
   $effect(() => { if (bucket) void resourceAccess.load('aws_account', account.id, `bucket:${bucket}`); });
   const canRead = $derived(resourceAccess.can('aws_account', account.id, 's3_read', 'aws_s3', 'view', `bucket:${bucket}`));
+  const canWrite = $derived(resourceAccess.can('aws_account', account.id, 's3_write', 'aws_s3', 'edit', `bucket:${bucket}`));
+  const canDelete = $derived(resourceAccess.can('aws_account', account.id, 's3_delete', 'aws_s3', 'edit', `bucket:${bucket}`));
+  /** Set when the daemon refused a write (403) — the reason the write
+   *  actions are disabled for the rest of this view. */
+  let writeDenied = $state('');
+  let deleteDenied = $state('');
+  const isProd = $derived(account.environment === 'prod');
 
   function goTo(b: string, p: string): void {
     const seg = p ? `${encodeURIComponent(b)}?prefix=${encodeURIComponent(p)}` : encodeURIComponent(b);
@@ -80,13 +92,80 @@
   let objFilter = $state('');
   const rowsShown = $derived.by(() => {
     const q = objFilter.trim().toLowerCase();
-    const folders = prefixes.map((p) => ({ kind: 'folder' as const, name: leaf(p), key: p }));
-    const files = objects
+    // Server prefix-search hits for the current filter join the loaded rows.
+    const s = search && search.q === objFilter.trim() ? search : null;
+    const seen = new Set<string>();
+    const allPrefixes = s ? prefixes.concat(s.prefixes) : prefixes;
+    const allObjects = s ? objects.concat(s.objects) : objects;
+    const folders = allPrefixes
+      .filter((p) => !seen.has(p) && (seen.add(p), true))
+      .map((p) => ({ kind: 'folder' as const, name: leaf(p), key: p }));
+    const files = allObjects
       .filter((o) => o.key !== prefix) // the "directory marker" object itself
+      .filter((o) => !seen.has(o.key) && (seen.add(o.key), true))
       .map((o) => ({ kind: 'file' as const, name: leaf(o.key), key: o.key, obj: o }));
     const all = [...folders, ...files];
     return q ? all.filter((r) => r.name.toLowerCase().includes(q)) : all;
   });
+
+  // ── server-side search (A-2) ──
+  // The filter above only sees loaded pages. When more pages exist, the
+  // bucket itself is searched by key prefix (`prefix + q`, case-sensitive —
+  // S3 has no substring search): automatically 400 ms after typing (unless
+  // the query has a `*`), or via the explicit "Search the bucket" row.
+  let search = $state<{
+    q: string;
+    prefixes: string[];
+    objects: S3Object[];
+    next: string | null;
+    loading: boolean;
+    error: string;
+  } | null>(null);
+  let searchCtrl: AbortController | null = null;
+
+  async function runSearch(q: string, more = false): Promise<void> {
+    if (!bucket || !q) return;
+    searchCtrl?.abort();
+    const ctrl = new AbortController();
+    searchCtrl = ctrl;
+    const prev = more && search?.q === q ? search : null;
+    search = { q, prefixes: prev?.prefixes ?? [], objects: prev?.objects ?? [], next: prev?.next ?? null, loading: true, error: '' };
+    try {
+      const r = await awsApi.s3Objects(account.id, bucket, prefix + q, prev?.next ?? undefined, undefined, ctrl.signal);
+      if (ctrl.signal.aborted) return;
+      search = {
+        q,
+        prefixes: (prev?.prefixes ?? []).concat(r.prefixes),
+        objects: (prev?.objects ?? []).concat(r.objects),
+        next: r.is_truncated ? (r.next_token ?? null) : null,
+        loading: false,
+        error: '',
+      };
+    } catch (e) {
+      if (ctrl.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return;
+      search = { q, prefixes: prev?.prefixes ?? [], objects: prev?.objects ?? [], next: prev?.next ?? null, loading: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  $effect(() => {
+    const q = objFilter.trim();
+    const more = nextToken !== null;
+    void bucket;
+    void prefix;
+    if (!q) {
+      untrack(() => {
+        searchCtrl?.abort();
+        search = null;
+      });
+      return;
+    }
+    if (!more || q.includes('*')) return;
+    const t = setTimeout(() => {
+      if (untrack(() => search?.q) !== q) void runSearch(q);
+    }, 400);
+    return () => clearTimeout(t);
+  });
+  const searchedThis = $derived(search !== null && search.q === objFilter.trim());
 
   // Window the object table (only the visible slice + spacers is in the DOM).
   const tw = new TableWindow();
@@ -172,6 +251,8 @@
     untrack(() => {
       if (!buckets && !bucketsLoading) void loadBuckets();
       objectRequest++;
+      searchCtrl?.abort();
+      search = null;
       if (b) {
         preview = null;
         void loadObjects();
@@ -187,34 +268,6 @@
   // ── preview drawer ──
   let preview = $state<{ obj: S3Object; data: S3PreviewResp | null; loading: boolean; error: string } | null>(null);
   const selKey = $derived(preview?.obj.key ?? '');
-  const previewKind = $derived.by<'json' | 'csv' | 'text' | 'binary' | null>(() => {
-    const d = preview?.data;
-    if (!d) return null;
-    if (d.binary) return 'binary';
-    const ct = (d.content_type ?? '').toLowerCase();
-    const key = preview?.obj.key.toLowerCase() ?? '';
-    if (ct.includes('json') || key.endsWith('.json') || key.endsWith('.ndjson')) return 'json';
-    if (ct.includes('csv') || key.endsWith('.csv') || key.endsWith('.tsv')) return 'csv';
-    return 'text';
-  });
-  const previewJson = $derived.by<unknown>(() => {
-    if (previewKind !== 'json' || !preview?.data?.text) return undefined;
-    try {
-      return JSON.parse(preview.data.text);
-    } catch {
-      return undefined;
-    }
-  });
-  const previewCsv = $derived.by<string[][]>(() => {
-    if (previewKind !== 'csv' || !preview?.data?.text) return [];
-    const sep = preview.obj.key.toLowerCase().endsWith('.tsv') ? '\t' : ',';
-    return preview.data.text
-      .split(/\r?\n/)
-      .filter((l) => l.length)
-      .slice(0, 200)
-      .map((l) => l.split(sep));
-  });
-
   async function openPreview(o: S3Object): Promise<void> {
     if (!canRead) return;
     preview = { obj: o, data: null, loading: true, error: '' };
@@ -329,6 +382,155 @@
     }
   }
 
+  // ── writes + presign (A-4) ──
+  function writeError(e: unknown, what: 'upload' | 'delete'): string {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (e instanceof ApiError && e.status === 403) {
+      const reason = `You don't have ${what === 'upload' ? 'upload (s3_write)' : 'delete (s3_delete)'} access to ${bucket} — ask an admin for aws_s3:Edit on this account. (${msg})`;
+      if (what === 'upload') writeDenied = reason;
+      else deleteDenied = reason;
+      return reason;
+    }
+    return awsErrorText(msg);
+  }
+
+  const PRESIGN_CHOICES = [
+    { label: '1 hour', value: '3600', kind: 'primary' as const },
+    { label: '12 hours', value: '43200' },
+    { label: '24 hours', value: '86400' },
+    { label: '7 days', value: '604800' },
+  ];
+
+  async function presign(o: S3Object): Promise<void> {
+    const { value } = await confirmer.choose(
+      `Create a presigned download link for s3://${bucket}/${o.key}? Anyone holding the link can download the object until it expires. The link is recorded in the audit log.`,
+      { title: 'Copy presigned link', options: PRESIGN_CHOICES },
+    );
+    if (!value) return;
+    try {
+      const r = await awsApi.s3Presign(account.id, bucket, o.key, Number(value));
+      await copyTextOrThrow(r.url);
+      toasts.success('Presigned link copied', `Expires ${fmtDate(r.expires_at)}`);
+      if (r.warning) toasts.warn('Link may expire early', r.warning);
+    } catch (e) {
+      toasts.error('Couldn’t create the link', awsErrorText(e instanceof Error ? e.message : String(e)));
+    }
+  }
+
+  async function deleteObject(o: S3Object): Promise<void> {
+    const where = `s3://${bucket}/${o.key}`;
+    const env = account.environment.toUpperCase();
+    let confirm: string | undefined;
+    if (isProd) {
+      const typed = await confirmer.promptText(
+        `Delete ${where} from ${account.name} (${env})? This can't be undone unless the bucket is versioned. Type the object key to confirm.`,
+        { title: 'Delete object — PRODUCTION', confirmLabel: 'Delete', placeholder: o.key, danger: true },
+      );
+      if (typed === null) return;
+      if (typed !== o.key) {
+        toasts.error('Not deleted', 'The typed key doesn’t match the object key.');
+        return;
+      }
+      confirm = typed;
+    } else {
+      const ok = await confirmer.ask(
+        `Delete ${where} from ${account.name} (${env})? This can't be undone unless the bucket is versioned.`,
+        { title: 'Delete object', confirmLabel: 'Delete' },
+      );
+      if (!ok) return;
+    }
+    try {
+      await awsApi.s3Delete(account.id, bucket, o.key, confirm);
+      if (preview?.obj.key === o.key) preview = null;
+      objects = objects.filter((x) => x.key !== o.key);
+      if (search) search = { ...search, objects: search.objects.filter((x) => x.key !== o.key) };
+      toasts.success('Deleted', where);
+    } catch (e) {
+      toasts.error('Delete failed', writeError(e, 'delete'));
+    }
+  }
+
+  let fileInput = $state<HTMLInputElement | null>(null);
+  let dragOver = $state(false);
+  let uploading = $state<{ done: number; total: number; name: string } | null>(null);
+  const uploadBlocked = $derived(
+    !canWrite ? 'You don’t have upload access to this bucket' : writeDenied || (uploading ? 'An upload is running' : ''),
+  );
+
+  async function uploadFiles(files: File[]): Promise<void> {
+    if (!bucket || files.length === 0) return;
+    if (uploadBlocked) {
+      toasts.warn('Can’t upload', uploadBlocked);
+      return;
+    }
+    const dest = `s3://${bucket}/${prefix}`;
+    const what = files.length === 1 ? files[0].name : `${files.length} files`;
+    if (isProd) {
+      const ok = await confirmer.ask(
+        `Upload ${what} to ${dest} in ${account.name} (PRODUCTION)?`,
+        { title: 'Upload to production', confirmLabel: 'Upload', danger: true },
+      );
+      if (!ok) return;
+    }
+    let okCount = 0;
+    try {
+      for (const [i, f] of files.entries()) {
+        uploading = { done: i, total: files.length, name: f.name };
+        const key = prefix + f.name;
+        try {
+          await awsS3Upload(account.id, bucket, key, f);
+          okCount++;
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 409) {
+            const replace = await confirmer.ask(
+              `s3://${bucket}/${key} already exists in ${account.name} (${account.environment.toUpperCase()}). Replace it with the file you picked (${fmtBytes(f.size)})?`,
+              { title: 'Replace existing object?', confirmLabel: 'Replace' },
+            );
+            if (!replace) continue;
+            try {
+              await awsS3Upload(account.id, bucket, key, f, { overwrite: true });
+              okCount++;
+            } catch (e2) {
+              toasts.error(`Upload failed: ${f.name}`, writeError(e2, 'upload'));
+              if (e2 instanceof ApiError && e2.status === 403) break;
+            }
+          } else {
+            toasts.error(`Upload failed: ${f.name}`, writeError(e, 'upload'));
+            if (e instanceof ApiError && e.status === 403) break;
+          }
+        }
+      }
+    } finally {
+      uploading = null;
+    }
+    if (okCount) {
+      toasts.success(okCount === 1 ? 'Uploaded' : `Uploaded ${okCount} files`, dest);
+      void refreshObjects();
+    }
+  }
+
+  function onPick(e: Event): void {
+    const input = e.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    input.value = '';
+    void uploadFiles(files);
+  }
+  function hasFiles(e: DragEvent): boolean {
+    return Array.from(e.dataTransfer?.types ?? []).includes('Files');
+  }
+  function onDragOver(e: DragEvent): void {
+    if (!bucket || !hasFiles(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = uploadBlocked ? 'none' : 'copy';
+    dragOver = true;
+  }
+  function onDrop(e: DragEvent): void {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragOver = false;
+    void uploadFiles(Array.from(e.dataTransfer?.files ?? []));
+  }
+
   function rowMenu(e: MouseEvent | KeyboardEvent, r: (typeof rowsShown)[number]): void {
     if (r.kind === 'folder') {
       ctxMenu.show(e, [
@@ -343,6 +545,15 @@
       { separator: true },
       { label: 'Copy key', icon: 'copy', action: () => void copy(r.key, 'key') },
       { label: 'Copy S3 URI', icon: 'copy', action: () => void copy(`s3://${bucket}/${r.key}`, 'S3 URI') },
+      { label: 'Copy presigned link…', disabled: !canRead, icon: 'link', action: () => void presign(r.obj) },
+      { separator: true },
+      {
+        label: 'Delete…',
+        icon: 'trash',
+        danger: true,
+        disabled: !canDelete || !!deleteDenied,
+        action: () => void deleteObject(r.obj),
+      },
     ]);
   }
 
@@ -401,6 +612,15 @@
     bind:auto
     onrefresh={() => refreshObjects()}
   >
+    {#snippet actions()}
+      <button
+        class="btn small"
+        onclick={() => fileInput?.click()}
+        disabled={!!uploadBlocked}
+        title={uploadBlocked || `Upload files to s3://${bucket}/${prefix} (or drop them on the list)`}
+      ><Icon name="arrowUp" size={12} /> Upload</button>
+      <input class="s3-file" type="file" multiple bind:this={fileInput} onchange={onPick} aria-label="Files to upload" tabindex="-1" />
+    {/snippet}
     <nav class="crumbs" aria-label="Prefix">
       <button class="crumb" onclick={() => goTo('', '')} title="All buckets" aria-label="All buckets"><Icon name="archive" size={12} /></button>
       <span class="sep">/</span>
@@ -412,15 +632,59 @@
     </nav>
   </ViewToolbar>
 
-  <div class="split" class:with-drawer={preview !== null && !viewport.isMobile}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="split"
+    class:with-drawer={preview !== null && !viewport.isMobile}
+    class:drag-over={dragOver}
+    ondragover={onDragOver}
+    ondragleave={(e) => { if (e.currentTarget === e.target) dragOver = false; }}
+    ondrop={onDrop}
+  >
     <div class="tbl-wrap" bind:this={objWrap} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
       {#if objLoading && objects.length === 0 && prefixes.length === 0}
         <div class="pad" role="status"><p class="load-note">Loading objects…</p><Skeleton rows={8} /></div>
       {:else if objError}
         <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list objects" body={awsErrorText(objError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadObjects()} />
+      {:else if rowsShown.length === 0 && objFilter && (nextToken || search)}
+        <div class="s3-search-empty">
+          {#if search?.loading}
+            <p class="load-note" role="status">Searching the bucket for keys starting with “{prefix}{objFilter.trim()}”…</p>
+          {:else if search?.error}
+            <p class="err" role="alert">{awsErrorText(search.error)} <button class="btn small" onclick={() => void runSearch(objFilter.trim())}>Retry search</button></p>
+          {:else}
+            <p class="dim">
+              {#if searchedThis}
+                No match in the {objects.length + prefixes.length} loaded rows, and no key in the bucket starts with “{prefix}{objFilter.trim()}” (bucket search matches the key prefix, case-sensitive).
+              {:else}
+                Showing {objects.length + prefixes.length} loaded — more objects exist. Load more, or search the bucket by key prefix (case-sensitive).
+              {/if}
+            </p>
+            <div class="s3-search-actions">
+              {#if nextToken}<button class="btn small" onclick={() => void loadObjects(true)} disabled={objLoading}>Load more</button>{/if}
+              {#if !searchedThis}<button class="btn small primary" onclick={() => void runSearch(objFilter.trim())}>Search the bucket</button>{/if}
+            </div>
+          {/if}
+        </div>
       {:else if rowsShown.length === 0}
-        <EmptyState icon="folder" title="Empty" body={objFilter ? 'Nothing matches the filter.' : 'No objects under this prefix.'} />
+        <EmptyState icon="folder" title="Empty" body={objFilter ? 'Nothing matches the filter.' : canWrite ? 'No objects under this prefix. Drop files here or use Upload.' : 'No objects under this prefix.'} />
       {:else}
+        {#if objFilter.trim() && (nextToken || search)}
+          <div class="s3-search-row">
+            {#if search?.loading && searchedThis}
+              <span class="dim" role="status">Searching the bucket for keys starting with “{prefix}{objFilter.trim()}”…</span>
+            {:else if search?.error && searchedThis}
+              <span class="err" role="alert">{awsErrorText(search.error)}</span>
+              <button class="btn small" onclick={() => void runSearch(objFilter.trim())}>Retry search</button>
+            {:else if searchedThis}
+              <span class="dim">Includes bucket matches for keys starting with “{prefix}{objFilter.trim()}” (case-sensitive).</span>
+              {#if search?.next}<button class="btn small" onclick={() => void runSearch(objFilter.trim(), true)}>More matches</button>{/if}
+            {:else}
+              <button class="btn small" onclick={() => void runSearch(objFilter.trim())}><Icon name="search" size={12} /> Search the bucket for “{objFilter.trim()}”</button>
+              <span class="dim">Only loaded pages are filtered. Bucket search matches the key prefix, case-sensitive.</span>
+            {/if}
+          </div>
+        {/if}
         <table class="tbl">
           <thead><tr><th>Name</th><th class="num">Size</th><th class="hide-sm">Modified</th><th class="hide-sm">Class</th><th class="act"></th></tr></thead>
           <tbody>
@@ -443,7 +707,10 @@
                 <td class="dim mono hide-sm">{r.kind === 'file' ? (r.obj.storage_class ?? '') : ''}</td>
                 <td class="act">
                   {#if r.kind === 'file'}
-                    <button class="icon-btn" onclick={(e) => { e.stopPropagation(); void download(r.obj); }} disabled={!canRead} title={canRead ? 'Download' : 'You don’t have read access to this bucket'} aria-label={`Download ${r.name}`}><Icon name="arrowDown" size={13} /></button>
+                    <span class="s3-acts">
+                      <button class="icon-btn" onclick={(e) => { e.stopPropagation(); void download(r.obj); }} disabled={!canRead} title={canRead ? 'Download' : 'You don’t have read access to this bucket'} aria-label={`Download ${r.name}`}><Icon name="arrowDown" size={13} /></button>
+                      <button class="icon-btn" onclick={(e) => { e.stopPropagation(); rowMenu(e, r); }} title="More actions" aria-label={`More actions for ${r.name}`}><Icon name="more" size={13} /></button>
+                    </span>
                   {/if}
                 </td>
               </tr>
@@ -459,6 +726,13 @@
       {/if}
     </div>
 
+    {#if dragOver}
+      <div class="s3-drop" aria-hidden="true">
+        <Icon name="arrowUp" size={18} />
+        <span>{uploadBlocked || `Drop to upload to s3://${bucket}/${prefix}`}</span>
+      </div>
+    {/if}
+
     {#if preview && !viewport.isMobile}
       <aside class="drawer" aria-label="Object preview">
         {@render previewBody()}
@@ -471,6 +745,14 @@
       {@render previewBody()}
     </Modal>
   {/if}
+{/if}
+
+{#if uploading}
+  <div class="dl-bar" role="status">
+    <span class="mono">Uploading {uploading.name}</span>
+    <progress max={uploading.total} value={uploading.done}></progress>
+    <span class="dim">{uploading.done + 1} / {uploading.total}</span>
+  </div>
 {/if}
 
 {#if dl}
@@ -499,36 +781,22 @@
       <div class="pv-actions">
         <button class="btn small" onclick={() => preview && void download(preview.obj)}><Icon name="arrowDown" size={12} /> Download</button>
         <button class="btn small" onclick={() => preview && void copy(`s3://${bucket}/${preview.obj.key}`, 'S3 URI')}><Icon name="copy" size={12} /> URI</button>
+        <button class="btn small" onclick={() => preview && void presign(preview.obj)} disabled={!canRead}><Icon name="link" size={12} /> Link</button>
         {#if !viewport.isMobile}
           <button class="icon-btn" onclick={() => (preview = null)} aria-label="Close preview" title="Close preview"><Icon name="x" size={13} /></button>
         {/if}
       </div>
     </div>
-    {#if preview.loading}
-      <Skeleton rows={6} />
-    {:else if preview.error}
-      <p class="err" role="alert">{preview.error} <button class="btn small" onclick={() => preview && void openPreview(preview.obj)}>Retry preview</button></p>
-    {:else if previewKind === 'binary'}
-      <p class="dim">Binary content ({preview.data?.content_type ?? 'unknown type'}) — download to open it.</p>
-    {:else if previewKind === 'json' && previewJson !== undefined}
-      <div class="pv-body mono"><JsonTree value={previewJson} /></div>
-    {:else if previewKind === 'csv' && previewCsv.length}
-      <div class="pv-body">
-        <table class="csv">
-          <thead><tr>{#each previewCsv[0] as h, i (i)}<th>{h}</th>{/each}</tr></thead>
-          <tbody>
-            {#each previewCsv.slice(1) as row, ri (ri)}
-              <tr>{#each row as c, ci (ci)}<td>{c}</td>{/each}</tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    {:else}
-      <pre class="pv-body text">{preview.data?.text ?? ''}</pre>
-    {/if}
-    {#if preview.data?.truncated}
-      <p class="dim">Preview truncated to the first 64 KiB.</p>
-    {/if}
+    <S3Preview
+      accountId={account.id}
+      {bucket}
+      obj={preview.obj}
+      data={preview.data}
+      loading={preview.loading}
+      error={preview.error}
+      onretry={() => preview && void openPreview(preview.obj)}
+      ondownload={() => preview && void download(preview.obj)}
+    />
   {/if}
 {/snippet}
 
@@ -579,7 +847,7 @@
     text-align: right;
   }
   .tbl .act {
-    width: 32px;
+    width: 60px;
     text-align: right;
   }
   .trow {
@@ -672,36 +940,54 @@
     align-items: center;
     flex-wrap: wrap;
   }
-  .pv-body {
+  .split {
+    position: relative;
+  }
+  .split.drag-over .tbl-wrap {
+    outline: 2px dashed var(--accent);
+    outline-offset: -4px;
+  }
+  .s3-drop {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    pointer-events: none;
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    color: var(--accent-text);
+    font-size: var(--fs-m);
+    font-weight: 600;
+  }
+  .s3-file {
+    display: none;
+  }
+  .s3-acts {
+    display: inline-flex;
+    gap: 4px;
+  }
+  .s3-search-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
     font-size: var(--fs-s);
-    overflow: auto;
-    max-height: 60vh;
   }
-  .pv-body.text {
-    margin: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: var(--font-mono);
-    background: var(--bg);
-    padding: 8px;
-    border-radius: var(--radius-m);
-    border: 1px solid var(--border);
+  .s3-search-empty {
+    padding: 24px 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    text-align: center;
+    font-size: var(--fs-m);
   }
-  .csv {
-    border-collapse: collapse;
-    font-size: var(--fs-s);
-    font-family: var(--font-mono);
-  }
-  .csv th,
-  .csv td {
-    border: 1px solid var(--border);
-    padding: 2px 6px;
-    white-space: nowrap;
-  }
-  .csv th {
-    position: sticky;
-    top: 0;
-    background: var(--surface-2);
+  .s3-search-actions {
+    display: flex;
+    gap: 8px;
   }
   .more-row {
     display: flex;

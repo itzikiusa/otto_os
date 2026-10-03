@@ -20,6 +20,7 @@
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import MetricsPanel from './MetricsPanel.svelte';
+  import RegionPicker from './RegionPicker.svelte';
   import { prettyJson, awsErrorText, serviceTabKey } from './util';
   import type { AwsAccount, SqsMessage, SqsQueue } from '../../lib/api/types';
 
@@ -35,7 +36,12 @@
   const canPurge = $derived(resourceAccess.can('aws_account', account.id, 'sqs_purge', 'aws_sqs', 'edit'));
   const canRedrive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_redrive', 'aws_sqs', 'edit'));
   const canReceive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_receive', 'aws_sqs', 'view'));
-  const queues = $derived(aws.sqsQueues[account.id] ?? null);
+  // A-1: queues live per region; the picker restores the last one used.
+  // svelte-ignore state_referenced_locally
+  let region = $state(account.region);
+  /** `''` = the account default (the daemon resolves it), else an override. */
+  const rq = $derived(region === account.region ? '' : region);
+  const queues = $derived(aws.sqsQueues[`${account.id}:${rq}`] ?? null);
   let loading = $state(false);
   let error = $state('');
   let filter = $state('');
@@ -59,7 +65,7 @@
   async function load(): Promise<void> {
     loading = true;
     try {
-      const list = await aws.loadSqsQueues(account.id);
+      const list = await aws.loadSqsQueues(account.id, '', rq);
       error = '';
       // Approximate counts: capped so a 500-queue account doesn't fire 500 CLI
       // calls on open (the rest load when selected), and at most 2 in flight —
@@ -67,7 +73,7 @@
       // the daemon for seconds. The list is usable while they fill in.
       loading = false;
       void mapLimit(list.slice(0, 40), 2, (q) =>
-        aws.loadSqsAttrs(account.id, q.url).catch(() => undefined),
+        aws.loadSqsAttrs(account.id, q.url, rq).catch(() => undefined),
       );
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -76,8 +82,11 @@
     }
   }
 
+  // Load on mount and whenever the region changes (`rq` is the only dep).
   $effect(() => {
+    void rq;
     untrack(() => {
+      selectedUrl = null;
       if (!queues) void load();
     });
   });
@@ -108,7 +117,7 @@
     peeking = false;
     openMsg = null;
     messages = [];
-    void aws.loadSqsAttrs(account.id, q.url);
+    void aws.loadSqsAttrs(account.id, q.url, rq);
   }
 
   // ── messages ──
@@ -123,7 +132,7 @@
     peeking = true;
     const version = ++peekVersion;
     try {
-      const r = await awsApi.sqsPeek(account.id, { url: selectedUrl, max: peekN, visibility_timeout: 0 });
+      const r = await awsApi.sqsPeek(account.id, { url: selectedUrl, max: peekN, visibility_timeout: 0 }, rq || undefined);
       if (version !== peekVersion) return;
       messages = r.messages;
       if (r.messages.length === 0) toasts.info('No messages visible right now');
@@ -145,10 +154,10 @@
     });
     if (!ok) return;
     try {
-      await awsApi.sqsDeleteMessage(account.id, selected.url, m.receipt_handle);
+      await awsApi.sqsDeleteMessage(account.id, selected.url, m.receipt_handle, rq || undefined);
       messages = messages.filter((x) => x.message_id !== m.message_id);
       toasts.success('Message deleted');
-      void aws.loadSqsAttrs(account.id, selected.url);
+      void aws.loadSqsAttrs(account.id, selected.url, rq);
     } catch (e) {
       toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
     }
@@ -185,9 +194,9 @@
         group_id: queue.fifo ? sendGroup || undefined : undefined,
         dedup_id: queue.fifo ? sendDedup || undefined : undefined,
         message_attributes: Object.keys(message_attributes).length ? message_attributes : undefined,
-      });
+      }, rq || undefined);
       toasts.success('Message sent', r.message_id);
-      void aws.loadSqsAttrs(account.id, queue.url);
+      void aws.loadSqsAttrs(account.id, queue.url, rq);
     } catch (e) {
       toasts.error('Send failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -207,9 +216,9 @@
       return;
     }
     try {
-      await awsApi.sqsPurge(account.id, q.url, typed);
+      await awsApi.sqsPurge(account.id, q.url, typed, rq || undefined);
       toasts.success('Purge started', 'SQS empties the queue over the next ~60 s');
-      void aws.loadSqsAttrs(account.id, q.url);
+      void aws.loadSqsAttrs(account.id, q.url, rq);
     } catch (e) {
       toasts.error('Purge failed', e instanceof Error ? e.message : String(e));
     }
@@ -227,7 +236,7 @@
     if (!ok) return;
     redriving = true;
     try {
-      const r = await awsApi.sqsRedrive(account.id, { source_arn: src, destination_arn: redriveDest.trim() || undefined });
+      const r = await awsApi.sqsRedrive(account.id, { source_arn: src, destination_arn: redriveDest.trim() || undefined }, rq || undefined);
       toasts.success('Redrive started', r.task_handle);
     } catch (e) {
       toasts.error('Redrive failed', e instanceof Error ? e.message : String(e));
@@ -248,7 +257,7 @@
   function queueMenu(e: MouseEvent | KeyboardEvent, q: SqsQueue): void {
     ctxMenu.show(e, [
       { label: 'Open', icon: 'send', action: () => select(q) },
-      { label: 'Refresh counts', icon: 'refresh', action: () => void aws.loadSqsAttrs(account.id, q.url) },
+      { label: 'Refresh counts', icon: 'refresh', action: () => void aws.loadSqsAttrs(account.id, q.url, rq) },
       { label: 'Copy URL', icon: 'copy', action: () => void copy(q.url, 'queue URL') },
       ...(canPurge ? [{ separator: true }, { label: 'Purge queue…', icon: 'trash', danger: true, action: () => void purge(q) }] : []),
     ]);
@@ -277,7 +286,9 @@
   {loading}
   bind:auto
   onrefresh={() => void load()}
-/>
+>
+  <RegionPicker {account} service="sqs" bind:region />
+</ViewToolbar>
 
 <div class="split" class:mobile={viewport.isMobile}>
   {#if showList}
@@ -422,7 +433,7 @@
             {/if}
           {:else if tab === 'metrics'}
             {#key `${account.id}/${selected.name}`}
-              <MetricsPanel accountId={account.id} namespace="AWS/SQS" dimValue={selected.name} {onsignin} />
+              <MetricsPanel accountId={account.id} namespace="AWS/SQS" dimValue={selected.name} region={rq || undefined} {onsignin} />
             {/key}
           {:else}
             <div class="form">

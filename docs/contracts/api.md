@@ -3104,7 +3104,7 @@ audited tools — `otto_db_schema`, `otto_git_pr_review`, `otto_product_story` (
 broker_topic deferred), the per-feature reads (see `docs/features/mcp-control-plane.md` §9), and the
 AWS / Kubernetes console tools that wrap `/aws/*` and `/k8s/*` — reads `aws_list_accounts`,
 `aws_s3_list_buckets` / `aws_s3_list_objects` / `aws_s3_preview`, `aws_sqs_list_queues` / `aws_sqs_peek`,
-`aws_ec2_list_instances`, `aws_athena_list_tables` / `aws_athena_get_query`, `aws_eks_list_clusters`,
+`aws_ec2_list_instances`, `aws_athena_list_tables` / `aws_athena_get_query`, `aws_eks_list_clusters`, `aws_logs_list_groups` / `aws_logs_filter` / `aws_logs_insights` / `aws_logs_get_insights`,
 `k8s_list_clusters`, `k8s_get_resources`, `k8s_describe`, `k8s_logs` (text tail), `k8s_top`; and the
 three Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `k8s_action` (same set, `otto.`-prefixed,
 on the outward server with the writers in `DANGEROUS`). The outward `otto.run_workflow` tool takes
@@ -4706,15 +4706,33 @@ VPC interface endpoints, S3-compatible stores).
 started_at?, finished_at?, error? }`. `DiscoveredProfile { name, region?,
 sso_start_url?, sso_session?, role_arn?, source: "config"|"credentials" }`.
 
-### S3 (read-only — every route is `AwsS3:View`)
+`AwsAccount.session?: { expires_at, source: "sso"|"credentials", refreshable }`
+(profile accounts, `GET /aws/accounts[/{id}]`): when the sign-in ends. A
+non-refreshable SSO token (legacy `sso_start_url` profile) is the hard
+deadline; with an `sso-session` refresh token it reports the exported
+credentials' expiry with `refreshable: true`. The UI warns ~15 min ahead.
+**Credential cache (A-5):** for profile accounts the daemon runs `aws configure
+export-credentials --profile P --format process` once and passes the result as
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` (alongside
+`AWS_PROFILE`, so the profile's other settings still apply) to every child
+until 5 min before `Expiration` (15 min for long-lived keys). An expired
+sign-in fails fast with `login required: the sign-in for AWS profile 'P' has
+expired — press Sign in …`; a CLI without `export-credentials` falls back to
+per-call resolution (re-tried after 10 min). Sign-in, edit and delete evict
+the cache.
+
+### S3 (reads are `AwsS3:View`; object upload/delete and `download-to` are `AwsS3:Edit`)
 
 | Method & path | Request | Response |
 |---|---|---|
 | GET /aws/accounts/{id}/s3/buckets | `?region=` | `{ buckets: { name, creation_date, region? }[] }` (`s3api list-buckets`) |
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/objects | `?prefix=&token=&max=&region=` (`max` 1..1000, default 500) | `{ prefixes: string[], objects: { key, size, last_modified, storage_class, etag }[], next_token?, is_truncated }` — `list-objects-v2 --delimiter /`; the prefix marker object is dropped; `token` is the CLI paginator's `NextToken` |
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/object | `?key=&region=` | `{ key, size, content_type, last_modified, etag, metadata, storage_class }` (`head-object`) |
-| GET /aws/accounts/{id}/s3/buckets/{bucket}/preview | `?key=&max_bytes=&region=` (default 64 KiB, cap 1 MiB) | `{ text?, truncated, content_type, binary? }` — ranged `get-object`; non-text types (anything but `text/*`, JSON/NDJSON/XML/YAML/CSV/JS/SQL, or an `octet-stream` with a text-looking extension) and NUL-bearing bodies return `{ binary: true }` without text |
-| GET /aws/accounts/{id}/s3/buckets/{bucket}/download | `?key=&region=` | streamed body (`aws s3 cp s3://… -` stdout), `Content-Disposition: attachment; filename="<basename>"`, `Content-Length` from the head; objects over **2 GiB** are refused with 413. The child is killed when the client disconnects. |
+| GET /aws/accounts/{id}/s3/buckets/{bucket}/preview | `?key=&max_bytes=&region=` (default 64 KiB, cap 1 MiB) | `{ text?, truncated, content_type, binary?, kind, size? }` — ranged `get-object`; non-text types (anything but `text/*`, JSON/NDJSON/XML/YAML/CSV/JS/SQL, or an `octet-stream` with a text-looking extension) and NUL-bearing bodies return `{ binary: true }` without text. `kind`: `text` (in `text`) · `image` (`image/*`, or an octet-stream key ending png/jpg/jpeg/gif/webp/svg/bmp/ico/avif) · `pdf` · `binary`; image/pdf bodies are fetched through `download?inline=true` |
+| PUT /aws/accounts/{id}/s3/buckets/{bucket}/object | **AwsS3:Edit** + `s3_write` on the bucket. `?key=&overwrite=&region=`, raw request body (≤ 5 GiB, spooled to `<data_dir>/tmp/<ulid>` and removed afterwards), `Content-Type` header becomes the object's type | 201 `{ key, size }` — `aws s3 cp <spool> s3://bucket/key` (1 h budget). An existing key → **409** "already exists — confirm to replace it" unless `overwrite=true`; a key ending in `/` → 400; over 5 GiB → 413. Audited `aws.s3.upload` (target `s3://bucket/key`, bytes, overwrite) |
+| DELETE /aws/accounts/{id}/s3/buckets/{bucket}/object | **AwsS3:Edit** + `s3_delete` on the bucket. `?key=&confirm=&region=` | 204 — `s3api delete-object`. On a **prod** account `confirm` must equal `key` → else 400 naming the fix. Audited `aws.s3.delete` |
+| POST /aws/accounts/{id}/s3/buckets/{bucket}/presign | AwsS3:View + `s3_read` on the bucket. `{ key, expires_in? }` (seconds, default 3600, clamped 1..604800) (`?region=`) | `{ url, expires_at, warning? }` — `aws s3 presign`. `warning` is set when the account signs with temporary credentials (SSO / exported) that end before `expires_at` (the link dies with them). Audited `aws.s3.presign` |
+| GET /aws/accounts/{id}/s3/buckets/{bucket}/download | `?key=&region=&inline=` | streamed body (`aws s3 cp s3://… -` stdout), `Content-Disposition: attachment; filename="<basename>"`, `Content-Length` from the head; objects over **2 GiB** are refused with 413. The child is killed when the client disconnects. `inline=true` (in-app image/PDF preview): `Content-Disposition: inline`, a specific MIME type derived from the extension when the stored one is generic, `Content-Security-Policy: sandbox; default-src 'none'…` (an SVG/PDF never runs script), and objects over **25 MB** → 413 "use Download instead". |
 | POST /aws/accounts/{id}/s3/buckets/{bucket}/download-to | `{key, local_dir, region?}` | `S3DownloadJob {id, bucket, key, local_path, state (running\|completed\|failed\|cancelled), bytes, total, error?}`. The daemon pipes `aws s3 cp s3://… -` into `<local_dir>/<basename>.otto-part` and renames it on success — never overwriting (` (n)` suffix). `local_dir` must be an existing absolute directory on the daemon host (`~/` expanded) → else 400; after canonicalizing, it must be inside the daemon user's home (not `~/Library`, not any dot-directory) or on an external volume (`/Volumes/<name>/…`) → else 403. The file name is the key's basename with leading dots replaced by `_` (a `.zshenv` key lands as `_zshenv`); the part file is created exclusively and moved into place with a no-overwrite link, so an existing file is never replaced. No 2 GiB cap (disk-bound). The UI uses it for objects over 100 MB instead of buffering them in the webview. **AwsS3:Edit** (it writes to the daemon host) plus `s3_read` on the bucket. |
 | GET /aws/accounts/{id}/s3/download-jobs/{job} | — | `S3DownloadJob` (live `bytes`). Jobs are in memory; finished ones are kept 15 min. 404 for another account's job. |
 | POST /aws/accounts/{id}/s3/download-jobs/{job}/cancel | — | `S3DownloadJob` (`cancelled`; the part file is removed). A finished job is returned unchanged. AwsS3:Edit. |
@@ -4735,7 +4753,7 @@ sso_start_url?, sso_session?, role_arn?, source: "config"|"credentials" }`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /aws/accounts/{id}/ec2/instances | AwsEc2:View | `?region=&state=&q=` (`state` ∈ pending/running/shutting-down/terminated/stopping/stopped; `q` filters id/name/ips/type client-side) | `{ instances: Ec2Instance[] }` |
+| GET /aws/accounts/{id}/ec2/instances | AwsEc2:View | `?region=&state=&q=` (`state` ∈ pending/running/shutting-down/terminated/stopping/stopped; `q` filters id/name/ips/type client-side; `region=all` ⇒ every enabled region) | `{ instances: Ec2Instance[], region_errors? }` (rows carry `region` on `region=all`) |
 | GET /aws/accounts/{id}/ec2/instances/{instance_id} | AwsEc2:View | `?region=` | `Ec2Instance & { raw }` |
 | POST /aws/accounts/{id}/ec2/instances/{instance_id}/start | AwsEc2:Edit | `{ confirm_id? }` (`?region=`) | `{ previous_state, current_state }` — audited `aws.ec2.start` |
 | POST /aws/accounts/{id}/ec2/instances/{instance_id}/stop | AwsEc2:Edit | `{ confirm_id }` (must equal the instance id) | `{ previous_state, current_state }` — audited `aws.ec2.stop` |
@@ -4760,7 +4778,7 @@ public_ip, launch_time, platform, vpc_id, subnet_id, tags: Record<string,string>
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /aws/accounts/{id}/eks/clusters | AwsEks:View | `?region=` | `{ clusters: { name, status, version, endpoint, arn, created_at }[] }` (`list-clusters` + `describe-cluster` fan-out, first 20) |
+| GET /aws/accounts/{id}/eks/clusters | AwsEks:View | `?region=` (`all` ⇒ every enabled region, rows carry `region`, plus `region_errors?`) | `{ clusters: { name, status, version, endpoint, arn, created_at }[] }` (`list-clusters` + `describe-cluster` fan-out, first 20) |
 | GET /aws/accounts/{id}/eks/clusters/{name} | AwsEks:View | `?region=` | `{ cluster: Value, nodegroups: { name, status, desired, min, max, instance_types, ami_type }[] }` |
 | POST /aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig | AwsEks:Edit **and** `kubernetes:Admin` (checked in the handler) | `{ cluster_name_override?, default_namespace? }` (`?region=`) | 201 `K8sCluster` — `aws eks update-kubeconfig --kubeconfig <data_dir>/kube/<new_id>.yaml --alias <name>` (file 0600), then a `k8s_clusters` row `source: "eks"`, `aws_account_id: id`; emits `k8s_cluster_updated`; audited `aws.eks.import_kubeconfig` |
 
@@ -4768,13 +4786,38 @@ public_ip, launch_time, platform, vpc_id, subnet_id, tags: Record<string,string>
 
 | Method & path | Request | Response |
 |---|---|---|
-| GET /aws/accounts/{id}/rds/instances | `?region=&q=` (`q` filters identifier/engine/class/endpoint/db name client-side) | `{ instances: RdsInstance[] }` (`rds describe-db-instances`) |
+| GET /aws/accounts/{id}/rds/instances | `?region=&q=` (`q` filters identifier/engine/class/endpoint/db name client-side; `region=all` fans out — see "All enabled regions") | `{ instances: RdsInstance[], region_errors? }` (`rds describe-db-instances`) |
 | GET /aws/accounts/{id}/rds/instances/{identifier} | `?region=` | `RdsInstance & { raw }` — 400 unless `identifier` is 1–63 letters/digits/hyphens starting with a letter |
 
 `RdsInstance { identifier, engine, engine_version, class, status, az,
 multi_az, storage_gb, storage_type, endpoint (host), port, db_name,
 master_username, publicly_accessible, created, tags: Record<string,string> }`.
 There are no start/stop/reboot routes for RDS by design.
+
+### All enabled regions (EC2 / EKS / RDS lists)
+
+`GET …/ec2/instances`, `GET …/eks/clusters` and `GET …/rds/instances` accept
+`?region=all`: the daemon resolves the account's enabled regions once
+(`ec2 describe-regions`, cached per account for 1 h; falls back to the account
+region when that call is denied) and runs the per-region list with at most
+**6** CLI children in flight. Every row carries `region`; regions that failed
+come back as `region_errors: { region, message }[]` (omitted when empty) while
+the other rows still render. Only when **every** region fails with
+`login required:` is that error returned as-is (400).
+
+### CloudWatch Logs (read-only — `Aws:View`, account operation `metrics`)
+
+| Method & path | Request | Response |
+|---|---|---|
+| GET /aws/accounts/{id}/logs/groups | `?prefix=&token=&max=&region=` (`max` 1..1000, default 200) | `{ groups: { name, arn?, created_ms?, retention_days?, stored_bytes?, class? }[], next_token? }` (`logs describe-log-groups`) |
+| GET /aws/accounts/{id}/logs/streams | `?group=&prefix=&token=&max=&region=` | `{ streams: { name, created_ms?, first_event_ms?, last_event_ms?, stored_bytes? }[], next_token? }` — newest first (`--order-by LastEventTime --descending`) unless `prefix` is set (the API refuses both) |
+| GET /aws/accounts/{id}/logs/events | `?group=&streams=a,b&pattern=&start=&end=&token=&max=&region=` (`start`/`end` epoch **ms**; ≤ 100 streams) | `{ events: { id, stream, timestamp, ingestion_time?, message }[], next_token? }` (`logs filter-log-events`, ascending). Live tail = poll with `start` = the newest timestamp seen and dedupe on `id` |
+| POST /aws/accounts/{id}/logs/insights | `{ groups: string[] (1..50), query, start, end (epoch ms, ≤ 31 days), limit? (≤ 10000, default 1000) }` (`?region=`) | `{ query_id }` (`logs start-query`; billed per GB scanned, never writes) |
+| GET /aws/accounts/{id}/logs/insights/{qid} | `?region=` | `{ status: Scheduled\|Running\|Complete\|Failed\|Cancelled\|Timeout\|Unknown, done, result: QueryResult, records_matched?, records_scanned?, bytes_scanned? }` — `result` is the DB Explorer shape; columns are the union of returned fields minus `@ptr` |
+| POST /aws/accounts/{id}/logs/insights/{qid}/stop | `?region=` | 204 (`logs stop-query`) |
+
+Invalid group names / stream lists / ranges answer 400 with what to fix
+("pick at least one log group…", "capped at 31 days — narrow it").
 
 ### CloudWatch metrics
 

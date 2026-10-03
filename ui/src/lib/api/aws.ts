@@ -10,7 +10,14 @@ import type {
   AthenaTable,
   AthenaWorkgroup,
   AwsAccount,
+  AwsLogEvent,
+  AwsLogEventsQuery,
+  AwsLogGroup,
+  AwsLogStream,
+  AwsLogsInsightsReq,
+  AwsLogsInsightsResults,
   AwsPermissions,
+  AwsRegionError,
   AwsRegion,
   AwsStatus,
   AwsTestResp,
@@ -34,7 +41,9 @@ import type {
   S3DownloadJob,
   S3ListObjectsResp,
   S3ObjectHead,
+  S3PresignResp,
   S3PreviewResp,
+  S3UploadResp,
   Session,
   SqsMessage,
   SqsPeekReq,
@@ -57,6 +66,9 @@ function qs(params: Record<string, string | number | boolean | null | undefined>
 }
 
 const acct = (id: string) => `/aws/accounts/${encodeURIComponent(id)}`;
+
+/** `region` value that fans EC2 / EKS / RDS lists out over every enabled region. */
+export const ALL_REGIONS = 'all';
 
 /** True when a daemon error means "credentials expired / missing — run `aws sso
  *  login`" (the contract's `login required:` message prefix). */
@@ -92,9 +104,17 @@ export const awsApi = {
 
   // --- S3 ---
   s3Buckets: (id: string) => api.get<{ buckets: S3Bucket[] }>(`${acct(id)}/s3/buckets`),
-  s3Objects: (id: string, bucket: string, prefix = '', token?: string | null, max?: number) =>
+  s3Objects: (
+    id: string,
+    bucket: string,
+    prefix = '',
+    token?: string | null,
+    max?: number,
+    signal?: AbortSignal,
+  ) =>
     api.get<S3ListObjectsResp>(
       `${acct(id)}/s3/buckets/${encodeURIComponent(bucket)}/objects${qs({ prefix, token, max })}`,
+      signal,
     ),
   s3Head: (id: string, bucket: string, key: string) =>
     api.get<S3ObjectHead>(
@@ -104,9 +124,21 @@ export const awsApi = {
     api.get<S3PreviewResp>(
       `${acct(id)}/s3/buckets/${encodeURIComponent(bucket)}/preview${qs({ key, max_bytes: maxBytes })}`,
     ),
-  /** Handler-relative path of the streamed download (feed to `awsDownloadBlob`). */
-  s3DownloadPath: (id: string, bucket: string, key: string) =>
-    `${acct(id)}/s3/buckets/${encodeURIComponent(bucket)}/download${qs({ key })}`,
+  /** Handler-relative path of the streamed download (feed to `awsDownloadBlob`).
+   *  `inline` = in-app image/PDF preview (served inline, capped at 25 MB). */
+  s3DownloadPath: (id: string, bucket: string, key: string, inline = false) =>
+    `${acct(id)}/s3/buckets/${encodeURIComponent(bucket)}/download${qs({ key, inline: inline ? 'true' : '' })}`,
+  /** Presigned GET link (`expiresIn` seconds, ≤ 7 days). Audited. */
+  s3Presign: (id: string, bucket: string, key: string, expiresIn?: number) =>
+    api.post<S3PresignResp>(`${acct(id)}/s3/buckets/${encodeURIComponent(bucket)}/presign`, {
+      key,
+      expires_in: expiresIn,
+    }),
+  /** Delete one object (Edit). Prod accounts need `confirm` === key. */
+  s3Delete: (id: string, bucket: string, key: string, confirm?: string) =>
+    api.del<void>(
+      `${acct(id)}/s3/buckets/${encodeURIComponent(bucket)}/object${qs({ key, confirm })}`,
+    ),
   /** Large objects: the daemon writes the object into `localDir` (a directory
    *  on the daemon host) — nothing is buffered in the webview. Poll the job. */
   s3DownloadTo: (id: string, bucket: string, key: string, localDir: string) =>
@@ -120,24 +152,31 @@ export const awsApi = {
     api.post<S3DownloadJob>(`${acct(id)}/s3/download-jobs/${encodeURIComponent(job)}/cancel`, {}),
 
   // --- SQS ---
-  sqsQueues: (id: string, prefix = '') =>
-    api.get<{ queues: SqsQueue[] }>(`${acct(id)}/sqs/queues${qs({ prefix })}`),
-  sqsAttributes: (id: string, url: string) =>
-    api.get<SqsQueueAttributesResp>(`${acct(id)}/sqs/queues/attributes${qs({ url })}`),
-  sqsPeek: (id: string, body: SqsPeekReq) =>
-    api.post<{ messages: SqsMessage[] }>(`${acct(id)}/sqs/queues/peek`, body),
-  sqsSend: (id: string, body: SqsSendReq) =>
-    api.post<{ message_id: string }>(`${acct(id)}/sqs/queues/send`, body),
-  sqsDeleteMessage: (id: string, url: string, receipt_handle: string) =>
-    api.post<void>(`${acct(id)}/sqs/queues/delete-message`, { url, receipt_handle }),
-  sqsPurge: (id: string, url: string, confirm_name: string) =>
-    api.post<void>(`${acct(id)}/sqs/queues/purge`, { url, confirm_name }),
-  sqsRedrive: (id: string, body: SqsRedriveReq) =>
-    api.post<{ task_handle: string }>(`${acct(id)}/sqs/queues/redrive`, body),
+  sqsQueues: (id: string, prefix = '', region?: string) =>
+    api.get<{ queues: SqsQueue[] }>(`${acct(id)}/sqs/queues${qs({ prefix, region })}`),
+  sqsAttributes: (id: string, url: string, region?: string) =>
+    api.get<SqsQueueAttributesResp>(`${acct(id)}/sqs/queues/attributes${qs({ url, region })}`),
+  sqsPeek: (id: string, body: SqsPeekReq, region?: string) =>
+    api.post<{ messages: SqsMessage[] }>(`${acct(id)}/sqs/queues/peek${qs({ region })}`, body),
+  sqsSend: (id: string, body: SqsSendReq, region?: string) =>
+    api.post<{ message_id: string }>(`${acct(id)}/sqs/queues/send${qs({ region })}`, body),
+  sqsDeleteMessage: (id: string, url: string, receipt_handle: string, region?: string) =>
+    api.post<void>(`${acct(id)}/sqs/queues/delete-message${qs({ region })}`, {
+      url,
+      receipt_handle,
+    }),
+  sqsPurge: (id: string, url: string, confirm_name: string, region?: string) =>
+    api.post<void>(`${acct(id)}/sqs/queues/purge${qs({ region })}`, { url, confirm_name }),
+  sqsRedrive: (id: string, body: SqsRedriveReq, region?: string) =>
+    api.post<{ task_handle: string }>(`${acct(id)}/sqs/queues/redrive${qs({ region })}`, body),
 
   // --- EC2 ---
+  /** `region = ALL_REGIONS` fans out over every enabled region (rows carry
+   *  `region`; failed regions come back in `region_errors`). */
   ec2Instances: (id: string, region?: string, state?: string, q?: string) =>
-    api.get<{ instances: Ec2Instance[] }>(`${acct(id)}/ec2/instances${qs({ region, state, q })}`),
+    api.get<{ instances: Ec2Instance[]; region_errors?: AwsRegionError[] }>(
+      `${acct(id)}/ec2/instances${qs({ region, state, q })}`,
+    ),
   ec2Instance: (id: string, instanceId: string, region?: string) =>
     api.get<Ec2InstanceDetail>(
       `${acct(id)}/ec2/instances/${encodeURIComponent(instanceId)}${qs({ region })}`,
@@ -149,28 +188,35 @@ export const awsApi = {
     ),
 
   // --- Athena ---
-  athenaWorkgroups: (id: string) =>
-    api.get<{ workgroups: AthenaWorkgroup[] }>(`${acct(id)}/athena/workgroups`),
-  athenaDatabases: (id: string, catalog = 'AwsDataCatalog') =>
-    api.get<{ databases: string[] }>(`${acct(id)}/athena/databases${qs({ catalog })}`),
-  athenaTables: (id: string, database: string, catalog = 'AwsDataCatalog') =>
-    api.get<{ tables: AthenaTable[] }>(`${acct(id)}/athena/tables${qs({ database, catalog })}`),
-  athenaHistory: (id: string, workgroup?: string, max?: number) =>
+  athenaWorkgroups: (id: string, region?: string) =>
+    api.get<{ workgroups: AthenaWorkgroup[] }>(`${acct(id)}/athena/workgroups${qs({ region })}`),
+  athenaDatabases: (id: string, catalog = 'AwsDataCatalog', region?: string) =>
+    api.get<{ databases: string[] }>(`${acct(id)}/athena/databases${qs({ catalog, region })}`),
+  athenaTables: (id: string, database: string, catalog = 'AwsDataCatalog', region?: string) =>
+    api.get<{ tables: AthenaTable[] }>(
+      `${acct(id)}/athena/tables${qs({ database, catalog, region })}`,
+    ),
+  athenaHistory: (id: string, workgroup?: string, max?: number, region?: string) =>
     api.get<{ executions: AthenaExecution[] }>(
-      `${acct(id)}/athena/history${qs({ workgroup, max })}`,
+      `${acct(id)}/athena/history${qs({ workgroup, max, region })}`,
     ),
-  athenaQuery: (id: string, body: AthenaQueryReq) =>
-    api.post<{ query_execution_id: string }>(`${acct(id)}/athena/query`, body),
-  athenaStatus: (id: string, qid: string, token?: string | null, max?: number) =>
+  athenaQuery: (id: string, body: AthenaQueryReq, region?: string) =>
+    api.post<{ query_execution_id: string }>(`${acct(id)}/athena/query${qs({ region })}`, body),
+  athenaStatus: (id: string, qid: string, token?: string | null, max?: number, region?: string) =>
     api.get<AthenaQueryStatus>(
-      `${acct(id)}/athena/query/${encodeURIComponent(qid)}${qs({ token, max })}`,
+      `${acct(id)}/athena/query/${encodeURIComponent(qid)}${qs({ token, max, region })}`,
     ),
-  athenaCancel: (id: string, qid: string) =>
-    api.post<void>(`${acct(id)}/athena/query/${encodeURIComponent(qid)}/cancel`, {}),
+  athenaCancel: (id: string, qid: string, region?: string) =>
+    api.post<void>(
+      `${acct(id)}/athena/query/${encodeURIComponent(qid)}/cancel${qs({ region })}`,
+      {},
+    ),
 
   // --- EKS ---
   eksClusters: (id: string, region?: string) =>
-    api.get<{ clusters: EksClusterSummary[] }>(`${acct(id)}/eks/clusters${qs({ region })}`),
+    api.get<{ clusters: EksClusterSummary[]; region_errors?: AwsRegionError[] }>(
+      `${acct(id)}/eks/clusters${qs({ region })}`,
+    ),
   eksCluster: (id: string, name: string, region?: string) =>
     api.get<EksClusterDetail>(
       `${acct(id)}/eks/clusters/${encodeURIComponent(name)}${qs({ region })}`,
@@ -183,7 +229,9 @@ export const awsApi = {
 
   // --- RDS (read-only) ---
   rdsInstances: (id: string, region?: string, q?: string) =>
-    api.get<{ instances: RdsInstance[] }>(`${acct(id)}/rds/instances${qs({ region, q })}`),
+    api.get<{ instances: RdsInstance[]; region_errors?: AwsRegionError[] }>(
+      `${acct(id)}/rds/instances${qs({ region, q })}`,
+    ),
   rdsInstance: (id: string, identifier: string, region?: string) =>
     api.get<RdsInstanceDetail>(
       `${acct(id)}/rds/instances/${encodeURIComponent(identifier)}${qs({ region })}`,
@@ -209,7 +257,76 @@ export const awsApi = {
       })}`,
       opts.signal,
     ),
+
+  // --- CloudWatch Logs (read-only; account `metrics` operation, Aws:View) ---
+  logGroups: (id: string, prefix = '', token?: string | null, region?: string) =>
+    api.get<{ groups: AwsLogGroup[]; next_token?: string | null }>(
+      `${acct(id)}/logs/groups${qs({ prefix, token, region })}`,
+    ),
+  logStreams: (id: string, group: string, prefix = '', token?: string | null, region?: string) =>
+    api.get<{ streams: AwsLogStream[]; next_token?: string | null }>(
+      `${acct(id)}/logs/streams${qs({ group, prefix, token, region })}`,
+    ),
+  logEvents: (id: string, q: AwsLogEventsQuery, signal?: AbortSignal) =>
+    api.get<{ events: AwsLogEvent[]; next_token?: string | null }>(
+      `${acct(id)}/logs/events${qs({
+        group: q.group,
+        streams: q.streams?.length ? q.streams.join(',') : '',
+        pattern: q.pattern,
+        start: q.start,
+        end: q.end,
+        token: q.token,
+        max: q.max,
+        region: q.region,
+      })}`,
+      signal,
+    ),
+  logsInsightsStart: (id: string, body: AwsLogsInsightsReq, region?: string) =>
+    api.post<{ query_id: string }>(`${acct(id)}/logs/insights${qs({ region })}`, body),
+  logsInsightsResults: (id: string, qid: string, region?: string) =>
+    api.get<AwsLogsInsightsResults>(
+      `${acct(id)}/logs/insights/${encodeURIComponent(qid)}${qs({ region })}`,
+    ),
+  logsInsightsStop: (id: string, qid: string, region?: string) =>
+    api.post<void>(`${acct(id)}/logs/insights/${encodeURIComponent(qid)}/stop${qs({ region })}`, {}),
 };
+
+/** Upload a File to `s3://bucket/key` (raw body PUT, Edit-gated). `overwrite`
+ *  replaces an existing object; without it the daemon answers 409. */
+export async function awsS3Upload(
+  id: string,
+  bucket: string,
+  key: string,
+  file: Blob,
+  opts: { overwrite?: boolean; region?: string; signal?: AbortSignal } = {},
+): Promise<S3UploadResp> {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    'Content-Type': file.type || 'application/octet-stream',
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const path = `${acct(id)}/s3/buckets/${encodeURIComponent(bucket)}/object${qs({
+    key,
+    overwrite: opts.overwrite ? 'true' : '',
+    region: opts.region,
+  })}`;
+  const resp = await laneFetch('long', path, {
+    method: 'PUT',
+    headers,
+    body: file,
+    signal: opts.signal,
+  });
+  if (!resp.ok) {
+    let problem: Problem = { code: 'internal', message: resp.statusText };
+    try {
+      problem = await resp.json();
+    } catch {
+      // non-JSON error body — keep statusText
+    }
+    throw new ApiError(resp.status, problem);
+  }
+  return (await resp.json()) as S3UploadResp;
+}
 
 /**
  * Stream an authenticated binary download (`…/s3/…/download`) into a Blob,

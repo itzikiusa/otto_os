@@ -1,7 +1,8 @@
 <script lang="ts">
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // AWS console module. Routes: `#/aws` (accounts overview) ·
-  // `#/aws/<accountId>/<service>` (service ∈ s3|sqs|ec2|athena|eks|rds) · deep link
+  // `#/aws/<accountId>/<service>` (service ∈ s3|sqs|ec2|athena|eks|rds) ·
+  // `#/aws/<accountId>/logs[/<group>[/<region>]]` (CloudWatch Logs) · deep link
   // `#/aws/<id>/s3/<bucket>?prefix=<encoded>` (the S3 browser reads/writes it).
   // First run: when `/aws/status` says the CLI is missing the InstallPanel takes
   // over the whole page. Layout: account/service rail + content; on mobile the
@@ -31,6 +32,8 @@
   import AthenaView from './AthenaView.svelte';
   import EksView from './EksView.svelte';
   import RdsView from './RdsView.svelte';
+  import LogsView from './LogsView.svelte';
+  import { logsRoute } from './util';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import type { AwsAccount, AwsService, Feature } from '../../lib/api/types';
 
@@ -41,7 +44,11 @@
     const s = router.parts[2];
     return s && (SERVICES as readonly string[]).includes(s) ? (s as AwsService) : null;
   });
+  // CloudWatch Logs is account-level (the `metrics` CloudWatch operation under
+  // the `aws` feature), not one of the per-service keys.
+  const routeLogs = $derived(router.parts[2] === 'logs');
   const account = $derived(aws.account(routeAccountId));
+  const logsAllowed = $derived(routeAccountId ? resourceAccess.can('aws_account', routeAccountId, 'metrics', 'aws', 'view') : false);
   const serviceFeature = $derived<Feature | null>(
     routeService ? (`aws_${routeService}` as Feature) : null,
   );
@@ -118,7 +125,7 @@
     return null;
   });
   $effect(() => {
-    if (routeAccountId && account && !routeService && firstService) {
+    if (routeAccountId && account && !routeService && !routeLogs && firstService) {
       const target = `aws/${routeAccountId}/${firstService}`;
       untrack(() => router.replace(target));
     }
@@ -151,7 +158,7 @@
   {#snippet badge()}
     {#if routeAccountId && account}
       <EnvBadge env={account.environment} />
-      {#if routeService}<span class="svc-badge">{SERVICE_LABEL[routeService]}</span>{/if}
+      {#if routeService}<span class="svc-badge">{SERVICE_LABEL[routeService]}</span>{:else if routeLogs}<span class="svc-badge">CloudWatch Logs</span>{/if}
     {/if}
   {/snippet}
   {#snippet actions()}
@@ -160,6 +167,11 @@
         <Icon name="search" size={13} />
         <input type="search" placeholder="Filter accounts…" bind:value={filter} aria-label="Filter accounts" />
       </label>
+    {/if}
+    {#if aws.installed && routeAccountId && account && !routeLogs && logsAllowed}
+      <button class="btn" onclick={() => router.go(logsRoute(account.id))} data-testid="aws-open-logs" aria-label="CloudWatch Logs" title="CloudWatch Logs">
+        <Icon name="text" size={13} />{#if !viewport.isPhone} Logs{/if}
+      </button>
     {/if}
     {#if aws.installed && canAdmin && aws.accounts.length > 0}
       <button class="btn primary" onclick={openCreate} data-testid="aws-add-account" aria-label="Add account" title="Add account">
@@ -190,6 +202,8 @@
             activeService={routeService}
             onedit={openEdit}
             ondelete={(a) => void deleteAccount(a)}
+            onsignin={(a) => void signIn(a)}
+            logsActive={routeLogs}
           />
         {/if}
       </aside>
@@ -211,6 +225,14 @@
             actionLabel="Back to accounts"
             onaction={() => router.go('aws')}
           />
+        {:else if routeLogs}
+          {#if !logsAllowed}
+            <EmptyState variant="page" icon="lock" title="No access" body="Reading CloudWatch Logs needs the account's CloudWatch (metrics) permission. Ask an administrator for a grant." />
+          {:else}
+            {#key `${account.id}/logs/${aws.accessRevision}`}
+              <LogsView {account} onsignin={() => void signIn(account)} />
+            {/key}
+          {/if}
         {:else if !routeService}
           <EmptyState variant="page" icon="lock" title="No AWS services available" body="You don't have View on any AWS service for this account. Ask an administrator for a grant." />
         {:else if !serviceAllowedByRbac}

@@ -17,6 +17,7 @@ import type {
   AwsAccount,
   AwsPermissions,
   AwsRegion,
+  AwsRegionError,
   AwsService,
   AwsStatus,
   EksClusterSummary,
@@ -112,7 +113,10 @@ class AwsStore {
   ec2: Record<string, Ec2Instance[]> = $state({});
   eks: Record<string, EksClusterSummary[]> = $state({});
   rds: Record<string, RdsInstance[]> = $state({});
-  athena: Record<Id, AthenaCatalog> = $state({});
+  /** `${account}:all` fan-outs → the regions that failed (shown inline). */
+  regionErrors: Record<string, AwsRegionError[]> = $state({});
+  /** Keyed `${account}:${region}` (A-1: workgroups/catalogs are per region). */
+  athena: Record<string, AthenaCatalog> = $state({});
 
   private installTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -259,6 +263,7 @@ class AwsStore {
     this.ec2 = drop(this.ec2);
     this.eks = drop(this.eks);
     this.rds = drop(this.rds);
+    this.regionErrors = drop(this.regionErrors);
     this.athena = drop(this.athena);
     if (this.login?.accountId === id) this.login = null;
   }
@@ -286,18 +291,19 @@ class AwsStore {
     return r.buckets;
   }
 
-  async loadSqsQueues(id: Id, prefix = ''): Promise<SqsQueue[]> {
+  /** Queues are cached per `${account}:${region}`. */
+  async loadSqsQueues(id: Id, prefix = '', region = ''): Promise<SqsQueue[]> {
     const revision=this.accessRevision;
-    const r = await awsApi.sqsQueues(id, prefix);
+    const r = await awsApi.sqsQueues(id, prefix, region || undefined);
     if(revision!==this.accessRevision)return [];
-    this.sqsQueues = { ...this.sqsQueues, [id]: r.queues };
+    this.sqsQueues = { ...this.sqsQueues, [`${id}:${region}`]: r.queues };
     return r.queues;
   }
 
-  async loadSqsAttrs(id: Id, url: string): Promise<SqsQueueAttributesResp | null> {
+  async loadSqsAttrs(id: Id, url: string, region = ''): Promise<SqsQueueAttributesResp | null> {
     const revision=this.accessRevision;
     try {
-      const a = await awsApi.sqsAttributes(id, url);
+      const a = await awsApi.sqsAttributes(id, url, region || undefined);
     if(revision!==this.accessRevision)return null;
       this.sqsAttrs = { ...this.sqsAttrs, [url]: a };
       return a;
@@ -311,6 +317,7 @@ class AwsStore {
     const r = await awsApi.ec2Instances(id, region || undefined, state, q);
     if(revision!==this.accessRevision)return [];
     this.ec2 = { ...this.ec2, [`${id}:${region}`]: r.instances };
+    this.regionErrors = { ...this.regionErrors, [`${id}:${region}`]: r.region_errors ?? [] };
     return r.instances;
   }
 
@@ -319,6 +326,7 @@ class AwsStore {
     const r = await awsApi.eksClusters(id, region || undefined);
     if(revision!==this.accessRevision)return [];
     this.eks = { ...this.eks, [`${id}:${region}`]: r.clusters };
+    this.regionErrors = { ...this.regionErrors, [`${id}:${region}`]: r.region_errors ?? [] };
     return r.clusters;
   }
 
@@ -327,30 +335,37 @@ class AwsStore {
     const r = await awsApi.rdsInstances(id, region || undefined);
     if(revision!==this.accessRevision)return [];
     this.rds = { ...this.rds, [`${id}:${region}`]: r.instances };
+    this.regionErrors = { ...this.regionErrors, [`${id}:${region}`]: r.region_errors ?? [] };
     return r.instances;
   }
 
-  async loadAthenaCatalog(id: Id): Promise<AthenaCatalog> {
+  async loadAthenaCatalog(id: Id, region = ''): Promise<AthenaCatalog> {
     const revision=this.accessRevision;
-    const [wg, dbs] = await Promise.all([awsApi.athenaWorkgroups(id), awsApi.athenaDatabases(id)]);
+    const key = `${id}:${region}`;
+    const rg = region || undefined;
+    const [wg, dbs] = await Promise.all([
+      awsApi.athenaWorkgroups(id, rg),
+      awsApi.athenaDatabases(id, 'AwsDataCatalog', rg),
+    ]);
     if(revision!==this.accessRevision)return {workgroups:[],databases:[],tables:{}};
     const cat: AthenaCatalog = {
       workgroups: wg.workgroups,
       databases: dbs.databases,
-      tables: this.athena[id]?.tables ?? {},
+      tables: this.athena[key]?.tables ?? {},
     };
-    this.athena = { ...this.athena, [id]: cat };
+    this.athena = { ...this.athena, [key]: cat };
     return cat;
   }
 
-  async loadAthenaTables(id: Id, database: string): Promise<AthenaTable[]> {
+  async loadAthenaTables(id: Id, database: string, region = ''): Promise<AthenaTable[]> {
     const revision=this.accessRevision;
-    const r = await awsApi.athenaTables(id, database);
+    const key = `${id}:${region}`;
+    const r = await awsApi.athenaTables(id, database, 'AwsDataCatalog', region || undefined);
     if(revision!==this.accessRevision)return [];
-    const cur = this.athena[id] ?? { workgroups: [], databases: [], tables: {} };
+    const cur = this.athena[key] ?? { workgroups: [], databases: [], tables: {} };
     this.athena = {
       ...this.athena,
-      [id]: { ...cur, tables: { ...cur.tables, [database]: r.tables } },
+      [key]: { ...cur, tables: { ...cur.tables, [database]: r.tables } },
     };
     return r.tables;
   }

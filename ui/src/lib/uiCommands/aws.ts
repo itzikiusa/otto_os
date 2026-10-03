@@ -154,7 +154,7 @@ registerUiCommands('aws', {
   ) {
     const a = await accountFor(args.account, ctx);
     await showService(a, 'sqs', ctx);
-    const queues = aws.sqsQueues[a.id] ?? (await aws.loadSqsQueues(a.id));
+    const queues = aws.sqsQueues[`${a.id}:`] ?? (await aws.loadSqsQueues(a.id));
     const q = resolveByIdOrName(queues, args.queue, (x) => x.url, (x) => x.name, 'SQS queue');
     if (q.fifo && !args.group_id) throw new UiCommandError('invalid_args', 'A FIFO queue needs `group_id`.');
     const who = agentLabel(ctx.agent);
