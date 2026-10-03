@@ -41,7 +41,7 @@ const OUT_FRAME = Buffer.from(LINE.repeat(Math.ceil(FRAME / LINE.length))).subar
  *  so the mock never holds anything back and every byte reaches the pane. */
 const OUT_FRAMES = 9;
 
-type Frame = { sid: Sid; type: string; t: number; bytes?: number; attach?: boolean };
+type Frame = { sid: Sid; type: string; t: number; bytes?: number; attach?: boolean; cols?: number };
 
 function mockDaemon(page: Page) {
   const frames: Frame[] = [];
@@ -77,6 +77,7 @@ function mockDaemon(page: Page) {
           const frame = JSON.parse(String(message));
           const rec: Frame = { sid, type: frame.type, t: Date.now() };
           if (frame.type === 'ack') rec.bytes = frame.bytes;
+          if (typeof frame.cols === 'number') rec.cols = frame.cols;
           frames.push(rec);
           switch (frame.type) {
             case 'credit':
@@ -148,6 +149,13 @@ test('widening the window compacts one pane at a time, and an off-screen pane on
   expect(daemon.maxInflight, 'one compact in flight per window').toBeLessThanOrEqual(1);
   for (const sid of visible) expect(perPane[sid], `${sid}: at most one compact per widen`).toBeLessThanOrEqual(1);
   expect(perPane.p4, 'the off-screen pane defers its compact').toBe(0);
+  // perf 01 N6: a visible widened pane's compact CARRIES the new grid (the
+  // daemon resizes + captures atomically) instead of resize + 900 ms + compact.
+  for (const f of daemon.frames.slice(from)) {
+    if (f.type === 'scrollback' && !f.attach && f.sid !== 'p4') {
+      expect(f.cols, `${f.sid}: the widen compact carries its grid`).toBeGreaterThan(0);
+    }
+  }
 
   // p4 comes into view: it runs the compact it skipped, exactly once.
   const before = daemon.frames.length;

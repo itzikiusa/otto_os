@@ -259,6 +259,16 @@ test('credit: binary snapshots are offered only on request (perf 01 N3: never to
   assert.match(src, /const hdr = binarySnapHeaders\.get\(s\);\s*if \(hdr\) \{\s*binarySnapHeaders\.delete\(s\);\s*applySnapshot\(/);
 });
 
+test('resize-with-grid compact (perf 01 N6): a widened visible agent pane sends ONE grid-carrying scrollback', () => {
+  const src = readFileSync(new URL('../src/lib/components/Terminal.svelte', import.meta.url), 'utf8');
+  // The confirm step queues the compact WITH the grid instead of `resize`…
+  assert.match(src, /if \(d\.compact && preferDom && !readOnly && snapshotEpoch !== null && !compactPending && compactEligible\(\)\) \{\s*compactGrid = \{ cols: lastCols, rows: lastRows \};/);
+  // …the queued request carries it…
+  assert.match(src, /if \(compactGrid\) \{\s*req\.cols = compactGrid\.cols;\s*req\.rows = compactGrid\.rows;/);
+  // …and every way the compact does not run still delivers the size.
+  assert.equal((src.match(/flushCompactGrid\(\);/g) ?? []).length >= 4, true);
+});
+
 test('credit: acks are cumulative, every CREDIT_ACK_STEP consumed, credited bytes only', () => {
   const { flow, q, parse, acks } = creditHarness();
   flow.granted();

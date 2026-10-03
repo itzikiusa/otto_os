@@ -807,6 +807,7 @@
     // The snapshot this socket requests on open rebuilds the screen anyway.
     localReflowed = false;
     compactDeferred = false;
+    compactGrid = null;
     compactQueue.cancel(compactClient);
     keyLat?.reset();
     // A fresh server stream starts unpaused. Bytes still queued in front of
@@ -1118,6 +1119,26 @@
       if (d.send) {
         lastCols = term.cols;
         lastRows = term.rows;
+        // Resize-with-grid compact (perf 01 N6): a widened agent pane that
+        // can compact NOW sends ONE `scrollback` carrying the new grid
+        // through the window-wide queue — the daemon reflows + resizes the
+        // PTY and captures atomically, so there is no separate `resize`, no
+        // RESIZE_COMPACT_MS wait and no second round trip. The TUI's
+        // SIGWINCH repaint then streams in after the snapshot (as on attach).
+        // Viewers that may not resize, panes off-screen / in a hidden window
+        // or with a compact already in flight keep the resize + deferred
+        // compact path.
+        if (d.compact && preferDom && !readOnly && snapshotEpoch !== null && !compactPending && compactEligible()) {
+          compactGrid = { cols: lastCols, rows: lastRows };
+          if (resizeCompactTimer !== null) {
+            clearTimeout(resizeCompactTimer);
+            resizeCompactTimer = null;
+          }
+          compactQueue.request(compactClient);
+          return;
+        }
+        // A grid still waiting in the queue is superseded by this one.
+        compactGrid = null;
         sendJson({ type: 'resize', cols: lastCols, rows: lastRows });
       }
       if (d.compact) scheduleResizeCompact();
@@ -1184,23 +1205,47 @@
   }
   /** A compact was due while the pane was hidden / off-screen. */
   let compactDeferred = false;
+  /** Grid riding on the queued compact instead of a `resize` (perf 01 N6). */
+  let compactGrid: { cols: number; rows: number } | null = null;
+  /** The queued compact will not carry its grid after all (declined, pane
+   *  hidden, parked): the PTY still needs the size — send it as a `resize`. */
+  function flushCompactGrid(): void {
+    const g = compactGrid;
+    compactGrid = null;
+    if (g && connected) sendJson({ type: 'resize', cols: g.cols, rows: g.rows });
+  }
   const compactClient: CompactClient = {
     lastFocus: () => gpuClient.lastFocus,
     eligible: () => {
       const ok = compactEligible();
-      if (!ok && connected) compactDeferred = true;
+      if (!ok && connected) {
+        compactDeferred = true;
+        flushCompactGrid();
+      }
       return ok;
     },
     run: () => {
-      if (!term || compactPending) return false;
+      if (!term || compactPending) {
+        flushCompactGrid();
+        return false;
+      }
       const buf = term.buffer.active;
       // Preserve an active selection: rebuilding resets xterm's selection and
       // would erase a drag just before the user copies it.
       // Skip also when the user is CLEARLY reading scrollback — a TUI repaint
       // routinely leaves the viewport a row or two shy of the bottom.
-      if (buf.baseY - buf.viewportY > 3 || term.hasSelection()) return false;
+      if (buf.baseY - buf.viewportY > 3 || term.hasSelection()) {
+        flushCompactGrid();
+        return false;
+      }
       compactPending = true;
-      sendJson({ type: 'scrollback', lines: term.options.scrollback ?? scrollback } satisfies WsTermScrollbackRequestFrame);
+      const req: WsTermScrollbackRequestFrame = { type: 'scrollback', lines: term.options.scrollback ?? scrollback };
+      if (compactGrid) {
+        req.cols = compactGrid.cols;
+        req.rows = compactGrid.rows;
+        compactGrid = null;
+      }
+      sendJson(req);
       return true;
     },
   };
@@ -2096,6 +2141,10 @@
     // minutes, and at the wrong size they land on the wrong cells (G1).
     let needsCompact = localReflowed || compactDeferred;
     compactDeferred = false;
+    // A widen whose grid was riding on a queued compact (N6) still owes the
+    // PTY its size; the adopter compacts if the parked xterm needs it.
+    if (compactGrid) needsCompact = true;
+    flushCompactGrid();
     compactQueue.cancel(compactClient);
     // A parked engine keeps parsing what arrives but stops acknowledging it
     // (perf F9): the daemon sends at most one credit window, and a session

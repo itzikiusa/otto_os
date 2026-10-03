@@ -318,6 +318,13 @@ frame behind a small JSON header) instead of base64 inside JSON: a 4000-row
 snapshot is a third smaller on the wire and the page no longer parses a
 multi-megabyte JSON string to show it. Other clients keep the JSON form.
 
+Widening an agent pane rebuilds it from one snapshot that **carries the new
+grid**: the daemon resizes the PTY and captures in one step, so there is no
+separate resize, no 900 ms wait and no second round trip. Only one pane in the
+window rebuilds at a time (the one you last focused first); a pane that is off
+screen or in a hidden window waits until it is visible again. Narrowing never
+rebuilds — the program's own redraw repaints it.
+
 **Memory.** The daemon's emulator keeps 4000 rows of formatted history per live
 session. Rows that scrolled off are stored trimmed of trailing blanks and shared
 between snapshot copies, so a session of short lines at 200 columns holds about
