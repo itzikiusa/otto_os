@@ -18,12 +18,16 @@ import { budgetMs, isDesktopProject } from './perf';
 // the measured values for re-calibrating the ceilings below.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Ceilings = the worst measured value ×1.5 (2026-10-03, merged perf wave, Vite
+// dev server, desktop-browser, 2 workers on a loaded machine): #/agents shell
+// 2636 ms / paint 2715 ms (1177 / 1204 with one worker), #/home 931 / 1008 ms;
+// 14 API requests before paint on #/home, 10 on #/agents.
 /** Shell mounted (first effect), from navigation start. */
-const SHELL_MOUNT_BUDGET_MS = 2_500;
+const SHELL_MOUNT_BUDGET_MS = 4_000;
 /** First page painted, from navigation start. */
-const PAGE_PAINT_BUDGET_MS = 3_500;
+const PAGE_PAINT_BUDGET_MS = 4_100;
 /** Daemon API requests started before the first page paint (a ceiling). */
-const MAX_API_REQUESTS_BEFORE_PAINT = 24;
+const MAX_API_REQUESTS_BEFORE_PAINT = 21;
 
 let wsId = '';
 
@@ -50,8 +54,23 @@ interface BootSample {
 }
 
 async function bootSample(page: Page, hash: string): Promise<BootSample> {
+  // The dev server serves every module as its own resource: #/agents loads
+  // more than the default 250-entry Resource Timing buffer holds, which
+  // silently dropped every API entry after the first few. Make room first.
+  await page.addInitScript(() => performance.setResourceTimingBufferSize(20_000));
   await page.goto(`/${hash}`);
   await page.waitForFunction(() => performance.getEntriesByName('otto:page-painted').length > 0, null, { timeout: 30_000 });
+  // A page can paint before the workspace list goes out (#/agents paints
+  // after 3 requests): wait for the list + scratch row to finish so their
+  // overlap is measured, not reported as "unknown". Counts stay paint-relative.
+  await page.waitForFunction(
+    () => {
+      const paths = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((e) => new URL(e.name).pathname);
+      return paths.some((p) => /\/api\/v1\/workspaces$/.test(p)) && paths.some((p) => /\/api\/v1\/workspaces\/[^/]+$/.test(p));
+    },
+    null,
+    { timeout: 15_000 },
+  );
   return page.evaluate(() => {
     const mark = (n: string): number => performance.getEntriesByName(n)[0]?.startTime ?? -1;
     const painted = mark('otto:page-painted');

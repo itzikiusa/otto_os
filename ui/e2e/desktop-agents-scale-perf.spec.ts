@@ -121,7 +121,9 @@ test('2,000 background + 300 archived sessions: list, archive paging, event stor
   await page.route(/\/api\/v1\/sessions(\?.*)?$/, answer);
 
   await page.goto('/#/agents');
-  await expect(page.getByText(`Agent a ${SHOWN - 1}`, { exact: true })).toBeVisible({ timeout: 45_000 });
+  // The newest session also opens as the selected tab/pane (list/detail opens
+  // on an item), so its title renders up to three times: check the list row.
+  await expect(page.getByText(`Agent a ${SHOWN - 1}`, { exact: true }).first()).toBeVisible({ timeout: 45_000 });
 
   // F1 — the main list asks for shown rows only; nothing pulls the full table.
   const main = lists.filter((l) => l.path === `/api/v1/workspaces/${wsA}/sessions` && l.q.get('archived') === 'false');
@@ -168,6 +170,6 @@ test('2,000 background + 300 archived sessions: list, archive paging, event stor
     return performance.now() - t0;
   }, wsB);
   expect(switchMs, `workspace switch ${switchMs.toFixed(0)} ms`).toBeLessThan(budgetMs(300));
-  await expect(page.getByText(`Agent b ${SHOWN - 1}`, { exact: true })).toBeVisible();
+  await expect(page.getByText(`Agent b ${SHOWN - 1}`, { exact: true }).first()).toBeVisible();
   expect(fatal).toEqual([]);
 });
