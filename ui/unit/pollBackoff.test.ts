@@ -105,3 +105,15 @@ test('createLimiter(2) (AccountsOverview probe stagger): never more than 2 in fl
   await Promise.all(done);
   assert.equal(peak, 2);
 });
+
+test('quiet cadence (Kafka Overview metrics): 4 s, then 8 → 10 s after 3 unchanged samples, snaps back on change', () => {
+  const c = backoff.quietCadence({ min: 4000, max: 10_000, quietAfter: 3 });
+  const seq: number[] = [];
+  for (const changed of [true, false, false, false, false, false, true, false]) {
+    c.sample(changed);
+    seq.push(c.ms);
+  }
+  assert.deepEqual(seq, [4000, 4000, 4000, 8000, 10_000, 10_000, 4000, 4000]);
+  c.sample(false); c.sample(false); c.reset();
+  assert.equal(c.ms, 4000);
+});
