@@ -22,7 +22,7 @@ use otto_core::auth::AuthUser;
 use otto_core::domain::WorkspaceRole;
 use otto_core::proof::{
     CiSummary, ProofArtifact, ProofArtifactKind, ProofArtifactStatus, ProofPack, RepoProofConfig,
-    WorkItemKind, MEDIA_CAP,
+    WorkItemKind, MEDIA_CAP, PREVIEW_CAP,
 };
 use otto_core::{Error, Id};
 
@@ -102,9 +102,10 @@ fn parse_work_kind(s: &str) -> ApiResult<WorkItemKind> {
 }
 
 async fn pack_resp(ctx: &ServerCtx, pack: ProofPack) -> ApiResult<ProofPackResp> {
+    // Badges + count only — never the inline content.
     let arts = ctx
         .proof_repo
-        .list_artifacts(&pack.id)
+        .list_artifacts_meta(&pack.id)
         .await
         .map_err(ApiError)?;
     let badges = engine::badge_strings(&pack, &arts);
@@ -115,8 +116,10 @@ async fn pack_resp(ctx: &ServerCtx, pack: ProofPack) -> ApiResult<ProofPackResp>
     })
 }
 
-fn artifact_view(a: ProofArtifact) -> ProofArtifactView {
-    // Inline content gets a capped preview; url/file refs do not.
+/// `a.content_ref` arrives already cut to [`PREVIEW_CAP`] characters by SQL
+/// (`list_artifacts_preview`); `full_len` is the stored content's byte length.
+/// Inline content gets a capped preview; url/file refs keep their (short) ref.
+fn artifact_view(mut a: ProofArtifact, full_len: i64) -> ProofArtifactView {
     let ref_kind = a
         .metadata
         .get("ref_kind")
@@ -126,7 +129,11 @@ fn artifact_view(a: ProofArtifact) -> ProofArtifactView {
         match &a.content_ref {
             Some(c) => {
                 let (p, t) = engine::preview(c);
-                (Some(p), t)
+                let truncated = t || full_len > p.len() as i64;
+                // The detail response never ships more than the preview; the
+                // full body is `GET /proof-artifacts/{id}/content`.
+                a.content_ref = Some(p.clone());
+                (Some(p), truncated)
             }
             None => (None, false),
         }
@@ -147,6 +154,21 @@ struct ListQuery {
     status: Option<String>,
     work_item_kind: Option<String>,
     work_item_id: Option<String>,
+    /// Page size (1..=500). Absent = every pack (legacy callers).
+    limit: Option<u32>,
+    /// Opaque keyset cursor from a previous page's `x-next-cursor` header.
+    cursor: Option<String>,
+}
+
+/// `<updated_at>|<id>` — both are RFC3339 / ULID-ish text without `|`.
+fn encode_cursor(c: &otto_state::PackCursor) -> String {
+    format!("{}|{}", c.0, c.1)
+}
+
+fn decode_cursor(s: &str) -> ApiResult<otto_state::PackCursor> {
+    s.split_once('|')
+        .map(|(u, id)| (u.to_string(), id.to_string()))
+        .ok_or_else(|| ApiError(Error::Invalid("bad cursor".into())))
 }
 
 async fn list(
@@ -154,26 +176,30 @@ async fn list(
     Extension(user): Extension<AuthUser>,
     Path(ws): Path<Id>,
     Query(q): Query<ListQuery>,
-) -> ApiResult<Json<Vec<ProofPackResp>>> {
+) -> ApiResult<Response> {
     check(&ctx, &user, &ws, WorkspaceRole::Viewer).await?;
-    let packs = ctx
+    let after = q.cursor.as_deref().map(decode_cursor).transpose()?;
+    let (packs, next) = ctx
         .proof_repo
-        .list_packs(
+        .list_packs_page(
             &ws,
             q.status.as_deref(),
             q.work_item_kind.as_deref(),
             q.work_item_id.as_deref(),
+            q.limit.map(|l| l.clamp(1, 500)),
+            after.as_ref(),
         )
         .await
         .map_err(ApiError)?;
-    // One narrow query for every pack's badge inputs (r3-07-01), not one
-    // full-content read per pack.
+    // Badge inputs for exactly this page's packs: one narrow `IN (…)` query
+    // (r3-07-01), never the inline content and never the whole workspace.
+    let ids: Vec<String> = packs.iter().map(|p| p.id.clone()).collect();
     let mut arts = ctx
         .proof_repo
-        .badge_artifacts(&ws)
+        .artifacts_meta_for_packs(&ids)
         .await
         .map_err(ApiError)?;
-    let out = packs
+    let out: Vec<ProofPackResp> = packs
         .into_iter()
         .map(|pack| {
             let a = arts.remove(&pack.id).unwrap_or_default();
@@ -184,7 +210,16 @@ async fn list(
             }
         })
         .collect();
-    Ok(Json(out))
+    let body = serde_json::to_vec(&out)
+        .map_err(|e| ApiError(Error::Internal(format!("serialize packs: {e}"))))?;
+    let mut b = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(c) = next {
+        b = b.header("x-next-cursor", encode_cursor(&c));
+    }
+    b.body(Body::from(body))
+        .map_err(|e| ApiError(Error::Internal(format!("packs response: {e}"))))
 }
 
 async fn summary(
@@ -272,26 +307,47 @@ async fn detail(
     Path(id): Path<Id>,
 ) -> ApiResult<Json<ProofPackDetailResp>> {
     let pack = pack_for(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
-    let arts = ctx
+    // Content cut to the preview cap in SQL — a pack of ten 2 MiB diffs used
+    // to read (and ship) 20 MiB to render 80 KiB of previews.
+    let rows = ctx
         .proof_repo
-        .list_artifacts(&pack.id)
+        .list_artifacts_preview(&pack.id, PREVIEW_CAP + 1)
         .await
         .map_err(ApiError)?;
+    let (arts, lens): (Vec<ProofArtifact>, Vec<i64>) = rows.into_iter().unzip();
     let badges = engine::badge_strings(&pack, &arts);
     // Recompute the done-contract LIVE so the meter is accurate even for packs
     // created before this feature (their persisted done_score may be stale).
     let done_contract = engine::live_contract(&ctx, &pack, &arts).await;
-    let artifacts = arts.into_iter().map(artifact_view).collect();
-    // Child packs (rollup), each as a summary row.
+    let artifacts = arts
+        .into_iter()
+        .zip(lens)
+        .map(|(a, n)| artifact_view(a, n))
+        .collect();
+    // Child packs (rollup), each as a summary row — one metadata query for
+    // all children instead of one full read each.
     let children_packs = ctx
         .proof_repo
         .list_children(&pack.id)
         .await
         .map_err(ApiError)?;
-    let mut children = Vec::with_capacity(children_packs.len());
-    for c in children_packs {
-        children.push(pack_resp(&ctx, c).await?);
-    }
+    let child_ids: Vec<String> = children_packs.iter().map(|c| c.id.clone()).collect();
+    let mut child_arts = ctx
+        .proof_repo
+        .artifacts_meta_for_packs(&child_ids)
+        .await
+        .map_err(ApiError)?;
+    let children: Vec<ProofPackResp> = children_packs
+        .into_iter()
+        .map(|c| {
+            let a = child_arts.remove(&c.id).unwrap_or_default();
+            ProofPackResp {
+                badges: engine::badge_strings(&c, &a),
+                artifact_count: a.len() as u32,
+                pack: c,
+            }
+        })
+        .collect();
     let snapshots = ctx
         .proof_repo
         .list_snapshots(&pack.id)
@@ -584,9 +640,14 @@ async fn add_media(
             engine::ALLOWED_MEDIA_MIMES.join(", ")
         ))));
     }
-    let data = base64::engine::general_purpose::STANDARD
-        .decode(req.data_base64.as_bytes())
-        .map_err(|_| ApiError(Error::Invalid("data_base64 is not valid base64".into())))?;
+    // Decoding ~34 MiB of base64 is CPU work — off the async workers.
+    let b64 = req.data_base64;
+    let data = tokio::task::spawn_blocking(move || {
+        base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())
+    })
+    .await
+    .map_err(|e| ApiError(Error::Internal(format!("media decode join: {e}"))))?
+    .map_err(|_| ApiError(Error::Invalid("data_base64 is not valid base64".into())))?;
     if data.is_empty() {
         return Err(ApiError(Error::Invalid("empty media".into())));
     }
@@ -617,9 +678,34 @@ async fn artifact_blob(
     State(ctx): State<ServerCtx>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
+    headers: axum::http::HeaderMap,
 ) -> ApiResult<Response> {
     let art = ctx.proof_repo.get_artifact(&id).await.map_err(ApiError)?;
     let _pack = pack_for(&ctx, &user, &art.proof_pack_id, WorkspaceRole::Viewer).await?;
+    // A media artifact's bytes never change (one blob per artifact, written
+    // once), so its sha is a strong validator: answer a revalidation with
+    // 304 before touching the blob.
+    let etag = art
+        .metadata
+        .get("sha256")
+        .and_then(|v| v.as_str())
+        .map(|s| format!("\"{s}\""));
+    if let (Some(tag), Some(inm)) = (etag.as_deref(), headers.get(header::IF_NONE_MATCH)) {
+        if inm
+            .to_str()
+            .is_ok_and(|v| v.split(',').any(|t| t.trim() == tag))
+        {
+            return Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(header::ETAG, tag)
+                .header(
+                    header::CACHE_CONTROL,
+                    "private, max-age=31536000, immutable",
+                )
+                .body(Body::empty())
+                .map_err(|e| ApiError(Error::Internal(format!("blob response: {e}"))));
+        }
+    }
     let blob = ctx
         .proof_repo
         .blob_for_artifact(&id)
@@ -627,8 +713,14 @@ async fn artifact_blob(
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("no blob for artifact {id}"))))?;
     let fname = art.title.replace(['"', '\n', '\r'], "_");
-    let resp = Response::builder()
-        .status(StatusCode::OK)
+    let mut resp = Response::builder().status(StatusCode::OK).header(
+        header::CACHE_CONTROL,
+        "private, max-age=31536000, immutable",
+    );
+    if let Some(tag) = etag.as_deref() {
+        resp = resp.header(header::ETAG, tag);
+    }
+    let resp = resp
         .header(header::CONTENT_TYPE, blob.mime)
         .header(
             header::CONTENT_DISPOSITION,
@@ -807,4 +899,49 @@ async fn put_repo_config(
         repo_id: id,
         config,
     }))
+}
+
+#[cfg(test)]
+mod proof_route_tests {
+    use super::*;
+
+    fn art(content: &str) -> ProofArtifact {
+        ProofArtifact {
+            id: "a".into(),
+            proof_pack_id: "p".into(),
+            workspace_id: "w".into(),
+            kind: ProofArtifactKind::Diff,
+            title: "diff".into(),
+            content_ref: Some(content.into()),
+            status: ProofArtifactStatus::Info,
+            metadata: json!({}),
+            content_sha256: None,
+            created_by: "u".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn proof_artifact_view_flags_sql_trimmed_content_as_truncated() {
+        // Short content: as stored, not truncated.
+        let v = artifact_view(art("hello"), 5);
+        assert_eq!(v.preview.as_deref(), Some("hello"));
+        assert!(!v.truncated);
+        // SQL already cut the body; the full length says there is more.
+        let v = artifact_view(art("hello"), 50_000);
+        assert!(v.truncated);
+        // A long cut body is capped to the preview and never shipped whole.
+        let long = "x".repeat(PREVIEW_CAP + 1);
+        let v = artifact_view(art(&long), (PREVIEW_CAP + 1) as i64);
+        assert!(v.truncated);
+        assert!(v.artifact.content_ref.unwrap().len() <= PREVIEW_CAP);
+    }
+
+    #[test]
+    fn proof_cursor_roundtrips() {
+        let c = ("2026-10-03T12:00:00Z".to_string(), "01ABC".to_string());
+        assert_eq!(decode_cursor(&encode_cursor(&c)).unwrap(), c);
+        assert!(decode_cursor("nobar").is_err());
+    }
 }

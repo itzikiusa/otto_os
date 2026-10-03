@@ -552,3 +552,90 @@ async fn capture_cancel_reports_cancelled() {
     let (_, body) = send(&app, Method::GET, "/snips", None).await;
     assert_eq!(json(&body).as_array().map(|a| a.len()), Some(0));
 }
+
+// ---------------------------------------------------------------------------
+// Raw image/png bodies + HTTP caching (perf: no base64 inflation per edit)
+// ---------------------------------------------------------------------------
+
+async fn send_raw(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    ct: &str,
+    body: Vec<u8>,
+    if_none_match: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", ct);
+    if let Some(t) = if_none_match {
+        b = b.header("if-none-match", t);
+    }
+    let mut req = b.body(Body::from(body)).unwrap();
+    req.extensions_mut().insert(AuthUser(user("alice")));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, headers, bytes)
+}
+
+#[tokio::test]
+async fn raw_png_upload_and_annotated_save_with_cache_validators() {
+    let (_tmp, data_dir, app) = test_app().await;
+
+    // Raw upload (no JSON, no base64).
+    let (status, _, body) = send_raw(
+        &app,
+        Method::POST,
+        "/snips",
+        "image/png",
+        fixture_png(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let id = json(&body)["id"].as_str().unwrap().to_string();
+    assert_eq!(json(&body)["width"], 60);
+
+    // Raw non-PNG is refused by the header sniff.
+    let (status, _, _) = send_raw(
+        &app,
+        Method::POST,
+        "/snips",
+        "image/png",
+        vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Raw annotated save lands on the clipboard sink byte-exactly.
+    let uri = format!("/snips/{id}/annotated");
+    let (status, _, body) =
+        send_raw(&app, Method::POST, &uri, "image/png", fixture_png2(), None).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let sink = std::fs::read(data_dir.join("snips/clipboard-last.png")).expect("sink");
+    assert_eq!(sink, fixture_png2());
+
+    // The original is immutable; the annotated export revalidates via ETag.
+    let img = format!("/snips/{id}/image");
+    let (status, h, got) = send_raw(&app, Method::GET, &img, "", vec![], None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, fixture_png());
+    assert!(h["cache-control"].to_str().unwrap().contains("immutable"));
+    let (status, h, got) = send_raw(&app, Method::GET, &uri, "", vec![], None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, fixture_png2());
+    let tag = h["etag"].to_str().unwrap().to_string();
+    let (status, _, got) = send_raw(&app, Method::GET, &uri, "", vec![], Some(&tag)).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert!(got.is_empty());
+}

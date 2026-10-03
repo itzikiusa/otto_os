@@ -63,6 +63,13 @@ pub async fn assemble(
         .list_full_for_review(review_id)
         .await
         .map_err(ApiError)?;
+    // Every finding's timeline in one batched query, not one per finding.
+    let ids: Vec<String> = findings.iter().map(|f| f.id.clone()).collect();
+    let mut events_by = ctx
+        .finding_events_store
+        .list_for_findings(&ids)
+        .await
+        .unwrap_or_default();
     let mut summary = ReviewProofPackSummary::default();
     let mut entries: Vec<ReviewProofPackEntry> = Vec::with_capacity(findings.len());
     for f in findings {
@@ -91,11 +98,7 @@ pub async fn assemble(
         if f.linked_test.as_deref().filter(|s| !s.is_empty()).is_some() {
             summary.with_test += 1;
         }
-        let events = ctx
-            .finding_events_store
-            .list_for_finding(&f.id)
-            .await
-            .unwrap_or_default();
+        let events = events_by.remove(&f.id).unwrap_or_default();
         entries.push(ReviewProofPackEntry { finding: f, events });
     }
     let repo_rules = ctx
