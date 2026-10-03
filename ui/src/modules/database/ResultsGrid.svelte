@@ -241,10 +241,13 @@
   let prevColKey: string | null = null;
   // The tab whose view state is live in this instance (non-reactive).
   let prevTabKey: string | null = null;
+  // The result the live view state was built on (non-reactive): on a tab
+  // switch `resultProp` is already the INCOMING tab's when the effect runs.
+  let shownResult: unknown = null;
   /** The live view state, to park under the tab it belongs to. */
   function currentGridState(): GridTabState<RowPatch> {
     return {
-      result: resultProp,
+      result: shownResult,
       colKey: prevColKey ?? '',
       search: searchInput,
       sortCol,
@@ -280,6 +283,7 @@
         flow.resetForResult();
         if (saved.result === resultProp && saved.pending.size > 0) flow.pending = saved.pending;
         compare = null;
+        shownResult = resultProp;
         return;
       }
       // No parked state for this tab: start it clean (the shape check below
@@ -304,6 +308,7 @@
     // index, so a result change invalidates them too — cleared together.
     flow.resetForResult();
     compare = null;
+    shownResult = resultProp;
   });
 
   // Engine behind this result (drives dialect for inline edits).

@@ -169,3 +169,25 @@ test('a tab keeps its uid and its run start time across a reload', async () => {
   assert.equal(back.tabs[0].pending.startedAt, 1_700_000_000_000, 'the timer keeps counting from the real start');
   assert.notEqual(back.tabs[0].id, undefined);
 });
+
+test('a daemon restart marks open connections stale and re-warms them', async () => {
+  const { db, calls, schema } = setup(['a', 'b'], 'a');
+  const done = db.restoreWorkbench();
+  await flush();
+  schema.get('int:a')!.resolve([]);
+  await done;
+  schema.get('bg:b')!.resolve([{ id: 'db:x', label: 'x', kind: 'database' }]);
+  await flush();
+  await flush();
+  assert.equal(db.connStatus.get('b').phase, 'ready');
+  const before = schemaCalls(calls).length;
+  db.onDaemonRestart();
+  await flush();
+  const after = schemaCalls(calls).slice(before);
+  assert.deepEqual([...after].sort(), ['bg:b', 'int:a'], 'selected reloads, the other re-warms');
+  assert.equal(db.connStatus.get('b').phase, 'connecting');
+  schema.get('bg:b')!.resolve([{ id: 'db:y', label: 'y', kind: 'database' }]);
+  await flush();
+  await flush();
+  assert.equal(db.snapshots.get('b').schemaRoot[0].id, 'db:y', 'the parked tree is refilled in place');
+});

@@ -29,6 +29,7 @@ import type {
   DbSavedQuery,
   DbSchemaGraph,
   DbTestResult,
+  DbQueryStatus,
   DbViz,
   DbWidget,
   DbWidgetMapping,
@@ -2258,7 +2259,14 @@ class DatabaseStore {
   warm(id: Id): Promise<void> {
     const inflight = this.warming.get(id);
     if (inflight) return inflight.promise;
-    if (!this.openConnIds.includes(id) || this.snapshots.has(id) || this.selectedConnId === id) {
+    // A parked snapshot with a tree needs nothing; one emptied by a daemon
+    // restart (onDaemonRestart) gets its caps + tree refilled in place.
+    const parked = this.snapshots.get(id);
+    if (
+      !this.openConnIds.includes(id) ||
+      (parked && parked.schemaRoot.length > 0) ||
+      this.selectedConnId === id
+    ) {
       return Promise.resolve();
     }
     const ctl = new AbortController();
@@ -2273,8 +2281,13 @@ class DatabaseStore {
         ]);
         if (!this.connLive(id, epoch) || ctl.signal.aborted) return;
         const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-        if (!this.snapshots.has(id) && this.selectedConnId !== id) {
-          this.snapshots.set(id, this.freshSnapshot(id, caps, root));
+        if (this.selectedConnId !== id) {
+          const snap = this.snapshots.get(id);
+          if (!snap) this.snapshots.set(id, this.freshSnapshot(id, caps, root));
+          else if (snap.schemaRoot.length === 0) {
+            // Keep the parked tabs/results; only the connection-side data refills.
+            this.snapshots.set(id, { ...snap, capabilities: caps, schemaRoot: root });
+          }
         }
         this.mergeConnStatus(id, {
           phase: 'ready',
@@ -2416,11 +2429,7 @@ class DatabaseStore {
     }
     this.connStatus = cs;
     if (sel && this.openConnIds.includes(sel)) void this.retryConnection(sel);
-    if (this.warmRestored === 'background') {
-      // Only ids without a usable snapshot warm (warm skips parked ones); the
-      // emptied snapshots re-fetch on open instead.
-      void this.warmMany(others.filter((id) => !this.snapshots.has(id)));
-    }
+    if (this.warmRestored === 'background') void this.warmMany(others);
   }
 
   // ── Non-DB workbench panes (Kafka clusters, SSH/custom terminals) ───────────
@@ -3502,12 +3511,11 @@ class DatabaseStore {
     // Re-entrancy / staleness guard: stop when the tab moved on to a different
     // run (a new runQuery replaces `pending`) or the marker was cleared.
     while (t.pending && t.pending.queryId === pending.queryId) {
-      let st: { status: string; result?: QueryResult; error?: string };
+      let st: DbQueryStatus;
       try {
-        st = await api.post<{ status: string; result?: QueryResult; error?: string }>(
-          `${this.connBase(pending.connId)}/query-status`,
-          { query_id: pending.queryId },
-        );
+        st = await api.post<DbQueryStatus>(`${this.connBase(pending.connId)}/query-status`, {
+          query_id: pending.queryId,
+        });
         failures = 0;
       } catch {
         // Daemon unreachable (sleep/restart in progress): retry a few times,
@@ -3520,6 +3528,16 @@ class DatabaseStore {
         continue;
       }
       if (st.status === 'running') {
+        // A run this page didn't start (agent, other window, an old marker):
+        // backfill its real start so the timer doesn't count from 0.
+        if (
+          st.elapsed_ms != null &&
+          t.pending?.queryId === pending.queryId &&
+          !t.pending.startedAt
+        ) {
+          t.pending = { ...t.pending, startedAt: Date.now() - st.elapsed_ms };
+          this.persistTabs();
+        }
         await new Promise((r) => setTimeout(r, 1500));
         continue;
       }
