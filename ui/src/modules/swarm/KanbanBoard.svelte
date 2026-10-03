@@ -13,7 +13,10 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { sentenceCase } from '../../lib/status';
-  import { TASK_COLUMNS, type SwarmProject, type SwarmTask, type TaskStatus } from './types';
+  import { TASK_COLUMNS, type SwarmProject, type SwarmTask, type TaskStatus, type SwarmUtilization, type TaskWaiting } from './types';
+  import { api } from '../../lib/api/client';
+  import { rel } from '../../lib/stores/now.svelte';
+  import { pollWhileVisible, type Poller } from '../../lib/poll';
 
   // `onnewproject` / `oneditproject` hand off to SwarmPage, which owns the
   // project create/edit modal (where project skills live). New project lives
@@ -44,6 +47,42 @@
     if (!cur || !projects.some((p) => p.id === cur)) {
       swarm.selectedProjectId = projects[0].id;
     }
+  });
+
+  // Why each ready "To do" card isn't starting (12-mcp W1): the coordinator
+  // records a reason per ready task every tick; read it from the utilization
+  // endpoint while the swarm is active — on task changes (debounced) and every
+  // 15 s while the page is visible. Best effort: a failed read keeps the last
+  // reasons and never surfaces an error (the board itself is unaffected).
+  let waiting: Record<string, TaskWaiting> = $state({});
+  const activeSid = $derived(swarm.detail?.status === 'active' ? swarm.detail.id : null);
+  async function loadWaiting(sid: string, signal?: AbortSignal) {
+    try {
+      const u = await api.get<SwarmUtilization>(`/swarm/swarms/${sid}/utilization`, signal);
+      if (sid === activeSid) waiting = u.waiting ?? {};
+    } catch {
+      /* keep the last reasons */
+    }
+  }
+  let waitingPoller: Poller | null = null;
+  $effect(() => {
+    const sid = activeSid;
+    if (!sid) {
+      waiting = {};
+      return;
+    }
+    const p = pollWhileVisible((signal) => loadWaiting(sid, signal), { ms: 15_000 });
+    waitingPoller = p;
+    return () => {
+      p.stop();
+      if (waitingPoller === p) waitingPoller = null;
+    };
+  });
+  // Re-read soon after the board's tasks change (a claim, a finished run).
+  $effect(() => {
+    void tasks;
+    const t = setTimeout(() => waitingPoller?.now({ background: true }), 800);
+    return () => clearTimeout(t);
   });
 
   const COLUMN_LABEL: Record<TaskStatus, string> = {
@@ -542,6 +581,12 @@
                   </button>
                 </div>
                 {#if t.delegated}<span class="tag" title="Handed to this agent by another agent">Delegated</span>{/if}
+                {#if t.status === 'todo' && waiting[t.id]}
+                  {@const w = waiting[t.id]}
+                  <span class="waiting" title="Ready, but not started: {w.detail} (since {rel(w.since)})">
+                    <Icon name="clock" size={11} /> Waiting: {w.detail}
+                  </span>
+                {/if}
               </div>
             {/each}
             {#if !showAllFinished && (col === 'done' || col === 'cancelled') && colTasks.length > DONE_CAP}
@@ -759,6 +804,15 @@
   }
   /* A long unbroken title (a path, a URL) used to overflow the 240px column. */
   .card-title-text {
+    overflow-wrap: anywhere;
+  }
+  .waiting {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-block-start: 6px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
     overflow-wrap: anywhere;
   }
   .card-meta {
