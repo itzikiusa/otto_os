@@ -658,13 +658,9 @@
     background: var(--surface);
     box-shadow: var(--shadow);
   }
-  /* The back arrow is a literal "←"; mirror it under RTL so it points the
-     direction "back" actually goes (→) instead of always pointing left. */
+  /* The back chevron mirrors under RTL via Icon's DIRECTIONAL set. */
   .rv-back-arrow {
     display: inline-flex;
-  }
-  :global([dir='rtl']) .rv-back-arrow {
-    transform: scaleX(-1);
   }
   .rv-tab-scroll {
     height: 100%;

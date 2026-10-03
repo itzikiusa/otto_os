@@ -245,7 +245,7 @@
     padding: 6px 14px;
     border: none;
     border-radius: var(--radius-m);
-    background: var(--accent);
+    background: var(--accent-solid);
     color: var(--accent-contrast);
     cursor: pointer;
     font-size: var(--fs-m);

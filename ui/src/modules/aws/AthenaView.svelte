@@ -571,6 +571,10 @@
     background: var(--bg);
     color: var(--text-dim);
   }
+  .tf:focus-within {
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
   .tf input {
     flex: 1;
     min-width: 0;

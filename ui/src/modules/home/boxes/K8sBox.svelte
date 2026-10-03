@@ -16,15 +16,18 @@
   import EnvBadge from '../../../lib/components/EnvBadge.svelte';
   import { WINDOWS, fmtPct, fmtRate, healthLabel, isWindow } from '../../kubernetes/monitor/monitor-util';
   import { home, type HomeBox } from '../home.svelte';
-  import { poll, type Poller } from './poll';
+  import { freshness, poll, type Poller } from './poll';
 
   interface Props {
     box: HomeBox;
     viewId: string;
     zoomed: boolean;
     tick: number;
+    /** False while this box's Home space is not on screen (or another box
+     *  is zoomed): the poller stops, the data stays (review 06 F3). */
+    active?: boolean;
   }
-  let { box, viewId, zoomed: _zoomed, tick }: Props = $props();
+  let { box, viewId, zoomed: _zoomed, tick, active = true }: Props = $props();
 
   const win = $derived(isWindow(String(box.config.window ?? '')) ? (box.config.window as (typeof WINDOWS)[number]) : '24h');
 
@@ -63,10 +66,12 @@
   }
 
   let poller: Poller | null = null;
+  const fresh = freshness(load);
   $effect(() => {
-    void win;
+    const key = win;
+    if (!active) return;
     poller?.stop();
-    poller = poll(load, 60_000);
+    poller = poll(fresh.run, 60_000, fresh.start(key, 60_000));
     return () => poller?.stop();
   });
   // Manual refresh (frame button) runs interactive; a collection cycle

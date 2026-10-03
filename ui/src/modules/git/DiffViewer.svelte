@@ -1816,19 +1816,15 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  /* Direction-aware glyphs: mirror the physical chevrons + the rename arrow in
-     RTL so the sidebar collapse, file collapse and "from → to" rename all read
-     in the reading direction (mirrors GraphView's df-chevron / df-rename-arrow). */
+  /* Direction-aware glyphs: the sidebar-collapse and file-collapse chevrons
+     mirror under RTL via Icon's DIRECTIONAL set; the literal "→" of a
+     "from → to" rename is text, so it is mirrored here. */
   .nav-collapse-ico,
   .dfile-chevron,
   .rename-arrow {
     display: inline-flex;
   }
-  :global([dir='rtl']) .nav-collapse-ico,
-  :global([dir='rtl']) .dfile-chevron,
   :global([dir='rtl']) .rename-arrow {
-    /* chevronDown is horizontally symmetric so flipping it is a no-op; the
-       collapsed chevronRight and the rename arrow flip to point start-ward. */
     transform: scaleX(-1);
   }
   .dfile-binary {

@@ -803,7 +803,7 @@
     height: 22px;
     flex: none;
     border-radius: 50%;
-    background: var(--accent);
+    background: var(--accent-solid);
     color: var(--accent-contrast);
     display: inline-flex;
     align-items: center;

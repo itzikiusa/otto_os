@@ -3,8 +3,10 @@
   // slide, each RevealStep cumulatively fades in its nodeIds (fade+translate).
   // A slide bound to a mermaid sequence node steps that diagram's messages.
   // Controls auto-hide; keys: →/Space/← Home/End/Esc, N (notes), F (fullscreen).
+  import { untrack } from 'svelte';
   import { fly } from 'svelte/transition';
   import Icon from '../../lib/components/Icon.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { renderMermaid } from './mermaid';
   import { parseSeq, revealUpTo, revealAll, type SeqSteps } from './present_seq';
@@ -15,6 +17,14 @@
     onexit: () => void;
   }
   let { onexit }: Props = $props();
+
+  // A full-screen overlay on the Modal layer: register it so the native
+  // browser webview hides under it (untracked: pushModal reads the counter it
+  // bumps — see Modal.svelte).
+  $effect(() => {
+    untrack(() => ui.pushModal());
+    return () => untrack(() => ui.popModal());
+  });
 
   const scene = $derived(canvas.scene);
   const slides = $derived<Slide[]>(scene?.slides ?? []);
@@ -278,21 +288,21 @@
 
     <!-- controls -->
     <div class="controls" class:hidden={!controlsVisible}>
-      <button class="ctl" onclick={prev} aria-label="Previous"><Icon name="chevronLeft" /></button>
+      <button class="ctl" onclick={prev} aria-label="Previous" title="Previous"><Icon name="chevronLeft" /></button>
       <span class="counter">{slideIdx + 1} / {slides.length} · step {stepIdx + 1}/{stepCount}</span>
-      <button class="ctl" onclick={next} aria-label="Next"><Icon name="chevronRight" /></button>
+      <button class="ctl" onclick={next} aria-label="Next" title="Next"><Icon name="chevronRight" /></button>
       <span class="dots">
         {#each slides as s, i (s.id)}
           <button class="dot" class:on={i === slideIdx} onclick={() => gotoSlide(i)} aria-label={`Slide ${i + 1}`}></button>
         {/each}
       </span>
-      <button class="ctl" class:on={autoplay} onclick={() => (autoplay = !autoplay)} title="Autoplay">
+      <button class="ctl" class:on={autoplay} onclick={() => (autoplay = !autoplay)} title="Autoplay" aria-label="Autoplay">
         <Icon name="play" />
       </button>
-      <button class="ctl" class:on={showNotes} onclick={() => (showNotes = !showNotes)} title="Notes (N)">
+      <button class="ctl" class:on={showNotes} onclick={() => (showNotes = !showNotes)} title="Notes (N)" aria-label="Notes (N)">
         <Icon name="note" />
       </button>
-      <button class="ctl" onclick={onexit} aria-label="Exit (Esc)"><Icon name="x" /></button>
+      <button class="ctl" onclick={onexit} aria-label="Exit (Esc)" title="Exit (Esc)"><Icon name="x" /></button>
     </div>
   {/if}
 </div>
@@ -333,7 +343,7 @@
   .present {
     position: fixed;
     inset: 0;
-    z-index: 1000;
+    z-index: var(--z-modal);
     background: var(--bg);
     color: var(--text);
     display: flex;
@@ -512,8 +522,8 @@
     cursor: pointer;
   }
   .btn.accent {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    border-color: var(--accent-solid);
+    color: var(--accent-contrast);
   }
 </style>

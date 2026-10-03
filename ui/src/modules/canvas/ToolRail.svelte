@@ -134,8 +134,8 @@
     background: var(--surface-2);
   }
   .tool.active {
-    background: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
   }
   .divider {
     width: 22px;

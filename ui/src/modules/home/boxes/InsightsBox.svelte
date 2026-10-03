@@ -11,14 +11,17 @@
   import { router } from '../../../lib/router.svelte';
   import type { InsightReport } from '../../../lib/api/types';
   import type { HomeBox } from '../home.svelte';
-  import { livePoll, type Poller } from './poll';
+  import { freshness, livePoll, type Poller } from './poll';
 
   interface Props {
     box: HomeBox;
     zoomed: boolean;
     tick: number;
+    /** False while this box's Home space is not on screen (or another box
+     *  is zoomed): the poller stops, the data stays (review 06 F3). */
+    active?: boolean;
   }
-  let { box: _box, zoomed, tick }: Props = $props();
+  let { box: _box, zoomed, tick, active = true }: Props = $props();
 
   let reports = $state<InsightReport[]>([]);
   let loading = $state(true);
@@ -38,9 +41,11 @@
   }
 
   let poller: Poller | null = null;
+  const fresh = freshness(load);
   $effect(() => {
+    if (!active) return;
     // A finished report arrives as `insight_ready`; 300 s only while offline.
-    poller = livePoll(load, 300_000, ['insight_ready']);
+    poller = livePoll(fresh.run, 300_000, ['insight_ready'], { immediate: fresh.start('', 300_000) });
     return () => poller?.stop();
   });
   $effect(() => {

@@ -1199,7 +1199,8 @@
   }
   .text-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .text-area {
     width: 100%;
@@ -1216,7 +1217,8 @@
   }
   .text-area:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
 
   /* ── Category sections ───────────────────────────────────────── */

@@ -703,7 +703,7 @@
       onblur={() => (urlFocused = false)}
     />
     <button class="icon-btn tool go-btn" onclick={go} title="Go" aria-label="Go" disabled={!urlInput.trim()}>
-      <span class="flip-rtl"><Icon name="chevronRight" size={14} /></span>
+      <Icon name="chevronRight" size={14} />
     </button>
     {#if browser.activeTab}
       <div class="mode-toggle" role="group" aria-label="Tab mode">
@@ -953,10 +953,6 @@
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text);
-  }
-  :global([dir='rtl']) .flip-rtl {
-    display: inline-flex;
-    transform: scaleX(-1);
   }
   .icon-btn.tool:disabled {
     opacity: 0.5;

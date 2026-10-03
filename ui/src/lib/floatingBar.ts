@@ -251,9 +251,40 @@ export function hitRoute(hit: { kind: string; id: string }): string {
       return 'brokers';
     case 'memory':
       return 'vault';
+    case 'canvas':
+      return 'canvas';
     default:
       return 'home';
   }
+}
+
+/** The search-hit actions the ⌘K palette can perform. The server may list
+ *  more (`rerun`, `review`) — those stay hidden until they have a handler, so
+ *  no button closes the palette and does nothing. Legacy labels such as the
+ *  canvas hit's "Open in Canvas" count as `open`. */
+export type HitAction = 'open' | 'copy-context' | 'send-to-agent';
+
+export function normalizeHitAction(action: string): HitAction | null {
+  const a = action.trim().toLowerCase();
+  if (a === 'open' || a.startsWith('open ')) return 'open';
+  if (a === 'copy-context' || a === 'send-to-agent') return a;
+  return null;
+}
+
+/** The hit's actions the palette can run, deduped, `open` first. */
+export function hitActions(hit: { actions: readonly string[] }): HitAction[] {
+  const out: HitAction[] = [];
+  for (const a of hit.actions) {
+    const n = normalizeHitAction(a);
+    if (n && !out.includes(n)) out.push(n);
+  }
+  return out.sort((x, y) => Number(y === 'open') - Number(x === 'open'));
+}
+
+/** Plain-text context for a hit (copy-context / send-to-agent). */
+export function hitContext(hit: { kind: string; id: string; title: string; subtitle?: string | null }): string {
+  const kind = hit.kind.replace(/_/g, ' ');
+  return [`${kind}: ${hit.title}`, hit.subtitle ?? '', `(${hit.kind} id ${hit.id})`].filter(Boolean).join('\n');
 }
 
 // ─── Keys ───────────────────────────────────────────────────────────────────

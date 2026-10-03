@@ -207,16 +207,16 @@
           <div class="actions">
             <button
               class="icon-btn"
-              title="Reveal password"
+              title="Reveal password" aria-label="Reveal password"
               disabled={revealingId === c.id}
               onclick={() => reveal(c)}
             >
               <Icon name="eye" size={13} />
             </button>
-            <button class="icon-btn" title="Edit" onclick={() => openEdit(c)}>
+            <button class="icon-btn" title="Edit credential" aria-label="Edit credential" onclick={() => openEdit(c)}>
               <Icon name="edit" size={13} />
             </button>
-            <button class="icon-btn" title="Delete" onclick={() => remove(c)}>
+            <button class="icon-btn" title="Delete credential" aria-label="Delete credential" onclick={() => remove(c)}>
               <Icon name="trash" size={13} />
             </button>
           </div>

@@ -1287,7 +1287,8 @@
   }
   .name-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
     background: var(--surface-2);
   }
   .name-input::placeholder {
@@ -1370,7 +1371,7 @@
   }
   .url-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .url-input::placeholder {

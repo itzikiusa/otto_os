@@ -130,10 +130,23 @@ test('spaces: add (max 4), switch with tabs / keys, rename, delete, persist', as
   await addView(page, 'Four');
   await expect(page.getByRole('tab')).toHaveCount(4);
   await expect(page.getByRole('button', { name: 'Add space' })).toHaveCount(0);
-  // Auto-rotate control appears with >1 views, defaults ON, toggles and persists.
+  // Every space stays mounted: the off-screen ones are hidden + inert (their
+  // boxes keep their data and pause), so a slide never remounts/re-fetches.
+  const home = page.getByRole('region', { name: 'Home dashboard' });
+  await expect(home.locator('.view')).toHaveCount(4);
+  await expect(home.locator('.view:not([hidden])')).toHaveCount(1);
+  await expect(home.locator('.view[hidden]').first()).toHaveAttribute('inert', '');
+  // Auto-rotate control appears with >1 views, defaults OFF (moving content is
+  // opt-in, WCAG 2.2.2), toggles and persists.
   const rot = page.getByRole('button', { name: /Auto-rotate/ });
+  await expect(rot).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('.progress i')).toHaveCount(0);
+  await rot.click();
   await expect(rot).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('.progress i')).toBeVisible();
+  // Hovering the widgets pauses cycling (the countdown bar goes away).
+  await home.locator('.stage').hover();
+  await expect(page.locator('.progress i')).toHaveCount(0);
   await rot.click();
   await expect(rot).toHaveAttribute('aria-pressed', 'false');
   await expect(page.locator('.progress i')).toHaveCount(0);
@@ -208,7 +221,8 @@ test('widgets: add from the picker (max 8), resize in grid units, zoom, remove',
   const zoomed = home.locator('section.hbox.zoomed');
   await expect(zoomed).toHaveCount(1);
   await expect(zoomed).toHaveAttribute('data-kind', 'sessions');
-  await expect(home.locator('section.hbox')).toHaveCount(1);
+  // The grid stays mounted (paused) under the zoom, but only the zoomed box shows.
+  await expect(home.locator('section.hbox:visible')).toHaveCount(1);
   const stage = await home.locator('.stage').boundingBox();
   const z = await zoomed.boundingBox();
   if (!stage || !z) throw new Error('no stage');

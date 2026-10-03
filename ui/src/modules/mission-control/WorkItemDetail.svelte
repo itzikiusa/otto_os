@@ -642,9 +642,6 @@
   .rel-dir {
     display: inline-flex;
   }
-  :global([dir='rtl']) .rel-dir {
-    transform: scaleX(-1);
-  }
   .peer-icon {
     color: var(--text-dim);
     display: inline-flex;

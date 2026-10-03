@@ -245,9 +245,9 @@
     color: var(--accent-text);
   }
   .lc-btn.primary {
-    background: var(--accent);
+    background: var(--accent-solid);
     color: var(--accent-contrast);
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
   }
   .lc-btn.primary:hover {
     color: var(--accent-contrast);

@@ -152,7 +152,7 @@
     cursor: pointer;
   }
   .toggle.active {
-    background: var(--accent);
+    background: var(--accent-solid);
     color: var(--accent-contrast);
     border-color: transparent;
   }

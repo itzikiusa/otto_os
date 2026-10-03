@@ -136,6 +136,7 @@
         <button
           class="rail-btn"
           class:active={isActive(m.id)}
+          aria-current={isActive(m.id) ? 'page' : undefined}
           class:side={inSide}
           onclick={(e) => navClick(e, m.id, m.label)}
           oncontextmenu={(e) => moduleMenu(e, m.id, m.label)}
@@ -164,6 +165,7 @@
     <button
       class="rail-btn"
       class:active={router.module === 'settings'}
+      aria-current={router.module === 'settings' ? 'page' : undefined}
       onclick={() => router.go('settings/appearance')}
       title="Settings"
       aria-label="Settings"

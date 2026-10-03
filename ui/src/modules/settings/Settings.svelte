@@ -322,7 +322,7 @@
     transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
   }
   .settings-nav-filter:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .settings-filter-input {

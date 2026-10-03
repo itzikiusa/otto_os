@@ -6,14 +6,14 @@
   // bounding-rect scale). Every committed mutation schedules a debounced
   // flatten → POST /snips/{id}/annotated, which puts the latest state on the
   // clipboard — the user can paste into a session at any moment (R4).
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { router } from '../../lib/router.svelte';
   import { snipApi } from '../../lib/snip';
   import { ApiError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
-  import { isTauri } from '../../lib/stores/ui.svelte';
+  import { isTauri, ui } from '../../lib/stores/ui.svelte';
   import {
     PALETTE,
     STROKES,
@@ -112,6 +112,14 @@
       loading = false;
     }
   }
+
+  // The editor is a full-screen overlay on the Modal layer: register it so
+  // the native browser webview hides under it (untracked: pushModal reads the
+  // counter it bumps — see Modal.svelte).
+  $effect(() => {
+    untrack(() => ui.pushModal());
+    return () => untrack(() => ui.popModal());
+  });
 
   onMount(() => {
     void loadImage();
@@ -775,7 +783,8 @@
     flex-direction: column;
     background: var(--bg);
     color: var(--text);
-    z-index: 50;
+    /* Above BottomNav (--z-mobile-nav) and the shell chrome. */
+    z-index: var(--z-modal);
   }
   .snip-bar {
     display: flex;
@@ -825,7 +834,9 @@
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
-  /* The icon set has no redo glyph: redo is undo, mirrored. */
+  /* The icon set has no redo glyph: redo is undo, mirrored. (Not an RTL
+     override: in RTL the Icon flips undo and this mirrors it back, so redo
+     still points opposite to undo.) */
   .mirror {
     display: inline-flex;
     transform: scaleX(-1);

@@ -92,6 +92,16 @@
     if (pick) untrack(() => select(pick));
   });
 
+  // Tablet/phone: the detail is a full-screen sheet on the Modal layer —
+  // register it while it is up so the native browser webview hides under it
+  // (untracked: pushModal reads the counter it bumps). Desktop's side pane is
+  // not an overlay, so it never registers.
+  $effect(() => {
+    if (!selectedId || viewport.isDesktop) return;
+    untrack(() => ui.pushModal());
+    return () => untrack(() => ui.popModal());
+  });
+
   // filters
   let kindF = $state<WorkKind | ''>('');
   let statusF = $state<WorkStatus | ''>('');
@@ -544,7 +554,9 @@
     .mc-detail {
       position: fixed;
       inset: 0;
-      z-index: 40;
+      /* The Modal layer: above BottomNav (--z-mobile-nav), which otherwise
+         covered the sheet's last 56 px. */
+      z-index: var(--z-modal);
       width: auto;
       flex: none;
       border: none;

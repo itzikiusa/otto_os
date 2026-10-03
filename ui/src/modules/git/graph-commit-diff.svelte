@@ -661,10 +661,8 @@
     display: inline-flex;
     flex-shrink: 0;
   }
-  /* Collapsed points in the reading direction: flip the chevron under RTL. */
-  :global([dir='rtl']) .df-chevron {
-    transform: scaleX(-1);
-  }
+  /* Collapsed points in the reading direction: Icon mirrors chevronRight
+     under RTL itself (DIRECTIONAL), so no flip here. */
   /* Rename separator: mirror the glyph in place so "from → to" reads right. */
   :global([dir='rtl']) .df-rename-arrow {
     display: inline-block;

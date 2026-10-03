@@ -43,7 +43,7 @@
   {/if}
   <section>
     <button class="hdr" aria-expanded={open.backlinks} onclick={() => (open.backlinks = !open.backlinks)}>
-      <span class="tri" class:open={open.backlinks}><Icon name="chevronRight" size={12} /></span>
+      <span class="tri" class:open={open.backlinks}><Icon name="chevronRight" noflip size={12} /></span>
       Backlinks
       <span class="badge">{vault.backlinks.length}</span>
     </button>
@@ -66,7 +66,7 @@
 
   <section>
     <button class="hdr" aria-expanded={open.outgoing} onclick={() => (open.outgoing = !open.outgoing)}>
-      <span class="tri" class:open={open.outgoing}><Icon name="chevronRight" size={12} /></span>
+      <span class="tri" class:open={open.outgoing}><Icon name="chevronRight" noflip size={12} /></span>
       Outgoing links
       <span class="badge">{vault.note?.outgoing.length ?? 0}</span>
     </button>
@@ -93,7 +93,7 @@
 
   <section>
     <button class="hdr" aria-expanded={open.outline} onclick={() => (open.outline = !open.outline)}>
-      <span class="tri" class:open={open.outline}><Icon name="chevronRight" size={12} /></span>
+      <span class="tri" class:open={open.outline}><Icon name="chevronRight" noflip size={12} /></span>
       Outline
       <span class="badge">{vault.note?.meta.headings.length ?? 0}</span>
     </button>
@@ -113,7 +113,7 @@
 
   <section>
     <button class="hdr" aria-expanded={open.props} onclick={() => (open.props = !open.props)}>
-      <span class="tri" class:open={open.props}><Icon name="chevronRight" size={12} /></span>
+      <span class="tri" class:open={open.props}><Icon name="chevronRight" noflip size={12} /></span>
       Properties
       <span class="badge">{props.length}</span>
     </button>
@@ -141,7 +141,7 @@
   {#if vault.current?.okf}
     <section>
       <button class="hdr" aria-expanded={open.okf} onclick={() => (open.okf = !open.okf)}>
-        <span class="tri" class:open={open.okf}><Icon name="chevronRight" size={12} /></span>
+        <span class="tri" class:open={open.okf}><Icon name="chevronRight" noflip size={12} /></span>
         OKF
         {#if vault.okfReport}
           <span class="badge" class:err={!vault.okfReport.conformant} title={vault.okfReport.conformant ? 'Conformant' : `${vault.okfReport.errors.length} errors`}>

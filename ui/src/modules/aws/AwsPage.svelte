@@ -163,7 +163,7 @@
   {/snippet}
   {#snippet actions()}
     {#if aws.installed && !routeAccountId && aws.accounts.length > 3}
-      <label class="filter">
+      <label class="filter input-group">
         <Icon name="search" size={13} />
         <input type="search" placeholder="Filter accounts…" bind:value={filter} aria-label="Filter accounts" />
       </label>
@@ -329,24 +329,15 @@
     border: 1px solid var(--border);
     color: var(--text-dim);
   }
+  /* Box + focus ring come from the global .input-group (app.css). */
   .filter {
-    display: flex;
-    align-items: center;
-    gap: 6px;
     height: 28px;
     padding: 0 8px;
-    border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--bg);
-    color: var(--text-dim);
   }
   .filter input {
-    border: 0;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-m);
-    outline: none;
+    flex: none;
     width: 160px;
   }
   .rail-col {

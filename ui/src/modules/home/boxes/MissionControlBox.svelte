@@ -15,14 +15,17 @@
   import { KIND_ICON, STATUS_LABEL, fmtCost, relTime, statusColor } from '../../mission-control/lib';
   import type { HomeBox } from '../home.svelte';
   import { loadErrorText } from '../../../lib/loadError';
-  import { livePoll, type Poller } from './poll';
+  import { freshness, livePoll, type Poller } from './poll';
 
   interface Props {
     box: HomeBox;
     zoomed: boolean;
     tick: number;
+    /** False while this box's Home space is not on screen (or another box
+     *  is zoomed): the poller stops, the data stays (review 06 F3). */
+    active?: boolean;
   }
-  let { box, zoomed, tick }: Props = $props();
+  let { box, zoomed, tick, active: onScreen = true }: Props = $props();
 
   let summary = $state<MissionSummary | null>(null);
   let items = $state<WorkItem[]>([]);
@@ -59,14 +62,16 @@
   }
 
   let poller: Poller | null = null;
+  const fresh = freshness(load);
   $effect(() => {
-    void ws.currentId;
-    void limit;
-    loading = true;
+    const key = `${ws.currentId}|${limit}`;
+    if (!onScreen) return;
+    const immediate = fresh.start(key, 30_000);
+    if (immediate) loading = true;
     poller?.stop();
     // Live ticks arrive via missionControlBus (below); the 30 s cadence runs
     // only while the event socket is down (5-min safety net otherwise).
-    poller = livePoll(load, 30_000, []);
+    poller = livePoll(fresh.run, 30_000, [], { immediate });
     return () => poller?.stop();
   });
   // Manual refresh (frame button) + live work-graph ticks: rerun immediately.
@@ -233,9 +238,6 @@
   }
   .foot:hover {
     text-decoration: underline;
-  }
-  :global([dir='rtl']) .foot :global(svg) {
-    transform: scaleX(-1);
   }
   .dot {
     width: 7px;

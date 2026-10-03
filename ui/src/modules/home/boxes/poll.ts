@@ -7,8 +7,41 @@ import { liveQuery, type LiveEvent } from '../../../lib/live';
 
 export type { Poller };
 
-export function poll(run: () => Promise<boolean>, ms: number): Poller {
-  return pollWhileVisible(() => run(), { ms, floorMs: 5000, jitter: 0 });
+export function poll(run: () => Promise<boolean>, ms: number, immediate = true): Poller {
+  return pollWhileVisible(() => run(), { ms, floorMs: 5000, jitter: 0, immediate });
+}
+
+/**
+ * Remembers when a box's `run` last succeeded, and for which inputs (`key`:
+ * the window, workspace, limit…). Every Home space stays mounted (review 06
+ * F3) and only the active one polls; when a space comes back, `start` says
+ * whether its data is stale enough to fetch at once or can wait for the next
+ * tick — a slide back no longer re-fetches every box. A changed key always
+ * fetches at once.
+ */
+export function freshness(run: () => Promise<boolean>): {
+  run: () => Promise<boolean>;
+  /** Call when (re)starting the poller; returns `immediate` for it. */
+  start: (key: string, ms: number) => boolean;
+} {
+  let at = 0;
+  let atKey = '';
+  let curKey = '';
+  return {
+    run: async () => {
+      const key = curKey;
+      const ok = await run();
+      if (ok) {
+        at = Date.now();
+        atKey = key;
+      }
+      return ok;
+    },
+    start: (key, ms) => {
+      curKey = key;
+      return !(at > 0 && atKey === key && Date.now() - at < ms);
+    },
+  };
 }
 
 /** Event-fed variant (TRANSPORT_PLAN stage 2): re-run when one of `on`
@@ -18,7 +51,7 @@ export function livePoll(
   run: () => Promise<boolean>,
   ms: number,
   on: readonly string[],
-  opts: { match?: (ev: LiveEvent) => boolean; debounceMs?: number; maxWaitMs?: number; minIntervalMs?: number } = {},
+  opts: { match?: (ev: LiveEvent) => boolean; debounceMs?: number; maxWaitMs?: number; minIntervalMs?: number; immediate?: boolean } = {},
 ): Poller {
   return liveQuery({ run: () => run(), on, fallbackMs: ms, floorMs: 5000, jitter: 0, ...opts });
 }

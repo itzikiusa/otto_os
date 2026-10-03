@@ -7,6 +7,7 @@
   // (RENAME / ALTER COLUMN TYPE / SET-DROP NOT NULL / SET DEFAULT), ClickHouse
   // RENAME/MODIFY COLUMN (no FKs; nullability lives in the type).
   import Icon from '../../lib/components/Icon.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import type { DbColumnDef } from '../../lib/api/types';
 
@@ -269,70 +270,13 @@
     if (sql) void database.openInNewTab(sql);
     onclose();
   }
-
-  // Modal a11y: Escape-to-close + a focus trap. On open we remember what had
-  // focus, move focus to the first field, and keep Tab/Shift+Tab cycling inside
-  // the dialog; on close we restore focus to the opener. `focusables()` is
-  // recomputed each keystroke so newly-added column/index/FK rows join the cycle.
-  let modalEl = $state<HTMLElement | null>(null);
-  $effect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    const focusables = (): HTMLElement[] =>
-      modalEl
-        ? Array.from(
-            modalEl.querySelectorAll<HTMLElement>(
-              'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-            ),
-          ).filter((el) => el.offsetParent !== null)
-        : [];
-    // Focus the first text field (fall back to any focusable) after paint.
-    queueMicrotask(() => {
-      const items = focusables();
-      (items.find((el) => el.tagName === 'INPUT') ?? items[0])?.focus();
-    });
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        onclose();
-        return;
-      }
-      if (e.key !== 'Tab') return;
-      const items = focusables();
-      if (items.length === 0) return;
-      const first = items[0];
-      const last = items[items.length - 1];
-      const active = document.activeElement as HTMLElement | null;
-      if (e.shiftKey && (active === first || !modalEl?.contains(active))) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => {
-      window.removeEventListener('keydown', onKey, true);
-      opener?.focus?.();
-    };
-  });
 </script>
 
-<!-- Backdrop: click outside the card closes (Esc is handled by the focus-trap
-     effect). role="presentation" — the accessible close paths are the button + Esc. -->
-<div class="td-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
-  <div
-    class="td-modal"
-    bind:this={modalEl}
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="td-title"
-  >
-    <div class="td-head">
-      <h3 id="td-title" class="mono"><Icon name="grid" size={14} /> Design {table}</h3>
-      <button class="icon-btn" aria-label="Close" onclick={onclose}><Icon name="x" size={14} /></button>
-    </div>
-
+<!-- The shared Modal owns the backdrop, Esc / backdrop-click close, the focus
+     trap + focus return, the Modal z-layer and ui.pushModal() (so the native
+     browser pane hides under it). Focus lands on the first column field. -->
+<Modal title="Design {table}" width={860} {onclose}>
+  <div class="td-modal">
     <div class="td-cols">
       <div class="td-row td-hdr">
         <span>Column</span><span>Type</span><span class="ctr">NN</span><span>Default</span><span></span>
@@ -412,48 +356,21 @@
       <div class="td-nochange dim">No changes yet.</div>
     {/if}
 
-    <div class="td-foot">
-      <span class="dim small">Opens the ALTER in a query tab to review &amp; run — nothing is applied automatically.</span>
-      <span class="grow"></span>
-      <button class="btn small" onclick={onclose}>Cancel</button>
-      <button class="btn small primary" disabled={!sql} onclick={apply}>Prepare ALTER →</button>
-    </div>
   </div>
-</div>
+  {#snippet footer()}
+    <span class="dim small td-note">Opens the ALTER in a query tab to review &amp; run — nothing is applied automatically.</span>
+    <span class="grow"></span>
+    <button class="btn small" onclick={onclose}>Cancel</button>
+    <button class="btn small primary" disabled={!sql} onclick={apply}>Prepare ALTER →</button>
+  {/snippet}
+</Modal>
 
 <style>
-  .td-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 60;
-    background: rgba(0, 0, 0, 0.4);
-    display: grid;
-    place-items: center;
-  }
+  /* Body of the shared Modal (which scrolls it and caps it to the window). */
   .td-modal {
-    width: min(860px, 92vw);
-    max-height: 86vh;
-    overflow-y: auto;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
-    padding: 14px 16px;
     display: flex;
     flex-direction: column;
     gap: 12px;
-  }
-  .td-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .td-head h3 {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    font-size: var(--fs-l);
-    margin: 0;
   }
   .td-cols {
     display: flex;
@@ -573,10 +490,9 @@
     font-size: var(--fs-s);
     padding: 8px;
   }
-  .td-foot {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  .td-note {
+    align-self: center;
+    min-width: 0;
   }
   .grow {
     flex: 1;

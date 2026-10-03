@@ -237,6 +237,41 @@ textarea.input {
   /* Full --text-dim: the old 75% mix was 2.9:1 on --surface-2. */
   color: var(--text-dim);
 }
+/* A bordered box holding an icon plus a BARE input (search/filter fields).
+   The inner input drops its own outline, so the box carries the focus ring —
+   the same treatment as `.input:focus`. Modules may restyle size/padding, but
+   keep the :focus-within indicator (ui-guards `outline-removed`). */
+.input-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 27px;
+  padding: 0 9px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
+}
+.input-group:focus-within {
+  border-color: var(--accent-text);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.input-group input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-m);
+  outline: none;
+}
+.input-group input::placeholder {
+  color: var(--text-dim);
+}
 
 .checkbox-row {
   display: flex;
@@ -561,5 +596,22 @@ html[data-scheme='dark'] .hljs-type {
     transition-duration: 0.01ms !important;
     transition-delay: 0ms !important;
     scroll-behavior: auto !important;
+  }
+}
+
+/* Touch hit areas (layout.md: ≥ 36 px on phone). `.icon-btn` is 24 px and
+   `.btn.small` 22 px; on a coarse pointer an invisible ::after grows the HIT
+   area by 6 px each side without moving the glyph or the layout. `:where()`
+   keeps it at zero specificity, so a module that positions its own button
+   (`position: absolute` close buttons, overlay controls) or uses ::after
+   still wins. */
+@media (pointer: coarse) {
+  :where(.icon-btn, .btn.small) {
+    position: relative;
+  }
+  :where(.icon-btn, .btn.small)::after {
+    content: '';
+    position: absolute;
+    inset: -6px;
   }
 }
