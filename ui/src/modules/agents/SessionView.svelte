@@ -16,7 +16,6 @@
   import AttachProductStory from './AttachProductStory.svelte';
   import Handover from './Handover.svelte';
   import HandoverDeliveryPanel from './HandoverDeliveryPanel.svelte';
-  import ShareModal from './ShareModal.svelte';
   import { ws, isForeground } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
@@ -187,6 +186,17 @@
   let attachProductOpen = $state(false);
   let handoverOpen = $state(false);
   let shareOpen = $state(false);
+  // Loaded on first use: ShareModal bundles the QR encoder (qrcode), which
+  // the Agents chunk — the default landing page — otherwise carries.
+  let ShareModal = $state<typeof import('./ShareModal.svelte').default | null>(null);
+  async function openShare(): Promise<void> {
+    try {
+      ShareModal ??= (await import('./ShareModal.svelte')).default;
+      shareOpen = true;
+    } catch (e) {
+      toasts.error("Couldn't open sharing", e instanceof Error ? e.message : String(e));
+    }
+  }
   let roomOpen = $state(false);
   /** ⋯ → Network profile…: show the network strip for a session without a
    *  profile (it is hidden then — see the markup). */
@@ -640,7 +650,7 @@
             // Parity with the tab's right-click menu — a tiled/split pane has no
             // tab to right-click, so Share was unreachable from here.
             ...((session?.kind === 'agent') ? [{ label: 'Start room…', icon: 'people', action: () => (roomOpen = true) } as MenuItem] : []),
-            { label: 'Share…', icon: 'share', action: () => (shareOpen = true) } as MenuItem,
+            { label: 'Share…', icon: 'share', action: () => void openShare() } as MenuItem,
             { separator: true } as MenuItem,
             {
               label: attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…',
@@ -949,7 +959,7 @@
 {/if}
 
 {#if roomOpen}<StartRoomModal {sessionId} onclose={() => (roomOpen = false)} />{/if}
-{#if shareOpen}
+{#if shareOpen && ShareModal}
   <ShareModal {sessionId} onclose={() => (shareOpen = false)} />
 {/if}
 

@@ -47,7 +47,7 @@ test('mermaid, sql-formatter and qrcode are never imported statically', () => {
   };
   walk(SRC);
   assert.deepEqual(offenders, [], 'import these heavy libraries with `await import(...)` (canvas/mermaid.ts for mermaid)');
-  for (const f of ['shell/Navigator.svelte', 'shell/TabBar.svelte']) {
+  for (const f of ['shell/Navigator.svelte', 'shell/TabBar.svelte', 'modules/agents/SessionView.svelte']) {
     assert.doesNotMatch(read(f), /import\s+ShareModal\s+from/, `${f}: ShareModal bundles qrcode — load it on open`);
   }
 });
