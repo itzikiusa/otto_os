@@ -240,7 +240,7 @@ test('URL keystrokes cost < 4 ms (p95) at 3,000 requests', async ({ page }) => {
   }
 });
 
-test('body keystrokes cost < 16 ms (p95) on 200 KB of minified JSON', async ({ page }) => {
+test('body keystrokes on 200 KB of minified JSON: p50 < 12 ms, p95 < 40 ms', async ({ page }) => {
   await openApiEditor(page);
   const bodyTab = page.getByRole('tab', { name: /^Body/ }).first();
   await bodyTab.click();
