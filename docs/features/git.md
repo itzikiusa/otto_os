@@ -233,10 +233,34 @@ tracking (any remote, not just `origin`).
 The graph reads `log --all --date-order`, so a parent never appears before all
 of its children even with clock skew or rewritten committer dates (which used to
 open phantom lanes). To keep that walk cheap on big histories Otto passes
-`-c fetch.writeCommitGraph=true` on its fetch/pull and, after the first fetch of a
-repo that has no commit-graph, writes one in the background
-(`commit-graph write --reachable --changed-paths`, which also speeds up file
-history and blame). Set `OTTO_GIT_COMMIT_GRAPH=0` on the daemon to opt out.
+`-c fetch.writeCommitGraph=true` on its fetch/pull and, the first time a repo
+without a commit-graph is fetched, graphed (`log --all`), blamed or opened
+(first status), writes one in the background
+(`commit-graph write --reachable --changed-paths --split`, which also speeds up
+file history and blame) — at most one write per repo at a time. Set
+`OTTO_GIT_COMMIT_GRAPH=0` on the daemon to opt out.
+
+**Status in big repos and many windows.** Every window re-reads status on each
+`repo_status_changed`; the daemon runs ONE `git status` per repo for all of
+them (concurrent reads share it) and reuses the result for up to 1 s until the
+next change event or write (`x-otto-status-cache: hit|miss` on the response).
+The watcher spaces its events by twice the repo's last status duration (at
+least 400 ms, at most 5 s), so a tree whose status takes a second is not
+re-walked back-to-back while a build writes non-ignored files. A response
+carries at most 5,000 untracked rows (`untracked_truncated` /
+`untracked_total` past that) — the Changes list says how many more there are.
+`OTTO_GIT_FSMONITOR=1` adds `-c core.fsmonitor=true -c core.untrackedCache=true`
+to status reads of repos whose index is over ~6 MB (never written to the repo
+config; skipped when the config already names an fsmonitor or git is older
+than 2.37). It is off by default: Otto reads status without optional locks, so
+it cannot persist either cache into the index itself.
+
+**Forge reads are cached.** PR list, PR detail (comments, reviews,
+discussions), PR commits and CI reads go through a per-account ETag cache: a
+repeat within 15 s makes no request, an older entry revalidates with
+`If-None-Match` (a GitHub 304 costs no rate-limit budget), and every write Otto
+makes to a repository (comment, approve, merge, …) clears that repository's
+entries first.
 
 **Linked git worktrees** are first-class in Graph:
 
