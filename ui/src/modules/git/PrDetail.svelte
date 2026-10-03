@@ -280,7 +280,10 @@
     if (disposed || rid !== repoId || num !== number) return;
     // Show it now (the full PR reload is 1–2 s of forge calls), then
     // reconcile quietly in the background.
-    if (pr) pr = { ...pr, comments: withComment(pr.comments, posted, inReplyTo) };
+    // Only a well-formed comment is merged; anything else waits for the reload.
+    if (pr && typeof posted?.id === 'string' && posted.id !== '') {
+      pr = { ...pr, comments: withComment(pr.comments, { ...posted, replies: posted.replies ?? [] }, inReplyTo) };
+    }
     void load(rid, num, true);
   }
 
@@ -289,12 +292,12 @@
   function withComment(comments: PrComment[], c: PrComment, parent?: string): PrComment[] {
     if (parent) {
       const i = comments.findIndex(
-        (h) => h.id === parent || h.thread_id === parent || h.replies.some((r) => r.id === parent),
+        (h) => h.id === parent || h.thread_id === parent || (h.replies ?? []).some((r) => r.id === parent),
       );
       if (i >= 0) {
         const head = comments[i];
         const next = comments.slice();
-        next[i] = { ...head, replies: [...head.replies, c] };
+        next[i] = { ...head, replies: [...(head.replies ?? []), c] };
         return next;
       }
     }
