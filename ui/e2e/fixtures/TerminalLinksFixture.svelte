@@ -9,14 +9,23 @@
   ws.sessions = [{ id: 'links', workspace_id: 'w', kind: 'agent', provider: 'codex', cwd: '/work' } as Session];
   const wide = new URLSearchParams(location.search).has('wide');
   const share = new URLSearchParams(location.search).has('share');
+  // desktop-terminal-park-redraw.spec.ts: a parking (keepAlive) terminal that
+  // can be hidden and shown again like a tab switch, and the Redraw action.
+  const keepAlive = new URLSearchParams(location.search).has('keepalive');
+  let shown = $state(true);
+  let termRef = $state<Terminal | null>(null);
 </script>
 <div class="toolbar">
   <button onclick={() => openFile.open('/outside/Application Support/report.ts', 2, 3)}>External file</button>
   <button onclick={() => openFile.open('/slow/first.ts')}>Slow file</button>
   <button onclick={() => openFile.open('/fast/latest.ts')}>Latest file</button>
   <button onclick={() => { ws.currentId = null; ws.workspaces = []; }}>No workspace</button>
+  {#if keepAlive}
+    <button onclick={() => (shown = !shown)}>Toggle terminal</button>
+    <button onclick={() => termRef?.redraw()}>Redraw terminal</button>
+  {/if}
 </div>
-<div class="layout"><div class="terminal" style:width={wide ? '1400px' : '650px'}><Terminal sessionId="links" preferDom showToolbar={false} shareToken={share ? 'guest-fixture' : undefined} /></div><div class="files"><FileTree primary /></div></div>
+<div class="layout"><div class="terminal" style:width={wide ? '1400px' : '650px'}>{#if shown}<Terminal bind:this={termRef} sessionId="links" preferDom showToolbar={false} {keepAlive} shareToken={share ? 'guest-fixture' : undefined} />{/if}</div><div class="files"><FileTree primary /></div></div>
 <output aria-label="Opened file">{JSON.stringify(openFile.request)}</output>
 <output aria-label="Workspace state">{ws.currentId}:{ws.sessions[0].cwd}</output>
 <style>.layout{display:flex;height:600px;gap:15px}.terminal{width:650px;min-width:0}.files{width:380px;min-width:0;height:100%}.toolbar{display:flex;gap:8px}output{display:block}</style>

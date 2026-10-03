@@ -416,3 +416,31 @@ export class QuietRepaint {
     this.timer = null;
   }
 }
+
+/**
+ * What a stability-confirmed grid does (Terminal.svelte `confirmResizeStep`).
+ *
+ * `send`: push `resize` to the PTY — when the grid differs from the last one
+ * SENT, or on a forced (attach / focus / adopt) sync, which the daemon drops
+ * for free when the PTY already has that size.
+ *
+ * `compact`: ask for a fresh server snapshot (agent TUI panes only) when the
+ * PTY grid changed OR the LOCAL xterm reflowed since the last decision. The
+ * second case is the garbled-pane-after-a-tab-switch bug (review 01 G1): a
+ * pane that goes A→B→A locally (a layout settling on leave/return, the font
+ * auto-fit, a parked engine at a stray size) reflowed its own buffer twice,
+ * yet the final grid equals the last one sent — no SIGWINCH, so the TUI
+ * never repaints, and without the snapshot the reflowed (cursor-addressed,
+ * now wrong) screen stayed until a reset.
+ */
+export function resizeDecision(o: {
+  sentChanged: boolean;
+  localReflowed: boolean;
+  force: boolean;
+  preferDom: boolean;
+}): { send: boolean; compact: boolean } {
+  return {
+    send: o.sentChanged || o.force,
+    compact: o.preferDom && (o.sentChanged || o.localReflowed),
+  };
+}
