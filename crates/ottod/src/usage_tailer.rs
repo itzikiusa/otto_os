@@ -637,7 +637,10 @@ impl UsageTailer {
                 }
                 Ok(false) => {}
                 Err(e) => {
-                    tracing::debug!("usage tailer: claude file {} skipped: {e}", file.display())
+                    // Not recorded in `last_size`: a transient read error is
+                    // retried on the next pass that lists the file.
+                    tracing::debug!("usage tailer: claude file {} skipped: {e}", file.display());
+                    continue;
                 }
             }
             self.last_size.insert(file.clone(), *size);
@@ -654,6 +657,7 @@ impl UsageTailer {
             }
             if let Err(e) = self.tail_codex_file(file, *size).await {
                 tracing::debug!("usage tailer: codex file {} skipped: {e}", file.display());
+                continue;
             }
             self.last_size.insert(file.clone(), *size);
         }
