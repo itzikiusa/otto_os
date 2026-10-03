@@ -880,8 +880,23 @@ the same round trip, a background session opened from its panel (or a
 notification) is fetched by id on demand, and the swarm views add `swarm` to
 `with_sources` while mounted. The Archived section loads lazily, 100 rows at a
 time, the first time it is expanded ("Load more" pages further back); the
-header shows whenever a 1-row probe finds any archived session. The per-session
-tokens rollup is polled every minute only while the **Tokens** sort is active.
+header shows whenever a 1-row probe finds any archived session — run once per
+workspace switch (archiving here flips it locally), not on every refresh. The
+workspace tokens rollup is polled every minute only while the **Tokens** sort
+is active; a focused pane's own token/cost chip loads on focus, when a turn
+ends (working → idle/exited) and when its details open, with a 5-minute safety
+tick only while the agent is working.
+
+On the daemon the "shown" rule reads the indexed generated column
+`sessions.source` (`meta.source` when it is a JSON string, else NULL;
+migration 0194) instead of parsing every row's `meta_json`, so a workspace
+with thousands of hidden review agents costs an index walk. Live, the store
+keeps background rows it saw created only while they run (an exited one leaves 30 s later
+unless a tab or pane holds it), adds only foreground agents of other
+workspaces to the all-workspaces view, prunes stale `statusMap` entries after
+every list load, and coalesces `session_status` bursts into one list write per
+frame. The scale gate is `ui/e2e/desktop-agents-scale-perf.spec.ts` (CI
+perf-gates, WebKit).
 
 ---
 

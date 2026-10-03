@@ -31,6 +31,9 @@ import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } f
 
 /** Archived rows per "Load more" page (per scope: workspace / scratch). */
 const ARCHIVED_PAGE = 100;
+/** How long an exited background row stays in `sessions` before it is
+ *  dropped (perf R2) — a draft dialog's embedded agent outlives its turn. */
+const EXITED_BACKGROUND_GRACE_MS = 30_000;
 
 // Layout state is per-WINDOW (multi-window): winKey() namespaces these by the
 // window's label so two windows never clobber each other's workspace/tabs/view.
@@ -1515,6 +1518,17 @@ class WorkspaceStore {
     if (other !== this.otherWsSessions) this.otherWsSessions = other;
   }
 
+  /** Drop an exited background row unless it came back to life or a tab,
+   *  pane or in-flight fetch holds it (R2). */
+  dropExitedBackground(id: Id): void {
+    const s = this.sessionById.get(id);
+    if (!s || isShownKind(s) || (this.statusMap[id] ?? s.status) !== 'exited') return;
+    const held = { tabs: [...this.openTabs, ...this.pendingTabs], panes: layout.panes, ensuring: new Set(this.ensuring.keys()) };
+    if (!canDropExited(id, held)) return;
+    this.sessions = this.sessions.filter((x) => x.id !== id);
+    this.pendingStatus.delete(id);
+  }
+
   /** Queue a row stamp for {@link flushStatus} (next animation frame, or a
    *  100 ms timer when frames are paused — a hidden window). */
   private queueStatus(id: Id, patch: StatusPatch): void {
@@ -1589,17 +1603,17 @@ class WorkspaceStore {
           }
         }
         // R2: a background row this document picked up live (a review agent,
-        // a PR draft) leaves the list once it exits, unless something on
-        // screen holds it — they used to pile up until the next refresh.
+        // a PR draft) leaves the list once it has exited — they used to pile
+        // up until the next refresh. After a grace period: a PR / commit
+        // draft dialog keeps showing its agent until the POST hands it the id.
         if (ev.status === 'exited') {
           const s = this.sessionById.get(ev.session_id);
-          if (
-            s &&
-            !isShownKind(s) &&
-            canDropExited(s.id, { tabs: [...this.openTabs, ...this.pendingTabs], panes: layout.panes, ensuring: new Set(this.ensuring.keys()) })
-          ) {
-            this.sessions = this.sessions.filter((x) => x.id !== s.id);
-            this.pendingStatus.delete(s.id);
+          if (s && !isShownKind(s)) {
+            const id = s.id;
+            const selection = this.selectionGeneration;
+            setTimeout(() => {
+              if (selection === this.selectionGeneration) this.dropExitedBackground(id);
+            }, EXITED_BACKGROUND_GRACE_MS);
           }
         }
         break;

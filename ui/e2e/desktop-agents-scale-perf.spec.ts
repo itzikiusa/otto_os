@@ -232,7 +232,11 @@ test('2,000 background + 300 archived sessions: list, archive paging, event stor
       ws.applyEvent({ type: 'session_created', session: mk('live-bg', a, { source: 'review' }) });
       const added = ws.getSession('live-bg') != null;
       ws.applyEvent({ type: 'session_status', session_id: 'live-bg', workspace_id: a, status: 'exited' });
-      const dropped = ws.getSession('live-bg') == null;
+      // Dropped after a grace period (a draft dialog still shows its agent);
+      // run the timer's body now.
+      const kept = ws.getSession('live-bg') != null;
+      ws.dropExitedBackground('live-bg');
+      const dropped = kept && ws.getSession('live-bg') == null;
       ws.applyEvent({ type: 'session_created', session: mk('other-bg', b, { source: 'review' }) });
       ws.applyEvent({ type: 'session_created', session: mk('other-fg', b, {}) });
       const other = (ws.otherWsSessions as { id: string }[]).map((s) => s.id);
