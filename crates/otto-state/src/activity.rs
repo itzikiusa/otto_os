@@ -291,18 +291,12 @@ impl ActivityRepo {
             // Per session, the newest trail row via the min/max optimisation
             // on `idx_agent_trail_session` — O(sessions · log n) instead of a
             // GROUP BY over every trail row in the workspace (r3-07-04).
-            let trail_rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "SELECT s.id AS session_id,
-                        (SELECT MAX(tr.ts) FROM agent_trail tr WHERE tr.session_id = s.id)
-                            AS last_ts
-                 FROM sessions s WHERE s.workspace_id = ? AND s.created_by = ? AND {}",
-                shown_sessions_sql()
-            )))
-            .bind(workspace_id)
-            .bind(uid)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("summary trail (user)"))?;
+            let trail_rows = sqlx::query(sqlx::AssertSqlSafe(summary_trail_sql(true)))
+                .bind(workspace_id)
+                .bind(uid)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("summary trail (user)"))?;
 
             (task_rows, trail_rows)
         } else {
@@ -315,17 +309,11 @@ impl ActivityRepo {
             .await
             .map_err(dberr("summary tasks"))?;
 
-            let trail_rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "SELECT s.id AS session_id,
-                        (SELECT MAX(tr.ts) FROM agent_trail tr WHERE tr.session_id = s.id)
-                            AS last_ts
-                 FROM sessions s WHERE s.workspace_id = ? AND {}",
-                shown_sessions_sql()
-            )))
-            .bind(workspace_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("summary trail"))?;
+            let trail_rows = sqlx::query(sqlx::AssertSqlSafe(summary_trail_sql(false)))
+                .bind(workspace_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("summary trail"))?;
 
             (task_rows, trail_rows)
         };
@@ -736,6 +724,26 @@ fn shown_sessions_sql() -> String {
     format!(
         "s.archived = 0 AND (s.kind <> 'agent' \
          OR s.source IS NULL OR s.source NOT IN ({bg}) OR s.source = 'channel')"
+    )
+}
+
+/// The activity summary's shown-only trail statement: per shown session, its
+/// newest trail `ts`. Binds `workspace_id`, then (`owner_scoped`) the owner.
+/// A `fn` so the sessions plan test can `EXPLAIN QUERY PLAN` it — it must stay
+/// on the 0162 source index (migration 0170 dropped the prefix index the
+/// planner used to prefer, which re-parsed every row's meta JSON).
+pub(crate) fn summary_trail_sql(owner_scoped: bool) -> String {
+    format!(
+        "SELECT s.id AS session_id,
+                (SELECT MAX(tr.ts) FROM agent_trail tr WHERE tr.session_id = s.id)
+                    AS last_ts
+         FROM sessions s WHERE s.workspace_id = ? {}AND {}",
+        if owner_scoped {
+            "AND s.created_by = ? "
+        } else {
+            ""
+        },
+        shown_sessions_sql()
     )
 }
 
