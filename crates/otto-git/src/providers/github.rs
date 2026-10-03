@@ -159,9 +159,12 @@ impl Github {
                 return Ok(nodes);
             }
         }
+        // Captured before the POST: a resolve or comment landing while it is
+        // in flight must not see the pre-write threads re-memoised.
+        let generation = crate::providers::client::write_generation(&memo_url);
         let nodes = self.fetch_review_threads_uncached(r, number).await?;
         if let Ok(body) = serde_json::to_string(&nodes) {
-            crate::providers::client::memo_store(&memo_url, &auth, body);
+            crate::providers::client::memo_store(&memo_url, &auth, body, generation);
         }
         Ok(nodes)
     }

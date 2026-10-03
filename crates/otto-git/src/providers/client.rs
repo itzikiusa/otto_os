@@ -35,12 +35,23 @@
 //! Concurrent misses on one key share a single request ([`page_flights`]):
 //! N windows opening one PR on a cold cache cost one GET, not N.
 //!
+//! Our own writes clear their repository's entries ([`invalidate_scope`]) and
+//! bump its write *generation* ([`write_generation`]). A read captures the
+//! generation before it goes to the network and stores its result only if the
+//! generation is unchanged — a read that left before a comment was posted
+//! must not put the pre-comment body back after the write cleared it — and
+//! the generation is part of the single-flight key, so a read issued after a
+//! write never joins a request that left before it.
+//!
 //! Callers that need pagination or mutation continue to use `send` / `json` /
 //! `text` / `ok` directly; those paths are unaffected.
 
 use std::{
     collections::HashMap,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -112,10 +123,85 @@ fn cache_key(url: &str, auth_value: &str) -> String {
     hex::encode(h.finalize())
 }
 
-/// Store `entry` under `key`, evicting the oldest fetch when the cache is full.
-fn insert_cached(key: String, entry: CachedGet) {
+/// Store `entry` under `key`, evicting the oldest fetch when the cache is
+/// full — unless a write to its scope landed since the read captured
+/// `generation` (then the body is pre-write and storing it would undo the
+/// write's [`invalidate_scope`]). Checked under the cache lock, which
+/// [`invalidate_scope`] also holds while it bumps, so no bump slips between
+/// the check and the insert.
+fn insert_cached(key: String, entry: CachedGet, generation: u64) {
     let mut guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
+    if write_generation(&entry.url) != generation {
+        return;
+    }
     insert_into(&mut guard, key, entry);
+}
+
+// ---------------------------------------------------------------------------
+// Write generations
+// ---------------------------------------------------------------------------
+
+/// Per-scope write generations (scope = what [`invalidate_scope`] clears: a
+/// repo prefix, or a host origin for a URL outside any repository). Values
+/// come from one process-wide counter, so a bump is always larger than every
+/// generation handed out before it.
+struct Generations {
+    by_scope: HashMap<String, u64>,
+    /// The generation of every scope not in `by_scope`: the counter value at
+    /// the last prune. A pruned scope reads as at least its old value (and a
+    /// read that captured it before the prune merely skips its store) — the
+    /// map is bounded without a generation ever going backwards.
+    floor: u64,
+}
+
+/// Scopes kept before [`Generations`] is pruned to its floor.
+const GENERATIONS_MAX: usize = 1024;
+
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn generations() -> &'static Mutex<Generations> {
+    static G: OnceLock<Mutex<Generations>> = OnceLock::new();
+    G.get_or_init(|| {
+        Mutex::new(Generations {
+            by_scope: HashMap::new(),
+            floor: 0,
+        })
+    })
+}
+
+impl Generations {
+    fn get(&self, scope: &str) -> u64 {
+        self.by_scope.get(scope).copied().unwrap_or(self.floor)
+    }
+
+    fn bump(&mut self, scope: String) {
+        let g = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        if self.by_scope.len() >= GENERATIONS_MAX && !self.by_scope.contains_key(&scope) {
+            self.by_scope.clear();
+            self.floor = g;
+        }
+        self.by_scope.insert(scope, g);
+    }
+}
+
+/// The write scope of `url` ([`repo_scope`]) and its host scope.
+fn write_scopes(url: &str) -> (Option<String>, Option<String>) {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .map(|u| u.origin().ascii_serialization() + "/");
+    (repo_scope(url), host)
+}
+
+/// The write generation a read of `url` must still see when it stores its
+/// result: the newer of its repository's and its host's (a write outside any
+/// repository clears the whole host). Changes iff one of OUR writes cleared
+/// `url`'s scope since — capture it BEFORE the request goes out.
+pub(crate) fn write_generation(url: &str) -> u64 {
+    let (repo, host) = write_scopes(url);
+    let g = generations().lock().unwrap_or_else(|p| p.into_inner());
+    let repo = repo.map_or(0, |s| g.get(&s));
+    let host = host.map_or(0, |s| g.get(&s));
+    repo.max(host)
 }
 
 /// Read `key`, treating an entry older than [`CACHE_STALE`] as a miss (and
@@ -193,14 +279,20 @@ pub(crate) fn invalidate_scope(url: &str) {
     });
     let Some(scope) = scope else { return };
     let mut guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
+    // Bump under the cache lock: a read that left before this write now
+    // fails its store check, and later reads start a new flight.
+    generations()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .bump(scope.clone());
     // A repo's own URL without the trailing slash (`GET /repos/o/r`) too.
     let bare = scope.trim_end_matches('/');
     guard.retain(|_, e| !(e.url.starts_with(&scope) || e.url == bare));
 }
 
 /// The network leg of a cached GET, shared by concurrent misses on one cache
-/// key (url + credential). Abort-safe: when every waiter is gone the request
-/// is dropped.
+/// key (url + credential) at one [`write_generation`]. Abort-safe: when every
+/// waiter is gone the request is dropped.
 fn page_flights() -> &'static crate::diff_cache::SingleFlight<(String, Option<String>)> {
     static F: OnceLock<crate::diff_cache::SingleFlight<(String, Option<String>)>> = OnceLock::new();
     F.get_or_init(crate::diff_cache::SingleFlight::new)
@@ -219,8 +311,10 @@ pub(crate) fn memo_read(url: &str, auth: &str) -> Option<String> {
     (at.elapsed() < SHORT_TTL).then_some(body)
 }
 
-/// Store a [`memo_read`] body.
-pub(crate) fn memo_store(url: &str, auth: &str, body: String) {
+/// Store a [`memo_read`] body, fetched after [`write_generation`] of `url`
+/// returned `generation` (a write since then drops the store — the body may
+/// predate it).
+pub(crate) fn memo_store(url: &str, auth: &str, body: String, generation: u64) {
     if !cache_enabled() {
         return;
     }
@@ -233,6 +327,7 @@ pub(crate) fn memo_store(url: &str, auth: &str, body: String) {
             url: url.to_string(),
             next: None,
         },
+        generation,
     );
 }
 
@@ -606,24 +701,29 @@ impl Http {
             }
         }
         // -- Miss / stale: one network leg per key, however many callers ----
+        // ...at one write generation: a read issued after our own write must
+        // not join (or be overwritten by) a request that left before it.
+        let generation = write_generation(&url);
         let this = self.clone();
-        let flight_key = key.clone();
+        let flight_key = format!("{key}@{generation}");
         page_flights()
             .run(&flight_key, move || async move {
-                this.fetch_page(req, url, key, cached).await
+                this.fetch_page(req, url, key, cached, generation).await
             })
             .await
     }
 
     /// The network leg of [`get_cached_page`](Self::get_cached_page): a
     /// conditional GET when the stale entry has an ETag (`304` → the cached
-    /// body), otherwise a plain one; the result is stored.
+    /// body), otherwise a plain one; the result is stored unless one of our
+    /// writes cleared the scope after `generation` was captured.
     async fn fetch_page(
         &self,
         req: reqwest::Request,
         url: String,
         key: String,
         cached: Option<(Option<String>, String, Instant)>,
+        generation: u64,
     ) -> Result<(String, Option<String>)> {
         let rebuild = |validator: Option<&str>| {
             let mut b = self.client.get(&url);
@@ -642,9 +742,12 @@ impl Http {
             // surfaced as success.
             let resp = self.send_checked(rebuild(Some(&tag))).await?;
             if resp.status().as_u16() == 304 {
-                // Not Modified: refresh fetched_at, return cached body.
+                // Not Modified: refresh fetched_at, return cached body. (A
+                // write since `generation` already removed the entry, and a
+                // newer read's entry is not ours to vouch for.)
                 let mut guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
-                let next = guard.get_mut(&key).and_then(|entry| {
+                let current = write_generation(&url) == generation;
+                let next = guard.get_mut(&key).filter(|_| current).and_then(|entry| {
                     entry.fetched_at = Instant::now();
                     entry.next.clone()
                 });
@@ -681,6 +784,7 @@ impl Http {
                 url,
                 next: next.clone(),
             },
+            generation,
         );
         Ok((new_body, next))
     }
@@ -924,9 +1028,35 @@ fn same_origin(origin: Option<&reqwest::Url>, next: &str) -> bool {
 mod tests {
     use super::{
         cache_key, extract_auth, insert_into, rate_limit_wait, read_from, repo_scope, same_origin,
-        x_next_page_url, CachedGet, Http, CACHE_MAX_BODY, CACHE_MAX_BYTES, CACHE_MAX_ENTRIES,
-        SHORT_TTL,
+        x_next_page_url, CachedGet, Generations, Http, CACHE_MAX_BODY, CACHE_MAX_BYTES,
+        CACHE_MAX_ENTRIES, GENERATIONS_MAX, SHORT_TTL,
     };
+
+    /// The scope map is bounded, yet no scope's generation ever goes back to
+    /// a value a pre-write read could still hold (that read would then store
+    /// its stale body).
+    #[test]
+    fn write_generations_stay_monotonic_across_a_prune() {
+        let mut g = Generations {
+            by_scope: HashMap::new(),
+            floor: 0,
+        };
+        g.bump("a/".into());
+        let a = g.get("a/");
+        assert!(a > 0);
+        assert_eq!(g.get("unwritten/"), 0);
+        for i in 0..GENERATIONS_MAX {
+            g.bump(format!("s{i}/"));
+        }
+        assert!(g.by_scope.len() <= GENERATIONS_MAX, "pruned");
+        assert!(
+            g.get("a/") > a,
+            "a pruned scope reads as the floor, never lower"
+        );
+        let before = g.get("unwritten/");
+        g.bump("b/".into());
+        assert!(g.get("b/") > before, "a bump always moves past the floor");
+    }
 
     #[test]
     fn pagination_follows_only_same_origin_links() {

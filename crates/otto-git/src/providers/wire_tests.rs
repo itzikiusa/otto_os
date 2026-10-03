@@ -1056,6 +1056,146 @@ mod cached_reads {
         );
     }
 
+    /// A read that left BEFORE our write must neither answer a read issued
+    /// after it (single-flight join) nor put its pre-write body back into the
+    /// cache the write cleared — the posted comment would stay hidden for the
+    /// whole TTL.
+    #[tokio::test]
+    async fn read_in_flight_across_a_write_neither_serves_nor_stores_stale() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        // The first GET (pre-write state) is slow; every later one is fresh.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(400))
+                    .set_body_json(json!([pr(1)])),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([pr(1), pr(2)])))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/acme/app/pulls/1/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let r = rr();
+        let (stale, fresh) = tokio::join!(gh.list_prs(&r, PrState::Open, 1, 50), async {
+            // Let the slow read reach the server before the write.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            gh.approve(&r, 1).await.unwrap();
+            gh.list_prs(&r, PrState::Open, 1, 50).await
+        });
+        assert_eq!(stale.unwrap().items.len(), 1, "the slow read's own answer");
+        assert_eq!(
+            fresh.unwrap().items.len(),
+            2,
+            "a read after the write must not join the pre-write request"
+        );
+        assert_eq!(list_gets(&server).await, 2);
+
+        let again = gh.list_prs(&r, PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(
+            again.items.len(),
+            2,
+            "the pre-write body, landing last, must not overwrite the cache"
+        );
+        assert_eq!(list_gets(&server).await, 2, "served from the fresh entry");
+    }
+
+    /// The same race on the GraphQL review-thread memo: a probe in flight
+    /// while a thread is resolved must not re-memoise the unresolved state.
+    #[tokio::test]
+    async fn thread_probe_in_flight_across_a_resolve_is_not_memoised() {
+        use wiremock::matchers::body_string_contains;
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        // One inline comment, so the GraphQL resolution probe runs.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "id": 11, "body": "nit", "user": { "login": "rev" },
+                "path": "a.rs", "line": 3, "created_at": "2026-09-01T10:00:00Z",
+            }])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/repos/acme/app/(issues/7/comments|pulls/7/reviews)$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/repos/acme/app/commits/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("resolveReviewThread"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(600))
+                    .set_body_json(json!({
+                        "data": { "repository": { "pullRequest": { "reviewThreads": {
+                            "nodes": [] } } } }
+                    })),
+            )
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        let probes = || async {
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| {
+                    r.url.path() == "/graphql"
+                        && !String::from_utf8_lossy(&r.body).contains("resolveReviewThread")
+                })
+                .count()
+        };
+
+        let r = rr();
+        let (probe, resolve) = tokio::join!(gh.get_pr(&r, 7), async {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            gh.resolve_pr_thread(&r, 7, "T1", true).await
+        });
+        probe.unwrap();
+        resolve.unwrap();
+        assert_eq!(probes().await, 1);
+        gh.get_pr(&r, 7).await.unwrap();
+        assert_eq!(
+            probes().await,
+            2,
+            "the probe that straddled the resolve did not memoise its answer"
+        );
+    }
+
     #[tokio::test]
     async fn review_thread_probe_is_memoised_until_a_resolve() {
         let server = MockServer::start().await;
