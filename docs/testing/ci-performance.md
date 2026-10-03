@@ -69,9 +69,22 @@ style, layout and paint dominate, so the gates could not see its regressions.
   step to painted frame p95 18–19 ms (40).
 - **Budget scale.** `OTTO_PERF_BUDGET_SCALE` multiplies timing budgets
   (`budgetMs()`); DOM and request counts are never scaled.
+- **Bundle bytes.** The UI job runs `node scripts/bundle-budget.mjs` after
+  `npm run build`. From `dist/.vite/manifest.json` it measures gzip bytes of
+  the entry (static closure), the shell chunk (minus the entry) and every
+  `shell/pages.svelte.ts` page (minus entry and shell). It compares them with
+  `ui/scripts/bundle-budget.json`: more than 3 % growth, or a target with no
+  budget, fails. Ratchet the file with `--update` after shrinking a chunk or
+  after a deliberate growth. `--json` prints the numbers.
+- **Boot.** `desktop-boot-perf` budgets a cold load of `#/agents` and
+  `#/home`. It reads the shell's `otto:shell-mounted` and `otto:page-painted`
+  performance marks and the count of daemon requests started before the first
+  paint. It also asserts that `/auth/me` and `/auth/capabilities` overlap
+  `/meta`, and that the scratch workspace overlaps `/workspaces`.
 - **CI.** The `perf-gates` job runs a small subset on the Ubuntu runner:
-  `desktop-git-sidebar-perf`, `desktop-docs-orch-perf`, `desktop-infra-perf`
-  and `desktop-db-results-perf`, with `OTTO_PERF_BUDGET_SCALE=3`. It is
+  `desktop-git-sidebar-perf`, `desktop-docs-orch-perf`, `desktop-infra-perf`,
+  `desktop-db-results-perf`, `desktop-nav-smooth-perf` and
+  `desktop-boot-perf`, with `OTTO_PERF_BUDGET_SCALE=3`. It is
   advisory (`continue-on-error`) until it has a green history: it is the first
   job to run the daemon and Playwright WebKit on Linux. Promote it by removing
   `continue-on-error`.

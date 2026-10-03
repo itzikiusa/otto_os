@@ -110,6 +110,18 @@
     if (!untrack(() => loadedPage(pageKey))) void loadPage(pageKey).catch(() => {});
   });
   $effect(() => installNavPrefetch());
+  // Boot timing marks (perf F1: e2e/desktop-boot-perf.spec.ts budgets them).
+  // Once per document: `otto:shell-mounted` on the shell's first effect,
+  // `otto:page-painted` after the frame that first paints a page.
+  $effect(() => {
+    if (!performance.getEntriesByName('otto:shell-mounted').length) performance.mark('otto:shell-mounted');
+  });
+  let pagePaintMarked = false;
+  $effect(() => {
+    if (!Page || pagePaintMarked) return;
+    pagePaintMarked = true;
+    requestAnimationFrame(() => setTimeout(() => performance.mark('otto:page-painted'), 0));
+  });
   // Dock badge = sessions waiting on you (A1). Once per window; the shell
   // command itself only honours the main window. Unmount (sign-out) → 0.
   if (isTauri && !isEmbedded) {

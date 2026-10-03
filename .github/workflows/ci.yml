@@ -172,6 +172,12 @@ jobs:
       - name: npm run build
         run: npm run build
 
+      # Gzip bytes of the entry, the shell chunk and every page chunk (static
+      # closure from dist/.vite/manifest.json) vs scripts/bundle-budget.json —
+      # >3 % growth fails; ratchet with `node scripts/bundle-budget.mjs --update`.
+      - name: Bundle-size budget
+        run: node scripts/bundle-budget.mjs
+
   # A SMALL, fast subset of the Playwright perf gates on WebKit — the engine
   # closest to the app's WKWebView — against an isolated debug daemon
   # (ui/e2e/global-setup.ts: temp data dir, own port, file secret store).
@@ -234,6 +240,8 @@ jobs:
           e2e/desktop-docs-orch-perf.spec.ts
           e2e/desktop-infra-perf.spec.ts
           e2e/desktop-db-results-perf.spec.ts
+          e2e/desktop-nav-smooth-perf.spec.ts
+          e2e/desktop-boot-perf.spec.ts
 
       - name: Upload the Playwright report
         if: failure()
