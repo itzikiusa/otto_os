@@ -1,6 +1,6 @@
 // Usage & metrics API: types mirroring otto-usage's DTOs, plus a small reactive
-// store the Usage dashboard reads. Root-only endpoints (the daemon aggregates
-// across every workspace).
+// store the Usage dashboard reads. Root sees every session; a non-root caller
+// holding Usage:View sees only the sessions they created (`scope: 'own'`).
 
 import { api } from './client';
 import { pollWhileVisible, type Poller } from '../poll';
@@ -306,6 +306,22 @@ class UsageStore {
   summaryError = $state<string | null>(null);
   budgetsError = $state<string | null>(null);
 
+  /** Whether the caller is root. Non-root `Usage:View` holders get their own
+   *  sessions (`summary.scope === 'own'`); the root-only metrics endpoint is
+   *  never requested for them. Set by the page from `auth.isRoot`. */
+  admin = $state(true);
+
+  // --- Usage report (GET /usage/report) ------------------------------------
+  report: UsageReport | null = $state.raw(null);
+  reportLoading = $state(false);
+  reportError = $state<string | null>(null);
+  private reportSeq = 0;
+
+  // --- ccusage cross-check (POST /usage/ccusage-check, root) ----------------
+  ccusage: CcusageCheck | null = $state.raw(null);
+  ccusageRunning = $state(false);
+  ccusageError = $state<string | null>(null);
+
   // --- Auto-refresh (opt-in) -----------------------------------------------
   /** Whether the dashboard should auto-refresh the full summary on a timer. */
   autoRefresh = $state(false);
@@ -359,9 +375,10 @@ class UsageStore {
       await this.loadStatus();
       if (this.status?.available) {
         mine = ++this.summarySeq;
+        // System CPU/RAM metrics are root-only: a non-root caller never asks.
         const [summary, metrics] = await Promise.all([
           api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`),
-          api.get<MetricPoint[]>('/usage/metrics?minutes=180'),
+          this.admin ? api.get<MetricPoint[]>('/usage/metrics?minutes=180') : Promise.resolve<MetricPoint[]>([]),
         ]);
         if (mine === this.summarySeq) {
           this.summary = summary;
@@ -369,6 +386,8 @@ class UsageStore {
         }
         this.metrics = metrics;
         this.lastMetricsFetch = Date.now();
+        // Keep an open report in step with the refreshed window.
+        if (this.report) void this.loadReport();
       } else if (this.status) {
         this.summary = null;
         this.metrics = [];
@@ -423,13 +442,65 @@ class UsageStore {
 
   async setDays(days: number): Promise<void> {
     this.days = days;
-    await this.refreshSummary();
+    await Promise.all([this.refreshSummary(), this.report ? this.loadReport() : Promise.resolve()]);
   }
 
   /** Toggle the Otto-only vs all-sessions view and reload. */
   async setOttoOnly(ottoOnly: boolean): Promise<void> {
     this.ottoOnly = ottoOnly;
-    await this.refreshSummary();
+    await Promise.all([this.refreshSummary(), this.report ? this.loadReport() : Promise.resolve()]);
+  }
+
+  /** Load the ccusage-style report for the current window + scope. */
+  async loadReport(): Promise<void> {
+    const mine = ++this.reportSeq;
+    this.reportLoading = true;
+    try {
+      const r = await api.get<UsageReport>(`/usage/report?${this.summaryQuery()}`);
+      if (mine !== this.reportSeq) return;
+      this.report = r;
+      this.reportError = null;
+    } catch (e) {
+      if (mine === this.reportSeq) this.reportError = loadErrorText(e);
+    } finally {
+      if (mine === this.reportSeq) this.reportLoading = false;
+    }
+  }
+
+  /** Opt-in: run `npx ccusage` through the daemon and compare (root only).
+   *  A run that executes but fails comes back as `ran=false` + `error`; a
+   *  request failure (timeout, 403…) lands in `ccusageError`. */
+  async runCcusage(days: number): Promise<void> {
+    if (this.ccusageRunning) return;
+    this.ccusageRunning = true;
+    this.ccusageError = null;
+    try {
+      this.ccusage = await api.post<CcusageCheck>('/usage/ccusage-check', { days });
+    } catch (e) {
+      this.ccusageError = loadErrorText(e);
+    } finally {
+      this.ccusageRunning = false;
+    }
+  }
+
+  /** Export the model rollup as CSV. */
+  exportModelsCsv(): void {
+    const models = this.summary?.models ?? [];
+    if (models.length === 0) return;
+    exportCsv(
+      models.map((m) => ({
+        provider: m.provider,
+        model: m.model,
+        events: m.events,
+        input_tokens: m.input_tokens,
+        output_tokens: m.output_tokens,
+        cache_read_tokens: m.cache_read_tokens,
+        cache_write_tokens: m.cache_write_tokens,
+        total_tokens: m.total_tokens,
+        cost_usd: m.cost_usd,
+      })),
+      `otto-usage-models-${this.days}d.csv`,
+    );
   }
 
   // --- Auto-refresh toggle (mirrors Brokers pattern) -----------------------
@@ -455,7 +526,7 @@ class UsageStore {
    *  Refreshes the metrics sparkline in near-real-time; throttled so a burst of
    *  ticks doesn't hammer the API. Kept as a capped fallback even if ticks stop. */
   applyMetricsTick(): void {
-    if (!this.status?.available) return;
+    if (!this.status?.available || !this.admin) return;
     if (this.metricsSubscribers === 0) return;
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     const now = Date.now();
@@ -540,6 +611,10 @@ class UsageStore {
         provider: s.provider,
         model: s.model,
         events: s.events,
+        input_tokens: s.input_tokens,
+        output_tokens: s.output_tokens,
+        cache_read_tokens: s.cache_read_tokens,
+        cache_write_tokens: s.cache_write_tokens,
         total_tokens: s.total_tokens,
         cost_usd: s.cost_usd,
         fallback_priced: s.fallback_priced ? 'yes' : 'no',

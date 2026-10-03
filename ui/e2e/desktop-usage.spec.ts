@@ -78,6 +78,19 @@ test.describe('usage (persistent clickhouse server)', () => {
       expect(rr.ok(), `${path} → ${rr.status()} ${await rr.text()}`).toBeTruthy();
     }
 
+    // Tokens-first rollups: the summary carries the model breakdown + scope,
+    // and the ccusage-style report answers with every table.
+    expect(Array.isArray(summary.models), 'summary.models').toBeTruthy();
+    expect(Array.isArray(summary.daily_models), 'summary.daily_models').toBeTruthy();
+    expect(summary.scope).toBe('all');
+    const rep = await ctx.get(`${base}${V1}/usage/report?days=30&otto_only=false`);
+    expect(rep.ok(), await rep.text()).toBeTruthy();
+    const report = await rep.json();
+    for (const k of ['totals', 'daily', 'monthly', 'models', 'daily_models', 'sessions', 'priced_as_of']) {
+      expect(report, `report missing ${k}`).toHaveProperty(k);
+    }
+    expect(report.otto_only).toBe(false);
+
     // forecast (POST) prices an explicit estimate without needing history.
     const f = await ctx.post(`${base}${V1}/usage/forecast`, {
       data: { feature: 'agent', provider: 'claude', est_tokens: 2_000 },
@@ -97,5 +110,12 @@ test.describe('usage (persistent clickhouse server)', () => {
     await expect(page.getByRole('heading', { name: /Usage/i }).first()).toBeVisible({
       timeout: 30_000,
     });
+    // With the engine up, the Report view opens and offers the HTML download.
+    const reportBtn = page.getByTestId('usage-view-report');
+    if (await reportBtn.isVisible().catch(() => false)) {
+      await reportBtn.click();
+      await expect(page.getByTestId('usage-report')).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByRole('button', { name: /Download HTML/ })).toBeVisible();
+    }
   });
 });
