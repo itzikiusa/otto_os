@@ -45,6 +45,15 @@
   import { ALT_BATCH, cellStr, copyText, fmtBytes, isComplex } from './results-format';
   import { newExpansionState } from './expansion-plan';
   import { cellMatchesFilter } from './grid-format';
+  import {
+    colScanFor as cachedColScan,
+    dropColScans,
+    dropScan,
+    memoFilter,
+    memoSort,
+    prebuild,
+    scanFor,
+  } from './grid-view-cache';
   import RowDetail from './RowDetail.svelte';
   import type { MenuItem } from '../../lib/contextmenu.svelte';
 
@@ -426,32 +435,37 @@
   const searchLc = $derived(search.trim().toLowerCase());
   const filtering = $derived(searchLc.length > 0);
 
-  // Per-row scan text, built ONCE per result rather than per keystroke. The old
-  // code re-serialized every cell on every character typed — with ~90KB Mongo
-  // documents that is megabytes of `JSON.stringify` + `toLowerCase` per keypress,
-  // which is what made the filter box lock up on fat collections.
-  //
-  // Reading `filtering` (a boolean) and not `searchLc` is deliberate: the cache is
-  // built when the box goes from empty→non-empty and then reused for every
-  // subsequent character.
-  /** Cap per row so one blob can't dominate memory; matches past it are not scanned. */
-  const SCAN_MAX = 65536;
-  const scanRows = $derived.by<string[]>(() => {
-    if (!filtering) return [];
-    return liveRows.map((row) => {
-      let s = '';
-      for (const v of row) {
-        if (v === null || v === undefined) continue;
-        s += cellStr(v) + '\u0000';
-        if (s.length >= SCAN_MAX) break;
-      }
-      return s.slice(0, SCAN_MAX).toLowerCase();
-    });
-  });
-
-  function rowMatches(idx: number): boolean {
-    return (scanRows[idx] ?? '').includes(searchLc);
+  // Per-row scan text, built ONCE per result rather than per keystroke (the
+  // old code re-serialized every cell on every character typed — megabytes of
+  // `JSON.stringify` per key on fat Mongo documents). It lives in
+  // grid-view-cache.ts, keyed by the rows array: it survives a tab switch while
+  // the tab's search is active, is pre-built in idle slices once the box is
+  // focused on a big result (so the first key finds it done), and is freed
+  // when the search is cleared or the box loses focus empty.
+  /** Big results pre-build their search / column text while the user aims at
+   *  the box (smaller ones build in one go on the first key, in < 20 ms). */
+  let cancelPrebuild: (() => void) | null = null;
+  function startPrebuild(target: 'search' | number): void {
+    cancelPrebuild?.();
+    cancelPrebuild = liveRows.length > SEARCH_DEBOUNCE_ROWS ? prebuild(liveRows, target, cellStr) : null;
   }
+  function stopPrebuild(): void {
+    cancelPrebuild?.();
+    cancelPrebuild = null;
+  }
+  $effect(() => () => stopPrebuild());
+  function onSearchFocus(): void {
+    if (!filtering) startPrebuild('search');
+  }
+  function onSearchBlur(): void {
+    stopPrebuild();
+    if (!filtering && searchInput === '') dropScan(liveRows);
+  }
+  // A cleared search frees its text (a re-seed with no search does too).
+  $effect(() => {
+    const rows = liveRows;
+    if (!filtering) untrack(() => dropScan(rows));
+  });
 
   // ── Quick-filter chips, applied CLIENT-SIDE over the loaded rows ─────────────
   // "Filter:"/"Exclude:" (database.filters) narrow the grid IMMEDIATELY here — the
@@ -528,33 +542,32 @@
       .filter(([, t]) => t.trim() !== '')
       .map(([ci, t]) => [Number(ci), t] as const),
   );
-  // Per-column display text, built lazily on a column's FIRST filtered key and
-  // reused for every following key (and every other box) until the rows
-  // change. For a JSON column `cellStr` is a full `JSON.stringify` per document
-  // — doing that per row per keystroke is what made the filter row stutter.
-  // Non-reactive on purpose: keyed by the `liveRows` array identity.
-  let colScanRows: unknown[][] | null = null;
-  const colScan = new Map<number, (string | null)[]>();
+  // Per-column display text, built on a column's FIRST filtered key (or in
+  // idle slices once its box is focused on a big result) and reused for every
+  // following key and every other box until the rows change — for a JSON
+  // column `cellStr` is a full `JSON.stringify` per document. Cached per rows
+  // array in grid-view-cache.ts; columns whose filter is cleared are freed.
   function colScanFor(ci: number): (string | null)[] {
-    if (colScanRows !== liveRows) {
-      colScan.clear();
-      colScanRows = liveRows;
-    }
-    let col = colScan.get(ci);
-    if (!col) {
-      col = new Array<string | null>(liveRows.length);
-      for (let i = 0; i < liveRows.length; i++) {
-        const v = liveRows[i][ci];
-        // null = SQL NULL; strings past SCAN_MAX are clipped like scanRows.
-        col[i] = v === null || v === undefined ? null : clipScan(cellStr(v));
-      }
-      colScan.set(ci, col);
-    }
-    return col;
+    return cachedColScan(liveRows, ci, cellStr);
   }
-  function clipScan(s: string): string {
-    return s.length > SCAN_MAX ? s.slice(0, SCAN_MAX) : s;
+  /** The filter box that has focus (its column's text is being pre-built). */
+  let focusedFilterCol: number | null = null;
+  function onColFilterFocus(ci: number | null): void {
+    stopPrebuild();
+    focusedFilterCol = ci;
+    if (ci !== null && !activeColFilters.some(([c]) => c === ci)) startPrebuild(ci);
+    else if (ci === null) freeColScans(liveRows);
   }
+  function freeColScans(rows: unknown[][]): void {
+    const keep = new Set(activeColFilters.map(([c]) => c));
+    if (focusedFilterCol !== null) keep.add(focusedFilterCol);
+    dropColScans(rows, keep);
+  }
+  $effect(() => {
+    const rows = liveRows;
+    void activeColFilters;
+    untrack(() => freeColScans(rows));
+  });
   function colFilterMatches(idx: number): boolean {
     for (const [ci, text] of activeColFilters) {
       const s = colScanFor(ci)[idx];
@@ -582,19 +595,32 @@
 
   // Rows passing the filter, carrying their original index so edits target the
   // right entry in `liveRows`. Purely client-side over the fetched rows.
+  // The last filtered view is kept per rows array (grid-view-cache.ts), so a
+  // tab switch back to a filtered 100k-row result is O(1).
   const filteredRows = $derived.by<{ row: unknown[]; idx: number }[]>(() => {
     const hasChips = activeChips.length > 0;
     const hasCols = activeColFilters.length > 0;
-    if (!filtering && !hasChips && !hasCols) return unfilteredView(liveRows);
-    const out: { row: unknown[]; idx: number }[] = [];
-    for (let idx = 0; idx < liveRows.length; idx++) {
-      const row = liveRows[idx];
-      if (hasChips && !chipMatches(row)) continue;
-      if (hasCols && !colFilterMatches(idx)) continue;
-      if (filtering && !rowMatches(idx)) continue;
-      out.push({ row, idx });
-    }
-    return out;
+    const rows = liveRows;
+    if (!filtering && !hasChips && !hasCols) return unfilteredView(rows);
+    const key = [
+      filtering ? searchLc : '',
+      JSON.stringify(activeColFilters),
+      JSON.stringify(activeChips.map((c) => (c.kind === 'col' ? [c.column, c.op, c.values] : null))),
+    ].join('\u0001');
+    return memoFilter(rows, key, () => {
+      const all = unfilteredView(rows);
+      const scan = filtering ? scanFor(rows, cellStr) : null;
+      const needle = searchLc;
+      const out: { row: unknown[]; idx: number }[] = [];
+      for (let idx = 0; idx < rows.length; idx++) {
+        const row = rows[idx];
+        if (hasChips && !chipMatches(row)) continue;
+        if (hasCols && !colFilterMatches(idx)) continue;
+        if (scan && !(scan[idx] ?? '').includes(needle)) continue;
+        out.push(all[idx]);
+      }
+      return out;
+    });
   });
 
   // ── Row detail side panel (grid view) ────────────────────────────────────────
@@ -676,11 +702,16 @@
   // Final displayed rows: filter first, then sort (stable). Both in-memory.
   // Each value's sort key (empty? / number / string) is computed ONCE per sort
   // instead of per comparison (~1.7M comparisons at 100k rows).
+  // The last sorted view is kept per rows array: switching back to a sorted
+  // tab skips the 100k-string collator sort (150–400 ms in JSC).
   const viewRows = $derived.by<{ row: unknown[]; idx: number }[]>(() => {
     const base = filteredRows;
     if (!sorting || sortCol === null || sortDir === null) return base;
     const col = sortCol;
     const factor = sortDir === 'asc' ? 1 : -1;
+    return memoSort(liveRows, base, `${col}|${sortDir}`, () => sortView(base, col, factor));
+  });
+  function sortView(base: { row: unknown[]; idx: number }[], col: number, factor: number): { row: unknown[]; idx: number }[] {
     const n = base.length;
     const empty = new Uint8Array(n);
     const nums = new Float64Array(n);
@@ -715,7 +746,7 @@
     const out = new Array<{ row: unknown[]; idx: number }>(n);
     for (let i = 0; i < n; i++) out[i] = base[order[i]];
     return out;
-  });
+  }
 
   // Filtered/sorted rows as plain objects (for the JSON / vertical views),
   // capped. `idx` is the ORIGINAL liveRows index so per-document edits can
@@ -1414,6 +1445,8 @@
             aria-label="Search rows"
             value={searchInput}
             oninput={(e) => setSearch(e.currentTarget.value, true)}
+            onfocus={onSearchFocus}
+            onblur={onSearchBlur}
             spellcheck="false"
             autocomplete="off"
           />
@@ -1602,6 +1635,7 @@
           filterRow={filterRow && !mini}
           colFilters={colFiltersInput}
           oncolfilter={setColFilter}
+          oncolfocus={onColFilterFocus}
           onfocusrow={(i) => { if (i !== null) detailIdx = i; }}
           oncellmenu={cellMenu}
           onheadermenu={headerMenu}

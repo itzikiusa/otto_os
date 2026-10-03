@@ -499,3 +499,72 @@ async fn invalid_specs_are_refused_before_anything_runs() {
     );
     assert!(stub.ran().is_empty());
 }
+
+#[tokio::test]
+async fn since_returns_only_the_runs_changed_after_that_seq() {
+    let mut fx = fixture().await;
+    let stub = Stub::new(Engine::Mongodb);
+    fx.svc.registry.set_for_test(Engine::Mongodb, stub.clone());
+    let dev = fx
+        .conn("mongo-dev", ConnectionKind::Mongodb, Environment::Dev)
+        .await;
+    let s = spec(
+        "db.orders.find({brand: :brand})",
+        vec![target(&dev, None)],
+        vec![param("brand", &["1", "2", "3"], VarType::Number)],
+    );
+    let (job, _) = fx.svc.multi_run_start(&fx.user, &start(s)).await.unwrap();
+    // The start answer is the full view at seq 0.
+    assert_eq!(job.seq, 0);
+    assert!(!job.partial);
+    assert_eq!(job.items.len(), 3);
+    let done = fx.wait(&job.id).await;
+    // Each run changes twice (running, then finished) + the job settles.
+    assert!(done.seq >= 7, "seq {}", done.seq);
+    assert!(!done.partial);
+    assert_eq!(done.targets.len(), 1);
+
+    // Nothing changed after the final seq: an empty, partial delta that
+    // still carries the status and summary.
+    let none = fx
+        .svc
+        .multi_run_get_since(&fx.user, false, &job.id, Some(done.seq))
+        .unwrap();
+    assert!(none.partial);
+    assert!(none.items.is_empty());
+    assert!(none.targets.is_empty());
+    assert_eq!(none.status, JobStatus::Done);
+    assert_eq!(none.summary.ok, 3);
+
+    // From seq 0 every run changed.
+    let all = fx
+        .svc
+        .multi_run_get_since(&fx.user, false, &job.id, Some(0))
+        .unwrap();
+    assert!(all.partial);
+    assert_eq!(all.items.len(), 3);
+
+    // Runs execute in order (sequential): past the first run's last change
+    // only the later runs come back.
+    let after_first = {
+        let j = fx.svc.multi_run_job(&fx.user, false, &job.id).unwrap();
+        let j = lock(&j);
+        j.items[0].seq
+    };
+    let later = fx
+        .svc
+        .multi_run_get_since(&fx.user, false, &job.id, Some(after_first))
+        .unwrap();
+    assert_eq!(
+        later.items.iter().map(|i| i.index).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+
+    // A seq from the future (another daemon) gets the full view.
+    let ahead = fx
+        .svc
+        .multi_run_get_since(&fx.user, false, &job.id, Some(done.seq + 100))
+        .unwrap();
+    assert!(!ahead.partial);
+    assert_eq!(ahead.items.len(), 3);
+}

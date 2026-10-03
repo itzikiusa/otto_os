@@ -297,6 +297,18 @@ jobs:
           e2e/desktop-terminal-compact-queue-perf.spec.ts
           e2e/desktop-agents-scale-perf.spec.ts
 
+      # DB Explorer at scale: the deterministic `@ci` subset of the scale spec
+      # (wide 20k × 300 grid, column filter over 100k JSON rows, result memory
+      # budget release + Re-run). The other scenarios run locally.
+      - name: Perf gates — DB at scale (desktop-webkit, @ci)
+        working-directory: ui
+        env:
+          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_PERF_BUDGET_SCALE: '3'
+        run: >-
+          npx playwright test --project=desktop-webkit --workers=1
+          e2e/desktop-db-scale-perf.spec.ts --grep @ci
+
       - name: Upload the Playwright report
         if: failure()
         uses: actions/upload-artifact@v7.0.1

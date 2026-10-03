@@ -105,7 +105,8 @@ async function fixture(page: Page) {
     starts.push({ confirm: body.confirm_write === true, hash: body.plan_hash ?? null });
     return route.fulfill({ status: 202, json: job('running') });
   });
-  await page.route('**/api/v1/db/multi-runs/job1', (route: Route) => {
+  // `*`: the poll carries `?since=<seq>` (the mock answers in full).
+  await page.route('**/api/v1/db/multi-runs/job1*', (route: Route) => {
     polls++;
     return route.fulfill({ json: job(polls > 1 ? 'done' : 'running') });
   });

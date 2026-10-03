@@ -17,6 +17,7 @@
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { api, ApiError } from '../../lib/api/client';
+  import { mergeMultiRunJob } from '../../lib/api/db-multirun-types';
   import { pollWhileVisible, type Poller } from '../../lib/poll';
   import { runStatus } from '../../lib/status';
   import { toasts } from '../../lib/toast.svelte';
@@ -263,7 +264,10 @@
     const since = Date.now();
     poller = pollWhileVisible(
       async (signal) => {
-        const j = await api.get<DbMultiRunJob>(`/db/multi-runs/${encodeURIComponent(id)}`, signal);
+        // Only the runs that changed since the last answer (`?since=`), merged
+        // by index — not all ≤200 items + targets every tick.
+        const since = job && job.id === id && job.seq !== undefined ? `?since=${job.seq}` : '';
+        const j = mergeMultiRunJob(job, await api.get<DbMultiRunJob>(`/db/multi-runs/${encodeURIComponent(id)}${since}`, signal));
         job = j;
         if (j.status !== 'running') poller?.stop();
       },

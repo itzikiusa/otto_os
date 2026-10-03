@@ -44,6 +44,8 @@ struct JobItem {
     statement: String,
     query_id: String,
     result: Option<QueryResult>,
+    /// The job's `seq` at this run's last change (`?since=` deltas).
+    seq: u64,
 }
 
 struct Job {
@@ -64,6 +66,9 @@ struct Job {
     /// A run failed under stop-on-error: dispatch no more.
     stopping: bool,
     cancel_tx: watch::Sender<bool>,
+    /// Bumped on every change to the job or one of its runs; a poll with
+    /// `?since=<seq>` gets only the runs changed after it.
+    seq: u64,
 }
 
 impl Job {
@@ -71,7 +76,23 @@ impl Job {
         MultiRunSummary::of(self.items.iter().map(|i| i.view.status))
     }
 
+    /// Record a change to run `idx` (and so to the job).
+    fn bump(&mut self, idx: usize) {
+        self.seq += 1;
+        if let Some(it) = self.items.get_mut(idx) {
+            it.seq = self.seq;
+        }
+    }
+
     fn view(&self) -> MultiRunJobView {
+        self.view_since(None)
+    }
+
+    /// The job view; with `since`, only the runs changed after that `seq`
+    /// (and no targets — they never change) and `partial: true`. A `since`
+    /// ahead of the job (another daemon's seq) gets the full view.
+    fn view_since(&self, since: Option<u64>) -> MultiRunJobView {
+        let since = since.filter(|s| *s <= self.seq);
         MultiRunJobView {
             id: self.id.clone(),
             status: self.status,
@@ -83,8 +104,19 @@ impl Job {
             read_only: self.read_only,
             statement_preview: self.statement_preview.clone(),
             summary: self.summary(),
-            targets: self.targets.clone(),
-            items: self.items.iter().map(|i| i.view.clone()).collect(),
+            targets: if since.is_some() {
+                Vec::new()
+            } else {
+                self.targets.clone()
+            },
+            items: self
+                .items
+                .iter()
+                .filter(|i| since.is_none_or(|s| i.seq > s))
+                .map(|i| i.view.clone())
+                .collect(),
+            seq: self.seq,
+            partial: since.is_some(),
         }
     }
 
@@ -610,6 +642,7 @@ impl DbViewerService {
                     statement: r.statement.clone(),
                     query_id: format!("multirun-{id}-{}", r.index),
                     result: None,
+                    seq: 0,
                 }
             })
             .collect();
@@ -629,6 +662,7 @@ impl DbViewerService {
             bytes: 0,
             stopping: false,
             cancel_tx,
+            seq: 0,
         }));
         {
             let mut store = self.multi_runs.lock().unwrap_or_else(|p| p.into_inner());
@@ -707,15 +741,17 @@ impl DbViewerService {
             let cancelled = *j.cancel_tx.borrow();
             let stopping = j.stopping;
             // Every run was visited above; this only settles a straggler.
-            for it in &mut j.items {
-                if it.view.status == RunStatus::Pending {
-                    it.view.status = if stopping && !cancelled {
+            for idx in 0..j.items.len() {
+                if j.items[idx].view.status == RunStatus::Pending {
+                    j.items[idx].view.status = if stopping && !cancelled {
                         RunStatus::Skipped
                     } else {
                         RunStatus::Cancelled
                     };
+                    j.bump(idx);
                 }
             }
+            j.seq += 1;
             j.status = if cancelled {
                 JobStatus::Cancelled
             } else {
@@ -749,10 +785,11 @@ impl DbViewerService {
             let mut j = lock(job);
             let cancelled = *cancel.borrow();
             let stopping = j.stopping;
-            let it = &mut j.items[idx];
-            if it.view.status != RunStatus::Pending {
+            if j.items[idx].view.status != RunStatus::Pending {
                 return;
             }
+            j.bump(idx);
+            let it = &mut j.items[idx];
             if cancelled {
                 it.view.status = RunStatus::Cancelled;
                 return;
@@ -802,6 +839,9 @@ impl DbViewerService {
         let elapsed = started.elapsed().as_millis() as u64;
         let mut failed = false;
         let mut keep: Option<QueryResult> = None;
+        // Every field below may change; the result retention is in the same
+        // critical section, so one bump covers it.
+        j.bump(idx);
         {
             let it = &mut j.items[idx];
             it.view.duration_ms = Some(elapsed);
@@ -879,7 +919,19 @@ impl DbViewerService {
         is_root: bool,
         run_id: &str,
     ) -> Result<MultiRunJobView> {
-        Ok(lock(&self.multi_run_job(user_id, is_root, run_id)?).view())
+        self.multi_run_get_since(user_id, is_root, run_id, None)
+    }
+
+    /// `GET /db/multi-runs/{rid}?since=<seq>` — only the runs changed after
+    /// `seq` (`partial: true`, no targets); the caller merges them by `index`.
+    pub fn multi_run_get_since(
+        &self,
+        user_id: &Id,
+        is_root: bool,
+        run_id: &str,
+        since: Option<u64>,
+    ) -> Result<MultiRunJobView> {
+        Ok(lock(&self.multi_run_job(user_id, is_root, run_id)?).view_since(since))
     }
 
     /// `GET /db/multi-runs` — the caller's retained multi-runs, newest first
@@ -943,9 +995,10 @@ impl DbViewerService {
         let mut j = lock(&job);
         if j.status == JobStatus::Running {
             let _ = j.cancel_tx.send(true);
-            for it in &mut j.items {
-                if it.view.status == RunStatus::Pending {
-                    it.view.status = RunStatus::Cancelled;
+            for idx in 0..j.items.len() {
+                if j.items[idx].view.status == RunStatus::Pending {
+                    j.items[idx].view.status = RunStatus::Cancelled;
+                    j.bump(idx);
                 }
             }
         }
