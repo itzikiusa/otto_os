@@ -135,24 +135,62 @@ async fn public_server<S: McpCtx>(
     Ok(server)
 }
 
-async fn visible_record<S: McpCtx>(
+/// Per-request memo for [`visible_record_memo`]: a 200-row audit / approval /
+/// stats page touches a handful of distinct servers and (server, tool) pairs,
+/// so each server is loaded (row + live policy) once and each pair evaluated
+/// once — not ~5–8 statements per ROW as before.
+#[derive(Default)]
+struct VisibilityMemo {
+    /// `None` = the server (or its live policy) is gone ⇒ its rows are hidden.
+    servers: std::collections::HashMap<
+        String,
+        Option<(otto_state::McpServerDetail, otto_core::access::AccessPolicy)>,
+    >,
+    verdicts: std::collections::HashMap<(String, Option<String>), bool>,
+}
+
+/// Whether the caller may see a governance row tied to `server_id` / `tool`
+/// (`discover` on the server / tool; a row with no server is visible).
+/// Memoized per request through `memo`.
+async fn visible_record_memo<S: McpCtx>(
     ctx: &S,
     user: &User,
+    memo: &mut VisibilityMemo,
     server_id: Option<&String>,
     tool: Option<&str>,
 ) -> Result<bool, ApiErr> {
     let Some(id) = server_id else {
         return Ok(true);
     };
-    let server = match ctx.mcp().registry().get(id).await {
-        Ok(s) => s,
-        Err(Error::NotFound(_)) => return Ok(false),
-        Err(e) => return Err(e.into()),
+    let key = (id.clone(), tool.map(str::to_string));
+    if let Some(v) = memo.verdicts.get(&key) {
+        return Ok(*v);
+    }
+    if !memo.servers.contains_key(id) {
+        let loaded = match ctx.mcp().registry().get(id).await {
+            Ok(server) => match otto_state::ResourceAccessRepo::new(ctx.mcp_pool().clone())
+                .get_live_policy(otto_core::access::ResourceKind::McpServer, id)
+                .await
+            {
+                Ok(policy) => Some((server, policy)),
+                Err(Error::NotFound(_)) => None,
+                Err(e) => return Err(e.into()),
+            },
+            Err(Error::NotFound(_)) => None,
+            Err(e) => return Err(e.into()),
+        };
+        memo.servers.insert(id.clone(), loaded);
+    }
+    let verdict = match memo.servers.get(id).and_then(Option::as_ref) {
+        None => false,
+        Some((server, policy)) => {
+            ctx.mcp()
+                .resource_allowed_under(policy, server, user, &[("discover", tool)])
+                .await?[0]
+        }
     };
-    Ok(ctx
-        .mcp()
-        .resource_allowed(&server, user, "discover", tool)
-        .await?)
+    memo.verdicts.insert(key, verdict);
+    Ok(verdict)
 }
 
 /// The workspaces a caller may see governance data for. `None` = all (root).
@@ -641,8 +679,17 @@ async fn get_allowlist<S: McpCtx>(
 ) -> ApiResult<Json<Vec<otto_state::McpAllowlistEntry>>> {
     require_ws(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
     let mut visible = Vec::new();
+    let mut memo = VisibilityMemo::default();
     for row in ctx.mcp().allowlist().list_for_ws(&wid).await? {
-        if visible_record(&ctx, &user, Some(&row.server_id), row.tool_name.as_deref()).await? {
+        if visible_record_memo(
+            &ctx,
+            &user,
+            &mut memo,
+            Some(&row.server_id),
+            row.tool_name.as_deref(),
+        )
+        .await?
+        {
             visible.push(row);
         }
     }
@@ -863,13 +910,22 @@ async fn list_approvals<S: McpCtx>(
 ) -> ApiResult<Json<Vec<otto_state::McpApproval>>> {
     let ws = accessible_ws(&ctx, &user).await?;
     let mut visible = Vec::new();
+    let mut memo = VisibilityMemo::default();
     for row in ctx
         .mcp()
         .approvals()
         .list(ws.as_deref(), q.status.as_deref(), 200)
         .await?
     {
-        if visible_record(&ctx, &user, row.server_id.as_ref(), row.tool.as_deref()).await? {
+        if visible_record_memo(
+            &ctx,
+            &user,
+            &mut memo,
+            row.server_id.as_ref(),
+            row.tool.as_deref(),
+        )
+        .await?
+        {
             visible.push(row);
         }
     }
@@ -971,8 +1027,17 @@ async fn list_audit<S: McpCtx>(
         offset: q.offset.unwrap_or(0),
     };
     let mut visible = Vec::new();
+    let mut memo = VisibilityMemo::default();
     for row in ctx.mcp().call_log().list(&query).await? {
-        if visible_record(&ctx, &user, row.server_id.as_ref(), Some(&row.tool)).await? {
+        if visible_record_memo(
+            &ctx,
+            &user,
+            &mut memo,
+            row.server_id.as_ref(),
+            Some(&row.tool),
+        )
+        .await?
+        {
             visible.push(row);
         }
     }
@@ -986,8 +1051,17 @@ async fn stats<S: McpCtx>(
     let ws = accessible_ws(&ctx, &user).await?;
     let mut visible = Vec::new();
     let me = ws.as_ref().map(|_| user.id.as_str());
+    let mut memo = VisibilityMemo::default();
     for row in ctx.mcp().call_log().stats(ws.as_deref(), me).await? {
-        if visible_record(&ctx, &user, row.server_id.as_ref(), Some(&row.tool)).await? {
+        if visible_record_memo(
+            &ctx,
+            &user,
+            &mut memo,
+            row.server_id.as_ref(),
+            Some(&row.tool),
+        )
+        .await?
+        {
             visible.push(row);
         }
     }

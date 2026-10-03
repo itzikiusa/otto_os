@@ -340,6 +340,12 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(crate::mcp_outward::otto_server_status)
                 .patch(crate::mcp_outward::otto_server_config),
         )
+        // The light enabled-names read every agent session's stdio bridge
+        // polls (tools/list + governed calls), instead of the full status.
+        .route(
+            "/mcp/otto-server/enabled",
+            get(crate::mcp_outward::otto_server_enabled),
+        )
         // MCP auto-approve rules: the explicit opt-in under which a mutating
         // otto.* tool skips the per-call approval (View reads, Admin writes).
         .route(

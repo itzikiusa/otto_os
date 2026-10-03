@@ -20,6 +20,22 @@ pub struct ResourceAccessRepo {
     pool: DbPool,
 }
 
+/// The single-statement live-policy read (see
+/// [`ResourceAccessRepo::get_live_policy`]): `?1` = resource id, `?2` = kind.
+fn live_policy_sql(table: &str) -> String {
+    format!(
+        "SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1) AS present,
+                p.revision AS revision,
+                v.policy_json AS policy_json
+         FROM (SELECT 1) AS one
+         LEFT JOIN resource_access_policies p
+           ON p.resource_kind = ?2 AND p.resource_id = ?1
+         LEFT JOIN resource_access_policy_versions v
+           ON v.resource_kind = p.resource_kind AND v.resource_id = p.resource_id
+          AND v.revision = p.revision"
+    )
+}
+
 impl ResourceAccessRepo {
     pub fn new(pool: impl Into<DbPool>) -> Self {
         let pool: DbPool = pool.into();
@@ -410,66 +426,50 @@ impl ResourceAccessRepo {
     }
 
     /// Load a policy for live authorization while proving the governed resource
-    /// still exists in the same SQLite read transaction. An existing resource
+    /// still exists in the same SQLite read snapshot. An existing resource
     /// without a policy is rollout-compatible Legacy; a missing/deleted resource
     /// is NotFound and can never inherit that fallback.
+    ///
+    /// ONE plain `SELECT` (existence + current revision + that revision's
+    /// policy JSON): a single statement reads one consistent snapshot, and the
+    /// pool routes it to a READER connection. This runs on every
+    /// resource-authorization check (MCP lists check it per row), so it must
+    /// never borrow one of the two writer connections or queue behind writes —
+    /// it used to open a writer transaction for three reads.
     pub async fn get_live_policy(
         &self,
         kind: ResourceKind,
         resource_id: &Id,
     ) -> Result<AccessPolicy> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(dberr("live resource policy begin"))?;
         let table = match kind {
             ResourceKind::Connection => "connections",
             ResourceKind::McpServer => "mcp_servers",
             ResourceKind::AwsAccount => "aws_accounts",
             ResourceKind::K8sCluster => "k8s_clusters",
         };
-        let exists_sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?)");
-        let exists: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(exists_sql.as_str()))
+        let sql = live_policy_sql(table);
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(resource_id)
-            .fetch_one(&mut *tx)
+            .bind(kind.as_str())
+            .fetch_one(&self.pool)
             .await
-            .map_err(dberr("live resource existence"))?;
-        if !exists {
+            .map_err(dberr("live resource access policy"))?;
+        if !row.get::<bool, _>("present") {
             return Err(Error::NotFound(format!("{} resource", kind.as_str())));
         }
-
-        let revision: Option<i64> = sqlx::query_scalar(
-            "SELECT revision FROM resource_access_policies
-             WHERE resource_kind = ? AND resource_id = ?",
-        )
-        .bind(kind.as_str())
-        .bind(resource_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(dberr("live resource access policy"))?;
-        let policy = match revision {
-            None => AccessPolicy::legacy(kind, resource_id.clone()),
-            Some(revision) => {
-                let json: String = sqlx::query_scalar(
-                    "SELECT policy_json FROM resource_access_policy_versions
-                     WHERE resource_kind = ? AND resource_id = ? AND revision = ?",
-                )
-                .bind(kind.as_str())
-                .bind(resource_id)
-                .bind(revision)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(dberr("live resource access policy version"))?;
-                serde_json::from_str(&json).map_err(|error| {
-                    Error::Internal(format!("decode live resource access policy: {error}"))
-                })?
-            }
-        };
-        tx.commit()
-            .await
-            .map_err(dberr("live resource policy commit"))?;
-        Ok(policy)
+        let revision: Option<i64> = row.get("revision");
+        let json: Option<String> = row.get("policy_json");
+        match (revision, json) {
+            (None, _) => Ok(AccessPolicy::legacy(kind, resource_id.clone())),
+            (Some(_), Some(json)) => serde_json::from_str(&json).map_err(|error| {
+                Error::Internal(format!("decode live resource access policy: {error}"))
+            }),
+            // The current revision has no version row — the same failure the
+            // old `fetch_one` raised.
+            (Some(revision), None) => Err(Error::Internal(format!(
+                "live resource access policy version: revision {revision} missing"
+            ))),
+        }
     }
 
     /// Ids of every `kind` resource whose CURRENT policy is `Enforced`, in one
@@ -823,4 +823,34 @@ async fn append_audit(
     .await
     .map_err(dberr("insert resource access audit"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod live_policy_tests {
+    use super::*;
+
+    #[test]
+    fn live_policy_read_routes_to_a_reader_connection() {
+        for table in ["connections", "mcp_servers", "aws_accounts", "k8s_clusters"] {
+            assert!(
+                crate::pool::is_read_only_sql(&live_policy_sql(table)),
+                "the live-policy read for {table} must be a plain reader SELECT"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn live_policy_is_not_found_for_a_missing_resource() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let repo = ResourceAccessRepo::new(pool.clone());
+        let missing = repo
+            .get_live_policy(ResourceKind::McpServer, &"nope".to_string())
+            .await;
+        assert!(matches!(missing, Err(Error::NotFound(_))), "{missing:?}");
+    }
 }

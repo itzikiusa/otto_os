@@ -66,6 +66,15 @@ pub fn pr_draft_model_from(value: Option<&serde_json::Value>) -> String {
         .to_string()
 }
 
+type SettingsCache =
+    std::collections::HashMap<(u64, String), (std::time::Instant, Option<serde_json::Value>)>;
+
+/// The process-wide cache behind [`SettingsRepo::get_cached`].
+fn settings_cache() -> &'static std::sync::Mutex<SettingsCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<SettingsCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
 #[derive(Clone)]
 pub struct SettingsRepo {
     pool: DbPool,
@@ -87,8 +96,49 @@ impl SettingsRepo {
             .transpose()
     }
 
+    /// [`Self::get`] through a short per-process read cache (`ttl`), for hot
+    /// paths that read the same few keys on EVERY call (the governed MCP
+    /// pipeline reads 4–5 keys per tool call). Every write through this repo
+    /// ([`Self::put`] / [`Self::delete`]) drops the key at once, so an
+    /// in-process change is seen immediately; `ttl` only bounds staleness for a
+    /// write from ANOTHER process (or a state-archive restore). Keyed by the
+    /// pool's identity, so two databases in one process never mix.
+    pub async fn get_cached(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> Result<Option<serde_json::Value>> {
+        let ck = (self.pool.id(), key.to_string());
+        if let Some((at, v)) = settings_cache()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&ck)
+        {
+            if at.elapsed() < ttl {
+                return Ok(v.clone());
+            }
+        }
+        let v = self.get(key).await?;
+        let mut cache = settings_cache().lock().unwrap_or_else(|p| p.into_inner());
+        // Bounded: a handful of hot keys per database; drop everything rather
+        // than grow if something starts caching unbounded keys.
+        if cache.len() > 256 {
+            cache.clear();
+        }
+        cache.insert(ck, (std::time::Instant::now(), v.clone()));
+        Ok(v)
+    }
+
+    fn invalidate(&self, key: &str) {
+        settings_cache()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&(self.pool.id(), key.to_string()));
+    }
+
     pub async fn put(&self, key: &str, value: &serde_json::Value) -> Result<()> {
-        sqlx::query(
+        self.invalidate(key);
+        let r = sqlx::query(
             "INSERT INTO settings (key, value_json) VALUES (?, ?)
              ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json",
         )
@@ -96,16 +146,23 @@ impl SettingsRepo {
         .bind(value.to_string())
         .execute(&self.pool)
         .await
-        .map_err(dberr("put setting"))?;
+        .map_err(dberr("put setting"));
+        // Again AFTER the write: a concurrent `get_cached` that read the old
+        // row between the first invalidation and the commit must not pin it.
+        self.invalidate(key);
+        r?;
         Ok(())
     }
 
     pub async fn delete(&self, key: &str) -> Result<()> {
-        sqlx::query("DELETE FROM settings WHERE key = ?")
+        self.invalidate(key);
+        let r = sqlx::query("DELETE FROM settings WHERE key = ?")
             .bind(key)
             .execute(&self.pool)
             .await
-            .map_err(dberr("delete setting"))?;
+            .map_err(dberr("delete setting"));
+        self.invalidate(key);
+        r?;
         Ok(())
     }
 
@@ -169,5 +226,52 @@ mod tests {
         // An explicit choice wins, whitespace-trimmed.
         assert_eq!(pr_draft_model_from(Some(&json!("sonnet"))), "sonnet");
         assert_eq!(pr_draft_model_from(Some(&json!("  opus  "))), "opus");
+    }
+
+    #[tokio::test]
+    async fn get_cached_serves_repeats_and_sees_in_process_writes_at_once() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let repo = SettingsRepo::new(pool.clone());
+        let ttl = std::time::Duration::from_secs(60);
+        repo.put("cache_probe", &json!(1)).await.unwrap();
+        assert_eq!(
+            repo.get_cached("cache_probe", ttl).await.unwrap(),
+            Some(json!(1))
+        );
+        // A write that bypasses the repo is NOT seen inside the TTL — proof the
+        // repeat read was served from the cache, not the database.
+        sqlx::query("UPDATE settings SET value_json = '2' WHERE key = 'cache_probe'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_cached("cache_probe", ttl).await.unwrap(),
+            Some(json!(1))
+        );
+        // A write through the repo invalidates at once.
+        repo.put("cache_probe", &json!(3)).await.unwrap();
+        assert_eq!(
+            repo.get_cached("cache_probe", ttl).await.unwrap(),
+            Some(json!(3))
+        );
+        repo.delete("cache_probe").await.unwrap();
+        assert_eq!(repo.get_cached("cache_probe", ttl).await.unwrap(), None);
+        // A zero TTL always reads through.
+        repo.put("cache_probe", &json!(4)).await.unwrap();
+        sqlx::query("UPDATE settings SET value_json = '5' WHERE key = 'cache_probe'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_cached("cache_probe", std::time::Duration::ZERO)
+                .await
+                .unwrap(),
+            Some(json!(5))
+        );
     }
 }

@@ -279,6 +279,8 @@ where
 fn mcp_route_allowed(method: &Method, template: &str) -> bool {
     (method == Method::POST && template == "/api/v1/mcp/otto-tools/invoke")
         || (method == Method::GET && template == "/api/v1/mcp/otto-server")
+        // The light enabled-names read: a strict subset of the status above.
+        || (method == Method::GET && template == "/api/v1/mcp/otto-server/enabled")
         || (template == "/api/v1/mcp/http" && (method == Method::POST || method == Method::GET))
 }
 
@@ -388,6 +390,22 @@ mod scope_tests {
         assert!(mcp_route_allowed(
             &Method::POST,
             "/api/v1/mcp/otto-tools/invoke",
+        ));
+    }
+
+    #[test]
+    fn mcp_token_reaches_the_light_enabled_read_but_only_by_get() {
+        assert!(mcp_route_allowed(
+            &Method::GET,
+            "/api/v1/mcp/otto-server/enabled",
+        ));
+        assert!(!mcp_route_allowed(
+            &Method::POST,
+            "/api/v1/mcp/otto-server/enabled",
+        ));
+        assert!(!mcp_route_allowed(
+            &Method::PATCH,
+            "/api/v1/mcp/otto-server",
         ));
     }
 
