@@ -26,7 +26,7 @@ use crate::convert::{dberr, fmt, json, ts};
 macro_rules! str_enum {
     ($(#[$m:meta])* $name:ident { $($variant:ident => $s:literal),+ $(,)? }) => {
         $(#[$m])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum $name { $($variant),+ }
         impl $name {
@@ -563,6 +563,69 @@ impl WorkGraphRepo {
             .await
             .map_err(dberr("find work item by source"))?;
         row.as_ref().map(row_to_item).transpose()
+    }
+
+    /// Batched [`Self::find_by_source`] for the reconcile sweep: the items of
+    /// `workspace_id` whose `(kind, source_id)` is among `keys`, each with
+    /// whether it already carries an artifact of `artifact_kind` (any ref).
+    /// One indexed statement per 400 distinct source ids (the
+    /// `UNIQUE(workspace_id, kind, source_id)` index + `idx_work_artifacts_item`), so an unchanged sweep
+    /// costs O(1) statements instead of a seek + an artifact probe per row.
+    pub async fn find_by_sources(
+        &self,
+        workspace_id: &Id,
+        keys: &[(WorkKind, String)],
+        artifact_kind: ArtifactKind,
+    ) -> Result<std::collections::HashMap<(WorkKind, String), (WorkItem, bool)>> {
+        let mut out = std::collections::HashMap::with_capacity(keys.len());
+        let wanted: std::collections::HashSet<&(WorkKind, String)> = keys.iter().collect();
+        let mut kinds: Vec<&'static str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        let mut sources: Vec<&str> = keys.iter().map(|(_, s)| s.as_str()).collect();
+        sources.sort_unstable();
+        sources.dedup();
+        // `kind IN (…) AND source_id IN (…)` seeks the UNIQUE(workspace_id,
+        // kind, source_id) index; a cross match (another kind sharing a source
+        // id) is dropped below.
+        let kind_marks = vec!["?"; kinds.len()].join(",");
+        for chunk in sources.chunks(400) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let q = format!(
+                "SELECT {ITEM_COLS}, EXISTS(SELECT 1 FROM work_artifacts a \
+                 WHERE a.work_item_id = work_items.id AND a.kind = ?) AS has_artifact \
+                 FROM work_items WHERE workspace_id = ? AND kind IN ({kind_marks}) \
+                 AND source_id IN ({marks})"
+            );
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(q.as_str()))
+                .bind(artifact_kind.as_str())
+                .bind(workspace_id);
+            for k in &kinds {
+                query = query.bind(*k);
+            }
+            for src in chunk {
+                query = query.bind(*src);
+            }
+            let rows = query
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("find work items by source"))?;
+            for r in &rows {
+                let item = row_to_item(r)?;
+                let has: bool = r.get::<i64, _>("has_artifact") != 0;
+                let key = (item.kind, item.source_id.clone());
+                if wanted.contains(&key) {
+                    out.insert(key, (item, has));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Would [`Self::upsert_item`] change `prev`? `false` → the upsert is a
+    /// no-op and a caller holding `prev` (the reconcile sweep) can skip it.
+    pub fn upsert_changes(prev: &WorkItem, up: &WorkItemUpsert) -> bool {
+        !upsert_is_noop(prev, up)
     }
 
     async fn get_unscoped(&self, id: &Id) -> Result<WorkItem> {
@@ -1799,6 +1862,80 @@ mod tests {
             .map(|n| &n.id)
             .collect();
         assert_eq!(flagged, vec![&ids[3]]);
+
+        // Statement budget (perf §15 N2): items + one grouped approval count +
+        // one edge batch per 500 nodes — constant in the node count.
+        let probe = repo.pool.statement_probe();
+        probe.reset();
+        repo.graph(&ws, &MissionFilter::default()).await.unwrap();
+        assert_eq!(probe.take().len(), 3, "graph budget at 5 nodes");
+        for i in 5..600 {
+            repo.upsert_item(&upsert(
+                "w1",
+                WorkKind::Session,
+                &format!("s{i}"),
+                &format!("item {i}"),
+                WorkStatus::Running,
+            ))
+            .await
+            .unwrap();
+        }
+        probe.reset();
+        let big = repo
+            .graph(
+                &ws,
+                &MissionFilter {
+                    limit: Some(1000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(big.nodes.len(), 600);
+        assert_eq!(big.edges.len(), 2);
+        let stmts = probe.take();
+        assert_eq!(
+            stmts.len(),
+            2 + 600usize.div_ceil(500),
+            "graph budget at 600: {stmts:?}"
+        );
+
+        // The reconcile's batched lookup: one statement per 400 keys, each item
+        // with its "has a session artifact" flag.
+        repo.add_artifact(&NewArtifact {
+            work_item_id: ids[0].clone(),
+            workspace_id: ws.clone(),
+            kind: ArtifactKind::Session,
+            title: "Open session".into(),
+            reference: Some("s0".into()),
+            payload: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+        let keys: Vec<(WorkKind, String)> = (0..600)
+            .map(|i| (WorkKind::Session, format!("s{i}")))
+            .chain([(WorkKind::Swarm, "s1".to_string())])
+            .collect();
+        probe.reset();
+        let known = repo
+            .find_by_sources(&ws, &keys, ArtifactKind::Session)
+            .await
+            .unwrap();
+        assert_eq!(probe.take().len(), 600usize.div_ceil(400));
+        assert_eq!(known.len(), 600, "the swarm key matches nothing");
+        assert!(known[&(WorkKind::Session, "s0".to_string())].1);
+        assert!(!known[&(WorkKind::Session, "s1".to_string())].1);
+        let (prev, _) = &known[&(WorkKind::Session, "s2".to_string())];
+        let same = upsert("w1", WorkKind::Session, "s2", "item 2", WorkStatus::Running);
+        assert!(!WorkGraphRepo::upsert_changes(prev, &same));
+        let renamed = upsert(
+            "w1",
+            WorkKind::Session,
+            "s2",
+            "renamed",
+            WorkStatus::Running,
+        );
+        assert!(WorkGraphRepo::upsert_changes(prev, &renamed));
 
         // A node filter that drops one endpoint drops the edge.
         let g = repo

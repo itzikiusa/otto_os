@@ -64,7 +64,8 @@ Open it from the app's **Mission Control** section (sidebar icon `radar`).
 > `/workspaces/{wid}/workgraph/…`, gated by `Feature::MissionControl`). There is an
 > **older, separate** 6-bucket "work-queue" endpoint (`GET /workspaces/{id}/mission`,
 > `crates/otto-server/src/routes/mission.rs`, gated by `Feature::Agents`) that aggregates
-> needs-you / working / review-ready / waiting / failed / budget-warn rows on the fly. It is
+> needs-you / working / review-ready / waiting / failed / budget-warn rows on the fly (cached
+> 3 s per workspace; concurrent cache misses share one build). It is
 > a different API and is **not** what the Mission Control page renders. Everything below is
 > the work graph.
 
@@ -154,6 +155,11 @@ M5 — the split is deliberate):
    (seconds; **`0` disables the periodic sweep entirely** — the live event loop and the boot
    backfill still run, so the graph stays current, it just stops self-healing on a timer).
    An escape hatch when you need to rule the sweep out of a daemon-wide slowdown.
+   The session part reads only live agent sessions (archived history and connection rows
+   are filtered in SQL) and looks their items up in one batched statement that also says
+   whether the "Open session" artifact is attached, so an unchanged workspace costs two
+   statements however many sessions it holds; only a changed or new item, or one missing
+   its artifact, writes (budget test `reconcile_sessions_statement_budget`).
 3. **Boot backfill** — a one-shot `backfill_all` is `tokio::spawn`ed so it never delays
    daemon startup.
 
