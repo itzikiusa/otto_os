@@ -5,7 +5,8 @@
 //! and identical content across artifacts is stored once. Writes go to a
 //! sibling temp file and are `rename`d into place (atomic on one filesystem),
 //! so a crash never leaves a truncated blob under a valid name. Nothing here
-//! deletes a blob on its own — removal is only the opt-in prune's GC step.
+//! deletes a blob on its own — removal is only the prune's GC step (opt-in
+//! admin route, or the scheduled retention job — see `retention`).
 
 use std::path::{Path, PathBuf};
 
@@ -93,6 +94,30 @@ impl BlobStore {
         }
     }
 
+    /// Storage gauge: `(blob files, total bytes)` under the store root. A walk
+    /// of one flat directory, off the runtime. A missing root is `(0, 0)`.
+    pub async fn usage(&self) -> (u64, u64) {
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || {
+            let Ok(rd) = std::fs::read_dir(&root) else {
+                return (0, 0);
+            };
+            let (mut n, mut bytes) = (0u64, 0u64);
+            for e in rd.flatten() {
+                if !is_sha(&e.file_name().to_string_lossy()) {
+                    continue; // temp files
+                }
+                if let Ok(m) = e.metadata() {
+                    n += 1;
+                    bytes += m.len();
+                }
+            }
+            (n, bytes)
+        })
+        .await
+        .unwrap_or((0, 0))
+    }
+
     /// Remove a blob — ONLY called by the opt-in prune after it proved no
     /// version/thumbnail references the blob. Returns whether a file existed.
     pub async fn remove(&self, sha: &str) -> Result<bool> {
@@ -126,8 +151,10 @@ mod tests {
             .collect();
         assert_eq!(names, vec![a.clone()]);
 
+        assert_eq!(store.usage().await, (1, 5));
         assert!(store.remove(&a).await.unwrap());
         assert!(!store.remove(&a).await.unwrap());
+        assert_eq!(store.usage().await, (0, 0));
         assert!(matches!(store.get(&a).await, Err(Error::NotFound(_))));
     }
 

@@ -335,16 +335,55 @@ impl DesignService {
 
     /// Head version + its bytes. `NotFound` when the artifact has no version.
     pub async fn head_content(&self, a: &DesignArtifact) -> Result<(DesignVersion, Vec<u8>)> {
+        let v = self.head_version(a).await?;
+        let bytes = self.version_bytes(&v).await?;
+        Ok((v, bytes))
+    }
+
+    /// Head version row only (no blob read) — enough to answer a conditional
+    /// GET with 304. `NotFound` when the artifact has no version.
+    pub async fn head_version(&self, a: &DesignArtifact) -> Result<DesignVersion> {
         let hid = a.head_version_id.as_deref().ok_or_else(|| {
             Error::NotFound(format!("design artifact {} has no content yet", a.id))
         })?;
-        let v = self
-            .store
+        self.store
             .get_version(hid)
             .await?
-            .ok_or_else(|| Error::NotFound(format!("design version {hid}")))?;
-        let bytes = self.version_bytes(&v).await?;
-        Ok((v, bytes))
+            .ok_or_else(|| Error::NotFound(format!("design version {hid}")))
+    }
+
+    /// Restore an older version server-side: its blob is re-committed as a new
+    /// `restore` version (the bytes never round-trip through the client, and
+    /// the content-addressed blob is reused — no new file). Same optimistic
+    /// `base` guard as a content PUT.
+    pub async fn restore_version(
+        &self,
+        a: &DesignArtifact,
+        v: &DesignVersion,
+        base: Option<String>,
+        author: Author,
+        message: Option<String>,
+    ) -> Result<SaveResult> {
+        let bytes = self.version_bytes(v).await?;
+        let message = message
+            .map(|m| m.trim().chars().take(2_000).collect::<String>())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| format!("Restored v{}", v.seq));
+        self.commit_bytes(
+            a,
+            bytes,
+            SaveOpts {
+                base,
+                kind: "restore".into(),
+                author,
+                message,
+                provenance: json!({ "restored_from": v.id, "restored_seq": v.seq }),
+                force: false,
+                validate: false,
+                change: "content",
+            },
+        )
+        .await
     }
 
     /// What a named commit without content snapshots: the working copy (an
@@ -1480,10 +1519,11 @@ impl DesignService {
         Ok(sig)
     }
 
-    // -- retention (opt-in) -----------------------------------------------------------
+    // -- retention ---------------------------------------------------------------------
 
-    /// Plan (and with `apply`, execute) the retention policy. Never runs on its
-    /// own. On apply, blobs no version/thumbnail references any more are GC'd.
+    /// Plan (and with `apply`, execute) the retention policy for one artifact
+    /// or the whole library (the admin route; a dry run unless `apply`). On
+    /// apply, blobs no version/thumbnail references any more are GC'd.
     pub async fn prune(
         &self,
         artifact_id: Option<&str>,
@@ -1494,18 +1534,58 @@ impl DesignService {
             Some(id) => vec![self.store.require_artifact(id).await?.id],
             None => self.store.all_artifact_ids().await?,
         };
+        self.prune_ids(ids, apply, window_secs, None).await
+    }
+
+    /// The scheduled pass (`retention::spawn_scheduler`): only artifacts with
+    /// more than one autosave older than `min_age_secs` are visited, and only
+    /// versions older than that are candidates — an editing session's recent
+    /// history is never squashed under the user.
+    pub async fn prune_scheduled(
+        &self,
+        window_secs: i64,
+        min_age_secs: i64,
+    ) -> Result<PruneReport> {
+        let cutoff = Utc::now() - chrono::Duration::seconds(min_age_secs.max(0));
+        let ids = self
+            .store
+            .prune_candidates(&crate::store::stamp(cutoff))
+            .await?;
+        self.prune_ids(ids, true, window_secs, Some(cutoff)).await
+    }
+
+    async fn prune_ids(
+        &self,
+        ids: Vec<Id>,
+        apply: bool,
+        window_secs: i64,
+        older_than: Option<DateTime<Utc>>,
+    ) -> Result<PruneReport> {
         let mut report = PruneReport {
             applied: apply,
             artifacts_scanned: ids.len(),
             ..Default::default()
         };
+        if ids.is_empty() {
+            return Ok(report);
+        }
+        // Publish pinned sets are parsed once per pass, not per artifact.
+        let pins = self.store.publish_pinned_index().await?;
         for id in ids {
             let Some(a) = self.store.get_artifact(&id).await? else {
                 continue;
             };
             let infos = self.store.version_infos(&a.id).await?;
-            let protected = self.store.protected_versions(&a).await?;
-            let doomed = retention::plan(&infos, &protected, window_secs);
+            let protected = self.store.protected_versions_with(&a, &pins).await?;
+            let mut doomed = retention::plan(&infos, &protected, window_secs);
+            if let Some(cut) = older_than {
+                let old: HashSet<&str> = infos
+                    .iter()
+                    .filter(|v| v.created_at < cut)
+                    .map(|v| v.id.as_str())
+                    .collect();
+                doomed.retain(|v| old.contains(v.as_str()));
+            }
             if doomed.is_empty() {
                 continue;
             }
@@ -1521,6 +1601,20 @@ impl DesignService {
             report.versions.extend(doomed);
         }
         Ok(report)
+    }
+
+    /// Storage gauge for `GET /design/admin/storage`.
+    pub async fn storage(&self) -> Result<StorageReport> {
+        let (blob_count, blob_bytes) = self.blobs.usage().await;
+        let (version_count, version_bytes) = self.store.version_totals().await?;
+        Ok(StorageReport {
+            blob_count,
+            blob_bytes,
+            version_count,
+            version_bytes,
+            auto_prune: retention::SchedulerConfig::from_env().enabled,
+            last_prune: retention::last_run(),
+        })
     }
 }
 
@@ -1543,7 +1637,7 @@ impl DesignService {
     /// bumped (the Lobby's "recent" order stays put) and no version is made.
     /// The same image again is a no-op; a new one emits
     /// `design_artifact_updated {change:"thumbnail"}`. The previous blob is
-    /// left for the opt-in prune's GC.
+    /// GC'd right away unless still referenced.
     pub async fn set_thumbnail(&self, a: &DesignArtifact, bytes: &[u8]) -> Result<DesignArtifact> {
         if bytes.is_empty() {
             return Err(Error::Invalid("the thumbnail is empty".into()));
@@ -1564,6 +1658,14 @@ impl DesignService {
             return Ok(a.clone());
         }
         self.store.set_thumb_blob(&a.id, &sha).await?;
+        // The replaced thumbnail is a cache, not history: GC it now when no
+        // version or other artifact references it (it used to linger until an
+        // admin ran the prune).
+        if let Some(old) = a.thumb_blob.as_deref() {
+            if blobs::is_sha(old) && !self.store.blob_in_use(old).await.unwrap_or(true) {
+                let _ = self.blobs.remove(old).await;
+            }
+        }
         let updated = self.store.require_artifact(&a.id).await?;
         self.emit(Event::DesignArtifactUpdated {
             workspace_id: updated.workspace_id.clone(),
@@ -2064,5 +2166,63 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn scheduled_prune_skips_recent_history_and_gcs_old_autosaves() {
+        let (s, _dir, _rx) = svc().await;
+        let created = s
+            .create_artifact(input("html", "Sched", Some("<p>0</p>")))
+            .await
+            .unwrap();
+        let mut a = created.artifact;
+        for i in 1..=4 {
+            let saved = s
+                .commit_bytes(
+                    &a,
+                    format!("<p>{i}</p>").into_bytes(),
+                    opts(None, Author::user("u1")),
+                )
+                .await
+                .unwrap();
+            a = saved.artifact;
+        }
+        let blobs_before = s.blobs().usage().await.0;
+        // Everything is younger than a day: the scheduled pass leaves it.
+        let r = s.prune_scheduled(600, 86_400).await.unwrap();
+        assert_eq!(
+            r.artifacts_scanned, 0,
+            "no candidates → no per-artifact queries"
+        );
+        assert!(r.versions.is_empty());
+        // With no minimum age the window squashes to its last autosave.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let r = s.prune_scheduled(600, 0).await.unwrap();
+        assert_eq!(r.artifacts_scanned, 1);
+        assert!(r.applied);
+        assert!(!r.versions.is_empty());
+        assert_eq!(
+            s.blobs().usage().await.0,
+            blobs_before - r.blobs.len() as u64
+        );
+        assert!(!r.blobs.is_empty(), "squashed autosaves free their blobs");
+        // The head survives and still reads.
+        let a = s.store().require_artifact(&a.id).await.unwrap();
+        assert_eq!(s.head_content(&a).await.unwrap().1, b"<p>4</p>");
+        let report = retention::run_scheduled_once(
+            &s,
+            &retention::SchedulerConfig {
+                enabled: true,
+                window_secs: 600,
+                min_age_secs: 0,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(report.versions.is_empty(), "idempotent");
+        assert!(retention::last_run().is_some());
+        let st = s.storage().await.unwrap();
+        assert_eq!(st.blob_count, s.blobs().usage().await.0);
+        assert!(st.version_count >= 1);
     }
 }

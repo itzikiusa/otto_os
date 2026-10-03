@@ -365,6 +365,16 @@ pub struct UpdateArtifactReq {
     pub thumb_b64: Option<String>,
 }
 
+/// `POST /design/artifacts/{id}/versions/{v}/restore`.
+#[derive(Debug, Default, Deserialize)]
+pub struct RestoreReq {
+    /// Optimistic concurrency, as on `PUT …/content` (409 on mismatch).
+    #[serde(default)]
+    pub base_version: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 /// `PUT /design/artifacts/{id}/content`.
 #[derive(Debug, Default, Deserialize)]
 pub struct ContentPutReq {
@@ -568,4 +578,27 @@ pub struct PruneReport {
     pub versions: Vec<Id>,
     /// Blobs no longer referenced by any version/thumbnail (removed on apply).
     pub blobs: Vec<String>,
+}
+
+/// One scheduled retention pass (see `retention::spawn_scheduler`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduledPruneRun {
+    pub at: String,
+    pub versions_removed: usize,
+    pub blobs_removed: usize,
+}
+
+/// `GET /design/admin/storage` — the Design Hall storage gauge.
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageReport {
+    /// Files / bytes on disk under `<data>/design/blobs` (after dedupe).
+    pub blob_count: u64,
+    pub blob_bytes: u64,
+    /// Version rows and the bytes they reference (before dedupe).
+    pub version_count: i64,
+    pub version_bytes: i64,
+    /// Whether the daily scheduled retention pass is on.
+    pub auto_prune: bool,
+    /// The last scheduled pass since boot, if any.
+    pub last_prune: Option<ScheduledPruneRun>,
 }
