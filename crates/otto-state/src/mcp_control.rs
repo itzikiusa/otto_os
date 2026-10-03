@@ -1885,7 +1885,7 @@ mod tests {
         let mine = mine.iter().find(|r| r.tool == "otto.mine").unwrap();
         assert_eq!(mine.caller_session_id.as_deref(), Some("me-session"));
         let mut stats: Vec<String> = log
-            .stats(Some(&[ws.clone()]), Some("me"))
+            .stats(Some(std::slice::from_ref(&ws)), Some("me"))
             .await
             .unwrap()
             .into_iter()
