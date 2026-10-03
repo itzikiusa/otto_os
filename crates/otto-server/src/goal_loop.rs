@@ -67,8 +67,10 @@ fn flag_bell() -> &'static tokio::sync::Notify {
     BELL.get_or_init(tokio::sync::Notify::new)
 }
 
-/// Backstop re-check interval of [`until_flag`].
-const FLAG_SAFETY: Duration = Duration::from_secs(1);
+/// Backstop re-check interval of [`until_flag`]. Every store site rings
+/// ([`ring_flags`]), so this only bounds a missed ring; 10 s (was 1 s, perf
+/// N7) keeps an idle multi-executor loop near zero wakeups.
+const FLAG_SAFETY: Duration = Duration::from_secs(10);
 
 /// Wake every [`until_flag`] waiter to re-check its condition. Call after
 /// raising a loop control flag.
@@ -78,6 +80,11 @@ pub(crate) fn ring_flags() {
 
 /// Resolve once `raised()` is true — immediately when it already is.
 pub(crate) async fn until_flag(raised: impl Fn() -> bool) {
+    until_flag_every(raised, FLAG_SAFETY).await
+}
+
+/// [`until_flag`] with an explicit backstop (tests use a short one).
+async fn until_flag_every(raised: impl Fn() -> bool, safety: Duration) {
     loop {
         let rung = flag_bell().notified();
         tokio::pin!(rung);
@@ -88,7 +95,7 @@ pub(crate) async fn until_flag(raised: impl Fn() -> bool) {
         }
         tokio::select! {
             _ = rung => {}
-            _ = tokio::time::sleep(FLAG_SAFETY) => {}
+            _ = tokio::time::sleep(safety) => {}
         }
     }
 }
@@ -1706,15 +1713,24 @@ mod goal_loop_tests {
         let t = std::time::Instant::now();
         until_flag(|| true).await;
         assert!(t.elapsed() < Duration::from_millis(50));
+        // The backstop (scaled down from FLAG_SAFETY so the test stays fast).
+        let safety = Duration::from_millis(150);
         let silent = Arc::new(AtomicBool::new(false));
         let s2 = silent.clone();
         let t = std::time::Instant::now();
-        let (_, ()) = tokio::join!(until_flag(|| silent.load(Ordering::Relaxed)), async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            s2.store(true, Ordering::Relaxed); // no ring
-        });
+        let (_, ()) = tokio::join!(
+            until_flag_every(|| silent.load(Ordering::Relaxed), safety),
+            async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                s2.store(true, Ordering::Relaxed); // no ring
+            }
+        );
         assert!(t.elapsed() >= Duration::from_millis(20));
-        assert!(t.elapsed() < FLAG_SAFETY + Duration::from_millis(500));
+        assert!(t.elapsed() < safety + Duration::from_millis(500));
+        assert!(
+            FLAG_SAFETY >= Duration::from_secs(10),
+            "idle waiters re-check at most every 10 s"
+        );
     }
 
     #[tokio::test]

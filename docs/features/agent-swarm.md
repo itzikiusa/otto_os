@@ -251,7 +251,10 @@ When a swarm is **active**, `start_coordinator` spawns a per-swarm background lo
 `swarm_task_updated`, `swarm_run_updated`, `swarm_status`, `swarm_goal_updated`
 or `swarm_project_cleared` event for the swarm rings its bell
 (`swarm_wake.rs`), at most once per 2 s — plus a **60 s safety tick** (was a
-fixed 5 s poll; stop/restart still wakes it at once). Each tick:
+fixed 5 s poll; stop/restart still wakes it at once). The bell exists only
+while a coordinator loop runs (registered before its first tick, dropped when
+the loop returns), so events for a swarm without a coordinator cost nothing
+and leave nothing behind. Each tick:
 
 1. **Re-reads the swarm.** If it isn't `active`, the tick no-ops.
 2. **Checks budgets first.** If any per-swarm budget is exhausted

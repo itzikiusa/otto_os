@@ -129,6 +129,9 @@ fn tick_lock(swarm_id: &str) -> Arc<tokio::sync::Mutex<()>> {
 }
 
 async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandle) {
+    // Hold the swarm's wake bell for the loop's life (registered before the
+    // first tick so its events are kept; released on every return — perf N7).
+    let bell = crate::swarm_wake::register(&swarm_id);
     loop {
         let ticked_at = std::time::Instant::now();
         if handle.cancel.is_cancelled() {
@@ -166,7 +169,7 @@ async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandl
         // Event-driven (perf W7): park until a swarm event rings this swarm's
         // bell (≥ MIN_GAP after the last tick) or the 60 s safety tick; was a
         // fixed 5 s poll. Stop/restart still wakes it at once.
-        if crate::swarm_wake::wait(&handle.cancel, &swarm_id, ticked_at).await {
+        if crate::swarm_wake::wait(&handle.cancel, &bell, ticked_at).await {
             return;
         }
     }
