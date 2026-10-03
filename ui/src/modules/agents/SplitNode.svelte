@@ -32,10 +32,15 @@
   // makes the split purely proportional; panes clip/scroll their own content.
   import Self from './SplitNode.svelte';
   import SessionView from './SessionView.svelte';
-  import DatabasePage from '../database/DatabasePage.svelte';
+  // The Database pane is rare; importing DatabasePage statically dragged
+  // CodeMirror + the DB views (~1.6 MB) into the Agents route — the default
+  // one — before first paint. Load it on demand from the page registry, which
+  // shares the chunk with the Database route (never fetched twice).
+  import { loadPage, loadedPage } from '../../shell/pages.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import {
     layout,
     MIN_PANE_PX,
@@ -197,7 +202,18 @@
             oncontextmenu={(e) => ctxMenu.show(e, presetItems())}
           ><Icon name="x" size={12} /></button>
         {/if}
-        <DatabasePage />
+        {#if loadedPage('database')}
+          {@const DatabasePage = loadedPage('database')!}
+          <DatabasePage />
+        {:else}
+          {#await loadPage('database')}
+            <div class="db-pane-loading" role="status" aria-label="Loading Database"><Skeleton rows={3} /></div>
+          {:catch err}
+            <div class="db-pane-loading" role="alert">
+              <span>Couldn't load the Database pane: {err instanceof Error ? err.message : String(err)}</span>
+            </div>
+          {/await}
+        {/if}
       </div>
     {:else}
       <SessionView
@@ -233,6 +249,11 @@
 {/if}
 
 <style>
+  .db-pane-loading {
+    padding: 16px;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+  }
   .split-node {
     display: grid;
     min-width: 0;

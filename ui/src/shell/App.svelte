@@ -20,6 +20,7 @@
   import TabBar from './TabBar.svelte';
   import BottomNav from './BottomNav.svelte';
   import Drawer from './Drawer.svelte';
+  import Skeleton from '../lib/components/Skeleton.svelte';
   import NavButtons from './NavButtons.svelte';
   import MobileActionBar from './MobileActionBar.svelte';
   import Icon from '../lib/components/Icon.svelte';
@@ -50,6 +51,7 @@
     pageError,
     prepareRoute,
     prefetchPagesWhenIdle,
+    ensureRightPanel,
     installNavPrefetch,
     loadedRightPanel,
   } from './pages.svelte';
@@ -77,7 +79,8 @@
   import { gcWindowKeys } from '../lib/win';
   import { openExternal, isExternalUrl } from '../lib/external';
   import { registry, type Command } from '../lib/commands.svelte';
-  import { activeNavId, availableModules, groupLabel, moduleLabel } from '../lib/sidebar';
+  import { activeNavId, availableModules, groupLabel, moduleLabel, resolveOrder, visibleOrder } from '../lib/sidebar';
+  import { prefetchQueue, shouldPrefetch } from '../lib/prefetchPlan';
   import { api, baseUrl } from '../lib/api/client';
   $effect(() => {transcriptStore.setIdentity(JSON.stringify([baseUrl(),auth.me?.id ?? '']));});
   import type { Connection, Session } from '../lib/api/types';
@@ -105,9 +108,22 @@
     if (!untrack(() => loadedPage(pageKey))) void loadPage(pageKey).catch(() => {});
   });
   $effect(() => installNavPrefetch());
+  // The Agents loader starts the right panel's chunk without waiting on it;
+  // re-ask while it's on screen so a failed load retries.
+  $effect(() => {
+    if (showRightPanel && !loadedRightPanel()) void ensureRightPanel();
+  });
   $effect(() => {
     if (isEmbedded || isPopout) return;
-    return prefetchPagesWhenIdle();
+    // Planned once per shell: the visible, permitted modules (Favorites
+    // first), capped — and nothing on a phone / Save-Data / remote daemon.
+    const queue = untrack(() => {
+      const conn = (navigator as Navigator & { connection?: { saveData?: boolean } }).connection;
+      if (!shouldPrefetch({ isPhone: viewport.isPhone, saveData: conn?.saveData, base: baseUrl(), href: location.href })) return [];
+      const visible = visibleOrder(resolveOrder(splitModules, ui.sidebarOrder), ui.sidebarHidden).map((m) => m.id);
+      return prefetchQueue(visible, ui.sidebarFavorites, (id) => pageKeyOf(id.split('/')), { skip: [pageKey] });
+    });
+    return queue.length ? prefetchPagesWhenIdle(queue) : undefined;
   });
   const compactShell = $derived(!viewport.isDesktop && !isPopout && !isEmbedded);
   // The page draws its own PageHeader (the first registered header, in the
@@ -502,6 +518,12 @@
   async function updateAllCLIs(): Promise<void> {
     const wsId = ws.currentId;
     if (!wsId) { toasts.error('No workspace selected'); return; }
+    // One chord (⌘U) used to launch a global install with no way back — ask.
+    const ok = await confirmer.ask(
+      'Otto opens an "Update CLIs" session that installs the latest Claude Code, Codex and other agent CLIs on this Mac. Running sessions keep their current version until they restart.',
+      { title: 'Update all agent CLIs?', confirmLabel: 'Update', danger: false },
+    );
+    if (!ok) return;
     try {
       const session = await api.post<Session>(`/workspaces/${wsId}/providers/update`, {});
       ws.addSession(session);
@@ -1170,7 +1192,7 @@
             <Drawer bind:open={ui.rightOpen} inline={!compactShell} side="right" label="Activity" width="min(92vw, 360px)">
               <!-- Loaded with the Agents page (shell/pages.svelte.ts). -->
               {@const RightPanel = loadedRightPanel()}
-              {#if RightPanel}<RightPanel forceOpen={compactShell} />{/if}
+              {#if RightPanel}<RightPanel forceOpen={compactShell} />{:else}<div class="rp-loading" role="status" aria-label="Loading activity panel"><Skeleton rows={4} height={28} /></div>{/if}
             </Drawer>
           {/if}
         </div>
@@ -1246,6 +1268,9 @@
 {/if}
 
 <style>
+  .rp-loading {
+    padding: 12px;
+  }
   .shell {
     /* 100% (of #app), NOT 100vh — in the transparent overlay-titlebar
        WKWebView, 100vh resolves to the full screen height, making the shell

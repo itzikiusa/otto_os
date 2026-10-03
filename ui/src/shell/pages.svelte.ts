@@ -7,9 +7,10 @@
 //
 // - A pop-out / side pane loads just the module it shows (plus whatever it
 //   navigates to).
-// - The main window warms every page at idle after its first paint
-//   (`prefetchPagesWhenIdle`) and on sidebar hover/focus (`installNavPrefetch`),
-//   so a click normally finds its chunk already evaluated.
+// - The main window warms the user's top visible pages at idle after its
+//   first paint (`prefetchPagesWhenIdle`, planned by lib/prefetchPlan.ts —
+//   not on a phone / remote daemon) and any page on sidebar hover/focus
+//   (`installNavPrefetch`), so a click normally finds its chunk evaluated.
 // - A navigation never shows a blank or a spinner: the router holds the
 //   CURRENT route (and so the current page) until the next page's chunk is in
 //   (`router.setPrepare`, installed by the shell). The URL moves at once; the
@@ -30,10 +31,14 @@ type Loader = () => Promise<{ default: PageComponent }>;
  *  sidebar's default order, most-used first). */
 const LOADERS: Record<string, Loader> = {
   // The right activity panel belongs to the Agents page (the only page that
-  // shows it) and arrives with it: its Git/Files/Browser/API tabs pull in
-  // CodeMirror, xterm and the git views — too much for the shell's closure.
-  agents: () =>
-    Promise.all([import('../modules/agents/AgentsPage.svelte'), loadRightPanel()]).then(([m]) => m),
+  // shows it) and starts loading with it: its Git/Files/Browser/API tabs pull
+  // in CodeMirror, xterm and the git views — too much for the shell's closure,
+  // and too much to hold the default route's first paint for (~540 KB). The
+  // Drawer shows a placeholder until `loadedRightPanel()` lands.
+  agents: () => {
+    void ensureRightPanel();
+    return import('../modules/agents/AgentsPage.svelte');
+  },
   home: () => import('../modules/home/HomePage.svelte'),
   git: () => import('../modules/git/GitPage.svelte'),
   database: () => import('../modules/database/DatabasePage.svelte'),
@@ -81,6 +86,12 @@ function loadRightPanel(): Promise<void> {
       throw e;
     },
   ));
+}
+
+/** Start (once) the right panel's chunk; never throws — a failed load is
+ *  forgotten, so the next call (the shell re-asks while it's shown) retries. */
+export function ensureRightPanel(): Promise<void> {
+  return loadRightPanel().catch(() => {});
 }
 
 /** The right activity panel once loaded (reactive), else null. */
@@ -180,13 +191,14 @@ function whenIdle(cb: () => void, timeout: number): () => void {
 }
 
 /**
- * Warm every page after the first paint, one chunk per idle slot so a
- * prefetch never lands as one long frame. Returns a stop function. The main
- * window only: a pop-out or side pane shows one module, so it loads just that
- * one (hover prefetch still covers anything it links to).
+ * Warm `keys` (see lib/prefetchPlan.ts — the visible modules, capped) after
+ * the first paint, one chunk per idle slot so a prefetch never lands as one
+ * long frame. Returns a stop function. The main window only: a pop-out or
+ * side pane shows one module, so it loads just that one (hover prefetch still
+ * covers anything it links to).
  */
-export function prefetchPagesWhenIdle(startDelayMs = 400): () => void {
-  const queue = Object.keys(LOADERS).filter((k) => k !== 'snip' && k !== 'plugin');
+export function prefetchPagesWhenIdle(keys: readonly string[], startDelayMs = 400): () => void {
+  const queue = keys.filter((k) => k in LOADERS && k !== 'snip' && k !== 'plugin');
   let cancel: (() => void) | null = null;
   let stopped = false;
   const next = (): void => {
