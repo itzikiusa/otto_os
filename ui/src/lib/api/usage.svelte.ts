@@ -8,6 +8,7 @@ import { toasts } from '../toast.svelte';
 import { loadErrorText } from '../loadError';
 import { exportCsv, downloadJson } from '../components/exporters';
 import type { Id } from './types';
+import { announceModule } from '../lazyModule';
 
 /** Sessions the report page loads first (one past the 100 it shows, so it
  *  knows whether "Show more" has anything to fetch) vs the full export. */
@@ -690,3 +691,6 @@ class UsageStore {
 }
 
 export const usage = new UsageStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf G2): let it see this store
+// however it was first imported.
+announceModule('usage', usage);

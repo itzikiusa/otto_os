@@ -1,16 +1,66 @@
+<script module lang="ts">
+  // Each tab's panel is its own chunk, loaded the first time it is shown (perf
+  // G1). The panel used to import all nine statically, so the Agents page —
+  // the default landing — evaluated Git, Files, both Browsers, Canvas and the
+  // API client (CodeMirror, xterm, marked, the git views) to render one tab.
+  // One promise per panel, shared by every RightPanel instance (the desktop
+  // aside and the mobile drawer); `panels` is reactive so a tab renders the
+  // moment its chunk lands and a loaded tab switches in synchronously.
+  import type { Component } from 'svelte';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+  import { ui as uiStore } from '../lib/stores/ui.svelte';
+  // Panels take different props (v1 Browser: `active`).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type PanelComponent = Component<any>;
+  export type PanelKey = 'git' | 'files' | 'activity' | 'outputs' | 'canvas' | 'info' | 'browserV1' | 'browserV2' | 'api';
+  export const PANEL_LOADERS: Record<PanelKey, () => Promise<{ default: PanelComponent }>> = {
+    git: () => import('../modules/git/GitPanel.svelte'),
+    files: () => import('../modules/panels/FilesPanel.svelte'),
+    activity: () => import('../modules/panels/ActivityPanel.svelte'),
+    outputs: () => import('../modules/panels/OutputsPanel.svelte'),
+    canvas: () => import('../modules/panels/CanvasPanel.svelte'),
+    info: () => import('../modules/panels/InfoPanel.svelte'),
+    browserV1: () => import('../modules/panels/BrowserPanel.svelte'),
+    browserV2: () => import('../modules/panels/BrowserPanelV2.svelte'),
+    api: () => import('../modules/api/ApiPanel.svelte'),
+  };
+  const panels = new SvelteMap<PanelKey, PanelComponent>();
+  const failedPanels = new SvelteSet<PanelKey>();
+  const inflight = new Map<PanelKey, Promise<void>>();
+  function loadPanel(key: PanelKey): Promise<void> {
+    let p = inflight.get(key);
+    if (!p) {
+      failedPanels.delete(key);
+      p = PANEL_LOADERS[key]().then(
+        (m) => void panels.set(key, m.default),
+        () => {
+          inflight.delete(key); // let Retry re-import
+          failedPanels.add(key);
+        },
+      );
+      inflight.set(key, p);
+    }
+    return p;
+  }
+  /** The chunk a tab renders (null: Notes lives in this file). */
+  function panelKeyOf(tab: string, browserVersion: string): PanelKey | null {
+    if (tab === 'notes') return null;
+    if (tab === 'browser') return browserVersion === 'v1' ? 'browserV1' : 'browserV2';
+    return tab in PANEL_LOADERS ? (tab as PanelKey) : null;
+  }
+  // Warm the persisted tab with this chunk, so an open panel's first tab does
+  // not wait for the mount → effect round trip before its import starts.
+  {
+    const k = uiStore.rightOpen ? panelKeyOf(uiStore.rightTab, uiStore.browserPanelVersion) : null;
+    if (k) void loadPanel(k);
+  }
+</script>
+
 <script lang="ts">
   // Collapsible right panel (⌘J): Git / Files / Notes / Activity / Outputs / Canvas / Info / Browser / API tabs ⇄ 36px icon strip.
   import Icon, { type IconName } from '../lib/components/Icon.svelte';
   import EmptyState from '../lib/components/EmptyState.svelte';
-  import GitPanel from '../modules/git/GitPanel.svelte';
-  import InfoPanel from '../modules/panels/InfoPanel.svelte';
-  import BrowserPanel from '../modules/panels/BrowserPanel.svelte';
-  import BrowserPanelV2 from '../modules/panels/BrowserPanelV2.svelte';
-  import FilesPanel from '../modules/panels/FilesPanel.svelte';
-  import ActivityPanel from '../modules/panels/ActivityPanel.svelte';
-  import OutputsPanel from '../modules/panels/OutputsPanel.svelte';
-  import CanvasPanel from '../modules/panels/CanvasPanel.svelte';
-  import ApiPanel from '../modules/api/ApiPanel.svelte';
+  import Skeleton from '../lib/components/Skeleton.svelte';
   import { ui, type RightTab } from '../lib/stores/ui.svelte';
   import { startMouseDrag } from '../lib/dragCursor';
   import { ws } from '../lib/stores/workspace.svelte';
@@ -218,6 +268,12 @@
   });
   const browserShown = $derived(open && ui.rightTab === 'browser');
 
+  // Load the visible tab's chunk, and the kept-alive v1 Browser's.
+  $effect(() => {
+    const k = open ? panelKeyOf(ui.rightTab, ui.browserPanelVersion) : null;
+    if (k && !panels.has(k)) void loadPanel(k);
+  });
+
   // Tablist keys: ←/→ (RTL-aware), Home/End move and select; focus follows.
   function onTabsKey(e: KeyboardEvent): void {
     const i = tabs.findIndex((t) => t.id === ui.rightTab);
@@ -237,6 +293,21 @@
     );
   }
 </script>
+
+<!-- One tab's panel: its chunk, a skeleton while it loads, Retry if it failed. -->
+{#snippet lazyPanel(key: PanelKey, props: Record<string, unknown> = {})}
+  {@const Panel = panels.get(key)}
+  {#if Panel}
+    <Panel {...props} />
+  {:else if failedPanels.has(key)}
+    <div class="rp-fail" role="alert">
+      <span>Couldn't load this panel.</span>
+      <button class="btn small" onclick={() => void loadPanel(key)}>Retry</button>
+    </div>
+  {:else}
+    <div class="rp-loading"><Skeleton rows={4} /></div>
+  {/if}
+{/snippet}
 
 {#if open || browserKept}
   <aside
@@ -303,18 +374,8 @@
     </header>
 
     <div class="rpanel-body">
-      {#if ui.rightTab === 'git'}
-        <GitPanel />
-      {:else if ui.rightTab === 'files'}
-        <FilesPanel />
-      {:else if ui.rightTab === 'activity'}
-        <ActivityPanel />
-      {:else if ui.rightTab === 'outputs'}
-        <OutputsPanel />
-      {:else if ui.rightTab === 'canvas'}
-        <CanvasPanel />
-      {:else if ui.rightTab === 'info'}
-        <InfoPanel />
+      {#if ui.rightTab === 'git' || ui.rightTab === 'files' || ui.rightTab === 'activity' || ui.rightTab === 'outputs' || ui.rightTab === 'canvas' || ui.rightTab === 'info'}
+        {@render lazyPanel(ui.rightTab as PanelKey)}
       {/if}
       {#if browserShown || (browserKept && ui.browserPanelVersion === 'v1')}
         <!-- Transitional v1/v2 switch: v1 is the original per-session panel,
@@ -340,14 +401,14 @@
             >v2</button>
           </div>
           {#if ui.browserPanelVersion === 'v2'}
-            <BrowserPanelV2 />
+            {@render lazyPanel('browserV2')}
           {:else}
-            <BrowserPanel active={browserShown} />
+            {@render lazyPanel('browserV1', { active: browserShown })}
           {/if}
         </div>
       {/if}
       {#if ui.rightTab === 'api'}
-        <ApiPanel />
+        {@render lazyPanel('api')}
       {:else if ui.rightTab === 'notes'}
         <div class="notes-wrap">
           <textarea
@@ -388,6 +449,19 @@
 {/if}
 
 <style>
+  .rp-fail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 24px 12px;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+  }
+  .rp-loading {
+    padding: 12px;
+  }
   .rpanel {
     /* width is set inline from ui.rightWidth (drag-resizable) */
     height: 100%;

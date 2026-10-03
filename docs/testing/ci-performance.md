@@ -71,8 +71,11 @@ style, layout and paint dominate, so the gates could not see its regressions.
   (`budgetMs()`); DOM and request counts are never scaled.
 - **Bundle bytes.** The UI job runs `node scripts/bundle-budget.mjs` after
   `npm run build`. From `dist/.vite/manifest.json` it measures gzip bytes of
-  the entry (static closure), the shell chunk (minus the entry) and every
-  `shell/pages.svelte.ts` page (minus entry and shell). It compares them with
+  the entry (static closure), the shell chunk (minus the entry), every
+  `shell/pages.svelte.ts` page (minus entry and shell), the right activity
+  panel (`rightPanel`: what `shell/RightPanel.svelte` adds to the Agents
+  landing) and each of its lazily loaded tabs (`panel:<tab>`, from
+  `PANEL_LOADERS`). It compares them with
   `ui/scripts/bundle-budget.json`: more than 3 % growth, or a target with no
   budget, fails. Ratchet the file with `--update` after shrinking a chunk or
   after a deliberate growth. `--json` prints the numbers.
@@ -80,7 +83,15 @@ style, layout and paint dominate, so the gates could not see its regressions.
   `#/home`. It reads the shell's `otto:shell-mounted` and `otto:page-painted`
   performance marks and the count of daemon requests started before the first
   paint. It also asserts that `/auth/me` and `/auth/capabilities` overlap
-  `/meta`, and that the scratch workspace overlaps `/workspaces`.
+  `/meta`, and that the scratch workspace and the saved workspace's session
+  list overlap `/workspaces`. Ceilings come from the `[boot-perf]` log line:
+  times are the worst measured ×1.5 (4.0 s shell, 4.1 s paint on the dev
+  server), the request count is the worst measured + 2 (16; 14 on `#/home`).
+- **Pending navigation.** `desktop-nav-smooth-perf` holds the Vault page
+  chunk with `page.route` and expects `aria-busy` on the tapped item within
+  200 ms and the progress bar after it. The spec blocks the service worker:
+  once `sw.js` claims the page, module fetches go through the worker and
+  `page.route` never sees them.
 - **CI.** The `perf-gates` job runs a small subset on the Ubuntu runner:
   `desktop-git-sidebar-perf`, `desktop-docs-orch-perf`, `desktop-infra-perf`,
   `desktop-db-results-perf`, `desktop-nav-smooth-perf`, `desktop-boot-perf`,

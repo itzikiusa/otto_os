@@ -47,5 +47,7 @@ test('service worker serves only hashed /assets/* cache-first and prunes old bui
   assert.ok(gate > 0 && cacheFirst > gate, 'the cache-first branch must sit behind the /assets/ gate');
   assert.equal(sw.match(/caches\.match\(event\.request\)\.then\(\n/g)?.length, 1, 'one cache-first branch only');
   assert.match(sw, /async function pruneAssets\(html\)/);
+  const devGate = sw.indexOf('@vite|@fs|@id|node_modules');
+  assert.ok(devGate > 0 && devGate < sw.indexOf('const isNav'), 'dev-server modules pass through before any respondWith');
   assert.doesNotMatch(sw, /CACHE_NAME = 'otto-shell-v3'/, 'bump CACHE_NAME on a policy change');
 });

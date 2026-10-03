@@ -29,6 +29,7 @@ import type {
   UpdateGoalReq,
   UpdateTriggerReq,
 } from '../../modules/swarm/types';
+import { announceModule } from '../lazyModule';
 
 type Lifecycle = 'start' | 'pause' | 'abort' | 'resume';
 
@@ -1011,3 +1012,6 @@ class SwarmStore {
 }
 
 export const swarm = new SwarmStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf G2): let it see this store
+// however it was first imported.
+announceModule('swarm', swarm);

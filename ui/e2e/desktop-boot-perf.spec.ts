@@ -12,7 +12,8 @@ import { budgetMs, isDesktopProject } from './perf';
 //    (never scaled — a count, not a time);
 //  - the boot overlap that removed the serial waterfall: `/auth/me` and
 //    `/auth/capabilities` start before `/meta` has answered, and the scratch
-//    workspace before `/workspaces` has.
+//    workspace and the saved workspace's session list (perf G3) before
+//    `/workspaces` has.
 // Everything is read from the page's own Resource Timing entries, so the
 // numbers don't depend on Playwright's clock. The [boot-perf] log line carries
 // the measured values for re-calibrating the ceilings below.
@@ -21,13 +22,14 @@ import { budgetMs, isDesktopProject } from './perf';
 // Ceilings = the worst measured value ×1.5 (2026-10-03, merged perf wave, Vite
 // dev server, desktop-browser, 2 workers on a loaded machine): #/agents shell
 // 2636 ms / paint 2715 ms (1177 / 1204 with one worker), #/home 931 / 1008 ms;
-// 14 API requests before paint on #/home, 10 on #/agents.
+// 14 API requests before paint on #/home, 10 on #/agents. The request ceiling
+// is the worst measured count + 2 (perf G4) — a count doesn't drift with load.
 /** Shell mounted (first effect), from navigation start. */
 const SHELL_MOUNT_BUDGET_MS = 4_000;
 /** First page painted, from navigation start. */
 const PAGE_PAINT_BUDGET_MS = 4_100;
 /** Daemon API requests started before the first page paint (a ceiling). */
-const MAX_API_REQUESTS_BEFORE_PAINT = 21;
+const MAX_API_REQUESTS_BEFORE_PAINT = 16;
 
 let wsId = '';
 
@@ -50,7 +52,12 @@ interface BootSample {
   pagePainted: number;
   apiBeforePaint: number;
   apiPaths: string[];
-  overlap: { meStartedBeforeMetaEnd: boolean | null; capsStartedBeforeMetaEnd: boolean | null; scratchStartedBeforeListEnd: boolean | null };
+  overlap: {
+    meStartedBeforeMetaEnd: boolean | null;
+    capsStartedBeforeMetaEnd: boolean | null;
+    scratchStartedBeforeListEnd: boolean | null;
+    sessionsStartedBeforeListEnd: boolean | null;
+  };
 }
 
 async function bootSample(page: Page, hash: string): Promise<BootSample> {
@@ -64,14 +71,18 @@ async function bootSample(page: Page, hash: string): Promise<BootSample> {
   // after 3 requests): wait for the list + scratch row to finish so their
   // overlap is measured, not reported as "unknown". Counts stay paint-relative.
   await page.waitForFunction(
-    () => {
+    (id) => {
       const paths = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((e) => new URL(e.name).pathname);
-      return paths.some((p) => /\/api\/v1\/workspaces$/.test(p)) && paths.some((p) => /\/api\/v1\/workspaces\/[^/]+$/.test(p));
+      return (
+        paths.some((p) => /\/api\/v1\/workspaces$/.test(p)) &&
+        paths.some((p) => /\/api\/v1\/workspaces\/[^/]+$/.test(p)) &&
+        paths.some((p) => p.endsWith(`/api/v1/workspaces/${id}/sessions`))
+      );
     },
-    null,
+    wsId,
     { timeout: 15_000 },
   );
-  return page.evaluate(() => {
+  return page.evaluate((id) => {
     const mark = (n: string): number => performance.getEntriesByName(n)[0]?.startTime ?? -1;
     const painted = mark('otto:page-painted');
     // Daemon API calls: fetch/XHR to anything that isn't a source module or
@@ -87,6 +98,9 @@ async function bootSample(page: Page, hash: string): Promise<BootSample> {
     const caps = byPath(/\/auth\/capabilities$/);
     const list = byPath(/\/workspaces$/);
     const scratch = byPath(/\/workspaces\/[^/]+$/);
+    // The first request for the saved workspace's sessions (the speculative
+    // shown-list one; the archived probe shares the path but starts later).
+    const sessions = api.find((e) => new URL(e.name).pathname.endsWith(`/workspaces/${id}/sessions`));
     const before = (a?: PerformanceResourceTiming, b?: PerformanceResourceTiming) =>
       a && b ? a.startTime <= b.responseEnd : null;
     const early = api.filter((e) => e.startTime <= painted);
@@ -99,9 +113,10 @@ async function bootSample(page: Page, hash: string): Promise<BootSample> {
         meStartedBeforeMetaEnd: before(me, meta),
         capsStartedBeforeMetaEnd: before(caps, meta),
         scratchStartedBeforeListEnd: before(scratch, list),
+        sessionsStartedBeforeListEnd: before(sessions, list),
       },
     };
-  });
+  }, wsId);
 }
 
 for (const hash of ['#/agents', '#/home']) {
@@ -122,5 +137,7 @@ for (const hash of ['#/agents', '#/home']) {
     expect(s.overlap.meStartedBeforeMetaEnd, '/auth/me waited for /meta').toBe(true);
     expect(s.overlap.capsStartedBeforeMetaEnd, '/auth/capabilities waited for /meta').toBe(true);
     expect(s.overlap.scratchStartedBeforeListEnd, 'the scratch workspace waited for /workspaces').toBe(true);
+    // G3: the saved workspace's session list goes out with /workspaces too.
+    expect(s.overlap.sessionsStartedBeforeListEnd, "the saved workspace's sessions waited for /workspaces").toBe(true);
   });
 }

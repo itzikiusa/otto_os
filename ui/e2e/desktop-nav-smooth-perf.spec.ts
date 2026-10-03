@@ -24,6 +24,15 @@ const HEADER_BUDGET_MS = 150;
 
 let wsId = '';
 
+// No service worker. Once sw.js claims the page (its `load`-time register
+// lands well before the first click on a warm dev server), every same-origin
+// GET — the dev server's /src/* modules included — is fetched BY the worker,
+// and `page.route` never sees it: the cold-switch test's held Vault chunk then
+// loads at full speed, so the pending bar never shows. The webkit project
+// blocks it in playwright.config.ts for the same reason; this covers
+// desktop-browser too, so both engines time the same (worker-free) page.
+test.use({ serviceWorkers: 'block' });
+
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   wsId = await seedWorkspace(ctx, base);
@@ -204,8 +213,10 @@ test('a slow cold page switch marks the tapped item busy and shows the progress 
   test.setTimeout(90_000);
   let release: () => void = () => {};
   const held = new Promise<void>((r) => (release = r));
+  let holdHit = false;
   // Hold the Vault page module (dev server URL, any query) until released.
   await page.route(/\/src\/modules\/vault\/VaultPage\.svelte(\?|$)/, async (route) => {
+    holdHit = true;
     await held;
     await route.continue();
   });
@@ -224,6 +235,10 @@ test('a slow cold page switch marks the tapped item busy and shows the progress 
   });
   await item.click();
   await expect(item).toHaveAttribute('aria-busy', 'true', { timeout: 5_000 });
+  // The hold must be what keeps the switch pending. If the chunk bypassed the
+  // route (a service worker, or a page chunk fetched under another URL) the
+  // failure names that instead of a missing bar.
+  await expect.poll(() => holdHit, { message: 'the held VaultPage chunk was never requested through page.route', timeout: 5_000 }).toBe(true);
   await expect(page.getByTestId('nav-pending-bar')).toBeVisible({ timeout: 5_000 });
   const busyAt = await page.evaluate(() => (window as unknown as { __pend: { busyAt: number } }).__pend.busyAt);
   // eslint-disable-next-line no-console

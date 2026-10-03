@@ -20,6 +20,7 @@ function setup() {
   const mod = loadSource(new URL('../src/lib/stores/personalAgents.svelte.ts', import.meta.url), {
     '../api/personalAgents': { personalAgentsApi: api },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
+    '../lazyModule': { announceModule: () => {} },
   });
   const store = mod.personalAgents;
   store.rooms = [{ room: { id: 'r1' }, members: [], message_count: 1, last_message_at: null }];

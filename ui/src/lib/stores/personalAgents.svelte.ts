@@ -13,6 +13,7 @@ import type {
   PersonalAgentSchedule,
 } from '../api/types';
 import { loadErrorText } from '../loadError';
+import { announceModule } from '../lazyModule';
 
 /** Room messages per request / kept in memory on live appends. */
 const ROOM_PAGE = 200;
@@ -389,3 +390,6 @@ class PersonalAgentsStore {
 }
 
 export const personalAgents = new PersonalAgentsStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf G2): let it see this store
+// however it was first imported.
+announceModule('personalAgents', personalAgents);

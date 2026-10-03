@@ -26,19 +26,19 @@ import { lazyModule } from './lazyModule';
 // and evaluate the database / apiClient / product / k8s / … stores before the
 // shell could paint. The shell-owned stores above stay static (the sidebar,
 // status bar and session view read them from the first frame).
-const swarmStore = lazyModule(() => import('./stores/swarm.svelte').then((m) => m.swarm));
+const swarmStore = lazyModule(() => import('./stores/swarm.svelte').then((m) => m.swarm), 'swarm');
 const loopsStore = lazyModule(() => import('./stores/loops.svelte').then((m) => m.loops));
-const usageStore = lazyModule(() => import('./api/usage.svelte').then((m) => m.usage));
+const usageStore = lazyModule(() => import('./api/usage.svelte').then((m) => m.usage), 'usage');
 const productStore = lazyModule(() => import('./stores/product.svelte').then((m) => m.product));
 const canvasStore = lazyModule(() => import('./stores/canvas.svelte').then((m) => m.canvas));
 const mockupAssistStore = lazyModule(() => import('./stores/mockup-assist.svelte').then((m) => m.mockupAssist));
-const databaseStore = lazyModule(() => import('./stores/database.svelte').then((m) => m.database));
+const databaseStore = lazyModule(() => import('./stores/database.svelte').then((m) => m.database), 'database');
 const scheduledTasksStore = lazyModule(() => import('./stores/scheduledTasks.svelte').then((m) => m.scheduledTasks));
 const runWithOttoStore = lazyModule(() => import('./stores/runWithOtto.svelte').then((m) => m.runWithOtto));
 const browserStore = lazyModule(() => import('./stores/browser.svelte').then((m) => m.browser));
 const browserLiveStore = lazyModule(() => import('./stores/browserLive.svelte').then((m) => m.browserLive));
-const personalAgentsStore = lazyModule(() => import('./stores/personalAgents.svelte').then((m) => m.personalAgents));
-const k8sStore = lazyModule(() => import('./stores/k8s.svelte').then((m) => m.k8s));
+const personalAgentsStore = lazyModule(() => import('./stores/personalAgents.svelte').then((m) => m.personalAgents), 'personalAgents');
+const k8sStore = lazyModule(() => import('./stores/k8s.svelte').then((m) => m.k8s), 'k8s');
 const awsStore = lazyModule(() => import('./stores/aws.svelte').then((m) => m.aws));
 const apiClientStore = lazyModule(() => import('./stores/apiClient.svelte').then((m) => m.apiClient));
 import {
@@ -516,7 +516,8 @@ class EventsClient {
     // Every liveQuery refetches (coalesced, staggered) — registered views
     // resync for free.
     liveEvents.resync();
-    swarmStore.use((swarm) => void swarm.resync());
+    // Nothing to resync in a document that never opened the Swarm page.
+    void swarmStore.peek()?.resync();
     transcript.resyncVisible();
     missionControlBus.resync();
     designBus.resync();
@@ -550,7 +551,8 @@ class EventsClient {
     void auth.refreshMeta();
     // Every DB pool/tunnel died with the old daemon: mark open connections
     // stale and re-warm them (selected first) instead of showing "ready".
-    databaseStore.use((database) => database.onDaemonRestart());
+    // Only a document that loaded the DB store has connections to re-warm.
+    databaseStore.peek()?.onDaemonRestart();
     // "Otto restarted — N kept running · M suspended" (A4), once per boot id
     // across every window (the key is shared; storage may be unavailable).
     const text = restartSummaryText(restore);
@@ -657,10 +659,13 @@ class EventsClient {
           parsed.type === 'swarm_goal_updated' ||
           parsed.type === 'swarm_status'
         ) {
-          swarmStore.use((swarm) => swarm.applyEvent(parsed));
+          // The Swarm page loads its swarms on mount: a document without the
+          // store has nothing to patch.
+          swarmStore.peek()?.applyEvent(parsed);
         } else if (parsed.type === 'usage_metrics_tick') {
           // Drive a near-real-time metrics sparkline refresh without polling.
-          usageStore.use((usage) => usage.applyMetricsTick());
+          // Broadcast on every sampler tick; only an open metrics view wants it.
+          usageStore.peek()?.applyMetricsTick();
         } else if (parsed.type === 'product_changed') {
           // Let product section tabs know a run completed (kills a poll cycle).
           productStore.use((product) => product.applyEvent(parsed));
@@ -816,7 +821,10 @@ class EventsClient {
           parsed.type === 'k8s_monitor_cycle'
         ) {
           // Kubernetes console: cluster list refetch / installer state tick.
-          k8sStore.use((k8s) => k8s.applyEvent(parsed));
+          // Monitor cycles tick per cluster on a schedule: they only feed an
+          // open console. Cluster/installer changes still load the store.
+          if (parsed.type === 'k8s_monitor_cycle') k8sStore.peek()?.applyEvent(parsed);
+          else k8sStore.use((k8s) => k8s.applyEvent(parsed));
         } else if (parsed.type === 'aws_account_updated' || parsed.type === 'aws_install_updated') {
           // AWS console: account rows changed / the CLI installer advanced.
           awsStore.use((aws) => aws.applyEvent(parsed));

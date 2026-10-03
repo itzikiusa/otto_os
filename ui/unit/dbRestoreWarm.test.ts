@@ -90,6 +90,7 @@ function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}
       './db-result-budget': resultBudgetMod,
       '../../modules/database/error-normalize': { normalizeDbError: (_e: unknown, msg: string) => ({ title: msg }) },
       './clipHistory.svelte': { clipHistory: { setGuard: noop } },
+      '../lazyModule': { announceModule: noop },
     },
     { localStorage, crypto: globalThis.crypto, performance: globalThis.performance, sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop } },
   );
