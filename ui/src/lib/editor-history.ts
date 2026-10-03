@@ -31,7 +31,9 @@ export interface SavedEditorState {
 }
 
 const MEM_MAX = 48;
-const PERSIST_MAX_BYTES = 512 * 1024;
+/** Largest serialized entry the disk tier keeps (exported so an editor can
+ *  skip serializing a doc that is bigger than this on its own). */
+export const PERSIST_MAX_BYTES = 512 * 1024;
 const PERSIST_TOTAL_BYTES = 10 * 1024 * 1024;
 /** Disk write delay after a save. The editor saves 1.5 s after the last edit,
  *  so a doc reaches IndexedDB about 2 s after typing stops. */

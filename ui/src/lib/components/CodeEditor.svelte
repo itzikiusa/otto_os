@@ -10,6 +10,7 @@
     prepareEditorHistory,
     registerLiveParker,
     saveEditorState,
+    PERSIST_MAX_BYTES,
   } from '../editor-history';
   import { search, searchKeymap, openSearchPanel } from '@codemirror/search';
   import {
@@ -34,17 +35,12 @@
   import { oneDark, oneDarkTheme } from '@codemirror/theme-one-dark';
   import type { Extension } from '@codemirror/state';
 
-  // Language packages
+  // Language packages — the DB workbench's (SQL, JavaScript for Mongo, JSON,
+  // Redis) are eager; the rest load on first use (cm-lazy-langs.ts).
   import { javascript } from '@codemirror/lang-javascript';
-  import { python } from '@codemirror/lang-python';
-  import { go } from '@codemirror/lang-go';
-  import { rust } from '@codemirror/lang-rust';
   import { json } from '@codemirror/lang-json';
-  import { html } from '@codemirror/lang-html';
-  import { css } from '@codemirror/lang-css';
-  import { markdown } from '@codemirror/lang-markdown';
-  import { java } from '@codemirror/lang-java';
   import { sql } from '@codemirror/lang-sql';
+  import { isLazyLang, lazyLangNow, loadLazyLang } from './cm-lazy-langs';
   import { sqlDialect as dialectFor, type SqlDialectName } from '../sql-dialects';
   import { redisLang } from './redis-lang';
   import { createChangeEmitter } from './changeEmitter';
@@ -330,20 +326,8 @@
     tsx:  () => javascript({ jsx: true, typescript: true }),
     mjs:  () => javascript(),
     cjs:  () => javascript(),
-    py:   () => python(),
-    go:   () => go(),
-    rs:   () => rust(),
     json: () => json(),
     jsonc:() => json(),
-    html: () => html(),
-    htm:  () => html(),
-    xml:  () => html(),
-    css:  () => css(),
-    scss: () => css(),
-    less: () => css(),
-    md:   () => markdown(),
-    mdx:  () => markdown(),
-    java: () => java(),
     sql:  () => sql({ dialect: dialectFor(appliedDialect) }),
     redis: () => redisLang() as AnyLangExtension,
   };
@@ -496,9 +480,31 @@
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
+  /** Paths whose state was built before their lazy language pack loaded. */
+  const langlessPaths = new Set<string>();
   function cmLangFor(filePath: string, hint?: string): AnyLangExtension | null {
     const ext = extOf(filePath) || (hint ?? '');
-    return EXT_TO_CM_LANG[ext]?.() ?? null;
+    const eager = EXT_TO_CM_LANG[ext];
+    if (eager) return eager();
+    if (!isLazyLang(ext)) return null;
+    const now = lazyLangNow(ext);
+    if (now) {
+      langlessPaths.delete(filePath);
+      return now;
+    }
+    // Open plain now; highlight once the pack arrives (if still on screen).
+    langlessPaths.add(filePath);
+    void loadLazyLang(ext).then(applyLoadedLang);
+    return null;
+  }
+  /** Give the live doc its language if it was opened before the pack loaded. */
+  function applyLoadedLang(): void {
+    if (!view || !langlessPaths.has(livePath)) return;
+    const ext = extOf(livePath) || (language ?? '');
+    const lang = lazyLangNow(ext);
+    if (!lang) return;
+    langlessPaths.delete(livePath);
+    view.dispatch({ effects: langCompartment.reconfigure(lang) });
   }
 
   function lspLangFor(filePath: string): string | null {
@@ -836,7 +842,9 @@
         hk.key,
         state.toJSON({ history: historyField }) as { doc: string },
         scrollTop,
-        hk.persist,
+        // A doc already past the disk cap would only be serialized again and
+        // dropped (editor-history.ts) — keep it in the memory tier only.
+        hk.persist && state.doc.length <= PERSIST_MAX_BYTES,
       );
     } catch {
       /* a state without the history field — nothing worth keeping */
@@ -860,6 +868,12 @@
   const historySaver = EditorView.updateListener.of((u) => {
     if (!u.docChanged) return;
     if (historySaveTimer !== null) clearTimeout(historySaveTimer);
+    historySaveTimer = null;
+    // The idle save exists so a RELOAD finds the history on disk. A doc past
+    // the disk cap can't go there, so serializing it (doc + every undo step)
+    // every 1.5 s of typing bought nothing; unmount / page hide still park it
+    // in the memory tier (parkLive / registerLiveParker).
+    if (u.state.doc.length > PERSIST_MAX_BYTES) return;
     historySaveTimer = setTimeout(() => {
       historySaveTimer = null;
       if (view) parkHistory(livePath, view.state, view.scrollDOM.scrollTop);
@@ -959,6 +973,8 @@
       applyPendingScroll();
     } else {
       view.setState(kept.state);
+      // Parked before its lazy language pack loaded: apply it now if it has.
+      if (langlessPaths.has(toPath)) queueMicrotask(applyLoadedLang);
       if (plainRecheck) clearTimeout(plainRecheck);
       plainRecheck = null;
       appliedPlain = highlightLineLimit > 0 && hasLongLine(kept.state.doc, highlightLineLimit);
