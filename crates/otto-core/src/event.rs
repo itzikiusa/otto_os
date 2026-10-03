@@ -735,6 +735,16 @@ pub enum Event {
 }
 
 impl Event {
+    /// High-rate variants only WebSocket clients consume (perf2/03 N6):
+    /// producers publish them with `otto_server::ws_fanout::publish_stream`,
+    /// which skips the internal bus and its ~13 subscribers.
+    pub fn is_streaming(&self) -> bool {
+        matches!(
+            self,
+            Event::TranscriptLive { .. } | Event::TranscriptAppended { .. }
+        )
+    }
+
     /// The wire `type` tag (`session_status`, …) without serializing — used to
     /// filter per-connection topic subscriptions (`/ws/events` `subscribe`)
     /// before the authorization check and serialization.
