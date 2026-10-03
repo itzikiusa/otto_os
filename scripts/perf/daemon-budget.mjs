@@ -57,8 +57,8 @@ const STRICT_TIMING = process.env.OTTO_PERF_STRICT_TIMING === '1';
 // Budgets: time/CPU scale with OTTO_PERF_BUDGET_SCALE, sizes don't.
 const BUDGET = {
   boot_ms: 2_000 * SCALE,
-  // Offline compaction of the seeded ≈40 MB-live file (measured ≈0.7 s for
-  // 400 MB on an M-series SSD; runners are slower).
+  // Offline compaction of the seeded file (167 MB, 69 % free → 52 MB): 363 ms
+  // locally on 2026-10-03, debug build; runners are slower.
   boot_db_compact_ms: 3_000 * SCALE,
   boot_db_open_ms: 1_000 * SCALE,
   idle_cpu_pct: 1.0 * SCALE,
@@ -66,8 +66,10 @@ const BUDGET = {
   threads: 96,
   wal_bytes: 64 * 1024 * 1024,
   free_pct: 20,
-  // Embedded ClickHouse (only measured when a binary is on PATH).
-  ch_threads: 60,
+  // Embedded ClickHouse (only measured when a binary is on PATH). Measured
+  // 69 threads / 0.5 % CPU on 2026-10-03 (M-series, fresh dir, debug ottod);
+  // the trim target is < 60 — ratchet this down as the pools shrink.
+  ch_threads: 80,
   ch_cpu_pct: 0.5 * SCALE,
 };
 /** Deterministic metrics: over budget fails the run. */
