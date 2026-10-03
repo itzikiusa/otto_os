@@ -37,7 +37,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::api_helpers::{
-    collection_to_openapi, eval_assertion, json_path, parse_curl, percent_decode,
+    collection_to_openapi, eval_assertion_with, header_value, json_path, parse_curl,
+    percent_decode, StepOutcome,
 };
 use crate::api_scripts::{self, ScriptRequest, ScriptResponse};
 use crate::api_secrets;
@@ -142,19 +143,24 @@ pub(crate) async fn workspace_allows_local(ctx: &ServerCtx, wid: &Id) -> bool {
 
 /// Build a one-off client when per-request settings deviate from the defaults
 /// (disable redirects, skip TLS verification) or the request is tunnelled
-/// through a SOCKS5 proxy. `None` → use the shared client. TLS verification is
-/// only ever skipped when the request explicitly sets `verify_ssl=false` (never
-/// the default).
+/// through a SOCKS5 proxy. `Ok(None)` → use the shared client. TLS verification
+/// is only ever skipped when the request explicitly sets `verify_ssl=false`
+/// (never the default).
+///
+/// Errors instead of degrading: a proxy URL reqwest rejects, or a builder that
+/// fails, must fail the send. Falling back would silently route a tunnelled
+/// request DIRECT through an unguarded builder (`guarded` is false whenever a
+/// proxy is set), or drop `follow_redirects=false` / `verify_ssl=false`.
 fn build_settings_client(
     wid: &Id,
     req: &ExecuteApiReq,
     proxy: Option<&str>,
     allow_local: bool,
-) -> Option<reqwest::Client> {
+) -> Result<Option<reqwest::Client>, String> {
     let no_redirect = req.follow_redirects == Some(false);
     let no_verify = req.verify_ssl == Some(false);
     if !no_redirect && !no_verify && proxy.is_none() {
-        return None;
+        return Ok(None);
     }
     // Tunnelled: the target resolves and is dialled at the FAR end — the local
     // guard would only false-block bastion-only hosts (and would refuse the
@@ -183,11 +189,17 @@ fn build_settings_client(
     if let Some(url) = proxy {
         // `socks5h://` so the bastion does the DNS — the target host is resolved
         // and dialled from the SSH server's network, not ours.
-        if let Ok(px) = reqwest::Proxy::all(url) {
-            builder = builder.proxy(px);
-        }
+        let px = reqwest::Proxy::all(url)
+            .map_err(|e| format!("Couldn't route through the SSH tunnel ({e})"))?;
+        builder = builder.proxy(px);
     }
-    builder.build().ok()
+    builder.build().map(Some).map_err(|e| {
+        if proxy.is_some() {
+            format!("Couldn't route through the SSH tunnel ({e})")
+        } else {
+            format!("couldn't build the HTTP client for this request's settings ({e})")
+        }
+    })
 }
 
 // ===========================================================================
@@ -2678,7 +2690,7 @@ async fn prepare_request(
     // Per-request settings: a custom client when any non-default is set or the
     // request is tunnelled, otherwise the workspace's shared pooled client.
     let shared_client = http_client(wid, allow_local);
-    let custom_client = build_settings_client(wid, req, proxy, allow_local);
+    let custom_client = build_settings_client(wid, req, proxy, allow_local)?;
     let client = custom_client.as_ref().unwrap_or(&shared_client);
     let mut builder = client.request(method, &url);
     if whole_body_timeout {
@@ -3363,6 +3375,25 @@ pub(crate) async fn run_step(
         }
     }
 
+    // A `{{var}}` nothing defines (an earlier extraction missed, a dataset
+    // column is absent) fails the step — never send the literal placeholder.
+    let unresolved = unresolved_placeholders(&exec, vars);
+    if !unresolved.is_empty() {
+        let names: Vec<String> = unresolved.iter().map(|n| format!("{{{{{n}}}}}")).collect();
+        return ApiRunStepResult {
+            request_id,
+            name: request.name,
+            status: None,
+            duration_ms: 0,
+            ok: false,
+            assertions: Value::Array(Vec::new()),
+            error: Some(format!(
+                "Not sent: no value for {} (set it in the environment, the dataset or an earlier step's extraction)",
+                names.join(", ")
+            )),
+        };
+    }
+
     // Resolve `$secret` auth markers (this stored request's own ref only).
     if let Err(msg) = api_secrets::resolve_auth_markers(
         ctx.secrets.as_ref(),
@@ -3390,11 +3421,27 @@ pub(crate) async fn run_step(
             let body_json = serde_json::from_str::<Value>(&resp.body).unwrap_or(Value::Null);
 
             // Evaluate assertions.
-            let (assertions_value, all_passed) =
-                eval_step_assertions(step, Some(resp.status), resp.duration_ms, &body_json);
+            let outcome = StepOutcome {
+                status: Some(resp.status),
+                duration_ms: resp.duration_ms,
+                body: &body_json,
+                body_text: &resp.body,
+                headers: &resp.headers,
+            };
+            let (assertions_value, mut all_passed) = eval_step_assertions(step, &outcome);
 
-            // Apply extractions into the chained variable map.
-            apply_extractions(step, &body_json, vars);
+            // Apply extractions into the chained variable map. A miss is a
+            // failed line in the report and fails the step — otherwise the
+            // next step would silently send a literal `{{token}}`.
+            let misses = apply_extractions(step, &outcome, vars);
+            if !misses.is_empty() {
+                all_passed = false;
+            }
+            script_asserts.extend(
+                misses
+                    .into_iter()
+                    .map(|desc| json!({ "desc": desc, "passed": false, "actual": Value::Null })),
+            );
 
             // Post-response script: chaining (set vars) + pm.test results,
             // reported alongside the step's declarative assertions.
@@ -3458,7 +3505,16 @@ pub(crate) async fn run_step(
         Err(err) => {
             // Request failed: still evaluate assertions (against a null body and
             // unknown status) so the report is complete, but ok is false.
-            let (assertions_value, _) = eval_step_assertions(step, None, 0, &Value::Null);
+            let (assertions_value, _) = eval_step_assertions(
+                step,
+                &StepOutcome {
+                    status: None,
+                    duration_ms: 0,
+                    body: &Value::Null,
+                    body_text: "",
+                    headers: &Value::Null,
+                },
+            );
             ApiRunStepResult {
                 request_id,
                 name: request.name,
@@ -3544,32 +3600,34 @@ fn request_to_execute(request: &ApiRequest) -> ExecuteApiReq {
     }
 }
 
-/// Evaluate a step's `assertions` array, returning the `[{desc,passed}]` JSON
-/// and whether every assertion passed (vacuously true when none).
-fn eval_step_assertions(
-    step: &Value,
-    status: Option<u16>,
-    duration_ms: i64,
-    body: &Value,
-) -> (Value, bool) {
+/// Evaluate a step's `assertions` array, returning the
+/// `[{desc,passed,actual}]` JSON and whether every assertion passed
+/// (vacuously true when none).
+fn eval_step_assertions(step: &Value, outcome: &StepOutcome<'_>) -> (Value, bool) {
     let mut out: Vec<Value> = Vec::new();
     let mut all = true;
     if let Some(arr) = step.get("assertions").and_then(Value::as_array) {
         for assertion in arr {
-            let r = eval_assertion(assertion, status, duration_ms, body);
+            let r = eval_assertion_with(assertion, outcome);
             if !r.passed {
                 all = false;
             }
-            out.push(json!({ "desc": r.desc, "passed": r.passed }));
+            out.push(json!({ "desc": r.desc, "passed": r.passed, "actual": r.actual }));
         }
     }
     (Value::Array(out), all)
 }
 
-/// Apply a step's `extract` list: evaluate each `path` against the JSON body and
-/// store `var -> value` into the chained variable map. Missing paths are
-/// skipped (the variable is simply not set).
-fn apply_extractions(step: &Value, body: &Value, vars: &mut serde_json::Map<String, Value>) {
+/// Apply a step's `extract` list into the chained variable map. `path` is a
+/// JSON path into the body, `header:<name>` for a response header, or
+/// `status` for the status code. Returns one worded line per MISS ("Save
+/// {{token}} from $.data.token: not found") — the caller fails the step.
+fn apply_extractions(
+    step: &Value,
+    outcome: &StepOutcome<'_>,
+    vars: &mut serde_json::Map<String, Value>,
+) -> Vec<String> {
+    let mut misses = Vec::new();
     if let Some(arr) = step.get("extract").and_then(Value::as_array) {
         for entry in arr {
             let var = entry.get("var").and_then(Value::as_str).unwrap_or("");
@@ -3577,11 +3635,71 @@ fn apply_extractions(step: &Value, body: &Value, vars: &mut serde_json::Map<Stri
             if var.is_empty() {
                 continue;
             }
-            if let Some(found) = json_path(body, path) {
-                vars.insert(var.to_string(), found.clone());
+            let found = if path.trim() == "status" {
+                outcome.status.map(Value::from)
+            } else if let Some(name) = path.trim().strip_prefix("header:") {
+                header_value(outcome.headers, name).map(Value::String)
+            } else {
+                json_path(outcome.body, path).cloned()
+            };
+            match found {
+                Some(v) => {
+                    vars.insert(var.to_string(), v);
+                }
+                None => misses.push(format!("Save {{{{{var}}}}} from {path}: not found")),
             }
         }
     }
+    misses
+}
+
+/// `{{name}}` placeholders still unresolved in what an automation step is
+/// about to send (URL, enabled query/headers, body, auth strings) — no value in
+/// `vars` and not a built-in dynamic (`$guid` & co). Sorted, deduplicated.
+fn unresolved_placeholders(
+    exec: &ExecuteApiReq,
+    vars: &serde_json::Map<String, Value>,
+) -> Vec<String> {
+    fn scan(text: &str, vars: &serde_json::Map<String, Value>, out: &mut BTreeSet<String>) {
+        let resolved = substitute(text, vars);
+        let mut rest = resolved.as_str();
+        while let Some(i) = rest.find("{{") {
+            let after = &rest[i + 2..];
+            let Some(end) = after.find("}}") else { break };
+            let name = after[..end].trim();
+            // Only identifier-shaped names — `{{ }}` or prose isn't a variable.
+            let ident = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '$'));
+            if ident {
+                out.insert(name.to_string());
+            }
+            rest = &after[end + 2..];
+        }
+    }
+    fn scan_value(v: &Value, vars: &serde_json::Map<String, Value>, out: &mut BTreeSet<String>) {
+        match v {
+            Value::String(s) => scan(s, vars, out),
+            Value::Array(a) => a.iter().for_each(|x| scan_value(x, vars, out)),
+            Value::Object(m) => m.values().for_each(|x| scan_value(x, vars, out)),
+            _ => {}
+        }
+    }
+    let mut out = BTreeSet::new();
+    scan(&exec.url, vars, &mut out);
+    for (k, v) in enabled_kv(&exec.query)
+        .iter()
+        .chain(enabled_kv(&exec.headers).iter())
+    {
+        scan(k, vars, &mut out);
+        scan(v, vars, &mut out);
+    }
+    if !matches!(exec.body_mode.as_str(), "none" | "") {
+        scan(&exec.body, vars, &mut out);
+    }
+    scan_value(&exec.auth, vars, &mut out);
+    out.into_iter().collect()
 }
 
 // ===========================================================================
@@ -4923,5 +5041,78 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, "request timed out after 200ms");
+    }
+
+    /// A tunnel URL reqwest rejects must FAIL the send — never fall back to a
+    /// direct, unguarded egress (or the shared client, dropping the tunnel).
+    #[tokio::test]
+    async fn an_invalid_tunnel_proxy_fails_instead_of_going_direct() {
+        let wid = otto_core::new_id();
+        let exec = exec_req("http://example.invalid/x");
+        let err = build_settings_client(&wid, &exec, Some("not a url"), false).unwrap_err();
+        assert!(err.contains("SSH tunnel"), "{err}");
+        let err = build_and_send(
+            &wid,
+            &exec,
+            &serde_json::Map::new(),
+            Some("not a url"),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("SSH tunnel"), "{err}");
+        // No proxy and default settings → the shared client, as before.
+        assert!(build_settings_client(&wid, &exec, None, false)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn extraction_misses_are_reported_and_headers_status_extract() {
+        let body = json!({"data":{"token":"t-1"}});
+        let headers = json!([{"key":"X-Request-Id","value":"r-9"}]);
+        let outcome = StepOutcome {
+            status: Some(201),
+            duration_ms: 1,
+            body: &body,
+            body_text: "",
+            headers: &headers,
+        };
+        let step = json!({"extract":[
+            {"var":"token","path":"$.data.token"},
+            {"var":"rid","path":"header:x-request-id"},
+            {"var":"code","path":"status"},
+            {"var":"gone","path":"$.data.nope"},
+        ]});
+        let mut vars = serde_json::Map::new();
+        let misses = apply_extractions(&step, &outcome, &mut vars);
+        assert_eq!(vars["token"], "t-1");
+        assert_eq!(vars["rid"], "r-9");
+        assert_eq!(vars["code"], 201);
+        assert!(!vars.contains_key("gone"));
+        assert_eq!(misses, vec!["Save {{gone}} from $.data.nope: not found"]);
+    }
+
+    #[test]
+    fn unresolved_placeholders_are_found_where_the_step_would_send_them() {
+        let mut vars = serde_json::Map::new();
+        vars.insert("host".into(), json!("api.test"));
+        let mut exec = exec_req("https://{{host}}/x?id={{id}}");
+        exec.headers = json!([
+            {"key":"Authorization","value":"Bearer {{token}}"},
+            {"key":"X-Off","value":"{{off}}","enabled":false},
+            {"key":"X-Id","value":"{{$guid}}"},
+        ]);
+        exec.body_mode = "json".into();
+        exec.body = r#"{"note":"{{ }}","id":"{{id}}"}"#.into();
+        exec.auth = json!({"type":"basic","username":"{{user}}","password":"x"});
+        assert_eq!(
+            unresolved_placeholders(&exec, &vars),
+            vec!["id".to_string(), "token".into(), "user".into()]
+        );
+        vars.insert("id".into(), json!(7));
+        vars.insert("token".into(), json!("t"));
+        vars.insert("user".into(), json!("u"));
+        assert!(unresolved_placeholders(&exec, &vars).is_empty());
     }
 }

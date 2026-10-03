@@ -4928,15 +4928,21 @@ export interface ParsedCurl {
 }
 
 export interface ApiAssertion {
-  kind: 'status' | 'json_path' | 'duration_ms';
-  /** JSON path into the response body, for kind='json_path'. */
+  kind: 'status' | 'json_path' | 'header' | 'body_text' | 'duration_ms';
+  /** JSON path into the response body (kind='json_path'), or the header name
+   *  (kind='header', case-insensitive). */
   path?: string;
-  op: 'eq' | 'ne' | 'contains' | 'lt' | 'gt';
+  /** A missing target (absent field/header, no response) fails every op
+   *  except `not_exists`. `matches` is a regex (≤1000 chars). */
+  op: 'eq' | 'ne' | 'contains' | 'lt' | 'gt' | 'lte' | 'gte' | 'exists' | 'not_exists' | 'matches';
+  /** Ignored for `exists` / `not_exists`. */
   value: string;
 }
 
 export interface ApiExtract {
-  /** JSON path into the response body. */
+  /** JSON path into the response body, `header:<name>` for a response
+   *  header, or `status`. A miss fails the step ("Save {{var}} from …: not
+   *  found"). */
   path: string;
   /** Environment variable to set from the extracted value (used by later steps). */
   var: string;
@@ -4967,7 +4973,10 @@ export interface ApiRunStepResult {
   status: number | null;
   duration_ms: number;
   ok: boolean;
-  assertions: { desc: string; passed: boolean }[];
+  /** `desc` is worded with the actual value ("Status code is less than 400:
+   *  got 500"); `actual` is that value (null when missing). Extraction misses
+   *  and script tests appear here too. */
+  assertions: { desc: string; passed: boolean; actual?: unknown }[];
   error: string | null;
 }
 
