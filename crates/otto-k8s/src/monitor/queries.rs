@@ -20,10 +20,14 @@
 //! producing a negative spike. `min`/`max` compose across buckets, so the
 //! rollups give exactly the raw answer for the same (snapped) range.
 
+use std::collections::BTreeMap;
+
 use chrono::Duration;
 use otto_core::{Error, Result};
+use serde_json::Value;
 
-use super::schema::{self, sql_str, Rollup, RAW_KEEP_DAYS, ROLLUPS};
+use super::schema::{self, sql_str, Rollup, WideTier, RAW_KEEP_DAYS, ROLLUPS, WIDE_TIERS};
+use crate::MonitorSink;
 
 /// Request-counter series recognised for rps / error-rate (Go + Spring).
 pub const REQUEST_COUNTERS: [&str; 2] =
@@ -445,21 +449,6 @@ pub fn latency_avg_in(span: &Span, cluster_ids: &[String], ns: Option<&str>) -> 
     )
 }
 
-/// Latest `version` label per pod (the last-value table) →
-/// `(cluster_id, namespace, workload, pod, version)` rows (one per pod);
-/// drift = workloads with >1 distinct version.
-pub fn versions_sql(cluster_ids: &[String], ns: Option<&str>, lookback_secs: i64) -> String {
-    format!(
-        "SELECT cluster_id, namespace, workload, pod, argMax(labels['version'], last_ts) AS version
-         FROM {latest}
-         WHERE cluster_id IN ({cids}) AND labels['version'] != '' AND last_ts >= now() - INTERVAL {lookback_secs} SECOND{ns}
-         GROUP BY cluster_id, namespace, workload, pod",
-        latest = schema::LATEST_TABLE,
-        cids = in_list_owned(cluster_ids),
-        ns = ns_filter(ns),
-    )
-}
-
 /// Normalise a chart step so it lines up with a tier: whole minutes from a
 /// minute up, whole 5 minutes from 5 minutes, whole hours from an hour.
 pub fn align_step(step: u32) -> u32 {
@@ -475,12 +464,22 @@ pub fn align_step(step: u32) -> u32 {
 /// A chart step for a window: [`align_step`], and never below a minute once
 /// the window is long enough for the minute tier (a sub-minute step would
 /// force a raw read).
+///
+/// Windows of a day or more step in whole hours (the hour tier: 24 rows per
+/// series per day instead of 288 on the 5-minute one).
 pub fn chart_step(step: u32, window_secs: i64) -> u32 {
-    if window_secs >= MIN_BUCKETS * 60 {
+    if window_secs >= 86_400 {
+        align_step(step.max(3600))
+    } else if window_secs >= MIN_BUCKETS * 60 {
         align_step(step.max(60))
     } else {
         align_step(step)
     }
+}
+
+/// [`chart_step`] for the wide tiers, which start at a minute.
+pub fn wide_step(step: u32, window_secs: i64) -> u32 {
+    chart_step(step.max(60), window_secs.max(MIN_BUCKETS * 60))
 }
 
 /// Per-bucket value per (pod, series): gauge mean or counter rate.
@@ -595,6 +594,418 @@ pub fn workload_spark_in(
         agg = bucket_value(is_counter, step),
         src = span.source(&filter),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Wide tiers (workload / pod rows of reset-aware increments — `wide`)
+// ---------------------------------------------------------------------------
+
+/// Which wide table a read uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    Workload,
+    Pod,
+}
+
+impl Level {
+    pub fn cols(self) -> &'static str {
+        match self {
+            Level::Workload => "cluster_id, namespace, workload",
+            Level::Pod => "cluster_id, namespace, workload, pod",
+        }
+    }
+}
+
+/// A planned wide read: tier + `[from, to)` in unix seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WSpan {
+    pub tier: WideTier,
+    pub from: i64,
+    /// Exclusive upper bound (snapped); `None` = up to now.
+    pub to: Option<i64>,
+    /// Seconds the read covers — the rate denominator.
+    pub secs: i64,
+}
+
+impl WSpan {
+    /// The coarsest wide tier giving `[now − back, now − until)` at least
+    /// [`MIN_BUCKETS`] buckets whose grain divides `step` and whose keep
+    /// still holds the start; else the finest one that fits.
+    pub fn plan(now: i64, back_secs: i64, until_secs: i64, step: Option<u32>) -> WSpan {
+        let back = back_secs.max(1);
+        let until = until_secs.clamp(0, back - 1);
+        let width = back - until;
+        let step_ok = |g: i64| step.is_none_or(|s| i64::from(s) % g == 0);
+        let holds = |days: u32| back <= i64::from(days) * 86_400;
+        let tier = WIDE_TIERS
+            .iter()
+            .rev()
+            .find(|w| w.grain * MIN_BUCKETS <= width && step_ok(w.grain) && holds(w.keep_days))
+            .or_else(|| {
+                WIDE_TIERS
+                    .iter()
+                    .find(|w| step_ok(w.grain) && holds(w.keep_days))
+            })
+            .copied()
+            .unwrap_or(schema::WIDE_1H);
+        WSpan::on(tier, now, back, until)
+    }
+
+    /// `[now − back, now − until)` on a given tier (snapped to its grain).
+    pub fn on(tier: WideTier, now: i64, back_secs: i64, until_secs: i64) -> WSpan {
+        let g = tier.grain;
+        let from = (now - back_secs.max(1)).div_euclid(g) * g;
+        let to = (until_secs > 0).then(|| ((now - until_secs).div_euclid(g) * g).max(from + g));
+        WSpan::between(tier, from, to, now)
+    }
+
+    pub fn between(tier: WideTier, from: i64, to: Option<i64>, now: i64) -> WSpan {
+        WSpan {
+            tier,
+            from,
+            to,
+            secs: (to.unwrap_or(now) - from).max(1),
+        }
+    }
+
+    /// A window TOTAL as parts: when the plan lands on the minute tier, the
+    /// whole 5-minute buckets inside it come from the 5-minute tier and only
+    /// the ragged head and the open edge from the minute tier (≤ 5 + 12 + 5
+    /// rows per workload for an hour instead of 60). Increments are
+    /// additive, so the parts sum to exactly the single-tier answer.
+    pub fn plan_total(now: i64, back_secs: i64, until_secs: i64) -> Vec<WSpan> {
+        let base = WSpan::plan(now, back_secs, until_secs, None);
+        let c = schema::WIDE_5M;
+        if base.tier != schema::WIDE_1M || back_secs > i64::from(c.keep_days) * 86_400 {
+            return vec![base];
+        }
+        let g = c.grain;
+        let end = base.to.unwrap_or(now);
+        let mid_from = (base.from + g - 1).div_euclid(g) * g;
+        let mid_to = end.div_euclid(g) * g;
+        if mid_to - mid_from < 2 * g {
+            return vec![base];
+        }
+        let mut parts = Vec::with_capacity(3);
+        if base.from < mid_from {
+            parts.push(WSpan::between(base.tier, base.from, Some(mid_from), now));
+        }
+        parts.push(WSpan::between(c, mid_from, Some(mid_to), now));
+        if base.to.is_none() || mid_to < end {
+            parts.push(WSpan::between(base.tier, mid_to, base.to, now));
+        }
+        parts
+    }
+
+    pub fn table(&self, level: Level) -> &'static str {
+        match level {
+            Level::Workload => self.tier.wl_table,
+            Level::Pod => self.tier.pod_table,
+        }
+    }
+
+    /// Immutable: the span ends at or before the start of the tier's current
+    /// bucket, so nothing the collector writes from now on lands in it.
+    pub fn closed(&self, now: i64) -> bool {
+        let g = self.tier.grain;
+        self.to.is_some_and(|to| to <= now.div_euclid(g) * g)
+    }
+
+    fn time_filter(&self) -> String {
+        let mut s = format!("t >= toDateTime({})", self.from);
+        if let Some(to) = self.to {
+            s.push_str(&format!(" AND t < toDateTime({to})"));
+        }
+        s
+    }
+}
+
+/// Seconds a list of total parts covers (the rate denominator).
+pub fn parts_secs(parts: &[WSpan], now: i64) -> i64 {
+    match (parts.first(), parts.last()) {
+        (Some(a), Some(b)) => (b.to.unwrap_or(now) - a.from).max(1),
+        _ => 1,
+    }
+}
+
+/// Additive totals per `group` row over one wide span, read from the `src`
+/// level → `(group cols…, n, pods, mem_n, mem_sum, mem_max, mem_last_ts,
+/// mem_last, req, err, lat_sum, lat_cnt, hist)`. `filter` appends to the
+/// `WHERE` (leading ` AND …`).
+pub fn wide_totals_in(span: &WSpan, src: Level, group: Level, filter: &str) -> String {
+    let pods = match src {
+        Level::Workload => "max(pods_max)",
+        Level::Pod => "uniqExact(pod)",
+    };
+    let cols = group.cols();
+    format!(
+        "SELECT {cols}, sum(n) AS n, {pods} AS pods, sum(mem_n) AS mem_n, sum(mem_sum) AS mem_sum,
+                max(mem_max) AS mem_max, toUnixTimestamp(tupleElement(max(mem_last), 1)) AS mem_last_ts,
+                tupleElement(max(mem_last), 2) AS mem_last, sum(req) AS req, sum(err) AS err,
+                sum(lat_sum) AS lat_sum, sum(lat_cnt) AS lat_cnt, sumMap(hist) AS hist
+         FROM {table} WHERE {time}{filter}
+         GROUP BY {cols}",
+        table = span.table(src),
+        time = span.time_filter(),
+    )
+}
+
+/// One row of wide totals (summed across parts).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Totals {
+    pub n: f64,
+    pub pods: f64,
+    pub mem_n: f64,
+    pub mem_sum: f64,
+    pub mem_max: f64,
+    pub mem_last_ts: f64,
+    pub mem_last: f64,
+    pub req: f64,
+    pub err: f64,
+    pub lat_sum: f64,
+    pub lat_cnt: f64,
+    pub hist: BTreeMap<String, f64>,
+}
+
+fn num(v: &Value, k: &str) -> f64 {
+    v.get(k)
+        .and_then(|x| {
+            x.as_f64()
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(0.0)
+}
+
+impl Totals {
+    pub fn from_row(r: &Value) -> Totals {
+        let hist = r
+            .get("hist")
+            .and_then(Value::as_object)
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| {
+                        let v = v
+                            .as_f64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                            .unwrap_or(0.0);
+                        (k.clone(), v)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Totals {
+            n: num(r, "n"),
+            pods: num(r, "pods"),
+            mem_n: num(r, "mem_n"),
+            mem_sum: num(r, "mem_sum"),
+            mem_max: num(r, "mem_max"),
+            mem_last_ts: num(r, "mem_last_ts"),
+            mem_last: num(r, "mem_last"),
+            req: num(r, "req"),
+            err: num(r, "err"),
+            lat_sum: num(r, "lat_sum"),
+            lat_cnt: num(r, "lat_cnt"),
+            hist,
+        }
+    }
+
+    pub fn merge(&mut self, o: &Totals) {
+        self.n += o.n;
+        self.pods = self.pods.max(o.pods);
+        self.mem_n += o.mem_n;
+        self.mem_sum += o.mem_sum;
+        self.mem_max = self.mem_max.max(o.mem_max);
+        if o.mem_last_ts > self.mem_last_ts {
+            self.mem_last_ts = o.mem_last_ts;
+            self.mem_last = o.mem_last;
+        }
+        self.req += o.req;
+        self.err += o.err;
+        self.lat_sum += o.lat_sum;
+        self.lat_cnt += o.lat_cnt;
+        for (le, v) in &o.hist {
+            *self.hist.entry(le.clone()).or_default() += v;
+        }
+    }
+
+    /// Mean memory per sample (a pod's mean; for a workload row, per pod).
+    pub fn mem_avg_per_pod(&self) -> f64 {
+        if self.mem_n > 0.0 {
+            self.mem_sum / self.mem_n
+        } else {
+            0.0
+        }
+    }
+
+    /// p95 (ms) from the histogram, else the `sum / count` mean →
+    /// `(kind, ms)`; `("", 0)` without latency data.
+    pub fn latency(&self) -> (&'static str, f64) {
+        let rows: Vec<(String, f64)> = self.hist.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        if let Some(p) = p95_from_buckets(&rows) {
+            return ("p95", p);
+        }
+        if self.lat_cnt > 0.0 {
+            let ms = 1000.0 * self.lat_sum / self.lat_cnt;
+            if ms > 0.0 {
+                return ("avg", ms);
+            }
+        }
+        ("", 0.0)
+    }
+}
+
+/// `(cluster_id, namespace, workload, pod)` — pod empty for workload rows.
+pub type RowKey = (String, String, String, String);
+
+/// Run one SELECT; a CLOSED span's answer is immutable, so it is served from
+/// the closed-span cache (keyed by the SQL, which carries the snapped
+/// bounds) until the tier's next bucket boundary.
+pub async fn query_span(
+    sink: &dyn MonitorSink,
+    span: &WSpan,
+    now: i64,
+    sql: &str,
+) -> Result<Vec<Value>> {
+    if !span.closed(now) {
+        return sink.query_rows(sql).await;
+    }
+    if let Some(Value::Array(rows)) = super::cache::get_closed(sql) {
+        return Ok(rows);
+    }
+    let rows = sink.query_rows(sql).await?;
+    let g = span.tier.grain;
+    let ttl = (now.div_euclid(g) + 1) * g - now;
+    super::cache::put_closed(
+        sql.to_string(),
+        &Value::Array(rows.clone()),
+        std::time::Duration::from_secs(ttl.max(1) as u64),
+    );
+    Ok(rows)
+}
+
+/// Wide totals per row over `parts` (see [`WSpan::plan_total`]), merged in
+/// Rust; closed parts come from the closed-span cache.
+pub async fn wide_totals(
+    sink: &dyn MonitorSink,
+    parts: &[WSpan],
+    now: i64,
+    src: Level,
+    group: Level,
+    filter: &str,
+) -> Result<BTreeMap<RowKey, Totals>> {
+    let sqls: Vec<String> = parts
+        .iter()
+        .map(|p| wide_totals_in(p, src, group, filter))
+        .collect();
+    let results = futures_util::future::join_all(
+        parts
+            .iter()
+            .zip(&sqls)
+            .map(|(p, sql)| query_span(sink, p, now, sql)),
+    )
+    .await;
+    let mut out: BTreeMap<RowKey, Totals> = BTreeMap::new();
+    for rows in results {
+        for r in rows? {
+            let st = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            let key = (
+                st("cluster_id"),
+                st("namespace"),
+                st("workload"),
+                if group == Level::Pod {
+                    st("pod")
+                } else {
+                    String::new()
+                },
+            );
+            out.entry(key).or_default().merge(&Totals::from_row(&r));
+        }
+    }
+    Ok(out)
+}
+
+/// Per-workload sparkline buckets (memory: mean workload total per cycle;
+/// rps) for one cluster → `(namespace, workload, t, mem, rps)` — keyed by
+/// namespace AND workload, so the same name in two namespaces never sums.
+pub fn wide_spark_in(span: &WSpan, cluster_id: &str, ns: Option<&str>, step_secs: u32) -> String {
+    let step = step_secs.max(60);
+    format!(
+        "SELECT namespace, workload, {b_utc} AS t, if(sum(n) > 0, sum(mem_sum) / sum(n), 0) AS mem, sum(req) / {step} AS rps
+         FROM (
+           SELECT {b} AS b, namespace, workload, n, mem_sum, req
+           FROM {table} WHERE {time} AND cluster_id = {cid}{ns}
+         ) GROUP BY namespace, workload, b ORDER BY namespace, workload, b",
+        b_utc = B_UTC,
+        b = bucket("t", step),
+        table = span.table(Level::Workload),
+        time = span.time_filter(),
+        cid = sql_str(cluster_id),
+        ns = ns_filter(ns),
+    )
+}
+
+/// What a wide chart line plots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WideMetric {
+    Mem,
+    Rps,
+    Err,
+    Latency,
+}
+
+/// Bucketed wide series → rows `(g, t, v)` ordered by `g, t`; `g_expr` keys
+/// the line (must only use columns of the `src` level), `filter` appends to
+/// the `WHERE`.
+pub fn wide_series_in(
+    span: &WSpan,
+    src: Level,
+    g_expr: &str,
+    filter: &str,
+    metric: WideMetric,
+    step_secs: u32,
+) -> String {
+    let step = step_secs.max(60);
+    let b = bucket("t", step);
+    let table = span.table(src);
+    let time = span.time_filter();
+    match metric {
+        // Memory: per row the mean per cycle (workload total / pod value),
+        // then summed into the line.
+        WideMetric::Mem => {
+            let (cols, v) = match src {
+                Level::Workload => (
+                    Level::Workload.cols(),
+                    "if(sum(n) > 0, sum(mem_sum) / sum(n), 0)",
+                ),
+                Level::Pod => (
+                    Level::Pod.cols(),
+                    "if(sum(mem_n) > 0, sum(mem_sum) / sum(mem_n), 0)",
+                ),
+            };
+            format!(
+                "SELECT g, {b_utc} AS t, sum(v) AS v FROM (
+                   SELECT {g_expr} AS g, {b} AS b, {cols}, {v} AS v
+                   FROM {table} WHERE {time}{filter}
+                   GROUP BY g, b, {cols}
+                 ) GROUP BY g, b ORDER BY g, b",
+                b_utc = B_UTC,
+            )
+        }
+        _ => {
+            let v = match metric {
+                WideMetric::Rps => format!("sum(req) / {step}"),
+                WideMetric::Err => "if(sum(req) > 0, 100 * sum(err) / sum(req), 0)".into(),
+                _ => "if(sum(lat_cnt) > 0, 1000 * sum(lat_sum) / sum(lat_cnt), 0)".into(),
+            };
+            format!(
+                "SELECT g, {b_utc} AS t, {v} AS v FROM (
+                   SELECT {g_expr} AS g, {b} AS b, req, err, lat_sum, lat_cnt
+                   FROM {table} WHERE {time}{filter}
+                 ) GROUP BY g, b ORDER BY g, b",
+                b_utc = B_UTC,
+            )
+        }
+    }
 }
 
 /// Classified restarts / churn (+ raw k8s events when `class` is `k8s_event`).
@@ -806,6 +1217,110 @@ mod tests {
         assert_eq!(align_step(3601), 7200);
         assert_eq!(chart_step(30, 3600), 60);
         assert_eq!(chart_step(30, 600), 30);
+        // A day or more steps in whole hours (the hour tier).
+        assert_eq!(chart_step(1440, 86_400), 3600);
+        assert_eq!(chart_step(2160, 86_400), 3600);
+        assert_eq!(chart_step(10_080, 7 * 86_400), 10_800);
+        assert_eq!(chart_step(540, 6 * 3600), 600);
+        assert_eq!(wide_step(30, 600), 60);
+        assert_eq!(
+            WSpan::plan(NOW, 86_400, 0, Some(chart_step(1440, 86_400))).tier,
+            schema::WIDE_1H
+        );
+    }
+
+    #[test]
+    fn wide_planner_and_stitched_totals() {
+        let tier = |back: i64, until: i64| WSpan::plan(NOW, back, until, None).tier;
+        assert_eq!(tier(600, 0), schema::WIDE_1M, "short windows: finest");
+        assert_eq!(tier(3600, 0), schema::WIDE_1M);
+        assert_eq!(tier(6 * 3600, 0), schema::WIDE_5M);
+        assert_eq!(tier(86_400, 0), schema::WIDE_1H);
+        assert_eq!(tier(25 * 3600, 3600), schema::WIDE_1H);
+        assert_eq!(tier(30 * 86_400, 0), schema::WIDE_1H);
+        // 1 h total: minute head + whole 5-minute buckets + open minute edge,
+        // contiguous and covering exactly the single-tier plan.
+        let now = 1_790_001_234;
+        let base = WSpan::plan(now, 3600, 0, None);
+        let parts = WSpan::plan_total(now, 3600, 0);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].tier, schema::WIDE_1M);
+        assert_eq!(parts[1].tier, schema::WIDE_5M);
+        assert_eq!(parts[2].tier, schema::WIDE_1M);
+        assert_eq!(parts[0].from, base.from);
+        assert_eq!(parts[0].to, Some(parts[1].from));
+        assert_eq!(parts[1].to, Some(parts[2].from));
+        assert_eq!(parts[2].to, None);
+        assert_eq!(parts[1].from % 300, 0);
+        assert_eq!(parts_secs(&parts, now), base.secs);
+        assert!(parts[0].closed(now) && parts[1].closed(now) && !parts[2].closed(now));
+        // A 24 h baseline is one closed hour-tier part.
+        let b = WSpan::plan_total(now, 25 * 3600, 3600);
+        assert_eq!(b.len(), 1);
+        assert!(b[0].closed(now));
+        assert_eq!(b[0].secs, 86_400);
+        // A grain-aligned start has no head.
+        let aligned = 1_790_001_000; // 5-minute aligned
+        assert_eq!(WSpan::plan_total(aligned + 30, 3600 + 30, 0).len(), 2);
+    }
+
+    #[test]
+    fn wide_builders_read_the_wide_tables() {
+        let now = 1_790_001_234;
+        let s = WSpan::plan(now, 86_400, 0, None);
+        let q = wide_totals_in(
+            &s,
+            Level::Workload,
+            Level::Workload,
+            " AND cluster_id IN ('c1')",
+        );
+        assert!(q.contains("FROM k8s_wl_1h WHERE t >= toDateTime("));
+        assert!(q.contains("sumMap(hist) AS hist"));
+        assert!(q.contains("max(pods_max) AS pods"));
+        assert!(
+            q.contains("GROUP BY cluster_id, namespace, workload\n")
+                || q.ends_with("GROUP BY cluster_id, namespace, workload")
+        );
+        let p = wide_totals_in(&s, Level::Pod, Level::Pod, "");
+        assert!(p.contains("FROM k8s_pod_1h"));
+        assert!(p.contains("uniqExact(pod) AS pods"));
+        let sp = wide_spark_in(&s, "c'1", Some("shop"), 3600);
+        assert!(sp.contains("cluster_id = 'c\\'1'"));
+        assert!(sp.contains("GROUP BY namespace, workload, b"));
+        assert!(sp.contains("sum(req) / 3600 AS rps"));
+        let m = wide_series_in(&s, Level::Workload, "cluster_id", "", WideMetric::Mem, 3600);
+        assert!(m.contains("GROUP BY g, b, cluster_id, namespace, workload"));
+        let e = wide_series_in(&s, Level::Pod, "pod", "", WideMetric::Err, 30);
+        assert!(e.contains("FROM k8s_pod_1h"));
+        assert!(
+            e.contains("intDiv(toUInt32(toUnixTimestamp(t)), 60) * 60"),
+            "step floors at a minute"
+        );
+        let mut t = Totals::default();
+        t.merge(&Totals {
+            req: 2.0,
+            mem_last_ts: 5.0,
+            mem_last: 7.0,
+            hist: [("+Inf".to_string(), 3.0)].into(),
+            ..Totals::default()
+        });
+        t.merge(&Totals {
+            req: 3.0,
+            mem_last_ts: 4.0,
+            mem_last: 1.0,
+            hist: [("+Inf".to_string(), 1.0)].into(),
+            ..Totals::default()
+        });
+        assert_eq!((t.req, t.mem_last, t.hist["+Inf"]), (5.0, 7.0, 4.0));
+        assert_eq!(
+            Totals {
+                lat_sum: 1.0,
+                lat_cnt: 4.0,
+                ..Totals::default()
+            }
+            .latency(),
+            ("avg", 250.0)
+        );
     }
 
     #[test]
@@ -814,9 +1329,6 @@ mod tests {
         assert!(m.contains("FROM k8s_latest"));
         assert!(m.contains("argMax(last_value, last_ts) AS mem"));
         assert!(m.contains("namespace = 'shop'"));
-        let v = versions_sql(&["c1".into()], None, 900);
-        assert!(v.contains("FROM k8s_latest"));
-        assert!(v.contains("labels['version'] != ''"));
     }
 
     #[test]

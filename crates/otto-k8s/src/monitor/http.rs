@@ -483,61 +483,42 @@ async fn workloads<S: K8sCtx>(
         health::workload_stats(sink.as_ref(), cluster.id.as_str(), &snap, ns, window).await?;
     stats.sort_by(|a, b| a.workload.cmp(&b.workload));
 
-    // Sparklines: memory (gauge) + rps (counter) per workload, ~40 buckets —
-    // but never finer than 3 collection cycles, or a counter bucket flips
-    // between one sample (Δ = 0) and two (Δ > 0) and draws a sawtooth.
-    let step = queries::chart_step(
+    // Sparklines: memory + rps per workload, ~40 buckets — but never finer
+    // than 3 collection cycles (a bucket with one cycle draws a sawtooth),
+    // and whole hours from a day up (the hour tier). One query over the
+    // wide workload tier, keyed by (namespace, workload): the same name in
+    // two namespaces (gateway in cbo + mscasino) never shares a line.
+    let step = queries::wide_step(
         ((window.num_seconds() / 40).clamp(30, 3600) as u32)
             .max(cfg.interval_secs.saturating_mul(3)),
         window.num_seconds(),
     );
-    let mut spark_mem: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
-    let mut spark_rps: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
-    let mem_rows = sink
-        .query_rows(&queries::workload_spark_sql(
+    type SparkKey = (String, String);
+    let mut spark_mem: std::collections::BTreeMap<SparkKey, Vec<f64>> = Default::default();
+    let mut spark_rps: std::collections::BTreeMap<SparkKey, Vec<f64>> = Default::default();
+    let span = queries::WSpan::plan(queries::now_secs(), window.num_seconds(), 0, Some(step));
+    let spark_rows = sink
+        .query_rows(&queries::wide_spark_in(
+            &span,
             cluster.id.as_str(),
             ns,
-            &queries::MEMORY_GAUGES,
-            window,
             step,
-            false,
         ))
         .await
         .unwrap_or_default();
-    for r in mem_rows {
-        let wl = r
-            .get("workload")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        spark_mem.entry(wl).or_default().push(num(&r, "v"));
-    }
-    let rps_rows = sink
-        .query_rows(&queries::workload_spark_sql(
-            cluster.id.as_str(),
-            ns,
-            &queries::REQUEST_COUNTERS,
-            window,
-            step,
-            true,
-        ))
-        .await
-        .unwrap_or_default();
-    for r in rps_rows {
-        let wl = r
-            .get("workload")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        spark_rps.entry(wl).or_default().push(num(&r, "v"));
+    for r in spark_rows {
+        let k: SparkKey = (str_field(&r, "namespace"), str_field(&r, "workload"));
+        spark_mem.entry(k.clone()).or_default().push(num(&r, "mem"));
+        spark_rps.entry(k).or_default().push(num(&r, "rps"));
     }
     let rows: Vec<Value> = stats
         .into_iter()
         .map(|s| {
+            let k: SparkKey = (s.namespace.clone(), s.workload.clone());
             let mut v = serde_json::to_value(&s).unwrap_or_default();
             v["spark"] = json!({
-                "mem": spark_mem.get(&s.workload).cloned().unwrap_or_default(),
-                "rps": spark_rps.get(&s.workload).cloned().unwrap_or_default(),
+                "mem": spark_mem.get(&k).cloned().unwrap_or_default(),
+                "rps": spark_rps.get(&k).cloned().unwrap_or_default(),
             });
             v
         })
@@ -548,6 +529,10 @@ async fn workloads<S: K8sCtx>(
     });
     cache::put(ck, &cycle, &out);
     Ok(Json(out))
+}
+
+fn str_field(v: &Value, k: &str) -> String {
+    v.get(k).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
 fn num(v: &Value, k: &str) -> f64 {
