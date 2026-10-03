@@ -8,16 +8,19 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
+use futures_util::stream::{self, StreamExt};
 use otto_core::auth::AuthUser;
 use otto_core::{Error, Id};
 use otto_state::{K8sCluster, K8sMonitorRepo, K8sMonitorStatusRow};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 use super::cache;
 use super::classify::{self, Snapshot};
 use super::collector;
 use super::health::{self, WorkloadStat};
+use super::latest;
 use super::parse;
 use super::probes::{self, is_excluded, MonitorConfig, PodRef, ProbeFormat};
 use super::queries;
@@ -75,7 +78,8 @@ async fn load<S: K8sCtx>(
         .await?
         .map(|r| probes::from_row(&r))
         .unwrap_or_default();
-    let status = repo.get_status(id.as_str()).await?;
+    // Meta only: the multi-MB snapshot is loaded on a cache miss (K3).
+    let status = repo.get_status_meta(id.as_str()).await?;
     Ok((cluster, cfg, status))
 }
 
@@ -123,7 +127,7 @@ async fn put_monitor<S: K8sCtx>(
         }),
     )
     .await;
-    let status = repo.get_status(id.as_str()).await?;
+    let status = repo.get_status_meta(id.as_str()).await?;
     Ok(Json(monitor_resp(
         &probes::from_row(&saved),
         status.as_ref(),
@@ -262,19 +266,15 @@ async fn run_now<S: K8sCtx>(
         .filter(|s| s.available())
         .ok_or_else(|| Error::Conflict("usage engine (ClickHouse) is not available".into()))?;
     super::schema::ensure(sink.as_ref(), cfg.retention_days).await?;
-    let prev: Snapshot = status
-        .as_ref()
-        .map(|s| serde_json::from_value(s.snapshot.clone()).unwrap_or_default())
-        .unwrap_or_default();
+    let repo = K8sMonitorRepo::new(ctx.pool());
+    let prev = snapshot_of(&repo, &id, status.as_ref()).await;
     let prev_at = status
         .as_ref()
         .and_then(|s| s.last_cycle_at.as_deref())
         .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
         .map(|t| t.with_timezone(&Utc));
     let out = collector::run_cycle(&ctx, &cluster, &cfg, &prev, prev_at, sink.as_ref()).await;
-    K8sMonitorRepo::new(ctx.pool())
-        .upsert_status(&out.status)
-        .await?;
+    collector::persist_outcome(&repo, &out).await?;
     Ok(Json(out.status))
 }
 
@@ -288,10 +288,17 @@ pub struct WindowQuery {
     pub ns: Option<String>,
 }
 
-fn snapshot_of(status: Option<&K8sMonitorStatusRow>) -> Snapshot {
-    status
-        .map(|s| serde_json::from_value(s.snapshot.clone()).unwrap_or_default())
-        .unwrap_or_default()
+/// The cluster's typed snapshot for `status`'s cycle — published by the
+/// collector, else parsed once off the runtime (K3). Empty without a status.
+async fn snapshot_of(
+    repo: &K8sMonitorRepo,
+    id: &Id,
+    status: Option<&K8sMonitorStatusRow>,
+) -> Arc<Snapshot> {
+    match status {
+        Some(st) => latest::load(repo, id.as_str(), st.last_cycle_at.as_deref()).await,
+        None => Arc::new(Snapshot::new()),
+    }
 }
 
 fn check_ident(name: &str, v: Option<&str>) -> ApiResult<()> {
@@ -371,28 +378,50 @@ async fn overview<S: K8sCtx>(
     let window = queries::parse_window(&window_label)?;
     let repo = K8sMonitorRepo::new(ctx.pool());
     let sink = ctx.monitor_sink();
-    let mut rows = Vec::new();
-    for cluster in Clusters::new(&ctx).list().await? {
+    // Clusters in parallel (each cold row is ~5 ClickHouse queries), order
+    // preserved (K3).
+    let clusters = Clusters::new(&ctx).list().await?;
+    let rows: Vec<ApiResult<Value>> = stream::iter(clusters)
+        .map(|cluster| {
+            let (repo, sink, window_label) = (&repo, &sink, window_label.as_str());
+            async move { overview_row(repo, sink.as_ref(), cluster, window_label, window).await }
+        })
+        .buffered(OVERVIEW_CONCURRENCY)
+        .collect()
+        .await;
+    Ok(Json(rows.into_iter().collect::<ApiResult<Vec<Value>>>()?))
+}
+
+/// Clusters computed at once by `/k8s/monitor/overview`.
+const OVERVIEW_CONCURRENCY: usize = 4;
+
+/// One overview row: cache-keyed on the cluster's last cycle, single-flight.
+async fn overview_row(
+    repo: &K8sMonitorRepo,
+    sink: Option<&Arc<dyn crate::MonitorSink>>,
+    cluster: K8sCluster,
+    window_label: &str,
+    window: chrono::Duration,
+) -> ApiResult<Value> {
+    {
         let cfg = repo
             .get_config(cluster.id.as_str())
             .await?
             .map(|r| probes::from_row(&r))
             .unwrap_or_default();
-        let status = repo.get_status(cluster.id.as_str()).await?;
+        let status = repo.get_status_meta(cluster.id.as_str()).await?;
         let ck = format!("ov:{}:{}", cluster.id, window_label);
         let cycle = cycle_key(status.as_ref());
         if let Some(v) = cache::get(&ck, &cycle) {
-            rows.push(v);
-            continue;
+            return Ok(v);
         }
         let _flight = cache::flight(&ck).await;
         if let Some(v) = cache::get(&ck, &cycle) {
-            rows.push(v);
-            continue;
+            return Ok(v);
         }
-        let snap = snapshot_of(status.as_ref());
+        let snap = snapshot_of(repo, &cluster.id, status.as_ref()).await;
         let pods = pods_json(&snap);
-        let stats: Vec<WorkloadStat> = match (&sink, cfg.enabled, status.as_ref()) {
+        let stats: Vec<WorkloadStat> = match (sink, cfg.enabled, status.as_ref()) {
             (Some(s), true, Some(_)) if s.available() => {
                 health::workload_stats(s.as_ref(), cluster.id.as_str(), &snap, None, window)
                     .await
@@ -439,9 +468,8 @@ async fn overview<S: K8sCtx>(
             "workloads": stats.len(),
         });
         cache::put(ck, &cycle, &row);
-        rows.push(row);
+        Ok(row)
     }
-    Ok(Json(rows))
 }
 
 /// `GET /k8s/clusters/{id}/monitor/workloads?window=&ns=`.
@@ -472,7 +500,7 @@ async fn workloads<S: K8sCtx>(
         .monitor_sink()
         .filter(|s| s.available())
         .ok_or_else(|| Error::Conflict("usage engine (ClickHouse) is not available".into()))?;
-    let snap = snapshot_of(status.as_ref());
+    let snap = snapshot_of(&K8sMonitorRepo::new(ctx.pool()), &id, status.as_ref()).await;
     // Every namespace in the snapshot — independent of the `ns` filter, so the
     // picker keeps its full list while one namespace is selected.
     let mut all_namespaces: Vec<String> = snap.values().map(|p| p.namespace.clone()).collect();
@@ -681,10 +709,17 @@ async fn health_digest<S: K8sCtx>(
     if let Some(v) = cache::get(&ck, &cycle) {
         return Ok(Json(v));
     }
+    let snap = latest::load(
+        &K8sMonitorRepo::new(ctx.pool()),
+        cluster.id.as_str(),
+        status.last_cycle_at.as_deref(),
+    )
+    .await;
     let v = health::health(
         sink.as_ref(),
         &cluster,
         &status,
+        &snap,
         cfg.enabled,
         window,
         &label,

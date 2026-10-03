@@ -74,6 +74,12 @@ case " $* " in
   *" get deployments "*) cat "{fx}/deployments.json" ;;
   *" rollout restart "*) echo "deployment.apps/web restarted" ;;
   *" rollout status "*) echo "Waiting for deployment \"web\" rollout to finish: 1 of 3 updated replicas are available..." >&2; exit 1 ;;
+  *"/proxy/app-404"*)
+    echo 'Error from server (NotFound): the server could not find the requested resource' >&2; exit 1 ;;
+  *"/proxy/api-denied"*)
+    echo 'Error from server (Forbidden): pods "web" is forbidden: User "dev" cannot get resource "pods/proxy" in API group "" in the namespace "shop"' >&2; exit 1 ;;
+  *"/proxy/not-listening"*)
+    echo 'Error from server (ServiceUnavailable): error trying to reach service: dial tcp 10.0.0.1:9000: connect: connection refused' >&2; exit 1 ;;
   *) echo '{{}}' ;;
 esac
 "#,
@@ -1221,6 +1227,96 @@ async fn monitor_run_now_sweeps_pods_and_writes_samples() {
         .filter(|l| l.contains("\"kind\":\"churn\"") || l.contains("\"kind\":\"restart\""))
         .count();
     assert_eq!(churn, 0);
+}
+
+/// Run one monitor cycle whose only probe hits `path`; returns the status
+/// body and this cluster's argv lines from the run.
+async fn monitor_cycle_with_probe(path: &str) -> (serde_json::Value, Vec<String>) {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let mine = format!("--kubeconfig {} ", c["kubeconfig_path"].as_str().unwrap());
+    let mut cfg = monitor_cfg(true, 60);
+    cfg["probes"] = serde_json::json!([{
+        "name": "health", "port": 9000, "path": path, "format": "health"
+    }]);
+    let (st, _, text) = call(
+        &ctx,
+        &user,
+        "PUT",
+        &format!("/k8s/clusters/{id}/monitor"),
+        Some(cfg),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "POST",
+        &format!("/k8s/clusters/{id}/monitor/run"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let lines = argv_log()
+        .into_iter()
+        .filter(|l| l.contains(&mine))
+        .collect();
+    (body, lines)
+}
+
+fn count_lines(lines: &[String], needle: &str) -> usize {
+    lines.iter().filter(|l| l.contains(needle)).count()
+}
+
+/// perf K1 — the live failure: the sample pod answered its APP's 404 through
+/// the API-server proxy, the sniff read that as "proxy unavailable" and the
+/// cycle spawned one `kubectl port-forward` per pod. An app 404 proves the
+/// proxy works: proxy is chosen and ZERO port-forwards are spawned.
+#[tokio::test]
+async fn monitor_auto_transport_keeps_proxy_on_an_app_404() {
+    let (body, lines) = monitor_cycle_with_probe("/app-404").await;
+    assert_eq!(body["transport_used"], "proxy", "{body}");
+    assert_eq!(count_lines(&lines, "port-forward"), 0, "{lines:#?}");
+    // One sniff (decisive on the first pod) + one fetch per scraped pod.
+    let targets =
+        (body["pods_scraped"].as_i64().unwrap() + body["pods_failed"].as_i64().unwrap()) as usize;
+    assert!(targets >= 2, "{body}");
+    assert_eq!(
+        count_lines(&lines, "/proxy/app-404"),
+        1 + targets,
+        "{lines:#?}"
+    );
+    // Spawn budget: the sweep (pods + events per namespace, metrics, the
+    // gateway attempt) + the sniff + the per-pod fallback fetches — no
+    // per-pod forwards on top.
+    assert!(
+        lines.len() <= 8 + targets,
+        "{} spawns: {lines:#?}",
+        lines.len()
+    );
+}
+
+/// An API-server refusal (RBAC `Forbidden` on `pods/proxy`) is what selects
+/// port-forward — decided on the first pod, no further sniffs.
+#[tokio::test]
+async fn monitor_auto_transport_uses_port_forward_when_the_api_server_denies_proxy() {
+    let (body, lines) = monitor_cycle_with_probe("/api-denied").await;
+    assert_eq!(body["transport_used"], "port_forward", "{body}");
+    assert_eq!(count_lines(&lines, "/proxy/api-denied"), 1, "{lines:#?}");
+}
+
+/// Inconclusive answers (nothing listening on the port) try up to three pods
+/// and stay on the cheap proxy path rather than forwarding every pod.
+#[tokio::test]
+async fn monitor_auto_transport_tries_several_pods_before_deciding() {
+    let (body, lines) = monitor_cycle_with_probe("/not-listening").await;
+    assert_eq!(body["transport_used"], "proxy", "{body}");
+    assert_eq!(count_lines(&lines, "port-forward"), 0, "{lines:#?}");
+    let targets =
+        (body["pods_scraped"].as_i64().unwrap() + body["pods_failed"].as_i64().unwrap()) as usize;
+    let sniffs = count_lines(&lines, "/proxy/not-listening") - targets;
+    assert_eq!(sniffs, targets.min(3), "{lines:#?}");
 }
 
 #[tokio::test]

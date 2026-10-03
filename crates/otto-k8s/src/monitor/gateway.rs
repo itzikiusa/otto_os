@@ -49,6 +49,11 @@ const MAX_IDLE: usize = super::probes::MAX_CONCURRENCY as usize;
 /// Only pod-proxy sub-resources and the version endpoint are reachable through
 /// the socket (kubectl matches these unanchored-per-entry regexes).
 const ACCEPT_PATHS: &str = r"^/api/v1/namespaces/[^/]+/pods/[^/]+/proxy(/.*)?$";
+/// The collector's read-only gateway also lists a namespace's events (an
+/// incremental watch read) and metrics-server pod metrics, so neither costs
+/// a kubectl process per namespace per cycle (perf K5). GET-only: the
+/// read-only proxy rejects every other method. Never on the mutating pool.
+const ACCEPT_PATHS_READ: &str = r"^/api/v1/namespaces/[^/]+/pods/[^/]+/proxy(/.*)?$,^/api/v1/namespaces/[^/]+/events$,^/apis/metrics\.k8s\.io/v1beta1/namespaces/[^/]+/pods$";
 /// kubectl's `--reject-methods` is a comma list of regexes.
 const REJECT_METHODS: &str = "POST,PUT,PATCH,DELETE,CONNECT,OPTIONS,TRACE";
 /// The pod-HTTP actions pool's proxies (see the module doc).
@@ -93,7 +98,14 @@ impl KubeProxy {
         let dir = private_dir()?;
         let sock = dir.join("s");
         let sock_arg = format!("--unix-socket={}", sock.display());
-        let accept = format!("--accept-paths={ACCEPT_PATHS}");
+        let accept = format!(
+            "--accept-paths={}",
+            if allow_mutating {
+                ACCEPT_PATHS
+            } else {
+                ACCEPT_PATHS_READ
+            }
+        );
         let reject = format!(
             "--reject-methods={}",
             if allow_mutating {
