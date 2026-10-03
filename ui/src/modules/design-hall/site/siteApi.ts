@@ -133,7 +133,7 @@ export async function resolveEmbed(uri: string): Promise<EmbedInfo> {
     let poster: string | null = null;
     if (d.artifact.thumb_blob) {
       try {
-        poster = await design.thumbnailUrl(r.id);
+        poster = await design.thumbnailUrl(r.id, d.artifact.thumb_blob);
       } catch {
         poster = null;
       }
