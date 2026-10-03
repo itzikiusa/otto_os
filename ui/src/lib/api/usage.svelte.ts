@@ -99,6 +99,106 @@ export interface UsageSummary {
   sessions: SessionUsage[];
   /** Per-feature (by-kind) rollup — review / product / channel / agent / … */
   by_kind: FeatureUsage[];
+  /** Per-(provider, model) token rollup over the window, biggest first. */
+  models?: ModelUsage[];
+  /** Per-(day, provider, model) token rollup — feeds the model chart. */
+  daily_models?: DailyModelUsage[];
+  /** "all" (root: every session) | "own" (non-root: only sessions you created). */
+  scope?: 'all' | 'own';
+}
+
+/** Token rollup for one (provider, model) pair. */
+export interface ModelUsage {
+  provider: string;
+  model: string;
+  events: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+}
+
+/** Token rollup for one (day, provider, model) triple. */
+export interface DailyModelUsage {
+  day: string;
+  provider: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+}
+
+/** Token rollup for one calendar month (`YYYY-MM`). */
+export interface MonthlyUsage {
+  month: string;
+  events: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+}
+
+/** Four token buckets + their sum + the estimated cost. */
+export interface TokenTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+}
+
+/** `GET /usage/report?days=N&otto_only=B` — ccusage-style report tables. */
+export interface UsageReport {
+  days: number;
+  generated_at: string;
+  priced_as_of: string;
+  scope: 'all' | 'own';
+  otto_only: boolean;
+  totals: TokenTotals;
+  daily: DailyUsage[];
+  monthly: MonthlyUsage[];
+  models: ModelUsage[];
+  daily_models: DailyModelUsage[];
+  /** Up to 1000 sessions, biggest first (enriched like the summary's). */
+  sessions: SessionUsage[];
+}
+
+export interface CcusageDiffRow {
+  provider: string;
+  model: string;
+  ours: TokenTotals;
+  theirs: TokenTotals;
+}
+
+export interface CcusageDayRow {
+  day: string;
+  ours: TokenTotals;
+  theirs: TokenTotals;
+}
+
+/** `POST /usage/ccusage-check {days?}` (root) — runs `npx ccusage` on demand
+ *  and compares it with Otto's numbers over the same dates (all sessions,
+ *  external included). `ran=false` + `error` when npx is missing, ccusage
+ *  failed / timed out, or its output didn't parse. */
+export interface CcusageCheck {
+  ran: boolean;
+  command: string;
+  duration_ms: number;
+  error?: string | null;
+  since: string;
+  until: string;
+  totals_ours: TokenTotals;
+  totals_theirs: TokenTotals;
+  rows: CcusageDiffRow[];
+  daily: CcusageDayRow[];
 }
 
 export interface UsageStatus {

@@ -44,7 +44,11 @@ pub use tailer::{
     CodexMeta, CursorStore, ParsedUsage, SeenKeys,
 };
 pub use types::{
-    AttributionDimension, AttributionRow, DailyUsage, FeatureUsage, ForecastReq, ForecastResp,
-    MetricPoint, ProviderUsage, SessionTotals, SessionUsage, UsageConfig, UsageEvent, UsageStatus,
-    UsageSummary,
+    AttributionDimension, AttributionRow, CcusageCheck, CcusageCheckReq, CcusageDayRow,
+    CcusageDiffRow, DailyModelUsage, DailyUsage, FeatureUsage, ForecastReq, ForecastResp,
+    MetricPoint, ModelUsage, MonthlyUsage, ProviderUsage, SessionTotals, SessionUsage,
+    TokenTotals, UsageConfig, UsageEvent, UsageReport, UsageStatus, UsageSummary,
 };
+
+/// Max sessions in a [`UsageReport`].
+pub const REPORT_SESSION_LIMIT: u32 = 1000;

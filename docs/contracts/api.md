@@ -123,11 +123,36 @@ connection library unusable for every non-root account.)
 | 57 | GET /api/v1/settings | root | — | `{ "<key>": <value_json>, ... }` |
 | 58 | PUT /api/v1/settings | root | same shape | same shape |
 
-Usage & metrics (embedded ClickHouse, all root-only; types in `crates/otto-usage`):
-- GET /usage/status → UsageStatus (engine + ClickHouse health).
+Usage & metrics (embedded ClickHouse; types in `crates/otto-usage`). Reads need
+`Usage:View`: **root sees every session (`scope:"all"`); a non-root caller sees only the
+sessions they created (`scope:"own"`, external sessions excluded)**. Config, install,
+budget writes, `/usage/metrics` and `/usage/ccusage-check` stay root-only. A ClickHouse
+failure on a read returns an error (500) — never a 200 with zero totals.
+- GET /usage/status → UsageStatus (engine + ClickHouse health). For non-root callers
+  `binary`/`version` are null, `data_dir` is `""` and `disk_bytes`/row counts are 0.
+  `disk_bytes` comes from `system.parts` (cached 5 min; the directory walk is the fallback
+  and runs off the async runtime).
 - GET /usage/summary?days=N&otto_only=B → UsageSummary. `days` 1–3650 (default 30),
   `otto_only` (default true) excludes externally-recorded sessions. Carries provider,
-  daily, session, and **`by_kind`** (per-feature) rollups.
+  daily, session, **`by_kind`** (per-feature), **`models: ModelUsage[]`**
+  (`{provider, model, events, input_tokens, output_tokens, cache_read_tokens,
+  cache_write_tokens, total_tokens, cost_usd}`, biggest first) and **`daily_models:
+  DailyModelUsage[]`** (`{day, provider, model, …tokens, cost_usd}`) rollups, plus
+  `scope` (`"all"`|`"own"`).
+- GET /usage/report?days=N&otto_only=B → UsageReport `{days, generated_at, priced_as_of,
+  scope, otto_only, totals: TokenTotals, daily: DailyUsage[], monthly: MonthlyUsage[]
+  {month:"YYYY-MM", events, …tokens, cost_usd}, models: ModelUsage[], daily_models:
+  DailyModelUsage[], sessions: SessionUsage[]}` — the ccusage-style report (≤1000 sessions,
+  enriched like the summary's). The UI renders it as a page and as a downloadable
+  self-contained HTML file. `TokenTotals{input_tokens, output_tokens, cache_read_tokens,
+  cache_write_tokens, total_tokens, cost_usd}`.
+- POST /usage/ccusage-check `{days?}` (root) → CcusageCheck `{ran, command, duration_ms,
+  error?, since, until, totals_ours, totals_theirs, rows: {provider, model, ours, theirs}[],
+  daily: {day, ours, theirs}[]}`. Opt-in: runs `npx --yes ccusage@latest daily --json
+  --breakdown --since … --until …` (no Otto dependency; 120 s timeout, `days` 1–90,
+  default 7) and compares it with Otto's rows over the same dates **with external
+  sessions included** (ccusage reads every local transcript). `ran:false` + `error` when
+  npx is missing, ccusage fails/times out, or its JSON doesn't parse.
 - GET /usage/by-kind?days=N&otto_only=B → `FeatureUsage[]` — the same per-feature rollup
   on its own. `FeatureUsage{feature, events, input_tokens, output_tokens,
   cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, sessions}`. `feature` is
@@ -2494,8 +2519,10 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /usage/status | root | — | engine status (installed/available) |
-| GET /usage/summary | root | — | token/cost breakdown (input/output + cache read/write) |
+| GET /usage/status | Usage:View (paths redacted for non-root) | — | engine status (installed/available) |
+| GET /usage/summary | Usage:View (non-root: own sessions) | — | token-first breakdown (input/output + cache read/write, per provider/day/session/model) |
+| GET /usage/report | Usage:View (non-root: own sessions) | — | UsageReport (daily/monthly/model/session tables) |
+| POST /usage/ccusage-check | root | `{days?}` | CcusageCheck (opt-in `npx ccusage` cross-check) |
 | GET /usage/metrics | root | — | system CPU/RAM metrics |
 | PUT /usage/config | root | UsageConfig | config |
 | POST /usage/install | root | — | install the embedded ClickHouse binary |
