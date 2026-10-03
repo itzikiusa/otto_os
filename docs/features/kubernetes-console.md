@@ -349,7 +349,7 @@ replicaset / job (≤ 50 pods, ≤ 8 at a time) — and returns one result per p
   `409 confirm_required` unless `confirm_name` equals the pod / workload name
   (the UI asks for it typed).
 - **Saved actions.** `GET/PUT/DELETE /k8s/clusters/{id}/pod-actions` keep
-  per-workload requests (migration `0158_k8s_pod_actions.sql`); `{{logger}}` /
+  per-workload requests (migration `0149_k8s_pod_actions.sql`); `{{logger}}` /
   `{{level}}` variables in the path / body template are filled at run time.
   Credential headers are never stored.
 - **Audit.** `k8s.pod_http` records cluster, namespace, pods, method, path,

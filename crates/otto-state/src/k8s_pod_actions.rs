@@ -1,5 +1,5 @@
 //! Kubernetes pod HTTP actions (K-3) — saved per-workload HTTP requests, see
-//! migration `0158_k8s_pod_actions.sql`. The row is the wire `PodAction` DTO
+//! migration `0149_k8s_pod_actions.sql`. The row is the wire `PodAction` DTO
 //! (serde-derived). Template variables (`{{logger}}`, `{{level}}`) stay raw:
 //! the UI fills them at run time.
 

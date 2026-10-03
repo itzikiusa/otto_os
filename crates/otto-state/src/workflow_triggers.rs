@@ -27,7 +27,7 @@ pub struct WorkflowTrigger {
     /// When the schedule was last (re)armed — created, re-enabled after a
     /// pause, or its cadence/timezone/expression changed. The scheduler's
     /// due check never looks before it (a resumed trigger doesn't fire the
-    /// run it missed while off). `None` on rows predating migration 0165.
+    /// run it missed while off). `None` on rows predating migration 0151.
     #[serde(default)]
     pub armed_at: Option<chrono::DateTime<Utc>>,
 }

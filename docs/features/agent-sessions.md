@@ -604,7 +604,7 @@ any agent processes (keeping every historical session resident would cost
 resumed **lazily** the moment a client opens it. The boot pass is one
 set-based UPDATE (`SessionsRepo::mark_dormant_except`): rows that are already
 `reconnectable` are not touched, `last_active_at` is never stamped (a restart is
-not activity — migration `0150` repaired rows earlier boots had stamped, from
+not activity — migration `0148` repaired rows earlier boots had stamped, from
 the agent trail), and only the changed rows are broadcast. Sessions that were
 live get `meta.suspended = {reason: "restart", at}`. Then `ensure_live` sees a
 non-live but resumable session and calls `restart`, which spawns the provider

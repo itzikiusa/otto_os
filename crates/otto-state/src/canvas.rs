@@ -57,7 +57,7 @@ pub struct CanvasSceneSummary {
     pub updated_at: DateTime<Utc>,
 }
 
-/// One entry of a scene's version history (migration 0170) — the document as
+/// One entry of a scene's version history (migration 0152) — the document as
 /// it was just before a change. List rows omit the document itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanvasSceneVersion {

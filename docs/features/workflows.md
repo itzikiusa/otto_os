@@ -570,14 +570,14 @@ channel, chat, thread and mention setting. Result destinations support Slack or
 Telegram chat/thread and an HTTP(S) webhook. Editing retains server tokens,
 cursors and extension fields; clearing a destination removes it from use.
 
-**Arming (`armed_at`, migration 0165).** A schedule trigger is armed when it is
+**Arming (`armed_at`, migration 0151).** A schedule trigger is armed when it is
 created, re-enabled after a pause, or given a different `cadence` / `every_min` /
 `at` / `weekday` / `expr` / `timezone` / `run_at`; editing only the prompt or the
 destinations doesn't re-arm. The scheduler never looks before
 `max(last_run, armed_at)`, so re-enabling a trigger after a week does **not**
 fire the run it missed (with its worktrees and chat delivery) within a minute,
 and a daily 09:00 trigger enabled at 15:00 waits for tomorrow 09:00. Rows
-created before 0165 have `armed_at = null` and keep the old behaviour until
+created before 0151 have `armed_at = null` and keep the old behaviour until
 their next resume or re-time.
 
 **Preview / validate** validates the draft without saving or firing anything.

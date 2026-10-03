@@ -206,7 +206,7 @@ the file instead).
 ### Version history
 
 Every scene keeps its last **30** versions (`canvas_scene_versions`, migration
-0170). A version is the document as it was **just before** a change: before each
+0152). A version is the document as it was **just before** a change: before each
 Ask AI commit, before a restore, and at most once per 10 minutes across manual
 saves. Identical consecutive snapshots are skipped. **Restore previous version…**
 in the Assistant panel lists them and restores the chosen one

@@ -65,7 +65,7 @@ pub struct PersonalAgentSchedule {
     /// before it. `None` on pre-0147 rows.
     #[serde(default)]
     pub armed_at: Option<String>,
-    /// The schedule's own permission set (0172): `read_only` confines its runs
+    /// The schedule's own permission set (0153): `read_only` confines its runs
     /// (no mutating otto.* tools, no sends, writes only inside the agent
     /// folder); `directed` runs under the normal approval + auto-approve rules.
     #[serde(default = "default_permission")]
@@ -98,7 +98,7 @@ pub struct PersonalAgentRun {
     pub report_hash: Option<String>,
     pub attempts: i64,
     pub skipped_delivery: bool,
-    /// The permission mode the run executed under (0172): `proactive` (a
+    /// The permission mode the run executed under (0153): `proactive` (a
     /// standing-goal run — always read-only, feed only, never delivered),
     /// `directed` (Run now / delegation / chat-initiated) or `scheduled`.
     #[serde(default = "default_permission")]
@@ -112,7 +112,7 @@ pub struct PersonalAgentRun {
     pub created_at: String,
 }
 
-/// Per-agent autonomy config (`personal_agent_autonomy.config_json`, 0172):
+/// Per-agent autonomy config (`personal_agent_autonomy.config_json`, 0153):
 /// the proactive budget, standing goals, custom rules and the primary flag.
 /// Every field defaults, so a missing row (or an older document) reads as
 /// "proactive off, no goals, no rules, not primary".
