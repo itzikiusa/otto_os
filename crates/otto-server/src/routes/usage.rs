@@ -974,13 +974,14 @@ pub async fn workspace_sessions_usage(
         || crate::auth::require_ws_role(&ctx, &user, &wid, WorkspaceRole::Admin)
             .await
             .is_ok();
-    let sessions = if admin {
-        repo.list_by_workspace(&wid).await
-    } else {
-        repo.list_by_workspace_for_user(&wid, &user.id).await
-    }
-    .map_err(ApiError)?;
-    let visible: std::collections::HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    // Only the ids of the sessions the sidebar shows (live, foreground +
+    // channel rows): it used to decode every row of the workspace — meta and
+    // 1.9 k hidden review agents included — and return usage for all of them.
+    let ids = repo
+        .visible_ids(&wid, (!admin).then_some(&user.id))
+        .await
+        .map_err(ApiError)?;
+    let visible: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
     let rows = cached_session_totals(&ctx, days).await?;
     Ok(Json(WorkspaceSessionsUsage {
         available: true,

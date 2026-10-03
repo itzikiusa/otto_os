@@ -52,6 +52,25 @@ pub trait SessionsCtx: Clone + Send + Sync + 'static {
         Box::pin(async { Ok(()) })
     }
 
+    /// Keep only the `sessions` [`Self::check_resource`] admits, in order.
+    /// The default checks row by row; `otto-server` overrides it to load the
+    /// caller once per request and memoise each (resource, op) decision.
+    fn check_resources<'a>(
+        &'a self,
+        user: &'a User,
+        sessions: Vec<Session>,
+    ) -> otto_core::auth::BoxFuture<'a, Vec<Session>> {
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(sessions.len());
+            for s in sessions {
+                if self.check_resource(user, &s).await.is_ok() {
+                    out.push(s);
+                }
+            }
+            out
+        })
+    }
+
     /// True when this session's terminal is bound to an external resource
     /// (k8s / AWS / a connection). Those re-authorize on a tight cadence — a
     /// revoked grant must drop the socket promptly — while a plain agent/shell
@@ -171,10 +190,29 @@ struct ListSessionsQuery {
     /// Paging cursor: only rows created strictly before this RFC 3339 instant
     /// (the `created_at` of the oldest row of the previous page).
     before: Option<String>,
+    /// `true` → only sidebar-listable rows: connections + foreground agents
+    /// (`Session::is_foreground_agent`); `false` → background agents only.
+    foreground: Option<bool>,
+    /// Comma list of background sources to keep anyway with
+    /// `foreground=true` (e.g. `channel` for the Slack/Telegram groups).
+    with_sources: Option<String>,
+    /// Comma list of session ids (≤ 64) — fetch-by-id for open tabs.
+    ids: Option<String>,
 }
 
 /// Hard ceiling on `?limit=`.
 const MAX_LIST_LIMIT: u32 = 1000;
+/// Hard ceiling on `?ids=` / `?with_sources=` entries.
+const MAX_LIST_IDS: usize = 64;
+
+/// Split a comma list, trimming and dropping blanks.
+fn comma_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(String::from)
+        .collect()
+}
 
 impl ListSessionsQuery {
     fn into_filter(self) -> Result<otto_state::SessionListFilter, Error> {
@@ -196,6 +234,26 @@ impl ListSessionsQuery {
             ),
             None => None,
         };
+        let ids = match self.ids.as_deref() {
+            Some(raw) => {
+                let ids = comma_list(raw);
+                if ids.len() > MAX_LIST_IDS {
+                    return Err(Error::Invalid(format!(
+                        "ids accepts at most {MAX_LIST_IDS} entries"
+                    )));
+                }
+                Some(ids)
+            }
+            None => None,
+        };
+        let with_sources = self
+            .with_sources
+            .as_deref()
+            .map(comma_list)
+            .unwrap_or_default();
+        if with_sources.len() > MAX_LIST_IDS {
+            return Err(Error::Invalid("too many with_sources".into()));
+        }
         Ok(otto_state::SessionListFilter {
             archived: self.archived,
             kind: self.kind,
@@ -203,6 +261,9 @@ impl ListSessionsQuery {
             source: self.source,
             limit: self.limit.map(|l| l.clamp(1, MAX_LIST_LIMIT)),
             before,
+            foreground: self.foreground,
+            with_sources,
+            ids,
         })
     }
 }
@@ -268,7 +329,11 @@ async fn list_all_sessions<S: SessionsCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(mut q): Query<ListSessionsQuery>,
 ) -> ApiResult<Json<Vec<SessionOut>>> {
-    q.archived = Some(q.archived.unwrap_or(false));
+    // A fetch-by-id (`ids=`) wants the rows whatever their archived state
+    // (an open tab may show an archived transcript).
+    if q.ids.is_none() {
+        q.archived = Some(q.archived.unwrap_or(false));
+    }
     let scopes: Vec<otto_state::SessionScope> = if user.is_root {
         ctx.workspaces()
             .list_all()
@@ -311,13 +376,13 @@ async fn visible_out<S: SessionsCtx>(
     user: &User,
     sessions: Vec<Session>,
 ) -> Vec<SessionOut> {
-    let mut out = Vec::with_capacity(sessions.len());
-    for session in sessions {
-        if ctx.check_resource(user, &session).await.is_ok() {
-            out.push(with_live(ctx, session));
-        }
-    }
-    out
+    // One batched check: the caller is loaded once per request and each
+    // (resource, op) is authorized once, not once per row (F9).
+    ctx.check_resources(user, sessions)
+        .await
+        .into_iter()
+        .map(|session| with_live(ctx, session))
+        .collect()
 }
 
 /// #18 POST /workspaces/{id}/sessions — editor
@@ -561,4 +626,44 @@ async fn bulk_sessions<S: SessionsCtx>(
         });
     }
     Ok(Json(out))
+}
+
+#[cfg(test)]
+mod list_query_tests {
+    use super::*;
+
+    #[test]
+    fn foreground_ids_and_sources_parse_into_the_filter() {
+        let q = ListSessionsQuery {
+            archived: Some(false),
+            foreground: Some(true),
+            with_sources: Some("channel, swarm,,".into()),
+            ids: Some("a,b , c".into()),
+            ..Default::default()
+        };
+        let f = q.into_filter().unwrap();
+        assert_eq!(f.foreground, Some(true));
+        assert_eq!(f.with_sources, vec!["channel", "swarm"]);
+        assert_eq!(f.ids, Some(vec!["a".into(), "b".into(), "c".into()]));
+        let empty = ListSessionsQuery {
+            ids: Some(String::new()),
+            ..Default::default()
+        }
+        .into_filter()
+        .unwrap();
+        assert_eq!(empty.ids, Some(vec![]), "ids= present but empty → no rows");
+    }
+
+    #[test]
+    fn more_than_64_ids_is_rejected() {
+        let ids = (0..65)
+            .map(|i| format!("s{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let q = ListSessionsQuery {
+            ids: Some(ids),
+            ..Default::default()
+        };
+        assert!(matches!(q.into_filter(), Err(Error::Invalid(_))));
+    }
 }

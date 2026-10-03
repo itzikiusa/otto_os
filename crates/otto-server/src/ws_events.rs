@@ -141,6 +141,10 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
     // lifetime. `created_by` is immutable, so one lookup per session_id is
     // enough — this keeps the high-frequency `TrailAppended` path off the DB.
     let mut owner_cache: HashMap<Id, Option<Id>> = HashMap::new();
+    // Workspace-Admin results cached per workspace for this connection's
+    // lifetime, like `role_cache` — a non-owner, non-root recipient used to
+    // pay an Admin role query per `session_status` / `trail_appended` (F8).
+    let mut admin_cache: HashMap<Id, bool> = HashMap::new();
     // Hands the worker back while a burst of big frames drains.
     let mut pacer = crate::ws_fanout::Pacer::new();
 
@@ -152,7 +156,7 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
                     if topics.as_ref().is_some_and(|t| !t.contains(event.type_name())) {
                         continue;
                     }
-                    if !allowed(&ctx, &user, event, &mut role_cache, &mut owner_cache).await {
+                    if !allowed(&ctx, &user, event, &mut role_cache, &mut owner_cache, &mut admin_cache).await {
                         continue;
                     }
                     let Some(text) = frame.text() else { continue };
@@ -499,6 +503,7 @@ async fn allowed(
     event: &Event,
     role_cache: &mut HashMap<Id, bool>,
     owner_cache: &mut HashMap<Id, Option<Id>>,
+    admin_cache: &mut HashMap<Id, bool>,
 ) -> bool {
     let (workspace_id, session) = match scope_of(event) {
         Scope::Everyone => return true,
@@ -539,7 +544,15 @@ async fn allowed(
             None => return user.is_root,
         },
     };
-    session_owner_admin_or_root(ctx.roles.as_ref(), user, workspace_id, &owner).await
+    if user.is_root || owner == user.id {
+        return true;
+    }
+    if let Some(&admin) = admin_cache.get(workspace_id) {
+        return admin;
+    }
+    let admin = session_owner_admin_or_root(ctx.roles.as_ref(), user, workspace_id, &owner).await;
+    admin_cache.insert(workspace_id.clone(), admin);
+    admin
 }
 
 /// Cached workspace viewer-membership check for this connection's lifetime.
