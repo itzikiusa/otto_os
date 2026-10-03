@@ -286,6 +286,8 @@
     const id = k8s.k9sSessionId;
     k8s.k9sSessionId = null;
     if (!id) return;
+    // The auto-refresh skipped its ticks while k9s covered the table.
+    void k8s.loadResources(true);
     try {
       await api.del(`/sessions/${id}`);
     } catch {

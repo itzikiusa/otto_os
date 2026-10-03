@@ -221,6 +221,8 @@ async function fleet(page: Page) {
     return r.fulfill({ json: { window: '24h', group: grouped ? 'pod' : 'workload', sort: 'restarts', dir: 'desc', offset: 0, total: 1, rows: [{ cluster, cluster_id: cluster.id, namespace: 'default', workload: 'checkout-api', pod: grouped ? 'checkout-pod' : '', pods: 1, restarts: restartCounts, churn: 1, mem_last: 240000000, mem_avg: 230000000, mem_max: 270000000, rps: 24, err_pct: 0.1, latency_kind: 'p95', latency_ms: 70 }] } });
   });
   await page.route('**/monitor/fleet/series?*', r => r.fulfill({ json: { window: '24h', metric: new URL(r.request().url()).searchParams.get('metric'), unit: 'count', by: 'cluster', step_secs: 60, series: [{ key: cluster.id, label: cluster.name, points: [2, 4, 3].map((v, i) => ({ t: `2026-09-25T12:0${i}:00Z`, v })) }] } }));
+  // perf K8s: the overview reads every chart in one batch call.
+  await page.route('**/monitor/fleet/series/batch?*', r => r.fulfill({ json: { series: Object.fromEntries((new URL(r.request().url()).searchParams.get('metrics') ?? '').split(',').filter(Boolean).map(metric => [metric, { window: '24h', metric, unit: 'count', by: 'cluster', step_secs: 60, series: [{ key: cluster.id, label: cluster.name, points: [2, 4, 3].map((v, i) => ({ t: `2026-09-25T12:0${i}:00Z`, v })) }] }])) } }));
   await page.route('**/monitor/fleet/events?*', r => r.fulfill({ json: { window: '24h', sort: 'ts', dir: 'desc', total: 1, offset: 0, rows: [{ ...event('checkout-api'), cluster, cluster_id: cluster.id }] } }));
 }
 

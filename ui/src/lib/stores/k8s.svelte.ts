@@ -14,6 +14,7 @@ import { resourceAccess, type ResourceAccessChange } from './resource-access.sve
 import { ApiError } from '../api/client';
 import { formatBytes, formatMillicores } from '../../modules/kubernetes/k8s-util';
 import { k8sApi } from '../api/k8s';
+import { resourcesPollMs, resourcesValidator } from '../../modules/kubernetes/resourcePoll';
 import { TickCoalescer, browserTickEnv } from '../../modules/kubernetes/monitor/tickCoalescer';
 import { parseClusterUi, type K8sClusterUi, type K8sDrawerTab, type K8sMonitorUi } from '../../modules/kubernetes/viewState';
 import type {
@@ -52,7 +53,6 @@ const CLUSTER_SCOPE_HINT =
   'This kubeconfig user can\'t list across all namespaces (cluster scope). Pick a namespace (press n) — e.g. the cluster\'s default one.';
 const UI_KEY = (clusterId: string): string => `otto_k8s_ui:${auth.me?.id ?? 'anonymous'}:${clusterId}`;
 const AUTO_KEY = 'otto_k8s_autorefresh';
-const AUTO_REFRESH_MS = 10_000;
 /** Monitor views re-read at most this often, however many clusters cycle:
  *  every read is a ClickHouse aggregation and the dashboards' windows (≥ 1 h,
  *  read from minute-or-coarser rollups) do not move faster than this. */
@@ -225,7 +225,10 @@ class K8sStore {
   private refreshTimer: Poller | null = null;
   /** LRU of recent row sets by `currentKey` (insertion order = recency).
    *  Plain field — the table reads `rows`, never this. */
-  private rowsCache = new Map<string, { rows: K8sRow[]; hasMetrics: boolean; loadedAt: number }>();
+  private rowsCache = new Map<string, { rows: K8sRow[]; hasMetrics: boolean; loadedAt: number; validator: string | null }>();
+  /** perf K8s: how long the last resources load took (ms) — with the row
+   *  count it sets the auto-refresh cadence ({@link resourcesPollMs}). */
+  private lastLoadMs = 0;
   /** Per-cluster view state (K-1), mirrored to localStorage. Plain field. */
   private uiCache = new Map<string, K8sClusterUi>();
   private uiSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -500,9 +503,9 @@ class K8sStore {
     this.rowsLoadedAt = hit.loadedAt;
   }
 
-  private cacheRows(key: string, rows: K8sRow[], hasMetrics: boolean, loadedAt: number): void {
+  private cacheRows(key: string, rows: K8sRow[], hasMetrics: boolean, loadedAt: number, validator: string | null = null): void {
     this.rowsCache.delete(key);
-    this.rowsCache.set(key, { rows, hasMetrics, loadedAt });
+    this.rowsCache.set(key, { rows, hasMetrics, loadedAt, validator });
     while (this.rowsCache.size > ROWS_CACHE_MAX) {
       const oldest = this.rowsCache.keys().next().value;
       if (oldest === undefined) break;
@@ -591,25 +594,42 @@ class K8sStore {
     // Just painted from the cache: refresh behind those rows, no skeleton.
     if (!had && this.rowsKey === key) quiet = true;
     if (!quiet || this.rowsKey !== key) this.rowsLoading = true;
+    const started = Date.now();
     try {
       let items: K8sRow[];
       let hasMetrics = false;
+      let validator: string | null = null;
       if (kind === 'nodes') {
         const r = await k8sApi.nodes(id, ac.signal);
         items = r.nodes.map(nodeToRow);
         hasMetrics = r.nodes.some((n) => n.cpu_usage != null);
       } else {
-        const r = await k8sApi.resources(id, kind, { ns }, ac.signal);
-        items = r.items;
-        hasMetrics = r.has_metrics;
+        // perf K8s: conditional read — only when the rows on screen ARE this
+        // key's cached set, so a 304 can never leave another view's rows up.
+        const held = this.rowsKey === key ? this.rowsCache.get(key) : undefined;
+        const r = await k8sApi.resourcesIfChanged(id, kind, { ns }, held?.validator ?? null, ac.signal);
+        if (ac.signal.aborted || this.currentKey !== key) return;
+        this.lastLoadMs = Date.now() - started;
+        if (r.notModified) {
+          // Unchanged list: the rows stay the very same array (no reassign,
+          // no parse, no table re-render) — only the freshness moves.
+          this.rowsError = '';
+          this.rowsLoadedAt = Date.now();
+          if (held) this.cacheRows(key, held.rows, held.hasMetrics, this.rowsLoadedAt, held.validator);
+          return;
+        }
+        items = r.data.items;
+        hasMetrics = r.data.has_metrics;
+        validator = resourcesValidator(r.etag, r.data.version);
       }
       if (ac.signal.aborted || this.currentKey !== key) return;
+      this.lastLoadMs = Date.now() - started;
       this.rows = items;
       this.hasMetrics = hasMetrics;
       this.rowsKey = key;
       this.rowsError = '';
       this.rowsLoadedAt = Date.now();
-      this.cacheRows(key, items, hasMetrics, this.rowsLoadedAt);
+      this.cacheRows(key, items, hasMetrics, this.rowsLoadedAt, validator);
       if (ns) this.rememberKnownNamespace(ns);
     } catch (e) {
       if (ac.signal.aborted || this.currentKey !== key) return;
@@ -633,12 +653,22 @@ class K8sStore {
     // Shared chain (lib/poll): never overlaps a slow kubectl list, paused
     // while hidden, backs off while the cluster fails; `/k8s/*` rides the
     // long lane (api/client.ts), off the interactive socket pool.
+    // perf K8s: the cadence adapts to the list (`ms` is re-read per schedule):
+    // 10 s under 1000 rows, else max(30 s, 3 × the last load). No poll while
+    // the k9s terminal covers the table — nobody can see the rows.
+    const rowsNow = (): number => this.rows.length;
+    const loadMs = (): number => this.lastLoadMs;
     this.refreshTimer = pollWhileVisible(
       async () => {
-        if (!this.clusterId || this.rowsLoading) return;
+        if (!this.clusterId || this.rowsLoading || this.k9sSessionId) return;
         await this.loadResources(true);
       },
-      { ms: AUTO_REFRESH_MS, immediate: false },
+      {
+        get ms() {
+          return resourcesPollMs(rowsNow(), loadMs());
+        },
+        immediate: false,
+      },
     );
   }
 

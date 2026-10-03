@@ -18,6 +18,11 @@ import { domCount, isDesktopProject, longTasks, requestLog, watchLongTasks } fro
 //     page and keeps the loaded pages + scroll (I9).
 //   • K8s: typing into the filter over 5k pods makes no long task, ≤ 150 rows
 //     are mounted; 10 rapid `j` presses cost ≤ 3 `/resource` loads (SC-05/12).
+//     The resources poll is conditional: it sends `If-None-Match` and a 304
+//     leaves the rows in place (perf K2).
+//   • K8s Fleet: one coalesced refresh tick costs ≤ 3 `/fleet/*` requests (the
+//     charts are ONE `series/batch`, filters are not re-read); a 2,400-row
+//     table mounts ≤ 150 rows (perf K6/K7).
 // Not covered here: k8s logs follow at 20k lines (needs a streaming mock).
 // Unit-level halves: ui/unit/infraViewers.test.ts (TableWindow at 5k/12k/50k,
 // manifest scalar clip) and the crates (batched watermarks on a mocked client,
@@ -347,7 +352,7 @@ test('S3: 100k objects mount ≤ 200 rows; auto-refresh re-reads one page and ke
 
 const K8S_ID = 'perf-k8s';
 
-async function mockK8s(page: Page): Promise<void> {
+async function mockK8s(page: Page, opts: { autoRefresh?: boolean; resources?: (route: Route) => Promise<void> } = {}): Promise<void> {
   const rows = Array.from({ length: 5000 }, (_, i) => ({
     name: `pod-${String(i).padStart(4, '0')}`,
     namespace: `ns-${i % 5}`,
@@ -399,7 +404,10 @@ async function mockK8s(page: Page): Promise<void> {
     if (path === `clusters/${K8S_ID}/namespaces`) {
       return json(route, { namespaces: Array.from({ length: 5 }, (_, i) => ({ name: `ns-${i}`, status: 'Active', age_seconds: 1 })) });
     }
-    if (path === `clusters/${K8S_ID}/resources`) return json(route, { kind: 'pods', items: rows, has_metrics: false });
+    if (path === `clusters/${K8S_ID}/resources`) {
+      if (opts.resources) return opts.resources(route);
+      return json(route, { kind: 'pods', items: rows, has_metrics: false });
+    }
     if (path === `clusters/${K8S_ID}/resource`) {
       const name = u.searchParams.get('name') ?? '';
       return json(route, {
@@ -410,8 +418,10 @@ async function mockK8s(page: Page): Promise<void> {
     }
     return json(route, { error: { code: 'not_found', message: `unmocked k8s ${path}` } }, 404);
   });
-  // Keep the 10 s auto-refresh out of the measurements.
-  await page.addInitScript(() => localStorage.setItem('otto_k8s_autorefresh', '0'));
+  // Keep the 10 s auto-refresh out of the measurements (unless a test is
+  // measuring the poll itself).
+  const auto = opts.autoRefresh ? '1' : '0';
+  await page.addInitScript((v) => localStorage.setItem('otto_k8s_autorefresh', v), auto);
 }
 
 test('K8s: typing a filter over 5k pods makes no long task and mounts ≤ 150 rows', async ({ page, browserName }) => {
@@ -450,4 +460,145 @@ test('K8s: 10 rapid j presses in the drawer cost ≤ 3 /resource loads', async (
   expect(s.count, s.paths.join('\n')).toBeLessThanOrEqual(3);
   expect(s.count, 'the settled key still loads').toBeGreaterThanOrEqual(1);
   await expect(page.getByTestId('k8s-drawer')).toBeVisible();
+});
+
+// ── K8s resources: conditional poll (perf K2) ─────────────────────────────────
+
+test('K8s: the resources poll sends If-None-Match and a 304 keeps the rows', async ({ page }) => {
+  test.setTimeout(90_000);
+  const items = Array.from({ length: 300 }, (_, i) => ({
+    name: `pod-${i}`, namespace: `ns-${i % 5}`, kind: 'Pod', status: 'Running', ready: '1/1', restarts: 0,
+    age_seconds: 3600, node: 'node-1', ip: `10.0.0.${i % 250}`, images: ['app:1'], labels: {}, extra: {}, health: 'ok',
+  }));
+  const seen: (string | null)[] = [];
+  let notModified = 0;
+  await mockK8s(page, {
+    autoRefresh: true,
+    resources: async (route) => {
+      const inm = (await route.request().allHeaders())['if-none-match'] ?? null;
+      seen.push(inm);
+      if (inm === '"v1"') {
+        notModified += 1;
+        return route.fulfill({ status: 304, headers: { ETag: '"v1"', 'Access-Control-Expose-Headers': 'ETag' }, body: '' });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        headers: { ETag: '"v1"', 'Access-Control-Expose-Headers': 'ETag' },
+        body: JSON.stringify({ kind: 'pods', items, has_metrics: false, version: 'v1' }),
+      });
+    },
+  });
+  await page.goto(`/#/kubernetes/${K8S_ID}/pods`);
+  const row = page.getByTestId('k8s-row');
+  await expect(row.first()).toBeVisible({ timeout: 30_000 });
+  const firstText = (await row.first().textContent()) ?? '';
+  expect(seen[0], 'the first load has nothing to validate').toBeNull();
+  // The auto-refresh tick (10 s under 1k rows) revalidates instead of re-reading.
+  await expect.poll(() => notModified, { timeout: 25_000 }).toBeGreaterThanOrEqual(1);
+  expect(seen[seen.length - 1], seen.join(', ')).toBe('"v1"');
+  // The 304 left the very same rows up: no skeleton, no error, same content.
+  await expect(row.first()).toHaveText(firstText);
+  expect(await domCount(page, '[data-testid="k8s-row"]')).toBeGreaterThan(0);
+  await expect(page.getByTestId('k8s-table-error')).toHaveCount(0);
+  // A manual refresh takes the same conditional path.
+  const before = notModified;
+  await page.getByTitle('Refresh (r)').click();
+  await expect.poll(() => notModified).toBeGreaterThan(before);
+  await expect(row.first()).toHaveText(firstText);
+});
+
+// ── K8s Fleet (perf K6/K7) ────────────────────────────────────────────────────
+
+const FLEET_CLUSTER = { id: K8S_ID, name: 'perf-k8s', color: null, environment: 'dev' };
+
+function fleetRows(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    cluster: FLEET_CLUSTER, cluster_id: K8S_ID, namespace: `ns-${i % 20}`, workload: `svc-${String(i).padStart(4, '0')}`, pod: '',
+    pods: 3, restarts: { oom: i % 3, crash: i % 2, probe: 0, unknown: 0, planned: 0, completed: 0 }, churn: i % 4,
+    mem_last: 200_000_000 + i, mem_avg: 190_000_000, mem_max: 260_000_000, rps: 10 + (i % 7), err_pct: (i % 5) / 2,
+    latency_ms: 40 + (i % 9), latency_kind: 'avg',
+  }));
+}
+
+function fleetSeriesFor(metric: string) {
+  return {
+    window: '24h', metric, unit: 'count', by: metric === 'restarts' ? 'class' : 'cluster', step_secs: 300,
+    series: [{ key: metric === 'restarts' ? 'oom' : K8S_ID, label: 'perf-k8s', points: Array.from({ length: 12 }, (_, i) => ({ t: new Date(1_790_000_000_000 + i * 300_000).toISOString(), v: i % 4 })) }],
+  };
+}
+
+async function mockFleet(page: Page, tableRows: number): Promise<void> {
+  const rows = fleetRows(tableRows);
+  await page.route(/\/api\/v1\/k8s\/monitor\/fleet\/(.*)$/, (route) => {
+    const u = new URL(route.request().url());
+    const path = u.pathname.replace(/^.*\/monitor\/fleet\//, '');
+    if (path === 'filters') {
+      return json(route, { window: '24h', clusters: [{ ...FLEET_CLUSTER, rows: tableRows }], namespaces: [], workloads: [], pods: [] });
+    }
+    // Every row regardless of `limit`: the 2k-row case a live refresh re-reads.
+    if (path === 'table') return json(route, { window: '24h', group: 'workload', sort: 'restarts', dir: 'desc', offset: 0, total: rows.length, rows });
+    if (path === 'series/batch') {
+      const metrics = (u.searchParams.get('metrics') ?? '').split(',').filter(Boolean);
+      return json(route, { series: Object.fromEntries(metrics.map((m) => [m, fleetSeriesFor(m)])) });
+    }
+    if (path === 'series') return json(route, fleetSeriesFor(u.searchParams.get('metric') ?? 'restarts'));
+    if (path === 'events') return json(route, { window: '24h', sort: 'ts', dir: 'desc', total: 0, offset: 0, rows: [] });
+    return json(route, { window: '24h', enabled_on: [], disabled_on: [], rows: [] });
+  });
+}
+
+test('K8s Fleet: one coalesced refresh tick costs ≤ 3 /fleet requests (one series batch, no filters)', async ({ page }) => {
+  // Play the daemon's event socket so the spec can deliver a collector cycle.
+  const ev: { send?: (data: string) => void } = {};
+  await page.routeWebSocket('**/ws/events**', (socket) => {
+    const server = socket.connectToServer();
+    ev.send = (d) => socket.send(d);
+    socket.onMessage((d) => server.send(d));
+    server.onMessage((d) => socket.send(d));
+  });
+  await mockK8s(page);
+  await mockFleet(page, 50);
+  const all = requestLog(page, /\/k8s\/monitor\/fleet\//);
+  await page.goto('/#/kubernetes/monitor/fleet/overview');
+  await expect(page.getByTestId('k8s-fleet-charts')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId('k8s-fleet-kpis')).toBeVisible();
+  await expect.poll(() => !!ev.send).toBe(true);
+  // Mount: the five charts were ONE batch call, never per-metric reads.
+  const mount = all.stats();
+  all.stop();
+  expect(mount.paths.filter((p) => p.includes('/fleet/series/batch?')), mount.paths.join('\n')).toHaveLength(1);
+  expect(mount.paths.filter((p) => /\/fleet\/series\?/.test(p)), mount.paths.join('\n')).toHaveLength(0);
+  await page.waitForTimeout(500);
+
+  const log = requestLog(page, /\/k8s\/monitor\/fleet\//);
+  // The first cycle after a quiet period ticks at once (TickCoalescer).
+  ev.send!(JSON.stringify({ type: 'k8s_monitor_cycle', cluster_id: K8S_ID, ok: true, pods_scraped: 50, pods_failed: 0, cycle_ms: 120 }));
+  await expect.poll(() => log.stats().count, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+  await page.waitForTimeout(1500); // anything else the tick would fire
+  log.stop();
+  const s = log.stats();
+  expect(s.count, s.paths.join('\n')).toBeLessThanOrEqual(3);
+  expect(s.paths.filter((p) => p.includes('/fleet/series/batch?')), s.paths.join('\n')).toHaveLength(1);
+  expect(s.paths.filter((p) => p.includes('/fleet/filters')), 'filters are not re-read on a tick').toHaveLength(0);
+  expect(s.maxInFlight, 'a tick never takes the socket pool').toBeLessThanOrEqual(3);
+});
+
+test('K8s Fleet: a 2,400-row table mounts ≤ 150 rows and scrolls to the last one', async ({ page }) => {
+  await mockK8s(page);
+  await mockFleet(page, 2400);
+  await page.goto('/#/kubernetes/monitor/fleet/table');
+  const row = page.getByTestId('k8s-fleet-row');
+  await expect(row.first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId('k8s-fleet-table-count')).toContainText('2,400');
+  expect(await domCount(page, '[data-testid="k8s-fleet-row"]'), 'virtualized fleet table').toBeLessThanOrEqual(150);
+  // Scroll the windowed body to the end: the last row renders, the DOM stays bounded.
+  await page.getByTestId('k8s-fleet-table').locator('.vlist').evaluate((el) => (el.scrollTop = el.scrollHeight));
+  await expect(page.getByRole('button', { name: 'Show pods for svc-2399', exact: true })).toBeVisible();
+  expect(await domCount(page, '[data-testid="k8s-fleet-row"]')).toBeLessThanOrEqual(150);
+  // Keyboard: the table is one tab stop; ↓ moves the focused row.
+  await page.getByTestId('k8s-fleet-table').locator('.vlist').evaluate((el) => (el.scrollTop = 0));
+  await page.locator('[data-testid="k8s-fleet-row"][data-i="0"]').focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.locator('[data-testid="k8s-fleet-row"][data-i="1"]')).toBeFocused();
 });
