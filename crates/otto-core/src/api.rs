@@ -1312,6 +1312,15 @@ pub struct RepoStatusResp {
     /// with `None` (e.g. a conflicting `stash pop` leaves no state file).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op_in_progress: Option<String>,
+    /// Total untracked paths git reported. Present only when the untracked
+    /// rows in `changes` were capped (`untracked_truncated`), so a client can
+    /// say "N more untracked" — a non-ignored build dir must not ship 200k rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untracked_total: Option<u32>,
+    /// True when `changes` holds only the first `UNTRACKED_ROW_CAP` untracked
+    /// rows (tracked/staged/conflicted rows are never capped).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untracked_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

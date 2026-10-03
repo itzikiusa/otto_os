@@ -9,6 +9,7 @@
   import CreatePr from './CreatePr.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import type { IconName } from '../../lib/components/Icon.svelte';
+  import { invalidatePr, prListCache, prListKey } from './pr-cache';
 
   interface Props {
     repoId: string;
@@ -38,6 +39,8 @@
   // Bumped by the Retry button to re-run the load effect.
   let retryRev = $state(0);
   let loadRevision = 0;
+  /** Retry always goes to the network, even over a fresh cache entry. */
+  let lastRetryRev = 0;
 
   $effect(() => {
     const id = repoId;
@@ -46,12 +49,31 @@
     const revision = ++loadRevision;
     let active = true;
     loadingMore = false;
-    loading = true;
     error = '';
     moreError = '';
+    // Stale-while-revalidate: paint the last answer for this repo+state at
+    // once; a fresh one (<45 s, not a Retry) needs no request at all.
+    const key = prListKey(id, st, 1);
+    const hit = prListCache.get(key);
+    if (hit) {
+      prs = hit.value.items;
+      hasMore = hit.value.has_more;
+      page = 1;
+      loading = false;
+      if (hit.fresh && retryRev === lastRetryRev) {
+        return () => {
+          active = false;
+          if (loadRevision === revision) loadRevision++;
+        };
+      }
+    } else {
+      loading = true;
+    }
+    lastRetryRev = retryRev;
     void api
       .get<PrListResp>(`/repos/${id}/prs?state=${st}&page=1&per_page=${PER_PAGE}`)
       .then((r) => {
+        prListCache.set(key, r);
         if (!active) return;
         prs = r.items;
         hasMore = r.has_more;
@@ -59,6 +81,8 @@
       })
       .catch((e) => {
         if (!active) return;
+        // A failed background revalidation keeps the cached rows on screen.
+        if (hit) return;
         prs = [];
         hasMore = false;
         error = e instanceof Error ? e.message : 'failed to load PRs';
@@ -226,6 +250,7 @@
     onclose={() => (createOpen = false)}
     oncreated={(pr) => {
       createOpen = false;
+      invalidatePr(repoId);
       router.go(`git/${repoId}/pr/${pr.number}`);
     }}
   />

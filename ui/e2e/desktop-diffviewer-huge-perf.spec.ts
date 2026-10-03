@@ -292,3 +292,50 @@ test('WIP diff of a 40k-line rewrite: large-file gate, windowed rows, capped hun
   expect(await domRows(page)).toBeLessThan(ROW_BUDGET);
   expect(await maxLongTask(page)).toBeLessThan(200);
 });
+
+// G7: a minified bundle — one 1 MB line. The DOM only gets the first 10k
+// chars plus an "… expand line" button; layout of the whole text node used
+// to be one long task.
+test('PR diff with a 1 MB single-line (minified) file: line cut, expand on demand, no long task', async ({ page }) => {
+  test.setTimeout(60_000);
+  const big = 'var a=1;'.repeat(131_072); // 1 MiB
+  const file = {
+    path: 'dist/bundle.min.js',
+    old_path: null,
+    is_binary: false,
+    hunks: [{ header: '@@ -0,0 +1,1 @@', lines: [{ origin: 'add', content: big, old_line: null, new_line: 1 }] }],
+    added: 1,
+    deleted: 0,
+    status: 'added',
+  };
+  await page.route('**/api/v1/repos/*/prs/*', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (!/\/prs\/\d+$/.test(path)) return route.fallback();
+    await route.fulfill({
+      json: {
+        number: 2, title: 'Minified', state: 'open', author: 'perf', source_branch: 'feature/min',
+        target_branch: 'main', url: 'https://github.com/otto-test/huge-diff/pull/2',
+        updated_at: '2026-09-25T08:00:00Z', draft: false, description_md: '', approved_by: [],
+        reviewers: [], mergeable: true, comments: [],
+      },
+    });
+  });
+  await page.route('**/api/v1/repos/*/prs/*/diff*', (r) => r.fulfill({ json: { files: [file], total_added: 1, total_deleted: 0 } }));
+  await page.route('**/api/v1/repos/*/prs/*/commits', (r) => r.fulfill({ json: [] }));
+  await page.route('**/api/v1/repos/*/prs/*/reviews', (r) => r.fulfill({ json: [] }));
+  await page.goto(`/#/git/${repoId}/pr/2`);
+  await expect(page.getByRole('tab', { name: 'Files', exact: true })).toBeVisible({ timeout: 15_000 });
+  await resetLongTasks(page);
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
+  const expand = page.getByRole('button', { name: /Expand line \(1\.0 MB\)/ });
+  await expect(expand).toBeVisible({ timeout: 15_000 });
+  await page.waitForTimeout(300);
+  const textLen = await page.evaluate(() => (document.querySelector('.diff-body .dline .code') as HTMLElement).textContent!.length);
+  expect(textLen, 'only the cut prefix reaches the DOM').toBeLessThan(10_100);
+  expect(await maxLongTask(page)).toBeLessThan(200);
+  // Expanding is explicit and still renders the whole line.
+  await expand.click();
+  await expect(expand).toHaveCount(0);
+  const full = await page.evaluate(() => (document.querySelector('.diff-body .dline .code') as HTMLElement).textContent!.length);
+  expect(full).toBeGreaterThanOrEqual(big.length);
+});

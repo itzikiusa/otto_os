@@ -18,8 +18,9 @@
 //!
 //! Bounded: at most [`MAX_WATCHED`] repos (least recently used evicted), a
 //! watcher idles out after [`IDLE_TTL`] without a status/fetch request, and a
-//! repo emits at most one event per [`MIN_GAP`] (trailing edge, so the last
-//! change of a burst is never lost).
+//! repo emits at most one event per [`event_gap`] — [`MIN_GAP`], or twice the
+//! repo's last status duration when that is longer, capped at [`MAX_GAP`]
+//! (trailing edge, so the last change of a burst is never lost).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -37,6 +38,18 @@ use tokio::sync::{broadcast, mpsc};
 const DEBOUNCE: Duration = Duration::from_millis(150);
 /// Minimum spacing between two events for the same repo.
 const MIN_GAP: Duration = Duration::from_millis(400);
+/// Ceiling of the adaptive spacing ([`event_gap`]).
+const MAX_GAP: Duration = Duration::from_secs(5);
+
+/// Spacing between two events for a repo whose last full `git status` took
+/// `last_status`: twice that, at least [`MIN_GAP`], at most [`MAX_GAP`]. A
+/// 100k-file tree whose status takes 900 ms would otherwise be re-walked
+/// back-to-back for as long as a build keeps writing non-ignored paths.
+pub(crate) fn event_gap(last_status: Option<Duration>) -> Duration {
+    last_status
+        .map(|d| (d * 2).clamp(MIN_GAP, MAX_GAP))
+        .unwrap_or(MIN_GAP)
+}
 /// Drop a watcher nobody has asked about for this long.
 const IDLE_TTL: Duration = Duration::from_secs(15 * 60);
 /// Hard cap on simultaneously watched repositories.
@@ -98,8 +111,9 @@ impl RepoWatchers {
                 tokio::spawn(async move {
                     let wait = {
                         let last = state.last_emit.lock().unwrap_or_else(|e| e.into_inner());
+                        let min_gap = event_gap(crate::status_cache::last_status(&state.repo_id));
                         let gap = last
-                            .map(|t| MIN_GAP.saturating_sub(t.elapsed()))
+                            .map(|t| min_gap.saturating_sub(t.elapsed()))
                             .unwrap_or_default();
                         gap.max(DEBOUNCE)
                     };
@@ -109,6 +123,9 @@ impl RepoWatchers {
                     state.pending.store(false, Ordering::SeqCst);
                     *state.last_emit.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(Instant::now());
+                    // Invalidate the shared status memo BEFORE anyone hears
+                    // of the change, so no reader is served the old tree.
+                    crate::status_cache::bump(&state.repo_id);
                     let _ = events.send(Event::RepoStatusChanged {
                         workspace_id: state.workspace_id.clone(),
                         repo_id: state.repo_id.clone(),
@@ -323,6 +340,17 @@ mod tests {
             Path::new("/elsewhere/file"),
             &ig
         ));
+    }
+
+    #[test]
+    fn event_gap_adapts_to_status_cost() {
+        assert_eq!(event_gap(None), MIN_GAP);
+        assert_eq!(event_gap(Some(Duration::from_millis(50))), MIN_GAP);
+        assert_eq!(
+            event_gap(Some(Duration::from_millis(900))),
+            Duration::from_millis(1800)
+        );
+        assert_eq!(event_gap(Some(Duration::from_secs(9))), MAX_GAP);
     }
 
     async fn next_change(rx: &mut broadcast::Receiver<Event>, within: Duration) -> Option<Id> {

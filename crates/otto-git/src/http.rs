@@ -11,13 +11,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{
-    AddRepoReq, BranchInfo, CheckoutReq, CleanupBaseResp, Collaborator, CommitInfo, CommitReq,
-    ConflictFile, CreateGitAccountReq, CreatePrReq, DiffResp, GitAccountTestResp, MergeBranchReq,
-    MergeCommitReq, MergeConflictStatus, MergePrReq, MergePreview, MergePreviewReq, MergeResult,
-    NewPrCommentReq, PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem, RefsResp,
-    RepoStatusResp, RequestChangesReq, ResolveConflictReq, ResolvePrThreadReq, SetCleanupBaseReq,
-    StagePathsReq, StashInfo, SubmoduleInfo, TestGitAccountReq, UpdateGitAccountReq, UpdatePrReq,
-    UpdateRepoReq, WorktreeInfo,
+    AddRepoReq, BranchInfo, CheckoutReq, CleanupBaseResp, Collaborator, CommitReq, ConflictFile,
+    CreateGitAccountReq, CreatePrReq, DiffResp, GitAccountTestResp, MergeBranchReq, MergeCommitReq,
+    MergeConflictStatus, MergePrReq, MergePreview, MergePreviewReq, MergeResult, NewPrCommentReq,
+    PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem, RefsResp, RepoStatusResp,
+    RequestChangesReq, ResolveConflictReq, ResolvePrThreadReq, SetCleanupBaseReq, StagePathsReq,
+    StashInfo, SubmoduleInfo, TestGitAccountReq, UpdateGitAccountReq, UpdatePrReq, UpdateRepoReq,
+    WorktreeInfo,
 };
 use otto_core::auth::{authorize_owner, AuthUser, RoleChecker};
 use otto_core::domain::{GitAccount, GitProviderKind, Repo, WorkspaceRole};
@@ -195,6 +195,34 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .merge(crate::history::router::<S>())
         .merge(crate::ops::router::<S>())
         .merge(crate::recovery::router::<S>())
+        .layer(axum::middleware::from_fn(invalidate_status_after_write))
+}
+
+/// Every non-GET under `/repos/{id}/…` (stage, commit, checkout, stash, PR
+/// merge, …) invalidates that repo's status memo once it has run, so the
+/// status read right after a mutation never comes from before it — without
+/// waiting for the watcher's event.
+async fn invalidate_status_after_write(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let write = !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    let id = write.then(|| repo_id_of(req.uri().path())).flatten();
+    let resp = next.run(req).await;
+    if let Some(id) = id {
+        crate::status_cache::bump(&id);
+    }
+    resp
+}
+
+/// The `{id}` of a `…/repos/{id}/…` request path.
+fn repo_id_of(path: &str) -> Option<String> {
+    let mut segs = path.split('/');
+    segs.by_ref().find(|s| *s == "repos")?;
+    segs.next().filter(|s| !s.is_empty()).map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -1194,10 +1222,13 @@ async fn repo_status<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
-) -> ApiResult<Json<RepoStatusResp>> {
+) -> ApiResult<Response> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     watch_repo(&s, &repo, &git).await;
-    Ok(Json(git.status().await?))
+    // Shared across windows: one walk per change, a 1 s memo between (see
+    // `status_cache`). Tagged `x-otto-status-cache: hit|miss`.
+    let (body, cache) = crate::status_cache::status_body(&id, &git).await?;
+    Ok(json_tagged(body, "x-otto-status-cache", cache))
 }
 
 /// Keep the repo's working-tree watcher armed (see `watch.rs`): the client
@@ -1212,6 +1243,10 @@ async fn watch_repo<S: GitCtx>(s: &S, repo: &Repo, git: &LocalGit) {
         PathBuf::from(&repo.path),
     );
     tokio::task::spawn_blocking(move || registry.touch(&id, &ws, &root, git_dir.as_deref()));
+    // The session's first status also seeds a missing commit-graph (once,
+    // guarded): a never-fetched repo otherwise never gets one, and the
+    // graph's `log --all --date-order` walks all history without it.
+    git.seed_commit_graph();
 }
 
 async fn repo_branches<S: GitCtx>(
@@ -1306,7 +1341,7 @@ async fn repo_log<S: GitCtx>(
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<LogQuery>,
-) -> ApiResult<Json<Vec<CommitInfo>>> {
+) -> ApiResult<Response> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     // No server-side ceiling: `limit=0` (or an explicit large limit) returns the
     // full reachable history. The graph pages through history with skip/limit and
@@ -1329,7 +1364,9 @@ async fn repo_log<S: GitCtx>(
         author: blank(&q.author),
         until: blank(&q.until),
     };
-    Ok(Json(git.log_with(&opts).await?))
+    let commits = git.log_with(&opts).await?;
+    let est = commits.len() * 256;
+    Ok(json_off_runtime(commits, est).await?)
 }
 
 #[derive(Deserialize)]
@@ -1385,6 +1422,40 @@ fn json_body(body: axum::body::Bytes, cache: &'static str) -> Response {
         body,
     )
         .into_response()
+}
+
+/// `application/json` from serialized bytes plus one diagnostic header.
+fn json_tagged(body: axum::body::Bytes, name: &'static str, value: &'static str) -> Response {
+    use axum::http::header::{HeaderName, HeaderValue, CONTENT_TYPE};
+    (
+        [
+            (CONTENT_TYPE, HeaderValue::from_static("application/json")),
+            (
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// Serialize any response body off the async workers once its estimated
+/// size (`est` bytes) is big enough to matter — a 10k-commit graph page or a
+/// big blame is several MB of JSON that axum's `Json` would encode inline.
+pub(crate) async fn json_off_runtime<T: serde::Serialize + Send + 'static>(
+    value: T,
+    est: usize,
+) -> Result<Response> {
+    use axum::http::header::{HeaderValue, CONTENT_TYPE};
+    let body = crate::local::off_runtime(est, move || serde_json::to_vec(&value))
+        .await?
+        .map_err(|e| Error::Internal(format!("json: {e}")))?;
+    Ok((
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        axum::body::Bytes::from(body),
+    )
+        .into_response())
 }
 
 /// Serialize a diff off the async workers once it is big enough to matter.

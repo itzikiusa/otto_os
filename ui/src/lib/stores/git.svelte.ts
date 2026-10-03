@@ -46,6 +46,8 @@ const OPEN_TABS_KEY = 'otto_git_open_tabs';
 const AUTO_FETCH_KEY = 'otto_git_auto_fetch';
 const DEFAULT_AUTO_FETCH_SEC = 120;
 const ACTIVE_AUTO_FETCH_SEC = 30;
+/** A status read younger than this is shared by a new caller (same burst). */
+const STATUS_SHARE_MS = 300;
 const DEFAULT_SUB: GitSubTab = 'graph';
 
 /** May an auto-fetch round run right now?
@@ -435,8 +437,28 @@ class GitStore {
     return true;
   }
 
-  /** Fetch (cheap, local) status for a repo and store it. */
-  async refreshStatus(repoId: string): Promise<void> {
+  /** In-flight status reads per repo. RepoView's mount, `ensureStatus` and a
+   *  live refresh used to overlap into 2–3 identical GETs (and each one a full
+   *  `git status` walk on the daemon). */
+  private statusFlights = new Map<string, { p: Promise<void>; at: number; next?: Promise<void> }>();
+
+  /** Fetch (cheap, local) status for a repo and store it. Callers within
+   *  STATUS_SHARE_MS of an in-flight read share it; a later caller (whose
+   *  change may postdate that read) shares ONE trailing read instead. */
+  refreshStatus(repoId: string): Promise<void> {
+    const f = this.statusFlights.get(repoId);
+    if (f) {
+      if (Date.now() - f.at < STATUS_SHARE_MS) return f.p;
+      return (f.next ??= f.p.then(() => this.refreshStatus(repoId)));
+    }
+    const p: Promise<void> = this.readStatus(repoId).finally(() => {
+      if (this.statusFlights.get(repoId)?.p === p) this.statusFlights.delete(repoId);
+    });
+    this.statusFlights.set(repoId, { p, at: Date.now() });
+    return p;
+  }
+
+  private async readStatus(repoId: string): Promise<void> {
     try {
       const s = await api.get<RepoStatusResp>(`/repos/${repoId}/status`);
       this.setStatus(repoId, s);

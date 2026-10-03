@@ -206,11 +206,11 @@ fn commit_graph_enabled() -> bool {
 /// The git subcommand in an argv, for error text: `args[0]`, or `args[2]` when
 /// the call is prefixed with `-c <key=value>` (the diff family does that).
 fn verb_of<'a>(args: &'a [&'a str]) -> &'a str {
-    match args.first() {
-        Some(&"-c") => args.get(2).copied().unwrap_or("command"),
-        Some(v) => v,
-        None => "command",
+    let mut i = 0;
+    while args.get(i) == Some(&"-c") {
+        i += 2;
     }
+    args.get(i).copied().unwrap_or("command")
 }
 
 /// git's `-l<N>` overflow warning ("exhaustive/inexact rename detection was
@@ -691,7 +691,36 @@ fn untracked_summary(root: &Path, files: &[String]) -> Vec<otto_core::api::FileD
         .collect()
 }
 
+/// Repos with a `commit-graph write` in flight (see [`LocalGit::seed_commit_graph`]).
+fn seeding() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// A repo's seat in [`seeding`]: taken before the spawn, released on drop
+/// (when the write task ends, however it ends).
+struct SeedSeat(PathBuf);
+
+impl SeedSeat {
+    fn take(repo: &Path) -> Option<Self> {
+        let mut s = seeding().lock().unwrap_or_else(|p| p.into_inner());
+        s.insert(repo.to_path_buf())
+            .then(|| SeedSeat(repo.to_path_buf()))
+    }
+}
+
+impl Drop for SeedSeat {
+    fn drop(&mut self) {
+        seeding()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.0);
+    }
+}
+
 /// A handle on one local repository; every method spawns `git -C <path> …`.
+#[derive(Clone)]
 pub struct LocalGit {
     repo_path: PathBuf,
     /// The git binary to spawn. Overridable so tests can point at a shim
@@ -1215,7 +1244,21 @@ impl LocalGit {
         }
     }
 
+    /// Status for a RESPONSE: untracked rows capped at
+    /// [`crate::parse::UNTRACKED_ROW_CAP`] (with `untracked_total` /
+    /// `untracked_truncated` set past it). Internal callers that act on
+    /// untracked paths use [`Self::status_full`].
     pub async fn status(&self) -> Result<RepoStatusResp> {
+        self.status_with_cap(crate::parse::UNTRACKED_ROW_CAP).await
+    }
+
+    /// Every untracked row, uncapped — for callers that classify specific
+    /// paths (discard must still find the 6,000th untracked file).
+    pub async fn status_full(&self) -> Result<RepoStatusResp> {
+        self.status_with_cap(usize::MAX).await
+    }
+
+    async fn status_with_cap(&self, cap: usize) -> Result<RepoStatusResp> {
         // `--untracked-files=all` lists every untracked FILE individually instead
         // of collapsing an entirely-new directory (e.g. `.claude/skills/` with
         // 80+ files) into a single entry — so the Changes view can show/stage
@@ -1225,18 +1268,78 @@ impl LocalGit {
         // `\` (`"caf\303\251.txt"`), and that quoted form is what came back
         // to stage/discard — `add` then failed "did not match", and `clean`
         // exited 0 having deleted NOTHING while the UI said "Discarded".
-        let out = self
-            .exec_text(&GitCmd::read(&[
-                "status",
-                "--porcelain=v2",
-                "--branch",
-                "-z",
-                "--untracked-files=all",
-            ]))
-            .await?;
-        let mut st = crate::parse::parse_status(&out);
+        let mut args: Vec<&str> = Vec::new();
+        if self.large_index_accel().await {
+            args.extend([
+                "-c",
+                "core.untrackedCache=true",
+                "-c",
+                "core.fsmonitor=true",
+            ]);
+        }
+        args.extend([
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+        ]);
+        let out = self.exec_text(&GitCmd::read(&args)).await?;
+        // 100k rows is tens of ms of parsing — off the async workers.
+        let mut st = off_runtime(out.len(), move || {
+            crate::parse::parse_status_capped(&out, cap)
+        })
+        .await?;
         st.op_in_progress = self.op_in_progress().await.map(str::to_string);
         Ok(st)
+    }
+
+    /// Opt-in (`OTTO_GIT_FSMONITOR=1`) status acceleration for big repos:
+    /// `-c core.untrackedCache=true -c core.fsmonitor=true` on the status
+    /// argv when the index is over ~6 MB (≈50k entries). Never written to the
+    /// repo config (see the `core.fsmonitor` guard on `.git/config` writes).
+    ///
+    /// Not on by default: both caches live in the INDEX, and Otto's status
+    /// runs with `GIT_OPTIONAL_LOCKS=0` (it must never take `index.lock` from
+    /// under an agent's commit), so it can't persist the fsmonitor token or
+    /// the untracked cache — the gain only appears when the user's own git
+    /// writes the index with them. Skipped when the repo config already
+    /// names an fsmonitor (a watchman hook must not be overridden) and on a
+    /// git without the built-in daemon (< 2.37 would run `true` as a hook).
+    async fn large_index_accel(&self) -> bool {
+        if std::env::var("OTTO_GIT_FSMONITOR").ok().as_deref() != Some("1") {
+            return false;
+        }
+        let Some(gd) = self.git_dir().await else {
+            return false;
+        };
+        let big = tokio::fs::metadata(gd.join("index"))
+            .await
+            .is_ok_and(|m| m.len() > 6 << 20);
+        if !big {
+            return false;
+        }
+        let cfg = tokio::fs::read_to_string(gd.join("config"))
+            .await
+            .unwrap_or_default();
+        if cfg.to_ascii_lowercase().contains("fsmonitor") {
+            return false;
+        }
+        static BUILTIN: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+        let bin = self.git_bin.clone();
+        *BUILTIN
+            .get_or_init(|| async move {
+                let out = Command::new(bin).arg("--version").output().await;
+                out.ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                    .and_then(|v| {
+                        let ver = v.split_whitespace().nth(2)?.to_string();
+                        let mut it = ver.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+                        Some((it.next()?, it.next()?))
+                    })
+                    .is_some_and(|(maj, min)| (maj, min) >= (2, 37))
+            })
+            .await
     }
 
     /// Tracked changes only (`--untracked-files=no`) — for internal callers
@@ -2519,8 +2622,9 @@ impl LocalGit {
         }
         Self::guard_paths(paths)?;
         let want: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
-        // Classify each requested path by its current change kind.
-        let status = self.status().await?;
+        // Classify each requested path by its current change kind — from the
+        // UNCAPPED status: a response's untracked rows stop at 5,000.
+        let status = self.status_full().await?;
         let mut restore: Vec<String> = Vec::new(); // tracked → revert to HEAD
         let mut remove: Vec<String> = Vec::new(); // new → delete
         let mut worktree: Vec<String> = Vec::new(); // keep_staged → revert to index
@@ -2908,13 +3012,27 @@ impl LocalGit {
         if info.join("commit-graph").exists() || info.join("commit-graphs").exists() {
             return;
         }
+        // One write per repo at a time: a first write on a huge history can
+        // outlast the 30 s auto-fetch, and log/blame/status seed too now.
+        let Some(seat) = SeedSeat::take(&self.repo_path) else {
+            return;
+        };
         let mut cmd = self.base_cmd();
-        cmd.args(["commit-graph", "write", "--reachable", "--changed-paths"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(false);
+        // `--split`: later writes (fetch.writeCommitGraph, the next seed)
+        // append a layer instead of rewriting the whole graph.
+        cmd.args([
+            "commit-graph",
+            "write",
+            "--reachable",
+            "--changed-paths",
+            "--split",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(false);
         let repo = self.repo_path.clone();
         tokio::spawn(async move {
+            let _seat = seat;
             match cmd.status().await {
                 Ok(st) if st.success() => {
                     tracing::info!(repo = %repo.display(), "wrote commit-graph")
@@ -2923,6 +3041,12 @@ impl LocalGit {
                 Err(e) => tracing::debug!(repo = %repo.display(), "commit-graph write: {e}"),
             }
         });
+    }
+
+    /// Number of commit-graph seeds currently running (tests).
+    #[cfg(test)]
+    pub(crate) fn seeding_now() -> usize {
+        seeding().lock().map(|s| s.len()).unwrap_or(0)
     }
 
     async fn run_remote(&self, args: &[&str], token: Option<String>) -> Result<String> {

@@ -2869,6 +2869,12 @@ export interface RepoStatusResp {
   /** Operation currently in progress (from the git dir's state files); absent/
    *  undefined when none. Conflicted files can exist without one (stash pop). */
   op_in_progress?: GitOpInProgress | null;
+  /** Total untracked paths git reported — present only when the untracked
+   *  rows in `changes` were capped (see `untracked_truncated`). */
+  untracked_total?: number | null;
+  /** True when `changes` carries only the first 5,000 untracked rows (tracked,
+   *  staged and conflicted rows are never capped). Absent/false otherwise. */
+  untracked_truncated?: boolean;
 }
 
 /** `POST /repos/{id}/pull` response: the fresh status plus an optional human
