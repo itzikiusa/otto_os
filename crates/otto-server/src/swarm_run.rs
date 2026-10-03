@@ -1006,7 +1006,55 @@ async fn detect_shared_files(
 
 /// Forget a branch's tracked files (called when its worktree is merged/removed).
 pub(crate) fn forget_branch_files(swarm_id: &str, branch: &str) {
-    if let Some(st) = shared_files().lock().unwrap().get_mut(swarm_id) {
-        st.by_branch.remove(branch);
+    forget_branch_in(&mut shared_files().lock().unwrap(), swarm_id, branch);
+}
+
+/// Drop `branch` and the overlap announcements naming it; drop the swarm's
+/// whole entry once no branch is tracked, so the process-wide map is bounded
+/// by live swarm branches rather than every swarm/branch ever seen.
+fn forget_branch_in(map: &mut HashMap<String, SharedState>, swarm_id: &str, branch: &str) {
+    let Some(st) = map.get_mut(swarm_id) else {
+        return;
+    };
+    st.by_branch.remove(branch);
+    st.announced.retain(|k| {
+        let mut parts = k.splitn(3, '|');
+        let (a, b) = (parts.next(), parts.next());
+        a != Some(branch) && b != Some(branch)
+    });
+    if st.by_branch.is_empty() {
+        map.remove(swarm_id);
+    }
+}
+
+/// Forget everything tracked for a swarm (its run stopped or it was deleted).
+pub(crate) fn forget_swarm_files(swarm_id: &str) {
+    shared_files().lock().unwrap().remove(swarm_id);
+}
+
+#[cfg(test)]
+mod shared_files_tests {
+    use super::*;
+
+    #[test]
+    fn forgetting_the_last_branch_drops_the_swarm_entry() {
+        let mut map: HashMap<String, SharedState> = HashMap::new();
+        let st = map.entry("sw".into()).or_default();
+        for b in ["a", "b"] {
+            st.by_branch.insert(
+                b.into(),
+                BranchFiles {
+                    agent_name: b.into(),
+                    files: ["x.rs".to_string()].into_iter().collect(),
+                },
+            );
+        }
+        st.announced.insert("a|b|x.rs".into());
+        forget_branch_in(&mut map, "sw", "a");
+        assert!(map["sw"].announced.is_empty());
+        assert_eq!(map["sw"].by_branch.len(), 1);
+        forget_branch_in(&mut map, "sw", "b");
+        assert!(!map.contains_key("sw"));
+        forget_branch_in(&mut map, "missing", "a"); // no-op
     }
 }

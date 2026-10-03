@@ -101,6 +101,8 @@ pub fn stop_coordinator(ctx: &ServerCtx, swarm_id: &str) {
     if let Some(h) = ctx.swarm_coords.lock().unwrap().remove(swarm_id) {
         h.cancel.cancel();
     }
+    // The run is over: drop its shared-file tracking (a restart re-detects).
+    crate::swarm_run::forget_swarm_files(swarm_id);
 }
 
 pub fn set_paused(ctx: &ServerCtx, swarm_id: &str, paused: bool) {
@@ -115,13 +117,15 @@ pub fn set_paused(ctx: &ServerCtx, swarm_id: &str, paused: bool) {
 /// dispatch it twice.
 fn tick_lock(swarm_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
-    LOCKS
+    let mut map = LOCKS
         .get_or_init(Default::default)
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(swarm_id.to_string())
-        .or_default()
-        .clone()
+        .unwrap_or_else(|e| e.into_inner());
+    // Prune locks no loop holds (strong count 1 = only this map) so deleted
+    // swarms don't leave an entry behind forever. A tick in progress keeps its
+    // clone, so the overlap guard is unaffected.
+    map.retain(|id, l| id == swarm_id || Arc::strong_count(l) > 1);
+    map.entry(swarm_id.to_string()).or_default().clone()
 }
 
 async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandle) {

@@ -2555,6 +2555,10 @@ async fn run_review(
             .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
             .clone()
     });
+    // Unregister this run's flag on every exit path (incl. the early return).
+    let _cancel_guard = attempt_cancel
+        .as_ref()
+        .map(|f| ReviewCancelGuard::new(&ctx.review_cancels, &review_id, f));
     let result = run_review_core(
         &ctx,
         &review_id,
@@ -3099,6 +3103,44 @@ fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComment>
         tracing::warn!(review = %review_id, "failed to parse final JSON ({e}); no comments stored");
         vec![]
     })
+}
+
+/// Drops a review's cancel flag from `review_cancels` when the attempt that
+/// registered it ends — but only while the registry still holds THAT flag, so
+/// an unwinding (cancelled) attempt never removes a newer retry's entry.
+/// Without it every branch/local review and summarizer retry leaked an entry,
+/// and a tripped flag left behind could cancel a later rerun of the same id.
+pub(crate) struct ReviewCancelGuard {
+    reg: crate::skill_eval::CancelRegistry,
+    id: String,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ReviewCancelGuard {
+    pub(crate) fn new(
+        reg: &crate::skill_eval::CancelRegistry,
+        id: &str,
+        flag: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            reg: reg.clone(),
+            id: id.to_string(),
+            flag: flag.clone(),
+        }
+    }
+}
+
+impl Drop for ReviewCancelGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.reg.lock() {
+            if map
+                .get(&self.id)
+                .is_some_and(|f| Arc::ptr_eq(f, &self.flag))
+            {
+                map.remove(&self.id);
+            }
+        }
+    }
 }
 
 /// Flags stop work immediately; the durable status covers daemon/retry paths
@@ -6069,6 +6111,8 @@ async fn retry_summarizer(
     let repo_id = review.repo_id.clone();
     let pr_number = review.pr_number;
     tokio::spawn(async move {
+        let _cancel_guard =
+            ReviewCancelGuard::new(&ctx_bg.review_cancels, &review_id_bg, &attempt_cancel);
         // The summarizer follows the repo's EFFECTIVE config (per-repo binding
         // resolution included), same as a fresh run would.
         let cfg = load_review_config_for_repo(&ctx_bg, &repo_id).await;
@@ -6423,10 +6467,13 @@ pub(crate) async fn cancel_running_review(ctx: &ServerCtx, review: &Review, work
     //    run_review_core skips the summarizer / finding persistence. The review-
     //    level flag gates the post-join summarizer skip; the recovery loops watch
     //    their per-agent flags (per-agent Stop), so trip those too.
-    if let Ok(mut map) = ctx.review_cancels.lock() {
-        map.entry(review_id.clone())
-            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    //    Only an attempt that is actually running has a flag; trip it, never
+    //    insert one — a tripped orphan would cancel a later rerun of this id
+    //    (the durable `cancelled` status below covers flagless paths).
+    if let Ok(map) = ctx.review_cancels.lock() {
+        if let Some(flag) = map.get(review_id.as_str()) {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
     for i in 0..review.agents.len() {
         signal_review_agent_cancel(&ctx.review_agent_cancels, &review_id, i);
@@ -8414,5 +8461,39 @@ mod readiness_tests {
             local_branch_facts(path, "no-such-branch", "main").await,
             (None, "unknown")
         );
+    }
+}
+
+#[cfg(test)]
+mod review_cancel_guard_tests {
+    use super::ReviewCancelGuard;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    fn flag() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
+    #[test]
+    fn guard_unregisters_its_own_flag_on_drop() {
+        let reg: crate::skill_eval::CancelRegistry = Default::default();
+        let f = flag();
+        reg.lock().unwrap().insert("r1".into(), f.clone());
+        drop(ReviewCancelGuard::new(&reg, "r1", &f));
+        assert!(reg.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn guard_keeps_a_newer_attempts_flag() {
+        let reg: crate::skill_eval::CancelRegistry = Default::default();
+        let old = flag();
+        reg.lock().unwrap().insert("r1".into(), old.clone());
+        let guard = ReviewCancelGuard::new(&reg, "r1", &old);
+        // A retry replaces the entry while the old attempt is unwinding.
+        let newer = flag();
+        reg.lock().unwrap().insert("r1".into(), newer.clone());
+        drop(guard);
+        let map = reg.lock().unwrap();
+        assert!(Arc::ptr_eq(map.get("r1").unwrap(), &newer));
     }
 }
