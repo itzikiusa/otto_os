@@ -228,6 +228,21 @@ Saves store the `doc` JSON text exactly as sent (no server-side re-parse into a
 tree and re-serialise; bodies over 1 MB are validated on the blocking pool), and
 the editor drops a queued autosave whose document a newer one superseded.
 
+**Images out of the live document (migration 0190).** The LIVE scene document
+keeps images as `otto-canvas-file:<sha256>` refs too: every write moves inline
+`dataURL`s into `canvas_files` (a doc without inline images is only
+byte-scanned, never parsed) and records the scene's refs in
+`canvas_scene_files`, so garbage collection keeps a file while any scene or
+version cites it. Older scenes convert on their next save. The editor opens a
+scene with `?files=ref`, fetches each image once from the immutable
+`GET /canvas/files/{sha}` (cached by the webview, so a reopened board fetches
+nothing), and autosaves refs: a pasted image goes up inline exactly once, then
+the editor learns its sha (sha256 of the data-URL text, the same address the
+server uses) and every later autosave of a board with a 3 MB screenshot is a few
+KB, with no main-thread stringify of the base64. Other readers (export,
+duplicate, agents, the side panel) get a self-contained doc with images inline
+unless they pass `?files=ref`.
+
 ### The prompts (mode hint)
 
 `build_assist_prompt` emits an `OTTO_TASK: canvas_assist` sentinel (which routes
