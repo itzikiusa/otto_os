@@ -298,6 +298,9 @@ fn build_window_with_init(
         .transparent(true)
         .accept_first_mouse(true)
         .disable_drag_drop_handler()
+        // Terminal parse (setTimeout) and paint (rAF) stall for ~1 s per
+        // frame when WebKit decides an occluded window is "inactive".
+        .background_throttling(crate::NO_THROTTLE)
         .initialization_script(format!(
             "window.__OTTO_WIN__='{}';{}",
             frame.label,

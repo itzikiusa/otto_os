@@ -176,6 +176,7 @@ pub async fn open_host_room_window(
         .inner_size(1100.0, 760.0)
         .min_inner_size(480.0, 360.0)
         .disable_drag_drop_handler()
+        .background_throttling(crate::NO_THROTTLE)
         .initialization_script(format!("window.__OTTO_WIN__='{label}';"))
         .on_navigation(move |destination| allows_navigation(&room_id, destination))
         .on_new_window(|_, _| NewWindowResponse::Deny)
