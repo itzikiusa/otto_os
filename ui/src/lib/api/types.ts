@@ -8266,6 +8266,13 @@ export interface PersonalAgentActivity {
   runs: PersonalAgentRun[] | null;
   /** Cursor: the newest ring `seq` the answer covers (pass as `after_seq`). */
   seq?: number;
+  /** The daemon boot id the cursor belongs to (pass back as `epoch`). The
+   *  ring and its `seq` restart with the daemon; a different epoch means the
+   *  cursor and items are from a previous process. */
+  epoch?: string;
+  /** The `after_seq`/`epoch` sent were stale (previous daemon process): this
+   *  is a full answer — replace the items and the cursor. */
+  reset?: boolean;
 }
 
 export type PersonalAgentMemorySource =

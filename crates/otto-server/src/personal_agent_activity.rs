@@ -47,10 +47,25 @@ fn ring() -> &'static Mutex<Ring> {
     RING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 fn next_seq() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(1);
-    SEQ.fetch_add(1, Ordering::Relaxed)
+    SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The newest `seq` this process has handed out (0 before the first entry).
+/// The counter restarts at 1 with the daemon, so a client cursor above this
+/// came from a previous process (perf N1) and must be treated as "no cursor".
+pub fn last_seq() -> u64 {
+    SEQ.load(std::sync::atomic::Ordering::Relaxed)
+        .saturating_sub(1)
+}
+
+/// Does a client cursor belong to this process? `epoch` is the boot id the
+/// client got with its cursor (absent from older clients); a cursor ahead of
+/// [`last_seq`] can only come from a previous process too.
+pub fn cursor_is_current(after_seq: u64, epoch: Option<&str>) -> bool {
+    epoch.is_none_or(|e| e == crate::transport::boot_id()) && after_seq <= last_seq()
 }
 
 fn push(agent_id: &str, item: ActivityItem) {
@@ -213,6 +228,21 @@ mod tests {
         );
         assert!(recent_after(agent, all[0].seq, 10).is_empty());
         assert_eq!(recent_after(agent, 0, 10).len(), 5);
+        clear(agent);
+    }
+
+    #[test]
+    fn cursor_from_a_previous_process_is_not_current() {
+        let agent = "agent-epoch-test";
+        clear(agent);
+        push(agent, item_for("t0", "s1", &AgentGate::Pass));
+        let cur = last_seq();
+        assert!(cursor_is_current(cur, None));
+        assert!(cursor_is_current(cur, Some(crate::transport::boot_id())));
+        // Another boot's id, or a cursor this process never handed out (the
+        // counter restarted below it) → reset.
+        assert!(!cursor_is_current(cur, Some("previous-boot")));
+        assert!(!cursor_is_current(cur + 1_000_000, None));
         clear(agent);
     }
 

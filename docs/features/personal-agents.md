@@ -182,7 +182,10 @@ the entries after the tab's cursor (`?after_seq=`), run history is re-read only
 when a run changed (or once a minute), and an approval change refreshes the tab
 only when it is one of the approvals it shows (perf W4). The tool-call list is an
 in-memory view (newest 200 per agent, cleared on daemon restart);
-`mcp_call_log` remains the durable audit.
+`mcp_call_log` remains the durable audit. Because the ring's `seq` counter
+restarts with the daemon, every answer carries the daemon's boot id (`epoch`);
+the tab sends it back with its cursor, and a cursor from a previous process is
+answered in full (`reset: true`) so the list never freezes after a restart.
 
 **Memory inspector** (Memory tab, above the raw editor): every top-level bullet
 of `memory/notes.md` as an item with its **source** — agents are told to start

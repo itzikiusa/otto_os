@@ -9,14 +9,32 @@ import type { PersonalAgentActivity } from '../../lib/api/types';
 /** Ring entries the client keeps (the daemon's per-agent cap). */
 export const ACTIVITY_ITEM_CAP = 200;
 
+/** Did the daemon restart since `prev`'s cursor was handed out? The ring and
+ *  its `seq` counter are per-process (restart at 1), so the old cursor and
+ *  items mean nothing to the new daemon (perf N1). The daemon also flags a
+ *  stale cursor itself (`reset`). */
+export function activityEpochChanged(
+  prev: PersonalAgentActivity | null,
+  next: PersonalAgentActivity,
+): boolean {
+  if (!prev) return false;
+  if (next.reset) return true;
+  return !!prev.epoch && !!next.epoch && prev.epoch !== next.epoch;
+}
+
 /** Merge an incremental answer into the current state. `items` are prepended
  *  (newest first, deduped by `seq`, capped); `now`/`approvals`/`seq` are
- *  replaced; `runs` is replaced only when the answer carries them. */
+ *  replaced; `runs` is replaced only when the answer carries them. An answer
+ *  from a different daemon process replaces the items and the cursor (the
+ *  run history is durable, so it is kept when the answer omits it). */
 export function mergeActivity(
   prev: PersonalAgentActivity | null,
   next: PersonalAgentActivity,
 ): PersonalAgentActivity {
   if (!prev) return { ...next, runs: next.runs ?? [] };
+  if (activityEpochChanged(prev, next)) {
+    return { ...next, runs: next.runs ?? prev.runs, seq: next.seq ?? 0 };
+  }
   const seen = new Set(prev.items.map((i) => i.seq));
   const fresh = next.items.filter((i) => !seen.has(i.seq));
   const items = [...fresh, ...prev.items].sort((a, b) => b.seq - a.seq).slice(0, ACTIVITY_ITEM_CAP);
@@ -26,6 +44,7 @@ export function mergeActivity(
     approvals: next.approvals,
     runs: next.runs ?? prev.runs,
     seq: Math.max(prev.seq ?? 0, next.seq ?? 0),
+    epoch: next.epoch ?? prev.epoch,
   };
 }
 
