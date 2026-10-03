@@ -2214,16 +2214,21 @@ impl LocalGit {
                 };
                 // Untracked files: render each as a fully-added diff. Scope the
                 // `ls-files` to the pathspec so a single-file request only checks
-                // that one path (and runs at most one `--no-index` diff).
-                for f in self.untracked(paths).await? {
-                    let (_, stdout, _, _) = self
-                        .exec(
-                            &GitCmd::diff("diff")
-                                .args(["-U3", "--no-index"])
-                                .paths(["/dev/null", f.as_str()]),
-                            None,
-                        )
-                        .await?;
+                // that one path (and runs at most one `--no-index` diff). A full
+                // working diff runs up to 8 of them at once (in order) instead
+                // of one after another: 200 new files were 200 serial spawns.
+                use futures_util::{StreamExt, TryStreamExt};
+                let added: Vec<Vec<u8>> = futures_util::stream::iter(self.untracked(paths).await?)
+                    .map(|f| async move {
+                        let cmd = GitCmd::diff("diff")
+                            .args(["-U3", "--no-index"])
+                            .paths(["/dev/null", f.as_str()]);
+                        self.exec(&cmd, None).await.map(|(_, stdout, _, _)| stdout)
+                    })
+                    .buffered(8)
+                    .try_collect()
+                    .await?;
+                for stdout in added {
                     out.extend_from_slice(&stdout);
                 }
                 out
@@ -2387,6 +2392,15 @@ impl LocalGit {
             }
             None => GitCmd::diff("diff").args(["-M"]),
         };
+        let (out, cut) = self.exec_truncated(&cmd.truncate_stdout(max), None).await?;
+        Ok((String::from_utf8_lossy(&out).into_owned(), cut))
+    }
+
+    /// [`Self::staged_diff_text`] held to its first `max` bytes (git is killed
+    /// there): a commit-message draft keeps 40 KB of the patch, so buffering
+    /// a 100 MB staged vendor drop just to clip it is waste. `bool` = cut.
+    pub async fn staged_diff_text_capped(&self, max: usize) -> Result<(String, bool)> {
+        let cmd = GitCmd::diff("diff").args(["-M", "--cached"]);
         let (out, cut) = self.exec_truncated(&cmd.truncate_stdout(max), None).await?;
         Ok((String::from_utf8_lossy(&out).into_owned(), cut))
     }

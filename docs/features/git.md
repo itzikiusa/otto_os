@@ -255,12 +255,27 @@ config; skipped when the config already names an fsmonitor or git is older
 than 2.37). It is off by default: Otto reads status without optional locks, so
 it cannot persist either cache into the index itself.
 
+**A push never blocks local work.** Push, fetch, pull and tag push serialise
+on a per-repo network lock, separate from the lock stage/commit/discard/
+checkout take, so a push waiting on a slow remote (up to 180 s) no longer
+holds up staging or committing. Pull takes both (it writes the worktree). Every
+mutating route reads the status it returns after releasing its lock.
+
+**The open diff re-reads only for its own file.** `repo_status_changed`
+carries the paths a burst touched (absent when unknown — an index/HEAD move,
+or more than 64 paths). The WIP panel re-reads the open file's diff only when
+its path is among them, and only in the focused window; an unfocused window
+catches up once when it is focused again.
+
 **Forge reads are cached.** PR list, PR detail (comments, reviews,
 discussions), PR commits and CI reads go through a per-account ETag cache: a
 repeat within 15 s makes no request, an older entry revalidates with
 `If-None-Match` (a GitHub 304 costs no rate-limit budget), and every write Otto
 makes to a repository (comment, approve, merge, …) clears that repository's
-entries first.
+entries first. Concurrent misses on one URL share a single request (N windows
+opening one PR on a cold cache cost one GET), and GitHub's GraphQL
+review-thread probe is memoised for the same 15 s (a resolve/unresolve or any
+write to the repo drops it).
 
 **Linked git worktrees** are first-class in Graph:
 

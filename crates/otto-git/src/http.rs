@@ -482,6 +482,57 @@ pub(crate) fn repo_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
+/// Per-repo locks for the NETWORK legs (push, tag push, fetch, pull), kept
+/// apart from [`repo_lock`] so a push — up to the 180 s remote budget — no
+/// longer queues stage/commit/discard behind it. A push writes only
+/// `refs/remotes/*` (plus `branch.*` config for `--set-upstream`, under git's
+/// own `config.lock`); it never touches the index or the worktree, which is
+/// what `repo_lock` protects. Two remote operations still serialise (push vs
+/// fetch both rewrite the tracking refs).
+///
+/// Lock order is ALWAYS `repo_lock` → `remote_lock` (pull holds both: it
+/// writes the worktree and the tracking refs); nothing takes them the other
+/// way round, so the pair cannot deadlock.
+fn remote_locks() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
+    static LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    LOCKS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Return (creating if needed) the network-leg mutex of repo `id`.
+pub(crate) fn remote_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = remote_locks().lock().expect("remote_locks poisoned");
+    map.entry(id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Forget a deleted repo's locks (both maps otherwise only ever grow). An
+/// in-flight holder keeps its own `Arc`, so dropping the entry is safe.
+fn forget_repo_locks(id: &Id) {
+    repo_locks()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(id.as_str());
+    remote_locks()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(id.as_str());
+}
+
+/// The fresh status a mutating route answers with, read AFTER its lock is
+/// released. `status()` is lock-free (`GIT_OPTIONAL_LOCKS=0`: it never takes
+/// `index.lock`), so a stage queued behind this route starts while the walk
+/// runs instead of waiting for it; the read may already include that next
+/// write, which only makes it fresher.
+pub(crate) async fn status_after_release(
+    git: &LocalGit,
+    guard: tokio::sync::MutexGuard<'_, ()>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    drop(guard);
+    Ok(Json(git.status().await?))
+}
+
 // ---------------------------------------------------------------------------
 // Accounts (#31–33)
 // ---------------------------------------------------------------------------
@@ -1211,6 +1262,7 @@ async fn delete_repo<S: GitCtx>(
     // Unregister only — never touch the files on disk.
     s.store().delete_repo(&id).await?;
     crate::watch::global(s.events()).forget(&id);
+    forget_repo_locks(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1316,8 +1368,12 @@ async fn repo_fetch<S: GitCtx>(
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     watch_repo(&s, &repo, &git).await;
     let token = optional_token(&s, &user, &repo).await?;
+    // Fetch and push both rewrite the tracking refs: one at a time per repo,
+    // so neither dies on "cannot lock ref". The worktree lock is not needed.
+    let lock = remote_lock(&id);
+    let _g = lock.lock().await;
     git.fetch(token).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -1570,7 +1626,7 @@ async fn repo_stage<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.stage(&req.paths).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 async fn repo_unstage<S: GitCtx>(
@@ -1583,7 +1639,7 @@ async fn repo_unstage<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.unstage(&req.paths).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 /// `POST /repos/{id}/discard` body: [`StagePathsReq`] plus `keep_staged`,
@@ -1605,7 +1661,7 @@ async fn repo_discard<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.discard_with(&req.paths, req.keep_staged).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 async fn repo_commit<S: GitCtx>(
@@ -1642,7 +1698,9 @@ async fn repo_push<S: GitCtx>(
     Path(id): Path<Id>,
     body: Option<Json<PushReq>>,
 ) -> ApiResult<Json<RepoStatusResp>> {
-    let lock = repo_lock(&id);
+    // The network-leg lock, NOT `repo_lock`: a slow push must not queue
+    // stage/commit behind it (see `remote_lock`).
+    let lock = remote_lock(&id);
     let _g = lock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
@@ -1655,7 +1713,7 @@ async fn repo_push<S: GitCtx>(
     }
     git.push_with(token, branch, force).await?;
     // Return the FRESH status so the UI's ahead/behind chip updates after push.
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 /// Optional pull body: `auto_stash` wraps the pull in stash → pull → pop when
@@ -1677,8 +1735,12 @@ async fn repo_pull<S: GitCtx>(
     Path(id): Path<Id>,
     body: Option<Json<PullReq>>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Pull writes the worktree AND the tracking refs: both locks, in the
+    // fixed `repo_lock` → `remote_lock` order.
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
+    let rlock = remote_lock(&id);
+    let _rg = rlock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
     // Pull, then return the FRESH status so the UI's branch chip clears its
@@ -1703,6 +1765,8 @@ async fn repo_pull<S: GitCtx>(
         git.pull_outcome_mode(token, mode).await?;
         None
     };
+    drop(_rg);
+    drop(_g);
     Ok(Json(serde_json::json!({
         "status": git.status().await?,
         "note": note,
@@ -1719,6 +1783,8 @@ async fn repo_collections_pull<S: GitCtx>(
 ) -> ApiResult<Json<serde_json::Value>> {
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
+    let rlock = remote_lock(&id);
+    let _rg = rlock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
     let _ = git.pull(token).await; // best-effort; report read result regardless
@@ -1765,6 +1831,8 @@ async fn repo_collections_push<S: GitCtx>(
 ) -> ApiResult<Json<serde_json::Value>> {
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
+    let rlock = remote_lock(&id);
+    let _rg = rlock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     if let Some(branch) = req.branch.as_deref().filter(|b| !b.is_empty()) {
         git.checkout(branch, true).await?;
@@ -1822,7 +1890,7 @@ async fn repo_checkout<S: GitCtx>(
     } else {
         git.checkout(branch, req.create).await?;
     }
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1849,7 +1917,7 @@ async fn repo_cherry_pick<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.cherry_pick(req.sha.trim()).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -1870,7 +1938,7 @@ async fn repo_revert<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.revert(req.sha.trim()).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -1905,7 +1973,7 @@ async fn repo_branch_create<S: GitCtx>(
         req.checkout.unwrap_or(false),
     )
     .await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -1927,7 +1995,7 @@ async fn repo_branch_rename<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.rename_branch(req.from.trim(), req.to.trim()).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -1980,7 +2048,7 @@ async fn repo_branch_delete<S: GitCtx>(
         let token = optional_token(&s, &user, &repo).await?;
         git.delete_remote_branch(name, token).await?;
     }
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -2024,7 +2092,7 @@ async fn repo_tag_create<S: GitCtx>(
         let token = optional_token(&s, &user, &repo).await?;
         git.push_tag(name, token).await?;
     }
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -2044,8 +2112,10 @@ async fn repo_tag_push<S: GitCtx>(
     }
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
+    let lock = remote_lock(&id);
+    let _g = lock.lock().await;
     git.push_tag(name, token).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -2074,7 +2144,7 @@ async fn repo_tag_delete<S: GitCtx>(
         let token = optional_token(&s, &user, &repo).await?;
         git.delete_remote_tag(name, token).await?;
     }
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 /// List stashes (read-only). Viewer role — no working-tree mutation.
@@ -2259,7 +2329,7 @@ async fn repo_stash<S: GitCtx>(
         }
         other => return Err(Error::Invalid(format!("bad stash op: {other}")).into()),
     }
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2358,7 +2428,7 @@ async fn repo_conflict_resolve<S: GitCtx>(
         Some(side) => git.resolve_take_side(&req.path, side).await?,
         None => git.write_resolution(&req.path, &req.content).await?,
     }
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 // ---------------------------------------------------------------------------
@@ -3564,6 +3634,110 @@ mod tests {
             "a clean pop leaves no stash entry"
         );
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// R1: a push holds only the network-leg lock. A stage issued while a
+    /// push is stuck on a slow remote (a `pre-receive` hook that sleeps)
+    /// returns at once instead of queueing for the whole round-trip; the
+    /// push still lands and answers with the post-push status.
+    #[tokio::test]
+    async fn stage_is_not_blocked_by_a_slow_push() {
+        let (_pool, ctx, user, ws) = fixture().await;
+        let dir = init_git_repo().await;
+        let remote = dir.with_extension("remote.git");
+        let sh = |cwd: &std::path::Path, args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        sh(&dir, &["config", "user.email", "otto@test.local"]);
+        sh(&dir, &["config", "user.name", "Otto Test"]);
+        sh(&dir, &["config", "commit.gpgsign", "false"]);
+        sh(&dir, &["checkout", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        sh(&dir, &["add", "-A"]);
+        sh(&dir, &["commit", "-q", "-m", "init"]);
+        sh(
+            dir.parent().unwrap(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        sh(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        sh(&dir, &["push", "-q", "-u", "origin", "main"]);
+        // From now on every push parks in the remote for ~3 s, after
+        // leaving a marker so the test knows the push is in flight.
+        let marker = dir.with_extension("pushing");
+        let hook = remote.join("hooks/pre-receive");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nsleep 3\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "b\n").unwrap();
+        sh(&dir, &["commit", "-q", "-am", "second"]);
+        std::fs::write(dir.join("c.txt"), "new\n").unwrap();
+
+        let repo = ctx
+            .store
+            .create_repo(NewRepo {
+                workspace_id: ws.clone(),
+                name: "slow-push".into(),
+                path: dir.to_string_lossy().into_owned(),
+                remote_url: None,
+                provider: None,
+                git_account_id: None,
+            })
+            .await
+            .unwrap();
+
+        let push = tokio::spawn(repo_push(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            None,
+        ));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !marker.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "push never reached the remote"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let t0 = std::time::Instant::now();
+        let st = repo_stage(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            Json(StagePathsReq {
+                paths: vec!["c.txt".into()],
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let took = t0.elapsed();
+        assert!(
+            !push.is_finished(),
+            "the push should still be parked in the hook"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(1),
+            "stage waited {took:?} behind the push"
+        );
+        assert!(st.changes.iter().any(|c| c.path == "c.txt" && c.staged));
+
+        let after = push.await.unwrap().unwrap().0;
+        assert_eq!(after.ahead, 0, "the push landed");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let _ = tokio::fs::remove_dir_all(&remote).await;
+        let _ = std::fs::remove_file(&marker);
     }
 
     /// `/diff` end to end through the handler: summary, the cache (hit on

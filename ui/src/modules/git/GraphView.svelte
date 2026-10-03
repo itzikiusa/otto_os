@@ -277,6 +277,11 @@
   // every row renders as real DOM, so an unbounded fetch on a 100k-commit repo
   // would lock the webview on mount.
   const PAGE = 10000;
+  /** The first page of a cold mount, and what a background reload re-reads
+   *  (perf R3): 2k commits paint at once; the next PAGE is prefetched right
+   *  after, so a ref click still rarely waits. A reload splices this onto the
+   *  held tail (graph-splice.ts). */
+  const FIRST_PAGE = 2000;
   /** False once a short page comes back — that's the root of history. */
   let hasMore = $state(true);
   /** Guards against overlapping page fetches (scroll fires far faster than IO). */
@@ -299,10 +304,10 @@
    *  `until` (a sha) makes it ONE daemon walk that stops right after that
    *  commit — how a jump to an old ref reaches it, instead of a chain of
    *  10k-commit `--skip` pages that each re-walk everything before them. */
-  function loadMore(until?: string): Promise<boolean> {
+  function loadMore(until?: string, limit = PAGE): Promise<boolean> {
     if (inflight) return inflight;
     if (!hasMore) return Promise.resolve(false);
-    const p = loadPage(until);
+    const p = loadPage(until, limit);
     inflight = p;
     loadingMore = true;
     // Release the slot by PROMISE IDENTITY, never by generation: a reload that
@@ -405,18 +410,18 @@
     pendingPages = [];
   }
 
-  async function loadPage(until?: string): Promise<boolean> {
+  async function loadPage(until?: string, limit = PAGE): Promise<boolean> {
     const gen = loadGen;
     try {
       // Only a sha is a valid target (the daemon 400s anything else).
       const to = until && /^[0-9a-f]{4,64}$/i.test(until) ? `&until=${until}` : '';
       const page = await api.get<CommitInfo[]>(
-        `/repos/${repoId}/log?all=true&limit=${PAGE}&skip=${skipCursor}${to}`,
+        `/repos/${repoId}/log?all=true&limit=${limit}&skip=${skipCursor}${to}`,
       );
       if (gen !== loadGen) return false; // repo changed under us — drop it
       commitsError = null;
       skipCursor += page.length;
-      if (page.length < PAGE) hasMore = false;
+      if (page.length < limit) hasMore = false;
       if (page.length > 0) {
         // `--all` + skip can re-emit a commit if refs moved between pages; dedupe
         // so the lane algorithm never sees the same sha twice.
@@ -647,7 +652,17 @@
     worktrees = [];
     submodules = [];
     void reloadSideLists(id, true);
-    await Promise.all([loadRefs(id), loadMore().finally(() => (commitsLoading = false))]);
+    const gen = loadGen;
+    await Promise.all([
+      loadRefs(id),
+      loadMore(undefined, FIRST_PAGE).finally(() => {
+        commitsLoading = false;
+        // Prefetch the next page once the first one has painted.
+        setTimeout(() => {
+          if (gen === loadGen && id === repoId && hasMore) void loadMore();
+        }, 0);
+      }),
+    ]);
   }
 
   /** Stashes + worktrees + submodules — not part of the refs fingerprint, so a
@@ -955,14 +970,14 @@
         .catch((e: unknown) => ({ v: null, e }));
     if (full) refRemoved = false;
     const [c0, st, wt] = await Promise.all([
-      readLog(full ? Math.max(PAGE, held.length) : PAGE),
+      readLog(full ? Math.max(PAGE, held.length) : FIRST_PAGE),
       api.get<StashInfo[]>(`/repos/${id}/stashes`).catch(() => null),
       api.get<WorktreeInfo[]>(`/repos/${id}/worktrees`).catch(() => null),
     ]);
     let c = c0;
-    let want = full ? Math.max(PAGE, held.length) : PAGE;
+    let want = full ? Math.max(PAGE, held.length) : FIRST_PAGE;
     let more: boolean | null = null;
-    if (!full && c.v && c.v.length >= PAGE && held.length > PAGE) {
+    if (!full && c.v && c.v.length >= FIRST_PAGE && held.length > FIRST_PAGE) {
       const spliced = spliceHistory(held, c.v);
       if (spliced) {
         c = { v: spliced, e: null };
@@ -2039,9 +2054,28 @@
   // $state — the derived owns it), and a pass whose `commits` merely EXTENDS
   // the previous list (same first/last objects at the same positions — pages
   // are appended with `concat`, so the objects are shared) resumes from there.
-  // Anything else (reload, splice, cache restore, new lane names) lays out
-  // from scratch.
+  // Anything else (reload, cache restore) lays out from scratch.
+  //
+  // A reload SPLICE (graph-splice.ts: a fresh first page + the held tail,
+  // whose objects are shared) lays out the new page from scratch and keeps
+  // going only until it CONVERGES: at each checkpoint of the previous pass
+  // (one per CHECKPOINT_EVERY rows) whose commit is the same object at the
+  // shifted position, an identical lane state means every row below is what
+  // the previous pass computed — those rows and the final state are reused.
+  // A splice after paging to 50k lays out ~the page, not 50k rows.
+  const CHECKPOINT_EVERY = 1000;
+  interface LaneCheckpoint {
+    /** Row index whose layout starts from this state. */
+    row: number;
+    lanes: (string | null)[];
+    laneColors: number[];
+    laneBranch: (string | null)[];
+    colorIdx: number;
+    /** Widest lane count over the rows from `row` to the next checkpoint. */
+    segWidest: number;
+  }
   interface LaneMemo {
+    checkpoints: LaneCheckpoint[];
     names: Map<string, string>;
     n: number;
     first: CommitInfo | undefined;
@@ -2069,6 +2103,32 @@
     const resume =
       m !== null && m.names === names && m.n > 0 && m.n <= commits.length &&
       commits[0] === m.first && commits[m.n - 1] === m.last;
+    // Splice convergence candidates: the previous pass's checkpoints, by the
+    // row they map to now (`d` = how far the shared tail moved).
+    const d = m ? commits.length - m.n : 0;
+    let converge: Map<number, LaneCheckpoint> | null = null;
+    /** No reuse at or above this row: a commit whose lane NAME changed (a
+     *  ref moved) sits there, and old rows below would carry the stale name. */
+    let convergeFloor = 0;
+    if (!resume && m !== null && m.n > 0 && commits[commits.length - 1] === m.last && commits[0] !== m.first) {
+      converge = new Map();
+      for (const cp of m.checkpoints) {
+        const at = cp.row + d;
+        if (cp.row > 0 && at > 0 && at < commits.length && commits[at] === m.rows[cp.row]?.commit) converge.set(at, cp);
+      }
+      if (converge.size === 0) converge = null;
+      else if (m.names !== names) {
+        const changed = new Set<string>();
+        for (const [k, v] of names) if (m.names.get(k) !== v) changed.add(k);
+        for (const k of m.names.keys()) if (!names.has(k)) changed.add(k);
+        for (let i = commits.length - 1; i >= 0 && changed.size > 0; i--) {
+          if (changed.has(commits[i].sha)) {
+            convergeFloor = i + 1;
+            break;
+          }
+        }
+      }
+    }
 
     // lanes[i] = sha of the commit expected next in lane i (null = free).
     // laneColors[i] = palette index for lane i — kept index-aligned with lanes[]
@@ -2138,11 +2198,58 @@
 
     // A copy: the previous `rows` array is what consumers hold — mutating it
     // would hand them the same reference and skip their recompute.
-    const rows: LaneRow[] = resume ? m.rows.slice() : [];
+    let rows: LaneRow[] = resume ? m.rows.slice() : [];
     const from = resume ? m.n : 0;
     lastLayoutRows = commits.length - from;
+    let checkpoints: LaneCheckpoint[] = resume ? m.checkpoints.slice() : [];
+    let lastCp = checkpoints.length ? checkpoints[checkpoints.length - 1] : null;
+    let adopted = false;
+
+    function sameState(cp: LaneCheckpoint): boolean {
+      if (cp.colorIdx % PALETTE.length !== colorIdx % PALETTE.length) return false;
+      if (cp.lanes.length !== lanes.length) return false;
+      for (let i = 0; i < lanes.length; i++) {
+        if (cp.lanes[i] !== lanes[i] || cp.laneColors[i] !== laneColors[i] || cp.laneBranch[i] !== laneBranch[i]) return false;
+      }
+      return true;
+    }
 
     for (let ci = from; ci < commits.length; ci++) {
+      if (converge !== null && ci >= convergeFloor && m !== null) {
+        const cp = converge.get(ci);
+        if (cp && sameState(cp)) {
+          // Converged: rows ci… are the previous pass's rows cp.row…, and so
+          // is the state after them. Re-base the old checkpoints onto the new
+          // row numbers (their state arrays are never mutated — shared).
+          rows = rows.concat(m.rows.slice(cp.row));
+          for (const old of m.checkpoints) {
+            if (old.row < cp.row) continue;
+            checkpoints.push({ ...old, row: old.row + d });
+            if (old.segWidest > widest) widest = old.segWidest;
+          }
+          lanes.length = 0;
+          lanes.push(...m.lanes);
+          laneColors.length = 0;
+          laneColors.push(...m.laneColors);
+          laneBranch.length = 0;
+          laneBranch.push(...m.laneBranch);
+          colorIdx = m.colorIdx;
+          lastLayoutRows = ci;
+          adopted = true;
+          break;
+        }
+      }
+      if (lastCp === null || ci - lastCp.row >= CHECKPOINT_EVERY) {
+        lastCp = {
+          row: ci,
+          lanes: lanes.slice(),
+          laneColors: laneColors.slice(),
+          laneBranch: laneBranch.slice(),
+          colorIdx,
+          segWidest: lanes.length,
+        };
+        checkpoints.push(lastCp);
+      }
       const commit = commits[ci];
       // Find this commit's column (which lane is "expecting" this sha)
       let col = lanes.indexOf(commit.sha);
@@ -2226,6 +2333,7 @@
       }
 
       if (lanes.length > widest) widest = lanes.length;
+      if (lanes.length > lastCp.segWidest) lastCp.segWidest = lanes.length;
 
       // A root commit (or the end of loaded history with no parent recorded) has
       // nothing below it — without this the gutter trailed a stub off the oldest
@@ -2234,6 +2342,7 @@
     }
 
     laneMemo = {
+      checkpoints,
       names,
       n: commits.length,
       first: commits[0],

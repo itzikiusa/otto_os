@@ -140,3 +140,40 @@ jobs:
             grep -E 'rows|ms' "$RUNNER_TEMP/k8s.log" | tail -n 40 || echo "no output"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  git-status-large-tree:
+    name: Git status on a large tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Generous on a shared runner (locally well under a second): it catches
+      # an order-of-magnitude regression (a lost untracked cap, a per-file
+      # spawn), not jitter.
+      OTTO_STATUS_BUDGET_MS: "5000"
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: nightly-bench
+
+      - name: Run large-tree status timing
+        shell: bash
+        run: |
+          cargo test -p otto-git --lib large_tree_status_timing \
+            -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/status.log"
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### Git status, 100k tracked + 10k untracked"
+            echo "Budget: ${OTTO_STATUS_BUDGET_MS} ms"
+            echo '```'
+            grep '^status on ' "$RUNNER_TEMP/status.log" || echo "no timing output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

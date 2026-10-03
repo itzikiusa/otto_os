@@ -1735,6 +1735,11 @@ export type OttoEvent =
       type: 'repo_status_changed';
       workspace_id: Id;
       repo_id: Id;
+      /** Repo-relative worktree paths (files or directories) the change burst
+       *  touched, so an open diff re-reads only for its own file. Absent =
+       *  unknown (index/HEAD/branch-ref move, a rescan, > 64 paths): assume
+       *  anything changed. Present and empty: only remote refs/tags moved. */
+      paths?: string[];
     }
   | {
       /** A browser tab was created or navigated (a reader-mode navigation
