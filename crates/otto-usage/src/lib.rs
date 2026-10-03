@@ -37,7 +37,7 @@ pub const EXTERNAL_WORKSPACE: &str = "external";
 
 pub use budget_dedup::{BudgetDedup, BudgetSignal};
 pub use clickhouse::ClickHouse;
-pub use engine::{UsageEngine, UsageScope};
+pub use engine::{ReportOptions, UsageEngine, UsageScope};
 pub use metrics::{Metric, MetricsSampler};
 pub use pricing::{estimate_cost, is_priced, PRICED_AS_OF};
 pub use tailer::{

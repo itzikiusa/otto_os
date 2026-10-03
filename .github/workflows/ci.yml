@@ -160,6 +160,18 @@ jobs:
           OTTO_PERF_BUDGET_SCALE: '3'
         run: cargo test -p otto-pty --release --lib perf_budgets -- --nocapture
 
+      # Embedded ClickHouse budgets (perf2/09 R6): idle thread count of the
+      # usage server with Otto's config (OTTO_PERF), plus the per-summary /
+      # per-report statement + rows-read guard and the idle-stop wake test.
+      # Uses the pinned clickhouse installed above. Report-only.
+      - name: ClickHouse usage budgets (otto-usage)
+        continue-on-error: true
+        env:
+          OTTO_PERF: '1'
+        run: |
+          cargo test -p otto-usage --test e2e \
+            -- budget summary_and_report_query_budget idle_stop --nocapture
+
       # nextest does not execute doctests, so retain Cargo's separate gate.
       - name: cargo test (doctests)
         run: cargo test --workspace --doc

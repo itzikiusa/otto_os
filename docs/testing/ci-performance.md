@@ -89,7 +89,12 @@ style, layout and paint dominate, so the gates could not see its regressions.
   plus the daemon's terminal emulator budgets
   (`OTTO_PERF=1 cargo test -p otto-pty --release --lib perf_budgets`: snapshot
   capture < 2 ms, format < 40 ms, 4000-row reflow < 50 ms, feed ≥ 50 MB/s with
-  3 subscribers, all ×scale). It is
+  3 subscribers, all ×scale), and the embedded ClickHouse budgets
+  (`OTTO_PERF=1 cargo test -p otto-usage --test e2e -- budget
+  summary_and_report_query_budget idle_stop`, with the official binary fetched
+  into a temp dir: idle server ≤ 62 threads — 56–58 measured on macOS; a
+  summary and a report each ≤ 2 statements reading ≤ 1.1× the table; an
+  idle-stopped server restarts on the next query with its data). It is
   advisory (`continue-on-error`) until it has a green history: it is the first
   job to run the daemon and Playwright WebKit on Linux. Promote it by removing
   `continue-on-error`.

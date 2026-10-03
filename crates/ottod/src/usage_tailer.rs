@@ -82,6 +82,11 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(600);
 /// Coalesce a burst of FSEvents (an agent writing many lines) into one pass.
 const FS_DEBOUNCE: Duration = Duration::from_secs(2);
 
+/// How long the attribution index is reused across passes before it is
+/// re-read from `sessions` (a lookup miss after a sessions write rebuilds
+/// sooner — see [`UsageTailer::refresh_after_miss`]).
+const ATTRIBUTION_TTL: Duration = Duration::from_secs(60);
+
 /// A held response whose file stayed quiet this long is counted as final.
 const HOLD_IDLE: Duration = Duration::from_secs(15);
 
@@ -179,9 +184,22 @@ pub struct UsageTailer {
     /// Session-wide cumulative-token baselines for Codex rollout snapshots.
     codex_counters: CodexCounterStore,
     codex_counters_dirty: bool,
-    /// Attribution for the current pass, built on the first tail that
-    /// actually has bytes (an idle pass never queries `sessions`).
+    /// Attribution index, built on the first tail that actually has bytes
+    /// (an idle pass never queries `sessions`) and REUSED across passes for
+    /// ATTRIBUTION_TTL — event-driven passes run every ~2 s while an agent
+    /// streams, and re-reading the whole table each time was the hot cost.
     attr: Option<Attribution>,
+    /// When `attr` was built.
+    attr_built: Option<Instant>,
+    /// [`otto_state::sessions::attribution_generation`] read just BEFORE the
+    /// build's query (a write racing the query re-arms the next miss).
+    attr_gen: u64,
+    /// `attr` was (re)built during the current pass — a miss never rebuilds
+    /// twice in one pass.
+    attr_fresh_this_pass: bool,
+    /// Source of the sessions write generation (a test seam: the real one is
+    /// process-global and parallel tests would bump it).
+    generation: fn() -> u64,
     /// Work counters (perf guards in tests; cheap enough to keep always).
     stats: TailerStats,
 }
@@ -248,6 +266,10 @@ impl UsageTailer {
             codex_counters,
             codex_counters_dirty: false,
             attr: None,
+            attr_built: None,
+            attr_gen: 0,
+            attr_fresh_this_pass: false,
+            generation: otto_state::sessions::attribution_generation,
             stats: TailerStats::default(),
         }
     }
@@ -408,8 +430,9 @@ impl UsageTailer {
             .unwrap_or_default(),
         );
 
-        // Pass 1 (blocking pool, streaming, O(1) memory): the oldest event
-        // date bounds the purge, and the purge must precede every insert.
+        // Pass 1 (blocking pool, head of each file only, O(1) memory): the
+        // oldest event date bounds the purge, and the purge must precede every
+        // insert.
         let f1 = Arc::clone(&files);
         let (n_usage, min_date) = tokio::task::spawn_blocking(move || rebuild_min_date(&f1))
             .await
@@ -624,7 +647,7 @@ impl UsageTailer {
     /// Tail every listed file whose size moved since it was last tailed, then
     /// release held responses that have been quiet for HOLD_IDLE.
     async fn tail_listed(&mut self, claude: &[(PathBuf, u64)], codex: &[(PathBuf, u64)]) {
-        self.attr = None; // rebuilt lazily, at most once per pass
+        self.attr_fresh_this_pass = false;
         for (file, size) in claude {
             if self.last_size.get(file) == Some(size) {
                 continue;
@@ -661,7 +684,6 @@ impl UsageTailer {
             }
             self.last_size.insert(file.clone(), *size);
         }
-        self.attr = None;
     }
 
     /// Persist whatever changed this scan, off the async worker. Provider-level
@@ -761,13 +783,71 @@ impl UsageTailer {
         self.cursors.set_if_changed(file, offset);
     }
 
-    /// The pass's attribution, querying `sessions` on first use only.
+    /// The cached attribution, (re)querying `sessions` only when there is
+    /// none yet or it is older than ATTRIBUTION_TTL.
     async fn attribution(&mut self) -> &Attribution {
-        if self.attr.is_none() {
-            let a = self.build_attribution().await;
-            self.attr = Some(a);
+        let stale = self
+            .attr_built
+            .is_none_or(|t| t.elapsed() >= ATTRIBUTION_TTL);
+        if self.attr.is_none() || stale {
+            self.rebuild_attribution().await;
         }
         self.attr.get_or_insert_with(Attribution::default)
+    }
+
+    async fn rebuild_attribution(&mut self) {
+        // Read the generation first: a session written while the query runs
+        // leaves the generation ahead of `attr_gen`, so its first miss
+        // rebuilds again instead of being cached as "external".
+        let generation = (self.generation)();
+        let a = self.build_attribution().await;
+        self.attr = Some(a);
+        self.attr_built = Some(Instant::now());
+        self.attr_gen = generation;
+        self.attr_fresh_this_pass = true;
+    }
+
+    /// A lookup missed the cached index. Rebuild (once per pass) only if a
+    /// sessions write happened since the index was built — a brand-new
+    /// session, or a provider-session id stamped after spawn. A transcript
+    /// that is simply not Otto's (external) misses forever without ever
+    /// re-querying. Returns whether the index was rebuilt.
+    async fn refresh_after_miss(&mut self) -> bool {
+        if self.attr_fresh_this_pass || (self.generation)() == self.attr_gen {
+            return false;
+        }
+        self.rebuild_attribution().await;
+        true
+    }
+
+    /// Claude attribution: transcript stem → Otto session (miss-refreshing).
+    async fn lookup_claude(&mut self, stem: &str) -> Option<SessionRef> {
+        if let Some(s) = self.attribution().await.by_provider_session.get(stem) {
+            return Some(s.clone());
+        }
+        if !self.refresh_after_miss().await {
+            return None;
+        }
+        self.attr.as_ref()?.by_provider_session.get(stem).cloned()
+    }
+
+    /// Codex attribution: the cwd's ONLY codex session (miss-refreshing).
+    async fn lookup_codex(&mut self, cwd: &str) -> Option<SessionRef> {
+        fn unique(a: &Attribution, cwd: &str) -> Option<SessionRef> {
+            let sessions = a.by_cwd.get(cwd)?;
+            let mut codex = sessions.iter().filter(|s| s.provider == "codex");
+            match (codex.next(), codex.next()) {
+                (Some(s), None) => Some(s.clone()),
+                _ => None,
+            }
+        }
+        if let Some(s) = unique(self.attribution().await, cwd) {
+            return Some(s);
+        }
+        if !self.refresh_after_miss().await {
+            return None;
+        }
+        unique(self.attr.as_ref()?, cwd)
     }
 
     /// Rebuild the claude (by provider-session-id) and codex (by cwd)
@@ -819,8 +899,8 @@ impl UsageTailer {
             // Filename stem is the CLI's session uuid (= provider_session_id);
             // a subagent transcript bills to its parent session.
             let stem = claude_session_stem(file);
-            let ids = match self.attribution().await.by_provider_session.get(&stem) {
-                Some(s) => (s.workspace_id.clone(), s.otto_session_id.clone()),
+            let ids = match self.lookup_claude(&stem).await {
+                Some(s) => (s.workspace_id, s.otto_session_id),
                 None => (EXTERNAL_WORKSPACE.to_string(), stem.clone()),
             };
 
@@ -943,15 +1023,7 @@ impl UsageTailer {
             };
             // Attribute by cwd → only when exactly one codex session matches.
             let sref = match cwd.as_deref() {
-                Some(c) => self.attribution().await.by_cwd.get(c).and_then(|sessions| {
-                    let codex: Vec<&SessionRef> =
-                        sessions.iter().filter(|s| s.provider == "codex").collect();
-                    if codex.len() == 1 {
-                        Some(codex[0].clone())
-                    } else {
-                        None
-                    }
-                }),
+                Some(c) => self.lookup_codex(c).await,
                 None => None,
             };
             for (_, total) in totals {
@@ -1288,6 +1360,17 @@ const REBUILD_BATCH: usize = 5_000;
 /// line)` with a bounded buffer. Returns the offset just past the last
 /// newline (0 if none). Blocking.
 fn for_each_complete_line(file: &Path, mut f: impl FnMut(u64, &str)) -> std::io::Result<u64> {
+    for_each_complete_line_until(file, |off, line| {
+        f(off, line);
+        true
+    })
+}
+
+/// [`for_each_complete_line`] that stops as soon as `f` returns `false`.
+fn for_each_complete_line_until(
+    file: &Path,
+    mut f: impl FnMut(u64, &str) -> bool,
+) -> std::io::Result<u64> {
     use std::io::BufRead;
     let file = std::fs::File::open(file)?;
     let mut r = std::io::BufReader::with_capacity(256 * 1024, file);
@@ -1301,30 +1384,41 @@ fn for_each_complete_line(file: &Path, mut f: impl FnMut(u64, &str)) -> std::io:
             return Ok(offset);
         }
         let line = String::from_utf8_lossy(&buf);
-        f(offset, &line);
+        let more = f(offset, &line);
         offset += n as u64;
+        if !more {
+            return Ok(offset);
+        }
         if buf.capacity() > 8 * 1024 * 1024 {
             buf = Vec::with_capacity(64 * 1024); // drop a one-off giant line
         }
     }
 }
 
-/// Rebuild pass 1: how many usage lines exist and the oldest event date.
+/// Rebuild pass 1: how many files hold usage lines, and the oldest event
+/// date. Transcripts are append-only and chronological (a resumed session's
+/// replayed history comes first), so each file is read only up to its FIRST
+/// timestamped usage line — pass 1 is O(files × head) instead of a second
+/// full parse of every transcript (R7).
 fn rebuild_min_date(files: &[PathBuf]) -> (usize, Option<String>) {
     let mut n = 0usize;
     let mut min_date: Option<String> = None;
     for file in files {
-        let _ = for_each_complete_line(file, |_, line| {
+        let mut has_usage = false;
+        let _ = for_each_complete_line_until(file, |_, line| {
             let Some(parsed) = parse_claude_line(line) else {
-                return;
+                return true;
             };
-            n += 1;
-            if let Some(date) = parsed.timestamp.as_deref().and_then(|t| t.get(..10)) {
-                if min_date.as_deref().map(|m| date < m).unwrap_or(true) {
-                    min_date = Some(date.to_string());
-                }
+            has_usage = true;
+            let Some(date) = parsed.timestamp.as_deref().and_then(|t| t.get(..10)) else {
+                return true; // keep looking for a dated line
+            };
+            if min_date.as_deref().is_none_or(|m| date < m) {
+                min_date = Some(date.to_string());
             }
+            false
         });
+        n += usize::from(has_usage);
     }
     (n, min_date)
 }
@@ -1715,6 +1809,106 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    static TEST_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Perf guard (R2): while agents stream, event-driven passes run every
+    /// ~2 s. The attribution index must be built ONCE and reused — not
+    /// re-read from `sessions` per pass — while an external transcript's
+    /// misses never re-query, a sessions write makes the next miss rebuild
+    /// exactly once, and the TTL bounds staleness.
+    #[tokio::test]
+    async fn streaming_passes_reuse_attribution() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let root = tmp_root("attr");
+        let home = root.join("home");
+        let proj = home.join(".claude/projects/-p");
+        std::fs::create_dir_all(&proj).unwrap();
+        let pool = otto_state::open(&root.join("t.db")).await.unwrap();
+        let now = "2026-10-03T00:00:00Z".to_string();
+        sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES ('u','u','x','U',0,?)")
+            .bind(&now).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES ('w','w','/tmp',?)",
+        )
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let add_session = |id: &'static str, psid: &'static str| {
+            let pool = pool.clone();
+            let now = now.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO sessions (id, workspace_id, kind, provider, title, status, cwd, \
+                     provider_session_id, created_by, created_at, last_active_at, meta_json) \
+                     VALUES (?, 'w', 'agent', 'claude', 't', 'running', '/tmp', ?, 'u', ?, ?, '{}')",
+                )
+                .bind(id).bind(psid).bind(&now).bind(&now)
+                .execute(&pool).await.unwrap();
+            }
+        };
+        add_session("otto-known", "known").await;
+        let usage = UsageEngine::start(
+            otto_usage::UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let mut t = UsageTailer::new(usage, pool.clone(), root.join("data"), home.clone());
+        t.generation = || TEST_GEN.load(SeqCst);
+        t.seed_existing_files().await;
+
+        let mut n = 0;
+        let mut append = |stem: &str| {
+            n += 1;
+            let f = proj.join(format!("{stem}.jsonl"));
+            let mut body = std::fs::read_to_string(&f).unwrap_or_default();
+            body.push_str(&assistant_line(&format!("m{n}"), 1));
+            body.push('\n');
+            std::fs::write(&f, body).unwrap();
+            f
+        };
+        // Ten streaming passes on a known session + an external one.
+        for _ in 0..10 {
+            let a = append("known");
+            let b = append("external");
+            t.scan_paths(HashSet::from([a, b])).await.unwrap();
+        }
+        assert_eq!(t.stats.attribution_builds, 1, "one build for 10 passes");
+        assert_eq!(
+            t.lookup_claude("known").await.map(|s| s.otto_session_id),
+            Some("otto-known".to_string())
+        );
+
+        // A new session lands (generation moves): its first miss rebuilds
+        // once and attributes it; the external stem still never re-queries.
+        add_session("otto-late", "late").await;
+        TEST_GEN.fetch_add(1, SeqCst);
+        let a = append("late");
+        let b = append("external");
+        t.scan_paths(HashSet::from([a, b])).await.unwrap();
+        assert_eq!(t.stats.attribution_builds, 2);
+        assert_eq!(
+            t.lookup_claude("late").await.map(|s| s.otto_session_id),
+            Some("otto-late".to_string())
+        );
+        let b = append("external");
+        t.scan_paths(HashSet::from([b])).await.unwrap();
+        assert_eq!(
+            t.stats.attribution_builds, 2,
+            "external misses never re-query"
+        );
+
+        // The TTL bounds staleness for writes that bypass the repo.
+        t.attr_built = Instant::now().checked_sub(ATTRIBUTION_TTL);
+        let a = append("known");
+        t.scan_paths(HashSet::from([a])).await.unwrap();
+        assert_eq!(t.stats.attribution_builds, 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn rebuild_streams_dedups_and_keeps_final_usage() {
         let root = tmp_root("rebuild");
@@ -1742,7 +1936,8 @@ mod tests {
         )
         .unwrap();
         let files = vec![a.clone(), b.clone()];
-        assert_eq!(rebuild_min_date(&files), (4, Some("2026-10-03".into())));
+        // Two files with usage; each read only to its first dated usage line.
+        assert_eq!(rebuild_min_date(&files), (2, Some("2026-10-03".into())));
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
         let attr = HashMap::new();
         let out = tokio::task::spawn_blocking(move || rebuild_events(&files, &attr, tx))

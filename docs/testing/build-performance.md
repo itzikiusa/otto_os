@@ -344,3 +344,28 @@ IO/parts/table-loader pools, merge selector 30 s → 5 min) idles at
 **0.4 % CPU, 71 threads, 135 MB**; the previous config at **0.5–0.6 %, 71
 threads, 134 MB** (the capped pools are created lazily, so thread count is
 unchanged at idle; the saving is wake-ups).
+
+Perf wave 2 (perf2/09), same probe with the bundled build on a scratch dir
+(50k rows, attach + `ALTER … DELETE` mutation + `OPTIMIZE FINAL` + restart
+re-attach all pass):
+
+| Config | Idle threads | CPU over 30 s | Restart → `/ping` |
+|---|---|---|---|
+| perf-wave 1 | 70 | 0.47 % | 0.62 s |
+| + `background_pool_size` 4 (paired free-entry thresholds) | 56–58 | 0.40–0.55 % | 0.46 s |
+| + idle-stop (15 min without a request) | **0** (no process) | **0 %** | wake + first summary 0.67 s |
+
+- `OTTO_PERF=1 cargo test -p otto-usage --test e2e budget -- --nocapture` —
+  the idle-thread budget (62) on the real bring-up.
+- `cargo test -p otto-usage --test e2e summary_and_report_query_budget` —
+  50k seeded rows: summary ≤ 2 statements, report ≤ 2, each reading ≤ 1.1×
+  the table (`X-ClickHouse-Summary`); by-kind + budgets after a summary run
+  0 statements (single-flight memo).
+- `cargo test -p otto-usage --test e2e idle_stop` — parks, process exits,
+  next query restarts it with the data intact.
+- `cargo test -p ottod --bin ottod streaming_passes_reuse_attribution` —
+  10 streaming passes build the tailer's attribution once; an external
+  transcript never re-queries; a sessions write + miss rebuilds once.
+- `system_metrics`: one insert per 5 min (was 1/min), and no sampling at all
+  while no session is live, nobody read `/usage/metrics` and no usage was
+  recorded in the last 10 min.

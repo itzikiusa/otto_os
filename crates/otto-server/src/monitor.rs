@@ -474,17 +474,29 @@ pub fn spawn_usage_recorder(ctx: ServerCtx) {
 /// `system_metrics` table. Re-reads the configured interval each tick so a
 /// settings change takes effect without a restart. The sample itself is
 /// blocking (it sleeps a CPU-refresh window), so it runs on a blocking thread.
+///
+/// Idle cost (R1a/R1b): a tick only samples while something needs it — a
+/// live session, a recent `/usage/metrics` reader, or recently recorded usage
+/// ([`otto_usage::UsageEngine::sampler_wanted`]); otherwise it skips the
+/// sample AND the `UsageMetricsTick` broadcast (nothing changed for budgets
+/// or sparklines to react to). Samples are buffered by the engine and
+/// inserted in 5-minute batches. ONE `MetricsSampler` lives across ticks, so
+/// the process CPU % is measured over the tick interval (a fresh sampler per
+/// tick saw a single refresh and reported ~0).
 pub fn spawn_metrics_sampler(ctx: ServerCtx) {
     tokio::spawn(async move {
         // A quick first sample so the dashboard has a data point seconds after
         // open, then sample on the configured cadence (re-read each loop so a
         // settings change takes effect within one interval).
         tokio::time::sleep(Duration::from_secs(3)).await;
+        let sampler = std::sync::Arc::new(std::sync::Mutex::new(otto_usage::MetricsSampler::new()));
         loop {
-            if ctx.usage.available() {
-                let active = ctx.manager.live_count() as u32;
+            let live = ctx.manager.live_count();
+            if ctx.usage.available() && ctx.usage.sampler_wanted(live) {
+                let active = live as u32;
+                let s = std::sync::Arc::clone(&sampler);
                 match tokio::task::spawn_blocking(move || {
-                    otto_usage::MetricsSampler::new().sample(active)
+                    s.lock().unwrap_or_else(|p| p.into_inner()).sample(active)
                 })
                 .await
                 {

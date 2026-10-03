@@ -26,11 +26,22 @@
   const report = $derived(usage.report);
   const sessions = $derived(report ? report.sessions.slice(0, sessionLimit) : []);
 
-  function download(): void {
-    if (!report) return;
-    const file = reportFileName(report);
-    downloadText(buildReportHtml(report), file, 'text/html');
+  async function download(): Promise<void> {
+    // The page holds the slim report; the export needs every session and the
+    // day×model table, fetched once on demand.
+    const full = await usage.fullReport();
+    if (!full) {
+      toasts.error('Could not load the full usage report', usage.reportError ?? undefined);
+      return;
+    }
+    const file = reportFileName(full);
+    downloadText(buildReportHtml(full), file, 'text/html');
     toasts.success('Saved the usage report', file);
+  }
+
+  async function showMore(): Promise<void> {
+    if (!usage.reportFull) await usage.fullReport();
+    sessionLimit += SESSION_PAGE * 4;
   }
 
   function scopeLabel(): string {
@@ -45,7 +56,7 @@
     <span class="dim small">
       {#if report}{scopeLabel()} · last {report.days} days · cost estimated at rates as of {report.priced_as_of}{/if}
     </span>
-    <button class="btn small" disabled={!report} onclick={download} title={report ? 'Save this report as one HTML file' : 'Load the report first'}>
+    <button class="btn small" disabled={!report || usage.reportLoading} onclick={() => void download()} title={report ? 'Save this report as one HTML file' : 'Load the report first'}>
       <Icon name="download" size={12} /> Download HTML
     </button>
   </div>
@@ -120,8 +131,8 @@
     )}
     {#if report.sessions.length > sessionLimit}
       <div class="more">
-        <button class="btn small" onclick={() => (sessionLimit += SESSION_PAGE * 4)}>
-          Show more sessions ({report.sessions.length - sessionLimit} hidden)
+        <button class="btn small" disabled={usage.reportLoading} onclick={() => void showMore()}>
+          {#if usage.reportFull}Show more sessions ({report.sessions.length - sessionLimit} hidden){:else}Show more sessions{/if}
         </button>
       </div>
     {/if}

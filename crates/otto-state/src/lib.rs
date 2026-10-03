@@ -185,6 +185,7 @@ pub use scheduled_tasks::{
 };
 pub use sessions::{
     DormantPass, NewSession, SessionListFilter, SessionScope, SessionsRepo, UsageAttrRow,
+    UsageLabelRow,
 };
 pub use settings::{
     otto_mcp_enabled_for, pr_draft_model_from, SettingsRepo, OTTO_MCP_ENABLED_KEY,

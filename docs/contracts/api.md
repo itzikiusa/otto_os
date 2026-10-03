@@ -139,11 +139,15 @@ failure on a read returns an error (500) — never a 200 with zero totals.
   cache_write_tokens, total_tokens, cost_usd}`, biggest first) and **`daily_models:
   DailyModelUsage[]`** (`{day, provider, model, …tokens, cost_usd}`) rollups, plus
   `scope` (`"all"`|`"own"`).
-- GET /usage/report?days=N&otto_only=B → UsageReport `{days, generated_at, priced_as_of,
+- GET /usage/report?days=N&otto_only=B&sessions_limit=N&include=daily_models → UsageReport
+  `{days, generated_at, priced_as_of,
   scope, otto_only, totals: TokenTotals, daily: DailyUsage[], monthly: MonthlyUsage[]
   {month:"YYYY-MM", events, …tokens, cost_usd}, models: ModelUsage[], daily_models:
-  DailyModelUsage[], sessions: SessionUsage[]}` — the ccusage-style report (≤1000 sessions,
-  enriched like the summary's). The UI renders it as a page and as a downloadable
+  DailyModelUsage[], sessions: SessionUsage[]}` — the ccusage-style report (enriched like
+  the summary's). `sessions_limit` caps the session table (default **100**, max 1000);
+  `daily_models` is **empty unless** `include=daily_models` (only the HTML export renders
+  it — the page loads the slim shape, the export/"Show more" the full one). Two ClickHouse
+  scans: daily/monthly/model/day×model are re-aggregations of one grouped scan. The UI renders it as a page and as a downloadable
   self-contained HTML file. `TokenTotals{input_tokens, output_tokens, cache_read_tokens,
   cache_write_tokens, total_tokens, cost_usd}`.
 - POST /usage/ccusage-check `{days?}` (root) → CcusageCheck `{ran, command, duration_ms,
@@ -2603,7 +2607,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 |---|---|---|---|
 | GET /usage/status | Usage:View (paths redacted for non-root) | — | engine status (installed/available) |
 | GET /usage/summary | Usage:View (non-root: own sessions) | — | token-first breakdown (input/output + cache read/write, per provider/day/session/model) |
-| GET /usage/report | Usage:View (non-root: own sessions) | — | UsageReport (daily/monthly/model/session tables) |
+| GET /usage/report | Usage:View (non-root: own sessions) | `sessions_limit` (1–1000, default 100), `include=daily_models` | UsageReport (daily/monthly/model/session tables; `daily_models` only when included) |
 | POST /usage/ccusage-check | root | `{days?}` | CcusageCheck (opt-in `npx ccusage` cross-check) |
 | GET /usage/metrics | root | — | system CPU/RAM metrics |
 | PUT /usage/config | root | UsageConfig | config |
