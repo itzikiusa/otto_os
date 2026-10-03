@@ -13,7 +13,9 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { formatSeconds } from '../../lib/metric-format';
+  import Modal from '../../lib/components/Modal.svelte';
   import type { GoalLoop } from '../../lib/api/types';
+  import { budgetCap, extendDefaults, hasBudgetLeft } from './budget';
   import { tick } from 'svelte';
 
   let { id, onback }: { id: string; onback: () => void } = $props();
@@ -114,6 +116,46 @@
       { label: 'Delete loop…', icon: 'trash', danger: true, action: () => void del() },
     ]);
   }
+  // ---- Extend budget (L1): an exhausted loop re-exhausts on a plain Resume,
+  // so raise its caps (PATCH limits) and then resume, in one step.
+  let extendOpen = $state(false);
+  let extIters = $state(0);
+  let extMinutes = $state(0);
+  let extError = $state('');
+  const cap = $derived(loop ? budgetCap(loop, elapsedSecs(loop)) : null);
+  const budgetLeft = $derived(!!loop && hasBudgetLeft(loop, elapsedSecs(loop)));
+  function openExtend(): void {
+    if (!loop) return;
+    const d = extendDefaults(loop, elapsedSecs(loop));
+    extIters = d.max_iterations;
+    extMinutes = d.runtime_minutes;
+    extError = '';
+    extendOpen = true;
+  }
+  async function extendAndResume(): Promise<void> {
+    if (!loop) return;
+    const iters = Math.floor(Number(extIters));
+    const mins = Math.floor(Number(extMinutes));
+    if (!(iters > 0) || !(mins > 0)) {
+      extError = 'Iterations and runtime must be positive whole numbers.';
+      return;
+    }
+    if (iters <= loop.iterations_started || mins * 60 <= elapsedSecs(loop)) {
+      extError = `Raise both above what is already used (${loop.iterations_started} iterations, ${formatSeconds(Math.round(elapsedSecs(loop)))}).`;
+      return;
+    }
+    extError = '';
+    acting = true;
+    try {
+      await loops.updateLimits(id, { ...loop.limits, max_iterations: iters, max_runtime_secs: mins * 60 });
+      extendOpen = false;
+      await loops.resume(id);
+    } catch (e) {
+      extError = errText(e);
+    } finally {
+      acting = false;
+    }
+  }
   const unanswered = $derived(loop?.ledger?.questions.some((q) => !q.answer) ?? false);
   const openQuestions = $derived((loop?.ledger?.questions ?? []).filter((q) => !q.answer));
   const answeredQuestions = $derived((loop?.ledger?.questions ?? []).filter((q) => !!q.answer));
@@ -140,8 +182,16 @@
           aria-label="More actions" title="More actions" aria-haspopup="menu">
           <Icon name="more" size={14} />
         </button>
-        <button class="btn small primary" disabled={unanswered || acting} title={unanswered ? 'Answer the open decision below first' : 'Continue iterating toward the goal'}
-          onclick={() => act(() => loops.resume(id), 'Couldn’t resume the goal loop')}><Icon name="play" size={12} /> Resume</button>
+        {#if budgetLeft}
+          <button class="btn small" data-overflow="-1" data-icon="plus" disabled={acting} onclick={openExtend}
+            title="Raise the iteration and runtime caps">Extend budget…</button>
+          <button class="btn small primary" disabled={unanswered || acting} title={unanswered ? 'Answer the open decision below first' : 'Continue iterating toward the goal'}
+            onclick={() => act(() => loops.resume(id), 'Couldn’t resume the goal loop')}><Icon name="play" size={12} /> Resume</button>
+        {:else}
+          <!-- No budget left: a plain Resume would re-exhaust at once. -->
+          <button class="btn small primary" disabled={unanswered || acting} title={unanswered ? 'Answer the open decision below first' : 'Raise the caps, then continue iterating'}
+            onclick={openExtend}><Icon name="play" size={12} /> Extend &amp; resume…</button>
+        {/if}
       {:else if loop.status === 'draft'}
         <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete loop" onclick={del}
           aria-label="Delete goal loop" title="Delete goal loop"><Icon name="trash" size={14} /></button>
@@ -186,8 +236,8 @@
       </ol>
 
       <dl class="stats">
-        <div><dt>Iteration</dt><dd>{loop.current_iteration} <span class="of">/ {loop.limits.max_iterations}</span></dd></div>
-        <div><dt>Time used</dt><dd>{formatSeconds(Math.round(elapsedSecs(loop)))} <span class="of">/ {formatSeconds(loop.limits.max_runtime_secs)}</span></dd></div>
+        <div><dt>Iteration</dt><dd>{loop.current_iteration} <span class="of" class:cap-hit={cap === 'iterations'}>/ {loop.limits.max_iterations}</span>{#if cap === 'iterations'} <span class="cap-hit">cap reached</span>{/if}</dd></div>
+        <div><dt>Time used</dt><dd>{formatSeconds(Math.round(elapsedSecs(loop)))} <span class="of" class:cap-hit={cap === 'runtime'}>/ {formatSeconds(loop.limits.max_runtime_secs)}</span>{#if cap === 'runtime'} <span class="cap-hit">cap reached</span>{/if}</dd></div>
         <div><dt>Mode</dt><dd>{loop.config.mode === 'research' ? 'Research' : 'Build'}</dd></div>
         {#if loop.branch}<div class="wide"><dt>Branch</dt><dd class="mono" title={loop.branch}>{loop.branch}</dd></div>{/if}
       </dl>
@@ -301,7 +351,33 @@
 </PageBody>
 </div>
 
+{#if extendOpen && loop}
+  <Modal title="Extend budget" onclose={() => (extendOpen = false)}>
+    <form class="extend" id="gl-extend-form" onsubmit={(e) => { e.preventDefault(); void extendAndResume(); }}>
+      <p class="extend-lede">
+        {#if cap === 'iterations'}The iteration cap was reached.{:else if cap === 'runtime'}The time cap was reached.{:else}Raise the caps to give the loop more room.{/if}
+        Used so far: {loop.iterations_started} iterations, {formatSeconds(Math.round(elapsedSecs(loop)))}.
+      </p>
+      <label class="extend-lbl" for="gl-ext-iters">Max iterations</label>
+      <input id="gl-ext-iters" type="number" min={loop.iterations_started + 1} step="1" bind:value={extIters} />
+      <label class="extend-lbl" for="gl-ext-mins">Max runtime (minutes)</label>
+      <input id="gl-ext-mins" type="number" min="1" step="1" bind:value={extMinutes} />
+      {#if extError}<p class="errline" role="alert"><Icon name="warning" size={13} /> <span>{extError}</span></p>{/if}
+    </form>
+    {#snippet footer()}
+      <button class="btn" onclick={() => (extendOpen = false)}>Cancel</button>
+      <button class="btn primary" type="submit" form="gl-extend-form" disabled={acting || unanswered}
+        title={unanswered ? 'Answer the open decision first' : undefined}>{acting ? 'Resuming…' : 'Extend & resume'}</button>
+    {/snippet}
+  </Modal>
+{/if}
+
 <style>
+  .extend { display: grid; gap: 6px; }
+  .extend-lede { margin: 0 0 6px; color: var(--text-dim); font-size: var(--fs-s); }
+  .extend-lbl { font-size: var(--fs-s); font-weight: 600; margin-block-start: 6px; }
+  .extend input { inline-size: 100%; }
+  .cap-hit { color: var(--warning); }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-s); margin: 8px 0 0; }
   .detail-page {
     display: flex;
