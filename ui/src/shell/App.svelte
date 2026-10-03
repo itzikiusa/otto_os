@@ -565,7 +565,7 @@
         group: 'Navigate',
         detail: groupLabel(m.group),
         keywords: `module ${m.id.replace(/[-/]/g, ' ')} ${groupLabel(m.group)} ${m.keywords ?? ''}`,
-        run: () => router.go(m.id),
+        run: () => router.openModule(m.id),
       })),
     );
   });
