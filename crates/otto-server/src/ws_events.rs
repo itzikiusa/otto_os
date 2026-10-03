@@ -909,14 +909,14 @@ mod tests {
                 session_id: "s1".into(),
                 workspace_id: "ws1".into(),
                 cursor: "0".into(),
-                turns: Vec::new(),
+                turns: Vec::new().into(),
             },
             Event::TranscriptLive {
                 session_id: "s1".into(),
                 workspace_id: "ws1".into(),
-                text: String::new(),
-                input: String::new(),
-                status: String::new(),
+                text: "".into(),
+                input: "".into(),
+                status: "".into(),
                 branch: None,
             },
             Event::ArtifactAdded {
