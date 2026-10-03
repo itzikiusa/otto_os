@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(listed[0].steps_passed, Some(666));
     }
 
-    /// A row written before 0166 (steps inline in record_json) still reads
+    /// A row written before 0157 (steps inline in record_json) still reads
     /// whole, deltas, and lists with counts.
     #[tokio::test]
     async fn legacy_inline_runs_stay_readable() {
