@@ -22,6 +22,7 @@ import { missionControlApi } from '../../lib/api/missionControl';
 import { scheduledTasksApi } from '../../lib/api/scheduledTasks';
 import type { IconName } from '../../lib/components/Icon.svelte';
 import type { AssistantTask, DesignArtifact, McpApproval, Notice, ScheduledTask, WorkItem } from '../../lib/api/types';
+import { untrack } from 'svelte';
 import { router } from '../../lib/router.svelte';
 import { auth } from '../../lib/stores/auth.svelte';
 import { assistant } from '../../lib/stores/assistant.svelte';
@@ -264,8 +265,10 @@ class TodayStore {
     const mine = ++this.seq;
     // The assistant store stays live over the WS once loaded; this re-syncs it
     // on the same quiet cadence (its loaders guard their own stale results).
-    void assistant.loadNeedsYou();
-    void assistant.loadTasks();
+    // A FIRST load already in flight (the event socket's first connect loads
+    // the needs-you badge) is joined, not repeated, during the cold boot.
+    if (untrack(() => assistant.needsState) !== 'loading') void assistant.loadNeedsYou();
+    if (untrack(() => assistant.tasks.state) !== 'loading') void assistant.loadTasks();
     const wsId = ws.currentId;
     const can = (f: Parameters<typeof auth.can>[0]) => auth.can(f, 'view');
     const settle = <T>(p: Promise<T>, fallback: T): Promise<{ ok: boolean; v: T }> =>
@@ -305,6 +308,9 @@ class TodayStore {
         debounceMs: 3000,
         maxWaitMs: 15_000,
         minIntervalMs: 15_000,
+        // Cold boot: wait for the workspace list (HomeToday refreshes when it
+        // settles) — an unscoped first load was repeated scoped right after.
+        immediate: untrack(() => ws.listSettled),
       },
     );
   }

@@ -609,8 +609,9 @@ class EventsClient {
       if (reconnected) resumeAltLoopback();
       if (reconnected) this.resyncAfterReconnect();
       // The Assistant's needs-you badge lives in the sidebar, so it loads on
-      // first connect too (quietly: an older daemon without the route → no badge).
-      else void assistant.loadNeedsYou();
+      // first connect too (quietly: an older daemon without the route → no badge)
+      // — unless a page's own first load (Home's Today) already has it.
+      else if (!['loading', 'ready'].includes(assistant.needsState)) void assistant.loadNeedsYou();
     };
     this.sock.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;

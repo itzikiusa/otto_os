@@ -107,6 +107,10 @@ class WorkspaceStore {
    *  Terminal applies each injection exactly once (e.g. DB rows → running agent). */
   injections: Record<Id, { text: string; n: number }> = $state({});
   sessionsLoading = $state(false);
+  /** The first workspace-list load has picked the selection (or failed).
+   *  Workspace-scoped boot loads (Home's Today) wait for it instead of
+   *  loading once unscoped and again when the saved workspace resolves. */
+  listSettled = $state(false);
   private selectionGeneration = 0;
   private loadGeneration = 0;
   private loadedToken: string | null | undefined;
@@ -498,6 +502,7 @@ class WorkspaceStore {
       workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
     } catch (e) {
       dropBoot();
+      this.listSettled = true;
       throw e;
     }
     if (!current()) return;
@@ -507,9 +512,12 @@ class WorkspaceStore {
     this.scratch = scratch;
     const target = workspaces.find((w) => w.id === saved) ?? workspaces[0] ?? null;
     if (target?.id !== saved) dropBoot();
+    // select()/selectNone() set currentId before their first await, so the
+    // flag flips with the selection already in place.
+    const selecting = target ? this.select(target.id) : this.selectNone();
+    this.listSettled = true;
     try {
-      if (target) await this.select(target.id);
-      else await this.selectNone();
+      await selecting;
     } finally {
       // One-shot: a later refresh always asks the daemon again.
       dropBoot();

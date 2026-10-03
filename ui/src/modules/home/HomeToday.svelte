@@ -3,6 +3,7 @@
   // cards — Needs you · Running · Up next · Recent (data: today.svelte.ts).
   // Text that sits straight on the ambient backdrop is --text only (AA over
   // any backdrop pixel — unit/ambient.test.ts); dim text lives on the cards.
+  import { untrack } from 'svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -15,18 +16,24 @@
   const ROWS = 3;
   let expanded = $state<Record<string, boolean>>({});
 
+  // untrack: start() runs the first load synchronously, and that load reads
+  // ws.currentId / auth.can(). Tracked, every boot change to them (grants
+  // arriving, the saved workspace resolving) stopped the poller — aborting
+  // its load AFTER the requests went out — and started a new one: three
+  // full Today loads before Home's first paint.
   $effect(() => {
-    today.start();
+    untrack(() => today.start());
     return () => today.stop();
   });
-  // A workspace switch changes every fetched list. Not on mount: start()
-  // already loads, and a refresh then queued a second full load (needs-you,
-  // tasks, approvals, designs…) during the cold boot.
-  let seenWs: string | null | undefined;
+  // A workspace switch changes every fetched list, and on a cold boot the
+  // first load waits for the list to settle (today.start). Not on mount:
+  // start() already loads once the list is in, and a refresh then queued a
+  // second full load (needs-you, tasks, approvals, designs…).
+  let seenWs: string | undefined;
   $effect(() => {
-    const id = ws.currentId;
-    if (seenWs !== undefined && id !== seenWs) today.refresh();
-    seenWs = id;
+    const key = ws.listSettled ? `ws:${ws.currentId}` : 'pending';
+    if (seenWs !== undefined && key !== seenWs) today.refresh();
+    seenWs = key;
   });
 
   const name = $derived(auth.me ? auth.me.display_name || auth.me.username : '');

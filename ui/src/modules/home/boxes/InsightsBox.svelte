@@ -48,8 +48,13 @@
     poller = livePoll(fresh.run, 300_000, ['insight_ready'], { immediate: fresh.start('', 300_000) });
     return () => poller?.stop();
   });
+  // Frame refresh only — not on mount, where the poller's first run is
+  // already loading (a now() then queued a second load on every Home boot).
+  let seenTick = untrack(() => tick);
   $effect(() => {
-    void tick;
+    const t = tick;
+    if (t === seenTick) return;
+    seenTick = t;
     untrack(() => poller?.now());
   });
 

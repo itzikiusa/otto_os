@@ -75,9 +75,16 @@
     return () => poller?.stop();
   });
   // Manual refresh (frame button) + live work-graph ticks: rerun immediately.
+  // Not on mount: the poller's own first run is already loading, and a now()
+  // then queued a second summary + items load on every cold Home boot.
+  let seenTick = untrack(() => tick);
+  let seenBus = untrack(() => missionControlBus.tick);
   $effect(() => {
-    void tick;
-    void missionControlBus.tick;
+    const t = tick;
+    const b = missionControlBus.tick;
+    if (t === seenTick && b === seenBus) return;
+    seenTick = t;
+    seenBus = b;
     untrack(() => poller?.now());
   });
 
