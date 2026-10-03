@@ -21,6 +21,56 @@ use sqlx::Row;
 
 use crate::convert::{dberr, fmt, json};
 
+/// Process cache of [`PersonalAgentsRepo::autonomy`] keyed by (database
+/// handle, agent id) — perf N4. Capped (cleared when full: it is a hit-rate
+/// aid, not state) and generation-checked so a read that overlapped an
+/// invalidation never re-inserts the old config.
+mod autonomy_cache {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
+
+    use super::AgentAutonomy;
+
+    const CAP: usize = 512;
+    type Key = (u64, String);
+
+    static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+    fn map() -> &'static Mutex<HashMap<Key, AgentAutonomy>> {
+        static MAP: OnceLock<Mutex<HashMap<Key, AgentAutonomy>>> = OnceLock::new();
+        MAP.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn generation() -> u64 {
+        GENERATION.load(Ordering::Acquire)
+    }
+
+    pub(super) fn get(key: &Key) -> Option<AgentAutonomy> {
+        map().lock().ok()?.get(key).cloned()
+    }
+
+    /// Cache `cfg` unless an invalidation happened since `generation` was
+    /// read (the row may have changed under the read).
+    pub(super) fn put(key: Key, cfg: AgentAutonomy, generation: u64) {
+        let Ok(mut m) = map().lock() else { return };
+        if GENERATION.load(Ordering::Acquire) != generation {
+            return;
+        }
+        if m.len() >= CAP && !m.contains_key(&key) {
+            m.clear();
+        }
+        m.insert(key, cfg);
+    }
+
+    pub(super) fn invalidate(pool: u64, agent_id: &str) {
+        GENERATION.fetch_add(1, Ordering::AcqRel);
+        if let Ok(mut m) = map().lock() {
+            m.remove(&(pool, agent_id.to_string()));
+        }
+    }
+}
+
 // --- Domain --------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +417,17 @@ fn row_to_schedule(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgentSchedule>
     })
 }
 
+/// Longest run `summary` (in characters) the Activity feed shows; the feed
+/// projection reads one more so the clip can mark the cut.
+pub const FEED_SUMMARY_CHARS: usize = 280;
+
+/// Every `personal_agent_runs` column [`row_to_run`] reads, with `summary`
+/// cut to [`FEED_SUMMARY_CHARS`] + 1 characters (perf N5).
+const FEED_RUN_COLS: &str = "id, agent_id, schedule_id, workspace_id, status, trigger, \
+     started_at, finished_at, substr(summary, 1, 281) AS summary, report_path, report_rel, \
+     delivered, delivery_error, error, session_id, report_hash, attempts, skipped_delivery, \
+     mode, goal_id, read_only, created_at";
+
 fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgentRun> {
     Ok(PersonalAgentRun {
         id: r.get("id"),
@@ -557,6 +618,8 @@ impl PersonalAgentsRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("delete personal agent"))?;
+        // The autonomy row cascaded with the agent.
+        autonomy_cache::invalidate(self.pool.id(), id);
         Ok(())
     }
 
@@ -824,6 +887,39 @@ impl PersonalAgentsRepo {
         Ok(())
     }
 
+    /// Proactive runs started at/after `since` (RFC3339), per agent, for
+    /// every agent in `agent_ids` in ONE statement (perf N6: the proactive
+    /// tick used to ask per agent per minute). Agents without such a run are
+    /// absent (count 0). Walks `idx_par_agent` per listed agent.
+    pub async fn count_proactive_runs_since(
+        &self,
+        agent_ids: &[&str],
+        since: &str,
+    ) -> Result<HashMap<String, i64>> {
+        if agent_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let q = format!(
+            "SELECT agent_id, COUNT(*) AS n FROM personal_agent_runs \
+             WHERE agent_id IN ({}) AND mode = 'proactive' AND started_at >= ? \
+             GROUP BY agent_id",
+            vec!["?"; agent_ids.len()].join(",")
+        );
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(q.as_str()));
+        for id in agent_ids {
+            query = query.bind(*id);
+        }
+        let rows = query
+            .bind(since)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("count proactive personal agent runs"))?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<String, _>("agent_id"), r.get::<i64, _>("n")))
+            .collect())
+    }
+
     /// Runs of `mode` started at/after `since` (RFC3339) — the proactive
     /// daily budget counter.
     pub async fn count_runs_since(&self, agent_id: &str, mode: &str, since: &str) -> Result<i64> {
@@ -878,15 +974,28 @@ impl PersonalAgentsRepo {
     }
 
     /// The agent's autonomy config (defaults when no row exists).
+    ///
+    /// Cached per database handle (perf N4): the governed pipeline asks for an
+    /// agent's rules on EVERY tool call its sessions make, and the config only
+    /// changes through [`Self::save_autonomy`] / [`Self::delete`] (the row
+    /// cascades with its agent), which invalidate it. A read that raced a
+    /// write never caches its (possibly stale) answer.
     pub async fn autonomy(&self, agent_id: &str) -> Result<AgentAutonomy> {
+        let key = (self.pool.id(), agent_id.to_string());
+        let generation = autonomy_cache::generation();
+        if let Some(hit) = autonomy_cache::get(&key) {
+            return Ok(hit);
+        }
         let row = sqlx::query("SELECT config_json FROM personal_agent_autonomy WHERE agent_id = ?")
             .bind(agent_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(dberr("get agent autonomy"))?;
-        Ok(row
+        let cfg: AgentAutonomy = row
             .and_then(|r| serde_json::from_str(&r.get::<String, _>("config_json")).ok())
-            .unwrap_or_default())
+            .unwrap_or_default();
+        autonomy_cache::put(key, cfg.clone(), generation);
+        Ok(cfg)
     }
 
     /// Replace the agent's autonomy config.
@@ -904,6 +1013,7 @@ impl PersonalAgentsRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("save agent autonomy"))?;
+        autonomy_cache::invalidate(self.pool.id(), agent_id);
         Ok(())
     }
 
@@ -951,17 +1061,39 @@ impl PersonalAgentsRepo {
     }
 
     /// The agent's newest `running` run, if any (the activity feed's "Now"
-    /// without listing history — perf W4).
+    /// without listing history — perf W4). `summary` is cut in SQL to
+    /// [`FEED_SUMMARY_CHARS`] + 1 characters (perf N5) — enough for the
+    /// feed's clip to know it was longer.
     pub async fn running_run(&self, agent_id: &str) -> Result<Option<PersonalAgentRun>> {
-        let row = sqlx::query(
-            "SELECT * FROM personal_agent_runs WHERE agent_id = ? AND status = 'running' \
-             ORDER BY started_at DESC LIMIT 1",
-        )
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {FEED_RUN_COLS} FROM personal_agent_runs \
+             WHERE agent_id = ? AND status = 'running' ORDER BY started_at DESC LIMIT 1"
+        )))
         .bind(agent_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(dberr("running personal agent run"))?;
         row.as_ref().map(row_to_run).transpose()
+    }
+
+    /// [`Self::list_runs`] for the Activity feed (perf N5): the same rows,
+    /// with `summary` cut in SQL to [`FEED_SUMMARY_CHARS`] + 1 characters, so
+    /// a long report summary is not read and copied only to be clipped.
+    pub async fn list_runs_for_feed(
+        &self,
+        agent_id: &str,
+        limit: i64,
+    ) -> Result<Vec<PersonalAgentRun>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {FEED_RUN_COLS} FROM personal_agent_runs \
+             WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?"
+        )))
+        .bind(agent_id)
+        .bind(limit.max(1))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list personal agent runs (feed)"))?;
+        rows.iter().map(row_to_run).collect()
     }
 
     pub async fn list_runs(&self, agent_id: &str, limit: i64) -> Result<Vec<PersonalAgentRun>> {
@@ -1562,6 +1694,146 @@ mod tests {
         probe.reset();
         assert!(repo.list_enabled_schedules().await.unwrap().is_empty());
         assert_eq!(probe.take().len(), 1);
+    }
+
+    /// Perf N4: the governed pipeline's per-call autonomy read is served from
+    /// the cache, and a save / delete is visible at once.
+    #[tokio::test]
+    async fn autonomy_is_cached_and_invalidated_on_save_and_delete() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = PersonalAgentsRepo::new(p.clone());
+        let a = repo.create(new_agent("ws1", "Cached")).await.unwrap();
+        let probe = p.statement_probe();
+        assert!(repo.autonomy(&a.id).await.unwrap().rules.is_empty());
+        probe.reset();
+        for _ in 0..10 {
+            repo.autonomy(&a.id).await.unwrap();
+        }
+        assert!(probe.take().is_empty(), "served from the cache");
+        let cfg = AgentAutonomy {
+            rules: vec![AgentRule {
+                id: "r1".into(),
+                text: "Ask before prod".into(),
+                enforce: None,
+            }],
+            ..Default::default()
+        };
+        // A fresh repo handle on the same database sees the save.
+        repo.save_autonomy(&a.id, &cfg).await.unwrap();
+        let other = PersonalAgentsRepo::new(p.clone());
+        assert_eq!(other.autonomy(&a.id).await.unwrap().rules.len(), 1);
+        repo.delete(&a.id).await.unwrap();
+        assert!(repo.autonomy(&a.id).await.unwrap().rules.is_empty());
+        // Another database never sees this one's entry.
+        let p2 = pool().await;
+        assert!(PersonalAgentsRepo::new(p2)
+            .autonomy(&a.id)
+            .await
+            .unwrap()
+            .rules
+            .is_empty());
+    }
+
+    /// Perf N6: the proactive tick's budget counts are ONE statement for any
+    /// number of agents, counting only proactive runs inside the window.
+    #[tokio::test]
+    async fn proactive_counts_are_one_query_for_any_n() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = PersonalAgentsRepo::new(p.clone());
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let a = repo
+                .create(new_agent("ws1", &format!("P{i}")))
+                .await
+                .unwrap();
+            for j in 0..i {
+                let r = repo
+                    .create_run(NewAgentRun {
+                        agent_id: a.id.clone(),
+                        schedule_id: None,
+                        workspace_id: "ws1".into(),
+                        trigger: "proactive".into(),
+                    })
+                    .await
+                    .unwrap();
+                let mode = if j == 0 { "directed" } else { "proactive" };
+                repo.set_run_mode(&r.id, mode, true, None).await.unwrap();
+            }
+            ids.push(a.id);
+        }
+        let since = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let probe = p.statement_probe();
+        probe.reset();
+        let counts = repo
+            .count_proactive_runs_since(&refs, &since)
+            .await
+            .unwrap();
+        assert_eq!(probe.take().len(), 1, "one statement for 5 agents");
+        for (i, id) in ids.iter().enumerate() {
+            let want = i.saturating_sub(1) as i64; // the first run is directed
+            assert_eq!(counts.get(id).copied().unwrap_or(0), want, "agent {i}");
+            assert_eq!(
+                repo.count_runs_since(id, "proactive", &since)
+                    .await
+                    .unwrap(),
+                want,
+                "matches the per-agent count"
+            );
+        }
+        let future = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(repo
+            .count_proactive_runs_since(&refs, &future)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(repo
+            .count_proactive_runs_since(&[], &since)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Perf N5: the feed projection reads every column `row_to_run` needs and
+    /// cuts the summary in SQL, one character past the feed's clip.
+    #[tokio::test]
+    async fn feed_projection_cuts_the_summary_in_sql() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = PersonalAgentsRepo::new(p.clone());
+        let a = repo.create(new_agent("ws1", "Feed")).await.unwrap();
+        let r = repo
+            .create_run(NewAgentRun {
+                agent_id: a.id.clone(),
+                schedule_id: None,
+                workspace_id: "ws1".into(),
+                trigger: "manual".into(),
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE personal_agent_runs SET summary = ? WHERE id = ?")
+            .bind("é".repeat(5_000))
+            .bind(&r.id)
+            .execute(&p)
+            .await
+            .unwrap();
+        assert!(FEED_RUN_COLS.contains(&format!("substr(summary, 1, {})", FEED_SUMMARY_CHARS + 1)));
+        let cur = repo.running_run(&a.id).await.unwrap().unwrap();
+        assert_eq!(cur.summary.chars().count(), FEED_SUMMARY_CHARS + 1);
+        let feed = repo.list_runs_for_feed(&a.id, 20).await.unwrap();
+        assert_eq!(feed[0].summary.chars().count(), FEED_SUMMARY_CHARS + 1);
+        let full = repo.list_runs(&a.id, 20).await.unwrap();
+        assert_eq!(full[0].summary.chars().count(), 5_000);
+        let (mut f, mut g) = (feed[0].clone(), full[0].clone());
+        f.summary.clear();
+        g.summary.clear();
+        assert_eq!(
+            serde_json::to_value(f).unwrap(),
+            serde_json::to_value(g).unwrap(),
+            "every other field identical"
+        );
     }
 
     #[tokio::test]
