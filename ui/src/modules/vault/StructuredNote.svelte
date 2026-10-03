@@ -85,7 +85,7 @@
   </div>
 
   <div class="links">
-    <div class="col">
+    <div class="col" data-testid="vault-structured-outgoing">
       <h4>Links to <span class="n">{outgoing.length}</span></h4>
       {#if outgoing.length === 0}<p class="dim">No outgoing links</p>{/if}
       <div class="chips">
@@ -105,7 +105,7 @@
         {#if outgoing.length > 40}<span class="dim">+{outgoing.length - 40} more in the side panel</span>{/if}
       </div>
     </div>
-    <div class="col">
+    <div class="col" data-testid="vault-structured-backlinks">
       <h4>Linked from <span class="n">{vault.backlinks.length}</span></h4>
       {#if vault.backlinks.length === 0}<p class="dim">No backlinks yet</p>{/if}
       <div class="chips">

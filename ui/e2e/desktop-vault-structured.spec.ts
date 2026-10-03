@@ -49,11 +49,14 @@ test('typed note renders structured panels with previews and live context', asyn
   await expect(panel.getByText(/expected sections/)).toBeVisible();
 
   // Outgoing chips: the resolved runbook link; the unresolved one is disabled.
-  const deployChip = panel.getByRole('button', { name: 'the deploy runbook' });
+  const outgoing = panel.getByTestId('vault-structured-outgoing');
+  const deployChip = outgoing.getByRole('button', { name: 'the deploy runbook' });
   await expect(deployChip).toBeVisible();
-  await expect(panel.getByRole('button', { name: 'Missing Note' })).toBeDisabled();
+  await expect(outgoing.getByRole('button', { name: 'Missing Note' })).toBeDisabled();
   // Backlinks: Orders API and the deploy runbook link here.
-  await expect(panel.getByRole('button', { name: 'Orders API' })).toBeVisible();
+  const backlinks = panel.getByTestId('vault-structured-backlinks');
+  await expect(backlinks.getByRole('button', { name: 'Orders API' })).toBeVisible();
+  await expect(backlinks.getByRole('button', { name: 'Deploy Runbook' })).toBeVisible();
 
   // Hover preview: loads the target's description, stays inside the viewport.
   await deployChip.hover();
