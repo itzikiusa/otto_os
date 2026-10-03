@@ -4,6 +4,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { pollWhileVisible } from '../../lib/poll';
+  import { quietCadence } from '../../lib/pollBackoff';
   import type { ClusterMetrics, ClusterOverview, Id } from '../../lib/api/types';
 
   interface Props {
@@ -20,6 +21,9 @@
   let slow = $state(false);
   /** Bumped by Retry to re-run the load effect. */
   let attempt = $state(0);
+  /** Metrics cadence: 4 s while traffic moves, up to 10 s on an idle cluster. */
+  const METRICS_MIN_MS = 4000;
+  const METRICS_MAX_MS = 10_000;
 
   function fmtBytes(n: number | null): string {
     if (n === null || !isFinite(n)) return '—';
@@ -61,14 +65,25 @@
     // Chained (never overlapping), paused while hidden, aborted on leave: the
     // metrics sweep is a cluster-wide ListOffsets pass that can outlast a 4 s
     // interval over a tunnel — an interval stacked sweeps and pinned sockets.
+    // An idle cluster (total unchanged for 3 samples) stretches the cadence
+    // to 10 s — each sample is a watermark sweep plus a Prometheus scrape.
+    const cadence = quietCadence({ min: METRICS_MIN_MS, max: METRICS_MAX_MS, quietAfter: 3 });
+    let lastTotal: number | null = null;
     const poller = pollWhileVisible(
       (signal) =>
         api
           .get<ClusterMetrics>(`/brokers/clusters/${id}/metrics`, signal)
           .then((m) => {
-            if (alive) metrics = m;
+            if (!alive) return;
+            metrics = m;
+            cadence.sample(lastTotal !== m.total_messages);
+            lastTotal = m.total_messages;
           }),
-      { ms: 4000 },
+      {
+        get ms() {
+          return cadence.ms;
+        },
+      },
     );
     // An unreachable broker can hang the first metadata call for a long time;
     // say so instead of an open-ended "Connecting…".

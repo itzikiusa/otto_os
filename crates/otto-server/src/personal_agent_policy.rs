@@ -412,37 +412,45 @@ pub async fn evaluate(
     bare: &str,
     args: &Value,
 ) -> (AgentGate, Option<CallingAgent>) {
+    evaluate_with(ctx, auth, bare, args, None).await
+}
+
+/// [`evaluate`] reusing a calling-session row the caller already loaded this
+/// request (the governed pipeline reads it for the audit workspace). Used
+/// only when it IS the bound session; otherwise the row is read here, so the
+/// verdict is identical either way.
+pub async fn evaluate_with(
+    ctx: &ServerCtx,
+    auth: &AuthContext,
+    bare: &str,
+    args: &Value,
+    preloaded: Option<&otto_core::domain::Session>,
+) -> (AgentGate, Option<CallingAgent>) {
     let Some(sid) = bound_session(auth) else {
         return (decide(false, &[], bare, args), None);
     };
-    let session = match otto_state::SessionsRepo::new(ctx.pool.clone())
-        .get(&sid)
-        .await
-    {
-        Ok(s) => s,
-        Err(_) => {
-            if read_only_denies(bare) {
-                return (
-                    AgentGate::Deny(
-                        "the calling session could not be resolved — refusing a mutating call"
-                            .into(),
-                    ),
-                    None,
-                );
-            }
-            return (decide(false, &[], bare, args), None);
-        }
+    let loaded = match preloaded.filter(|s| s.id == sid) {
+        Some(s) => Some(SessionBinding::of(s)),
+        None => session_binding(&ctx.pool, &sid).await,
     };
-    let read_only = meta_is_read_only(&session.meta);
-    let agent = session
-        .meta
-        .get("personal_agent")
-        .and_then(Value::as_str)
-        .map(|a| CallingAgent {
-            agent_id: a.to_string(),
-            workspace_id: session.workspace_id.clone(),
-            session_id: sid.clone(),
-        });
+    let Some(binding) = loaded else {
+        if read_only_denies(bare) {
+            return (
+                AgentGate::Deny(
+                    "the calling session could not be resolved — refusing a mutating call".into(),
+                ),
+                None,
+            );
+        }
+        return (decide(false, &[], bare, args), None);
+    };
+    let read_only = binding.read_only;
+    let agent = binding.agent_id.as_ref().map(|a| CallingAgent {
+        agent_id: a.clone(),
+        workspace_id: binding.workspace_id.clone(),
+        session_id: sid.clone(),
+    });
+    // Cached in the repo, invalidated on save/delete (perf N4).
     let rules = match &agent {
         Some(a) => otto_state::PersonalAgentsRepo::new(ctx.pool.clone())
             .autonomy(&a.agent_id)
@@ -459,7 +467,7 @@ pub async fn evaluate(
     // + auto-approve rules instead. Personal agents (and their rules) are
     // never exempt.
     if agent.is_none()
-        && unattended_automation(&session.meta)
+        && binding.unattended
         && matches!(
             gate,
             AgentGate::ForceApproval {
@@ -494,6 +502,8 @@ pub async fn evaluate(
 /// they apply [`decide`] themselves.
 const READ_ONLY_POST_ALLOW: &[&str] = &[
     "/mcp/otto-tools/invoke",
+    // The session's own tool-call audit row (an append to its ledger, R7).
+    "/mcp/tool-calls",
     "/mcp/http",
     "/workspaces/{}/memory/search",
     "/workspaces/{}/vault/vaults/{}/search",
@@ -529,14 +539,87 @@ pub fn read_only_route_allowed(method: &axum::http::Method, template: &str) -> b
     READ_ONLY_POST_ALLOW.iter().any(|p| template_matches(p, t))
 }
 
-/// Read the session row and report whether it is confined read-only (`None`
-/// when the row cannot be read — the caller decides).
-pub async fn session_read_only(pool: &otto_state::DbPool, session_id: &str) -> Option<bool> {
-    otto_state::SessionsRepo::new(pool.clone())
+/// What the policy needs from a calling session's row — all of it fixed when
+/// the session is created (`read_only`, the `personal_agent` binding and the
+/// automation `source` are written into the creation meta and no route or
+/// engine rewrites them), so it is cached per session (perf N4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionBinding {
+    pub read_only: bool,
+    pub agent_id: Option<String>,
+    pub workspace_id: String,
+    pub unattended: bool,
+}
+
+impl SessionBinding {
+    pub fn of(session: &otto_core::domain::Session) -> Self {
+        Self {
+            read_only: meta_is_read_only(&session.meta),
+            agent_id: session
+                .meta
+                .get("personal_agent")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            workspace_id: session.workspace_id.to_string(),
+            unattended: unattended_automation(&session.meta),
+        }
+    }
+}
+
+/// Process cache of [`SessionBinding`]s keyed by (database handle, session
+/// id). Capped (cleared when full — a hit-rate aid, never state). Only
+/// successful reads are cached, so a DB error still fails closed.
+mod binding_cache {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    use super::SessionBinding;
+
+    const CAP: usize = 512;
+    type Key = (u64, String);
+
+    fn map() -> &'static Mutex<HashMap<Key, SessionBinding>> {
+        static MAP: OnceLock<Mutex<HashMap<Key, SessionBinding>>> = OnceLock::new();
+        MAP.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn get(key: &Key) -> Option<SessionBinding> {
+        map().lock().ok()?.get(key).cloned()
+    }
+
+    pub(super) fn put(key: Key, b: SessionBinding) {
+        let Ok(mut m) = map().lock() else { return };
+        if m.len() >= CAP && !m.contains_key(&key) {
+            m.clear();
+        }
+        m.insert(key, b);
+    }
+}
+
+/// The calling session's [`SessionBinding`], from the cache or one row read
+/// (`None` when the row cannot be read — the caller decides; not cached).
+pub async fn session_binding(
+    pool: &otto_state::DbPool,
+    session_id: &str,
+) -> Option<SessionBinding> {
+    let key = (pool.id(), session_id.to_string());
+    if let Some(hit) = binding_cache::get(&key) {
+        return Some(hit);
+    }
+    let s = otto_state::SessionsRepo::new(pool.clone())
         .get(&session_id.to_string())
         .await
-        .ok()
-        .map(|s| meta_is_read_only(&s.meta))
+        .ok()?;
+    let b = SessionBinding::of(&s);
+    binding_cache::put(key, b.clone());
+    Some(b)
+}
+
+/// Is the session confined read-only (`None` when its row cannot be read —
+/// the caller decides). Cached ([`session_binding`]): the feature guard asks
+/// on every non-GET request an agent session's token makes.
+pub async fn session_read_only(pool: &otto_state::DbPool, session_id: &str) -> Option<bool> {
+    session_binding(pool, session_id).await.map(|b| b.read_only)
 }
 
 #[cfg(test)]

@@ -21,6 +21,8 @@
     server: 'M3.5 2.5h9a1 1 0 0 1 1 1V6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1Zm0 6.5h9a1 1 0 0 1 1 1v2.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1Zm1.8-4.25h.01m-.01 6.5h.01',
     // Design Hall (module): a diamond inside a diamond — a design, set in its hall
     designHall: 'M8 1.8 14.2 8 8 14.2 1.8 8 8 1.8Zm0 3.4L10.8 8 8 10.8 5.2 8 8 5.2Z',
+    // Workbench (module): a page with a code bracket pair — scratch scripts
+    workbench: 'M3.5 2.5h6l3 3v8h-9v-11Zm6 0v3h3M6.5 8 5 9.5 6.5 11M9.5 8 11 9.5 9.5 11',
     // Design Hall studios + learning (in-page glyphs, not sidebar modules)
     frame: 'M5.5 2.5v11M10.5 2.5v11M2.5 5.5h11M2.5 10.5h11',
     layout: 'M3 2.5h10a.5.5 0 0 1 .5.5v10a.5.5 0 0 1-.5.5H3a.5.5 0 0 1-.5-.5V3a.5.5 0 0 1 .5-.5Zm-.5 3.5h11M7 6v7.5',

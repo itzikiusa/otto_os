@@ -58,6 +58,7 @@ pub fn claude_transcript_path(home: &Path, cwd: &str, provider_session_id: &str)
 /// string): scan every immediate subdirectory of `~/.claude/projects` for a
 /// `<provider_session_id>.jsonl`. Returns `Exists`/`Gone`; never `Unknown`
 /// (the caller decides `Unknown` when it has no home/session id).
+#[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
 pub fn claude_transcript_exists(home: &Path, cwd: &str, provider_session_id: &str) -> Resumability {
     // Fast path: exact encoded location.
     if claude_transcript_path(home, cwd, provider_session_id).is_file() {
@@ -107,6 +108,7 @@ pub fn transcript_path(
 /// `<codex sessions>`) — the daemon derives them from `OTTO_TRANSCRIPT_ROOTS`
 /// (or empty per-daemon dirs under `OTTO_E2E=1`) so a throwaway daemon never
 /// reads the real `~/.claude` / `~/.codex`.
+#[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
 pub fn transcript_path_in_roots(
     claude_root: &Path,
     codex_root: &Path,

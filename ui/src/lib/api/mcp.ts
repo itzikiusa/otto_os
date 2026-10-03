@@ -21,6 +21,7 @@ import type {
   ImportMcpPoliciesReq,
   ImportMcpPoliciesResp,
   McpApproval,
+  McpApprovalCount,
   McpAuditQuery,
   McpAllowlistEntry,
   McpCallLogRow,
@@ -109,6 +110,9 @@ export const mcpCpApi = {
   // --- approvals ---
   cpApprovals: (status?: string) =>
     api.get<McpApproval[]>(`/mcp/approvals${qs({ status })}`),
+  /** Badge count only (no rows): same visibility as `cpApprovals`. */
+  cpApprovalsCount: (status?: string) =>
+    api.get<McpApprovalCount>(`/mcp/approvals/count${qs({ status })}`),
   cpDecide: (id: Id, body: DecideMcpApprovalReq) =>
     api.post<McpApproval>(`/mcp/approvals/${id}/decide`, body),
 

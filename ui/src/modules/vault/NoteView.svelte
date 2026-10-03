@@ -45,6 +45,8 @@
   import { renderMermaid } from '../canvas/mermaid';
   import { renderD2 } from '../canvas/d2';
   import { renderNote, resolverFrom, slugifyHeading, stripFrontmatter } from './mdRender';
+  import { plainPreview, rendersOffThread } from './noteRenderPlan';
+  import { renderNoteOffThread } from './noteRenderAsync';
   import RefineDrawer from './RefineDrawer.svelte';
   import StructuredNote from './StructuredNote.svelte';
   import LinkPreview from './LinkPreview.svelte';
@@ -96,25 +98,57 @@
 
   // -- reading view ------------------------------------------------------------
   /** Parse + highlight + sanitize once per note content: toggling Edit⇄Read or
-   *  an equal poll refresh reuses the HTML instead of re-rendering 300 KB. */
-  const rendered = $derived.by(() => {
+   *  an equal poll refresh reuses the HTML instead of re-rendering 300 KB.
+   *  Notes over 64 KB (F10) parse in a worker: the pane shows the escaped
+   *  plain body at once, and `offThreadDone` re-runs this when the html lands
+   *  in the cache. */
+  let offThreadDone = $state(0);
+  const offThreadInFlight = new Set<string>();
+  const renderKey = $derived.by(() => {
     const n = vault.note;
     if (!n || vault.editing) return '';
-    const key = `${vault.current?.id}:${n.meta.path}:${n.meta.hash}:${n.outgoing.map((o) => o.dst_path ?? '').join('|')}`;
+    return `${vault.current?.id}:${n.meta.path}:${n.meta.hash}:${n.outgoing.map((o) => o.dst_path ?? '').join('|')}`;
+  });
+  function cacheHtml(key: string, html: string): void {
+    renderCache.set(key, html);
+    while (renderCache.size > RENDER_CACHE_MAX) renderCache.delete(renderCache.keys().next().value!);
+  }
+  const rendered = $derived.by(() => {
+    void offThreadDone;
+    const n = vault.note;
+    const key = renderKey;
+    if (!n || !key) return '';
     const hit = renderCache.get(key);
     if (hit !== undefined) {
       renderCache.delete(key);
       renderCache.set(key, hit); // LRU touch
       return hit;
     }
+    if (rendersOffThread(n.raw)) return plainPreview(stripFrontmatter(n.raw));
     const html = renderNote(stripFrontmatter(n.raw), {
       resolve: resolverFrom(n.outgoing),
       assetUrl: noAssetUrl,
       lazyAssets: true,
     });
-    renderCache.set(key, html);
-    while (renderCache.size > RENDER_CACHE_MAX) renderCache.delete(renderCache.keys().next().value!);
+    cacheHtml(key, html);
     return html;
+  });
+
+  // Large note, not cached: render it in the worker; a superseded result
+  // (the note changed or was left meanwhile) is still cached, never shown.
+  $effect(() => {
+    const key = renderKey;
+    const n = vault.note;
+    if (!key || !n || !rendersOffThread(n.raw) || renderCache.has(key) || offThreadInFlight.has(key)) return;
+    const raw = n.raw, outgoing = n.outgoing;
+    offThreadInFlight.add(key);
+    untrack(() => {
+      void renderNoteOffThread(raw, outgoing).then((html) => {
+        offThreadInFlight.delete(key);
+        cacheHtml(key, html);
+        if (renderKey === key) offThreadDone++;
+      });
+    });
   });
 
   $effect(() => {
@@ -559,6 +593,15 @@
     width: 100%;
     margin: 0 auto;
     line-height: 1.6;
+  }
+  .read :global(pre.note-plain) {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-family: var(--font-mono);
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+    background: none;
+    margin: 0;
   }
   .read :global(a.internal-link) {
     color: var(--accent-text);

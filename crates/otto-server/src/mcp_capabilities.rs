@@ -158,6 +158,7 @@ struct SearchOutcome {
 /// The walk itself. Blocking; checks `cancel` and the budgets between files.
 /// Each file is lowercased ONCE and skipped whole unless it contains the
 /// needle — the old loop lowercased (and allocated) every line of every file.
+#[allow(clippy::disallowed_methods)] // sync helper: code_search runs it via offload::blocking
 fn search_tree(
     root: &Path,
     search_root: &Path,
@@ -330,12 +331,16 @@ fn valid_ref(s: &str) -> bool {
         && !s.contains("..")
 }
 
-fn safe_git(path: &Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git")
+/// Fixed-argv git on tokio's process driver — `status` on a large repo can take
+/// seconds, which must not park a runtime worker.
+async fn safe_git(path: &Path, args: &[&str]) -> Option<String> {
+    let out = tokio::process::Command::new("git")
         .arg("-C")
         .arg(path)
         .args(args)
+        .kill_on_drop(true)
         .output()
+        .await
         .ok()?;
     if !out.status.success() {
         return None;
@@ -375,19 +380,20 @@ pub async fn proof_pack(
         if !valid_ref(branch) {
             return Err(ApiError(Error::Invalid("invalid branch/ref".into())));
         }
-        let commits = safe_git(
-            &path,
-            &[
-                "log",
-                "-n",
-                "20",
-                "--pretty=format:%h %an %ad %s",
-                "--date=short",
-                branch,
-            ],
+        // Independent reads: run the three concurrently.
+        let log_args = [
+            "log",
+            "-n",
+            "20",
+            "--pretty=format:%h %an %ad %s",
+            "--date=short",
+            branch,
+        ];
+        let (commits, status, diffstat) = tokio::join!(
+            safe_git(&path, &log_args),
+            safe_git(&path, &["status", "--porcelain"]),
+            safe_git(&path, &["diff", "--stat", "HEAD"]),
         );
-        let status = safe_git(&path, &["status", "--porcelain"]);
-        let diffstat = safe_git(&path, &["diff", "--stat", "HEAD"]);
         pack["repo"] = json!({
             "id": repo.id,
             "name": repo.name,

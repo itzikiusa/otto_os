@@ -1,5 +1,6 @@
 //! Kafka driver over `rdkafka` (librdkafka). Wraps an `AdminClient`, a base
-//! `BaseConsumer` (metadata / watermarks / groups) and a `FutureProducer`.
+//! `BaseConsumer` (metadata / watermarks / groups) and a `FutureProducer` (the
+//! admin client and producer are created on first use).
 //!
 //! Consumer-only operations are **synchronous** librdkafka C calls and are meant
 //! to be run on a blocking thread by the service (`spawn_blocking`). Admin and
@@ -163,9 +164,15 @@ pub struct RawConsume {
 }
 
 pub struct KafkaClient {
-    admin: AdminClient<DefaultClientContext>,
+    /// Created on the first admin op / produce (see [`lazy_client`]): each
+    /// librdkafka handle owns its own broker threads and connections, and a
+    /// browse-only session never needs either.
+    admin: std::sync::OnceLock<AdminClient<DefaultClientContext>>,
     consumer: BaseConsumer<QuietContext>,
-    producer: FutureProducer,
+    producer: std::sync::OnceLock<FutureProducer>,
+    /// Serializes the lazy creation above (so two first calls racing never
+    /// build — and then drop — a second handle).
+    lazy_init: std::sync::Mutex<()>,
     base_config: ClientConfig,
     /// Idle pooled peek consumer (manual assignment, never commits). A peek
     /// takes it (or builds a fresh one when another peek holds it) and puts it
@@ -179,11 +186,139 @@ pub struct KafkaClient {
     /// bootstrap/TLS/SASL handshake per call (SC-10). Never subscribed, so
     /// holding one never joins (or rebalances) the real group.
     group_pool: std::sync::Mutex<Vec<(String, BaseConsumer<QuietContext>)>>,
+    /// `topic → partition ids`, so the Topics tab's 5 s count refresh maps its
+    /// ~50 visible names to partitions without an all-topics metadata pass
+    /// (that response is the whole cluster — MBs on a 10k-partition cluster).
+    partition_cache: std::sync::Mutex<PartitionCache>,
 }
 
 /// Idle group-scoped consumers kept per cluster (each is a librdkafka client
 /// with its own broker threads, so the pool stays small).
 const GROUP_POOL_MAX: usize = 4;
+
+/// How long a cached `topic → partition ids` entry is trusted. Partitions only
+/// change by an explicit admin op (create/delete here, or an `kafka-topics
+/// --alter` elsewhere), so a minute of staleness costs at most a missing new
+/// partition in a count — never a wrong offset (watermarks are always live).
+const PARTITION_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Above this many uncached topics one all-topics metadata pass (which also
+/// refills the cache) beats that many serial single-topic round-trips.
+const PARTITION_MISS_FANOUT_MAX: usize = 4;
+
+/// Per-cluster `topic → partition ids` cache (see [`PARTITION_CACHE_TTL`]).
+/// A topic absent from metadata is cached as an empty list, so a deleted
+/// topic still on screen doesn't force a refetch on every refresh.
+#[derive(Default)]
+struct PartitionCache {
+    entries: HashMap<String, (Instant, Vec<i32>)>,
+}
+
+impl PartitionCache {
+    fn put(&mut self, topic: &str, ids: Vec<i32>, now: Instant) {
+        self.entries.insert(topic.to_string(), (now, ids));
+    }
+
+    fn invalidate(&mut self, topic: &str) {
+        self.entries.remove(topic);
+    }
+
+    /// Split `topics` into watermark targets served from fresh entries and the
+    /// topics that need a metadata lookup (stale entries are evicted).
+    fn plan(&mut self, topics: &[String], now: Instant) -> (Vec<(String, i32)>, Vec<String>) {
+        self.entries
+            .retain(|_, (at, _)| now.saturating_duration_since(*at) < PARTITION_CACHE_TTL);
+        let (mut targets, mut misses) = (Vec::new(), Vec::new());
+        let mut seen = HashSet::new();
+        for t in topics.iter().filter(|t| seen.insert(t.as_str())) {
+            match self.entries.get(t) {
+                Some((_, ids)) => targets.extend(ids.iter().map(|&p| (t.clone(), p))),
+                None => misses.push(t.clone()),
+            }
+        }
+        (targets, misses)
+    }
+}
+
+/// Topic → partition metadata lookups, abstracted so the cache's fetch plan
+/// is testable without a broker.
+trait TopicMetaSource {
+    /// Every topic's partition ids (one all-topics metadata request).
+    fn all_partitions(&self) -> Result<Vec<(String, Vec<i32>)>>;
+    /// One topic's partition ids; empty when the topic doesn't exist.
+    fn topic_partition_ids(&self, topic: &str) -> Result<Vec<i32>>;
+}
+
+impl TopicMetaSource for BaseConsumer<QuietContext> {
+    fn all_partitions(&self) -> Result<Vec<(String, Vec<i32>)>> {
+        let md = self.fetch_metadata(None, META_TIMEOUT).map_err(kerr)?;
+        Ok(md
+            .topics()
+            .iter()
+            .map(|t| {
+                let ids = t.partitions().iter().map(|p| p.id()).collect();
+                (t.name().to_string(), ids)
+            })
+            .collect())
+    }
+
+    fn topic_partition_ids(&self, topic: &str) -> Result<Vec<i32>> {
+        let md = self
+            .fetch_metadata(Some(topic), META_TIMEOUT)
+            .map_err(kerr)?;
+        Ok(md
+            .topics()
+            .iter()
+            .find(|t| t.name() == topic)
+            .map(|t| t.partitions().iter().map(|p| p.id()).collect())
+            .unwrap_or_default())
+    }
+}
+
+/// Watermark targets for `topics`: fresh cache entries first, then metadata
+/// for the misses only — per topic for a handful, one all-topics pass (which
+/// refills the whole cache) for more. A per-topic lookup error stops the
+/// lookups (an unreachable cluster must not cost N × [`META_TIMEOUT`]); it is
+/// returned only when nothing at all resolved, else those topics read `-1`.
+fn partition_targets_with<S: TopicMetaSource>(
+    src: &S,
+    cache: &std::sync::Mutex<PartitionCache>,
+    topics: &[String],
+) -> Result<Vec<(String, i32)>> {
+    let lock = || cache.lock().unwrap_or_else(|p| p.into_inner());
+    let (mut targets, misses) = lock().plan(topics, Instant::now());
+    if misses.is_empty() {
+        return Ok(targets);
+    }
+    if misses.len() > PARTITION_MISS_FANOUT_MAX {
+        let all = src.all_partitions()?;
+        let now = Instant::now();
+        let mut found: HashMap<String, Vec<i32>> = all.into_iter().collect();
+        let mut c = lock();
+        for (t, ids) in &found {
+            c.put(t, ids.clone(), now);
+        }
+        for t in misses {
+            let ids = found.remove(&t).unwrap_or_default();
+            if !c.entries.contains_key(&t) {
+                c.put(&t, Vec::new(), now);
+            }
+            targets.extend(ids.into_iter().map(|p| (t.clone(), p)));
+        }
+        return Ok(targets);
+    }
+    for t in misses {
+        match src.topic_partition_ids(&t) {
+            Ok(ids) => {
+                lock().put(&t, ids.clone(), Instant::now());
+                targets.extend(ids.into_iter().map(|p| (t.clone(), p)));
+            }
+            Err(e) if targets.is_empty() => return Err(e),
+            Err(_) => break,
+        }
+    }
+    Ok(targets)
+}
 
 /// A leased peek consumer; unassigns and returns it to the pool on drop.
 struct PeekLease<'a> {
@@ -349,6 +484,24 @@ fn fanout_watermarks_with<S: WatermarkSource>(
     results.into_inner().unwrap_or_else(|p| p.into_inner())
 }
 
+/// `cell`'s client, built from `cfg` on first use (double-checked under
+/// `lock`, so concurrent first calls create exactly one).
+fn lazy_client<'a, T: rdkafka::config::FromClientConfig>(
+    cell: &'a std::sync::OnceLock<T>,
+    lock: &std::sync::Mutex<()>,
+    cfg: &ClientConfig,
+) -> Result<&'a T> {
+    if let Some(c) = cell.get() {
+        return Ok(c);
+    }
+    let _g = lock.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(c) = cell.get() {
+        return Ok(c);
+    }
+    let client: T = cfg.create().map_err(kerr)?;
+    Ok(cell.get_or_init(|| client))
+}
+
 fn build_config(spec: &KafkaConnSpec) -> ClientConfig {
     let mut c = ClientConfig::new();
     c.set("bootstrap.servers", &spec.bootstrap_servers);
@@ -408,21 +561,31 @@ impl ConsumerContext for QuietContext {}
 impl KafkaClient {
     pub fn connect(spec: &KafkaConnSpec) -> Result<Self> {
         let base = build_config(spec);
-        let admin: AdminClient<DefaultClientContext> = base.create().map_err(kerr)?;
-        let producer: FutureProducer = base.create().map_err(kerr)?;
         let mut cc = base.clone();
         cc.set("group.id", "otto-brokers-meta");
         cc.set("enable.auto.commit", "false");
         let consumer: BaseConsumer<QuietContext> =
             cc.create_with_context(QuietContext).map_err(kerr)?;
         Ok(Self {
-            admin,
+            admin: std::sync::OnceLock::new(),
             consumer,
-            producer,
+            producer: std::sync::OnceLock::new(),
+            lazy_init: std::sync::Mutex::new(()),
             base_config: base,
             peek_pool: std::sync::Mutex::new(None),
             group_pool: std::sync::Mutex::new(Vec::new()),
+            partition_cache: std::sync::Mutex::new(PartitionCache::default()),
         })
+    }
+
+    /// The admin client, created on first use.
+    fn admin(&self) -> Result<&AdminClient<DefaultClientContext>> {
+        lazy_client(&self.admin, &self.lazy_init, &self.base_config)
+    }
+
+    /// The producer, created on the first produce.
+    fn producer(&self) -> Result<&FutureProducer> {
+        lazy_client(&self.producer, &self.lazy_init, &self.base_config)
     }
 
     /// Run `f` with a consumer whose `group.id` is `group`: the pooled one when
@@ -478,9 +641,13 @@ impl KafkaClient {
                 cfg.set("enable.auto.commit", "false");
                 cfg.set("enable.partition.eof", "true");
                 // Bound librdkafka's prefetch: a peek returns ≤ MAX_CONSUME_BYTES,
-                // but the defaults queue up to 64 MB per partition.
-                cfg.set("queued.max.messages.kbytes", "8192");
-                cfg.set("queued.min.messages", "1000");
+                // but the defaults queue up to 64 MB per partition. Both limits
+                // are PER PARTITION, so an assignment over a 100-partition topic
+                // could buffer 100 × the value — 8 MB / 1000 msgs each meant up
+                // to ~800 MB resident for one peek. 1 MB / 100 msgs per partition
+                // still keeps a fetch in flight ahead of the reader.
+                cfg.set("queued.max.messages.kbytes", "1024");
+                cfg.set("queued.min.messages", "100");
                 cfg.set("fetch.max.bytes", "8388608");
                 cfg.set("max.partition.fetch.bytes", "1048576");
                 cfg.create_with_context(QuietContext).map_err(kerr)?
@@ -490,6 +657,29 @@ impl KafkaClient {
             pool: &self.peek_pool,
             consumer: Some(consumer),
         })
+    }
+
+    /// Refill the partition cache from a metadata response already in hand.
+    fn remember_partitions(&self, md: &rdkafka::metadata::Metadata) {
+        let now = Instant::now();
+        let mut c = self
+            .partition_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        for t in md.topics() {
+            c.put(
+                t.name(),
+                t.partitions().iter().map(|p| p.id()).collect(),
+                now,
+            );
+        }
+    }
+
+    fn forget_partitions(&self, topic: &str) {
+        self.partition_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .invalidate(topic);
     }
 
     // ---- sync (consumer) ops — run via spawn_blocking ---------------------
@@ -590,6 +780,7 @@ impl KafkaClient {
             .consumer
             .fetch_metadata(None, META_TIMEOUT)
             .map_err(kerr)?;
+        self.remember_partitions(&md);
         let mut out = Vec::with_capacity(md.topics().len());
         for t in md.topics() {
             let rf = t
@@ -630,6 +821,7 @@ impl KafkaClient {
             .consumer
             .fetch_metadata(None, META_TIMEOUT)
             .map_err(kerr)?;
+        self.remember_partitions(&md);
         let targets: Vec<(&str, i32)> = md
             .topics()
             .iter()
@@ -646,22 +838,14 @@ impl KafkaClient {
             .sum())
     }
 
-    /// Message counts for many topics: one metadata pass plus one batched
-    /// watermark pass for all their partitions (the Topics tab's 50-row page).
-    /// A topic missing from metadata, or with no resolvable partition, maps to
-    /// `-1` ("count unavailable").
+    /// Message counts for many topics: partition ids from the per-cluster cache
+    /// (metadata only for misses — see [`partition_targets_with`]) plus one
+    /// batched watermark pass for all their partitions (the Topics tab's 50-row
+    /// page, refreshed every 5 s). A topic missing from metadata, or with no
+    /// resolvable partition, maps to `-1` ("count unavailable").
     pub fn topics_message_counts(&self, topics: &[String]) -> Result<HashMap<String, i64>> {
-        let md = self
-            .consumer
-            .fetch_metadata(None, META_TIMEOUT)
-            .map_err(kerr)?;
-        let wanted: HashSet<&str> = topics.iter().map(String::as_str).collect();
-        let targets: Vec<(&str, i32)> = md
-            .topics()
-            .iter()
-            .filter(|t| wanted.contains(t.name()))
-            .flat_map(|t| t.partitions().iter().map(move |p| (t.name(), p.id())))
-            .collect();
+        let owned = partition_targets_with(&self.consumer, &self.partition_cache, topics)?;
+        let targets: Vec<(&str, i32)> = owned.iter().map(|(t, p)| (t.as_str(), *p)).collect();
         let wm = self.batch_watermarks(&targets);
         let mut out: HashMap<String, i64> = topics.iter().map(|t| (t.clone(), -1)).collect();
         for ((t, _), (low, high)) in wm {
@@ -683,6 +867,7 @@ impl KafkaClient {
             .iter()
             .find(|t| t.name() == topic)
             .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+        self.remember_partitions(&md);
         let targets: Vec<(&str, i32)> = mt.partitions().iter().map(|p| (topic, p.id())).collect();
         Ok(self
             .batch_watermarks(&targets)
@@ -703,6 +888,7 @@ impl KafkaClient {
             .iter()
             .find(|t| t.name() == topic)
             .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+        self.remember_partitions(&md);
         if mt.partitions().is_empty() {
             return Err(Error::NotFound(format!("topic {topic}")));
         }
@@ -748,16 +934,17 @@ impl KafkaClient {
         starts: Option<&HashMap<i32, i64>>,
         byte_budget: Option<usize>,
     ) -> Result<RawConsume> {
-        let md = self
-            .consumer
-            .fetch_metadata(Some(topic), META_TIMEOUT)
-            .map_err(kerr)?;
-        let mt = md
-            .topics()
-            .iter()
-            .find(|t| t.name() == topic)
-            .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
-        let all: Vec<i32> = mt.partitions().iter().map(|p| p.id()).collect();
+        // Partition ids from the per-cluster cache (60 s TTL, invalidated on
+        // create/delete): a live-tail tick every 3 s no longer pays a metadata
+        // round trip before its ListOffsets batch.
+        let all: Vec<i32> =
+            partition_targets_with(&self.consumer, &self.partition_cache, &[topic.to_string()])?
+                .into_iter()
+                .map(|(_, p)| p)
+                .collect();
+        if all.is_empty() {
+            return Err(Error::NotFound(format!("topic {topic}")));
+        }
         let parts: Vec<i32> = match (starts, req.partition) {
             (Some(st), _) => {
                 let mut v: Vec<i32> = all.iter().copied().filter(|p| st.contains_key(p)).collect();
@@ -1180,7 +1367,11 @@ impl KafkaClient {
             nt = nt.set(&kv.name, &kv.value);
         }
         let opts = AdminOptions::new().operation_timeout(Some(Duration::from_secs(20)));
-        let res = self.admin.create_topics([&nt], &opts).await.map_err(kerr)?;
+        let res = self.admin()?.create_topics([&nt], &opts).await;
+        // After the op (success or not): a refresh racing it may have cached
+        // the topic as absent.
+        self.forget_partitions(&req.name);
+        let res = res.map_err(kerr)?;
         for r in res {
             r.map_err(|(name, code)| topic_op_err("create", &name, code))?;
         }
@@ -1189,11 +1380,9 @@ impl KafkaClient {
 
     pub async fn delete_topic(&self, topic: &str) -> Result<()> {
         let opts = AdminOptions::new().operation_timeout(Some(Duration::from_secs(20)));
-        let res = self
-            .admin
-            .delete_topics(&[topic], &opts)
-            .await
-            .map_err(kerr)?;
+        let res = self.admin()?.delete_topics(&[topic], &opts).await;
+        self.forget_partitions(topic);
+        let res = res.map_err(kerr)?;
         for r in res {
             r.map_err(|(name, code)| topic_op_err("delete", &name, code))?;
         }
@@ -1204,7 +1393,7 @@ impl KafkaClient {
         let opts = AdminOptions::new().request_timeout(Some(Duration::from_secs(15)));
         let spec = ResourceSpecifier::Topic(topic);
         let res = self
-            .admin
+            .admin()?
             .describe_configs([&spec], &opts)
             .await
             .map_err(kerr)?;
@@ -1244,7 +1433,10 @@ impl KafkaClient {
             .iter()
             .map(|t| ResourceSpecifier::Topic(t.as_str()))
             .collect();
-        let Ok(res) = self.admin.describe_configs(specs.iter(), &opts).await else {
+        let Ok(admin) = self.admin() else {
+            return HashMap::new();
+        };
+        let Ok(res) = admin.describe_configs(specs.iter(), &opts).await else {
             return HashMap::new();
         };
         let mut out = HashMap::with_capacity(topics.len());
@@ -1268,7 +1460,7 @@ impl KafkaClient {
         let opts = AdminOptions::new().request_timeout(Some(Duration::from_secs(15)));
         let spec = ResourceSpecifier::Topic(topic);
         let current = self
-            .admin
+            .admin()?
             .describe_configs([&spec], &opts)
             .await
             .map_err(kerr)?;
@@ -1292,7 +1484,7 @@ impl KafkaClient {
             alter = alter.set(k, v);
         }
         let res = self
-            .admin
+            .admin()?
             .alter_configs([&alter], &opts)
             .await
             .map_err(kerr)?;
@@ -1338,7 +1530,7 @@ impl KafkaClient {
         if !req.headers.is_empty() {
             record = record.headers(owned);
         }
-        match self.producer.send(record, Duration::from_secs(15)).await {
+        match self.producer()?.send(record, Duration::from_secs(15)).await {
             Ok(d) => Ok(ProduceResp {
                 partition: d.partition,
                 offset: d.offset,
@@ -1609,6 +1801,152 @@ mod tests {
         .expect("librdkafka clients are created lazily (no broker needed)")
     }
 
+    /// N4: connecting builds only the metadata consumer; the admin client and
+    /// producer appear on first use, once.
+    #[test]
+    fn admin_and_producer_are_created_on_first_use() {
+        let c = offline_client();
+        assert!(c.admin.get().is_none() && c.producer.get().is_none());
+        let p1 = c.producer().unwrap() as *const FutureProducer;
+        assert!(
+            c.admin.get().is_none(),
+            "producing must not build the admin"
+        );
+        assert!(std::ptr::eq(p1, c.producer().unwrap()));
+        let a1 = c.admin().unwrap() as *const AdminClient<DefaultClientContext>;
+        assert!(std::ptr::eq(a1, c.admin().unwrap()));
+    }
+
+    /// Counts metadata requests by kind; `topics` is the cluster.
+    #[derive(Default)]
+    struct MetaMock {
+        topics: Vec<(String, Vec<i32>)>,
+        all_calls: AtomicUsize,
+        one_calls: AtomicUsize,
+        fail: bool,
+    }
+
+    impl TopicMetaSource for MetaMock {
+        fn all_partitions(&self) -> Result<Vec<(String, Vec<i32>)>> {
+            self.all_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.topics.clone())
+        }
+        fn topic_partition_ids(&self, topic: &str) -> Result<Vec<i32>> {
+            self.one_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(Error::Upstream("broker down".into()));
+            }
+            Ok(self
+                .topics
+                .iter()
+                .find(|(t, _)| t == topic)
+                .map(|(_, ids)| ids.clone())
+                .unwrap_or_default())
+        }
+    }
+
+    fn names(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("t{i}")).collect()
+    }
+
+    #[test]
+    fn warm_partition_cache_skips_all_topics_metadata() {
+        let src = MetaMock {
+            topics: (0..60).map(|i| (format!("t{i}"), vec![0, 1, 2])).collect(),
+            ..Default::default()
+        };
+        let cache = std::sync::Mutex::new(PartitionCache::default());
+        // Warm it the way `list_topics` does (from metadata already in hand).
+        {
+            let mut c = cache.lock().unwrap();
+            for (t, ids) in &src.topics {
+                c.put(t, ids.clone(), Instant::now());
+            }
+        }
+        let page = names(50);
+        for _ in 0..3 {
+            let targets = partition_targets_with(&src, &cache, &page).unwrap();
+            assert_eq!(targets.len(), 150);
+        }
+        assert_eq!(
+            src.all_calls.load(Ordering::SeqCst),
+            0,
+            "no all-topics fetch"
+        );
+        assert_eq!(src.one_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn partition_cache_fetches_only_misses() {
+        let src = MetaMock {
+            topics: vec![("a".into(), vec![0]), ("b".into(), vec![0, 1])],
+            ..Default::default()
+        };
+        let cache = std::sync::Mutex::new(PartitionCache::default());
+        cache.lock().unwrap().put("a", vec![0], Instant::now());
+        // A few misses → per-topic lookups; a gone topic is negatively cached.
+        let want = vec!["a".to_string(), "b".into(), "gone".into()];
+        let mut t = partition_targets_with(&src, &cache, &want).unwrap();
+        t.sort();
+        assert_eq!(t, vec![("a".into(), 0), ("b".into(), 0), ("b".into(), 1)]);
+        assert_eq!(src.one_calls.load(Ordering::SeqCst), 2);
+        partition_targets_with(&src, &cache, &want).unwrap();
+        assert_eq!(src.one_calls.load(Ordering::SeqCst), 2, "now all cached");
+        assert_eq!(src.all_calls.load(Ordering::SeqCst), 0);
+        // Invalidation (create/delete topic) makes it a miss again.
+        cache.lock().unwrap().invalidate("b");
+        partition_targets_with(&src, &cache, &want).unwrap();
+        assert_eq!(src.one_calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn partition_cache_cold_page_uses_one_all_topics_pass_and_expires() {
+        let src = MetaMock {
+            topics: (0..60).map(|i| (format!("t{i}"), vec![0])).collect(),
+            ..Default::default()
+        };
+        let cache = std::sync::Mutex::new(PartitionCache::default());
+        let page = names(50);
+        assert_eq!(
+            partition_targets_with(&src, &cache, &page).unwrap().len(),
+            50
+        );
+        assert_eq!(src.all_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            src.one_calls.load(Ordering::SeqCst),
+            0,
+            "no N serial lookups"
+        );
+        // Past the TTL every entry is stale → planned as a miss again.
+        let later = Instant::now() + PARTITION_CACHE_TTL + Duration::from_secs(1);
+        let (targets, misses) = cache.lock().unwrap().plan(&page, later);
+        assert!(targets.is_empty());
+        assert_eq!(misses.len(), 50);
+    }
+
+    #[test]
+    fn partition_lookup_failure_stops_after_first_error() {
+        let src = MetaMock {
+            fail: true,
+            ..Default::default()
+        };
+        let cache = std::sync::Mutex::new(PartitionCache::default());
+        let few = names(3);
+        assert!(partition_targets_with(&src, &cache, &few).is_err());
+        assert_eq!(src.one_calls.load(Ordering::SeqCst), 1, "not 3 × timeout");
+        // With something resolved from cache, the rest just read "-1".
+        cache.lock().unwrap().put("t0", vec![0], Instant::now());
+        let t = partition_targets_with(&src, &cache, &few).unwrap();
+        assert_eq!(t, vec![("t0".to_string(), 0)]);
+    }
+
+    #[test]
+    fn pooled_peek_consumer_config_is_accepted() {
+        // The lowered per-partition prefetch bounds must still build a client.
+        let client = offline_client();
+        assert!(client.peek_lease().is_ok());
+    }
+
     #[test]
     fn group_describe_reuses_one_consumer_per_group() {
         let client = offline_client();
@@ -1683,5 +2021,185 @@ mod tests {
     #[test]
     fn parse_assignment_malformed_is_empty() {
         assert!(parse_member_assignment(&[0x00]).is_empty());
+    }
+
+    /// An in-process librdkafka mock cluster with request tracking, so a
+    /// test can count the Kafka protocol requests a call really sends.
+    /// (`rdkafka::mocking::MockCluster` hides its handle, and request
+    /// tracking is only reachable through the raw API.)
+    struct TrackedMock {
+        mock: *mut rdkafka::bindings::rd_kafka_mock_cluster_t,
+        /// The handle the mock cluster lives on; dropped after it.
+        _owner: rdkafka::producer::BaseProducer,
+        bootstrap: String,
+    }
+
+    /// Kafka protocol API keys.
+    const API_LIST_OFFSETS: i16 = 2;
+    const API_METADATA: i16 = 3;
+
+    impl TrackedMock {
+        fn new(topics: &[(&str, i32)]) -> Self {
+            use rdkafka::bindings as rd;
+            use rdkafka::producer::Producer;
+            let owner: rdkafka::producer::BaseProducer = ClientConfig::new().create().unwrap();
+            // SAFETY: `owner` outlives the mock (destroyed first in `Drop`).
+            let mock = unsafe { rd::rd_kafka_mock_cluster_new(owner.client().native_ptr(), 1) };
+            assert!(!mock.is_null(), "mock cluster");
+            for &(t, parts) in topics {
+                let name = std::ffi::CString::new(t).unwrap();
+                // SAFETY: valid mock handle and NUL-terminated name.
+                let err = unsafe { rd::rd_kafka_mock_topic_create(mock, name.as_ptr(), parts, 1) };
+                assert_eq!(err, rd::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR);
+            }
+            // SAFETY: the returned string is owned by the mock cluster.
+            let bootstrap = unsafe {
+                std::ffi::CStr::from_ptr(rd::rd_kafka_mock_cluster_bootstraps(mock))
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            // SAFETY: valid mock handle.
+            unsafe { rd::rd_kafka_mock_start_request_tracking(mock) };
+            Self {
+                mock,
+                _owner: owner,
+                bootstrap,
+            }
+        }
+
+        fn clear(&self) {
+            // SAFETY: valid mock handle.
+            unsafe { rdkafka::bindings::rd_kafka_mock_clear_requests(self.mock) };
+        }
+
+        /// Requests seen since the last `clear`, by API key.
+        fn requests(&self, api_key: i16) -> usize {
+            use rdkafka::bindings as rd;
+            let mut n = 0usize;
+            // SAFETY: the array and its `n` elements are ours to read, then
+            // free with `destroy_array`.
+            unsafe {
+                let arr = rd::rd_kafka_mock_get_requests(self.mock, &mut n);
+                if arr.is_null() {
+                    return 0;
+                }
+                let hits = (0..n)
+                    .filter(|&i| rd::rd_kafka_mock_request_api_key(*arr.add(i)) == api_key)
+                    .count();
+                rd::rd_kafka_mock_request_destroy_array(arr, n);
+                hits
+            }
+        }
+
+        fn client(&self) -> KafkaClient {
+            KafkaClient::connect(&KafkaConnSpec {
+                bootstrap_servers: self.bootstrap.clone(),
+                security_protocol: SecurityProtocol::Plaintext,
+                sasl_mechanism: None,
+                sasl_username: None,
+                sasl_password: None,
+                tls_skip_verify: false,
+            })
+            .unwrap()
+        }
+
+        fn produce(&self, topic: &str, n: usize) {
+            use rdkafka::producer::{BaseRecord, Producer};
+            let p: rdkafka::producer::BaseProducer = ClientConfig::new()
+                .set("bootstrap.servers", &self.bootstrap)
+                .create()
+                .unwrap();
+            for i in 0..n {
+                let key = format!("k{i}");
+                p.send(
+                    BaseRecord::to(topic)
+                        .key(&key)
+                        .payload("v")
+                        .partition((i % 3) as i32),
+                )
+                .map_err(|(e, _)| e)
+                .unwrap();
+            }
+            p.flush(Duration::from_secs(10)).unwrap();
+        }
+    }
+
+    impl Drop for TrackedMock {
+        fn drop(&mut self) {
+            // SAFETY: created in `new`, destroyed exactly once, before `_owner`.
+            unsafe { rdkafka::bindings::rd_kafka_mock_cluster_destroy(self.mock) };
+        }
+    }
+
+    /// N5 budget, against a real (in-process) Kafka protocol peer: the
+    /// Topics tab's warm count refresh sends NO metadata request and one
+    /// batched ListOffsets per offset kind (never one per partition), within
+    /// a generous wall-clock ceiling; a live-tail tick over a 3-partition
+    /// topic is the same single watermark batch and returns the new messages.
+    #[test]
+    fn mock_cluster_counts_and_tail_tick_request_budget() {
+        let topics: Vec<(String, i32)> = (0..6).map(|i| (format!("t{i}"), 3)).collect();
+        let refs: Vec<(&str, i32)> = topics.iter().map(|(t, p)| (t.as_str(), *p)).collect();
+        let mock = TrackedMock::new(&refs);
+        mock.produce("t0", 30);
+        let client = mock.client();
+        let names: Vec<String> = topics.iter().map(|(t, _)| t.clone()).collect();
+
+        // Cold: one all-topics pass fills the partition cache.
+        let cold = client.topics_message_counts(&names).unwrap();
+        assert_eq!(cold["t0"], 30, "{cold:?}");
+
+        // Warm: partitions from the cache, watermarks in one batch per kind.
+        mock.clear();
+        let started = Instant::now();
+        let warm = client.topics_message_counts(&names).unwrap();
+        let took = started.elapsed();
+        assert_eq!(warm, cold);
+        assert_eq!(
+            mock.requests(API_METADATA),
+            0,
+            "a warm count refresh must not fetch metadata"
+        );
+        let list_offsets = mock.requests(API_LIST_OFFSETS);
+        assert!(
+            (1..=2).contains(&list_offsets),
+            "18 partitions must cost ≤ 2 batched ListOffsets, saw {list_offsets}"
+        );
+        assert!(took < Duration::from_secs(2), "warm counts took {took:?}");
+
+        // Live tail: first tick reads the latest page and warms the peek pool.
+        let req: ConsumeReq = serde_json::from_value(serde_json::json!({
+            "limit": 50, "max_wait_ms": 3000
+        }))
+        .unwrap();
+        let first = client.consume_raw_from("t0", &req, None, None).unwrap();
+        assert_eq!(first.messages.len(), 30);
+        let starts: HashMap<i32, i64> = first
+            .partitions
+            .iter()
+            .map(|r| (r.partition, r.high))
+            .collect();
+        mock.produce("t0", 30);
+
+        // Next tick: everything after the previous highs, in one batch.
+        mock.clear();
+        let started = Instant::now();
+        let tick = client
+            .consume_raw_from("t0", &req, Some(&starts), Some(MAX_CONSUME_BYTES))
+            .unwrap();
+        let took = started.elapsed();
+        assert_eq!(tick.messages.len(), 30, "the tick returns the new messages");
+        let list_offsets = mock.requests(API_LIST_OFFSETS);
+        assert!(
+            (1..=2).contains(&list_offsets),
+            "a tail tick is one batched watermark pass, saw {list_offsets} ListOffsets"
+        );
+        assert!(took < Duration::from_secs(2), "tail tick took {took:?}");
+        // The partition list comes from the warm cache, not a metadata request.
+        assert_eq!(
+            mock.requests(API_METADATA),
+            0,
+            "a warm tail tick must not fetch topic metadata"
+        );
     }
 }

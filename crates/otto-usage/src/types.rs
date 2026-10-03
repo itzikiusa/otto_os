@@ -220,6 +220,12 @@ pub struct SessionTotals {
     pub cache_write_tokens: u64,
     pub total_tokens: u64,
     pub cost_usd: f64,
+    /// Most-used model and last activity — internal: they let the summary take
+    /// its top sessions from this rollup (R4). Not part of the API shape.
+    #[serde(default, skip_serializing)]
+    pub model: String,
+    #[serde(default, skip_serializing)]
+    pub last_active: String,
 }
 
 // ---------------------------------------------------------------------------

@@ -26,12 +26,27 @@ import { layout, type Axis } from './splitLayout.svelte';
 import { MAX_PANES, LS_PANES } from './splitLayout';
 import { isEmbedded } from '../desktop';
 import { SCRATCH_WORKSPACE_ID } from './sessionScope';
-import { patchSessionIn } from './sessionPatch';
+import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
+import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
+import { whenIdle } from '../lazy-component.svelte';
+
+/** Archived rows per "Load more" page (per scope: workspace / scratch). */
+const ARCHIVED_PAGE = 100;
+/** How long an exited background row stays in `sessions` before it is
+ *  dropped (perf R2) — a draft dialog's embedded agent outlives its turn. */
+const EXITED_BACKGROUND_GRACE_MS = 30_000;
 
 // Layout state is per-WINDOW (multi-window): winKey() namespaces these by the
 // window's label so two windows never clobber each other's workspace/tabs/view.
 // The main window keeps the legacy unprefixed keys.
 const LS_CURRENT = 'otto_workspace';
+
+/** Boot-time shown-list requests for the saved workspace (perf G3). */
+interface BootSessions {
+  key: string;
+  own: Promise<Session[]>;
+  scratch: Promise<Session[]>;
+}
 const LS_TABS = 'otto_tabs_'; // + workspace id
 // App-wide (deliberately NOT winKey-namespaced): whether the sidebar lists
 // sessions from every workspace, grouped by workspace, instead of only the
@@ -42,44 +57,9 @@ const LS_ALL_WS = 'otto_nav_all_ws';
 // the pure scope rules there are unit-testable; re-exported for callers.
 export { SCRATCH_WORKSPACE_ID };
 
-/** Background-spawned session sources that never surface in the sidebar's flat
- *  session lists (they live in their own panels/views). MUST stay byte-identical
- *  to the Rust source of truth: `BACKGROUND_SESSION_SOURCES` in
- *  `crates/otto-core/src/domain.rs` (which also drives server-side durability).
- *  Every derived list below filters through `isForeground` — never re-inline a
- *  source blacklist. */
-const BACKGROUND_SOURCES = new Set([
-  'channel',
-  'review',
-  'review_summarizer',
-  'skilleval',
-  'skillreview',
-  'product-analysis',
-  'product_refine',
-  'swarm',
-  'canvas_assist',
-  'canvas_assist_preview',
-  'mockup_assist',
-  'db_assist',
-  'workflow',
-  'vault-docs',
-  'vault-docs-review',
-  'pr-draft',
-  'commit-draft',
-  'insights',
-  'run_with_otto',
-  'goal_loop',
-  'discovery_chat',
-  'scheduled_task',
-  'finding',
-  'assistant',
-]);
-
-/** A user-facing foreground session (sidebar-listable). */
-export function isForeground(s: Session): boolean {
-  const src = (s.meta as { source?: string } | null)?.source;
-  return src == null || !BACKGROUND_SOURCES.has(src);
-}
+// The background-source blacklist, `isForeground` and the one-pass sidebar
+// bucketing live in the rune-free `sessionBuckets.ts` (unit-tested there).
+export { isForeground };
 
 /** Per-device session isolation (Settings → Appearance, opt-in): with it on, a
  *  FOREGROUND session is kept only on the device that started it
@@ -109,16 +89,50 @@ class WorkspaceStore {
   scratch: Workspace | null = $state(null);
   /** Sessions of the current workspace PLUS the scratch workspace's (always
    *  loaded, so workspace-less sessions work with zero workspaces). */
-  sessions: Session[] = $state([]);
+  sessions: Session[] = $state.raw([]);
+  /** `sessions` by id — every per-row / per-pane lookup goes through
+   *  {@link getSession} instead of an O(n) `.find`. Rows are immutable
+   *  (`$state.raw`; every update replaces the array), so no deep proxies. */
+  sessionById: Map<Id, Session> = $derived(new Map(this.sessions.map((s) => [s.id, s] as const)));
+  /** The loaded row for `id`, or null. */
+  getSession(id: Id | null | undefined): Session | null {
+    return id ? (this.sessionById.get(id) ?? null) : null;
+  }
+  /** Every sidebar list in ONE pass over `sessions` (see `bucketSessions`). */
+  private buckets = $derived(bucketSessions(this.sessions));
+  /** Background sources a mounted panel asked to have loaded with the main
+   *  list (e.g. the swarm page's `swarm` agents) — {@link includeSources}. */
+  private extraSources = new Map<string, number>();
   /** Programmatic PTY input keyed by session id, with a bump counter so the
    *  Terminal applies each injection exactly once (e.g. DB rows → running agent). */
   injections: Record<Id, { text: string; n: number }> = $state({});
   sessionsLoading = $state(false);
+  /** The first workspace-list load has picked the selection (or failed).
+   *  Workspace-scoped boot loads (Home's Today) wait for it instead of
+   *  loading once unscoped and again when the saved workspace resolves. */
+  listSettled = $state(false);
   private selectionGeneration = 0;
   private loadGeneration = 0;
   private loadedToken: string | null | undefined;
   private sessionsGeneration = 0;
   private sessionsInFlight: Promise<void> | null = null;
+  /** `${selectionGeneration}:${currentId}` of the in-flight load, and the one
+   *  trailing refresh queued behind it (single-flight, F7). */
+  private sessionsInFlightKey = '';
+  private sessionsTrailing: Promise<void> | null = null;
+  /** In-flight fetch-by-id per session id ({@link ensureSession}). */
+  private ensuring = new Map<Id, Promise<Session | null>>();
+  /** The saved workspace's shown-list requests, started WITH `/workspaces`
+   *  on boot (perf G3) and taken once by the first {@link loadSessions} whose
+   *  workspace + query + token match; dropped when the saved id isn't the one
+   *  selected. Keyed `${token}|${wsId}|${query}`. */
+  private bootSessions: BootSessions | null = null;
+  /** `session_status` row stamps queued for the next frame (perf R6): a burst
+   *  of N events is ONE `sessions` write, not N id-map + bucket rebuilds.
+   *  `statusMap` is still written per event (dots / badges stay live). */
+  private pendingStatus = new Map<Id, StatusPatch>();
+  private statusFlushRaf: number | null = null;
+  private statusFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** In-flight workflow runs (pending|running) in the current workspace, for the
    *  "Running" sidebar list + the Workflows nav count chip. Refreshed on each
@@ -197,12 +211,10 @@ class WorkspaceStore {
 
   activeSessionId: Id | null = $derived(this.panes[this.focusedPane] ?? null);
 
-  activeSession: Session | null = $derived(
-    this.sessions.find((s) => s.id === this.activeSessionId) ?? null,
-  );
+  activeSession: Session | null = $derived(this.getSession(this.activeSessionId));
 
   /** Active (non-archived) sessions. */
-  activeSessions: Session[] = $derived(this.sessions.filter((s) => !s.archived));
+  activeSessions: Session[] = $derived(this.buckets.active);
 
   /** Sessions the tiled grid shows: all active EXCEPT background-spawned ones
    *  (Slack/Telegram channels + PR-review agents) the user hasn't explicitly
@@ -217,39 +229,28 @@ class WorkspaceStore {
     // (they are not its sessions, exactly as {@link agentSessions} has it)
     // unless the user opened one. With no workspace selected they are all there
     // is, so the grid is theirs.
-    this.activeSessions.filter(
-      (s) =>
-        (isForeground(s) &&
-          (this.currentId === null || s.workspace_id !== SCRATCH_WORKSPACE_ID)) ||
-        this.openTabs.includes(s.id),
-    ),
+    this.mainOf(this.buckets.active, new Set(this.openTabs)),
   );
+
+  private mainOf(active: Session[], open: Set<Id>): Session[] {
+    return active.filter(
+      (s) =>
+        (isForeground(s) && (this.currentId === null || s.workspace_id !== SCRATCH_WORKSPACE_ID)) ||
+        open.has(s.id),
+    );
+  }
 
   /** Active agent sessions (claude/codex/shell) of the current workspace —
    *  sidebar "Agents" group. Scratch sessions have their own group
    *  ({@link scratchSessions}). */
-  agentSessions: Session[] = $derived(
-    this.sessions.filter(
-      (s) => !s.archived && s.kind === 'agent' && s.workspace_id !== SCRATCH_WORKSPACE_ID,
-    ),
-  );
+  agentSessions: Session[] = $derived(this.buckets.agent);
 
   /** Foreground agent sessions of the hidden scratch workspace — the sidebar
    *  "No workspace" group. Present in every workspace and with none. */
-  scratchSessions: Session[] = $derived(
-    this.sessions.filter(
-      (s) =>
-        !s.archived &&
-        s.kind === 'agent' &&
-        s.workspace_id === SCRATCH_WORKSPACE_ID &&
-        isForeground(s),
-    ),
-  );
+  scratchSessions: Session[] = $derived(this.buckets.scratch);
 
   /** Active connection sessions (ssh/db/custom) — sidebar "Connections" group. */
-  connectionSessions: Session[] = $derived(
-    this.sessions.filter((s) => !s.archived && s.kind === 'connection'),
-  );
+  connectionSessions: Session[] = $derived(this.buckets.connection);
 
   // ── All-workspaces sidebar view ────────────────────────────────────────────
 
@@ -267,7 +268,7 @@ class WorkspaceStore {
    *  by fanning out over the membership list ({@link refreshOtherSessions}).
    *  RBAC holds — each per-workspace list is the same one the user would see
    *  after switching there. */
-  otherWsSessions: Session[] = $state([]);
+  otherWsSessions: Session[] = $state.raw([]);
 
   /** The all-workspaces view, grouped: every OTHER workspace that has at least
    *  one foreground agent session, with its sessions newest-first. The current
@@ -297,7 +298,9 @@ class WorkspaceStore {
     const others = new Set(this.workspaces.filter((w) => w.id !== this.currentId).map((w) => w.id));
     let rows: Session[];
     try {
-      rows = await api.get<Session[]>('/sessions?archived=false');
+      // Only rows the grouped view can show (foreground agents): background
+      // engine sessions of every workspace used to ride along.
+      rows = await api.get<Session[]>('/sessions?archived=false&foreground=true');
     } catch {
       return;
     }
@@ -308,10 +311,21 @@ class WorkspaceStore {
     for (const s of flat) if (!(s.id in this.statusMap)) this.statusMap[s.id] = s.status;
     // Prune statusMap entries for sessions no longer present anywhere (left
     // workspaces, reaped sessions) so the map doesn't grow without bound.
-    const known = new Set<Id>([...this.sessions.map((s) => s.id), ...flat.map((s) => s.id)]);
-    for (const id of Object.keys(this.statusMap)) {
-      if (!known.has(id)) delete this.statusMap[id];
-    }
+    this.pruneStatusMap();
+  }
+
+  /** Drop `statusMap` entries for sessions no loaded list holds (left
+   *  workspaces, reaped / exited background sessions) — after every list
+   *  load, so the map doesn't grow with every id an event ever named (R2).
+   *  Live (`working`/`running`) entries stay: a panel watching a background
+   *  session it fetched itself reads its dot from here. */
+  private pruneStatusMap(): void {
+    const known = new Set<Id>();
+    for (const s of this.sessions) known.add(s.id);
+    for (const s of this.otherWsSessions) known.add(s.id);
+    for (const s of this.archivedSessions) known.add(s.id);
+    for (const id of this.ensuring.keys()) known.add(id);
+    for (const id of staleStatusIds(this.statusMap, known)) delete this.statusMap[id];
   }
 
   /** Open a session that lives in another workspace: switch there, then focus
@@ -325,19 +339,11 @@ class WorkspaceStore {
   /** Agent sessions opened from a Telegram chat — sidebar "Telegram" group.
    *  Newest first (RFC3339 last_active_at sorts chronologically) so the
    *  sidebar's "most recent N" cap keeps the freshest tickets visible. */
-  telegramSessions: Session[] = $derived(
-    this.agentSessions
-      .filter((s) => s.meta.channel === 'telegram')
-      .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at)),
-  );
+  telegramSessions: Session[] = $derived(this.buckets.telegram);
 
   /** Agent sessions opened from a Slack chat — sidebar "Slack" group.
    *  Newest first, like {@link telegramSessions}. */
-  slackSessions: Session[] = $derived(
-    this.agentSessions
-      .filter((s) => s.meta.channel === 'slack')
-      .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at)),
-  );
+  slackSessions: Session[] = $derived(this.buckets.slack);
 
   /** Agent sessions started locally (not by an engine) — sidebar "Agents"
    *  group. Background sessions (workflow steps, review agents, vault docs
@@ -347,27 +353,49 @@ class WorkspaceStore {
    *  crates/otto-core/src/domain.rs — the daemon exempts exactly the
    *  foreground complement from auto-pruning, so what the Agents tab shows is
    *  what retention protects. */
-  plainAgentSessions: Session[] = $derived(this.agentSessions.filter(isForeground));
+  plainAgentSessions: Session[] = $derived(this.buckets.plainAgent);
 
-  /** Archived sessions — shown in a collapsible "Archived" section. */
-  archivedSessions: Session[] = $derived(this.sessions.filter((s) => s.archived));
+  /** Archived sessions — the collapsible "Archived" section. Loaded LAZILY,
+   *  {@link ARCHIVED_PAGE} at a time, the first time the section opens
+   *  ({@link loadArchived}); newest first. The main list never carries them. */
+  archivedSessions: Session[] = $state.raw([]);
+  /** At least one page was loaded for the current selection. */
+  archivedLoaded = $state(false);
+  archivedLoading = $state(false);
+  /** Older archived rows exist beyond what is loaded ("Load more"). */
+  archivedHasMore = $state(false);
+  /** The current workspace (or scratch) has archived rows at all — a 1-row
+   *  probe on every list load, so the folded header shows without paging. */
+  hasArchived = $state(false);
+  /** The probe (or an archive from here) already found archived rows for this
+   *  selection (perf G7): they don't go away on their own, so later refreshes
+   *  skip the 1–2 probe requests. Only a positive answer is kept — "none yet"
+   *  is re-asked, so an archive from another client still shows the header.
+   *  Cleared on a workspace switch and on an unarchive. */
+  private archivedKnown = false;
+  /** Per-scope paging cursor: the oldest loaded `created_at`, or null once
+   *  that scope is exhausted. */
+  private archivedCursor: Record<Id, string | null> = {};
+  private archivedGeneration = 0;
 
   // "Working" count for the Agents badge — only foreground agent sessions, not
   // background review/channel ones (those are hidden from the Agents list, so
   // counting them made the badge disagree with the list, e.g. badge 4 / list empty).
   workingCount: number = $derived(
-    this.sessions.filter(
-      (s) => !s.archived && this.statusMap[s.id] === 'working' && isForeground(s),
-    ).length,
+    this.buckets.foregroundActive.filter((s) => this.statusMap[s.id] === 'working').length,
   );
 
   /** Foreground agent sessions currently flagged "needs you" — the sidebar
    *  "Needs you" badge/count (mirrors {@link workingCount}'s scoping). */
   needsYouCount: number = $derived(
-    this.sessions.filter(
-      (s) => !s.archived && this.needsYou[s.id] === true && isForeground(s),
-    ).length,
+    this.buckets.foregroundActive.filter((s) => this.needsYou[s.id] === true).length,
   );
+
+  /** Foreground live sessions (the scope of the badge counts) — exported for
+   *  the Home "waiting" box so it doesn't re-filter the whole list. */
+  get foregroundActive(): Session[] {
+    return this.buckets.foregroundActive;
+  }
 
   /** Flag a session as needing the operator's attention (blocked on input). */
   markNeedsYou(id: Id): void {
@@ -450,32 +478,68 @@ class WorkspaceStore {
       this.sessions = [];
       this.otherWsSessions = [];
       this.activeWorkflowRuns = [];
+      this.resetArchived();
     }
     const selection = this.selectionGeneration;
     const current = () => generation === this.loadGeneration && token === getToken() && selection === this.selectionGeneration;
-    const workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
-    if (!current()) return;
-    this.workspaces = workspaces;
     // The hidden scratch workspace — best-effort: a daemon without it leaves
-    // `scratch` null and the sheet falls back to `~`.
-    let scratch: Workspace | null = null;
+    // `scratch` null and the sheet falls back to `~`. Fetched WITH the list
+    // (perf F3: one round-trip instead of two before the session list).
+    const scratchReq = api.get<Workspace>(`/workspaces/${SCRATCH_WORKSPACE_ID}`).catch(() => null);
+    // The saved workspace's session list goes out WITH the list too (perf
+    // G3): it used to wait for `/workspaces` to answer, then for `select()`,
+    // so the sidebar filled after three round trips instead of two. Only used
+    // if the saved id survives validation below; otherwise dropped unread.
+    const saved = lsGet(winKey(LS_CURRENT));
+    const boot = saved && saved !== SCRATCH_WORKSPACE_ID ? this.startBootSessions(token, saved) : null;
+    this.bootSessions = boot;
+    // Drop ours only — a newer load() may have replaced it meanwhile.
+    const dropBoot = () => {
+      if (this.bootSessions === boot) this.bootSessions = null;
+    };
+    let workspaces: WorkspaceWithRole[];
     try {
-      scratch = await api.get<Workspace>(`/workspaces/${SCRATCH_WORKSPACE_ID}`);
-    } catch {
-      // Optional workspace unavailable.
+      workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
+    } catch (e) {
+      dropBoot();
+      this.listSettled = true;
+      throw e;
     }
     if (!current()) return;
+    this.workspaces = workspaces;
+    const scratch = await scratchReq;
+    if (!current()) return;
     this.scratch = scratch;
-    const saved = lsGet(winKey(LS_CURRENT));
     const target = workspaces.find((w) => w.id === saved) ?? workspaces[0] ?? null;
-    if (target) await this.select(target.id);
-    else await this.selectNone();
+    if (target?.id !== saved) dropBoot();
+    // select()/selectNone() set currentId before their first await, so the
+    // flag flips with the selection already in place.
+    const selecting = target ? this.select(target.id) : this.selectNone();
+    this.listSettled = true;
+    try {
+      await selecting;
+    } finally {
+      // One-shot: a later refresh always asks the daemon again.
+      dropBoot();
+    }
+  }
+
+  /** Start the shown-list requests {@link loadSessions} would make for `wsId`
+   *  (its own rows + the scratch workspace's). A rejection is held for the
+   *  consumer, never reported as unhandled when the requests go unused. */
+  private startBootSessions(token: string | null, wsId: Id): BootSessions {
+    const q = shownListQuery(this.extraSources.keys());
+    const own = api.get<Session[]>(`/workspaces/${wsId}/sessions${q}`);
+    own.catch(() => {});
+    const scratch = api.get<Session[]>(`/workspaces/${SCRATCH_WORKSPACE_ID}/sessions${q}`).catch(() => [] as Session[]);
+    return { key: `${token}|${wsId}|${q}`, own, scratch };
   }
 
   async select(id: Id): Promise<void> {
     if (this.currentId === id && this.sessions.length > 0) return;
     const generation = ++this.selectionGeneration;
     this.currentId = id;
+    this.resetArchived();
     lsSet(winKey(LS_CURRENT), id);
     // Pin both persistence keys NOW, before the await below: the route→store
     // effect may `openSession` while sessions are still loading, and that
@@ -499,6 +563,7 @@ class WorkspaceStore {
   private async selectNone(): Promise<void> {
     const generation = ++this.selectionGeneration;
     this.currentId = null;
+    this.resetArchived();
     this.activeWorkflowRuns = [];
     this.otherWsSessions = [];
     this.tabsKey = SCRATCH_WORKSPACE_ID;
@@ -536,12 +601,14 @@ class WorkspaceStore {
     const raw = lsGet(winKey(LS_TABS + key));
     const ids: Id[] = raw ? JSON.parse(raw) : [];
     // Keep real sessions + the DB-Explorer pane sentinel (it has no session row).
-    const valid = ids.filter((t) => t === DB_PANE_ID || this.sessions.some((s) => s.id === t));
+    const valid = ids.filter((t) => t === DB_PANE_ID || this.sessionById.has(t));
     // Tabs opened while this key was still un-hydrated (see {@link bindTabsKey})
     // are appended — the route→store effect's session must survive the restore.
-    const pending = this.pendingTabs.filter(
-      (t) => !valid.includes(t) && (t === DB_PANE_ID || this.sessions.some((s) => s.id === t)),
-    );
+    const pendingAll = this.pendingTabs.filter((t) => !valid.includes(t));
+    const pending = pendingAll.filter((t) => t === DB_PANE_ID || this.sessionById.has(t));
+    // A route-opened session the shown list doesn't carry (a background
+    // agent's `#/agents/<id>`): fetch it by id, then open it.
+    for (const t of pendingAll) if (!pending.includes(t)) this.openWhenLoaded(t);
     this.pendingTabs = [];
     this.tabsHydrated = true;
     this.openTabs = [...valid, ...pending];
@@ -562,18 +629,170 @@ class WorkspaceStore {
   /** Reload `sessions` for the current workspace (+ scratch). `reconcile`
    *  (default on) prunes phantom tabs afterwards; a workspace switch turns it
    *  off because {@link restoreLayout} replaces the layout wholesale. */
-  async refreshSessions(opts: { reconcile?: boolean } = {}): Promise<void> {
-    const pending = this.loadSessions(opts);
-    this.sessionsInFlight = pending;
-    try { await pending; }
-    finally { if (this.sessionsInFlight === pending) this.sessionsInFlight = null; }
+  refreshSessions(opts: { reconcile?: boolean } = {}): Promise<void> {
+    // Single-flight (F7): a refresh while one is already loading for the SAME
+    // selection queues at most ONE trailing load (it starts after the current
+    // one settles, so it sees every change) instead of another request each.
+    const key = `${this.selectionGeneration}:${this.currentId}`;
+    if (this.sessionsInFlight && this.sessionsInFlightKey === key) {
+      this.sessionsTrailing ??= this.sessionsInFlight
+        .catch(() => {})
+        .then(() => {
+          this.sessionsTrailing = null;
+          return this.refreshSessions(opts);
+        });
+      return this.sessionsTrailing;
+    }
+    this.sessionsInFlightKey = key;
+    const run: Promise<void> = this.loadSessions(opts).finally(() => {
+      if (this.sessionsInFlight === run) this.sessionsInFlight = null;
+    });
+    this.sessionsInFlight = run;
+    return run;
+  }
+
+  /** Ask for a background source to be loaded with the main list while a
+   *  panel that lists those sessions is mounted (the swarm org tree reads
+   *  `meta.source = 'swarm'` rows). Returns the release function. */
+  includeSources(...sources: string[]): () => void {
+    // Ref-counted: two mounted panels asking for the same source share it.
+    const fresh = sources.filter((src) => !this.extraSources.has(src));
+    for (const src of sources) this.extraSources.set(src, (this.extraSources.get(src) ?? 0) + 1);
+    if (fresh.length > 0 && this.layoutReady) void this.refreshSessions().catch(() => {});
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      for (const src of sources) {
+        const n = (this.extraSources.get(src) ?? 1) - 1;
+        if (n <= 0) this.extraSources.delete(src);
+        else this.extraSources.set(src, n);
+      }
+    };
+  }
+
+  /** Fetch ONE session by id into `sessions` (when it belongs to the current
+   *  workspace or scratch) — for an id the shown list doesn't carry: a
+   *  background agent opened from its panel, a notification, a handover
+   *  source. Deduped per id; null when missing / not visible. */
+  ensureSession(id: Id): Promise<Session | null> {
+    const have = this.sessionById.get(id);
+    if (have) return Promise.resolve(have);
+    const inflight = this.ensuring.get(id);
+    if (inflight) return inflight;
+    const selection = this.selectionGeneration;
+    const p = api
+      .get<Session[]>(`/sessions?ids=${encodeURIComponent(id)}`)
+      .then((rows) => {
+        const s = rows.find((r) => r.id === id) ?? null;
+        if (!s || selection !== this.selectionGeneration) return s;
+        if (this.belongsHere(s.workspace_id) && visibleOnThisDevice(s) && !this.sessionById.has(id)) {
+          this.sessions = [...this.sessions, s];
+          if (!(s.id in this.statusMap)) this.statusMap[s.id] = s.status;
+        }
+        return s;
+      })
+      .catch(() => null)
+      .finally(() => this.ensuring.delete(id));
+    this.ensuring.set(id, p);
+    return p;
+  }
+
+  /** {@link ensureSession}, then open it — once (no retry loop when the row
+   *  turns out not to be listable here). */
+  private openWhenLoaded(id: Id): void {
+    void this.ensureSession(id).then(() => {
+      if (this.sessionById.has(id)) this.openSession(id);
+    });
+  }
+
+  private resetArchived(): void {
+    ++this.archivedGeneration;
+    this.archivedSessions = [];
+    this.archivedLoaded = false;
+    this.archivedLoading = false;
+    this.archivedHasMore = false;
+    this.hasArchived = false;
+    this.archivedKnown = false;
+    this.archivedCursor = {};
+  }
+
+  /** Load the first (or, with `more`, the next) page of archived sessions for
+   *  the current workspace + scratch — `?archived=true&limit=100&before=…`. */
+  async loadArchived(more = false): Promise<void> {
+    if (this.archivedLoading || (more && !this.archivedHasMore) || (!more && this.archivedLoaded)) return;
+    const generation = this.archivedGeneration;
+    const scopes = [this.currentId, SCRATCH_WORKSPACE_ID].filter((w, i, a): w is Id => !!w && a.indexOf(w) === i);
+    const todo = scopes.filter((w) => !more || this.archivedCursor[w] != null);
+    this.archivedLoading = true;
+    try {
+      const pages = await Promise.all(
+        todo.map((w) => {
+          const before = more ? this.archivedCursor[w] : null;
+          const q = `?archived=true&limit=${ARCHIVED_PAGE}${before ? `&before=${encodeURIComponent(before)}` : ''}`;
+          return api
+            .get<Session[]>(`/workspaces/${w}/sessions${q}`)
+            .catch((e) => (w === SCRATCH_WORKSPACE_ID ? ([] as Session[]) : Promise.reject(e)))
+            .then((rows) => ({ w, rows }));
+        }),
+      );
+      if (generation !== this.archivedGeneration) return;
+      const seen = new Set(more ? this.archivedSessions.map((s) => s.id) : []);
+      const next = more ? [...this.archivedSessions] : [];
+      for (const { w, rows } of pages) {
+        // Rows come oldest-first; the oldest is the next page's cursor.
+        this.archivedCursor[w] = rows.length >= ARCHIVED_PAGE ? rows[0].created_at : null;
+        for (const s of rows) {
+          if (seen.has(s.id) || !visibleOnThisDevice(s)) continue;
+          seen.add(s.id);
+          next.push(s);
+        }
+      }
+      next.sort((a, b) => b.created_at.localeCompare(a.created_at));
+      this.archivedSessions = next;
+      this.archivedLoaded = true;
+      this.archivedHasMore = scopes.some((w) => this.archivedCursor[w] != null);
+      if (next.length > 0) this.hasArchived = true;
+    } finally {
+      if (generation === this.archivedGeneration) this.archivedLoading = false;
+    }
+  }
+
+  /** Ids to fetch by id alongside the shown list: open tabs / panes (this
+   *  workspace's persisted ones too, before `restoreLayout` reads them) and
+   *  background rows still live in the store (an embedded PR draft, a review
+   *  agent being watched) — so a refresh never drops what is on screen. */
+  private pinnedIds(): Id[] {
+    const ids = new Set<Id>();
+    try {
+      const raw = lsGet(winKey(LS_TABS + this.tabsKey));
+      for (const t of raw ? (JSON.parse(raw) as Id[]) : []) ids.add(t);
+    } catch {
+      /* corrupt payload: restoreLayout handles it */
+    }
+    for (const t of this.openTabs) ids.add(t);
+    for (const t of this.pendingTabs) ids.add(t);
+    for (const t of layout.panes) ids.add(t);
+    const live = this.sessions
+      .filter(
+        (s) =>
+          !isShownKind(s) &&
+          !s.archived &&
+          this.belongsHere(s.workspace_id) &&
+          (this.statusMap[s.id] ?? s.status) !== 'exited',
+      )
+      .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at))
+      .slice(0, 64);
+    for (const s of live) ids.add(s.id);
+    ids.delete(DB_PANE_ID);
+    return [...ids];
   }
 
   /** Events may refresh again while selection is waiting. Restore persisted
    * tabs only after the latest response for this selection is settled. */
   private async waitForSessions(selection: number): Promise<void> {
-    while (selection === this.selectionGeneration && this.sessionsInFlight) {
-      await this.sessionsInFlight;
+    while (selection === this.selectionGeneration && (this.sessionsTrailing || this.sessionsInFlight)) {
+      await (this.sessionsTrailing ?? this.sessionsInFlight)?.catch(() => {});
     }
   }
 
@@ -588,32 +807,83 @@ class WorkspaceStore {
       // scratch workspace's — always, best-effort (a daemon without the
       // scratch row answers 403, which leaves workspace-less sessions empty
       // and everything else unchanged). Deduped by id defensively.
-      const [own, scratch] = await Promise.all([
-        wsId ? api.get<Session[]>(`/workspaces/${wsId}/sessions`) : Promise.resolve([]),
+      //
+      // ONLY the rows the sidebar shows (F1): live connections, foreground
+      // agents and channel tickets (+ sources a mounted panel asked for). A
+      // main workspace with 1.9 k hidden review agents used to ship ~1.2 MB
+      // per refresh. Open tabs / panes and live background rows ride along by
+      // id (in parallel), and anything else is fetched on demand
+      // ({@link ensureSession}). Archived rows load lazily ({@link loadArchived}).
+      const q = shownListQuery(this.extraSources.keys());
+      // Not once rows are known (G7, which also covers R4's "once per selection"
+      // for any workspace that has archived rows); "none yet" is re-asked so an
+      // archive from another client still shows the header.
+      const probeArchived = !this.archivedLoaded && !this.archivedKnown;
+      const probe = (w: Id) =>
         api
-          .get<Session[]>(`/workspaces/${SCRATCH_WORKSPACE_ID}/sessions`)
-          .catch(() => [] as Session[]),
+          .get<Session[]>(`/workspaces/${w}/sessions?archived=true&limit=1`)
+          .then((r) => r.length > 0)
+          .catch(() => false);
+      // The boot's speculative requests for exactly this list, if any (G3).
+      const boot =
+        this.bootSessions && this.bootSessions.key === `${getToken()}|${wsId}|${q}` ? this.bootSessions : null;
+      if (boot) this.bootSessions = null;
+      const [own, scratch, pinned] = await Promise.all([
+        boot ? boot.own : wsId ? api.get<Session[]>(`/workspaces/${wsId}/sessions${q}`) : Promise.resolve([]),
+        boot
+          ? boot.scratch
+          : api.get<Session[]>(`/workspaces/${SCRATCH_WORKSPACE_ID}/sessions${q}`).catch(() => [] as Session[]),
+        Promise.all(
+          idChunks(this.pinnedIds()).map((chunk) =>
+            api
+              .get<Session[]>(`/sessions?ids=${chunk.map(encodeURIComponent).join(',')}`)
+              .catch(() => [] as Session[]),
+          ),
+        ).then((pages) => pages.flat()),
       ]);
       if (!current()) return;
       const seen = new Set<Id>();
       const all: Session[] = [];
-      for (const s of [...own, ...scratch]) {
+      // Fetch-by-id rows span every workspace (`GET /sessions`): keep this
+      // one's + scratch's.
+      for (const s of [...own, ...scratch, ...pinned.filter((p) => this.belongsHere(p.workspace_id))]) {
         if (seen.has(s.id)) continue;
         seen.add(s.id);
         all.push(s);
       }
-      // Background engine sessions (insights, canvas/db assist, workflow steps,
-      // review agents, PR drafts, …) are NOT stripped here: they stay in
-      // `this.sessions` so their owning panels can look them up / open them,
-      // and every user-facing list filters them via `isForeground` instead —
-      // one shared blacklist (`BACKGROUND_SOURCES`) rather than per-list drift.
+      this.hasArchived = this.archivedKnown || this.archivedSessions.length > 0;
+      // Once a page is loaded the section knows on its own; until then a
+      // 1-row probe decides whether the folded header shows at all; archiving
+      // here flips `hasArchived` locally. Off the boot path (idle): it only
+      // gates a folded header, and on a cold boot its two requests went out
+      // before first paint (desktop-boot-perf's request budget).
+      if (probeArchived) {
+        whenIdle(() => {
+          if (!current()) return;
+          void Promise.all([...(wsId ? [probe(wsId)] : []), probe(SCRATCH_WORKSPACE_ID)]).then((r) => {
+            if (!current() || !r.some(Boolean)) return;
+            this.archivedKnown = true;
+            this.hasArchived = true;
+          });
+        });
+      }
+      // Background engine sessions that ARE here (open tabs, live ones this
+      // document saw created, `includeSources` panels) stay in `this.sessions`
+      // so their owning panels can look them up / open them; every
+      // user-facing list still filters them via `isForeground` — one shared
+      // blacklist (`BACKGROUND_SOURCES`) rather than per-list drift.
       // Per-device session isolation (opt-in, default off): show only sessions
       // this device started. When off, leave the list unchanged so every device
       // sees every session. Drives tabs/Navigator/agents list consistently since
       // they all derive from `this.sessions`. The setter re-runs this so flips
       // apply live.
-      this.sessions = all.filter(visibleOnThisDevice);
-      for (const s of this.sessions) this.statusMap[s.id] = s.status;
+      const next = all.filter(visibleOnThisDevice);
+      // The fetched rows are the truth: a stamp queued before they arrived
+      // must not re-apply an older status over them on the next frame.
+      for (const s of next) this.pendingStatus.delete(s.id);
+      this.sessions = next;
+      for (const s of next) this.statusMap[s.id] = s.status;
+      this.pruneStatusMap();
       if (opts.reconcile !== false) this.reconcileTabs();
     } catch (e) {
       if (current()) throw e;
@@ -628,7 +898,7 @@ class WorkspaceStore {
    *  sentinel pane, which has no session row. */
   private reconcileTabs(): void {
     const exists = (t: Id): boolean =>
-      t === DB_PANE_ID || this.sessions.some((s) => s.id === t);
+      t === DB_PANE_ID || this.sessionById.has(t);
     const tabs = this.openTabs.filter(exists);
     if (tabs.length !== this.openTabs.length) {
       this.openTabs = tabs;
@@ -693,7 +963,11 @@ class WorkspaceStore {
     // left in the `#/agents/<id>` route hash after the session was reaped (the
     // cause of an undismissable "phantom" tab). Allowed while sessions are still
     // loading; reconcileTabs() prunes any that turn out invalid once loaded.
-    if (id !== DB_PANE_ID && !this.sessionsLoading && !this.sessions.some((s) => s.id === id)) {
+    if (id !== DB_PANE_ID && !this.sessionsLoading && !this.sessionById.has(id)) {
+      // Not in the shown list — maybe a background agent opened from its
+      // panel (the list no longer carries those): fetch it by id and open it
+      // if it exists. A reaped id stays closed (no phantom tab).
+      this.openWhenLoaded(id);
       return;
     }
     // Opening a session counts as attending to it — drop any "needs you" flag.
@@ -758,7 +1032,7 @@ class WorkspaceStore {
 
   /** Add a freshly created session object and navigate to it. */
   addSession(s: Session): void {
-    if (this.belongsHere(s.workspace_id) && !this.sessions.some((x) => x.id === s.id)) {
+    if (this.belongsHere(s.workspace_id) && !this.sessionById.has(s.id)) {
       this.sessions = [...this.sessions, s];
     }
     this.statusMap[s.id] = s.status;
@@ -773,7 +1047,7 @@ class WorkspaceStore {
    * the 1–4 pane cap was hit (caller can toast).
    */
   addSessionInSplit(s: Session): boolean {
-    if (this.belongsHere(s.workspace_id) && !this.sessions.some((x) => x.id === s.id)) {
+    if (this.belongsHere(s.workspace_id) && !this.sessionById.has(s.id)) {
       this.sessions = [...this.sessions, s];
     }
     this.statusMap[s.id] = s.status;
@@ -803,7 +1077,7 @@ class WorkspaceStore {
       meta: { ...(req.meta ?? {}), client_id: clientId() },
     };
     const s = await api.post<Session>(`/workspaces/${target}/sessions`, stamped);
-    if (this.belongsHere(s.workspace_id) && !this.sessions.some((x) => x.id === s.id)) {
+    if (this.belongsHere(s.workspace_id) && !this.sessionById.has(s.id)) {
       this.sessions = [...this.sessions, s];
     }
     this.statusMap[s.id] = s.status;
@@ -847,7 +1121,7 @@ class WorkspaceStore {
     if (opts?.route) {
       this.addSession(s);
     } else {
-      if (this.belongsHere(s.workspace_id) && !this.sessions.some((x) => x.id === s.id)) {
+      if (this.belongsHere(s.workspace_id) && !this.sessionById.has(s.id)) {
         this.sessions = [...this.sessions, s];
       }
       this.statusMap[s.id] = s.status;
@@ -1034,7 +1308,7 @@ class WorkspaceStore {
     while (this.recentlyClosed.length > 0) {
       const id = this.recentlyClosed[this.recentlyClosed.length - 1];
       this.recentlyClosed = this.recentlyClosed.slice(0, -1);
-      if (id === DB_PANE_ID || this.sessions.some((s) => s.id === id)) {
+      if (id === DB_PANE_ID || this.sessionById.has(id)) {
         this.navigateToSession(id);
         return;
       }
@@ -1188,8 +1462,25 @@ class WorkspaceStore {
     this.closeTab(id);
     this.sessions = this.sessions.filter((s) => s.id !== id);
     this.otherWsSessions = this.otherWsSessions.filter((s) => s.id !== id);
+    this.dropArchived(id);
     delete this.statusMap[id];
     this.clearNeedsYou(id);
+  }
+
+  private dropArchived(id: Id): void {
+    if (this.archivedSessions.some((s) => s.id === id)) {
+      this.archivedSessions = this.archivedSessions.filter((s) => s.id !== id);
+    }
+  }
+
+  /** A session just got archived: it leaves the live lists and joins the
+   *  (loaded) Archived section, newest first. */
+  private moveToArchived(s: Session): void {
+    this.sessions = this.sessions.filter((x) => x.id !== s.id);
+    this.otherWsSessions = this.otherWsSessions.filter((x) => x.id !== s.id);
+    this.hasArchived = true;
+    this.archivedKnown = true;
+    if (this.archivedLoaded) this.archivedSessions = [s, ...this.archivedSessions.filter((x) => x.id !== s.id)];
   }
 
   /** Bulk archive (sidebar multi-select): one toast for the batch instead of
@@ -1200,8 +1491,7 @@ class WorkspaceStore {
       try {
         const s = await api.post<Session>(`/sessions/${id}/archive`);
         this.closeTab(id);
-        this.sessions = this.sessions.map((x) => (x.id === id ? s : x));
-        this.otherWsSessions = this.otherWsSessions.filter((x) => x.id !== id);
+        this.moveToArchived(s);
         this.statusMap[id] = s.status;
         this.clearNeedsYou(id);
       } catch {
@@ -1228,16 +1518,23 @@ class WorkspaceStore {
   async archiveSession(id: Id): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/archive`);
     this.closeTab(id);
-    this.sessions = this.sessions.map((x) => (x.id === id ? s : x));
-    // Archived rows leave the all-workspaces view (it lists non-archived only).
-    this.otherWsSessions = this.otherWsSessions.filter((x) => x.id !== id);
+    // Archived rows leave the live lists (and the all-workspaces view).
+    this.moveToArchived(s);
     this.statusMap[id] = s.status;
     toasts.info('Session archived', s.title);
   }
 
   async unarchiveSession(id: Id): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/unarchive`);
-    this.sessions = this.sessions.map((x) => (x.id === id ? s : x));
+    this.dropArchived(id);
+    // Maybe that was the last one: the next refresh probes again.
+    this.archivedKnown = false;
+    this.hasArchived = this.archivedSessions.length > 0 || this.archivedHasMore || !this.archivedLoaded;
+    this.sessions = this.sessionById.has(id)
+      ? this.sessions.map((x) => (x.id === id ? s : x))
+      : this.belongsHere(s.workspace_id)
+        ? [...this.sessions, s]
+        : this.sessions;
     this.statusMap[id] = s.status;
   }
 
@@ -1292,6 +1589,42 @@ class WorkspaceStore {
     if (other !== this.otherWsSessions) this.otherWsSessions = other;
   }
 
+  /** Drop an exited background row unless it came back to life or a tab,
+   *  pane or in-flight fetch holds it (R2). */
+  dropExitedBackground(id: Id): void {
+    const s = this.sessionById.get(id);
+    if (!s || isShownKind(s) || (this.statusMap[id] ?? s.status) !== 'exited') return;
+    const held = { tabs: [...this.openTabs, ...this.pendingTabs], panes: layout.panes, ensuring: new Set(this.ensuring.keys()) };
+    if (!canDropExited(id, held)) return;
+    this.sessions = this.sessions.filter((x) => x.id !== id);
+    this.pendingStatus.delete(id);
+  }
+
+  /** Queue a row stamp for {@link flushStatus} (next animation frame, or a
+   *  100 ms timer when frames are paused — a hidden window). */
+  private queueStatus(id: Id, patch: StatusPatch): void {
+    this.pendingStatus.set(id, patch);
+    if (this.statusFlushTimer != null) return;
+    const flush = () => this.flushStatus();
+    this.statusFlushTimer = setTimeout(flush, 100);
+    if (typeof requestAnimationFrame === 'function') this.statusFlushRaf = requestAnimationFrame(flush);
+  }
+
+  /** Apply every queued `session_status` stamp to both lists in one write. */
+  flushStatus(): void {
+    if (this.statusFlushTimer != null) clearTimeout(this.statusFlushTimer);
+    if (this.statusFlushRaf != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.statusFlushRaf);
+    this.statusFlushTimer = null;
+    this.statusFlushRaf = null;
+    if (this.pendingStatus.size === 0) return;
+    const pending = this.pendingStatus;
+    this.pendingStatus = new Map();
+    const mine = applyStatusPatches(this.sessions, pending);
+    if (mine !== this.sessions) this.sessions = mine;
+    const other = applyStatusPatches(this.otherWsSessions, pending);
+    if (other !== this.otherWsSessions) this.otherWsSessions = other;
+  }
+
   /** Event-bus feed (WS /ws/events). */
   applyEvent(ev: OttoEvent): void {
     switch (ev.type) {
@@ -1312,9 +1645,8 @@ class WorkspaceStore {
         // the idle "suspends in N" countdown starts from THIS transition instead
         // of whatever the row said when the list loaded (a session that just
         // went working → idle showed "37m idle · suspending…").
-        const lastActiveAt = new Date().toISOString();
-        const stamp = (s: Session): Session => ({ ...s, status: ev.status, last_active_at: lastActiveAt });
-        this.patchSession(ev.session_id, stamp);
+        // Coalesced (R6): one `sessions` write per frame for a burst.
+        this.queueStatus(ev.session_id, { status: ev.status, at: new Date().toISOString() });
         // The agent resuming work means the operator already responded to
         // whatever it was blocked on — clear the sticky "needs you" flag. Also
         // clear it once the session exits or becomes reconnectable: a dead agent
@@ -1332,13 +1664,27 @@ class WorkspaceStore {
         // session (closeTab never deletes; the run detail's "Open session" reopens
         // it) — and never yank the tab the user is actively viewing.
         if (ev.status === 'reconnectable' || ev.status === 'exited') {
-          const s = this.sessions.find((x) => x.id === ev.session_id);
+          const s = this.sessionById.get(ev.session_id);
           if (
             s?.meta?.source === 'workflow' &&
             ev.session_id !== this.activeSessionId &&
             this.openTabs.includes(ev.session_id)
           ) {
             this.closeTab(ev.session_id);
+          }
+        }
+        // R2: a background row this document picked up live (a review agent,
+        // a PR draft) leaves the list once it has exited — they used to pile
+        // up until the next refresh. After a grace period: a PR / commit
+        // draft dialog keeps showing its agent until the POST hands it the id.
+        if (ev.status === 'exited') {
+          const s = this.sessionById.get(ev.session_id);
+          if (s && !isShownKind(s)) {
+            const id = s.id;
+            const selection = this.selectionGeneration;
+            setTimeout(() => {
+              if (selection === this.selectionGeneration) this.dropExitedBackground(id);
+            }, EXITED_BACKGROUND_GRACE_MS);
           }
         }
         break;
@@ -1349,8 +1695,17 @@ class WorkspaceStore {
         // Another device's session under isolation: not ours to list.
         if (!visibleOnThisDevice(s)) break;
         if (this.belongsHere(s.workspace_id)) {
-          if (!this.sessions.some((x) => x.id === s.id)) this.sessions = [...this.sessions, s];
-        } else if (this.allWorkspaces && !this.otherWsSessions.some((x) => x.id === s.id)) {
+          // Background rows too: WipPanel / CreatePr watch their draft agent
+          // appear here (exited ones leave again — `session_status`).
+          if (!this.sessionById.has(s.id)) this.sessions = [...this.sessions, s];
+        } else if (
+          this.allWorkspaces &&
+          // The grouped view renders foreground agents only (R2): background
+          // review/workflow agents of other workspaces never belonged here.
+          s.kind === 'agent' &&
+          isForeground(s) &&
+          !this.otherWsSessions.some((x) => x.id === s.id)
+        ) {
           this.otherWsSessions = [...this.otherWsSessions, s];
         }
         break;
@@ -1378,6 +1733,7 @@ class WorkspaceStore {
           delete next[ev.session_id];
           this.unread = next;
         }
+        this.dropArchived(ev.session_id);
         if (this.belongsHere(ev.workspace_id)) {
           this.sessions = this.sessions.filter((s) => s.id !== ev.session_id);
           if (this.openTabs.includes(ev.session_id)) this.closeTab(ev.session_id);
@@ -1499,6 +1855,23 @@ class WorkspaceStore {
     this.workspaces = this.workspaces.map((w) =>
       w.id === updated.id ? { ...w, ...updated } : w,
     );
+  }
+
+  /** Newest finished automation runs kept per automation
+   *  (`settings.api_client.automation_runs_keep`; 0 = keep all, the opt-in
+   *  default). */
+  get apiRunsKeep(): number {
+    const v = (this.current?.settings?.api_client as { automation_runs_keep?: unknown } | undefined)?.automation_runs_keep;
+    return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0;
+  }
+
+  /** Set the run-history retention (same admin-gated PATCH, shallow merge). */
+  async setApiRunsKeep(keep: number): Promise<void> {
+    if (!this.currentId || !this.current) return;
+    const prev = (this.current.settings?.api_client as Record<string, unknown>) ?? {};
+    const settings = { ...this.current.settings, api_client: { ...prev, automation_runs_keep: keep } };
+    const updated = await api.patch<Workspace>(`/workspaces/${this.currentId}`, { settings });
+    this.workspaces = this.workspaces.map((w) => (w.id === updated.id ? { ...w, ...updated } : w));
   }
 
   /** Set this workspace's default agent CLI. '' clears it (use the global

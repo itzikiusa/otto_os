@@ -26,6 +26,10 @@ use crate::types::*;
 /// The Vault page polls status every 5 s: at 5 s here every poll walked the
 /// whole tree (10k files ≈ 27 ms of stat calls) and wrote `scan_state` twice.
 const STALE_AFTER_SECS: i64 = 30;
+/// Scan publication batch bounds (F7): notes per transaction, and prepared
+/// body bytes held at once (a few 4 MiB notes close a batch early).
+const SCAN_BATCH_NOTES: usize = 200;
+const SCAN_BATCH_BYTES: usize = 16 * 1024 * 1024;
 /// `mode=full` graph default edge budget (override via `edge_budget`).
 const DEFAULT_EDGE_BUDGET: usize = 2_000_000;
 
@@ -34,6 +38,8 @@ type VaultWriteLock = Arc<tokio::sync::Mutex<()>>;
 /// (vault, source, target) → (source content hash, context line).
 type BacklinkCtxCache = HashMap<(i64, String, String), (String, String)>;
 /// (graph generation the payloads were built against, [(opts key, payload)]).
+/// ((generation, graph generation), counts) — see `status_counts`.
+type StatusCountsEntry = ((i64, i64), crate::store::StatusCounts);
 type GraphCacheEntry = (i64, Vec<(String, Arc<GraphPayload>)>);
 /// Cached graph payloads kept per vault (full view + a few local views).
 const GRAPH_CACHE_PER_VAULT: usize = 6;
@@ -104,6 +110,16 @@ pub struct VaultEngine {
     /// Scans have their own lock; mutation holders may await a scan.
     writes: Mutex<HashMap<VaultWriteKey, VaultWriteLock>>,
     fts_ok: std::sync::atomic::AtomicU8, // 0 unknown / 1 yes / 2 no
+    /// FSEvents watchers per vault (F2) — see `watch.rs`. Off in unit tests
+    /// unless a test opts in (counter-asserting tests must stay deterministic).
+    pub(crate) watches: Mutex<HashMap<i64, crate::watch::VaultWatch>>,
+    pub(crate) watch_starting: Mutex<HashSet<i64>>,
+    pub(crate) watch_enabled: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub(crate) watch_kicks: std::sync::atomic::AtomicUsize,
+    /// `(generation, graph generation)` → the status COUNTs (F2): the page's
+    /// 5 s status poll runs no aggregate SQL while nothing changed.
+    status_counts: Mutex<HashMap<i64, StatusCountsEntry>>,
 }
 
 impl VaultEngine {
@@ -133,6 +149,12 @@ impl VaultEngine {
             graph_cache: Mutex::new(HashMap::new()),
             writes: Mutex::new(HashMap::new()),
             fts_ok: std::sync::atomic::AtomicU8::new(0),
+            watches: Mutex::new(HashMap::new()),
+            watch_starting: Mutex::new(HashSet::new()),
+            watch_enabled: std::sync::atomic::AtomicBool::new(cfg!(not(test))),
+            #[cfg(test)]
+            watch_kicks: Default::default(),
+            status_counts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -245,6 +267,8 @@ impl VaultEngine {
         self.generations.lock().unwrap().remove(&id);
         self.graph_generations.lock().unwrap().remove(&id);
         self.graph_cache.lock().unwrap().remove(&id);
+        self.status_counts.lock().unwrap().remove(&id);
+        self.stop_watch(id);
         Ok(())
     }
 
@@ -253,6 +277,96 @@ impl VaultEngine {
     }
 
     /// Caller owns publication. Ordinary note updates never load global links.
+    /// Publish a batch of scanned notes under ONE publication-lock hold and
+    /// ONE transaction (F7). Same fencing as the per-note path: paths an API
+    /// write touched since `epoch` are skipped. Links resolve against the
+    /// pre-batch resolver; any added path sets `links_dirty`, so the scan's
+    /// closing reconcile pass re-resolves everything. Returns `true` when the
+    /// batch could not be published (index refreshing → scan incomplete).
+    async fn index_scan_batch(
+        &self,
+        id: i64,
+        state: &crate::index::IndexState,
+        epoch: u64,
+        batch: Vec<crate::prepare::PreparedNote>,
+    ) -> Result<bool> {
+        let _publication = state.publication.lock().await;
+        state.check_active()?;
+        let mut notes: Vec<_> = batch
+            .into_iter()
+            .filter(|n| !state.changed_since(&n.row.path, epoch))
+            .collect();
+        if notes.is_empty() {
+            return Ok(false);
+        }
+        if notes.len() == 1 {
+            if state.cache.read().unwrap().is_none() {
+                return Ok(true);
+            }
+            self.index_prepared(id, state, notes.pop().unwrap(), false)
+                .await?;
+            return Ok(false);
+        }
+        let mut records = Vec::with_capacity(notes.len());
+        let (mut added, mut graph_changed) = (false, false);
+        {
+            let cached = state.cache.read().unwrap();
+            let Some(index) = cached.as_ref() else {
+                return Ok(true);
+            };
+            for note in &mut notes {
+                let old = index.records.get(&note.row.path);
+                for link in &mut note.links {
+                    link.dst_path = index.resolver.resolve(&note.row.path, &link.raw_target);
+                }
+                let sig = graph_sig(note);
+                added |= old.is_none();
+                graph_changed |= old.and_then(|r| r.graph_sig) != Some(sig);
+                let mut record = crate::index::IndexRecord::note(&note.row);
+                record.graph_sig = Some(sig);
+                records.push(record);
+            }
+        }
+        if added {
+            state.links_dirty.store(true, Ordering::Relaxed);
+        }
+        // A failed batch transaction rolled back (DB not ahead of the
+        // caches): publish note by note instead, so one bad file costs only
+        // itself — exactly the pre-batch behaviour, error included.
+        if let Err(e) = self
+            .store
+            .index_notes(id, &notes, self.fts_ready().await)
+            .await
+        {
+            tracing::debug!(vault = id, error = %e, "vault scan batch failed; retrying per note");
+            for note in notes {
+                self.index_prepared(id, state, note, false).await?;
+            }
+            return Ok(false);
+        }
+        let mut repair = IndexRepair {
+            state,
+            last_scan: self.last_scan_cell(id),
+            graph: self.graph_generation(id),
+            complete: false,
+        };
+        #[cfg(test)]
+        Self::pause_publication(state).await;
+        {
+            let mut cached = state.cache.write().unwrap();
+            let cache = cached.as_mut().expect("publication owns cache");
+            for record in records {
+                cache.upsert(record);
+            }
+        }
+        self.generation(id).fetch_add(1, Ordering::Relaxed);
+        if graph_changed || added {
+            self.graph_generation(id).fetch_add(1, Ordering::Relaxed);
+        }
+        repair.complete = true;
+        Ok(false)
+    }
+
     async fn index_prepared(
         &self,
         id: i64,
@@ -286,7 +400,22 @@ impl VaultEngine {
         let mut incoming = vec![];
         if added && reconcile_added {
             let resolver = resolver.as_ref().unwrap();
-            for (rowid, source, raw, dst) in self.store.all_links_full(id).await? {
+            // F9: only a link whose raw target mentions the new file's stem can
+            // re-resolve to it (case-folded superset filter in SQL); a stem with
+            // characters a link might percent-encode falls back to every row.
+            let file = note.row.path.rsplit('/').next().unwrap_or(&note.row.path);
+            let stem = file.to_ascii_lowercase();
+            let stem = stem.strip_suffix(".md").unwrap_or(&stem);
+            let plain = !stem.is_empty()
+                && stem
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+            let rows = if plain {
+                self.store.links_mentioning(id, stem).await?
+            } else {
+                self.store.all_links_full(id).await?
+            };
+            for (rowid, source, raw, dst) in rows {
                 if source == note.row.path {
                     continue;
                 }
@@ -424,10 +553,14 @@ impl VaultEngine {
 
     /// Ensure freshness before a read: if the last completed scan is older than
     /// the staleness window, kick a background scan (non-blocking).
+    /// With a healthy FSEvents watcher (F2) external changes trigger their own
+    /// scan, so the window stretches to a 10-minute safety net.
     pub fn ensure_fresh(self: &Arc<Self>, id: i64) {
+        self.ensure_watch(id);
         let cell = self.last_scan_cell(id);
         let now = chrono::Utc::now().timestamp();
-        if now - cell.load(Ordering::Relaxed) > STALE_AFTER_SECS {
+        let window = self.stale_after(id).unwrap_or(STALE_AFTER_SECS);
+        if now - cell.load(Ordering::Relaxed) > window {
             self.kick_scan(id);
         }
     }
@@ -540,8 +673,12 @@ impl VaultEngine {
             }
         }
         let mut incomplete = !walk.complete;
-        // A sequential stream retains one prepared body, never N tasks/bodies.
-        // Added paths resolve all incoming links once after the entire scan.
+        // A sequential stream retains a bounded batch of prepared bodies
+        // (≤ SCAN_BATCH_NOTES / SCAN_BATCH_BYTES), never N tasks/bodies, and
+        // commits each batch in one transaction (F7). Added paths resolve all
+        // incoming links once after the entire scan.
+        let mut batch: Vec<crate::prepare::PreparedNote> = Vec::new();
+        let mut batch_bytes = 0usize;
         for rel in changed_notes {
             if state.changed_since(&rel, epoch) {
                 continue;
@@ -561,16 +698,17 @@ impl VaultEngine {
                     continue;
                 }
             };
-            let _publication = state.publication.lock().await;
-            state.check_active()?;
-            if state.changed_since(&rel, epoch) {
-                continue;
+            batch_bytes += prepared.body.len();
+            batch.push(prepared);
+            if batch.len() >= SCAN_BATCH_NOTES || batch_bytes >= SCAN_BATCH_BYTES {
+                batch_bytes = 0;
+                incomplete |= self
+                    .index_scan_batch(id, &state, epoch, std::mem::take(&mut batch))
+                    .await?;
             }
-            if state.cache.read().unwrap().is_none() {
-                incomplete = true;
-                continue;
-            }
-            self.index_prepared(id, &state, prepared, false).await?;
+        }
+        if !batch.is_empty() {
+            incomplete |= self.index_scan_batch(id, &state, epoch, batch).await?;
         }
         let file_sizes: HashMap<_, _> = walk
             .files
@@ -698,13 +836,23 @@ impl VaultEngine {
     pub async fn status(self: &Arc<Self>, ws: &str, id: i64) -> Result<VaultStatus> {
         self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
-        let mut status = self.store.status(id).await?;
-        status.generation = Some(self.generation(id).load(Ordering::Relaxed).to_string());
-        status.graph_generation = Some(
-            self.graph_generation(id)
-                .load(Ordering::Relaxed)
-                .to_string(),
+        let key = (
+            self.generation(id).load(Ordering::Relaxed),
+            self.graph_generation(id).load(Ordering::Relaxed),
         );
+        let cached = self
+            .status_counts
+            .lock()
+            .unwrap()
+            .get(&id)
+            .filter(|(k, _)| *k == key)
+            .map(|(_, c)| *c);
+        let (mut status, counts) = self.store.status_with(id, cached).await?;
+        if cached.is_none() {
+            self.status_counts.lock().unwrap().insert(id, (key, counts));
+        }
+        status.generation = Some(key.0.to_string());
+        status.graph_generation = Some(key.1.to_string());
         Ok(status)
     }
 
@@ -973,6 +1121,22 @@ impl VaultEngine {
         content: &str,
         if_hash: Option<&str>,
     ) -> Result<NoteMeta> {
+        self.write_note_opts(ws, id, path, content, if_hash, false)
+            .await
+    }
+
+    /// [`Self::write_note`] with `autosave`: an editor autosave, whose history
+    /// revision may coalesce with the same note's open one (F1). Agent writes,
+    /// restores, renames and deletes always pass `false` → their own revision.
+    pub async fn write_note_opts(
+        self: &Arc<Self>,
+        ws: &str,
+        id: i64,
+        path: &str,
+        content: &str,
+        if_hash: Option<&str>,
+        autosave: bool,
+    ) -> Result<NoteMeta> {
         let v = self.get_scoped(ws, id).await?;
         let rel = Self::check_rel(path)?;
         if !rel.to_ascii_lowercase().ends_with(".md") {
@@ -1008,6 +1172,7 @@ impl VaultEngine {
             before.as_deref(),
             content.as_bytes(),
             "note write",
+            autosave,
         )
         .await?;
         state.mutated(&[&rel]);
@@ -1095,6 +1260,7 @@ impl VaultEngine {
             before.as_deref(),
             bytes,
             "artifact write",
+            false,
         )
         .await?;
         state.mutated(&[&rel]);
@@ -1401,6 +1567,7 @@ impl VaultEngine {
                 Some(content.as_bytes()),
                 new_content.as_bytes(),
                 "rename links",
+                false,
             )
             .await?;
             let (parent, name) = Self::text_parent(root, &src_now)?;
@@ -1521,22 +1688,21 @@ impl VaultEngine {
                 }
                 continue;
             }
-            let mut best: Option<(f32, Option<String>)> = None;
-            for (cand, alias) in std::iter::once((title.clone(), None))
-                .chain(std::iter::once((path.clone(), None)))
-                .chain(aliases.iter().map(|a| (a.clone(), Some(a.clone()))))
-            {
-                if let Some(s) = fuzzy_score(&ql, &cand.to_lowercase()) {
-                    if best.as_ref().map(|(b, _)| s > *b).unwrap_or(true) {
-                        best = Some((s, alias));
+            // Candidates were lower-cased at index time; index 0 = title,
+            // 1 = path, 2.. = aliases (no per-keystroke clones, F8).
+            let mut best: Option<(f32, usize)> = None;
+            for (i, cand) in record.search_lc.iter().enumerate() {
+                if let Some(s) = fuzzy_score(&ql, cand) {
+                    if best.is_none_or(|(b, _)| s > b) {
+                        best = Some((s, i));
                     }
                 }
             }
-            if let Some((score, alias)) = best {
+            if let Some((score, i)) = best {
                 out.push(SwitchHit {
                     path: path.clone(),
                     title: title.clone(),
-                    alias,
+                    alias: i.checked_sub(2).and_then(|k| aliases.get(k)).cloned(),
                     score,
                 });
             }
@@ -1627,10 +1793,17 @@ impl VaultEngine {
 
     // -- graph -----------------------------------------------------------------
 
-    pub async fn graph(self: &Arc<Self>, ws: &str, id: i64, o: &GraphOpts) -> Result<GraphPayload> {
+    /// The cached payload itself (F8): a hit is an `Arc` bump, never a deep
+    /// copy of a 10k-node / 50k-edge graph.
+    pub async fn graph(
+        self: &Arc<Self>,
+        ws: &str,
+        id: i64,
+        o: &GraphOpts,
+    ) -> Result<Arc<GraphPayload>> {
         self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
-        Ok((*self.graph_cached(id, o).await?).clone())
+        self.graph_cached(id, o).await
     }
 
     /// Graph payload through the per-vault cache: a request repeated within
@@ -1772,24 +1945,59 @@ impl VaultEngine {
         Ok(finish_graph(nodes, flat, false, orphans_ok))
     }
 
+    /// Build the global/local graph. The SQL reads stay async; the O(N+E)
+    /// assembly (string clones, hash maps, BFS, degree sort) runs on the
+    /// blocking pool so a 10k-note vault never stalls a tokio worker.
     async fn graph_build(&self, id: i64, o: &GraphOpts) -> Result<GraphPayload> {
+        // Validate the focus up front (cheap) so a bad `path` fails before
+        // any row is read.
+        if o.mode == "local" {
+            let focus = o
+                .path
+                .as_deref()
+                .ok_or_else(|| Error::Invalid("local graph requires `path`".into()))?;
+            Self::check_rel(focus)?;
+        }
         let notes = self.store.all_notes(id).await?;
         let edges_raw = self.store.all_edges(id).await?;
+        // Per-note tags. Loaded unconditionally: they are a filterable node
+        // ATTRIBUTE regardless of whether `tags` also draws them as nodes.
+        let tag_rows = self.store.all_note_tags(id).await?;
+        let ghost_rows = if o.ghosts {
+            self.store.all_ghost_edges(id).await?
+        } else {
+            Vec::new()
+        };
+        let o = o.clone();
+        tokio::task::spawn_blocking(move || {
+            assemble_graph(&notes, &edges_raw, &tag_rows, ghost_rows, &o)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("vault graph build: {e}")))?
+    }
+}
+
+/// Pure graph assembly over rows already read (see [`VaultEngine::graph_build`]).
+fn assemble_graph(
+    notes: &[(String, String, Option<String>, bool)],
+    edges_raw: &[(String, String, String)],
+    tag_rows: &[(String, String)],
+    ghost_rows: Vec<(String, String)>,
+    o: &GraphOpts,
+) -> Result<GraphPayload> {
+    {
         let include_reserved = o.reserved;
         let orphans_ok = o.orphans.unwrap_or(true);
 
-        // Per-note tags. Loaded unconditionally: they are a filterable node
-        // ATTRIBUTE regardless of whether `tags` also draws them as nodes.
         let mut note_tags: HashMap<&str, Vec<String>> = HashMap::new();
-        let tag_rows = self.store.all_note_tags(id).await?;
-        for (p, tag) in &tag_rows {
+        for (p, tag) in tag_rows {
             note_tags.entry(p.as_str()).or_default().push(tag.clone());
         }
 
         // Node table: notes first.
         let mut index: HashMap<String, u32> = HashMap::new();
         let mut nodes = NodeTable::default();
-        for (p, t, ty, reserved) in &notes {
+        for (p, t, ty, reserved) in notes {
             if *reserved && !include_reserved {
                 continue;
             }
@@ -1809,7 +2017,7 @@ impl VaultEngine {
         }
 
         let mut edge_list: Vec<(u32, u32)> = Vec::new();
-        for (s, d, _kind) in &edges_raw {
+        for (s, d, _kind) in edges_raw {
             let (Some(&si), Some(&di)) = (index.get(s), index.get(d)) else {
                 continue;
             };
@@ -1822,7 +2030,7 @@ impl VaultEngine {
         // Ghost nodes for unresolved targets.
         if o.ghosts {
             let mut ghost_ix: HashMap<String, u32> = HashMap::new();
-            for (src, raw) in self.store.all_ghost_edges(id).await? {
+            for (src, raw) in ghost_rows {
                 let Some(&si) = index.get(&src) else { continue };
                 let key = raw.trim().to_lowercase();
                 let gi = *ghost_ix.entry(key).or_insert_with(|| {
@@ -1842,7 +2050,7 @@ impl VaultEngine {
         // Tag nodes.
         if o.tags {
             let mut tag_ix: HashMap<String, u32> = HashMap::new();
-            for (p, tag) in &tag_rows {
+            for (p, tag) in tag_rows {
                 let Some(&si) = index.get(p) else { continue };
                 let ti = *tag_ix.entry(tag.clone()).or_insert_with(|| {
                     nodes.push(
@@ -1864,7 +2072,7 @@ impl VaultEngine {
                 .path
                 .as_deref()
                 .ok_or_else(|| Error::Invalid("local graph requires `path`".into()))?;
-            let focus_rel = Self::check_rel(focus)?;
+            let focus_rel = VaultEngine::check_rel(focus)?;
             let Some(&fi) = index.get(&focus_rel) else {
                 return Err(Error::NotFound(format!("note {focus_rel}")));
             };

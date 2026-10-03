@@ -242,13 +242,73 @@ async fn run(cfg: Config) -> Result<(), String> {
         }
     };
 
+    // Per-phase boot timing (perf2/03 N4/N7): one `boot: ready` line with the
+    // breakdown, read by scripts/perf/daemon-budget.mjs.
+    let mut boot = BootPhases::start();
+
+    // Offline compaction (perf2/03 N1): a large, fragmented otto.db is
+    // rewritten HERE, before the pool opens — nothing can be writing, so no
+    // write stalls and none made after the snapshot is lost. The old file is
+    // kept until the new one has opened and migrated (confirm below); an
+    // unconfirmed swap is rolled back at the next start.
+    match otto_state::maintenance::offline_compact_at_boot(&cfg.db_path()).await {
+        otto_state::maintenance::OfflineOutcome::NotNeeded => {}
+        otto_state::maintenance::OfflineOutcome::Compacted(r) => tracing::info!(
+            "db maintenance: compacted offline {} → {} bytes in {} ms",
+            r.before_bytes,
+            r.after_bytes,
+            r.duration_ms
+        ),
+        otto_state::maintenance::OfflineOutcome::RolledBack => tracing::warn!(
+            "db maintenance: the last start never confirmed the compacted database — \
+             restored the original file (no automatic retry)"
+        ),
+        otto_state::maintenance::OfflineOutcome::Skipped(why) => {
+            tracing::warn!("db maintenance: offline compaction skipped: {why}")
+        }
+    }
+    boot.mark("db_compact");
+
     let pool = otto_state::open(&cfg.db_path())
         .await
         .map_err(|e| format!("open database: {e}"))?;
+    if otto_state::maintenance::confirm_offline_compaction(&cfg.db_path()) {
+        tracing::info!("db maintenance: compacted database opened cleanly; old file removed");
+    }
+    boot.mark("db_open");
     otto_state::database_changes::DatabaseChangesRepo::new(pool.clone())
         .recover_interrupted()
         .await
         .map_err(|e| format!("recover interrupted database changes: {e}"))?;
+    // Planner statistics from the first query (sqlite_stat1), plus the
+    // one-time compaction when a third of the file is free pages and the live
+    // data is small enough to rewrite in a second or two (perf F1) — normally
+    // already done by the offline pass above; this inline VACUUM only catches
+    // a file that pass skipped. A bigger one waits for the next start.
+    {
+        let t = std::time::Instant::now();
+        match otto_state::maintenance::boot(&pool).await {
+            Ok(b) => {
+                if let Some(r) = b.compacted {
+                    tracing::info!(
+                        "db maintenance: compacted at boot {} → {} bytes in {} ms",
+                        r.before_bytes,
+                        r.after_bytes,
+                        r.duration_ms
+                    );
+                } else if b.deferred_compaction {
+                    tracing::info!(
+                        "db maintenance: {} of {} bytes free — compaction deferred to the next start",
+                        b.stats.free_bytes(),
+                        b.stats.size_bytes()
+                    );
+                }
+                tracing::debug!("db maintenance: boot pass {} ms", t.elapsed().as_millis());
+            }
+            Err(e) => tracing::warn!("db boot maintenance failed: {e}"),
+        }
+    }
+    boot.mark("maintenance");
     // Self-improvement runs are in-process: nothing can still be running at
     // boot, and an orphaned `running` row blocks that workspace's runs forever.
     match ImprovementsRepo::new(pool.clone())
@@ -443,6 +503,10 @@ async fn run(cfg: Config) -> Result<(), String> {
                 if n > 0 {
                     tracing::info!("db explorer: reaped {n} idle SSH tunnel(s)");
                 }
+                let n = db.reap_idle_handles().await;
+                if n > 0 {
+                    tracing::info!("db explorer: dropped {n} idle client handle(s)");
+                }
             }
         });
     }
@@ -634,7 +698,9 @@ async fn run(cfg: Config) -> Result<(), String> {
             events.clone(),
         )),
         scheduled_tasks: otto_state::ScheduledTasksRepo::new(pool.clone()),
-        proof_repo: otto_state::ProofRepo::new(pool.clone()),
+        // Proof media lives in a content-addressed file store, not the state DB.
+        proof_repo: otto_state::ProofRepo::new(pool.clone())
+            .with_media_dir(cfg.data_dir.join("proof-media")),
         proof_locks: otto_server::proof::new_locks(),
         runs: otto_state::RunsRepo::new(pool.clone()),
         runs_engine: otto_server::run_engine::RunEngine::new(),
@@ -651,9 +717,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         )),
     };
 
-    // Spawn enabled runtime plugins (sidecar processes Otto supervises + proxies).
-    // Best-effort: per-plugin spawn failures are logged inside, never fatal.
-    ctx.plugins.start_enabled().await;
+    boot.mark("modules");
 
     // Restore sessions from the previous daemon run: resumable agent
     // sessions respawn, everything else becomes reconnectable.
@@ -681,14 +745,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         }
         Err(e) => tracing::warn!("session restore: {e}"),
     }
-
-    // Sweep stray `com.otto.deploy.*` launchd jobs. deploy.sh detaches with
-    // nohup — never launchd — so any job under that prefix is an agent's
-    // improvisation, and launchd re-runs a submitted job every time it exits:
-    // build → app swap → daemon restart → script exits → launchd runs it
-    // again, forever (seen 2026-07-16 as `com.otto.deploy.okfv3`). Removing
-    // them here caps any such loop at the first restart it causes.
-    sweep_stray_deploy_jobs();
+    boot.mark("restore");
 
     // Fail any reviews orphaned by the previous process exit: a review's
     // background task dies with the process, so a row left `running` would
@@ -745,11 +802,39 @@ async fn run(cfg: Config) -> Result<(), String> {
             tracing::info!("workflow recovery: re-enqueued {n} queued run(s)");
         }
     }
-    // And their leftover run worktrees (+ safe otto-wf/<id> branch cleanup) —
-    // finalize-time reaping can't run for a crashed daemon, and pre-reap
-    // versions left one worktree per run in the user's real repos. Runs the
-    // reconciler chose to resume are `pending` again and keep theirs.
-    otto_server::workflow_engine::sweep_stale_run_worktrees(&ctx).await;
+    // Work no route depends on runs AFTER the listener starts serving
+    // (perf2/03 N7): plugin sidecars (a request before they are up gets the
+    // proxy's "not running" answer, as during any plugin restart), the
+    // launchd-job sweep and the worktree sweep (git subprocesses per run).
+    {
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            let t = std::time::Instant::now();
+            // Spawn enabled runtime plugins (sidecar processes Otto supervises
+            // + proxies). Best-effort: per-plugin spawn failures are logged
+            // inside, never fatal.
+            ctx.plugins.start_enabled().await;
+            let plugins_ms = t.elapsed().as_millis();
+            // Sweep stray `com.otto.deploy.*` launchd jobs. deploy.sh detaches
+            // with nohup — never launchd — so any job under that prefix is an
+            // agent's improvisation, and launchd re-runs a submitted job every
+            // time it exits: build → app swap → daemon restart → script exits
+            // → launchd runs it again, forever (seen 2026-07-16 as
+            // `com.otto.deploy.okfv3`). Removing them here caps any such loop
+            // at the first restart it causes.
+            let _ = tokio::task::spawn_blocking(sweep_stray_deploy_jobs).await;
+            // And leftover workflow run worktrees (+ safe otto-wf/<id> branch
+            // cleanup) — finalize-time reaping can't run for a crashed daemon,
+            // and pre-reap versions left one worktree per run in the user's
+            // real repos. Runs the reconciler chose to resume (above, before
+            // this task was spawned) are `pending` again and keep theirs.
+            otto_server::workflow_engine::sweep_stale_run_worktrees(&ctx).await;
+            tracing::info!(
+                "boot: post-listen work done in {} ms (plugins={plugins_ms})",
+                t.elapsed().as_millis()
+            );
+        });
+    }
 
     // Goal loops: each loop's controller dies with the process, so a row left
     // running/paused/blocked is orphaned. Pause active loops, preserve blocked
@@ -877,6 +962,12 @@ async fn run(cfg: Config) -> Result<(), String> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
+                // Nothing live → no transcript is growing; skip the SQL
+                // candidate scan (the first sweep after a session goes live
+                // catches anything left unnamed).
+                if manager.live_count() == 0 {
+                    continue;
+                }
                 let n = manager.refresh_provider_titles().await;
                 if n > 0 {
                     tracing::info!("auto-named {n} session(s) from provider title");
@@ -936,11 +1027,13 @@ async fn run(cfg: Config) -> Result<(), String> {
         let pool = pool.clone();
         let auth_cache = auth_cache.clone();
         let interval = std::time::Duration::from_secs(60 * 60); // hourly
+        let manager = Arc::clone(&manager);
         tokio::spawn(async move {
             let settings = SettingsRepo::new(pool.clone());
             let auth = otto_rbac::AuthRepo::with_cache(pool.clone(), auth_cache);
             let maint_pool = pool.clone();
             let repo = otto_state::RetentionRepo::new(pool);
+            let mut compaction_logged = false;
             loop {
                 let raw = settings
                     .get(otto_state::retention::SETTING_KEY)
@@ -952,13 +1045,17 @@ async fn run(cfg: Config) -> Result<(), String> {
                     Ok(r) if r.total() > 0 => tracing::info!(
                         "retention: pruned {} work_events, {} mcp_tool_calls, \
                          {} mcp_call_log, {} audit_log, {} review_agent_prompts, \
-                         {} review_diffs row(s)",
+                         {} review_diffs, {} notifications, {} room_messages row(s); \
+                         run history {:?}",
                         r.work_events,
                         r.mcp_tool_calls,
                         r.mcp_call_log,
                         r.audit_log,
                         r.review_agent_prompts,
-                        r.review_diffs
+                        r.review_diffs,
+                        r.notifications,
+                        r.room_messages,
+                        r.run_history
                     ),
                     Ok(_) => {}
                     Err(e) => tracing::warn!("retention prune failed: {e}"),
@@ -988,6 +1085,39 @@ async fn run(cfg: Config) -> Result<(), String> {
                     }
                     Err(e) => tracing::warn!("db maintenance failed: {e}"),
                 }
+                // One-time auto-compaction (perf F1). A SMALL file (≤ the
+                // boot-inline cap, ~1–2 s) is rewritten in place while no
+                // session is live. A large one is never rewritten under a
+                // running daemon — its write lock would stall every route for
+                // the whole VACUUM; the next start compacts it offline before
+                // the pool opens (perf2/03 N1, `offline_compact_at_boot`).
+                if let Ok(s) = otto_state::maintenance::stats(&maint_pool).await {
+                    if otto_state::maintenance::needs_compaction(&s) {
+                        let live = s.size_bytes() - s.free_bytes();
+                        if live > otto_state::maintenance::BOOT_COMPACT_MAX_LIVE_BYTES {
+                            if !compaction_logged {
+                                compaction_logged = true;
+                                tracing::info!(
+                                    "db maintenance: {} of {} bytes free — compacting offline at \
+                                     the next start (≈{} ms, no write stall)",
+                                    s.free_bytes(),
+                                    s.size_bytes(),
+                                    otto_state::maintenance::estimate_offline_compact_ms(&s)
+                                );
+                            }
+                        } else if manager.live_count() == 0 {
+                            match otto_state::maintenance::compact(&maint_pool).await {
+                                Ok(r) => tracing::info!(
+                                    "db maintenance: auto-compacted {} → {} bytes in {} ms",
+                                    r.before_bytes,
+                                    r.after_bytes,
+                                    r.duration_ms
+                                ),
+                                Err(e) => tracing::warn!("db auto-compaction failed: {e}"),
+                            }
+                        }
+                    }
+                }
                 tokio::time::sleep(interval).await;
             }
         });
@@ -1016,6 +1146,8 @@ async fn run(cfg: Config) -> Result<(), String> {
                     Ok(ids) if !ids.is_empty() => {
                         let root = ctx_root.clone();
                         let n = ids.len();
+                        // Runs inside spawn_blocking (std fs is fine there).
+                        #[allow(clippy::disallowed_methods)]
                         let dirs = tokio::task::spawn_blocking(move || {
                             ids.iter()
                                 .filter_map(|id| otto_core::paths::confine_join(&root, id))
@@ -1167,6 +1299,8 @@ async fn run(cfg: Config) -> Result<(), String> {
     // design graph (graph rows only; the legacy rows/files are never touched)
     // and re-syncs a `sync` version when a legacy source changed.
     otto_server::design_hall::spawn_startup_import(&ctx);
+    // Move legacy inline proof media into the file store + daily GC.
+    otto_server::proof::spawn_media_maintenance(ctx.proof_repo.clone());
 
     // --- Vault docs-runs recovery: this restart killed any in-flight run ---
     // Flip still-non-terminal persisted runs to 'interrupted' and soft-trash
@@ -1453,6 +1587,8 @@ async fn run(cfg: Config) -> Result<(), String> {
         })
     });
 
+    boot.finish();
+
     let mut rx = shutdown_rx.clone();
     let shutdown = async move {
         let _ = rx.changed().await;
@@ -1535,6 +1671,53 @@ fn pty_holder_config(
 /// turning one deploy into an endless build → swap → restart loop that
 /// outlives the session that started it. Best-effort and macOS-only by
 /// construction (launchctl is absent elsewhere, and probe_cmd just fails).
+/// Wall time per boot phase (perf2/03 N4/N7). `finish` logs ONE line —
+/// `boot: ready in N ms (db_compact=… db_open=… …)` — that the perf budget
+/// script parses for its boot_ms and per-phase budgets.
+struct BootPhases {
+    started: std::time::Instant,
+    last: std::time::Instant,
+    phases: Vec<(&'static str, u128)>,
+}
+
+impl BootPhases {
+    fn start() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            started: now,
+            last: now,
+            phases: Vec::new(),
+        }
+    }
+
+    /// Close the phase that ended now.
+    fn mark(&mut self, phase: &'static str) {
+        let now = std::time::Instant::now();
+        self.phases.push((phase, (now - self.last).as_millis()));
+        self.last = now;
+    }
+
+    fn line(&self) -> String {
+        let parts: Vec<String> = self
+            .phases
+            .iter()
+            .map(|(p, ms)| format!("{p}={ms}"))
+            .collect();
+        format!(
+            "boot: ready in {} ms ({})",
+            self.started.elapsed().as_millis(),
+            parts.join(" ")
+        )
+    }
+
+    fn finish(&mut self) {
+        self.mark("recovery");
+        tracing::info!("{}", self.line());
+    }
+}
+
+// Sync by design: spawned on the blocking pool after the listener starts.
+#[allow(clippy::disallowed_methods)]
 fn sweep_stray_deploy_jobs() {
     let Some(list) = probe_cmd("launchctl", &["list"]) else {
         return;
@@ -1609,6 +1792,9 @@ fn prepend_path(dirs: &[String]) {
 
 /// Run `cmd args`, returning trimmed stdout on success (best-effort; `None` if
 /// the command is missing or fails). Used to discover tool install prefixes.
+// Sync by design: called from `augment_path` before the runtime starts and
+// from `sweep_stray_deploy_jobs`, which runs on the blocking pool.
+#[allow(clippy::disallowed_methods)]
 fn probe_cmd(cmd: &str, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new(cmd).args(args).output().ok()?;
     out.status

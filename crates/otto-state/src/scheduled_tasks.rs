@@ -555,6 +555,24 @@ mod tests {
         }
     }
 
+    /// Perf W12 budget: the scheduled-task scheduler's per-minute scan is ONE
+    /// statement for any number of enabled tasks.
+    #[tokio::test]
+    async fn tick_scan_is_one_query_for_any_n() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = ScheduledTasksRepo::new(p.clone());
+        for i in 0..8 {
+            repo.create(new_task("ws1", &format!("t{i}")))
+                .await
+                .unwrap();
+        }
+        let probe = p.statement_probe();
+        probe.reset();
+        assert_eq!(repo.list_enabled().await.unwrap().len(), 8);
+        assert_eq!(probe.take().len(), 1);
+    }
+
     #[tokio::test]
     async fn create_get_list() {
         let p = pool().await;

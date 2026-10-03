@@ -13,8 +13,8 @@
 use std::time::Duration;
 
 use otto_usage::{
-    AttributionDimension, ClickHouse, ForecastReq, MetricsSampler, UsageConfig, UsageEngine,
-    UsageEvent,
+    AttributionDimension, ClickHouse, ForecastReq, MetricsSampler, ReportOptions, UsageConfig,
+    UsageEngine, UsageEvent, UsageScope,
 };
 
 fn event(
@@ -126,9 +126,10 @@ async fn usage_engine_end_to_end() {
         300,
         0.01,
     ));
-    // The background writer flushes on a ~2s timer: wait for the buffered row
-    // to land (condition, not a fixed sleep — returns as soon as it flushes).
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    // The background writer flushes FLUSH_INTERVAL (15 s) after the first
+    // buffered event: wait for the row to land (condition, not a fixed sleep —
+    // returns as soon as it flushes).
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
     while engine
         .summary(30, false)
         .await
@@ -203,10 +204,16 @@ async fn usage_engine_end_to_end() {
     assert_eq!(metric.active_sessions, 7);
     engine.store_metric(&metric).await.expect("store metric");
 
+    // Buffered (R1a): served from memory before the 5-minute batch insert…
     let points = engine.metrics(60).await.expect("metrics query");
     assert_eq!(points.len(), 1, "one metric point stored");
     assert_eq!(points[0].active_sessions, 7);
     assert!(points[0].mem_total_mb > 0.0);
+    // …and exactly once after it (no duplicate of the flushed tail).
+    assert_eq!(engine.flush_metrics().await.expect("flush metrics"), 1);
+    let points = engine.metrics(60).await.expect("metrics after flush");
+    assert_eq!(points.len(), 1, "flushed sample not double-counted");
+    assert_eq!(points[0].active_sessions, 7);
 
     // ── Status ────────────────────────────────────────────────────────────────
     let status = engine.status().await;
@@ -524,5 +531,382 @@ async fn explicit_ts_inserts_and_tailer_purge() {
     // A malformed date must error out, not reach SQL.
     assert!(engine.purge_claude_tailer_rows("junk';--").await.is_err());
 
+    engine.shutdown().await;
+}
+
+/// Seed `n` usage rows spread over the last 20 days / 500 sessions / 4 models
+/// in one server-side INSERT…SELECT (fast, no client payload).
+async fn seed_rows(engine: &UsageEngine, n: u64) {
+    engine
+        .exec_sql(&format!(
+            "INSERT INTO usage_events (ts, workspace_id, session_id, provider, model, kind, \
+             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, duration_ms) \
+             SELECT now64(3) - toIntervalDay(number % 20), 'ws1', concat('s', toString(number % 500)), \
+             if(number % 3 = 0, 'codex', 'claude'), concat('m', toString(number % 4)), 'completion', \
+             number % 100, number % 50, number % 7, 0, (number % 7) / 1000.0, 0 FROM numbers({n})"
+        ))
+        .await
+        .expect("seed rows");
+}
+
+fn test_config() -> UsageConfig {
+    UsageConfig {
+        enabled: true,
+        retention_days: 180,
+        metrics_interval_secs: 60,
+        clickhouse_path: None,
+    }
+}
+
+/// Perf guard (R3/R4/R6): a dashboard summary is at most TWO ClickHouse
+/// statements (the grouped scan + the memoised per-session totals) and a
+/// report at most two, each reading no more than the table once; the
+/// by-kind rollup and budgets that follow a summary reuse its totals (zero
+/// statements). The report's re-aggregated tables match the old per-table
+/// queries.
+#[tokio::test]
+async fn summary_and_report_query_budget() {
+    if ClickHouse::locate(None).is_none() {
+        eprintln!("SKIP: no `clickhouse` binary found on this machine");
+        return;
+    }
+    let _serial = serial().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let engine = UsageEngine::start(test_config(), tmp.path().to_path_buf()).await;
+    assert!(engine.wait_ready(Duration::from_secs(30)).await);
+    const N: u64 = 50_000;
+    seed_rows(&engine, N).await;
+    let ch = engine.clickhouse().expect("clickhouse handle");
+    let rows_cap = N + N / 10; // ≤ 1.1 × the table per statement
+
+    let (q0, r0) = ch.query_stats();
+    let summary = engine.summary(30, false).await.expect("summary");
+    let (q1, r1) = ch.query_stats();
+    assert_eq!(summary.total_events, N);
+    assert_eq!(summary.sessions.len(), 50, "top-50 from the folded totals");
+    assert!(
+        q1 - q0 <= 2,
+        "summary ran {} statements (budget 2)",
+        q1 - q0
+    );
+    assert!(r1 > r0, "X-ClickHouse-Summary read_rows must be reported");
+    assert!(
+        r1 - r0 <= 2 * rows_cap,
+        "summary read {} rows for a {N}-row table",
+        r1 - r0
+    );
+    // By-kind + budgets right after: the single-flight memo serves both.
+    let (fa, fb) = tokio::join!(
+        engine.feature_usage(30, false, |_| "agent".to_string()),
+        engine.session_totals(30, false)
+    );
+    assert_eq!(fa.expect("by kind")[0].events, N);
+    assert_eq!(fb.expect("totals").len(), 500);
+    assert_eq!(ch.query_stats().0, q1, "memoised totals: no new statements");
+
+    // The page's slim report: two statements, capped sessions, no day×model.
+    let (q2, r2) = ch.query_stats();
+    let slim = engine
+        .report_with(
+            30,
+            false,
+            UsageScope::All,
+            ReportOptions {
+                sessions_limit: 100,
+                daily_models: false,
+            },
+        )
+        .await
+        .expect("slim report");
+    let (q3, r3) = ch.query_stats();
+    assert!(q3 - q2 <= 2, "report ran {} statements (budget 2)", q3 - q2);
+    assert!(r3 - r2 <= 2 * rows_cap, "report read {} rows", r3 - r2);
+    assert_eq!(slim.sessions.len(), 100);
+    assert!(slim.daily_models.is_empty());
+
+    // Full (export) report == the old per-table queries.
+    let full = engine
+        .report(30, false, UsageScope::All)
+        .await
+        .expect("report");
+    assert_eq!(full.sessions.len(), 500);
+    let daily = engine.daily_usage(30, false).await.expect("daily");
+    assert_eq!(full.daily.len(), daily.len());
+    for (a, b) in full.daily.iter().zip(&daily) {
+        assert_eq!(
+            (&a.day, a.events, a.total_tokens),
+            (&b.day, b.events, b.total_tokens)
+        );
+        assert!((a.cost_usd - b.cost_usd).abs() < 1e-6, "{} cost", a.day);
+    }
+    assert_eq!(full.totals.total_tokens, summary.total_tokens);
+    let months = engine
+        .query_rows(
+            "SELECT formatDateTime(event_date, '%Y-%m') AS month, count() AS events, \
+             sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS t \
+             FROM usage_events WHERE event_date >= today() - 29 GROUP BY month ORDER BY month",
+        )
+        .await
+        .expect("months");
+    assert_eq!(full.monthly.len(), months.len());
+    for (m, row) in full.monthly.iter().zip(&months) {
+        assert_eq!(m.month, row["month"].as_str().unwrap());
+        assert_eq!(m.events, row["events"].as_u64().unwrap());
+        assert_eq!(m.total_tokens, row["t"].as_u64().unwrap());
+    }
+    let models_tokens: u64 = full.models.iter().map(|m| m.total_tokens).sum();
+    assert_eq!(models_tokens, summary.total_tokens);
+    assert_eq!(full.models.len(), 8, "2 providers × 4 models");
+    assert!(!full.daily_models.is_empty());
+    engine.shutdown().await;
+}
+
+/// R1d: an idle server is stopped (no process, no threads) and transparently
+/// restarted by the next query or insert, data intact; while parked it
+/// counts as alive (no self-heal reinit).
+#[tokio::test]
+async fn idle_stop_parks_and_wakes_on_demand() {
+    if ClickHouse::locate(None).is_none() {
+        eprintln!("SKIP: no `clickhouse` binary found on this machine");
+        return;
+    }
+    let _serial = serial().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let engine = UsageEngine::start(test_config(), tmp.path().to_path_buf()).await;
+    assert!(engine.wait_ready(Duration::from_secs(30)).await);
+    engine
+        .insert_events(&[event(
+            "claude",
+            "s1",
+            "claude-opus-4",
+            "prompt",
+            10,
+            5,
+            0.01,
+        )])
+        .await
+        .expect("insert");
+    let ch = engine.clickhouse().expect("clickhouse handle");
+    let pid = ch.server_pid().expect("server pid");
+
+    engine.set_idle_stop(Some(Duration::from_secs(1)));
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !ch.is_parked() {
+        assert!(std::time::Instant::now() < deadline, "never idle-stopped");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    engine.set_idle_stop(None);
+    assert!(ch.server_pid().is_none());
+    assert!(ch.server_alive(), "parked is not dead (no heal)");
+    // `parked` flips before the SIGTERM shutdown finishes: wait for the exit.
+    let alive = || {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while alive() {
+        assert!(std::time::Instant::now() < deadline, "server never exited");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // A read wakes it; data survived.
+    let started = std::time::Instant::now();
+    let s = engine.summary(30, false).await.expect("summary after wake");
+    eprintln!("wake + summary: {} ms", started.elapsed().as_millis());
+    assert_eq!(s.total_events, 1);
+    assert!(!ch.is_parked());
+    assert_eq!(ch.park_stats(), (1, 1));
+    // An insert while running lands normally.
+    engine
+        .insert_events(&[event("codex", "s2", "gpt-5", "prompt", 1, 1, 0.0)])
+        .await
+        .expect("insert after wake");
+    assert_eq!(engine.summary(30, false).await.unwrap().total_events, 2);
+    engine.shutdown().await;
+}
+
+/// perf3 N1/G2: background metrics writes must not keep the server up. With
+/// samples stored + flushed every 300 ms (a live session's cadence, sped up)
+/// and no real query, the server still idle-stops; samples taken while it is
+/// parked stay buffered without waking it, and the next real request wakes it
+/// and writes them — every sample lands exactly once.
+#[tokio::test]
+async fn idle_stop_fires_under_a_metrics_cadence_and_keeps_every_sample() {
+    if ClickHouse::locate(None).is_none() {
+        eprintln!("SKIP: no `clickhouse` binary found on this machine");
+        return;
+    }
+    let _serial = serial().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let engine = UsageEngine::start(test_config(), tmp.path().to_path_buf()).await;
+    assert!(engine.wait_ready(Duration::from_secs(30)).await);
+    let gen0 = engine.usage_generation();
+    engine
+        .insert_events(&[event(
+            "claude",
+            "s1",
+            "claude-opus-4",
+            "prompt",
+            10,
+            5,
+            0.01,
+        )])
+        .await
+        .expect("insert");
+    assert_eq!(
+        engine.usage_generation(),
+        gen0 + 1,
+        "usage write bumps the generation"
+    );
+    let ch = engine.clickhouse().expect("clickhouse handle");
+
+    let mut stored: u32 = 0;
+    let store = |n: u32| {
+        let engine = std::sync::Arc::clone(&engine);
+        async move {
+            let m = otto_usage::Metric {
+                mem_total_mb: 1.0,
+                active_sessions: n,
+                ..Default::default()
+            };
+            engine.store_metric(&m).await.expect("store metric");
+            engine.flush_metrics().await.expect("background flush")
+        }
+    };
+
+    engine.set_idle_stop(Some(Duration::from_secs(2)));
+    let mut written = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !ch.is_parked() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "metrics writes kept clickhouse awake ({stored} samples, {written} written)"
+        );
+        written += store(stored).await;
+        stored += 1;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(written > 0, "samples were written while the server ran");
+
+    // Parked: more samples buffer without waking it.
+    for _ in 0..5 {
+        assert_eq!(store(stored).await, 0, "nothing written while parked");
+        stored += 1;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(ch.is_parked(), "a metrics write woke the server");
+    assert_eq!(ch.park_stats(), (1, 0));
+    engine.set_idle_stop(None);
+
+    // A real request wakes it; the held samples follow right after.
+    let s = engine.summary(30, false).await.expect("summary after wake");
+    assert_eq!(s.total_events, 1);
+    assert!(!ch.is_parked());
+    assert_eq!(ch.park_stats(), (1, 1));
+    assert_eq!(
+        engine.usage_generation(),
+        gen0 + 1,
+        "a read is not a usage write"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let n = engine
+            .query_rows("SELECT count() AS n FROM system_metrics")
+            .await
+            .expect("count")[0]["n"]
+            .as_u64()
+            .unwrap();
+        if n == u64::from(stored) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "held samples never written after wake ({n}/{stored})"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut seen: Vec<u32> = engine
+        .metrics(5)
+        .await
+        .expect("metrics after wake")
+        .iter()
+        .map(|p| p.active_sessions)
+        .collect();
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        (0..stored).collect::<Vec<_>>(),
+        "every sample exactly once"
+    );
+    engine.shutdown().await;
+}
+
+/// `OTTO_PERF=1` budget (R6): the embedded server's idle thread count with
+/// Otto's config. Measured 58 on macOS with the bundled build (70 before the
+/// R1c pool cut); budget 62, override with `OTTO_PERF_CH_THREADS`. Prints
+/// idle CPU over the window for the perf report.
+#[tokio::test]
+async fn budget_clickhouse_idle_threads() {
+    if std::env::var("OTTO_PERF").ok().as_deref() != Some("1") {
+        eprintln!("SKIP: set OTTO_PERF=1 to run the ClickHouse idle budget");
+        return;
+    }
+    if ClickHouse::locate(None).is_none() {
+        eprintln!("SKIP: no `clickhouse` binary found on this machine");
+        return;
+    }
+    let _serial = serial().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // The real bring-up (schema, partitioning, writer) with idle-stop off.
+    let engine = UsageEngine::start(test_config(), tmp.path().to_path_buf()).await;
+    assert!(engine.wait_ready(Duration::from_secs(30)).await);
+    engine.set_idle_stop(None);
+    let ch = engine.clickhouse().expect("clickhouse handle");
+    let pid = ch.server_pid().expect("pid");
+    let cpu_secs = |pid: u32| -> f64 {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "time=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps");
+        let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // [[dd-]hh:]mm:ss[.cc]
+        t.rsplit(['-', ':'])
+            .zip([1.0, 60.0, 3600.0, 86400.0])
+            .map(|(v, m)| v.parse::<f64>().unwrap_or(0.0) * m)
+            .sum()
+    };
+    tokio::time::sleep(Duration::from_secs(10)).await; // settle after boot
+    let c0 = cpu_secs(pid);
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let c1 = cpu_secs(pid);
+    let threads = if cfg!(target_os = "linux") {
+        std::fs::read_dir(format!("/proc/{pid}/task"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    } else {
+        let out = std::process::Command::new("ps")
+            .args(["-M", "-p", &pid.to_string()])
+            .output()
+            .expect("ps -M");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .count()
+            .saturating_sub(1)
+    };
+    let budget: usize = std::env::var("OTTO_PERF_CH_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(62);
+    eprintln!(
+        "clickhouse idle: {threads} threads (budget {budget}), cpu {:.2}% over 20 s",
+        (c1 - c0) / 20.0 * 100.0
+    );
+    assert!(threads > 0, "could not count server threads");
+    assert!(
+        threads <= budget,
+        "{threads} idle threads > budget {budget}"
+    );
     engine.shutdown().await;
 }

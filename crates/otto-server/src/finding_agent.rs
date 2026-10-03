@@ -19,6 +19,7 @@ use otto_core::finding::Finding;
 use crate::state::ServerCtx;
 
 /// `git -C <dir> rev-parse HEAD` → the current commit sha, if `dir` is a repo.
+#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
 pub fn head_of(dir: &Path) -> Option<String> {
     let out = Command::new("git")
         .arg("-C")
@@ -39,6 +40,7 @@ pub fn head_of(dir: &Path) -> Option<String> {
 
 /// The set of tracked test files in a worktree (paths whose name suggests a
 /// test, across common languages).
+#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
 pub fn list_test_files(dir: &Path) -> HashSet<String> {
     let out = match Command::new("git")
         .arg("-C")
@@ -375,6 +377,7 @@ pub async fn spawn_session(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod tests {
     use super::*;
     use std::process::Command;

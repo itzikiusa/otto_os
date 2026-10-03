@@ -90,6 +90,29 @@ jobs:
           "$tool_dir/cargo-nextest" nextest --version
           echo "$tool_dir" >> "$GITHUB_PATH"
 
+      # The k8s-monitor ClickHouse tests (every query builder against a real
+      # engine + the rows-read-per-refresh ratchet) skip without a `clickhouse`
+      # binary, so they passed vacuously here. Install the pinned single binary
+      # (SHA-512 pinned to this exact release asset) and REQUIRE it: the tests
+      # fail instead of skipping when OTTO_REQUIRE_CLICKHOUSE is set.
+      - name: Install ClickHouse (k8s monitor ratchets)
+        env:
+          CLICKHOUSE_VERSION: 26.8.15.10
+          CLICKHOUSE_SHA512: d54f83e187b19399260fa9d7f68403a7c3adf48059f211d0620216e6ea49687490898b5aa32f49d9728db58c5912cfb700148b814b8c3314f88ccfa940ffd85a
+        run: |
+          archive="$RUNNER_TEMP/clickhouse.tgz"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/ClickHouse/ClickHouse/releases/download/v$CLICKHOUSE_VERSION-lts/clickhouse-common-static-$CLICKHOUSE_VERSION-amd64.tgz" \
+            --output "$archive"
+          printf '%s  %s\n' "$CLICKHOUSE_SHA512" "$archive" | sha512sum --check
+          mkdir -p "$RUNNER_TEMP/ch"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/ch"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$(find "$RUNNER_TEMP/ch" -type f -name clickhouse -path '*/bin/*' | head -n 1)" "$HOME/.local/bin/clickhouse"
+          rm -rf "$RUNNER_TEMP/ch" "$archive"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/clickhouse" local --version
+
       # librdkafka (rdkafka-sys, for the Message Brokers viewer) is compiled from
       # source by CMake and links libcurl for OAUTHBEARER/OIDC. Ubuntu runners
       # preinstall cmake and ship the libcurl runtime but NOT its dev headers, so
@@ -115,6 +138,8 @@ jobs:
       # Same full binary/test inventory as cargo test; shared external resources
       # are bounded in .config/nextest.toml. Ignored tests remain ignored.
       - name: cargo nextest
+        env:
+          OTTO_REQUIRE_CLICKHOUSE: "1"
         run: cargo nextest run --workspace --profile ci --no-fail-fast
 
       # Scale gates kept out of the everyday run (#[ignore], e.g. the 50k-revision
@@ -122,6 +147,30 @@ jobs:
       # build as above (--workspace), so this only lists + runs; no recompile.
       - name: cargo nextest (ignored scale gates)
         run: cargo nextest run --workspace --profile ci --run-ignored only -E 'test(/_at_50k_revisions_/)'
+
+      # Daemon-side terminal budgets (perf 01 F7/N4): snapshot capture /
+      # format / reflow / feed throughput, release profile, ×3 for shared
+      # runners, best-of-N rounds. BLOCKING — unlike the advisory perf-gates
+      # job, this is pure CPU work with no browser, daemon or network, so a
+      # failure is a real regression. (The scrollback memory assertion,
+      # `short_lines_at_wide_grid_keep_a_small_scrollback`, runs in nextest.)
+      - name: Terminal emulator budgets (otto-pty, release)
+        env:
+          OTTO_PERF: '1'
+          OTTO_PERF_BUDGET_SCALE: '3'
+        run: cargo test -p otto-pty --release --lib perf_budgets -- --nocapture
+
+      # Embedded ClickHouse budgets (perf2/09 R6): idle thread count of the
+      # usage server with Otto's config (OTTO_PERF), plus the per-summary /
+      # per-report statement + rows-read guard and the idle-stop wake test.
+      # Uses the pinned clickhouse installed above. Report-only.
+      - name: ClickHouse usage budgets (otto-usage)
+        continue-on-error: true
+        env:
+          OTTO_PERF: '1'
+        run: |
+          cargo test -p otto-usage --test e2e \
+            -- budget summary_and_report_query_budget idle_stop --nocapture
 
       # nextest does not execute doctests, so retain Cargo's separate gate.
       - name: cargo test (doctests)
@@ -172,13 +221,20 @@ jobs:
       - name: npm run build
         run: npm run build
 
+      # Gzip bytes of the entry, the shell chunk and every page chunk (static
+      # closure from dist/.vite/manifest.json) vs scripts/bundle-budget.json —
+      # >3 % growth fails; ratchet with `node scripts/bundle-budget.mjs --update`.
+      - name: Bundle-size budget
+        run: node scripts/bundle-budget.mjs
+
   # A SMALL, fast subset of the Playwright perf gates on WebKit — the engine
   # closest to the app's WKWebView — against an isolated debug daemon
   # (ui/e2e/global-setup.ts: temp data dir, own port, file secret store).
   # Chosen for stability: bounded-DOM counts (git sidebar, file viewer,
   # insights, Kafka/K8s lists, a 100k-row grid) plus the grid's scroll/paint
-  # timings, which run with OTTO_PERF_BUDGET_SCALE=3 (budgets were measured on
-  # a Mac; counts are never scaled). The full perf set runs locally with
+  # timings, the terminal flood/^C and park-redraw budgets, and the daemon's
+  # terminal emulator budgets (otto-pty, gated by OTTO_PERF), which run with
+  # OTTO_PERF_BUDGET_SCALE=3 (budgets were measured on a Mac; counts are never scaled). The full perf set runs locally with
   # `npx playwright test --project=desktop-webkit` (docs/testing/ci-performance.md).
   # Advisory until it has a green history: this is the first job to run the
   # daemon + Playwright WebKit on the Linux runner.
@@ -234,6 +290,24 @@ jobs:
           e2e/desktop-docs-orch-perf.spec.ts
           e2e/desktop-infra-perf.spec.ts
           e2e/desktop-db-results-perf.spec.ts
+          e2e/desktop-nav-smooth-perf.spec.ts
+          e2e/desktop-boot-perf.spec.ts
+          e2e/desktop-terminal-flood-perf.spec.ts
+          e2e/desktop-terminal-park-redraw.spec.ts
+          e2e/desktop-terminal-compact-queue-perf.spec.ts
+          e2e/desktop-agents-scale-perf.spec.ts
+
+      # DB Explorer at scale: the deterministic `@ci` subset of the scale spec
+      # (wide 20k × 300 grid, column filter over 100k JSON rows, result memory
+      # budget release + Re-run). The other scenarios run locally.
+      - name: Perf gates — DB at scale (desktop-webkit, @ci)
+        working-directory: ui
+        env:
+          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_PERF_BUDGET_SCALE: '3'
+        run: >-
+          npx playwright test --project=desktop-webkit --workers=1
+          e2e/desktop-db-scale-perf.spec.ts --grep @ci
 
       - name: Upload the Playwright report
         if: failure()
@@ -242,6 +316,47 @@ jobs:
           name: perf-gates-report
           path: ui/e2e/.report-0
           retention-days: 7
+
+  # Daemon budgets (perf/03 F8, perf2/03 N4): an isolated throwaway daemon on
+  # a SEEDED, fragmented otto.db (boot runs the offline compaction), then
+  # boot phases, idle CPU/wakeups, threads, WAL size and freelist share.
+  # BLOCKING for the deterministic metrics (threads, wal_bytes, free_pct, the
+  # compaction outcome); time/CPU on a shared runner are reported in the step
+  # summary only. macOS + ClickHouse: .github/workflows/perf-nightly.yml.
+  daemon-budget:
+    name: Daemon perf budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: perf-gates
+          save-if: false
+
+      - name: Install librdkafka build deps
+        run: |
+          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
+          sudo apt-get install -y cmake libcurl4-openssl-dev
+
+      - name: Build the test daemon
+        run: cargo build -p ottod
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.10.0
+
+      - name: Daemon perf budget
+        env:
+          OTTO_PERF_BUDGET_SCALE: '3'
+        run: node scripts/perf/daemon-budget.mjs target/debug/ottod
 
   audit:
     name: cargo audit (advisory)

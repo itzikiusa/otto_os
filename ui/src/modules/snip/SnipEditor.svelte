@@ -29,7 +29,8 @@
     resizeAnno,
     bounds,
     flatten,
-    blobToB64,
+    annosHash,
+    uploadNeeded,
   } from './annotations';
 
   // The shell keys this editor by id; cleanup saves belong to that mounted image.
@@ -44,7 +45,9 @@
   let canvasEl: HTMLCanvasElement | undefined = $state();
   let wrapEl: HTMLDivElement | undefined = $state();
 
-  let annos: Anno[] = $state([]);
+  // `$state.raw`: every mutation replaces the array (commit/map), so deep
+  // proxies only cost a proxy per point of every pen stroke (S3).
+  let annos: Anno[] = $state.raw([]);
   let selected: number | null = $state(null); // Anno id
   let tool: Tool = $state('rect');
   let color: string = $state(PALETTE[0]);
@@ -52,14 +55,22 @@
   let fontIx = $state(1);
 
   // Undo/redo: snapshots of the object list (cheap — plain JSON objects).
-  let undoStack: Anno[][] = $state([]);
-  let redoStack: Anno[][] = $state([]);
+  // Raw + capped: an hour of editing kept every snapshot forever (S4).
+  const UNDO_CAP = 100;
+  let undoStack: Anno[][] = $state.raw([]);
+  let redoStack: Anno[][] = $state.raw([]);
+  function pushUndo(s: Anno[]): void {
+    undoStack = [...undoStack.slice(-(UNDO_CAP - 1)), s];
+  }
 
   // Auto-copy machinery.
   let copyState: 'idle' | 'pending' | 'copying' | 'copied' | 'failed' = $state('idle');
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
   let copyInFlight = false;
   let copyAgain = false;
+  // Fingerprint of the annotations last saved successfully — an unchanged
+  // state is never re-encoded or re-uploaded. `annosHash([])` = the original.
+  let savedHash = annosHash([]);
 
   // In-progress drawing state (not reactive — pointermove is hot).
   let drafting: Anno | null = null;
@@ -157,20 +168,41 @@
     return baseLayer;
   }
 
+  // Move/resize: every OTHER annotation is fixed for the whole drag, so the
+  // image + those are rendered once and each frame blits them and draws only
+  // the dragged one (it was a full-resolution re-render per pointer move).
+  // The dragged shape sits on top while dragging; the full render on release
+  // restores its z-order.
+  let dragBase: HTMLCanvasElement | null = null;
+  function dragLayer(image: HTMLImageElement): HTMLCanvasElement | null {
+    if (dragBase) return dragBase;
+    const c = document.createElement('canvas');
+    c.width = image.width;
+    c.height = image.height;
+    const bctx = c.getContext('2d');
+    if (!bctx) return null;
+    render(bctx, image, annos.filter((a) => a.id !== selected));
+    dragBase = c;
+    return c;
+  }
+
   function redraw(): void {
     if (!canvasEl || !img) return;
     if (canvasEl.width !== img.width) canvasEl.width = img.width;
     if (canvasEl.height !== img.height) canvasEl.height = img.height;
     const ctx = canvasEl.getContext('2d');
     if (!ctx) return;
-    const base = drafting ? committedLayer(img) : null;
+    const sel = annos.find((a) => a.id === selected);
+    const moving = (dragMode === 'move' || dragMode === 'resize') && sel;
+    const base = drafting ? committedLayer(img) : moving ? dragLayer(img) : null;
     if (drafting && base) renderOver(ctx, base, img, [drafting]);
+    else if (moving && base) renderOver(ctx, base, img, [moving]);
     else {
       render(ctx, img, drafting ? [...annos, drafting] : annos);
       // Nothing is being drawn: free the off-screen copy (a 5K snip is ~60 MB).
       if (baseLayer) { baseLayer.width = baseLayer.height = 0; baseLayer = null; baseFor = null; }
     }
-    const sel = annos.find((a) => a.id === selected);
+    if (!moving && dragBase) { dragBase.width = dragBase.height = 0; dragBase = null; }
     if (sel) drawSelection(ctx, sel);
   }
 
@@ -204,7 +236,7 @@
   }
 
   function snapshot(): void {
-    undoStack = [...undoStack, cloneAnnos()];
+    pushUndo(cloneAnnos());
     redoStack = [];
   }
 
@@ -217,7 +249,7 @@
   /** First real mutation of a move/resize commits the stashed snapshot. */
   function markDragChanged(): void {
     if (dragChanged || !dragSnap) return;
-    undoStack = [...undoStack, dragSnap];
+    pushUndo(dragSnap);
     redoStack = [];
     dragChanged = true;
   }
@@ -242,11 +274,18 @@
       copyAgain = true;
       return;
     }
+    const hash = uploadNeeded(annos, savedHash);
+    if (hash === null) {
+      copyState = 'copied'; // already saved + on the clipboard
+      return;
+    }
     copyInFlight = true;
     copyState = 'copying';
     try {
       const blob = await flatten(img, annos);
-      const resp = await snipApi.saveAnnotated(snipId, await blobToB64(blob));
+      // Raw image/png body — no base64 inflation, no JSON parse server-side.
+      const resp = await snipApi.saveAnnotatedPng(snipId, blob);
+      savedHash = hash;
       copyState = resp.copied ? 'copied' : 'failed';
     } catch (e) {
       copyState = 'failed';
@@ -273,7 +312,7 @@
     const next = redoStack.at(-1);
     if (!next) return;
     redoStack = redoStack.slice(0, -1);
-    undoStack = [...undoStack, annos];
+    pushUndo(annos);
     selected = null;
     commit(next);
   }
@@ -382,8 +421,10 @@
       }
       drafting = null;
       requestRedraw();
-    } else if ((dragMode === 'move' || dragMode === 'resize') && dragChanged) {
-      scheduleCopy();
+    } else if (dragMode === 'move' || dragMode === 'resize') {
+      if (dragChanged) scheduleCopy();
+      // Full render restores the dragged shape's z-order + frees dragBase.
+      requestRedraw();
     }
     dragMode = null;
     dragSnap = null;

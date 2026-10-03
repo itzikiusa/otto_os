@@ -25,6 +25,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { rel } from '../../lib/stores/now.svelte';
+  import { invalidatePr, prCommitsCache, prDetailCache, prKey } from './pr-cache';
 
   interface Props {
     repoId: string;
@@ -104,8 +105,15 @@
       prError = null;
       diffError = null;
       commitsError = null;
+      // Stale-while-revalidate: paint the last-seen PR at once and refresh it
+      // quietly (the daemon's ETag cache makes that a cheap 304). Commits are
+      // reused only while fresh — they have no other revalidation path.
+      const hit = prDetailCache.get(prKey(rid, num));
+      if (hit) pr = hit.value;
+      const ch = prCommitsCache.get(prKey(rid, num));
+      if (ch?.fresh) commits = ch.value;
+      void load(rid, num, !!hit);
     });
-    void load(rid, num);
   });
 
   // Load failures render INLINE with Retry (a toast is for failed actions).
@@ -134,6 +142,7 @@
     if (!quiet) loading = true;
     try {
       const next = await api.get<PrDetail>(`/repos/${rid}/prs/${num}`);
+      prDetailCache.set(prKey(rid, num), next);
       if (disposed || rid !== repoId || num !== number) return; // switched PRs mid-flight
       pr = next;
       prError = null;
@@ -181,6 +190,7 @@
     commitsLoading = true;
     try {
       const next = await api.get<PrCommit[]>(`/repos/${rid}/prs/${num}/commits`);
+      prCommitsCache.set(prKey(rid, num), next);
       if (disposed || rid !== repoId || num !== number) return;
       commits = next;
       commitsError = null;
@@ -195,6 +205,7 @@
     if (busy !== '') return;
     busy = 'request-changes';
     try {
+      invalidatePr(repoId, number);
       await api.post(`/repos/${repoId}/prs/${number}/request-changes`, {
         body: requestChangesBody.trim() || null,
       });
@@ -242,6 +253,7 @@
     if (busy !== '') return;
     busy = 'edit';
     try {
+      invalidatePr(repoId, number);
       await api.patch(`/repos/${repoId}/prs/${number}`, { title: editTitle, description: editDesc });
       if (disposed) return;
       editMode = false;
@@ -276,6 +288,7 @@
       // a PR round-trip for the head sha.
       if (diffHead) req.commit_id = diffHead;
     }
+    invalidatePr(rid, num);
     const posted = await api.post<PrComment>(`/repos/${rid}/prs/${num}/comments`, req);
     if (disposed || rid !== repoId || num !== number) return;
     // Show it now (the full PR reload is 1–2 s of forge calls), then
@@ -307,6 +320,7 @@
   /** Resolve or reopen a review thread on the provider, then refresh statuses. */
   async function resolveThread(threadId: string, resolved: boolean): Promise<void> {
     try {
+      invalidatePr(repoId, number);
       await api.post(`/repos/${repoId}/prs/${number}/comments/${encodeURIComponent(threadId)}/resolve`, { resolved });
       if (disposed) return;
       toasts.success(resolved ? 'Thread resolved' : 'Thread reopened');
@@ -356,6 +370,7 @@
     if (!ok || disposed || busy !== '') return;
     busy = kind;
     try {
+      invalidatePr(repoId, number);
       await api.post(`/repos/${repoId}/prs/${number}/${kind}`);
       if (disposed) return;
       toasts.success(`PR ${kind === 'approve' ? 'approved' : kind + 'd'}`, `#${number}`);
@@ -722,6 +737,7 @@
       if (saved && TABS.includes(saved as Tab)) activeTab = saved as Tab;
     }}
     onmerged={() => {
+      invalidatePr(repoId, number);
       mergeOpen = false;
       void load(repoId, number);
     }}

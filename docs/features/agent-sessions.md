@@ -307,12 +307,50 @@ substituted with `DEFAULT_ATTACH_HISTORY_LINES` (1000) so even a minimal client
 restores ample context. Over-asking (2000 requested, ≤10,000 retained) is
 clamped, never an error.
 
+The attach request also carries the pane's measured grid
+(`{"type":"scrollback","lines":…,"cols":…,"rows":…}`): a pane that holds size
+authority has the PTY resized to that grid **before** the snapshot is taken,
+so opening a pane costs exactly one snapshot. The depth a client asked for is
+reused for every snapshot the daemon later pushes on its own (lag, flow-control
+recovery, a respawned process), so a 2000-row tile is never sent 4000 rows.
+The app's own terminal socket asks for snapshots as raw bytes (one binary
+frame behind a small JSON header) instead of base64 inside JSON: a 4000-row
+snapshot is a third smaller on the wire and the page no longer parses a
+multi-megabyte JSON string to show it. Other clients keep the JSON form.
+
+Widening an agent pane rebuilds it from one snapshot that **carries the new
+grid**: the daemon resizes the PTY and captures in one step, so there is no
+separate resize, no 900 ms wait and no second round trip. Only one pane in the
+window rebuilds at a time (the one you last focused first); a pane that is off
+screen or in a hidden window waits until it is visible again. Narrowing never
+rebuilds — the program's own redraw repaints it.
+
+**Memory.** The daemon's emulator keeps 4000 rows of formatted history per live
+session. Rows that scrolled off are stored trimmed of trailing blanks and shared
+between snapshot copies, so a session of short lines at 200 columns holds about
+2.4 MB instead of 25 MB, and taking a snapshot no longer copies the history. A
+live terminal **nobody has viewed for 10 minutes** keeps only its newest 1000
+rows of emulator history; the next viewer restores the 4000-row cap and history
+grows again from there (the 10,000-line raw ring used by search is unaffected).
+For a session that survives daemon restarts, the PTY holder's own emulator (the
+copy a restarted daemon re-adopts) follows the same cap, and the holder keeps no
+raw ring of its own (search is daemon-side).
+
+In the app, a primary pane keeps **4000 rows** of xterm scrollback, the same as
+the daemon: a snapshot can never restore more, so deeper local history only cost
+memory until the next rebuild. Grid tiles and embedded previews keep 2000.
+Terminals parked while you are elsewhere in the app (so coming back needs no
+replay) are bounded by count (12) and by an estimated **48 MB** of buffer; the
+least recently parked go first.
+
 **Two searches:**
 - **In-viewport** — the xterm `SearchAddon` over the currently rendered buffer
   (instant, but lost on reconnect).
 - **Server-side ring search** — the `{"type":"search"}` frame greps the full
   10,000-line ring (plain substring, case-insensitive, ANSI-stripped) and
-  returns up to 200 matches in buffer order. Use it after reopening a session or
+  returns up to 200 matches in buffer order (the newest 200 when more match; the
+scan runs off the daemon's async workers and never blocks the session's
+output). Use it after reopening a session or
   to find output that scrolled off. The UI find bar runs both: local first, then
   a 300 ms-debounced server query.
 
@@ -339,8 +377,13 @@ switch, a split animation, a window restore) they only *measure*, and resize
 the local xterm once the same grid has measured twice (≈350 ms). A passing size
 never reflows the TUI's screen. If the local grid did change and came back to
 the size the PTY already has (no SIGWINCH, so no repaint), the pane asks for a
-fresh snapshot instead. A pane parked by a tab switch is put back to the PTY's
-grid first. If a pane still looks garbled, **⋯ → Redraw terminal** (or ⌘K
+fresh snapshot instead. Such a "compact" only runs when the grid grew wider or
+the height changed by more than two rows, one pane at a time per window (the
+focused pane first); panes that are off-screen or in a hidden window compact
+when they come back into view. A pane parked by a tab switch is put back to the
+PTY's grid first, and while parked (or in a hidden window, unless focused) it
+stops acknowledging output: the daemon holds or drops what it would have sent
+and the pane catches up with one snapshot when it returns. If a pane still looks garbled, **⋯ → Redraw terminal** (or ⌘K
 "Redraw terminal") rebuilds the screen from the session without reconnecting.
 
 ### Watching, splitting, tiling
@@ -849,6 +892,33 @@ the updated `Session`.
 - **Quit hook** — `POST /api/v1/app/kill-sessions` terminates every live PTY
   (the desktop app's quit hook).
 
+**How the sidebar loads (performance).** The Agents sidebar asks the daemon
+only for the rows it shows — `?archived=false&foreground=true&with_sources=channel`
+(live connections, foreground agents, Slack/Telegram tickets). Background
+engine sessions (review agents, workflow steps, assists, …) are never bulk
+downloaded: open tabs and panes are fetched by id (`GET /sessions?ids=…`) in
+the same round trip, a background session opened from its panel (or a
+notification) is fetched by id on demand, and the swarm views add `swarm` to
+`with_sources` while mounted. The Archived section loads lazily, 100 rows at a
+time, the first time it is expanded ("Load more" pages further back); the
+header shows whenever a 1-row probe finds any archived session — run once per
+workspace switch (archiving here flips it locally), not on every refresh. The
+workspace tokens rollup is polled every minute only while the **Tokens** sort
+is active; a focused pane's own token/cost chip loads on focus, when a turn
+ends (working → idle/exited) and when its details open, with a 5-minute safety
+tick only while the agent is working.
+
+On the daemon the "shown" rule reads the indexed generated column
+`sessions.source` (`meta.source` when it is a JSON string, else NULL;
+migration 0162) instead of parsing every row's `meta_json`, so a workspace
+with thousands of hidden review agents costs an index walk. Live, the store
+keeps background rows it saw created only while they run (an exited one leaves 30 s later
+unless a tab or pane holds it), adds only foreground agents of other
+workspaces to the all-workspaces view, prunes stale `statusMap` entries after
+every list load, and coalesces `session_status` bursts into one list write per
+frame. The scale gate is `ui/e2e/desktop-agents-scale-perf.spec.ts` (CI
+perf-gates, WebKit).
+
 ---
 
 ## 5. Workspace auto-trust & the prompt-guard
@@ -1024,7 +1094,7 @@ resolve the owning workspace from the row and role-check against it.
 | Method & path | Auth | Notes |
 |---|---|---|
 | `GET /meta` | public | `MetaResp` — `providers`, `default_provider`, `tools` |
-| `GET /workspaces/{id}/sessions` | ws viewer (`Agents:View`) | `Session[]` (you see your own; ws-admin/root see all); optional `?archived=&kind=&source=&status=` filters; rows carry transient `live` + `viewers` |
+| `GET /workspaces/{id}/sessions` | ws viewer (`Agents:View`) | `Session[]` (you see your own; ws-admin/root see all); optional `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` filters (`foreground=true` = what the sidebar lists: connections + foreground agents + any `with_sources`; `ids` ≤ 64); rows carry transient `live` + `viewers` |
 | `POST /workspaces/{id}/sessions` | ws editor (`Agents:Edit`) | `CreateSessionReq` → `Session` |
 | `GET /workspaces/scratch` | `Agents:View` | the hidden scratch `Workspace` (`id: "scratch"`, `root_path` = daemon `$HOME`); every user is an implicit Editor there, so `…/scratch/sessions` starts / lists workspace-less sessions (§2); `PATCH`/`DELETE` + member edits → 409 |
 | `GET /sessions/{id}` | owner-or-admin | `Session` (with transient `live`, `viewers`) |

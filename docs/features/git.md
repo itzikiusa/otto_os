@@ -233,10 +233,50 @@ tracking (any remote, not just `origin`).
 The graph reads `log --all --date-order`, so a parent never appears before all
 of its children even with clock skew or rewritten committer dates (which used to
 open phantom lanes). To keep that walk cheap on big histories Otto passes
-`-c fetch.writeCommitGraph=true` on its fetch/pull and, after the first fetch of a
-repo that has no commit-graph, writes one in the background
-(`commit-graph write --reachable --changed-paths`, which also speeds up file
-history and blame). Set `OTTO_GIT_COMMIT_GRAPH=0` on the daemon to opt out.
+`-c fetch.writeCommitGraph=true` on its fetch/pull and, the first time a repo
+without a commit-graph is fetched, graphed (`log --all`), blamed or opened
+(first status), writes one in the background
+(`commit-graph write --reachable --changed-paths --split`, which also speeds up
+file history and blame) — at most one write per repo at a time. Set
+`OTTO_GIT_COMMIT_GRAPH=0` on the daemon to opt out.
+
+**Status in big repos and many windows.** Every window re-reads status on each
+`repo_status_changed`; the daemon runs ONE `git status` per repo for all of
+them (concurrent reads share it) and reuses the result for up to 1 s until the
+next change event or write (`x-otto-status-cache: hit|miss` on the response).
+The watcher spaces its events by twice the repo's last status duration (at
+least 400 ms, at most 5 s), so a tree whose status takes a second is not
+re-walked back-to-back while a build writes non-ignored files. A response
+carries at most 5,000 untracked rows (`untracked_truncated` /
+`untracked_total` past that) — the Changes list says how many more there are.
+`OTTO_GIT_FSMONITOR=1` adds `-c core.fsmonitor=true -c core.untrackedCache=true`
+to status reads of repos whose index is over ~6 MB (never written to the repo
+config; skipped when the config already names an fsmonitor or git is older
+than 2.37). It is off by default: Otto reads status without optional locks, so
+it cannot persist either cache into the index itself.
+
+**A push never blocks local work.** Push, fetch, pull and tag push serialise
+on a per-repo network lock, separate from the lock stage/commit/discard/
+checkout take, so a push waiting on a slow remote (up to 180 s) no longer
+holds up staging or committing. Pull takes both (it writes the worktree). Every
+mutating route reads the status it returns after releasing its lock.
+
+**The open diff re-reads only for its own file.** `repo_status_changed`
+carries the paths a burst touched (absent when unknown — an index/HEAD move,
+or more than 64 paths). The WIP panel re-reads the open file's diff only when
+its path is among them, and only while the window is visible — a
+visible-but-unfocused window (the diff beside your editor) refreshes live too;
+a hidden window catches up once when it shows again.
+
+**Forge reads are cached.** PR list, PR detail (comments, reviews,
+discussions), PR commits and CI reads go through a per-account ETag cache: a
+repeat within 15 s makes no request, an older entry revalidates with
+`If-None-Match` (a GitHub 304 costs no rate-limit budget), and every write Otto
+makes to a repository (comment, approve, merge, …) clears that repository's
+entries first. Concurrent misses on one URL share a single request (N windows
+opening one PR on a cold cache cost one GET), and GitHub's GraphQL
+review-thread probe is memoised for the same 15 s (a resolve/unresolve or any
+write to the repo drops it).
 
 **Linked git worktrees** are first-class in Graph:
 
@@ -631,6 +671,13 @@ in **[code-review.md](./code-review.md)**.
   optional delete-source-branch)/decline PRs across all three forges, with CI
   status and mergeability shown.
 - Push/pull over HTTPS using a Keychain-stored token, or over SSH via your agent.
+- Work in big repos without the UI stalling: the PR list and PR detail repaint
+  instantly from a per-repo cache and revalidate in the background (fresh for
+  45 s; your own approve/decline/merge/edit/comment drops it); a graph reload
+  after a ref moved reads ONE 10k-commit page and splices it onto the history
+  already paged in, and "load more" lays out only the new rows; diff lines over
+  10 KB (minified bundles) show their first 10 KB with an **expand line**
+  button; a status capped at 5,000 untracked rows says how many more there are.
 
 **You cannot (by design / current behavior):**
 

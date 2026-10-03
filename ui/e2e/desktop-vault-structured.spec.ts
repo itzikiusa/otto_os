@@ -72,6 +72,8 @@ test('typed note renders structured panels with previews and live context', asyn
   await expectFullyInViewport(page, tip);
 
   // Live context resolves to a designed state (no matches in an empty daemon).
+  // (It loads once scrolled into view.)
+  await panel.getByLabel('Live context', { exact: true }).scrollIntoViewIfNeeded();
   await expect(panel.getByLabel('Live context', { exact: true })).toContainText(/Nothing in Otto matches|Open|Couldn’t read/);
   await expectNoHorizontalOverflow(page);
 
@@ -96,4 +98,35 @@ test('plain notes stay plain; the toggle hides panels and persists', async ({ pa
   await expect(page.getByTestId('vault-structured')).toHaveCount(0);
   await page.getByRole('button', { name: 'Structured view' }).click();
   await expect(page.getByTestId('vault-structured')).toBeVisible();
+});
+
+// F3 (perf): the Live context panel caches its cross-module reads per key
+// (directories/overviews 60 s, repo status 15 s, whole-panel result 15 s),
+// never asks the forge for open PRs unless the user clicks "Count open PRs",
+// and re-mounting (note flips, Edit → Read) inside the window costs nothing.
+test('live context: flipping typed notes reuses cached reads and never lists PRs', async ({ page }) => {
+  const hits = { prs: 0, status: 0, overview: 0, connections: 0, dashboards: 0 };
+  page.on('request', (r) => {
+    const u = r.url();
+    if (/\/repos\/[^/]+\/prs\b/.test(u)) hits.prs++;
+    else if (/\/repos\/[^/]+\/status\b/.test(u)) hits.status++;
+    else if (u.includes('/k8s/monitor/overview')) hits.overview++;
+    else if (/\/workspaces\/[^/]+\/connections\b/.test(u)) hits.connections++;
+    else if (u.includes('/db/dashboards')) hits.dashboards++;
+  });
+  await openPage(page, 'vault');
+  const live = page.getByTestId('vault-live-context');
+  for (let i = 0; i < 5; i++) {
+    await openNote(page, 'services', 'auth-api');
+    await live.scrollIntoViewIfNeeded();
+    await expect(live).toContainText(/Nothing in Otto matches|Open|Couldn’t read/);
+    await openNote(page, 'services', 'orders-api');
+    await live.scrollIntoViewIfNeeded();
+    await expect(live).toContainText(/Nothing in Otto matches|Open|Couldn’t read/);
+  }
+  expect(hits.prs, 'open PRs are opt-in').toBe(0);
+  expect(hits.status, 'repo status is cached').toBeLessThanOrEqual(3);
+  expect(hits.overview, 'k8s overview fetched at most once').toBeLessThanOrEqual(1);
+  expect(hits.connections, 'connections fetched at most once').toBeLessThanOrEqual(1);
+  expect(hits.dashboards, 'dashboards fetched at most once').toBeLessThanOrEqual(1);
 });

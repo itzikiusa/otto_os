@@ -108,6 +108,12 @@ pub struct DbStatsResp {
     pub auto_vacuum: i64,
     /// A compaction is running right now.
     pub compacting: bool,
+    /// An offline compaction will run at the next daemon start (requested via
+    /// `at: "next_restart"`, or automatic for a large fragmented file).
+    pub compaction_scheduled: bool,
+    /// Rough duration of that offline compaction (ms) — it delays that start
+    /// by about this much and stalls no write.
+    pub estimated_offline_ms: u64,
 }
 
 /// Body of `POST /admin/db/compact`: must carry `confirm: true` — the UI
@@ -116,6 +122,31 @@ pub struct DbStatsResp {
 pub struct CompactReq {
     #[serde(default)]
     pub confirm: bool,
+    /// `now` (default): in-place rewrite, writes wait meanwhile.
+    /// `next_restart`: offline copy-and-swap before the pool opens at the next
+    /// start (no write stall). `cancel`: withdraw a `next_restart` request.
+    #[serde(default)]
+    pub at: CompactAt,
+}
+
+#[derive(serde::Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactAt {
+    #[default]
+    Now,
+    NextRestart,
+    Cancel,
+}
+
+/// Response of `POST /admin/db/compact` with `at: "next_restart" | "cancel"`.
+#[derive(serde::Serialize)]
+pub struct CompactScheduled {
+    pub compaction_scheduled: bool,
+    pub estimated_offline_ms: u64,
+}
+
+fn db_file(ctx: &ServerCtx) -> std::path::PathBuf {
+    ctx.data_dir.join("otto.db")
 }
 
 /// One compaction at a time: a second request while one runs gets 409.
@@ -134,6 +165,8 @@ pub async fn db_stats(
         free_bytes: s.free_bytes(),
         auto_vacuum: s.auto_vacuum,
         compacting: COMPACTING.load(std::sync::atomic::Ordering::SeqCst),
+        compaction_scheduled: otto_state::maintenance::compaction_scheduled(&db_file(&ctx), &s),
+        estimated_offline_ms: otto_state::maintenance::estimate_offline_compact_ms(&s),
     }))
 }
 
@@ -145,12 +178,49 @@ pub async fn db_compact(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
     Json(body): Json<CompactReq>,
-) -> ApiResult<Json<otto_state::maintenance::CompactReport>> {
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
     require_root(&user)?;
     if !body.confirm {
         return Err(
             otto_core::Error::Invalid("compact requires an explicit confirm: true".into()).into(),
         );
+    }
+    if body.at != CompactAt::Now {
+        // A marker file next to otto.db; the work happens at the next start.
+        let db = db_file(&ctx);
+        let next = body.at == CompactAt::NextRestart;
+        {
+            let db = db.clone();
+            tokio::task::spawn_blocking(move || {
+                if next {
+                    otto_state::maintenance::request_compaction(&db)
+                } else {
+                    otto_state::maintenance::cancel_compaction_request(&db);
+                    Ok(())
+                }
+            })
+            .await
+            .map_err(|e| otto_core::Error::Internal(format!("compaction request task: {e}")))??;
+        }
+        let s = otto_state::maintenance::stats(&ctx.pool).await?;
+        ctx.audit(NewAuditEntry {
+            user_id: Some(user.id.clone()),
+            action: if next {
+                "db.compact_scheduled".into()
+            } else {
+                "db.compact_cancelled".into()
+            },
+            target: None,
+            detail: None,
+            ip: None,
+        })
+        .await;
+        return Ok(Json(CompactScheduled {
+            compaction_scheduled: otto_state::maintenance::compaction_scheduled(&db, &s),
+            estimated_offline_ms: otto_state::maintenance::estimate_offline_compact_ms(&s),
+        })
+        .into_response());
     }
     use std::sync::atomic::Ordering;
     if COMPACTING
@@ -182,5 +252,79 @@ pub async fn db_compact(
         ip: None,
     })
     .await;
-    Ok(Json(report))
+    Ok(Json(report).into_response())
+}
+
+// --- Secret store status + "Secure secrets…" (p-daemon SEC-1) ---------------
+
+fn secrets_control() -> ApiResult<std::sync::Arc<otto_keychain::SecretsControl>> {
+    otto_keychain::control::global().ok_or_else(|| {
+        otto_core::Error::NotFound("this daemon has no managed secret store".into()).into()
+    })
+}
+
+/// `GET /admin/secrets/status` — active secret backend, whether plaintext
+/// `secrets.json` is in use (entry COUNT only) and the master-key state
+/// (`locked` while a Keychain prompt waits). Root only. Never returns values
+/// or key names.
+pub async fn secrets_status(
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<otto_keychain::SecretsStatus>> {
+    require_root(&user)?;
+    let c = secrets_control()?;
+    // Counting entries reads the plaintext file — keep it off the worker.
+    let st = tokio::task::spawn_blocking(move || c.status())
+        .await
+        .map_err(|e| otto_core::Error::Internal(format!("secrets status task: {e}")))?;
+    Ok(Json(st))
+}
+
+/// Body of `POST /admin/secrets/secure`: `confirm: true` is required — the UI
+/// sends it only after a `confirmer.ask` that explains the Keychain prompt.
+#[derive(serde::Deserialize)]
+pub struct SecureSecretsReq {
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+/// `POST /admin/secrets/secure` — migrate plaintext `secrets.json` into the
+/// encrypted store (master key in the Keychain): every entry is verified to
+/// read back before the plaintext is wiped and deleted; an encrypted backup is
+/// kept until then. Root only, explicit `confirm`, audited (counts only).
+/// NEVER run automatically — the Keychain may prompt, and an unattended boot
+/// must not block on that. 409 if already encrypted / running / the Keychain
+/// is locked (`502`, nothing changed).
+pub async fn secrets_secure(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<SecureSecretsReq>,
+) -> ApiResult<Json<otto_keychain::control::MigrationReport>> {
+    require_root(&user)?;
+    if !body.confirm {
+        return Err(otto_core::Error::Invalid(
+            "securing secrets requires an explicit confirm: true".into(),
+        )
+        .into());
+    }
+    let c = secrets_control()?;
+    let res = tokio::task::spawn_blocking(move || c.migrate_to_encrypted())
+        .await
+        .map_err(|e| otto_core::Error::Internal(format!("secrets migration task: {e}")))?;
+    let detail = match &res {
+        Ok(r) => serde_json::to_value(r).ok(),
+        Err(e) => Some(serde_json::json!({ "error": e.to_string() })),
+    };
+    ctx.audit(NewAuditEntry {
+        user_id: Some(user.id.clone()),
+        action: if res.is_ok() {
+            "secrets.secure".into()
+        } else {
+            "secrets.secure_failed".into()
+        },
+        target: None,
+        detail,
+        ip: None,
+    })
+    .await;
+    Ok(Json(res?))
 }

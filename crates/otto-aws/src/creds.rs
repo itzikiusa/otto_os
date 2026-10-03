@@ -167,9 +167,63 @@ pub fn parse_sso_token(v: &serde_json::Value) -> Option<(String, DateTime<Utc>, 
 /// Latest token for `start_url` in `dir` (the CLI writes one file per
 /// session / start URL; client-registration files carry no `accessToken`).
 pub fn sso_token_in(dir: &Path, start_url: &str) -> Option<(DateTime<Utc>, bool)> {
-    let want = start_url.trim_end_matches('/');
-    let mut best: Option<(DateTime<Utc>, bool)> = None;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+    sso_tokens_in(dir)
+        .get(start_url.trim_end_matches('/'))
+        .copied()
+}
+
+/// Everything `session_info` needs from disk, read ONCE per request: profile →
+/// SSO start URL (both AWS ini files) and start URL → best token in
+/// `~/.aws/sso/cache`. Before, every account in `GET /aws/accounts` re-read
+/// and re-parsed both ini files and every cache file on a runtime worker
+/// (O(accounts × cache files) sync I/O); callers now build this inside
+/// `spawn_blocking` and look accounts up in memory.
+#[derive(Debug, Default, Clone)]
+pub struct SsoIndex {
+    start_urls: HashMap<String, String>,
+    tokens: HashMap<String, (DateTime<Utc>, bool)>,
+}
+
+impl SsoIndex {
+    /// Blocking: reads the ini files + the SSO cache dir.
+    pub fn load() -> Self {
+        let start_urls = crate::discover::discover()
+            .into_iter()
+            .filter_map(|d| Some((d.name, d.sso_start_url?)))
+            .collect();
+        let tokens = dirs::home_dir()
+            .map(|h| sso_tokens_in(&h.join(".aws").join("sso").join("cache")))
+            .unwrap_or_default();
+        Self { start_urls, tokens }
+    }
+
+    /// [`Self::load`] off the async workers.
+    pub async fn load_async() -> Self {
+        tokio::task::spawn_blocking(Self::load)
+            .await
+            .unwrap_or_default()
+    }
+
+    fn sso_token(&self, profile: &str) -> Option<(DateTime<Utc>, bool)> {
+        let start = self.start_urls.get(profile)?;
+        self.tokens.get(start.trim_end_matches('/')).copied()
+    }
+
+    /// Session info for a profile account: the SSO token when the profile is
+    /// an SSO one, else the exported temporary credentials' expiry (if any).
+    pub fn session_info(&self, id: &Id, profile: Option<&str>) -> Option<SessionInfo> {
+        combine(profile.and_then(|p| self.sso_token(p)), expires_at(id))
+    }
+}
+
+/// Every start URL's latest token in `dir`, in one pass over the directory.
+#[allow(clippy::disallowed_methods)] // sync helper: only reached via SsoIndex::load, which load_async runs in spawn_blocking
+pub fn sso_tokens_in(dir: &Path) -> HashMap<String, (DateTime<Utc>, bool)> {
+    let mut best: HashMap<String, (DateTime<Utc>, bool)> = HashMap::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return best;
+    };
+    for entry in rd.flatten() {
         let p = entry.path();
         if p.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
@@ -181,26 +235,13 @@ pub fn sso_token_in(dir: &Path, start_url: &str) -> Option<(DateTime<Utc>, bool)
             continue;
         };
         if let Some((url, exp, refreshable)) = parse_sso_token(&v) {
-            if url.trim_end_matches('/') == want && best.is_none_or(|(b, _)| exp > b) {
-                best = Some((exp, refreshable));
+            let url = url.trim_end_matches('/').to_string();
+            if best.get(&url).is_none_or(|(b, _)| exp > *b) {
+                best.insert(url, (exp, refreshable));
             }
         }
     }
     best
-}
-
-/// Session info for a profile account: the SSO token when the profile is an
-/// SSO one, else the exported temporary credentials' expiry (if any).
-pub fn session_info(id: &Id, profile: Option<&str>) -> Option<SessionInfo> {
-    let sso = profile.and_then(|p| {
-        let start = crate::discover::discover()
-            .into_iter()
-            .find(|d| d.name == p)?
-            .sso_start_url?;
-        let dir = dirs::home_dir()?.join(".aws").join("sso").join("cache");
-        sso_token_in(&dir, &start)
-    });
-    combine(sso, expires_at(id))
 }
 
 /// Pure merge of the two sources (unit-tested).
@@ -234,6 +275,7 @@ pub fn combine(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / secret store is fine
 mod tests {
     use super::*;
 

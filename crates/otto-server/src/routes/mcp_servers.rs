@@ -68,6 +68,7 @@ fn secret_ref(id: &str) -> String {
 }
 
 /// Read a server's secret blob; absent/corrupt → empty object.
+#[allow(clippy::disallowed_methods)] // sync McpProvider path: enabled_servers is blocking by contract (already blocks on a bridge thread)
 fn load_secret_blob(secrets: &dyn SecretStore, id: &str) -> Value {
     secrets
         .get(&secret_ref(id))
@@ -83,12 +84,17 @@ fn load_secret_blob(secrets: &dyn SecretStore, id: &str) -> Value {
 /// stored values are never echoed back, so the client can't resend them). An
 /// empty combined blob deletes the Keychain entry and clears the row's ref.
 async fn write_secret_env(
-    secrets: &dyn SecretStore,
+    secrets: &std::sync::Arc<dyn SecretStore>,
     repo: &McpServersRepo,
     id: &str,
     secret_env: &BTreeMap<String, String>,
 ) -> ApiResult<McpServer> {
-    let mut blob = load_secret_blob(secrets, id);
+    let mut blob = otto_core::secrets::get_async(secrets, &secret_ref(id))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
     let previous = blob
         .get("env")
         .and_then(Value::as_object)
@@ -112,10 +118,10 @@ async fn write_secret_env(
     let keys: Vec<String> = secret_env.keys().cloned().collect();
     let sref = secret_ref(id);
     if secret_env.is_empty() && headers_empty {
-        secrets.delete(&sref)?;
+        otto_core::secrets::delete_async(secrets, &sref).await?;
         Ok(repo.set_secret_meta(&id.to_string(), None, &keys).await?)
     } else {
-        secrets.put(&sref, &blob.to_string())?;
+        otto_core::secrets::put_async(secrets, &sref, &blob.to_string()).await?;
         Ok(repo
             .set_secret_meta(&id.to_string(), Some(&sref), &keys)
             .await?)
@@ -193,7 +199,7 @@ pub async fn create(
         })
         .await?;
     if !req.secret_env.is_empty() {
-        server = write_secret_env(ctx.secrets.as_ref(), &repo, &server.id, &req.secret_env).await?;
+        server = write_secret_env(&ctx.secrets, &repo, &server.id, &req.secret_env).await?;
     }
     let operations: Vec<String> =
         otto_core::access::operations_for(otto_core::access::ResourceKind::McpServer)
@@ -271,7 +277,7 @@ pub async fn update(
         )
         .await?;
     if let Some(secret_env) = &req.secret_env {
-        server = write_secret_env(ctx.secrets.as_ref(), &repo, &id, secret_env).await?;
+        server = write_secret_env(&ctx.secrets, &repo, &id, secret_env).await?;
     }
     Ok(Json(server))
 }
@@ -288,7 +294,7 @@ pub async fn delete(
     require_ws_role(&ctx, &user, &existing.workspace_id, WorkspaceRole::Editor).await?;
     repo.delete(&id).await?;
     // Best-effort: drop the server's Keychain blob with it.
-    let _ = ctx.secrets.delete(&secret_ref(&id));
+    let _ = otto_core::secrets::delete_async(&ctx.secrets, &secret_ref(&id)).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -383,6 +389,7 @@ fn merge_secret_env(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod tests {
     use super::*;
     use otto_state::NewMcpServer;
@@ -443,7 +450,8 @@ mod tests {
     #[tokio::test]
     async fn secret_env_blob_write_keep_and_clear() {
         let (_pool, repo, ws, user) = mk_repo().await;
-        let store = MemStore(std::sync::Mutex::new(BTreeMap::new()));
+        let store: std::sync::Arc<dyn SecretStore> =
+            std::sync::Arc::new(MemStore(std::sync::Mutex::new(BTreeMap::new())));
 
         let server = repo
             .create(NewMcpServer {
@@ -504,7 +512,8 @@ mod tests {
     #[tokio::test]
     async fn provider_merge_resolves_secret_env_for_mcp_json() {
         let (pool, repo, ws, user) = mk_repo().await;
-        let store = MemStore(std::sync::Mutex::new(BTreeMap::new()));
+        let store: std::sync::Arc<dyn SecretStore> =
+            std::sync::Arc::new(MemStore(std::sync::Mutex::new(BTreeMap::new())));
 
         let server = repo
             .create(NewMcpServer {
@@ -556,7 +565,7 @@ mod tests {
         assert_eq!(rows[0].secret_env_keys, vec!["TOKEN".to_string()]);
 
         // …and the merge (what the provider renders into .mcp.json) does.
-        let blob = load_secret_blob(&store, &server.id);
+        let blob = load_secret_blob(store.as_ref(), &server.id);
         let env = merge_secret_env(rows[0].env.clone(), &rows[0].secret_env_keys, &blob);
         assert_eq!(env.get("BASE").map(String::as_str), Some("https://x"));
         assert_eq!(env.get("TOKEN").map(String::as_str), Some("s3cr3t"));

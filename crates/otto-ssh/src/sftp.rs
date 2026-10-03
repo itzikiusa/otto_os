@@ -33,6 +33,9 @@ const META_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// own, caller-chosen limit on top).
 const TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// How often [`SftpSession::download_prefix`] checks how far the `get` got.
+const PREFIX_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// One directory entry from a remote `ls -la` longname listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SftpEntry {
@@ -344,6 +347,20 @@ impl SftpSession {
         self.run_bounded(&batch, TRANSFER_TIMEOUT).await.map(|_| ())
     }
 
+    /// Download at most about `cap` bytes of a remote file to `local` — the
+    /// text-preview path, which must not pull a multi-GB log just to show its
+    /// first MiB. Runs the same whole-file `get`, polling the local file's
+    /// length; once it passes `cap` the transfer is cancelled (dropping the
+    /// op kills the `sftp` client — `kill_on_drop`), leaving a prefix of at
+    /// least `cap` bytes behind. Pure SFTP (`get`), so it works on SFTP-only
+    /// accounts with no remote shell. Returns `true` when the file is larger
+    /// than `cap` (stopped early, or completed over the cap).
+    pub async fn download_prefix(&self, remote: &str, local: &str, cap: u64) -> Result<bool> {
+        let batch = format!("get {} {}", quote_checked(remote)?, quote_checked(local)?);
+        let get = self.run_bounded(&batch, TRANSFER_TIMEOUT);
+        get_until_cap(get, std::path::Path::new(local), cap, PREFIX_POLL).await
+    }
+
     /// Upload a local file to a remote path (sftp `put`).
     pub async fn upload(&self, local: &str, remote: &str) -> Result<()> {
         let batch = format!("put {} {}", quote_checked(local)?, quote_checked(remote)?);
@@ -429,6 +446,39 @@ fn uniq_token() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{pid}-{n}-{nanos}")
+}
+
+/// Drive a whole-file transfer `get` writing to `local`, stopping it once the
+/// local file holds more than `cap` bytes. `true` = the file exceeds the cap.
+/// OpenSSH's sftp-server answers pipelined reads in order, so the bytes on
+/// disk are a contiguous prefix whenever the length is sampled.
+async fn get_until_cap<F>(
+    get: F,
+    local: &std::path::Path,
+    cap: u64,
+    poll: std::time::Duration,
+) -> Result<bool>
+where
+    F: std::future::Future<Output = Result<String>>,
+{
+    let len = || async { tokio::fs::metadata(local).await.map(|m| m.len()).ok() };
+    tokio::pin!(get);
+    let mut tick = tokio::time::interval(poll);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            done = &mut get => {
+                done?;
+                return Ok(len().await.is_some_and(|n| n > cap));
+            }
+            _ = tick.tick() => {
+                // Returning drops `get` → the sftp child is killed mid-transfer.
+                if len().await.is_some_and(|n| n > cap) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
 }
 
 /// The caller can drop a probe while either pipe or wait is pending. Keep the
@@ -974,6 +1024,98 @@ mod file_size_tests {
         assert!(error.contains("retry"), "{error}");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         assert!(!std::path::Path::new(&session.ctl_path).exists());
+    }
+
+    /// A transfer that keeps growing past the cap is cancelled at the cap
+    /// instead of running to completion (the preview must not pull a whole
+    /// multi-GB file); one that finishes under it reports "not truncated".
+    #[tokio::test]
+    async fn get_until_cap_stops_a_growing_file_and_passes_small_ones() {
+        let dir = std::env::temp_dir().join(format!("otto-sftp-cap-{}", uniq_token()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big");
+        let writer = {
+            let big = big.clone();
+            async move {
+                use tokio::io::AsyncWriteExt;
+                let mut f = tokio::fs::File::create(&big).await.unwrap();
+                // Never completes on its own: 4 KiB every 5 ms, forever.
+                loop {
+                    f.write_all(&[b'x'; 4096]).await.unwrap();
+                    f.flush().await.unwrap();
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }
+        };
+        let poll = std::time::Duration::from_millis(10);
+        let truncated = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            get_until_cap(writer, &big, 64 * 1024, poll),
+        )
+        .await
+        .expect("stopped at the cap, not run forever")
+        .unwrap();
+        assert!(truncated);
+        let len = std::fs::metadata(&big).unwrap().len();
+        assert!(len > 64 * 1024, "a full cap-sized prefix is on disk: {len}");
+        // The writer was dropped: the file stops growing.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(std::fs::metadata(&big).unwrap().len(), len);
+
+        let small = dir.join("small");
+        let done = {
+            let small = small.clone();
+            async move {
+                tokio::fs::write(&small, b"hello").await.unwrap();
+                Ok(String::new())
+            }
+        };
+        assert!(!get_until_cap(done, &small, 64 * 1024, poll).await.unwrap());
+        // Completed over the cap (grew between polls) still reports truncated.
+        let over = {
+            let small = small.clone();
+            async move {
+                tokio::fs::write(&small, vec![b'y'; 100]).await.unwrap();
+                Ok(String::new())
+            }
+        };
+        assert!(
+            get_until_cap(over, &small, 10, std::time::Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+        // A failed transfer surfaces its error.
+        let failed = async { Err::<String, _>(Error::Upstream("no such file".into())) };
+        assert!(get_until_cap(failed, &small, 10, poll).await.is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// End to end over a fixture `sftp` whose `get` streams forever: the
+    /// prefix download returns promptly, truncated, with the client killed.
+    #[tokio::test]
+    async fn download_prefix_cancels_an_oversized_get() {
+        let session = fixture(
+            "import time,shlex\nline=sys.stdin.read().strip()\nlocal=shlex.split(line)[2]\nf=open(local,'wb')\nwhile True:\n    f.write(b'z'*8192); f.flush(); time.sleep(0.002)",
+        );
+        let local = session.ctl_dir.join("preview");
+        let started = std::time::Instant::now();
+        let truncated = session
+            .download_prefix("/var/log/huge.log", local.to_str().unwrap(), 32 * 1024)
+            .await
+            .unwrap();
+        assert!(truncated);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(std::fs::metadata(&local).unwrap().len() > 32 * 1024);
+        // A get that completes under the cap is a plain, untruncated download.
+        let session = fixture(
+            "import shlex\nline=sys.stdin.read().strip()\nopen(shlex.split(line)[2],'wb').write(b'tiny')",
+        );
+        let local = session.ctl_dir.join("preview");
+        assert!(!session
+            .download_prefix("/etc/motd", local.to_str().unwrap(), 32 * 1024)
+            .await
+            .unwrap());
+        assert_eq!(std::fs::read(&local).unwrap(), b"tiny");
     }
 
     /// A failed op reports the explanatory stderr line, not the known_hosts

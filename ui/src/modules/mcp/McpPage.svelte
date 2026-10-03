@@ -82,7 +82,8 @@
 
   async function loadPending(): Promise<void> {
     try {
-      pending = (await mcpCpApi.cpApprovals('pending')).length;
+      // The count route, not 200 whole rows just to take their length.
+      pending = (await mcpCpApi.cpApprovalsCount('pending')).count;
     } catch {
       pending = 0;
     }

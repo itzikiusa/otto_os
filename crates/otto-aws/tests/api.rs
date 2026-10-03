@@ -6,6 +6,7 @@
 //!
 //! The fake logs every invocation (env + argv) to `calls.log` next to itself
 //! so tests can assert what the CLI was asked to do.
+#![allow(clippy::disallowed_methods)] // integration tests: plain sync fs / secret store is fine
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -50,11 +51,37 @@ case "$1 $2" in
     echo '{"Contents": [{"Key": "logs/app.log", "LastModified": "2024-01-02T00:00:00+00:00", "ETag": "\"abc\"", "Size": 11, "StorageClass": "STANDARD"}], "CommonPrefixes": [{"Prefix": "logs/2024/"}], "IsTruncated": false}'; exit 0;;
   "s3api head-object")
     echo '{"ContentLength": 11, "ContentType": "text/plain", "LastModified": "2024-01-02T00:00:00+00:00", "ETag": "\"abc\"", "Metadata": {}}'; exit 0;;
+  "s3api get-object")
+    # outfile is the last positional before the appended `--output json`
+    for a in "$@"; do [ "$a" = "--output" ] && break; out="$a"; done
+    printf 'hello world' > "$out"
+    echo '{"ContentType": "text/plain", "ContentLength": 11, "ContentRange": "bytes 0-10/11", "ETag": "\"abc\""}'; exit 0;;
   "s3 cp")
+    if [ "$3" = "-" ]; then
+      # streamed upload (F9): the body arrives on stdin
+      cat > "$dir/upload.$AWS_PROFILE"; exit 0
+    fi
     printf 'hello world'; exit 0;;
+  "s3api list-multipart-uploads")
+    echo "{\"Uploads\": [{\"Key\": \"up/big.bin\", \"UploadId\": \"u-1\", \"Initiated\": \"$(date -u +%Y-%m-%dT%H:%M:%S+00:00)\"}]}"; exit 0;;
+  "s3api abort-multipart-upload")
+    exit 0;;
   "sqs list-queues")
     echo '{"QueueUrls": ["https://sqs.eu-west-1.amazonaws.com/123456789012/orders"]}'; exit 0;;
+  "configure export-credentials")
+    # The spawn-count tests' profiles export creds (slowly, so a fan-out that
+    # does not single-flight would visibly start several exports).
+    case "$AWS_PROFILE" in regions-*)
+      sleep 0.3
+      echo '{"Version": 1, "AccessKeyId": "ASIAEXPORTEDEXAMPLE", "SecretAccessKey": "exportedSecretExample0000000000000000000", "SessionToken": "tok", "Expiration": "2099-01-01T00:00:00Z"}'; exit 0;;
+    esac
+    echo "fake aws: unhandled: $*" >&2; exit 252;;
+  "ec2 describe-regions")
+    echo '{"Regions": [{"RegionName": "eu-west-1"}, {"RegionName": "us-east-1"}, {"RegionName": "ap-south-1"}]}'; exit 0;;
   "ec2 describe-instances")
+    case "$AWS_PROFILE" in regions-*)
+      echo '{"Reservations": [{"Instances": [{"InstanceId": "i-0abc", "InstanceType": "t3.micro", "State": {"Name": "running"}}]}]}'; exit 0;;
+    esac
     echo "An error occurred (UnauthorizedOperation) when calling the DescribeInstances operation: You are not authorized to perform this operation." >&2; exit 254;;
   "athena list-work-groups")
     echo '{"WorkGroups": [{"Name": "primary", "State": "ENABLED"}]}'; exit 0;;
@@ -215,6 +242,8 @@ struct TestCtx {
     events: tokio::sync::broadcast::Sender<Event>,
     data_dir: PathBuf,
     spawner: Arc<dyn Spawner>,
+    /// Native SigV4 calls: off (CLI only) unless a test points them at a mock.
+    native: otto_aws::native::Mode,
 }
 
 impl TestCtx {
@@ -231,6 +260,7 @@ impl TestCtx {
             events,
             data_dir,
             spawner: Arc::new(NullSpawner),
+            native: otto_aws::native::Mode::Off,
         }
     }
 }
@@ -250,6 +280,9 @@ impl AwsCtx for TestCtx {
     }
     fn spawner(&self) -> &Arc<dyn Spawner> {
         &self.spawner
+    }
+    fn aws_native(&self) -> otto_aws::native::Mode {
+        self.native.clone()
     }
 }
 
@@ -1169,4 +1202,502 @@ async fn aws_parent_page_is_required_and_discovery_redacts_configuration() {
     assert_eq!(st, StatusCode::OK);
     assert!(probe["identity"].is_null());
     assert_eq!(probe["message"], "Connection succeeded");
+}
+
+/// F14: spawn counts per action. A cold all-regions EC2 list costs one
+/// `describe-regions` and one `describe-instances` per region; repeating it
+/// within the 20 s all-regions TTL spawns nothing; and with expired exported
+/// creds the concurrent region calls run ONE `export-credentials` between
+/// them (single-flight), not one each.
+#[tokio::test]
+async fn all_regions_spawn_counts_cold_and_cached() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let (st, a, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("regions", "regions-spawn")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{a}");
+    let id = a["id"].as_str().unwrap().to_string();
+    let count = |op: &str| {
+        calls_log()
+            .lines()
+            .filter(|l| l.contains("PROFILE=regions-spawn ") && l.contains(op))
+            .count()
+    };
+    let exports_after_create = count("ARGS=configure export-credentials");
+    let uri = format!("/aws/accounts/{id}/ec2/instances?region=all");
+    let (st, v, _) = call(&ctx, &root, "GET", &uri, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["instances"].as_array().map(Vec::len), Some(3), "{v}");
+    assert_eq!(count("ARGS=ec2 describe-regions"), 1);
+    assert_eq!(
+        count("ARGS=ec2 describe-instances"),
+        3,
+        "one list per region"
+    );
+    assert!(
+        count("ARGS=configure export-credentials") <= exports_after_create + 1,
+        "creds exported at most once"
+    );
+    // Exported creds reach the region calls.
+    assert!(calls_log()
+        .lines()
+        .any(|l| l.contains("PROFILE=regions-spawn ")
+            && l.contains("AKID=ASIAEXPORTEDEXAMPLE")
+            && l.contains("ARGS=ec2 describe-instances")));
+
+    // Within the TTL: zero new children.
+    let before = calls_log().lines().count();
+    let (st, v2, _) = call(&ctx, &root, "GET", &uri, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v2, v);
+    let new_for_profile = calls_log()
+        .lines()
+        .skip(before)
+        .filter(|l| l.contains("PROFILE=regions-spawn "))
+        .count();
+    assert_eq!(new_for_profile, 0, "cached all-regions answer");
+
+    // Expired creds + a new filter (a different cached view): the three
+    // region calls start together and share ONE export; the region list is
+    // still cached.
+    otto_aws::creds::evict(&id);
+    let exports_before = count("ARGS=configure export-credentials");
+    let (st, _, _) = call(&ctx, &root, "GET", &format!("{uri}&state=running"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        count("ARGS=configure export-credentials"),
+        exports_before + 1,
+        "single-flight export across concurrent region calls"
+    );
+    assert_eq!(count("ARGS=ec2 describe-regions"), 1);
+    assert_eq!(count("ARGS=ec2 describe-instances"), 6);
+}
+
+/// F14: the runner exposes its live counters (children running / spawned).
+#[tokio::test]
+async fn cli_stats_count_spawns() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let before = otto_aws::cli::stats().spawned_total;
+    let (_, a, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("stats", "stats-profile")),
+    )
+    .await;
+    let id = a["id"].as_str().unwrap();
+    let (st, _, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        &format!("/aws/accounts/{id}/test"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let s = otto_aws::cli::stats();
+    // export-credentials (unhandled ⇒ fallback) + get-caller-identity.
+    assert!(s.spawned_total >= before + 2, "{s:?}");
+    assert!(s.running <= s.max_concurrent);
+}
+
+/// F10/F14: a text-looking key previews with ONE CLI spawn (ranged get-object;
+/// its JSON supplies type + size) — no head-object round trip.
+#[tokio::test]
+async fn s3_text_preview_is_a_single_spawn() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let (_, a, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("preview", "preview-profile")),
+    )
+    .await;
+    let id = a["id"].as_str().unwrap();
+    let (st, p, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/s3/buckets/logs-prod/preview?key=logs/app.log"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    assert_eq!(p["text"], "hello world");
+    assert_eq!(p["size"], 11);
+    assert_eq!(p["truncated"], false);
+    let log = calls_log();
+    let mine = |op: &str| {
+        log.lines()
+            .filter(|l| l.contains("PROFILE=preview-profile ") && l.contains(op))
+            .count()
+    };
+    assert_eq!(mine("ARGS=s3api get-object"), 1);
+    assert_eq!(mine("ARGS=s3api head-object"), 0, "no head for a texty key");
+}
+
+/// Raw-body PUT for the upload tests (`len` = the Content-Length header).
+async fn put_raw(
+    ctx: &TestCtx,
+    user: &User,
+    uri: &str,
+    body: Body,
+    len: Option<u64>,
+) -> (StatusCode, serde_json::Value) {
+    let app = otto_aws::api_router::<TestCtx>()
+        .layer(Extension(AuthUser(user.clone())))
+        .with_state(ctx.clone());
+    let mut req = Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "text/plain");
+    if let Some(len) = len {
+        req = req.header("content-length", len.to_string());
+    }
+    let resp = app.oneshot(req.body(body).unwrap()).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// F9/N2: a body with a Content-Length streams into `s3 cp -` (no spool file),
+/// and a body cut short kills the child before EOF and aborts the multipart
+/// upload it opened.
+#[tokio::test]
+async fn s3_upload_streams_and_aborts_an_interrupted_multipart_upload() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let mut ids = Vec::new();
+    for profile in ["upload-ok", "upload-cut"] {
+        let (_, a, _) = call(
+            &ctx,
+            &root,
+            "POST",
+            "/aws/accounts",
+            Some(profile_req(profile, profile)),
+        )
+        .await;
+        ids.push(a["id"].as_str().unwrap().to_string());
+    }
+    // Complete body → streamed, nothing spooled under <data_dir>/tmp.
+    let payload = "x".repeat(200_000);
+    let (st, r) = put_raw(
+        &ctx,
+        &root,
+        &format!(
+            "/aws/accounts/{}/s3/buckets/logs-prod/object?key=up/small.txt&overwrite=true",
+            ids[0]
+        ),
+        Body::from(payload.clone()),
+        Some(payload.len() as u64),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+    assert_eq!(r["size"], 200_000);
+    let got = std::fs::read(fake_aws_dir().join("upload.upload-ok")).unwrap();
+    assert_eq!(
+        got.len(),
+        200_000,
+        "the whole body reached the child's stdin"
+    );
+    let tmp = ctx.data_dir.join("tmp");
+    let spooled = std::fs::read_dir(&tmp).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(spooled, 0, "a streamed upload writes no temp copy");
+    assert!(calls_log().lines().any(|l| l.contains("PROFILE=upload-ok ")
+        && l.contains(
+            "ARGS=s3 cp - s3://logs-prod/up/small.txt --no-progress --expected-size 200000"
+        )));
+
+    // Body errors half-way (client disconnect) → 4xx, child killed, abort issued.
+    let chunks: Vec<std::result::Result<bytes::Bytes, std::io::Error>> = vec![
+        Ok(bytes::Bytes::from(vec![b'y'; 64 * 1024])),
+        Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "client went away",
+        )),
+    ];
+    let (st, r) = put_raw(
+        &ctx,
+        &root,
+        &format!(
+            "/aws/accounts/{}/s3/buckets/logs-prod/object?key=up/big.bin&overwrite=true",
+            ids[1]
+        ),
+        Body::from_stream(futures_util::stream::iter(chunks)),
+        Some(10 * 1024 * 1024),
+    )
+    .await;
+    assert!(st.is_client_error(), "{st} {r}");
+    // The abort runs detached after the child is reaped; give it a moment.
+    let mut aborted = false;
+    for _ in 0..100 {
+        if calls_log().lines().any(|l| {
+            l.contains("PROFILE=upload-cut ")
+                && l.contains("ARGS=s3api abort-multipart-upload --bucket logs-prod --key up/big.bin --upload-id u-1")
+        }) {
+            aborted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        aborted,
+        "interrupted upload was not aborted:\n{}",
+        calls_log()
+    );
+}
+
+/// One request the mock AWS endpoint saw: (x-amz-target, authorization,
+/// x-amz-security-token, body).
+type Seen = Arc<Mutex<Vec<(String, String, String, String)>>>;
+
+/// A local stand-in for the AWS endpoints: Logs `FilterLogEvents` (two pages)
+/// and EC2 `DescribeInstances` (XML).
+async fn mock_aws() -> (String, Seen) {
+    let seen: Seen = Arc::default();
+    let s2 = seen.clone();
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::post(move |headers: axum::http::HeaderMap, body: String| {
+            let seen = s2.clone();
+            async move {
+                let h = |k: &str| {
+                    headers
+                        .get(k)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                let target = h("x-amz-target");
+                seen.lock().unwrap().push((
+                    target.clone(),
+                    h("authorization"),
+                    h("x-amz-security-token"),
+                    body.clone(),
+                ));
+                match target.as_str() {
+                    "Logs_20140328.FilterLogEvents" if !body.contains("nextToken") => {
+                        r#"{"events":[{"logStreamName":"s1","timestamp":1000,"message":"one","eventId":"e1"}],"nextToken":"p2"}"#.to_string()
+                    }
+                    "Logs_20140328.FilterLogEvents" => {
+                        r#"{"events":[{"logStreamName":"s1","timestamp":2000,"message":"two","eventId":"e2"}],"nextToken":"p3"}"#.to_string()
+                    }
+                    "Logs_20140328.GetQueryResults" => {
+                        r#"{"status":"Complete","results":[[{"field":"@message","value":"hit"}]],"statistics":{"recordsMatched":1.0}}"#.to_string()
+                    }
+                    "AmazonAthena.GetQueryExecution" => {
+                        r#"{"QueryExecution":{"Status":{"State":"SUCCEEDED","SubmissionDateTime":1.7e9},"Statistics":{"DataScannedInBytes":42,"TotalExecutionTimeInMillis":7}}}"#.to_string()
+                    }
+                    "AmazonAthena.GetQueryResults" => {
+                        r#"{"ResultSet":{"ResultSetMetadata":{"ColumnInfo":[{"Name":"n","Type":"integer"}]},"Rows":[{"Data":[{"VarCharValue":"n"}]},{"Data":[{"VarCharValue":"1"}]}]},"NextToken":"a2"}"#.to_string()
+                    }
+                    _ => r#"<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>i-0abc1234</instanceId><instanceType>t3.micro</instanceType><instanceState><code>16</code><name>running</name></instanceState><tagSet><item><key>Name</key><value>web</value></item></tagSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>"#.to_string(),
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), seen)
+}
+
+/// F2d: with static creds, the Logs tail and EC2 lists are signed in-process —
+/// no `aws` child at all — and page through like `--max-items`.
+#[tokio::test]
+async fn logs_tail_and_ec2_list_are_native_with_static_creds() {
+    let (url, seen) = mock_aws().await;
+    let mut ctx = TestCtx::new().await;
+    ctx.native = otto_aws::native::Mode::Endpoint(url);
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let body = serde_json::json!({
+        "name": "native", "auth_mode": "access_keys", "region": "eu-central-1",
+        "access_key_id": "AKIANATIVEEXAMPLE001",
+        "secret_access_key": "nativeSecretExample00000000000000000000",
+        "session_token": "nativeTok"
+    });
+    let (st, a, _) = call(&ctx, &root, "POST", "/aws/accounts", Some(body)).await;
+    assert_eq!(st, StatusCode::CREATED, "{a}");
+    let id = a["id"].as_str().unwrap();
+    let native_before = otto_aws::cli::stats().native_total;
+
+    let (st, ev, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/logs/events?group=app&max=2&start=500"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ev}");
+    let msgs: Vec<&str> = ev["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(msgs, ["one", "two"], "two API pages collected into max=2");
+    assert_eq!(ev["next_token"], "n1:p3", "native tokens are tagged");
+
+    let (st, inst, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/ec2/instances?state=running"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{inst}");
+    assert_eq!(inst["instances"][0]["instance_id"], "i-0abc1234");
+    assert_eq!(inst["instances"][0]["name"], "web");
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    let (target, auth, tok, body) = &seen[0];
+    assert_eq!(target, "Logs_20140328.FilterLogEvents");
+    assert!(
+        auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIANATIVEEXAMPLE001/")
+            && auth.contains("/eu-central-1/logs/aws4_request"),
+        "{auth}"
+    );
+    assert_eq!(tok, "nativeTok");
+    let b: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(b["logGroupName"], "app");
+    assert_eq!(b["startTime"], 500);
+    assert_eq!(b["limit"], 2);
+    let b2: serde_json::Value = serde_json::from_str(&seen[1].3).unwrap();
+    assert_eq!(
+        (b2["nextToken"].as_str(), b2["limit"].as_i64()),
+        (Some("p2"), Some(1))
+    );
+    assert!(seen[2].1.contains("/eu-central-1/ec2/aws4_request"));
+    assert!(
+        seen[2].3.contains("Action=DescribeInstances")
+            && seen[2].3.contains("Filter.1.Value.1=running")
+    );
+    // Not one `aws` child for any of it (other tests spawn concurrently, so
+    // check this account's lines in the fake's log, not the global counter).
+    assert!(
+        !calls_log()
+            .lines()
+            .any(|l| l.contains("AKID=AKIANATIVEEXAMPLE001")
+                && (l.contains("filter-log-events") || l.contains("describe-instances"))),
+        "a CLI child ran for a native call"
+    );
+    assert!(otto_aws::cli::stats().native_total >= native_before + 3);
+
+    // Status polls: Insights and Athena (state + first page) are native too.
+    let (st, ins, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/logs/insights/q-1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ins}");
+    assert_eq!(ins["status"], "Complete");
+    let (st, ath, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/athena/query/qe-1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ath}");
+    assert_eq!(ath["state"], "SUCCEEDED");
+    assert_eq!(ath["next_token"], "n1:a2");
+    assert_eq!(
+        ath["result"]["rows"].as_array().map(Vec::len),
+        Some(1),
+        "{ath}"
+    );
+    assert!(calls_log()
+        .lines()
+        .all(|l| !(l.contains("AKID=AKIANATIVEEXAMPLE001") && (l.contains("get-query")))));
+
+    // A CLI-minted token cannot be resumed natively: it stays on the CLI path.
+    let (st, _, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/logs/events?group=app&token=eyJjbGki"),
+        None,
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "the fake CLI has no filter-log-events");
+    assert!(calls_log().contains("ARGS=logs filter-log-events --log-group-name app"));
+}
+
+/// F2d: when something between Otto and AWS answers instead of AWS (a proxy
+/// page, a TLS-inspecting middlebox), the call is repeated on the CLI — and
+/// that endpoint stays on the CLI for a while instead of failing every tick.
+#[tokio::test]
+async fn native_transport_failure_falls_back_to_the_cli() {
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let h2 = hits.clone();
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::post(move || {
+            let hits = h2.clone();
+            async move {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                axum::response::Html("<html><body>Proxy login required")
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let mut ctx = TestCtx::new().await;
+    ctx.native = otto_aws::native::Mode::Endpoint(format!("http://{addr}"));
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let body = serde_json::json!({
+        "name": "proxied", "auth_mode": "access_keys", "region": "ap-south-1",
+        "access_key_id": "AKIAPROXIEDEXAMPLE01",
+        "secret_access_key": "proxiedSecretExample000000000000000000000",
+    });
+    let (st, a, _) = call(&ctx, &root, "POST", "/aws/accounts", Some(body)).await;
+    assert_eq!(st, StatusCode::CREATED, "{a}");
+    let id = a["id"].as_str().unwrap();
+    for _ in 0..2 {
+        let (st, r, _) = call(
+            &ctx,
+            &root,
+            "GET",
+            &format!("/aws/accounts/{id}/ec2/instances"),
+            None,
+        )
+        .await;
+        // The fake CLI's answer (UnauthorizedOperation → 403), not the proxy page.
+        assert_eq!(st, StatusCode::FORBIDDEN, "{r}");
+    }
+    let cli_calls = calls_log()
+        .lines()
+        .filter(|l| l.contains("AKID=AKIAPROXIEDEXAMPLE01") && l.contains("ec2 describe-instances"))
+        .count();
+    assert_eq!(cli_calls, 2, "both calls answered by the CLI");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the failing endpoint is not retried natively on the next tick"
+    );
 }

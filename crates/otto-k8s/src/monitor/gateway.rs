@@ -49,6 +49,16 @@ const MAX_IDLE: usize = super::probes::MAX_CONCURRENCY as usize;
 /// Only pod-proxy sub-resources and the version endpoint are reachable through
 /// the socket (kubectl matches these unanchored-per-entry regexes).
 const ACCEPT_PATHS: &str = r"^/api/v1/namespaces/[^/]+/pods/[^/]+/proxy(/.*)?$";
+/// The collector's read-only gateway also lists a namespace's events (an
+/// incremental watch read) and metrics-server pod metrics, so neither costs
+/// a kubectl process per namespace per cycle (perf K5). GET-only: the
+/// read-only proxy rejects every other method. Never on the mutating pool.
+const ACCEPT_PATHS_READ: &str = r"^/api/v1/namespaces/[^/]+/pods/[^/]+/proxy(/.*)?$,^/api/v1/namespaces/[^/]+/events$,^/apis/metrics\.k8s\.io/v1beta1/namespaces/[^/]+/pods$";
+/// The console's list gateway (perf R3, [`crate::list_gateway`]): GET-only
+/// collection reads of the kinds the resources table lists (cluster-wide or
+/// per namespace) plus metrics-server pod metrics — never a single object,
+/// never a sub-resource (exec/attach/proxy/log), never a write.
+const ACCEPT_PATHS_LIST: &str = r"^/api/v1/(namespaces/[^/]+/)?(pods|services|configmaps|secrets|persistentvolumeclaims|events)$,^/apis/(apps/v1/(namespaces/[^/]+/)?(deployments|statefulsets|daemonsets|replicasets)|batch/v1/(namespaces/[^/]+/)?(jobs|cronjobs)|networking\.k8s\.io/v1/(namespaces/[^/]+/)?ingresses|autoscaling/v2/(namespaces/[^/]+/)?horizontalpodautoscalers|argoproj\.io/v1alpha1/(namespaces/[^/]+/)?(rollouts|applications)|metrics\.k8s\.io/v1beta1/(namespaces/[^/]+/)?pods)$";
 /// kubectl's `--reject-methods` is a comma list of regexes.
 const REJECT_METHODS: &str = "POST,PUT,PATCH,DELETE,CONNECT,OPTIONS,TRACE";
 /// The pod-HTTP actions pool's proxies (see the module doc).
@@ -90,18 +100,24 @@ impl KubeProxy {
     /// [`start`](Self::start); `allow_mutating` also admits POST/PUT/PATCH/
     /// DELETE (pod-HTTP actions only — see the module doc).
     pub async fn start_with(k: &Kubectl, allow_mutating: bool) -> Result<Self> {
+        if allow_mutating {
+            Self::start_paths(k, ACCEPT_PATHS, REJECT_METHODS_MUTATING).await
+        } else {
+            Self::start_paths(k, ACCEPT_PATHS_READ, REJECT_METHODS).await
+        }
+    }
+
+    /// A GET-only gateway for the console's collection lists (perf R3).
+    pub async fn start_lists(k: &Kubectl) -> Result<Self> {
+        Self::start_paths(k, ACCEPT_PATHS_LIST, REJECT_METHODS).await
+    }
+
+    async fn start_paths(k: &Kubectl, accept_paths: &str, reject_methods: &str) -> Result<Self> {
         let dir = private_dir()?;
         let sock = dir.join("s");
         let sock_arg = format!("--unix-socket={}", sock.display());
-        let accept = format!("--accept-paths={ACCEPT_PATHS}");
-        let reject = format!(
-            "--reject-methods={}",
-            if allow_mutating {
-                REJECT_METHODS_MUTATING
-            } else {
-                REJECT_METHODS
-            }
-        );
+        let accept = format!("--accept-paths={accept_paths}");
+        let reject = format!("--reject-methods={reject_methods}");
         let argv = k.argv_stream(["proxy", sock_arg.as_str(), accept.as_str(), reject.as_str()]);
         let mut cmd = Command::new(&k.program);
         cmd.args(&argv)

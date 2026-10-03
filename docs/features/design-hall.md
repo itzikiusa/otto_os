@@ -80,10 +80,29 @@ otto.db
 - Rows hold metadata only; there are no foreign keys (child rows are removed
   explicitly), so the saved-state archive can restore tables in any order.
 
-### Retention — opt-in only
+### Retention
 
-The daemon never deletes a version or a blob on its own. `POST
-/design/admin/prune` (dry run unless `apply: true`) squashes `autosave`
+Every content save keeps a full content-addressed blob, so the store needs
+squashing. **Auto-tidy** is a daily pass that applies the policy below to
+`autosave` versions **older than a week** only — an editing session's recent
+history is never touched — then GCs unreferenced blobs.
+
+It is **opt-in and off by default**, because it deletes intermediate autosave
+versions, which are user data. Root turns it on in **Settings → Backup &
+restore → Design Hall storage**: the card shows the bytes on disk, the version
+count, and what a pass would free right now (a dry run of the same pass), and
+asks for confirmation before enabling. The toggle is persisted in the
+`settings` table (`design.auto_tidy`); the scheduler re-reads it hourly (first
+check 10 minutes after boot) and runs at most one pass a day.
+`OTTO_DESIGN_AUTO_PRUNE=0` turns it off whatever the toggle says, `=1` forces it
+on (the toggle is then shown disabled with the reason);
+`OTTO_DESIGN_PRUNE_WINDOW_SECS` (default 600) and
+`OTTO_DESIGN_PRUNE_MIN_AGE_SECS` (default 604800) tune it.
+`GET /design/admin/storage` (root) is the gauge; `PUT /design/admin/auto-tidy
+{enabled}` flips the toggle. A replaced thumbnail's blob is GC'd immediately
+when nothing else references it.
+
+`POST /design/admin/prune` (dry run unless `apply: true`) squashes `autosave`
 versions to the last one per editing window (default 10 minutes). It never
 touches the head, the approved version, versions a link pins or was
 extracted from, published or publish-pinned versions, versions a signal

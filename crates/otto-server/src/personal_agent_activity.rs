@@ -47,10 +47,25 @@ fn ring() -> &'static Mutex<Ring> {
     RING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 fn next_seq() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(1);
-    SEQ.fetch_add(1, Ordering::Relaxed)
+    SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The newest `seq` this process has handed out (0 before the first entry).
+/// The counter restarts at 1 with the daemon, so a client cursor above this
+/// came from a previous process (perf N1) and must be treated as "no cursor".
+pub fn last_seq() -> u64 {
+    SEQ.load(std::sync::atomic::Ordering::Relaxed)
+        .saturating_sub(1)
+}
+
+/// Does a client cursor belong to this process? `epoch` is the boot id the
+/// client got with its cursor (absent from older clients); a cursor ahead of
+/// [`last_seq`] can only come from a previous process too.
+pub fn cursor_is_current(after_seq: u64, epoch: Option<&str>) -> bool {
+    epoch.is_none_or(|e| e == crate::transport::boot_id()) && after_seq <= last_seq()
 }
 
 fn push(agent_id: &str, item: ActivityItem) {
@@ -137,6 +152,39 @@ pub fn recent(agent_id: &str, limit: usize) -> Vec<ActivityItem> {
         .unwrap_or_default()
 }
 
+/// Entries newer than `after_seq`, newest first, at most `limit` (perf W4:
+/// the Activity tab appends only what is new instead of re-reading the ring).
+pub fn recent_after(agent_id: &str, after_seq: u64, limit: usize) -> Vec<ActivityItem> {
+    let map = ring().lock().unwrap_or_else(|e| e.into_inner());
+    map.get(agent_id)
+        .map(|q| {
+            q.iter()
+                .rev()
+                .take_while(|i| i.seq > after_seq)
+                .take(limit)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Approval ids of the agent's `approval_waiting` entries still in the ring
+/// (newest first, deduped).
+pub fn waiting_approval_ids(agent_id: &str) -> Vec<String> {
+    let map = ring().lock().unwrap_or_else(|e| e.into_inner());
+    let mut seen = std::collections::HashSet::new();
+    map.get(agent_id)
+        .map(|q| {
+            q.iter()
+                .rev()
+                .filter(|i| i.kind == "approval_waiting")
+                .filter_map(|i| i.approval_id.clone())
+                .filter(|id| seen.insert(id.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Forget an agent's live entries ("reset agent", delete).
 pub fn clear(agent_id: &str) {
     ring()
@@ -162,6 +210,40 @@ mod tests {
         assert!(got[0].seq > got[1].seq);
         clear(agent);
         assert!(recent(agent, 10).is_empty());
+    }
+
+    #[test]
+    fn recent_after_returns_only_newer_entries() {
+        let agent = "agent-after-test";
+        clear(agent);
+        for i in 0..5 {
+            push(agent, item_for(&format!("t{i}"), "s1", &AgentGate::Pass));
+        }
+        let all = recent(agent, 10);
+        let cursor = all[2].seq; // t2
+        let newer = recent_after(agent, cursor, 10);
+        assert_eq!(
+            newer.iter().map(|i| i.tool.as_str()).collect::<Vec<_>>(),
+            ["t4", "t3"]
+        );
+        assert!(recent_after(agent, all[0].seq, 10).is_empty());
+        assert_eq!(recent_after(agent, 0, 10).len(), 5);
+        clear(agent);
+    }
+
+    #[test]
+    fn cursor_from_a_previous_process_is_not_current() {
+        let agent = "agent-epoch-test";
+        clear(agent);
+        push(agent, item_for("t0", "s1", &AgentGate::Pass));
+        let cur = last_seq();
+        assert!(cursor_is_current(cur, None));
+        assert!(cursor_is_current(cur, Some(crate::transport::boot_id())));
+        // Another boot's id, or a cursor this process never handed out (the
+        // counter restarted below it) → reset.
+        assert!(!cursor_is_current(cur, Some("previous-boot")));
+        assert!(!cursor_is_current(cur + 1_000_000, None));
+        clear(agent);
     }
 
     #[test]

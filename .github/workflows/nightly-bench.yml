@@ -1,0 +1,222 @@
+name: Nightly bench
+
+# Timing benches kept out of the per-PR run (`#[ignore]`: wall-clock numbers on
+# a shared runner are noisy). Nightly, plus on demand, so a regression shows up
+# within a day instead of when a user notices.
+#
+# synthetic_sftp_browse_latency (otto-connections) drives the real SFTP pool,
+# authorization and subprocess paths against a Python stand-in for the `sftp`
+# batch client — no sshd, network or credentials. It prints median/p95 per mode
+# (`SFTP_SYNTHETIC …` lines) and fails when a browse p95 exceeds
+# OTTO_BENCH_P95_MS. The ceiling is deliberately generous (locally the p95 is
+# tens of ms) — it catches order-of-magnitude regressions, not runner jitter.
+# otto-connections doesn't link librdkafka, so no cmake/libcurl setup is needed.
+#
+# big_run_write_budget (otto-state, perf W12/N2) times the memoized workflow
+# progress write on a 500-node, ~200 KB run — what every node start/finish and
+# live log line costs off the runtime. Release build; it fails when the
+# steady-state write exceeds OTTO_BENCH_WRITE_MS (15 ms; locally ~1–3 ms).
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # 03:17 UTC nightly (off the top of the hour)
+  workflow_dispatch:
+    inputs:
+      p95_ms:
+        description: "Browse p95 ceiling in ms (blank = default)"
+        required: false
+        default: ""
+      write_ms:
+        description: "Workflow big-run write ceiling in ms (blank = default)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  sftp-latency:
+    name: SFTP browse latency (synthetic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      OTTO_BENCH_P95_MS: ${{ github.event.inputs.p95_ms || '1500' }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: nightly-bench
+
+      # The fixture `sftp` is a python3 script (preinstalled on the runner).
+      - name: Check python3
+        run: python3 --version
+
+      - name: Run synthetic SFTP browse bench
+        # Explicit `shell: bash` = `-eo pipefail`, so `tee` can't mask a failure.
+        shell: bash
+        run: |
+          cargo test -p otto-connections --lib synthetic_sftp_browse_latency \
+            -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/bench.log"
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### SFTP synthetic browse latency"
+            echo "Ceiling: browse p95 <= ${OTTO_BENCH_P95_MS} ms"
+            echo '```'
+            grep '^SFTP_SYNTHETIC' "$RUNNER_TEMP/bench.log" || echo "no bench output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # perf R4: the k8s-monitor rows-read ratchet at a scale where a full scan
+  # would show (600 pods × 26 h of 60 s cycles, ~19M raw + ~0.9M wide rows).
+  # The per-PR run keeps the 60-pod default; this restores the 600-pod gate.
+  # (600 once failed with MEMORY_LIMIT_EXCEEDED: the synthetic history was
+  # inserted in ONE statement and the rollup views' aggregation outgrew the
+  # embedded engine's 1 GiB cap — the generator now inserts per chunk of
+  # cycles; the collector itself inserts one cycle per statement.)
+  k8s-monitor-scale:
+    name: K8s monitor rows-read ratchet (600 pods)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: nightly-bench-k8s
+
+      - name: Install ClickHouse
+        env:
+          CLICKHOUSE_VERSION: 26.8.15.10
+          CLICKHOUSE_SHA512: d54f83e187b19399260fa9d7f68403a7c3adf48059f211d0620216e6ea49687490898b5aa32f49d9728db58c5912cfb700148b814b8c3314f88ccfa940ffd85a
+        run: |
+          archive="$RUNNER_TEMP/clickhouse.tgz"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/ClickHouse/ClickHouse/releases/download/v$CLICKHOUSE_VERSION-lts/clickhouse-common-static-$CLICKHOUSE_VERSION-amd64.tgz" \
+            --output "$archive"
+          printf '%s  %s\n' "$CLICKHOUSE_SHA512" "$archive" | sha512sum --check
+          mkdir -p "$RUNNER_TEMP/ch"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/ch"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$(find "$RUNNER_TEMP/ch" -type f -name clickhouse -path '*/bin/*' | head -n 1)" "$HOME/.local/bin/clickhouse"
+          rm -rf "$RUNNER_TEMP/ch" "$archive"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/clickhouse" local --version
+
+      # otto-server links librdkafka (built from source: cmake + libcurl headers).
+      - name: Install librdkafka build deps
+        run: |
+          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
+          sudo apt-get install -y cmake libcurl4-openssl-dev
+
+      - name: Rows-read ratchet at 600 pods
+        shell: bash
+        env:
+          OTTO_REQUIRE_CLICKHOUSE: "1"
+          OTTO_K8S_MEASURE_PODS: "600"
+        run: |
+          cargo test -p otto-server --test it k8s_monitor_clickhouse::rows_read_per_refresh \
+            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/k8s.log"
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### K8s monitor rows-read ratchet (600 pods)"
+            echo '```'
+            grep -E 'rows|ms' "$RUNNER_TEMP/k8s.log" | tail -n 40 || echo "no output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  git-status-large-tree:
+    name: Git status on a large tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Generous on a shared runner (locally well under a second): it catches
+      # an order-of-magnitude regression (a lost untracked cap, a per-file
+      # spawn), not jitter.
+      OTTO_STATUS_BUDGET_MS: "5000"
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: nightly-bench
+
+      - name: Run large-tree status timing
+        shell: bash
+        run: |
+          cargo test -p otto-git --lib large_tree_status_timing \
+            -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/status.log"
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### Git status, 100k tracked + 10k untracked"
+            echo "Budget: ${OTTO_STATUS_BUDGET_MS} ms"
+            echo '```'
+            grep '^status on ' "$RUNNER_TEMP/status.log" || echo "no timing output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  workflow-write:
+    name: Workflow big-run progress write
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      OTTO_BENCH_WRITE_MS: ${{ github.event.inputs.write_ms || '15' }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: nightly-bench-release
+
+      - name: Run big-run write budget
+        shell: bash
+        run: |
+          cargo test --release -p otto-state --lib big_run_write_budget \
+            -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/write.log"
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### Workflow big-run progress write"
+            echo "Ceiling: steady-state write <= ${OTTO_BENCH_WRITE_MS} ms"
+            echo '```'
+            grep '^WORKFLOW_BIG_RUN' "$RUNNER_TEMP/write.log" || echo "no bench output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

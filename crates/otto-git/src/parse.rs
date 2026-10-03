@@ -19,6 +19,19 @@ use otto_core::{Error, Result};
 /// followed by its origPath as the NEXT record. Newline-separated output (a
 /// `\t` between path and origPath, quoted names) is still accepted.
 pub fn parse_status(out: &str) -> RepoStatusResp {
+    parse_status_capped(out, usize::MAX)
+}
+
+/// Untracked rows a status RESPONSE carries at most. A non-ignored
+/// `node_modules`/build dir is 200k rows ≈ 30 MB of JSON per watcher event;
+/// past the cap the client gets a count and a "add it to .gitignore" hint.
+pub const UNTRACKED_ROW_CAP: usize = 5_000;
+
+/// [`parse_status`] keeping only the first `cap` untracked (`?`) rows — the
+/// rest are counted, never allocated. Tracked, staged and conflicted rows are
+/// never capped (they are what a commit is made of).
+pub fn parse_status_capped(out: &str, cap: usize) -> RepoStatusResp {
+    let mut untracked = 0usize;
     let mut branch = String::new();
     let mut upstream = None;
     let mut ahead = 0u32;
@@ -56,11 +69,18 @@ pub fn parse_status(out: &str) -> RepoStatusResp {
             }
             continue;
         }
+        if line.starts_with("? ") {
+            untracked += 1;
+            if untracked > cap {
+                continue;
+            }
+        }
         if let Some(fc) = parse_status_entry(line) {
             changes.push(fc);
         }
     }
 
+    let truncated = untracked > cap;
     RepoStatusResp {
         branch,
         upstream,
@@ -70,6 +90,8 @@ pub fn parse_status(out: &str) -> RepoStatusResp {
         // Filled by LocalGit::status from the git dir's state files — the
         // porcelain output alone can't tell a merge from a rebase.
         op_in_progress: None,
+        untracked_total: truncated.then(|| u32::try_from(untracked).unwrap_or(u32::MAX)),
+        untracked_truncated: truncated,
     }
 }
 
@@ -1324,6 +1346,29 @@ fn parse_hunk_header(rest: &str) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn status_caps_untracked_rows_only() {
+        let mut out = String::from("# branch.head main\0");
+        out.push_str("1 .M N... 100644 100644 100644 aaa bbb src/lib.rs\0");
+        for i in 0..7 {
+            out.push_str(&format!("? new/{i}.txt\0"));
+        }
+        out.push_str("u UU N... 100644 100644 100644 100644 a b c conflict.rs\0");
+        let st = parse_status_capped(&out, 3);
+        let untracked = st.changes.iter().filter(|c| c.kind == "untracked").count();
+        assert_eq!(untracked, 3);
+        assert!(st.changes.iter().any(|c| c.path == "src/lib.rs"));
+        assert!(st.changes.iter().any(|c| c.kind == "conflicted"));
+        assert!(st.untracked_truncated);
+        assert_eq!(st.untracked_total, Some(7));
+        // Under the cap: nothing flagged, nothing serialized.
+        let st = parse_status_capped(&out, 100);
+        assert!(!st.untracked_truncated);
+        assert_eq!(st.untracked_total, None);
+        let json = serde_json::to_string(&st).unwrap();
+        assert!(!json.contains("untracked_t"), "{json}");
+    }
+
     use super::*;
 
     #[test]

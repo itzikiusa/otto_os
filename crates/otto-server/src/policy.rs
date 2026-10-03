@@ -80,6 +80,13 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/room-join" {
         return Exempt;
     }
+    // perf2/10-mcp R7: an agent session's stdio bridge appends its OWN tool-call
+    // audit rows here (it used to hold a writer connection to the live DB).
+    // Not feature-gated — any agent session's tool calls are audited — but the
+    // handler accepts only a session credential and stamps that session.
+    if p == "/mcp/tool-calls" {
+        return Exempt;
+    }
     if p == "/room-recap-settings" {
         return Require(Settings, Admin);
     }
@@ -498,6 +505,15 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // list/fetch images = View; capture/upload/annotate/copy/delete = Edit.
     // Root bypasses.
     if p == "/snips" || p.starts_with("/snips/") {
+        return Require(Agents, if get { View } else { Edit });
+    }
+
+    // ---- Workbench (per-user scratch files with full history) ----------------
+    // Rides the Agents feature like Snips (scratch scripts feed sessions, DB
+    // runs and API requests): every GET (list, doc, revisions, diff, asset) =
+    // View; create/autosave/trash/restore/purge/upload = Edit. Handlers add the
+    // per-owner scoping. Root bypasses.
+    if p.starts_with("/workspaces/{ws}/workbench/") {
         return Require(Agents, if get { View } else { Edit });
     }
 
@@ -955,6 +971,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if matches!(p, "/admin/db/stats" | "/admin/db/compact") {
         return Require(Settings, Admin);
     }
+    // Secret-store status + the confirmed "Secure secrets…" migration — root
+    // daemon maintenance (handlers require root).
+    if matches!(p, "/admin/secrets/status" | "/admin/secrets/secure") {
+        return Require(Settings, Admin);
+    }
     if matches!(
         p,
         "/state/connections/export" | "/state/connections/export/formats"
@@ -1034,6 +1055,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
     if p == "/workspaces/{id}/proof-summary" {
         return Require(ProofPack, View);
+    }
+    if p == "/workspaces/{id}/proof-packs/archive-sessions" {
+        // Opt-in archive of stale session packs (hides, never deletes).
+        return Require(ProofPack, Admin);
     }
     if p == "/proof-packs/{id}" {
         // GET detail = View; PATCH = Edit; DELETE = Edit.
@@ -1749,6 +1774,13 @@ mod tests {
             Require(ProofPack, View),
         );
         assert_eq!(
+            pol(
+                Method::POST,
+                "/api/v1/workspaces/{id}/proof-packs/archive-sessions"
+            ),
+            Require(ProofPack, Admin),
+        );
+        assert_eq!(
             pol(Method::GET, "/api/v1/proof-packs/{id}"),
             Require(ProofPack, View),
         );
@@ -2148,6 +2180,16 @@ mod tests {
         assert_eq!(
             pol(Method::PATCH, "/api/v1/mcp/otto-server"),
             Require(Mcp, Admin)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/mcp/otto-server/enabled"),
+            Require(Mcp, View)
+        );
+        // The bridge's own audit append: session-credential-only in the handler.
+        assert_eq!(pol(Method::POST, "/api/v1/mcp/tool-calls"), Exempt);
+        assert_eq!(
+            pol(Method::GET, "/api/v1/mcp/approvals/count"),
+            Require(Mcp, View)
         );
         assert_eq!(
             pol(Method::GET, "/api/v1/mcp/auto-approve"),

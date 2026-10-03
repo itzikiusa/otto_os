@@ -71,20 +71,106 @@ async fn parse_off_runtime<T: Send + 'static>(
 }
 
 /// Persist a cycle's status, rewriting the (large) snapshot column only when
-/// the snapshot differs from `baseline` — what this loop last stored. Returns
+/// `cur` (this cycle's typed snapshot; `None` = the cycle never got one, keep
+/// what is stored) differs from `baseline` — what this loop last stored. The
+/// comparison is typed and the serialisation runs on the blocking pool
+/// straight to text: no `Value` round-trip per cycle (perf K4). Returns
 /// whether the snapshot was written.
 async fn store_status(
     repo: &K8sMonitorRepo,
     status: &K8sMonitorStatusRow,
-    baseline: Option<&Value>,
+    cur: Option<&Arc<Snapshot>>,
+    baseline: Option<&Arc<Snapshot>>,
 ) -> otto_core::Result<bool> {
-    if baseline == Some(&status.snapshot) {
-        repo.upsert_status_keep_snapshot(status).await?;
-        Ok(false)
-    } else {
-        repo.upsert_status(status).await?;
-        Ok(true)
+    let changed = match (cur, baseline) {
+        (None, _) => None,
+        (Some(c), Some(b)) if Arc::ptr_eq(c, b) || **c == **b => None,
+        (Some(c), _) => Some(c.clone()),
+    };
+    match changed {
+        None => {
+            repo.upsert_status_keep_snapshot(status).await?;
+            Ok(false)
+        }
+        Some(snap) => {
+            let raw = tokio::task::spawn_blocking(move || {
+                serde_json::to_string(&*snap).unwrap_or_else(|_| "{}".into())
+            })
+            .await
+            .map_err(|e| Error::Internal(format!("k8s monitor snapshot task: {e}")))?;
+            repo.upsert_status_with_snapshot_str(status, &raw).await?;
+            Ok(true)
+        }
     }
+}
+
+/// Persist a one-off cycle's outcome (the "Run now" route) and publish its
+/// snapshot for the dashboards.
+pub async fn persist_outcome(repo: &K8sMonitorRepo, out: &CycleOutcome) -> otto_core::Result<()> {
+    let cur = out.snapshot.clone().map(Arc::new);
+    store_status(repo, &out.status, cur.as_ref(), None).await?;
+    if let Some(snap) = cur {
+        super::latest::publish(
+            &out.status.cluster_id,
+            out.status.last_cycle_at.clone(),
+            snap,
+        );
+    }
+    Ok(())
+}
+
+/// Re-sniff a cached `Auto` transport decision at least this often.
+const TRANSPORT_TTL: Duration = Duration::from_secs(3600);
+/// Status series (restarts, ready, phase, limits) are written when they change
+/// and for every pod at least this often (perf K8: they were 6 rows per pod
+/// per cycle into the narrow table, read only by the generic series picker).
+const STATUS_HEARTBEAT: Duration = Duration::from_secs(15 * 60);
+/// A watch-based incremental events read holds the request this long.
+const EVENTS_WATCH_SECS: u64 = 1;
+
+/// A cached transport decision.
+#[derive(Debug, Clone, Copy)]
+struct CachedTransport {
+    used: TransportUsed,
+    want: Transport,
+    at: Instant,
+}
+
+/// What the per-cluster loop keeps across cycles: the `kubectl proxy`
+/// gateway, the transport decision (perf K1), the port-forward pool, the
+/// per-namespace events `resourceVersion` (incremental reads, K5) and when
+/// status series were last written in full (K8).
+#[derive(Default)]
+pub struct LoopState {
+    pub gateway: Option<KubeProxy>,
+    transport: Option<CachedTransport>,
+    pub forwards: scrape::ForwardPool,
+    event_rv: std::collections::HashMap<String, String>,
+    status_full_at: Option<Instant>,
+}
+
+/// The cached `Auto` decision when it is still valid for `want` (field-level
+/// helpers: the gateway borrow of the same `LoopState` is live meanwhile).
+fn cached_transport(
+    c: &Option<CachedTransport>,
+    want: Transport,
+    now: Instant,
+) -> Option<TransportUsed> {
+    c.filter(|c| c.want == want && now.duration_since(c.at) < TRANSPORT_TTL)
+        .map(|c| c.used)
+}
+
+fn remember_transport(
+    c: &mut Option<CachedTransport>,
+    want: Transport,
+    used: TransportUsed,
+    now: Instant,
+) {
+    *c = Some(CachedTransport {
+        used,
+        want,
+        at: now,
+    });
 }
 
 /// Back-off ceiling after consecutive kubectl failures.
@@ -96,6 +182,9 @@ const PURGE_EVERY: Duration = Duration::from_secs(24 * 3600);
 
 pub struct CycleOutcome {
     pub status: K8sMonitorStatusRow,
+    /// This cycle's typed pod snapshot; `None` when the cycle failed before
+    /// the sweep finished (the stored one stays the baseline).
+    pub snapshot: Option<Snapshot>,
     pub samples_written: usize,
     pub events_written: usize,
     /// The cluster could not be reached at all (kubectl failed on the sweep);
@@ -340,9 +429,11 @@ struct Scraped {
 }
 
 /// Scrape one pod: every probe on every port, parsed into NDJSON.
+#[allow(clippy::too_many_arguments)]
 async fn scrape_pod(
     k: &Kubectl,
     gw: Option<&KubeProxy>,
+    pool: &scrape::ForwardPool,
     cluster_id: &str,
     transport: TransportUsed,
     cfg: &MonitorConfig,
@@ -362,7 +453,7 @@ async fn scrape_pod(
             pod: pod.name.clone(),
             port,
         };
-        let results = scrape::fetch_via(k, gw, transport, &target, &probes).await;
+        let results = scrape::fetch_pooled(k, gw, Some(pool), transport, &target, &probes).await;
         for (probe, res) in probes.iter().zip(results) {
             match res {
                 Ok(r) => {
@@ -453,8 +544,8 @@ async fn scrape_pod(
 /// Run one full cycle (spec steps 1–10). Never panics on cluster errors: an
 /// unreachable cluster yields `unreachable = true` + `last_error`.
 ///
-/// A one-off cycle: the `kubectl proxy` gateway it may start dies with it.
-/// The per-cluster loop uses [`run_cycle_with`] to keep one across cycles.
+/// A one-off cycle: the `kubectl proxy` gateway / port-forwards it may start
+/// die with it. The per-cluster loop uses [`run_cycle_with`] to keep them.
 pub async fn run_cycle<S: K8sCtx>(
     ctx: &S,
     cluster: &K8sCluster,
@@ -463,13 +554,153 @@ pub async fn run_cycle<S: K8sCtx>(
     prev_cycle_at: Option<DateTime<Utc>>,
     sink: &dyn MonitorSink,
 ) -> CycleOutcome {
-    let mut gw = None;
-    run_cycle_with(ctx, cluster, cfg, prev, prev_cycle_at, sink, &mut gw).await
+    let mut state = LoopState::default();
+    run_cycle_with(ctx, cluster, cfg, prev, prev_cycle_at, sink, &mut state).await
 }
 
-/// [`run_cycle`] reusing (or (re)starting) the cluster's `kubectl proxy`
-/// gateway in `gw`, so probe scrapes are pooled HTTP requests instead of one
-/// kubectl process per pod per probe (r3-08-02).
+/// Did the status series of `p` change since `old` (restarts, readiness,
+/// phase, limits — `pod_age_seconds` is derivable and never written)?
+fn status_changed(p: &PodSnap, old: Option<&PodSnap>) -> bool {
+    let Some(o) = old else { return true };
+    let restarts = |x: &PodSnap| x.containers.values().map(|c| c.restarts).sum::<i64>();
+    restarts(p) != restarts(o)
+        || p.ready != o.ready
+        || (p.phase == "Running") != (o.phase == "Running")
+        || p.mem_limit != o.mem_limit
+        || p.cpu_request != o.cpu_request
+}
+
+/// A namespace's event hints + the `resourceVersion` to resume from.
+type NamespaceEvents = (Vec<EventHint>, Option<String>);
+
+/// One namespace's event hints newer than `since` (perf K5). With a gateway
+/// and a known `resourceVersion` it is an incremental watch read — only the
+/// events after that version, the API server closes it after
+/// [`EVENTS_WATCH_SECS`]; otherwise (first cycle, expired version, no
+/// gateway) a full list. Returns the hints and the version to resume from.
+async fn namespace_events(
+    k: &Kubectl,
+    gw: Option<&KubeProxy>,
+    ns: &str,
+    rv: Option<String>,
+    since: Option<DateTime<Utc>>,
+) -> otto_core::Result<NamespaceEvents> {
+    if let (Some(gw), Some(rv)) = (gw, rv.as_deref()) {
+        let path = format!(
+            "/api/v1/namespaces/{ns}/events?watch=1&resourceVersion={rv}&timeoutSeconds={EVENTS_WATCH_SECS}&allowWatchBookmarks=false"
+        );
+        if let Ok(r) = gw
+            .get(
+                &path,
+                Duration::from_secs(EVENTS_WATCH_SECS + 5),
+                32 * 1024 * 1024,
+            )
+            .await
+        {
+            if r.status == 200 {
+                let rv = rv.to_string();
+                let parsed = tokio::task::spawn_blocking(move || parse_event_watch(&r.body, since))
+                    .await
+                    .map_err(|e| Error::Internal(format!("k8s monitor parse task: {e}")))?;
+                if let Some((hints, new_rv)) = parsed {
+                    return Ok((hints, Some(new_rv.unwrap_or(rv))));
+                }
+                // Version expired (410): fall through to a full relist.
+            }
+        }
+    }
+    if let Some(gw) = gw {
+        if let Ok(r) = gw
+            .get(
+                &format!("/api/v1/namespaces/{ns}/events"),
+                Duration::from_secs(30),
+                256 * 1024 * 1024,
+            )
+            .await
+        {
+            if r.status == 200 {
+                return parse_off_runtime(r.body, move |list| {
+                    let rv = s(&list, "/metadata/resourceVersion")
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_string);
+                    (parse_event_hints(&list, since), rv)
+                })
+                .await;
+            }
+        }
+    }
+    let out = k.run(["get", "events", "-n", ns, "-o", "json"]).await?;
+    parse_off_runtime(out.stdout, move |list| {
+        (parse_event_hints(&list, since), None)
+    })
+    .await
+}
+
+/// A watch response (one JSON event per line) → hints + the newest
+/// `resourceVersion` seen. `None` when the watch reports an `ERROR` (the
+/// version expired: relist).
+pub fn parse_event_watch(
+    body: &str,
+    since: Option<DateTime<Utc>>,
+) -> Option<(Vec<EventHint>, Option<String>)> {
+    let mut items = Vec::new();
+    let mut rv = None;
+    for line in body.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(ev) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match ev.get("type").and_then(Value::as_str) {
+            Some("ERROR") => return None,
+            Some("ADDED") | Some("MODIFIED") => {
+                if let Some(obj) = ev.get("object") {
+                    if let Some(v) = s(obj, "/metadata/resourceVersion") {
+                        rv = Some(v.to_string());
+                    }
+                    items.push(obj.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let hints = parse_event_hints(&json!({ "items": items }), since);
+    Some((hints, rv))
+}
+
+/// metrics-server for one namespace — through the gateway when there is one
+/// (an HTTP request, not a process), parsed off the runtime either way.
+async fn namespace_metrics(
+    k: &Kubectl,
+    gw: Option<&KubeProxy>,
+    ns: &str,
+) -> otto_core::Result<Vec<resources::PodMetrics>> {
+    let path = format!("/apis/metrics.k8s.io/v1beta1/namespaces/{ns}/pods");
+    if let Some(gw) = gw {
+        if let Ok(r) = gw
+            .get(&path, Duration::from_secs(30), 64 * 1024 * 1024)
+            .await
+        {
+            match r.status {
+                200 => {
+                    return parse_off_runtime(r.body, |v| resources::parse_pod_metrics(&v)).await
+                }
+                401 | 403 => {
+                    return Err(Error::Forbidden(format!(
+                        "cluster RBAC: metrics-server answered HTTP {}",
+                        r.status
+                    )))
+                }
+                _ => {}
+            }
+        }
+    }
+    let out = k.run(["get", "--raw", path.as_str()]).await?;
+    parse_off_runtime(out.stdout, |v| resources::parse_pod_metrics(&v)).await
+}
+
+/// [`run_cycle`] reusing the loop's [`LoopState`]: the cluster's `kubectl
+/// proxy` gateway (probe scrapes, events and metrics are pooled HTTP requests
+/// instead of processes — r3-08-02), the cached transport decision and the
+/// long-lived port-forwards (perf K1).
 pub async fn run_cycle_with<S: K8sCtx>(
     ctx: &S,
     cluster: &K8sCluster,
@@ -477,14 +708,14 @@ pub async fn run_cycle_with<S: K8sCtx>(
     prev: &Snapshot,
     prev_cycle_at: Option<DateTime<Utc>>,
     sink: &dyn MonitorSink,
-    gw_slot: &mut Option<KubeProxy>,
+    state: &mut LoopState,
 ) -> CycleOutcome {
     let started = Instant::now();
     let now = Utc::now();
     let cid = cluster.id.to_string();
     let mut status = K8sMonitorStatusRow::empty(&cid);
     status.last_cycle_at = Some(ts(now));
-    status.snapshot = serde_json::to_value(prev).unwrap_or_default();
+    status.snapshot = Value::Null;
 
     let k = match kubectl_for(ctx, cluster).await {
         Ok(k) => k,
@@ -493,6 +724,7 @@ pub async fn run_cycle_with<S: K8sCtx>(
             status.cycle_ms = started.elapsed().as_millis() as i64;
             return CycleOutcome {
                 status,
+                snapshot: None,
                 samples_written: 0,
                 events_written: 0,
                 unreachable: true,
@@ -536,6 +768,7 @@ pub async fn run_cycle_with<S: K8sCtx>(
                 status.cycle_ms = started.elapsed().as_millis() as i64;
                 return CycleOutcome {
                     status,
+                    snapshot: None,
                     samples_written: 0,
                     events_written: 0,
                     unreachable: true,
@@ -544,8 +777,21 @@ pub async fn run_cycle_with<S: K8sCtx>(
         }
     }
     status.pods_seen = cur.len() as i64;
+
+    // Status series: only pods whose values changed, plus everyone every
+    // STATUS_HEARTBEAT (and on the loop's first cycle) — perf K8.
+    let full_status = prev.is_empty()
+        || state
+            .status_full_at
+            .is_none_or(|t| t.elapsed() >= STATUS_HEARTBEAT);
+    if full_status {
+        state.status_full_at = Some(Instant::now());
+    }
     let mut samples_nd = String::new();
-    for p in cur.values() {
+    for (key, p) in cur.iter() {
+        if !full_status && !status_changed(p, prev.get(key)) {
+            continue;
+        }
         let container = p.containers.keys().next().cloned().unwrap_or_default();
         samples_nd.push_str(&samples_ndjson(
             &cid,
@@ -557,24 +803,19 @@ pub async fn run_cycle_with<S: K8sCtx>(
         ));
     }
 
-    // 2. Events (same fan-out; parsed off the runtime).
-    let listed: Vec<(String, otto_core::Result<Vec<EventHint>>)> =
+    // The gateway serves events + metrics (read-only paths) and, unless the
+    // config pins port-forward, the proxy transport.
+    let gw: Option<&KubeProxy> = gateway::ensure(&mut state.gateway, &k).await;
+
+    // 2. Events: incremental per namespace (same fan-out; parsed off the
+    // runtime).
+    let listed: Vec<(String, otto_core::Result<NamespaceEvents>)> =
         stream::iter(namespaces.iter().cloned())
             .map(|ns| {
                 let k = &k;
+                let rv = state.event_rv.get(&ns).cloned();
                 async move {
-                    let res = match k
-                        .run(["get", "events", "-n", ns.as_str(), "-o", "json"])
-                        .await
-                    {
-                        Ok(out) => {
-                            parse_off_runtime(out.stdout, move |list| {
-                                parse_event_hints(&list, prev_cycle_at)
-                            })
-                            .await
-                        }
-                        Err(e) => Err(e),
-                    };
+                    let res = namespace_events(k, gw, &ns, rv, prev_cycle_at).await;
                     (ns, res)
                 }
             })
@@ -582,25 +823,45 @@ pub async fn run_cycle_with<S: K8sCtx>(
             .collect()
             .await;
     let mut events: Vec<EventHint> = Vec::new();
+    let mut event_rv = std::collections::HashMap::new();
     for (ns, res) in listed {
         match res {
-            Ok(hints) => events.extend(hints),
+            Ok((hints, rv)) => {
+                events.extend(hints);
+                if let Some(rv) = rv {
+                    event_rv.insert(ns, rv);
+                }
+            }
             Err(e) => tracing::debug!("k8s monitor: events in {ns}: {e}"),
         }
     }
 
     // 3. Metrics-server (re-probed every cycle, never cached) — unless the
     // config turns it off (RBAC that will never be granted = a wasted call).
+    // Namespaces in parallel, parsed off the runtime (perf K5).
     let mut ms_state = if cfg.metrics_server {
         "absent".to_string()
     } else {
         "disabled".to_string()
     };
     let ms_namespaces: &[String] = if cfg.metrics_server { &namespaces } else { &[] };
+    let metrics: Vec<(String, otto_core::Result<Vec<resources::PodMetrics>>)> =
+        stream::iter(ms_namespaces.iter().cloned())
+            .map(|ns| {
+                let k = &k;
+                async move {
+                    let res = namespace_metrics(k, gw, &ns).await;
+                    (ns, res)
+                }
+            })
+            .buffered(SWEEP_CONCURRENCY)
+            .collect()
+            .await;
     // Per pod (snap key): the samples the wide row is built from.
     let mut wide_samples: std::collections::HashMap<String, Vec<Sample>> = Default::default();
-    for ns in ms_namespaces {
-        match resources::pod_metrics(&k, Some(ns)).await {
+    let mut forbidden = None;
+    for (ns, res) in metrics {
+        match res {
             Ok(pods) => {
                 ms_state = "ok".into();
                 for pm in pods {
@@ -624,12 +885,16 @@ pub async fn run_cycle_with<S: K8sCtx>(
                 }
             }
             Err(Error::Forbidden(m)) => {
-                ms_state = format!("forbidden: {m}");
-                break;
+                forbidden.get_or_insert(m);
             }
             Err(e) => {
-                tracing::debug!("k8s monitor: metrics-server: {e}");
+                tracing::debug!("k8s monitor: metrics-server in {ns}: {e}");
             }
+        }
+    }
+    if let Some(m) = forbidden {
+        if ms_state != "ok" {
+            ms_state = format!("forbidden: {m}");
         }
     }
     status.metrics_server = ms_state;
@@ -654,60 +919,105 @@ pub async fn run_cycle_with<S: K8sCtx>(
     let mut parse_errors = 0u32;
     let mut capped = 0u32;
     let mut scraped_versions: Vec<(String, String)> = Vec::new();
-    if !cfg.probes.is_empty() {
-        if let Some(first) = targets.first() {
-            let probe0 = &cfg.probes[0];
-            let sample = ScrapeTarget {
-                namespace: first.namespace.clone(),
-                pod: first.name.clone(),
-                port: probe0.port.or(first.first_port).unwrap_or(80),
-            };
-            // The gateway only serves the proxy transport; a pinned
-            // port-forward config never starts (or keeps) one.
-            let gw: Option<&KubeProxy> = if cfg.transport == Transport::PortForward {
-                *gw_slot = None;
-                None
-            } else {
-                gateway::ensure(gw_slot, &k).await
-            };
-            let transport =
-                scrape::pick_transport_via(&k, gw, cfg.transport, &sample, &probe0.path).await;
-            status.transport_used = transport.as_str().into();
-
-            // 5. Scrape with bounded concurrency. The futures are built up
-            // front (owned pod copies) so no closure borrows across the
-            // `'static` boundary tokio::spawn demands of the enclosing loop.
-            let concurrency = cfg.concurrency.clamp(1, probes::MAX_CONCURRENCY) as usize;
-            let futs: Vec<_> = targets
-                .iter()
-                .map(|p| {
-                    let pod: PodSnap = (*p).clone();
-                    let (k, cid, cfg) = (&k, cid.as_str(), cfg);
-                    async move { scrape_pod(k, gw, cid, transport, cfg, &pod, now).await }
-                })
-                .collect();
-            let keys: Vec<String> = targets
-                .iter()
-                .map(|p| classify::snap_key(&p.namespace, &p.name))
-                .collect();
-            let results: Vec<Scraped> = stream::iter(futs).buffered(concurrency).collect().await;
-            for (key, r) in keys.into_iter().zip(results) {
-                if r.ok {
-                    status.pods_scraped += 1;
-                } else {
-                    status.pods_failed += 1;
+    let mut transport_used = None;
+    let target_count = targets.len();
+    if !cfg.probes.is_empty() && !targets.is_empty() {
+        let probe0 = &cfg.probes[0];
+        // The gateway only serves the proxy transport when the config does
+        // not pin port-forward.
+        let proxy_gw = if cfg.transport == Transport::PortForward {
+            None
+        } else {
+            gw
+        };
+        let transport = match cached_transport(&state.transport, cfg.transport, Instant::now()) {
+            Some(t) => t,
+            None => {
+                let samples: Vec<ScrapeTarget> = scrape::sniff_sample(&targets)
+                    .into_iter()
+                    .map(|p| ScrapeTarget {
+                        namespace: p.namespace.clone(),
+                        pod: p.name.clone(),
+                        port: probe0.port.or(p.first_port).unwrap_or(80),
+                    })
+                    .collect();
+                let (t, conclusive) = scrape::pick_transport_multi(
+                    &k,
+                    proxy_gw,
+                    cfg.transport,
+                    &samples,
+                    &probe0.path,
+                )
+                .await;
+                if conclusive {
+                    remember_transport(&mut state.transport, cfg.transport, t, Instant::now());
                 }
-                parse_errors += r.parse_errors;
-                capped += r.capped;
-                samples_nd.push_str(&r.ndjson);
-                wide_samples
-                    .entry(key.clone())
-                    .or_default()
-                    .extend(r.samples);
-                scraped_versions.push((key, r.version));
+                t
             }
+        };
+        transport_used = Some(transport);
+        status.transport_used = transport.as_str().into();
+
+        // 5. Scrape with bounded concurrency. The futures are built up
+        // front (owned pod copies) so no closure borrows across the
+        // `'static` boundary tokio::spawn demands of the enclosing loop.
+        let concurrency = cfg.concurrency.clamp(1, probes::MAX_CONCURRENCY) as usize;
+        let pool = &state.forwards;
+        if transport == TransportUsed::PortForward {
+            pool.begin_cycle().await;
+        }
+        let futs: Vec<_> = targets
+            .iter()
+            .map(|p| {
+                let pod: PodSnap = (*p).clone();
+                let (k, cid, cfg) = (&k, cid.as_str(), cfg);
+                async move { scrape_pod(k, proxy_gw, pool, cid, transport, cfg, &pod, now).await }
+            })
+            .collect();
+        let keys: Vec<String> = targets
+            .iter()
+            .map(|p| classify::snap_key(&p.namespace, &p.name))
+            .collect();
+        let results: Vec<Scraped> = stream::iter(futs).buffered(concurrency).collect().await;
+        for (key, r) in keys.into_iter().zip(results) {
+            if r.ok {
+                status.pods_scraped += 1;
+            } else {
+                status.pods_failed += 1;
+            }
+            parse_errors += r.parse_errors;
+            capped += r.capped;
+            samples_nd.push_str(&r.ndjson);
+            wide_samples
+                .entry(key.clone())
+                .or_default()
+                .extend(r.samples);
+            scraped_versions.push((key, r.version));
+        }
+        // Every pod unreachable over the cached transport: decide again next
+        // cycle (RBAC or the proxy may have changed).
+        if status.pods_scraped == 0 && status.pods_failed > 0 {
+            state.transport = None;
         }
     }
+    // Port-forwards live only while their pod is still being scraped over
+    // port-forward.
+    if transport_used == Some(TransportUsed::PortForward) {
+        let live: std::collections::HashSet<(&str, &str)> = targets
+            .iter()
+            .map(|p| (p.namespace.as_str(), p.name.as_str()))
+            .collect();
+        state
+            .forwards
+            .retain(|ns, pod, _| live.contains(&(ns, pod)))
+            .await;
+        // A forward that missed two cycles is idle: kill it (R2).
+        let interval = Duration::from_secs(u64::from(cfg.interval_secs.max(probes::MIN_INTERVAL)));
+        state.forwards.reap_idle(interval * 2).await;
+    } else {
+        state.forwards.clear().await;
+    }
+    state.event_rv = event_rv;
     // Versions: what the probes reported this cycle, else what we knew last
     // cycle for the same pod (so an unscraped pod does not look downgraded).
     for (key, version) in scraped_versions {
@@ -760,13 +1070,13 @@ pub async fn run_cycle_with<S: K8sCtx>(
             write_err = Some(format!("write events: {e}"));
         }
     }
-    if samples_written + events_written > 0 {
+    if samples_written + events_written > 0 || !wide_nd.is_empty() {
         // Fleet answers computed before this write are now stale.
         super::cache::bump_generation();
     }
 
-    // 9. Status.
-    status.snapshot = serde_json::to_value(&cur).unwrap_or_default();
+    // 9. Status (the typed snapshot travels in the outcome; the loop decides
+    // whether the stored column needs rewriting).
     status.cycle_ms = started.elapsed().as_millis() as i64;
     match write_err {
         Some(e) => status.last_error = e,
@@ -779,11 +1089,26 @@ pub async fn run_cycle_with<S: K8sCtx>(
             if capped > 0 {
                 notes.push(format!("series_capped on {capped} probe(s)"));
             }
+            let interval_ms = i64::from(cfg.interval_secs.max(probes::MIN_INTERVAL)) * 1000;
+            let pool_cap = state.forwards.cap();
+            if transport_used == Some(TransportUsed::PortForward) && target_count > pool_cap {
+                notes.push(format!(
+                    "port-forward: {target_count} pods rotate through a pool of {pool_cap}"
+                ));
+            }
+            if transport_used == Some(TransportUsed::PortForward) && status.cycle_ms > interval_ms {
+                notes.push(format!(
+                    "port-forward transport: cycle took {} s, longer than the {} s interval",
+                    status.cycle_ms / 1000,
+                    interval_ms / 1000
+                ));
+            }
             status.last_error = notes.join("; ");
         }
     }
     CycleOutcome {
         status,
+        snapshot: Some(cur),
         samples_written,
         events_written,
         unreachable: false,
@@ -800,16 +1125,16 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
     };
     let mut schema_ready = false;
     let mut failures: u32 = 0;
-    // The cluster's long-lived `kubectl proxy` (probe scrapes), reused across
-    // cycles; dropped (child killed, socket dir removed) when the loop ends or
-    // is aborted by the supervisor.
-    let mut gateway: Option<KubeProxy> = None;
+    // The cluster's long-lived `kubectl proxy`, transport decision and
+    // port-forwards, reused across cycles; dropped (children killed, socket
+    // dir removed) when the loop ends or is aborted by the supervisor.
+    let mut state = LoopState::default();
     // When this loop last considered trimming rows past the retention.
     let mut last_purge: Option<Instant> = None;
-    // What this loop last stored: the snapshot (the write-on-change baseline
-    // and the next cycle's `prev`, so the row isn't re-read and re-parsed
-    // every cycle) and that cycle's time. `None` = read the row.
-    let mut last: Option<(Value, Option<String>)> = None;
+    // What this loop last stored: the typed snapshot (the write-on-change
+    // baseline and the next cycle's `prev`, so the row isn't re-read and
+    // re-parsed every cycle) and that cycle's time. `None` = read the row.
+    let mut last: Option<(Arc<Snapshot>, Option<String>)> = None;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return;
@@ -858,17 +1183,15 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
         }
 
         if last.is_none() {
-            last = repo
-                .get_status(cluster_id.as_str())
-                .await
-                .ok()
-                .flatten()
-                .map(|s| (s.snapshot, s.last_cycle_at));
+            if let Ok(Some(meta)) = repo.get_status_meta(cluster_id.as_str()).await {
+                let snap =
+                    super::latest::load(&repo, cluster_id.as_str(), meta.last_cycle_at.as_deref())
+                        .await;
+                last = Some((snap, meta.last_cycle_at));
+            }
         }
-        let prev: Snapshot = last
-            .as_ref()
-            .map(|(snap, _)| serde_json::from_value(snap.clone()).unwrap_or_default())
-            .unwrap_or_default();
+        let empty = Snapshot::new();
+        let prev: &Snapshot = last.as_ref().map(|(snap, _)| &**snap).unwrap_or(&empty);
         let prev_at = last
             .as_ref()
             .and_then(|(_, at)| at.as_deref())
@@ -879,19 +1202,26 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
             &ctx,
             &cluster,
             &cfg,
-            &prev,
+            prev,
             prev_at,
             sink.as_ref(),
-            &mut gateway,
+            &mut state,
         )
         .await;
         let ok = out.status.last_ok_at.is_some();
-        match store_status(&repo, &out.status, last.as_ref().map(|(snap, _)| snap)).await {
+        let cur: Option<Arc<Snapshot>> = out.snapshot.map(Arc::new);
+        let baseline = last.as_ref().map(|(snap, _)| snap.clone());
+        match store_status(&repo, &out.status, cur.as_ref(), baseline.as_ref()).await {
             Ok(_) => {
-                last = Some((
-                    out.status.snapshot.clone(),
+                // A failed sweep keeps the stored snapshot as the baseline;
+                // the cycle time still moves on (as the stored row does).
+                let snap = cur.or(baseline).unwrap_or_default();
+                super::latest::publish(
+                    cluster_id.as_str(),
                     out.status.last_cycle_at.clone(),
-                ))
+                    snap.clone(),
+                );
+                last = Some((snap, out.status.last_cycle_at.clone()));
             }
             Err(e) => {
                 tracing::warn!(cluster = %cluster_id, "k8s monitor: status write failed: {e}");
@@ -985,21 +1315,110 @@ mod tests {
         .unwrap();
         let repo = K8sMonitorRepo::new(pool);
         let mut st = K8sMonitorStatusRow::empty("c1");
-        st.snapshot = serde_json::json!({"ns/p": {"phase": "Running"}});
+        let pod = |phase: &str| PodSnap {
+            namespace: "ns".into(),
+            name: "p".into(),
+            phase: phase.into(),
+            ..PodSnap::default()
+        };
+        let snap = |phase: &str| {
+            let mut m = Snapshot::new();
+            m.insert("ns/p".into(), pod(phase));
+            Arc::new(m)
+        };
+        let running = snap("Running");
         // First write (no baseline): snapshot stored.
-        assert!(store_status(&repo, &st, None).await.unwrap());
-        // Same snapshot again: the status fields move, the snapshot isn't rewritten.
-        let baseline = st.snapshot.clone();
+        assert!(store_status(&repo, &st, Some(&running), None)
+            .await
+            .unwrap());
+        // Same snapshot again (a fresh, equal value): the status fields move,
+        // the snapshot isn't rewritten.
         st.cycle_ms = 77;
-        assert!(!store_status(&repo, &st, Some(&baseline)).await.unwrap());
+        assert!(
+            !store_status(&repo, &st, Some(&snap("Running")), Some(&running))
+                .await
+                .unwrap()
+        );
         assert_eq!(repo.get_status("c1").await.unwrap().unwrap().cycle_ms, 77);
+        // A failed cycle (no snapshot) keeps the stored one.
+        assert!(!store_status(&repo, &st, None, Some(&running))
+            .await
+            .unwrap());
         // A changed snapshot is written.
-        st.snapshot = serde_json::json!({"ns/p": {"phase": "Failed"}});
-        assert!(store_status(&repo, &st, Some(&baseline)).await.unwrap());
+        assert!(
+            store_status(&repo, &st, Some(&snap("Failed")), Some(&running))
+                .await
+                .unwrap()
+        );
         assert_eq!(
             repo.get_status("c1").await.unwrap().unwrap().snapshot["ns/p"]["phase"],
             "Failed"
         );
+    }
+
+    #[test]
+    fn transport_cache_expires_and_follows_the_config() {
+        let mut st = LoopState::default();
+        let t0 = Instant::now();
+        assert_eq!(cached_transport(&st.transport, Transport::Auto, t0), None);
+        remember_transport(&mut st.transport, Transport::Auto, TransportUsed::Proxy, t0);
+        assert_eq!(
+            cached_transport(
+                &st.transport,
+                Transport::Auto,
+                t0 + Duration::from_secs(59 * 60)
+            ),
+            Some(TransportUsed::Proxy)
+        );
+        assert_eq!(
+            cached_transport(&st.transport, Transport::Auto, t0 + TRANSPORT_TTL),
+            None,
+            "re-sniffed hourly"
+        );
+        assert_eq!(
+            cached_transport(&st.transport, Transport::PortForward, t0),
+            None,
+            "a config change re-decides"
+        );
+    }
+
+    #[test]
+    fn status_rows_only_for_changed_pods() {
+        let mut a = PodSnap {
+            phase: "Running".into(),
+            ready: true,
+            mem_limit: 100,
+            ..PodSnap::default()
+        };
+        assert!(status_changed(&a, None), "new pod");
+        let b = a.clone();
+        assert!(!status_changed(&a, Some(&b)));
+        a.ready = false;
+        assert!(status_changed(&a, Some(&b)));
+        a.ready = true;
+        a.created = "2026-01-01T00:00:00Z".into();
+        assert!(
+            !status_changed(&a, Some(&b)),
+            "age is derivable, never a change"
+        );
+    }
+
+    #[test]
+    fn event_watch_lines_parse_incrementally() {
+        let now = Utc::now();
+        let t = now.to_rfc3339();
+        let body = format!(
+            "{}\n{}\n",
+            json!({"type":"ADDED","object":{"reason":"BackOff","lastTimestamp":t,"metadata":{"namespace":"ns","resourceVersion":"41"},"involvedObject":{"kind":"Pod","name":"p"}}}),
+            json!({"type":"MODIFIED","object":{"reason":"Pulled","lastTimestamp":t,"metadata":{"namespace":"ns","resourceVersion":"42"}}}),
+        );
+        let (hints, rv) = parse_event_watch(&body, None).unwrap();
+        assert_eq!(hints.len(), 1, "only kept reasons");
+        assert_eq!(hints[0].reason, "BackOff");
+        assert_eq!(rv.as_deref(), Some("42"));
+        assert_eq!(parse_event_watch("", None).unwrap().1, None);
+        let expired = json!({"type":"ERROR","object":{"kind":"Status","code":410}}).to_string();
+        assert!(parse_event_watch(&expired, None).is_none(), "410 → relist");
     }
 
     use crate::monitor::classify::{Class, ContainerSnap};

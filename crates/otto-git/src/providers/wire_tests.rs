@@ -894,3 +894,371 @@ mod github_read_back {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cached provider reads (perf G1/G10): a remount within the TTL makes no
+// request, a stale entry revalidates with If-None-Match (304 = cached body),
+// and our own write clears the repo's entries.
+// ---------------------------------------------------------------------------
+
+mod cached_reads {
+    use super::*;
+    use crate::providers::client::{enable_cache_for_tests, expire_cached_for_tests};
+    use crate::providers::github::Github;
+    use wiremock::matchers::header;
+
+    fn pr(number: u64) -> serde_json::Value {
+        json!({
+            "number": number, "title": format!("PR {number}"), "state": "open",
+            "user": { "login": "dev" }, "head": { "ref": "feat", "sha": "deadbeef" },
+            "base": { "ref": "main" }, "updated_at": "2026-09-01T10:00:00Z",
+            "html_url": format!("https://github.com/acme/app/pull/{number}"),
+        })
+    }
+
+    async fn list_gets(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method.as_str() == "GET" && r.url.path() == "/repos/acme/app/pulls")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn second_list_within_ttl_makes_no_request_and_304_serves_cache() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        // A conditional GET carrying the stored ETag is answered 304.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .and(header("if-none-match", "\"v1\""))
+            .respond_with(ResponseTemplate::new(304))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("etag", "\"v1\"")
+                    .set_body_json(json!([pr(1), pr(2)])),
+            )
+            .mount(&server)
+            .await;
+
+        let a = gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        let b = gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(a.items.len(), 2);
+        assert_eq!(b.items.len(), 2);
+        assert_eq!(
+            list_gets(&server).await,
+            1,
+            "a repeat within the TTL is free"
+        );
+
+        expire_cached_for_tests(&server.uri());
+        let c = gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(c.items.len(), 2, "the 304 serves the cached body");
+        let reqs = server.received_requests().await.unwrap();
+        let last = reqs.last().unwrap();
+        assert_eq!(
+            last.headers
+                .get("if-none-match")
+                .and_then(|v| v.to_str().ok()),
+            Some("\"v1\""),
+            "a stale entry revalidates with its ETag"
+        );
+        assert_eq!(list_gets(&server).await, 2);
+    }
+
+    #[tokio::test]
+    async fn own_write_invalidates_the_repo_reads() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([pr(1)])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/acme/app/pulls/1/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        gh.approve(&rr(), 1).await.unwrap();
+        gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(
+            list_gets(&server).await,
+            2,
+            "the approve cleared the cached list — no 15 s of stale state"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_detail_reopen_within_ttl_costs_no_rest_request() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/repos/acme/app/(pulls|issues)/7/(comments|reviews)$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/repos/acme/app/commits/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        gh.get_pr(&rr(), 7).await.unwrap();
+        let first = server.received_requests().await.unwrap().len();
+        assert!(first >= 4, "detail + 3 lists (+ CI): {first}");
+        gh.get_pr(&rr(), 7).await.unwrap();
+        let second = server.received_requests().await.unwrap().len();
+        assert_eq!(second, first, "a re-open within the TTL hits the cache");
+    }
+
+    #[tokio::test]
+    async fn concurrent_cold_reads_share_one_request() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(150))
+                    .set_body_json(json!([pr(1)])),
+            )
+            .mount(&server)
+            .await;
+        let r = rr();
+        let reads = (0..4).map(|_| gh.list_prs(&r, PrState::Open, 1, 50));
+        for r in futures_util::future::join_all(reads).await {
+            assert_eq!(r.unwrap().items.len(), 1);
+        }
+        assert_eq!(
+            list_gets(&server).await,
+            1,
+            "four windows opening the list on a cold cache cost one GET"
+        );
+    }
+
+    /// A read that left BEFORE our write must neither answer a read issued
+    /// after it (single-flight join) nor put its pre-write body back into the
+    /// cache the write cleared — the posted comment would stay hidden for the
+    /// whole TTL.
+    #[tokio::test]
+    async fn read_in_flight_across_a_write_neither_serves_nor_stores_stale() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        // The first GET (pre-write state) is slow; every later one is fresh.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(400))
+                    .set_body_json(json!([pr(1)])),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([pr(1), pr(2)])))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/acme/app/pulls/1/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let r = rr();
+        let (stale, fresh) = tokio::join!(gh.list_prs(&r, PrState::Open, 1, 50), async {
+            // Let the slow read reach the server before the write.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            gh.approve(&r, 1).await.unwrap();
+            gh.list_prs(&r, PrState::Open, 1, 50).await
+        });
+        assert_eq!(stale.unwrap().items.len(), 1, "the slow read's own answer");
+        assert_eq!(
+            fresh.unwrap().items.len(),
+            2,
+            "a read after the write must not join the pre-write request"
+        );
+        assert_eq!(list_gets(&server).await, 2);
+
+        let again = gh.list_prs(&r, PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(
+            again.items.len(),
+            2,
+            "the pre-write body, landing last, must not overwrite the cache"
+        );
+        assert_eq!(list_gets(&server).await, 2, "served from the fresh entry");
+    }
+
+    /// The same race on the GraphQL review-thread memo: a probe in flight
+    /// while a thread is resolved must not re-memoise the unresolved state.
+    #[tokio::test]
+    async fn thread_probe_in_flight_across_a_resolve_is_not_memoised() {
+        use wiremock::matchers::body_string_contains;
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        // One inline comment, so the GraphQL resolution probe runs.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "id": 11, "body": "nit", "user": { "login": "rev" },
+                "path": "a.rs", "line": 3, "created_at": "2026-09-01T10:00:00Z",
+            }])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/repos/acme/app/(issues/7/comments|pulls/7/reviews)$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/repos/acme/app/commits/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("resolveReviewThread"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(600))
+                    .set_body_json(json!({
+                        "data": { "repository": { "pullRequest": { "reviewThreads": {
+                            "nodes": [] } } } }
+                    })),
+            )
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        let probes = || async {
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| {
+                    r.url.path() == "/graphql"
+                        && !String::from_utf8_lossy(&r.body).contains("resolveReviewThread")
+                })
+                .count()
+        };
+
+        let r = rr();
+        let (probe, resolve) = tokio::join!(gh.get_pr(&r, 7), async {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            gh.resolve_pr_thread(&r, 7, "T1", true).await
+        });
+        probe.unwrap();
+        resolve.unwrap();
+        assert_eq!(probes().await, 1);
+        gh.get_pr(&r, 7).await.unwrap();
+        assert_eq!(
+            probes().await,
+            2,
+            "the probe that straddled the resolve did not memoise its answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_thread_probe_is_memoised_until_a_resolve() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        enable_cache_for_tests(&server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        // One inline comment, so the GraphQL resolution probe runs.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "id": 11, "body": "nit", "user": { "login": "rev" },
+                "path": "a.rs", "line": 3, "created_at": "2026-09-01T10:00:00Z",
+            }])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/repos/acme/app/(issues/7/comments|pulls/7/reviews)$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/repos/acme/app/commits/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "repository": { "pullRequest": { "reviewThreads": { "nodes": [
+                    { "id": "T1", "isResolved": false,
+                      "comments": { "nodes": [ { "databaseId": 11 } ] } }
+                ] } } } }
+            })))
+            .mount(&server)
+            .await;
+        let posts = || async {
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/graphql")
+                .count()
+        };
+
+        gh.get_pr(&rr(), 7).await.unwrap();
+        assert_eq!(posts().await, 1);
+        gh.get_pr(&rr(), 7).await.unwrap();
+        assert_eq!(
+            posts().await,
+            1,
+            "a re-open within the TTL makes no GraphQL POST"
+        );
+
+        gh.resolve_pr_thread(&rr(), 7, "T1", true).await.unwrap();
+        assert_eq!(posts().await, 2, "the resolve mutation");
+        gh.get_pr(&rr(), 7).await.unwrap();
+        assert_eq!(posts().await, 3, "the resolve dropped the memo");
+    }
+}

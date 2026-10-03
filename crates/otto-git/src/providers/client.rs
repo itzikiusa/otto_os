@@ -32,12 +32,26 @@
 //! and an entry older than [`CACHE_STALE`] reads as a miss — a process-wide
 //! cache keyed by (url, credential) must not grow for the life of the daemon.
 //!
+//! Concurrent misses on one key share a single request ([`page_flights`]):
+//! N windows opening one PR on a cold cache cost one GET, not N.
+//!
+//! Our own writes clear their repository's entries ([`invalidate_scope`]) and
+//! bump its write *generation* ([`write_generation`]). A read captures the
+//! generation before it goes to the network and stores its result only if the
+//! generation is unchanged — a read that left before a comment was posted
+//! must not put the pre-comment body back after the write cleared it — and
+//! the generation is part of the single-flight key, so a read issued after a
+//! write never joins a request that left before it.
+//!
 //! Callers that need pagination or mutation continue to use `send` / `json` /
 //! `text` / `ok` directly; those paths are unaffected.
 
 use std::{
     collections::HashMap,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -57,11 +71,26 @@ struct CachedGet {
     body: String,
     /// When the body was last fetched from the network.
     fetched_at: Instant,
+    /// The request URL — what [`invalidate_scope`] matches a write against
+    /// (the map key is a hash, so it can't be prefix-matched).
+    url: String,
+    /// `Link: rel="next"` of this page, so a cached page still paginates.
+    next: Option<String>,
 }
 
 /// Fallback TTL: if a response has no ETag we still serve the cached copy
 /// for this long before issuing a fresh unconditional GET.
-const SHORT_TTL: Duration = Duration::from_secs(60);
+/// Short on purpose: Bitbucket sends no ETag on PR reads, so this is how long
+/// a colleague's new comment can stay invisible there. It exists to collapse
+/// a burst (N windows, a remount, the detail + its sub-lists) into one fetch;
+/// our OWN writes never wait it out — they clear the repo's entries
+/// ([`invalidate_scope`]).
+const SHORT_TTL: Duration = Duration::from_secs(15);
+
+/// Byte budget across all cached bodies, and the largest body worth keeping
+/// (a 20-page comment list is ~1 MB; a bigger one is simply re-fetched).
+const CACHE_MAX_BYTES: usize = 32 << 20;
+const CACHE_MAX_BODY: usize = 2 << 20;
 
 /// Hard cap on cached entries. The cache is process-wide and keyed by
 /// (url, credential), so a long-lived daemon talking to many repos/accounts
@@ -94,10 +123,85 @@ fn cache_key(url: &str, auth_value: &str) -> String {
     hex::encode(h.finalize())
 }
 
-/// Store `entry` under `key`, evicting the oldest fetch when the cache is full.
-fn insert_cached(key: String, entry: CachedGet) {
+/// Store `entry` under `key`, evicting the oldest fetch when the cache is
+/// full — unless a write to its scope landed since the read captured
+/// `generation` (then the body is pre-write and storing it would undo the
+/// write's [`invalidate_scope`]). Checked under the cache lock, which
+/// [`invalidate_scope`] also holds while it bumps, so no bump slips between
+/// the check and the insert.
+fn insert_cached(key: String, entry: CachedGet, generation: u64) {
     let mut guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
+    if write_generation(&entry.url) != generation {
+        return;
+    }
     insert_into(&mut guard, key, entry);
+}
+
+// ---------------------------------------------------------------------------
+// Write generations
+// ---------------------------------------------------------------------------
+
+/// Per-scope write generations (scope = what [`invalidate_scope`] clears: a
+/// repo prefix, or a host origin for a URL outside any repository). Values
+/// come from one process-wide counter, so a bump is always larger than every
+/// generation handed out before it.
+struct Generations {
+    by_scope: HashMap<String, u64>,
+    /// The generation of every scope not in `by_scope`: the counter value at
+    /// the last prune. A pruned scope reads as at least its old value (and a
+    /// read that captured it before the prune merely skips its store) — the
+    /// map is bounded without a generation ever going backwards.
+    floor: u64,
+}
+
+/// Scopes kept before [`Generations`] is pruned to its floor.
+const GENERATIONS_MAX: usize = 1024;
+
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn generations() -> &'static Mutex<Generations> {
+    static G: OnceLock<Mutex<Generations>> = OnceLock::new();
+    G.get_or_init(|| {
+        Mutex::new(Generations {
+            by_scope: HashMap::new(),
+            floor: 0,
+        })
+    })
+}
+
+impl Generations {
+    fn get(&self, scope: &str) -> u64 {
+        self.by_scope.get(scope).copied().unwrap_or(self.floor)
+    }
+
+    fn bump(&mut self, scope: String) {
+        let g = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        if self.by_scope.len() >= GENERATIONS_MAX && !self.by_scope.contains_key(&scope) {
+            self.by_scope.clear();
+            self.floor = g;
+        }
+        self.by_scope.insert(scope, g);
+    }
+}
+
+/// The write scope of `url` ([`repo_scope`]) and its host scope.
+fn write_scopes(url: &str) -> (Option<String>, Option<String>) {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .map(|u| u.origin().ascii_serialization() + "/");
+    (repo_scope(url), host)
+}
+
+/// The write generation a read of `url` must still see when it stores its
+/// result: the newer of its repository's and its host's (a write outside any
+/// repository clears the whole host). Changes iff one of OUR writes cleared
+/// `url`'s scope since — capture it BEFORE the request goes out.
+pub(crate) fn write_generation(url: &str) -> u64 {
+    let (repo, host) = write_scopes(url);
+    let g = generations().lock().unwrap_or_else(|p| p.into_inner());
+    let repo = repo.map_or(0, |s| g.get(&s));
+    let host = host.map_or(0, |s| g.get(&s));
+    repo.max(host)
 }
 
 /// Read `key`, treating an entry older than [`CACHE_STALE`] as a miss (and
@@ -110,16 +214,121 @@ fn read_cached(key: &str) -> Option<(Option<String>, String, Instant)> {
 /// Lock-free body of [`insert_cached`] so the bound is unit-testable without
 /// touching the process-wide cache (tests run in parallel in one binary).
 fn insert_into(map: &mut HashMap<String, CachedGet>, key: String, entry: CachedGet) {
-    if map.len() >= CACHE_MAX_ENTRIES && !map.contains_key(&key) {
+    map.remove(&key);
+    if entry.body.len() > CACHE_MAX_BODY {
+        return;
+    }
+    let mut total: usize = map.values().map(|e| e.body.len()).sum();
+    while !map.is_empty()
+        && (map.len() >= CACHE_MAX_ENTRIES || total + entry.body.len() > CACHE_MAX_BYTES)
+    {
         let oldest = map
             .iter()
             .min_by_key(|(_, e)| e.fetched_at)
             .map(|(k, _)| k.clone());
-        if let Some(k) = oldest {
-            map.remove(&k);
+        match oldest.and_then(|k| map.remove(&k)) {
+            Some(e) => total -= e.body.len(),
+            None => break,
         }
     }
     map.insert(key, entry);
+}
+
+/// The repository a forge API URL belongs to, as a URL prefix:
+/// `…/repos/{owner}/{repo}/` (GitHub), `…/repositories/{ws}/{repo}/`
+/// (Bitbucket), `…/projects/{id}/` (GitLab — the id is one encoded segment).
+/// `None` for URLs outside a repository (`/user`, `/graphql`).
+fn repo_scope(url: &str) -> Option<String> {
+    let u = reqwest::Url::parse(url).ok()?;
+    let segs: Vec<&str> = u.path_segments()?.collect();
+    let i = segs
+        .iter()
+        .position(|s| *s == "repos" || *s == "repositories" || *s == "projects")?;
+    let take = if segs[i] == "projects" { 1 } else { 2 };
+    if segs.len() < i + 1 + take {
+        return None;
+    }
+    let mut scope = u.origin().ascii_serialization();
+    for s in &segs[..=i + take] {
+        scope.push('/');
+        scope.push_str(s);
+    }
+    scope.push('/');
+    Some(scope)
+}
+
+/// Drop every cached GET of the repository `url` belongs to (or, for a URL
+/// outside any repository, every entry on its host). Run after each
+/// successful write, so a comment/approve/merge is visible on the very next
+/// read instead of after [`SHORT_TTL`].
+pub(crate) fn invalidate_scope(url: &str) {
+    // GitHub's GraphQL endpoint is POSTed for READS too (review-thread
+    // state on every PR open); nothing it touches is in this cache, and a
+    // host-wide clear per PR open would void the cache entirely.
+    if url
+        .split('?')
+        .next()
+        .is_some_and(|p| p.ends_with("/graphql"))
+    {
+        return;
+    }
+    let scope = repo_scope(url).or_else(|| {
+        reqwest::Url::parse(url)
+            .ok()
+            .map(|u| u.origin().ascii_serialization() + "/")
+    });
+    let Some(scope) = scope else { return };
+    let mut guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
+    // Bump under the cache lock: a read that left before this write now
+    // fails its store check, and later reads start a new flight.
+    generations()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .bump(scope.clone());
+    // A repo's own URL without the trailing slash (`GET /repos/o/r`) too.
+    let bare = scope.trim_end_matches('/');
+    guard.retain(|_, e| !(e.url.starts_with(&scope) || e.url == bare));
+}
+
+/// The network leg of a cached GET, shared by concurrent misses on one cache
+/// key (url + credential) at one [`write_generation`]. Abort-safe: when every
+/// waiter is gone the request is dropped.
+fn page_flights() -> &'static crate::diff_cache::SingleFlight<(String, Option<String>)> {
+    static F: OnceLock<crate::diff_cache::SingleFlight<(String, Option<String>)>> = OnceLock::new();
+    F.get_or_init(crate::diff_cache::SingleFlight::new)
+}
+
+/// A read that is not a GET (GitHub's GraphQL review-thread probe), memoised
+/// in the GET cache under a synthetic repo-scoped `url`, so it shares the
+/// byte budget, the [`SHORT_TTL`] and — through [`invalidate_scope`] — every
+/// write to that repository. `None` when absent, older than the TTL, or the
+/// cache is off.
+pub(crate) fn memo_read(url: &str, auth: &str) -> Option<String> {
+    if !cache_enabled() {
+        return None;
+    }
+    let (_, body, at) = read_cached(&cache_key(url, auth))?;
+    (at.elapsed() < SHORT_TTL).then_some(body)
+}
+
+/// Store a [`memo_read`] body, fetched after [`write_generation`] of `url`
+/// returned `generation` (a write since then drops the store — the body may
+/// predate it).
+pub(crate) fn memo_store(url: &str, auth: &str, body: String, generation: u64) {
+    if !cache_enabled() {
+        return;
+    }
+    insert_cached(
+        cache_key(url, auth),
+        CachedGet {
+            etag: None,
+            body,
+            fetched_at: Instant::now(),
+            url: url.to_string(),
+            next: None,
+        },
+        generation,
+    );
 }
 
 /// Lock-free body of [`read_cached`] (see [`insert_into`]).
@@ -133,6 +342,85 @@ fn read_from(
     }
     let e = map.get(key)?;
     Some((e.etag.clone(), e.body.clone(), e.fetched_at))
+}
+
+/// A GET builder equivalent to the already-built `req`.
+fn rb_from(client: &reqwest::Client, req: &reqwest::Request) -> reqwest::RequestBuilder {
+    let mut b = client.get(req.url().clone());
+    for (name, value) in req.headers() {
+        b = b.header(name.clone(), value.clone());
+    }
+    b
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Unit tests share one process and wiremock POOLS its servers (a later
+    /// test gets an earlier one's port, so the same URL) — the process-wide
+    /// cache would serve one test another's body. Off unless a test opts in
+    /// ([`enable_cache_for_tests`]); `#[tokio::test]` is single-threaded, so
+    /// the flag covers everything the test awaits.
+    static TEST_CACHE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn cache_enabled() -> bool {
+    #[cfg(test)]
+    {
+        TEST_CACHE.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+/// Opt this test (thread) into the GET cache, starting from no entries for
+/// `server` (a pooled server may carry another test's).
+#[cfg(test)]
+pub(crate) fn enable_cache_for_tests(server: &str) {
+    TEST_CACHE.with(|c| c.set(true));
+    let mut guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
+    guard.retain(|_, e| !e.url.starts_with(server));
+}
+
+/// Test hook: age every entry under `prefix` past [`SHORT_TTL`] so the next
+/// read revalidates (wiremock servers have unique ports, so a prefix never
+/// reaches another test's entries).
+#[cfg(test)]
+pub(crate) fn expire_cached_for_tests(prefix: &str) {
+    let mut guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
+    for e in guard.values_mut() {
+        if e.url.starts_with(prefix) {
+            e.fetched_at = Instant::now() - SHORT_TTL - Duration::from_secs(1);
+        }
+    }
+}
+
+/// GitLab's `x-next-page: <n>` (empty on the last page) as the URL of that
+/// page — instances behind some proxies send it without a `Link` header.
+fn x_next_page_url(url: &str, headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let n = headers
+        .get("x-next-page")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))?;
+    let mut u = reqwest::Url::parse(url).ok()?;
+    let rest: Vec<(String, String)> = u
+        .query_pairs()
+        .filter(|(k, _)| k != "page")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    u.query_pairs_mut()
+        .clear()
+        .extend_pairs(rest)
+        .append_pair("page", n);
+    Some(u.to_string())
+}
+
+/// The cached page's `Link: rel="next"` (only meaningful right after a hit).
+fn cached_next(key: &str) -> Option<String> {
+    let guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
+    guard.get(key).and_then(|e| e.next.clone())
 }
 
 /// Extract the value of whichever auth header is present on the request.
@@ -215,6 +503,7 @@ fn rate_limited_err(provider: &str, wait: Duration) -> Error {
 // Http helper
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct Http {
     client: reqwest::Client,
     provider: &'static str,
@@ -318,6 +607,10 @@ impl Http {
 
         let status = resp.status();
         if status.is_success() || (allow_304 && status.as_u16() == 304) {
+            if !idempotent {
+                // A write landed: the repo's cached reads are stale now.
+                invalidate_scope(resp.url().as_str());
+            }
             return Ok(resp);
         }
         let headers = resp.headers().clone();
@@ -359,6 +652,25 @@ impl Http {
     /// The `rb` parameter **must** be a GET request with the auth header(s)
     /// already attached.  Non-2xx responses are returned as `Error::Upstream`.
     pub async fn get_cached(&self, rb: reqwest::RequestBuilder) -> Result<String> {
+        self.get_cached_page(rb).await.map(|(body, _)| body)
+    }
+
+    /// [`get_cached`](Self::get_cached), parsed as JSON. The read path for
+    /// provider GETs whose result the UI re-asks for on every mount (PR list,
+    /// PR detail and its comment/review lists, CI): a GitHub `304` costs no
+    /// rate-limit budget, and a burst within [`SHORT_TTL`] costs nothing.
+    pub async fn get_cached_json(&self, rb: reqwest::RequestBuilder) -> Result<Value> {
+        let body = self.get_cached(rb).await?;
+        serde_json::from_str(&body)
+            .map_err(|e| Error::Upstream(format!("{}: bad json: {e}", self.provider)))
+    }
+
+    /// The cached GET plus the page's `Link: rel="next"` (cached with it, so a
+    /// 304 or a TTL hit still knows whether there is a next page).
+    pub async fn get_cached_page(
+        &self,
+        rb: reqwest::RequestBuilder,
+    ) -> Result<(String, Option<String>)> {
         // Build the request so we can inspect its headers (url + auth) for the
         // cache key, then convert back to a builder for sending.
         let req = rb
@@ -368,94 +680,156 @@ impl Http {
         let url = req.url().to_string();
         let auth = extract_auth(req.headers());
         let key = cache_key(&url, &auth);
-
+        if !cache_enabled() {
+            let resp = self.send(rb_from(&self.client, &req)).await?;
+            let next =
+                parse_next_link(resp.headers()).or_else(|| x_next_page_url(&url, resp.headers()));
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| Error::Upstream(format!("{}: body read: {e}", self.provider)))?;
+            return Ok((body, next));
+        }
         // -- Read the cache (lock scope: just the lookup) -------------------
+        // Still within TTL → return without hitting the network. With an
+        // ETag the revalidation is cheap (and free of rate-limit cost on
+        // GitHub), but a burst inside the TTL still needs no request.
         let cached = read_cached(&key);
-
-        if let Some((etag, body, fetched_at)) = cached {
-            let age = fetched_at.elapsed();
-
-            // Still within TTL → return without hitting the network.
-            if age < SHORT_TTL && etag.is_none() {
-                return Ok(body);
+        if let Some((_, body, fetched_at)) = &cached {
+            if fetched_at.elapsed() < SHORT_TTL {
+                return Ok((body.clone(), cached_next(&key)));
             }
+        }
+        // -- Miss / stale: one network leg per key, however many callers ----
+        // ...at one write generation: a read issued after our own write must
+        // not join (or be overwritten by) a request that left before it.
+        let generation = write_generation(&url);
+        let this = self.clone();
+        let flight_key = format!("{key}@{generation}");
+        page_flights()
+            .run(&flight_key, move || async move {
+                this.fetch_page(req, url, key, cached, generation).await
+            })
+            .await
+    }
 
-            // We have an ETag → send conditional GET.
-            if let Some(ref tag) = etag {
-                let mut rb2 = self.client.get(&url).header("If-None-Match", tag);
-                // Re-attach the auth header by copying from the original req.
-                for (name, value) in req.headers() {
-                    rb2 = rb2.header(name.clone(), value.clone());
-                }
-
-                // Same retry / rate-limit classification as `send`, with 304
-                // surfaced as success.
-                let resp = self.send_checked(rb2).await?;
-
-                if resp.status().as_u16() == 304 {
-                    // Not Modified: refresh fetched_at, return cached body.
-                    let mut guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
-                    if let Some(entry) = guard.get_mut(&key) {
-                        entry.fetched_at = Instant::now();
-                    }
-                    return Ok(body);
-                }
-
-                // 200 — the resource changed; replace the entry.
-                let new_etag = resp
-                    .headers()
-                    .get("etag")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string);
-                let new_body = resp
-                    .text()
-                    .await
-                    .map_err(|e| Error::Upstream(format!("{}: body read: {e}", self.provider)))?;
-                insert_cached(
-                    key,
-                    CachedGet {
-                        etag: new_etag,
-                        body: new_body.clone(),
-                        fetched_at: Instant::now(),
-                    },
-                );
-                return Ok(new_body);
+    /// The network leg of [`get_cached_page`](Self::get_cached_page): a
+    /// conditional GET when the stale entry has an ETag (`304` → the cached
+    /// body), otherwise a plain one; the result is stored unless one of our
+    /// writes cleared the scope after `generation` was captured.
+    async fn fetch_page(
+        &self,
+        req: reqwest::Request,
+        url: String,
+        key: String,
+        cached: Option<(Option<String>, String, Instant)>,
+        generation: u64,
+    ) -> Result<(String, Option<String>)> {
+        let rebuild = |validator: Option<&str>| {
+            let mut b = self.client.get(&url);
+            for (name, value) in req.headers() {
+                b = b.header(name.clone(), value.clone());
             }
+            if let Some(tag) = validator {
+                b = b.header("If-None-Match", tag);
+            }
+            b
+        };
 
-            // TTL elapsed, no ETag → unconditional GET (fall through).
+        let mut validator = None;
+        if let Some((Some(tag), body, _)) = cached {
+            // Same retry / rate-limit classification as `send`, with 304
+            // surfaced as success.
+            let resp = self.send_checked(rebuild(Some(&tag))).await?;
+            if resp.status().as_u16() == 304 {
+                // Not Modified: refresh fetched_at, return cached body. (A
+                // write since `generation` already removed the entry, and a
+                // newer read's entry is not ours to vouch for.)
+                let mut guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
+                let current = write_generation(&url) == generation;
+                let next = guard.get_mut(&key).filter(|_| current).and_then(|entry| {
+                    entry.fetched_at = Instant::now();
+                    entry.next.clone()
+                });
+                return Ok((body, next));
+            }
+            validator = Some(resp);
         }
+        // TTL elapsed and no ETag, or no usable entry → unconditional GET.
 
-        // -- No usable cache entry: unconditional GET -----------------------
-        // Re-create the builder from the already-built request by cloning its
-        // headers into a fresh GET for the same URL.
-        let mut rb_fresh = self.client.get(&url);
-        for (name, value) in req.headers() {
-            rb_fresh = rb_fresh.header(name.clone(), value.clone());
-        }
-
-        // No validator is sent here, so `send_checked` can only return a 2xx.
-        let resp = self.send_checked(rb_fresh).await?;
-
+        // -- A 200 from the conditional GET, or no usable entry -------------
+        // No validator is sent on the fresh GET, so `send_checked` can only
+        // return a 2xx there.
+        let resp = match validator {
+            Some(resp) => resp,
+            None => self.send_checked(rebuild(None)).await?,
+        };
         let new_etag = resp
             .headers()
             .get("etag")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
+        let next =
+            parse_next_link(resp.headers()).or_else(|| x_next_page_url(&url, resp.headers()));
         let new_body = resp
             .text()
             .await
             .map_err(|e| Error::Upstream(format!("{}: body read: {e}", self.provider)))?;
-
         insert_cached(
             key,
             CachedGet {
                 etag: new_etag,
                 body: new_body.clone(),
                 fetched_at: Instant::now(),
+                url,
+                next: next.clone(),
             },
+            generation,
         );
+        Ok((new_body, next))
+    }
 
-        Ok(new_body)
+    /// [`paginate_json`](Self::paginate_json) with every page read through the
+    /// cached GET: each page revalidates on its own (a new comment lands on the
+    /// LAST page of an ascending list, so page 1's 304 can't vouch for the
+    /// rest), at no rate-limit cost on GitHub, and a repeat within the TTL
+    /// makes no request at all. Same 20-page cap and same-origin rule.
+    pub async fn paginate_json_cached(
+        &self,
+        first_rb: reqwest::RequestBuilder,
+        client: &reqwest::Client,
+        auth_header: (&'static str, String),
+    ) -> Result<Vec<Value>> {
+        const MAX_PAGES: usize = 20;
+        let origin = first_rb
+            .try_clone()
+            .and_then(|b| b.build().ok())
+            .map(|r| r.url().clone());
+        let mut all: Vec<Value> = Vec::new();
+        let mut rb = Some(first_rb);
+        let mut pages = 0usize;
+        while let Some(b) = rb.take() {
+            let (body, next) = self.get_cached_page(b).await?;
+            let page: Value = serde_json::from_str(&body)
+                .map_err(|e| Error::Upstream(format!("{}: bad json: {e}", self.provider)))?;
+            if let Some(arr) = page.as_array() {
+                all.extend_from_slice(arr);
+            }
+            pages += 1;
+            let Some(url) = next else { break };
+            if pages >= MAX_PAGES {
+                break;
+            }
+            if !same_origin(origin.as_ref(), &url) {
+                tracing::warn!(
+                    provider = self.provider,
+                    "pagination link leaves the API origin — not followed"
+                );
+                break;
+            }
+            rb = Some(client.get(&url).header(auth_header.0, &auth_header.1));
+        }
+        Ok(all)
     }
 
     /// Fetch all pages of a JSON array endpoint by following GitHub-style
@@ -516,9 +890,18 @@ impl Http {
 
     /// Send WITHOUT erroring on non-2xx so callers can inspect the status.
     pub async fn send_raw(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::Response> {
-        rb.send()
+        let write = rb
+            .try_clone()
+            .and_then(|c| c.build().ok())
+            .is_some_and(|req| !is_idempotent_read(req.method()));
+        let resp = rb
+            .send()
             .await
-            .map_err(|e| Error::Upstream(format!("{}: {e}", self.provider)))
+            .map_err(|e| Error::Upstream(format!("{}: {e}", self.provider)))?;
+        if write && resp.status().is_success() {
+            invalidate_scope(resp.url().as_str());
+        }
+        Ok(resp)
     }
 
     /// Map a response to Ok/Err based on its HTTP status, extracting the
@@ -644,9 +1027,36 @@ fn same_origin(origin: Option<&reqwest::Url>, next: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_key, extract_auth, insert_into, rate_limit_wait, read_from, same_origin, CachedGet,
-        Http, CACHE_MAX_ENTRIES, SHORT_TTL,
+        cache_key, extract_auth, insert_into, rate_limit_wait, read_from, repo_scope, same_origin,
+        x_next_page_url, CachedGet, Generations, Http, CACHE_MAX_BODY, CACHE_MAX_BYTES,
+        CACHE_MAX_ENTRIES, GENERATIONS_MAX, SHORT_TTL,
     };
+
+    /// The scope map is bounded, yet no scope's generation ever goes back to
+    /// a value a pre-write read could still hold (that read would then store
+    /// its stale body).
+    #[test]
+    fn write_generations_stay_monotonic_across_a_prune() {
+        let mut g = Generations {
+            by_scope: HashMap::new(),
+            floor: 0,
+        };
+        g.bump("a/".into());
+        let a = g.get("a/");
+        assert!(a > 0);
+        assert_eq!(g.get("unwritten/"), 0);
+        for i in 0..GENERATIONS_MAX {
+            g.bump(format!("s{i}/"));
+        }
+        assert!(g.by_scope.len() <= GENERATIONS_MAX, "pruned");
+        assert!(
+            g.get("a/") > a,
+            "a pruned scope reads as the floor, never lower"
+        );
+        let before = g.get("unwritten/");
+        g.bump("b/".into());
+        assert!(g.get("b/") > before, "a bump always moves past the floor");
+    }
 
     #[test]
     fn pagination_follows_only_same_origin_links() {
@@ -670,6 +1080,8 @@ mod tests {
             etag: None,
             body: body.to_string(),
             fetched_at,
+            url: String::new(),
+            next: None,
         }
     }
 
@@ -682,6 +1094,57 @@ mod tests {
             );
         }
         h
+    }
+
+    #[test]
+    fn repo_scope_per_forge() {
+        assert_eq!(
+            repo_scope("https://api.github.com/repos/acme/app/pulls/7/reviews").as_deref(),
+            Some("https://api.github.com/repos/acme/app/")
+        );
+        assert_eq!(
+            repo_scope("https://api.bitbucket.org/2.0/repositories/ws/app/pullrequests/3")
+                .as_deref(),
+            Some("https://api.bitbucket.org/2.0/repositories/ws/app/")
+        );
+        assert_eq!(
+            repo_scope("https://gl.example/api/v4/projects/acme%2Fapp/merge_requests/1/notes")
+                .as_deref(),
+            Some("https://gl.example/api/v4/projects/acme%2Fapp/")
+        );
+        assert_eq!(repo_scope("https://api.github.com/user"), None);
+        assert_eq!(repo_scope("https://api.github.com/repos/acme"), None);
+    }
+
+    #[test]
+    fn insert_respects_byte_budget_and_body_cap() {
+        let mut m = HashMap::new();
+        let big = "x".repeat(CACHE_MAX_BODY + 1);
+        insert_into(&mut m, "k".into(), entry(&big, Instant::now()));
+        assert!(m.is_empty(), "an oversized body is never cached");
+        let chunk = "y".repeat(CACHE_MAX_BODY);
+        for i in 0..(CACHE_MAX_BYTES / CACHE_MAX_BODY + 4) {
+            insert_into(&mut m, format!("k{i}"), entry(&chunk, Instant::now()));
+        }
+        let total: usize = m.values().map(|e| e.body.len()).sum();
+        assert!(total <= CACHE_MAX_BYTES, "total {total}");
+    }
+
+    #[test]
+    fn x_next_page_becomes_a_page_url() {
+        let h = headers(&[("x-next-page", "3")]);
+        assert_eq!(
+            x_next_page_url(
+                "https://gl.example/api/v4/projects/1/merge_requests?per_page=50&page=2",
+                &h
+            )
+            .as_deref(),
+            Some("https://gl.example/api/v4/projects/1/merge_requests?per_page=50&page=3")
+        );
+        assert_eq!(
+            x_next_page_url("https://x/y", &headers(&[("x-next-page", "")])),
+            None
+        );
     }
 
     #[test]
@@ -715,8 +1178,8 @@ mod tests {
     }
 
     #[test]
-    fn short_ttl_is_sixty_seconds() {
-        assert_eq!(SHORT_TTL, Duration::from_secs(60));
+    fn short_ttl_is_fifteen_seconds() {
+        assert_eq!(SHORT_TTL, Duration::from_secs(15));
     }
 
     #[test]

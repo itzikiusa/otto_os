@@ -79,8 +79,7 @@ fn s(metric: &str, labels: &[(&str, &str)], value: f64) -> Sample {
 
 #[tokio::test]
 async fn every_query_builder_runs_on_a_real_clickhouse() {
-    if ClickHouse::locate(None).is_none() {
-        eprintln!("SKIP: no `clickhouse` binary on this machine");
+    if no_clickhouse() {
         return;
     }
     let tmp = tempfile::tempdir().unwrap();
@@ -393,16 +392,42 @@ async fn every_query_builder_runs_on_a_real_clickhouse() {
         .await
         .unwrap();
     assert_eq!(from_rollups[0].mem_bytes, 400.0);
-    assert_eq!(from_rollups[0].rps, web.rps);
+    // Same request total, but `rps` divides by the open window's length up
+    // to the CURRENT second (`parts_secs(.., now)`, ~3600–3660 s), so a call
+    // that lands a second later reads a ~0.03 % lower rate. Exact equality
+    // made this flaky whenever the TRUNCATE straddled a second boundary.
+    assert!(
+        (from_rollups[0].rps - web.rps).abs() <= web.rps * 0.01,
+        "rps from rollups {} vs {}",
+        from_rollups[0].rps,
+        web.rps
+    );
     assert_eq!(from_rollups[0].latency_ms, web.latency_ms);
     assert_eq!(from_rollups[0].versions.len(), 2);
 
     engine.shutdown().await;
 }
 
+/// No `clickhouse` binary: skip on a dev box, FAIL where the ratchets are
+/// required (CI sets `OTTO_REQUIRE_CLICKHOUSE=1` after installing the pinned
+/// binary — a vacuous pass there hid every query-builder regression, perf K7).
+fn no_clickhouse() -> bool {
+    if ClickHouse::locate(None).is_some() {
+        return false;
+    }
+    let required = std::env::var("OTTO_REQUIRE_CLICKHOUSE")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+    assert!(
+        !required,
+        "OTTO_REQUIRE_CLICKHOUSE is set but no `clickhouse` binary was found"
+    );
+    eprintln!("SKIP: no `clickhouse` binary on this machine");
+    true
+}
+
 async fn start_engine(tmp: &tempfile::TempDir) -> Option<Arc<UsageEngine>> {
-    if ClickHouse::locate(None).is_none() {
-        eprintln!("SKIP: no `clickhouse` binary on this machine");
+    if no_clickhouse() {
         return None;
     }
     let engine = UsageEngine::start(
@@ -1375,18 +1400,32 @@ async fn rows_read_per_refresh_before_and_after() {
         .collect::<Vec<_>>()
         .join(", ");
     let t0 = std::time::Instant::now();
-    sink.exec(&format!(
-        "INSERT INTO k8s_samples (ts, cluster_id, namespace, workload_kind, workload, pod, container, metric, labels, value)
-         SELECT toDateTime64({start} + 60 * c, 3), '{cid}', 'shop', 'deployment', concat('wl', toString(intDiv(p, 3))),
-                concat('wl', toString(intDiv(p, 3)), '-', toString(p % 3)), 'app',
-                s.1, mapFromArrays(s.2, s.3), s.4 + s.5 * c
-         FROM (SELECT number % {pods} AS p, intDiv(number, {pods}) AS c FROM numbers({total}))
-         ARRAY JOIN [{arr}] AS s
-         SETTINGS max_block_size = 4096, min_insert_block_size_rows = 200000, max_threads = 2",
-        total = pods * cycles,
-    ))
-    .await
-    .unwrap();
+    // Chunked by cycles (perf R4): ONE statement for 26 h × 600 pods is
+    // ~19M rows whose `k8s_samples_1m_mv` aggregation outgrew the embedded
+    // engine's hard 1 GiB `max_server_memory_usage` (MEMORY_LIMIT_EXCEEDED
+    // "while pushing to view default.k8s_samples_1m_mv"). A synthetic-load
+    // artifact: the collector inserts one cycle per statement (pods × series
+    // rows — 5k pods is ~100k rows), far below it. So the load mirrors that
+    // size: ClickHouse 26.8 (CI's pin) holds more per view push and hit the
+    // cap at 2M locally and at 500k on CI's Linux runner (RSS accounting).
+    let chunk = (100_000 / (pods * series.len() as u64)).clamp(1, cycles);
+    let mut c0 = 0;
+    while c0 < cycles {
+        let n = chunk.min(cycles - c0);
+        sink.exec(&format!(
+            "INSERT INTO k8s_samples (ts, cluster_id, namespace, workload_kind, workload, pod, container, metric, labels, value)
+             SELECT toDateTime64({start} + 60 * c, 3), '{cid}', 'shop', 'deployment', concat('wl', toString(intDiv(p, 3))),
+                    concat('wl', toString(intDiv(p, 3)), '-', toString(p % 3)), 'app',
+                    s.1, mapFromArrays(s.2, s.3), s.4 + s.5 * c
+             FROM (SELECT number % {pods} AS p, {c0} + intDiv(number, {pods}) AS c FROM numbers({total}))
+             ARRAY JOIN [{arr}] AS s
+             SETTINGS max_block_size = 4096, min_insert_block_size_rows = 200000, max_threads = 2",
+            total = pods * n,
+        ))
+        .await
+        .unwrap();
+        c0 += n;
+    }
     // The wide rows the collector would write for the same samples: constant
     // increments (0 on the first cycle), memory 1e8 per pod. Blocks hold
     // whole cycles (max_block_size is a multiple of the pod count).
@@ -1405,20 +1444,29 @@ async fn rows_read_per_refresh_before_and_after() {
             .join(", ");
         format!("mapFromArrays([{ks}], [{vs}])")
     };
-    sink.exec(&format!(
-        "INSERT INTO k8s_pod_cycle
-         SELECT toDateTime({start} + 60 * c), '{cid}', 'shop', concat('wl', toString(intDiv(p, 3))),
-                concat('wl', toString(intDiv(p, 3)), '-', toString(p % 3)),
-                1e8, 1, if(c = 0, 0, 51), if(c = 0, 0, 1), if(c = 0, 0, 2.55), if(c = 0, 0, 51),
-                if(c = 0, mapFromArrays(CAST([] AS Array(String)), CAST([] AS Array(Float64))), {h})
-         FROM (SELECT number % {pods} AS p, intDiv(number, {pods}) AS c FROM numbers({total}))
-         SETTINGS max_block_size = {block}, max_threads = 1",
-        h = hist_rate(51.0),
-        total = pods * cycles,
-        block = pods * 50,
-    ))
-    .await
-    .unwrap();
+    // Chunked like the raw rows: one 50-cycle block per statement (the
+    // histogram maps make `k8s_pod_1m_mv`'s aggregation the heavier one —
+    // 26 h × 600 pods in one statement also hit the 1 GiB cap).
+    let wide_chunk = 50;
+    let mut c0 = 0;
+    while c0 < cycles {
+        let n = wide_chunk.min(cycles - c0);
+        sink.exec(&format!(
+            "INSERT INTO k8s_pod_cycle
+             SELECT toDateTime({start} + 60 * c), '{cid}', 'shop', concat('wl', toString(intDiv(p, 3))),
+                    concat('wl', toString(intDiv(p, 3)), '-', toString(p % 3)),
+                    1e8, 1, if(c = 0, 0, 51), if(c = 0, 0, 1), if(c = 0, 0, 2.55), if(c = 0, 0, 51),
+                    if(c = 0, mapFromArrays(CAST([] AS Array(String)), CAST([] AS Array(Float64))), {h})
+             FROM (SELECT number % {pods} AS p, {c0} + intDiv(number, {pods}) AS c FROM numbers({total}))
+             SETTINGS max_block_size = {block}, max_threads = 1",
+            h = hist_rate(51.0),
+            total = pods * n,
+            block = pods * 50,
+        ))
+        .await
+        .unwrap();
+        c0 += n;
+    }
     let mut tables: Vec<&str> = schema::ROLLUPS.iter().map(|r| r.table).collect();
     tables.push("k8s_latest");
     tables.extend(schema::wide_tables());

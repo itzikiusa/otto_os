@@ -287,7 +287,7 @@ CREATE TABLE IF NOT EXISTS {table} (
     metric      LowCardinality(String),
     pod         String,
     series      UInt64,
-    labels      Map(LowCardinality(String), String),
+    labels      SimpleAggregateFunction(any, Map(String, String)),
     v_min       SimpleAggregateFunction(min, Float64),
     v_max       SimpleAggregateFunction(max, Float64),
     v_sum       SimpleAggregateFunction(sum, Float64),

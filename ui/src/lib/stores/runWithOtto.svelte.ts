@@ -15,6 +15,7 @@ import type {
   OttoRun,
   RunEvent,
 } from '../api/types';
+import { announceModule } from '../lazyModule';
 
 class RunWithOttoStore {
   /** The current workspace's runs (newest first). */
@@ -118,9 +119,11 @@ class RunWithOttoStore {
   }
 
   /** Live WS tick: re-fetch the affected run + the list status. Only the run's
-   *  own workspace data is on screen, so ignore other workspaces' ticks. */
+   *  own workspace data is on screen, so ignore other workspaces' ticks — and
+   *  a run this store holds nothing for while no list is loaded (perf H1). */
   applyEvent(ev: Extract<OttoEvent, { type: 'otto_run_updated' }>): void {
     if (this.wsId && ev.workspace_id !== this.wsId) return;
+    if (!this.wsId && !(ev.run_id in this.byId)) return;
     void this.refreshRun(ev.run_id);
     if (this.wsId) void this.loadList(this.wsId);
     if (this.openId === ev.run_id) void this.loadEvents(ev.run_id);
@@ -128,3 +131,6 @@ class RunWithOttoStore {
 }
 
 export const runWithOtto = new RunWithOttoStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf H1): let it see this store
+// however it was first imported.
+announceModule('runWithOtto', runWithOtto);

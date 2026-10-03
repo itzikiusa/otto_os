@@ -202,11 +202,12 @@
   }
 
   // Chained (a slow tunnel never stacks ticks), paused while hidden, aborted
-  // on leave.
+  // on leave. 10 s: each tick is a stats fan-out over every visible topic, and
+  // a rate column doesn't need sub-10 s freshness.
   $effect(() => {
     void cluster.id;
     const poller = pollWhileVisible((signal) => refreshRates(signal), {
-      ms: 5000,
+      ms: 10_000,
       immediate: false,
     });
     return () => poller.stop();

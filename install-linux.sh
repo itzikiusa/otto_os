@@ -248,6 +248,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=OTTO_SECRETS=file
+Environment=OTTO_SECRETS_ALLOW_PLAINTEXT=1
 WorkingDirectory=$ROOT
 ExecStart=$BIN
 Restart=on-failure

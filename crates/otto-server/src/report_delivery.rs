@@ -11,7 +11,7 @@ use otto_core::domain::Channel;
 use otto_core::{Error, Result};
 use serde_json::Value;
 
-use otto_channels::improve_notify::{build_adapter, send_to};
+use otto_channels::improve_notify::build_adapter;
 use otto_channels::{Adapter, GmailSender, WebhookAdapter};
 use otto_state::{EmailSendersRepo, IntegrationsRepo};
 
@@ -152,19 +152,25 @@ async fn deliver_channel(
     if chat.trim().is_empty() {
         return (false, Some("no destination chat configured".into()));
     }
-    if !send_to(&ctx.secrets, &integ, &chat, None, msg).await {
+    // One adapter (one Keychain read, the shared HTTP pool) for the message and
+    // its attachment.
+    let Some(adapter) = build_adapter(&ctx.secrets, &integ).await else {
+        return (
+            false,
+            Some("channel send failed (bot token missing or API error)".into()),
+        );
+    };
+    if adapter.send_formatted(&chat, None, msg).await.is_err() {
         return (
             false,
             Some("channel send failed (bot token missing or API error)".into()),
         );
     }
-    if let Some(adapter) = build_adapter(&ctx.secrets, &integ) {
-        if let Err(e) = adapter.upload(&chat, None, "report.md", bytes).await {
-            return (
-                true,
-                Some(format!("message sent but attachment upload failed: {e}")),
-            );
-        }
+    if let Err(e) = adapter.upload(&chat, None, "report.md", bytes).await {
+        return (
+            true,
+            Some(format!("message sent but attachment upload failed: {e}")),
+        );
     }
     (true, None)
 }
@@ -194,7 +200,7 @@ async fn deliver_email(
         Ok(_) => return (false, Some("no verified email sender for the owner".into())),
         Err(e) => return (false, Some(e.to_string())),
     };
-    let pw = match ctx.secrets.get(&sender.secret_ref) {
+    let pw = match otto_core::secrets::get_async(&ctx.secrets, &sender.secret_ref).await {
         Ok(Some(p)) => p,
         _ => {
             return (

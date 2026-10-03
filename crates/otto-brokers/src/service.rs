@@ -219,12 +219,12 @@ impl BrokersService {
         let mut sr_secret_ref = None;
         if let Some(pw) = nonempty(req.sasl_password) {
             let r = secret_ref_for(&row.id);
-            self.secrets.put(&r, &pw)?;
+            otto_core::secrets::put_async(&self.secrets, &r, &pw).await?;
             secret_ref = Some(Some(r));
         }
         if let Some(pw) = nonempty(req.schema_registry_password) {
             let r = sr_secret_ref_for(&row.id);
-            self.secrets.put(&r, &pw)?;
+            otto_core::secrets::put_async(&self.secrets, &r, &pw).await?;
             sr_secret_ref = Some(Some(r));
         }
         if secret_ref.is_some() || sr_secret_ref.is_some() {
@@ -245,18 +245,22 @@ impl BrokersService {
         let row = self.repo.get(id).await?;
 
         // Secret handling: absent password = keep; non-empty = set; empty = clear.
-        let secret_ref = self.secret_change(
-            id,
-            &secret_ref_for(id),
-            row.secret_ref.clone(),
-            req.sasl_password,
-        )?;
-        let sr_secret_ref = self.secret_change(
-            id,
-            &sr_secret_ref_for(id),
-            row.sr_secret_ref.clone(),
-            req.schema_registry_password,
-        )?;
+        let secret_ref = self
+            .secret_change(
+                id,
+                &secret_ref_for(id),
+                row.secret_ref.clone(),
+                req.sasl_password,
+            )
+            .await?;
+        let sr_secret_ref = self
+            .secret_change(
+                id,
+                &sr_secret_ref_for(id),
+                row.sr_secret_ref.clone(),
+                req.schema_registry_password,
+            )
+            .await?;
 
         let u = UpdateBrokerCluster {
             name: req.name,
@@ -287,10 +291,10 @@ impl BrokersService {
     pub async fn delete_cluster(&self, id: &Id) -> Result<()> {
         let row = self.repo.get(id).await?;
         if let Some(r) = &row.secret_ref {
-            let _ = self.secrets.delete(r);
+            let _ = otto_core::secrets::delete_async(&self.secrets, r).await;
         }
         if let Some(r) = &row.sr_secret_ref {
-            let _ = self.secrets.delete(r);
+            let _ = otto_core::secrets::delete_async(&self.secrets, r).await;
         }
         self.repo.delete(id).await?;
         self.evict(id);
@@ -300,7 +304,7 @@ impl BrokersService {
     }
 
     /// Apply a secret change and return the repo three-state ref update.
-    fn secret_change(
+    async fn secret_change(
         &self,
         id: &Id,
         key: &str,
@@ -312,13 +316,13 @@ impl BrokersService {
             Some(pw) if pw.is_empty() => {
                 // explicit clear
                 if let Some(r) = &existing {
-                    let _ = self.secrets.delete(r);
+                    let _ = otto_core::secrets::delete_async(&self.secrets, r).await;
                 }
                 Ok(Some(None))
             }
             Some(pw) => {
                 let _ = id;
-                self.secrets.put(key, &pw)?;
+                otto_core::secrets::put_async(&self.secrets, key, &pw).await?;
                 Ok(Some(Some(key.to_string())))
             }
         }
@@ -376,7 +380,7 @@ impl BrokersService {
         Option<Arc<BrokerTunnel>>,
     )> {
         let sasl_password = match &row.secret_ref {
-            Some(r) => self.secrets.get(r)?,
+            Some(r) => otto_core::secrets::get_async(&self.secrets, r).await?,
             None => None,
         };
         let security = SecurityProtocol::parse(&row.security_protocol).unwrap_or_default();
@@ -419,7 +423,7 @@ impl BrokersService {
         let registry = match &row.schema_registry_url {
             Some(url) if !url.is_empty() => {
                 let pw = match &row.sr_secret_ref {
-                    Some(r) => self.secrets.get(r)?,
+                    Some(r) => otto_core::secrets::get_async(&self.secrets, r).await?,
                     None => None,
                 };
                 Some(Arc::new(SchemaRegistry::new(
@@ -497,13 +501,24 @@ impl BrokersService {
             .filter(|e| e.value().last_used.elapsed() > idle)
             .map(|e| e.key().clone())
             .collect();
+        let mut evicted = Vec::with_capacity(stale.len());
         for id in &stale {
             // Dropping the `Pooled` frees the librdkafka handles; dropping the
             // tunnel entry (the other Arc holder) tears down the ssh child +
             // proxy tasks. Leave the sampler/negative-cache — cheap in-memory
             // state that a re-open reuses.
-            self.pool.remove(id);
-            self.tunnels.remove(id);
+            evicted.push((self.pool.remove(id), self.tunnels.remove(id)));
+        }
+        // `rd_kafka_destroy` (run by the last client drop) flushes and joins
+        // librdkafka's threads and can block for seconds — never on a runtime
+        // worker. Off-runtime callers (tests) just drop inline.
+        if !evicted.is_empty() {
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => {
+                    h.spawn_blocking(move || drop(evicted));
+                }
+                Err(_) => drop(evicted),
+            }
         }
         stale.len()
     }
@@ -1182,6 +1197,8 @@ impl BrokersService {
 
         // Resolve every registry schema this batch references (keys always
         // try Avro; values when Auto/Avro is requested) — a handful of ids.
+        // Lookups run concurrently; failed ids are negatively cached, so a
+        // topic whose keys only look framed costs no round trip per tail tick.
         let mut schemas: std::collections::HashMap<i32, Arc<apache_avro::Schema>> =
             std::collections::HashMap::new();
         if let Some(reg) = &registry {
@@ -1197,11 +1214,7 @@ impl BrokersService {
                     }
                 }
             }
-            for sid in ids {
-                if let Ok(schema) = reg.parsed_schema_by_id(sid).await {
-                    schemas.insert(sid, schema);
-                }
-            }
+            schemas = reg.parsed_schemas_by_ids(ids).await;
         }
 
         let req = req.clone();

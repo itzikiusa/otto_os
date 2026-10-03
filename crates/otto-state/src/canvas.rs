@@ -163,9 +163,19 @@ impl CanvasRepo {
         Self { pool }
     }
 
+    /// Create a scene. Inline Excalidraw images in `doc_json` are moved into
+    /// the content-addressed `canvas_files` table first (the stored doc keeps
+    /// `otto-canvas-file:<sha>` refs; see [`Self::apply_update`]).
     pub async fn create(&self, r: NewScene) -> Result<CanvasScene> {
         let id = new_id();
         let now = fmt(Utc::now());
+        let prep = prepare_doc(r.doc_json).await?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("create canvas scene tx"))?;
+        insert_files(&mut tx, &prep.files, &now).await?;
         sqlx::query(
             "INSERT INTO canvas_scenes
              (id, workspace_id, story_id, title, doc_json, thumbnail,
@@ -176,15 +186,19 @@ impl CanvasRepo {
         .bind(&r.workspace_id)
         .bind(&r.story_id)
         .bind(&r.title)
-        .bind(&r.doc_json)
+        .bind(&prep.doc)
         .bind(&r.provider)
         .bind(&r.section)
         .bind(&r.created_by)
         .bind(&now)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("create canvas scene"))?;
+        sync_scene_refs(&mut tx, &id, &prep.refs).await?;
+        tx.commit()
+            .await
+            .map_err(dberr("create canvas scene commit"))?;
         self.get_required(&id).await
     }
 
@@ -347,8 +361,28 @@ impl CanvasRepo {
         self.summary(id).await
     }
 
-    async fn apply_update(&self, id: &Id, patch: SceneUpdate) -> Result<()> {
+    /// The write behind [`Self::update`]. A new document is externalized
+    /// first (R2): inline Excalidraw `files[*].dataURL` payloads go to
+    /// `canvas_files` once and the stored doc keeps `otto-canvas-file:<sha>`
+    /// refs — so a board with a pasted 3 MB screenshot is stored (and, once
+    /// the client sends refs back, autosaved) as a few KB. Docs without inline
+    /// files are only byte-scanned (no JSON parse). Files, the row and the
+    /// scene's ref set (`canvas_scene_files`, the live GC root) change in ONE
+    /// transaction, so a concurrent GC can never drop a file mid-save.
+    async fn apply_update(&self, id: &Id, mut patch: SceneUpdate) -> Result<()> {
         let now = fmt(Utc::now());
+        let prep = match patch.doc_json.take() {
+            Some(doc) => Some(prepare_doc(doc).await?),
+            None => None,
+        };
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("update canvas scene tx"))?;
+        if let Some(p) = &prep {
+            insert_files(&mut tx, &p.files, &now).await?;
+        }
         let result = sqlx::query(
             "UPDATE canvas_scenes
              SET title = COALESCE(?, title),
@@ -361,7 +395,7 @@ impl CanvasRepo {
              WHERE id = ? AND (? IS NULL OR updated_at = ?)",
         )
         .bind(&patch.title)
-        .bind(&patch.doc_json)
+        .bind(prep.as_ref().map(|p| p.doc.as_str()))
         .bind(&patch.thumbnail)
         .bind(&patch.provider)
         .bind(&patch.section)
@@ -370,10 +404,11 @@ impl CanvasRepo {
         .bind(id)
         .bind(patch.expect_updated_at.map(fmt))
         .bind(patch.expect_updated_at.map(fmt))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("update canvas scene"))?;
         if result.rows_affected() == 0 {
+            drop(tx);
             // Distinguish "gone" from "changed under us".
             return match self.workspace_of(id).await? {
                 Some(_) => Err(Error::Conflict(format!(
@@ -381,6 +416,16 @@ impl CanvasRepo {
                 ))),
                 None => Err(Error::NotFound(format!("canvas scene {id}"))),
             };
+        }
+        let dropped = match &prep {
+            Some(p) => sync_scene_refs(&mut tx, id, &p.refs).await?,
+            None => 0,
+        };
+        tx.commit()
+            .await
+            .map_err(dberr("update canvas scene commit"))?;
+        if dropped > 0 {
+            self.gc_files().await?;
         }
         Ok(())
     }
@@ -393,11 +438,29 @@ impl CanvasRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("delete canvas scene refs"))?;
+        let refs = sqlx::query(
+            "DELETE FROM canvas_version_files WHERE version_id IN (
+                 SELECT id FROM canvas_scene_versions WHERE scene_id = ?)",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("delete canvas version files"))?
+        .rows_affected();
         sqlx::query("DELETE FROM canvas_scene_versions WHERE scene_id = ?")
             .bind(id)
             .execute(&self.pool)
             .await
             .map_err(dberr("delete canvas scene versions"))?;
+        let live = sqlx::query("DELETE FROM canvas_scene_files WHERE scene_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete canvas scene files"))?
+            .rows_affected();
+        if refs + live > 0 {
+            self.gc_files().await?;
+        }
         let result = sqlx::query("DELETE FROM canvas_scenes WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
@@ -409,12 +472,18 @@ impl CanvasRepo {
         Ok(())
     }
 
-    /// Snapshot the scene's CURRENT document into its version history (C5). The
-    /// copy happens inside SQLite (the doc never travels through Rust). Skipped
-    /// — returning `None` — when the newest version already holds this exact
-    /// document, or when `throttle_secs` is set and a snapshot of the same `origin`
-    /// is younger than it (user saves: at most one per window). Prunes to the
-    /// newest [`SCENE_VERSIONS_KEPT`].
+    /// Snapshot the scene's CURRENT document into its version history (C5).
+    /// Skipped — returning `None` — when the newest version already holds this
+    /// exact document, or when `throttle_secs` is set and a snapshot of the same
+    /// `origin` is younger than it (user saves: at most one per window). Prunes
+    /// to the newest [`SCENE_VERSIONS_KEPT`].
+    ///
+    /// `format` / `size` are recorded once here (migration 0159) so
+    /// [`Self::list_versions`] never parses a document. A plain doc is copied
+    /// inside SQLite (it never travels through Rust); an Excalidraw doc with
+    /// pasted images has its base64 `files` moved into the content-addressed
+    /// `canvas_files` table first, so N versions of a board with one 3 MB
+    /// screenshot store the screenshot once, not N times.
     pub async fn snapshot(
         &self,
         scene_id: &Id,
@@ -438,27 +507,142 @@ impl CanvasRepo {
                 return Ok(None);
             }
         }
-        let vid = new_id();
-        let result = sqlx::query(
-            "INSERT INTO canvas_scene_versions (id, scene_id, doc_json, origin, created_by, created_at)
-             SELECT ?, s.id, s.doc_json, ?, ?, ?
-             FROM canvas_scenes s
-             WHERE s.id = ?
-               AND s.doc_json IS NOT (
-                   SELECT v.doc_json FROM canvas_scene_versions v
-                   WHERE v.scene_id = s.id ORDER BY v.rowid DESC LIMIT 1)",
+        // Does the doc carry inline Excalidraw files? `instr` is a byte scan —
+        // no JSON parse — and `NULL` means the scene is gone.
+        let has_files: Option<bool> = sqlx::query_scalar(
+            "SELECT instr(doc_json, 'dataURL') > 0 FROM canvas_scenes WHERE id = ?",
         )
-        .bind(&vid)
-        .bind(origin)
-        .bind(created_by)
-        .bind(fmt(Utc::now()))
         .bind(scene_id)
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(dberr("snapshot canvas scene"))?;
-        if result.rows_affected() == 0 {
+        .map_err(dberr("canvas snapshot probe"))?;
+        let Some(has_files) = has_files else {
+            return Ok(None);
+        };
+        let vid = new_id();
+        let now = fmt(Utc::now());
+        let inserted = if has_files {
+            self.snapshot_externalized(scene_id, &vid, origin, created_by, &now)
+                .await?
+        } else {
+            sqlx::query(
+                "INSERT INTO canvas_scene_versions
+                 (id, scene_id, doc_json, origin, created_by, created_at, format, size)
+                 SELECT ?, s.id, s.doc_json, ?, ?, ?,
+                        CASE WHEN json_valid(s.doc_json) THEN json_extract(s.doc_json, '$.format') END,
+                        length(s.doc_json)
+                 FROM canvas_scenes s
+                 WHERE s.id = ?
+                   AND s.doc_json IS NOT (
+                       SELECT v.doc_json FROM canvas_scene_versions v
+                       WHERE v.scene_id = s.id ORDER BY v.rowid DESC LIMIT 1)",
+            )
+            .bind(&vid)
+            .bind(origin)
+            .bind(created_by)
+            .bind(&now)
+            .bind(scene_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("snapshot canvas scene"))?
+            .rows_affected()
+                > 0
+        };
+        if !inserted {
             return Ok(None);
         }
+        self.prune_versions(scene_id).await?;
+        Ok(Some(vid))
+    }
+
+    /// The Excalidraw-with-images snapshot path: externalize `files` off the
+    /// runtime, then insert files + version + refs in one transaction.
+    async fn snapshot_externalized(
+        &self,
+        scene_id: &Id,
+        vid: &Id,
+        origin: &str,
+        created_by: Option<&Id>,
+        now: &str,
+    ) -> Result<bool> {
+        let doc: Option<String> =
+            sqlx::query_scalar("SELECT doc_json FROM canvas_scenes WHERE id = ?")
+                .bind(scene_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(dberr("canvas snapshot doc"))?;
+        let Some(doc) = doc else {
+            return Ok(false);
+        };
+        let size = doc.len() as i64;
+        // A live doc is normally already externalized (refs only — a byte
+        // scan); a legacy doc not saved since 0163 still carries inline files.
+        let ext = prepare_doc(doc).await?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("canvas snapshot tx"))?;
+        insert_files(&mut tx, &ext.files, now).await?;
+        let res = sqlx::query(
+            "INSERT INTO canvas_scene_versions
+             (id, scene_id, doc_json, origin, created_by, created_at, format, size)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6,
+                    COALESCE(?7, CASE WHEN json_valid(?3) THEN json_extract(?3, '$.format') END),
+                    ?8
+             WHERE ?9 IS NOT (
+                 SELECT v.doc_json FROM canvas_scene_versions v
+                 WHERE v.scene_id = ?10 ORDER BY v.rowid DESC LIMIT 1)",
+        )
+        .bind(vid)
+        .bind(scene_id)
+        .bind(&ext.doc)
+        .bind(origin)
+        .bind(created_by)
+        .bind(now)
+        .bind(&ext.format)
+        .bind(size)
+        .bind(&ext.doc)
+        .bind(scene_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(dberr("snapshot canvas scene"))?;
+        if res.rows_affected() == 0 {
+            // Unchanged since the newest version: drop the transaction (the
+            // INSERT OR IGNOREd files, if new, go with it).
+            return Ok(false);
+        }
+        for sha in &ext.refs {
+            sqlx::query(
+                "INSERT OR IGNORE INTO canvas_version_files (version_id, sha256) VALUES (?, ?)",
+            )
+            .bind(vid)
+            .bind(sha)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("insert canvas version file"))?;
+        }
+        tx.commit().await.map_err(dberr("canvas snapshot commit"))?;
+        Ok(true)
+    }
+
+    /// Keep the newest [`SCENE_VERSIONS_KEPT`] versions; drop the file refs of
+    /// pruned versions and garbage-collect files nothing references any more.
+    async fn prune_versions(&self, scene_id: &Id) -> Result<()> {
+        let refs = sqlx::query(
+            "DELETE FROM canvas_version_files WHERE version_id IN (
+                 SELECT id FROM canvas_scene_versions
+                 WHERE scene_id = ? AND rowid NOT IN (
+                     SELECT rowid FROM canvas_scene_versions WHERE scene_id = ?
+                     ORDER BY rowid DESC LIMIT ?))",
+        )
+        .bind(scene_id)
+        .bind(scene_id)
+        .bind(SCENE_VERSIONS_KEPT)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("prune canvas version files"))?
+        .rows_affected();
         sqlx::query(
             "DELETE FROM canvas_scene_versions
              WHERE scene_id = ? AND rowid NOT IN (
@@ -471,15 +655,45 @@ impl CanvasRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("prune canvas scene versions"))?;
-        Ok(Some(vid))
+        if refs > 0 {
+            self.gc_files().await?;
+        }
+        Ok(())
     }
 
-    /// A scene's version history, newest first (no documents).
+    /// Delete `canvas_files` rows no version AND no live scene references
+    /// (both index-backed).
+    async fn gc_files(&self) -> Result<u64> {
+        Ok(sqlx::query(
+            "DELETE FROM canvas_files
+              WHERE NOT EXISTS (
+                    SELECT 1 FROM canvas_version_files r WHERE r.sha256 = canvas_files.sha256)
+                AND NOT EXISTS (
+                    SELECT 1 FROM canvas_scene_files l WHERE l.sha256 = canvas_files.sha256)",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("gc canvas files"))?
+        .rows_affected())
+    }
+
+    /// Total bytes held by the content-addressed file store + how many files —
+    /// a storage-size gauge for the canvas history.
+    pub async fn file_store_stats(&self) -> Result<(i64, i64)> {
+        let row =
+            sqlx::query("SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS bytes FROM canvas_files")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(dberr("canvas file stats"))?;
+        Ok((row.get("n"), row.get("bytes")))
+    }
+
+    /// A scene's version history, newest first (no documents). Reads the
+    /// `format` / `size` columns recorded at snapshot time — no JSON parsing.
     pub async fn list_versions(&self, scene_id: &Id) -> Result<Vec<CanvasSceneVersion>> {
         let rows = sqlx::query(
             "SELECT id, scene_id, origin, created_by, created_at,
-                    length(doc_json) AS size,
-                    CASE WHEN json_valid(doc_json) THEN json_extract(doc_json, '$.format') END AS format
+                    COALESCE(size, 0) AS size, format
              FROM canvas_scene_versions WHERE scene_id = ?
              ORDER BY rowid DESC",
         )
@@ -503,16 +717,97 @@ impl CanvasRepo {
     }
 
     /// One version's document (scoped to its scene so a version id can't be
-    /// replayed onto another scene).
+    /// replayed onto another scene), with externalized Excalidraw files
+    /// rehydrated back to their inline `dataURL`s.
     pub async fn version_doc(&self, scene_id: &Id, version_id: &Id) -> Result<Option<String>> {
-        sqlx::query_scalar(
+        let doc: Option<String> = sqlx::query_scalar(
             "SELECT doc_json FROM canvas_scene_versions WHERE scene_id = ? AND id = ?",
         )
         .bind(scene_id)
         .bind(version_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(dberr("get canvas scene version"))
+        .map_err(dberr("get canvas scene version"))?;
+        let Some(doc) = doc else {
+            return Ok(None);
+        };
+        if !doc.contains(FILE_REF_PREFIX) {
+            return Ok(Some(doc));
+        }
+        let rows = sqlx::query(
+            "SELECT f.sha256, f.data_url FROM canvas_version_files r
+             JOIN canvas_files f ON f.sha256 = r.sha256
+             WHERE r.version_id = ?",
+        )
+        .bind(version_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("get canvas version files"))?;
+        let files: std::collections::HashMap<String, String> = rows
+            .iter()
+            .map(|r| (r.get("sha256"), r.get("data_url")))
+            .collect();
+        let out = tokio::task::spawn_blocking(move || rehydrate_files(&doc, &files))
+            .await
+            .map_err(|e| Error::Internal(format!("canvas rehydrate: {e}")))?;
+        Ok(Some(out))
+    }
+
+    /// The scene's document with its externalized files put back inline —
+    /// for API callers that want a self-contained doc (export, duplicate,
+    /// agents); the Canvas editor asks for refs (`?files=ref`) and fetches
+    /// each file once from `GET /canvas/files/{sha}` instead.
+    pub async fn rehydrate_live(&self, mut scene: CanvasScene) -> Result<CanvasScene> {
+        if !scene.doc_json.contains(FILE_REF_PREFIX) {
+            return Ok(scene);
+        }
+        let rows = sqlx::query(
+            "SELECT f.sha256, f.data_url FROM canvas_scene_files r
+             JOIN canvas_files f ON f.sha256 = r.sha256
+             WHERE r.scene_id = ?",
+        )
+        .bind(&scene.id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("get canvas scene files"))?;
+        let files: std::collections::HashMap<String, String> = rows
+            .iter()
+            .map(|r| (r.get("sha256"), r.get("data_url")))
+            .collect();
+        let doc = std::mem::take(&mut scene.doc_json);
+        scene.doc_json = tokio::task::spawn_blocking(move || rehydrate_files(&doc, &files))
+            .await
+            .map_err(|e| Error::Internal(format!("canvas rehydrate: {e}")))?;
+        Ok(scene)
+    }
+
+    /// One content-addressed file (`mime`, `data_url`) and the workspaces of
+    /// every scene that references it, live or in history — the caller must
+    /// be able to view one of them (`GET /canvas/files/{sha}`).
+    pub async fn file_with_workspaces(
+        &self,
+        sha: &str,
+    ) -> Result<Option<(String, String, Vec<Id>)>> {
+        let row = sqlx::query("SELECT mime, data_url FROM canvas_files WHERE sha256 = ?")
+            .bind(sha)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("get canvas file"))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let ws: Vec<Id> = sqlx::query_scalar(
+            "SELECT DISTINCT s.workspace_id FROM canvas_scenes s
+              WHERE s.id IN (SELECT scene_id FROM canvas_scene_files WHERE sha256 = ?1)
+                 OR s.id IN (SELECT v.scene_id FROM canvas_scene_versions v
+                               JOIN canvas_version_files r ON r.version_id = v.id
+                              WHERE r.sha256 = ?1)",
+        )
+        .bind(sha)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("canvas file workspaces"))?;
+        Ok(Some((row.get("mime"), row.get("data_url"), ws)))
     }
 
     /// Link the managed session backing this scene's Ask-AI (set on first use).
@@ -531,6 +826,231 @@ impl CanvasRepo {
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Excalidraw file externalization (migration 0159)
+// ---------------------------------------------------------------------------
+
+/// Marker a version doc stores in place of an externalized file's `dataURL`.
+pub const FILE_REF_PREFIX: &str = "otto-canvas-file:";
+
+struct ExtFile {
+    sha256: String,
+    mime: String,
+    data_url: String,
+}
+
+struct Externalized {
+    doc: String,
+    format: Option<String>,
+    files: Vec<ExtFile>,
+    /// Every file ref the output doc holds (new and pre-existing), sorted.
+    refs: Vec<String>,
+}
+
+/// Does `doc` carry an inline Excalidraw file (`"dataURL": "data:…"`, in the
+/// outer doc or JSON-escaped inside `source`)? A byte scan — no parse.
+fn has_inline_files(doc: &str) -> bool {
+    doc.match_indices("dataURL").any(|(i, m)| {
+        let rest = doc[i + m.len()..].trim_start_matches(['\\', '"', ':', ' ']);
+        rest.starts_with("data:")
+    })
+}
+
+/// The `otto-canvas-file:<sha256>` refs in `doc`, sorted + deduped. A byte
+/// scan — no parse.
+fn scan_refs(doc: &str) -> Vec<String> {
+    let mut out: Vec<String> = doc
+        .match_indices(FILE_REF_PREFIX)
+        .filter_map(|(i, m)| doc.get(i + m.len()..i + m.len() + 64))
+        .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Externalize a doc's inline files (parse on the blocking pool), or — the
+/// common case once a scene has been saved since 0163 — just byte-scan its refs.
+async fn prepare_doc(doc: String) -> Result<Externalized> {
+    if !has_inline_files(&doc) {
+        let refs = scan_refs(&doc);
+        return Ok(Externalized {
+            doc,
+            format: None,
+            files: Vec::new(),
+            refs,
+        });
+    }
+    tokio::task::spawn_blocking(move || externalize_files(&doc))
+        .await
+        .map_err(|e| Error::Internal(format!("canvas externalize: {e}")))
+}
+
+async fn insert_files(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    files: &[ExtFile],
+    now: &str,
+) -> Result<()> {
+    for f in files {
+        sqlx::query(
+            "INSERT OR IGNORE INTO canvas_files (sha256, mime, data_url, size, created_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&f.sha256)
+        .bind(&f.mime)
+        .bind(&f.data_url)
+        .bind(f.data_url.len() as i64)
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(dberr("insert canvas file"))?;
+    }
+    Ok(())
+}
+
+/// Make `canvas_scene_files` for `scene_id` equal `refs` (sorted). Reads the
+/// tiny current set first, so an autosave that changed no image writes
+/// nothing. Returns how many refs were dropped (→ the caller GCs).
+async fn sync_scene_refs(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    scene_id: &str,
+    refs: &[String],
+) -> Result<u64> {
+    let mut have: Vec<String> = sqlx::query_scalar(
+        "SELECT sha256 FROM canvas_scene_files WHERE scene_id = ? ORDER BY sha256",
+    )
+    .bind(scene_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(dberr("canvas scene files"))?;
+    have.sort();
+    if have == refs {
+        return Ok(0);
+    }
+    let want: std::collections::HashSet<&str> = refs.iter().map(String::as_str).collect();
+    let mut dropped = 0;
+    for sha in have.iter().filter(|h| !want.contains(h.as_str())) {
+        dropped += sqlx::query("DELETE FROM canvas_scene_files WHERE scene_id = ? AND sha256 = ?")
+            .bind(scene_id)
+            .bind(sha)
+            .execute(&mut **tx)
+            .await
+            .map_err(dberr("drop canvas scene file"))?
+            .rows_affected();
+    }
+    for sha in refs {
+        sqlx::query("INSERT OR IGNORE INTO canvas_scene_files (scene_id, sha256) VALUES (?, ?)")
+            .bind(scene_id)
+            .bind(sha)
+            .execute(&mut **tx)
+            .await
+            .map_err(dberr("add canvas scene file"))?;
+    }
+    Ok(dropped)
+}
+
+/// Move an Excalidraw doc's inline `files[*].dataURL` payloads out into
+/// content-addressed entries. Any doc that isn't a parseable Excalidraw scene
+/// with inline files is returned unchanged (with its `format`, if any).
+fn externalize_files(doc: &str) -> Externalized {
+    use sha2::{Digest, Sha256};
+    let unchanged = |format: Option<String>| Externalized {
+        doc: doc.to_string(),
+        format,
+        files: Vec::new(),
+        refs: scan_refs(doc),
+    };
+    let Ok(mut outer) = serde_json::from_str::<serde_json::Value>(doc) else {
+        return unchanged(None);
+    };
+    let format = outer
+        .get("format")
+        .and_then(|f| f.as_str())
+        .map(str::to_string);
+    if format.as_deref() != Some("excalidraw") {
+        return unchanged(format);
+    }
+    let Some(src) = outer.get("source").and_then(|s| s.as_str()) else {
+        return unchanged(format);
+    };
+    let Ok(mut scene) = serde_json::from_str::<serde_json::Value>(src) else {
+        return unchanged(format);
+    };
+    let mut files = Vec::new();
+    if let Some(map) = scene.get_mut("files").and_then(|f| f.as_object_mut()) {
+        for entry in map.values_mut() {
+            let Some(obj) = entry.as_object_mut() else {
+                continue;
+            };
+            let Some(data_url) = obj.get("dataURL").and_then(|d| d.as_str()) else {
+                continue;
+            };
+            if data_url.starts_with(FILE_REF_PREFIX) {
+                continue;
+            }
+            let sha256 = hex::encode(Sha256::digest(data_url.as_bytes()));
+            let mime = obj
+                .get("mimeType")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string();
+            files.push(ExtFile {
+                sha256: sha256.clone(),
+                mime,
+                data_url: data_url.to_string(),
+            });
+            obj.insert(
+                "dataURL".into(),
+                serde_json::Value::String(format!("{FILE_REF_PREFIX}{sha256}")),
+            );
+        }
+    }
+    if files.is_empty() {
+        return unchanged(format);
+    }
+    outer["source"] = serde_json::Value::String(scene.to_string());
+    let doc = outer.to_string();
+    let refs = scan_refs(&doc);
+    Externalized {
+        doc,
+        format,
+        files,
+        refs,
+    }
+}
+
+/// Inverse of [`externalize_files`]: put each referenced file's `dataURL`
+/// back. A ref whose file is missing is left as the marker (never a crash).
+fn rehydrate_files(doc: &str, files: &std::collections::HashMap<String, String>) -> String {
+    let Ok(mut outer) = serde_json::from_str::<serde_json::Value>(doc) else {
+        return doc.to_string();
+    };
+    let Some(src) = outer.get("source").and_then(|s| s.as_str()) else {
+        return doc.to_string();
+    };
+    let Ok(mut scene) = serde_json::from_str::<serde_json::Value>(src) else {
+        return doc.to_string();
+    };
+    if let Some(map) = scene.get_mut("files").and_then(|f| f.as_object_mut()) {
+        for entry in map.values_mut() {
+            let Some(obj) = entry.as_object_mut() else {
+                continue;
+            };
+            let sha = obj
+                .get("dataURL")
+                .and_then(|d| d.as_str())
+                .and_then(|d| d.strip_prefix(FILE_REF_PREFIX))
+                .map(str::to_string);
+            if let Some(data) = sha.and_then(|s| files.get(&s)) {
+                obj.insert("dataURL".into(), serde_json::Value::String(data.clone()));
+            }
+        }
+    }
+    outer["source"] = serde_json::Value::String(scene.to_string());
+    outer.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -628,6 +1148,346 @@ mod tests {
 
         repo.delete(&scene.id).await.unwrap();
         assert!(repo.list_versions(&scene.id).await.unwrap().is_empty());
+    }
+
+    fn excali_doc(images: &[(&str, &str)], label: &str) -> String {
+        let files: serde_json::Map<String, serde_json::Value> = images
+            .iter()
+            .map(|(id, data)| {
+                (
+                    id.to_string(),
+                    serde_json::json!({"id": id, "mimeType": "image/png", "dataURL": data}),
+                )
+            })
+            .collect();
+        let scene = serde_json::json!({
+            "type": "excalidraw", "elements": [{"id": label}], "files": files,
+        });
+        serde_json::json!({
+            "type": "otto-canvas", "version": 1, "format": "excalidraw",
+            "source": scene.to_string(),
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn excalidraw_images_are_stored_once_and_rehydrated_on_restore() {
+        let repo = CanvasRepo::new(mem_pool().await);
+        let img = format!("data:image/png;base64,{}", "A".repeat(200_000));
+        let doc0 = excali_doc(&[("f1", &img)], "e0");
+        let scene = repo
+            .create(NewScene {
+                workspace_id: "w1".into(),
+                story_id: None,
+                title: "X".into(),
+                doc_json: doc0.clone(),
+                provider: "claude".into(),
+                section: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+        // 10 versions of the same board, each with the same 200 KB image.
+        for i in 0..10 {
+            repo.snapshot(&scene.id, "agent", None, None)
+                .await
+                .unwrap()
+                .unwrap();
+            let next = SceneUpdate {
+                doc_json: Some(excali_doc(&[("f1", &img)], &format!("e{}", i + 1))),
+                ..Default::default()
+            };
+            repo.update(&scene.id, next).await.unwrap();
+        }
+        // Unchanged doc → deduped even on the externalized path.
+        repo.snapshot(&scene.id, "agent", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(repo
+            .snapshot(&scene.id, "agent", None, None)
+            .await
+            .unwrap()
+            .is_none());
+
+        let (n, bytes) = repo.file_store_stats().await.unwrap();
+        assert_eq!(n, 1, "one image stored once");
+        assert_eq!(bytes, img.len() as i64);
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT SUM(length(doc_json)) FROM canvas_scene_versions WHERE scene_id = ?",
+        )
+        .bind(&scene.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert!(
+            stored < 20_000,
+            "versions hold refs, not base64 ({stored} B)"
+        );
+
+        let list = repo.list_versions(&scene.id).await.unwrap();
+        assert_eq!(list.len(), 11);
+        assert_eq!(list[0].format.as_deref(), Some("excalidraw"));
+        // The live doc is stored externalized since 0163, so a snapshot of it
+        // is small too.
+        assert!(list[0].size < 20_000, "size is the stored (ref) doc length");
+        // The oldest version rehydrates to the original document's content.
+        let oldest = repo
+            .version_doc(&scene.id, &list[10].id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(oldest.contains(&img));
+        assert!(!oldest.contains(FILE_REF_PREFIX));
+        let v: serde_json::Value = serde_json::from_str(&oldest).unwrap();
+        let inner: serde_json::Value = serde_json::from_str(v["source"].as_str().unwrap()).unwrap();
+        assert_eq!(inner["elements"][0]["id"], "e0");
+
+        // Deleting the scene garbage-collects the file.
+        repo.delete(&scene.id).await.unwrap();
+        assert_eq!(repo.file_store_stats().await.unwrap().0, 0);
+    }
+
+    #[test]
+    fn inline_and_ref_scans_need_no_parse() {
+        let img = "data:image/png;base64,AAAA";
+        let doc = excali_doc(&[("f1", img)], "e");
+        assert!(has_inline_files(&doc), "escaped inside `source`");
+        assert!(has_inline_files(r#"{"dataURL": "data:x"}"#));
+        assert!(!has_inline_files(r#"{"text":"dataURL is data: here"}"#));
+        let sha = "a".repeat(64);
+        let refd = excali_doc(&[("f1", &format!("{FILE_REF_PREFIX}{sha}"))], "e");
+        assert!(!has_inline_files(&refd));
+        assert_eq!(scan_refs(&refd), vec![sha.clone()]);
+        assert!(scan_refs(&format!("{FILE_REF_PREFIX}xyz")).is_empty());
+    }
+
+    /// R2: the LIVE doc keeps refs, so an autosave that sends refs back is a
+    /// few KB however big the pasted image; every read path still works.
+    #[tokio::test]
+    async fn live_doc_externalizes_images_and_ref_saves_stay_small() {
+        let repo = CanvasRepo::new(mem_pool().await);
+        let img = format!("data:image/png;base64,{}", "C".repeat(3 * 1024 * 1024));
+        let scene = repo
+            .create(NewScene {
+                workspace_id: "w1".into(),
+                story_id: None,
+                title: "Live".into(),
+                doc_json: excali_doc(&[("f1", &img)], "e0"),
+                provider: "claude".into(),
+                section: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+        // Stored with a ref, not the 3 MB payload.
+        assert!(scene.doc_json.len() < 10_000, "{}", scene.doc_json.len());
+        let shas = scan_refs(&scene.doc_json);
+        assert_eq!(shas.len(), 1);
+        let sha = shas[0].clone();
+        assert_eq!(repo.file_store_stats().await.unwrap().0, 1);
+        // The editor's next autosaves send the ref back: small bodies, no new
+        // file rows, and the history still rehydrates.
+        let ref_url = format!("{FILE_REF_PREFIX}{sha}");
+        for i in 1..=5 {
+            let body = excali_doc(&[("f1", &ref_url)], &format!("e{i}"));
+            assert!(body.len() < 200_000, "autosave body {} B", body.len());
+            repo.snapshot(&scene.id, "agent", None, None).await.unwrap();
+            repo.update_summary(
+                &scene.id,
+                SceneUpdate {
+                    doc_json: Some(body),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(repo.file_store_stats().await.unwrap().0, 1);
+        let versions = repo.list_versions(&scene.id).await.unwrap();
+        assert_eq!(versions[0].format.as_deref(), Some("excalidraw"));
+        let old = repo
+            .version_doc(&scene.id, &versions[0].id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(old.contains(&img), "a version rehydrates from its refs");
+        // Self-contained read for export / duplicate / agents.
+        let live = repo.get(&scene.id).await.unwrap().unwrap();
+        assert!(!live.doc_json.contains(&img));
+        let full = repo.rehydrate_live(live).await.unwrap();
+        assert!(full.doc_json.contains(&img));
+        assert!(!full.doc_json.contains(FILE_REF_PREFIX));
+        // The file route's access data.
+        let (mime, data, ws) = repo.file_with_workspaces(&sha).await.unwrap().unwrap();
+        assert_eq!(
+            (mime.as_str(), data.len(), ws),
+            ("image/png", img.len(), vec!["w1".to_string()])
+        );
+        // Removing the image from the live doc keeps the file while history
+        // cites it; deleting the scene collects it.
+        repo.update(
+            &scene.id,
+            SceneUpdate {
+                doc_json: Some(excali_doc(&[], "gone")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(repo.file_store_stats().await.unwrap().0, 1);
+        repo.delete(&scene.id).await.unwrap();
+        assert_eq!(repo.file_store_stats().await.unwrap().0, 0);
+        assert!(repo.file_with_workspaces(&sha).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn live_only_file_is_collected_once_the_doc_drops_it() {
+        let repo = CanvasRepo::new(mem_pool().await);
+        let scene = repo
+            .create(NewScene {
+                workspace_id: "w1".into(),
+                story_id: None,
+                title: "Drop".into(),
+                doc_json: excali_doc(&[("f", "data:image/png;base64,only")], "a"),
+                provider: "claude".into(),
+                section: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(repo.file_store_stats().await.unwrap().0, 1);
+        repo.update(
+            &scene.id,
+            SceneUpdate {
+                doc_json: Some(excali_doc(&[], "b")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(repo.file_store_stats().await.unwrap().0, 0);
+    }
+
+    #[tokio::test]
+    async fn pruning_versions_garbage_collects_unreferenced_files() {
+        let repo = CanvasRepo::new(mem_pool().await);
+        let scene = repo
+            .create(NewScene {
+                workspace_id: "w1".into(),
+                story_id: None,
+                title: "G".into(),
+                doc_json: excali_doc(&[("f", "data:image/png;base64,first")], "a"),
+                provider: "claude".into(),
+                section: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+        repo.snapshot(&scene.id, "agent", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        // Every later version uses a different image; the first one ages out.
+        for i in 0..SCENE_VERSIONS_KEPT {
+            let next = SceneUpdate {
+                doc_json: Some(excali_doc(
+                    &[("f", &format!("data:image/png;base64,img{i}"))],
+                    &format!("b{i}"),
+                )),
+                ..Default::default()
+            };
+            repo.update(&scene.id, next).await.unwrap();
+            repo.snapshot(&scene.id, "agent", None, None)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let (n, _) = repo.file_store_stats().await.unwrap();
+        assert_eq!(
+            n, SCENE_VERSIONS_KEPT,
+            "the pruned version's file was collected"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_versions_reads_columns_not_documents() {
+        let repo = CanvasRepo::new(mem_pool().await);
+        let scene = repo
+            .create(NewScene {
+                workspace_id: "w1".into(),
+                story_id: None,
+                title: "L".into(),
+                doc_json: r#"{"format":"d2","source":"abc"}"#.into(),
+                provider: "claude".into(),
+                section: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+        repo.snapshot(&scene.id, "agent", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        // Corrupt the stored document: a list that parsed it would now
+        // report no format / a different size.
+        sqlx::query("UPDATE canvas_scene_versions SET doc_json = 'x' WHERE scene_id = ?")
+            .bind(&scene.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        let list = repo.list_versions(&scene.id).await.unwrap();
+        assert_eq!(list[0].format.as_deref(), Some("d2"));
+        assert_eq!(
+            list[0].size,
+            r#"{"format":"d2","source":"abc"}"#.len() as i64
+        );
+    }
+
+    /// Budget bench: a 5 MB Excalidraw scene — save, snapshot and list the
+    /// history. `cargo test -p otto-state --lib canvas_large_scene -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn canvas_large_scene_budget() {
+        let repo = CanvasRepo::new(mem_pool().await);
+        let img = format!("data:image/png;base64,{}", "B".repeat(5 * 1024 * 1024));
+        let scene = repo
+            .create(NewScene {
+                workspace_id: "w1".into(),
+                story_id: None,
+                title: "Big".into(),
+                doc_json: excali_doc(&[("f1", &img)], "e"),
+                provider: "claude".into(),
+                section: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+        let t = std::time::Instant::now();
+        for i in 0..SCENE_VERSIONS_KEPT {
+            let next = SceneUpdate {
+                doc_json: Some(excali_doc(&[("f1", &img)], &format!("e{i}"))),
+                ..Default::default()
+            };
+            repo.update_summary(&scene.id, next).await.unwrap();
+            repo.snapshot(&scene.id, "agent", None, None).await.unwrap();
+        }
+        let per_save = t.elapsed() / SCENE_VERSIONS_KEPT as u32;
+        let t = std::time::Instant::now();
+        let list = repo.list_versions(&scene.id).await.unwrap();
+        let list_ms = t.elapsed();
+        let (_, bytes) = repo.file_store_stats().await.unwrap();
+        println!("5 MB scene: save+snapshot {per_save:?}/op, list_versions {list_ms:?}, file store {bytes} B");
+        assert_eq!(list.len() as i64, SCENE_VERSIONS_KEPT);
+        assert!(
+            list_ms < std::time::Duration::from_millis(100),
+            "{list_ms:?}"
+        );
+        assert!(
+            per_save < std::time::Duration::from_millis(300),
+            "{per_save:?}"
+        );
+        assert!(bytes < 6 * 1024 * 1024, "image stored once");
     }
 
     #[tokio::test]

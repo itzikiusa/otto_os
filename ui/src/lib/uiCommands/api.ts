@@ -138,7 +138,7 @@ registerUiCommands('api', {
   async api_open_request(args: { request_id: string }, ctx: UiCommandCtx) {
     await ready(ctx.signal);
     const r = resolveByIdOrName(apiClient.requests, args.request_id, (x) => x.id, (x) => x.name, 'saved request');
-    apiClient.loadRequestIntoDraft(r);
+    if (!(await apiClient.openRequest(r.id))) throw new Error(`Couldn’t load the saved request “${r.name}”.`);
     apiClient.showRequestView();
     await highlightWhenReady(ctx, URL_INPUT);
     return { tab_id: apiClient.draft.tabId ?? null, request_id: r.id, name: r.name, method: r.method, url: r.url };

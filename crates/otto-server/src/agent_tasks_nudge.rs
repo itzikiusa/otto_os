@@ -22,8 +22,12 @@
 //! * an atomic claim (`UPDATE … WHERE nudge_pending = 1`) so two sweeps never
 //!   deliver one task twice; a failed PTY write un-claims it.
 //!
-//! Driven by `Event::SessionStatus` plus a 15 s tick, and kicked directly by
-//! `POST /sessions/{id}/tasks`. Independent of transcript tails.
+//! Driven by `Event::SessionStatus` plus a safety tick, and kicked directly by
+//! `POST /sessions/{id}/tasks` (which also [`wake`]s the loop). The tick is
+//! [`TICK`] (15 s) only while some nudge is still pending — a deferred one
+//! needs a re-check with no status event — and [`IDLE_TICK`] (5 min)
+//! otherwise, so an idle daemon doesn't query SQLite every 15 s for nothing.
+//! Independent of transcript tails.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -37,6 +41,8 @@ use otto_state::{ActivityRepo, NewTrail, PendingNudge};
 use crate::state::ServerCtx;
 
 pub const TICK: Duration = Duration::from_secs(15);
+/// Safety tick while no nudge is pending (events + [`wake`] cover new ones).
+pub const IDLE_TICK: Duration = Duration::from_secs(300);
 /// Max time a nudge waits for `Idle` while the session is busy.
 pub const MAX_DEFER: Duration = Duration::from_secs(120);
 /// Never type into a PTY younger than this.
@@ -135,63 +141,112 @@ fn forget(sid: &Id) {
         .remove(sid);
 }
 
+fn wake_signal() -> &'static tokio::sync::Notify {
+    static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    N.get_or_init(tokio::sync::Notify::new)
+}
+
+/// A board task was just queued: switch the sweep loop to the fast [`TICK`]
+/// so a deferred nudge is re-checked within 15 s, not [`IDLE_TICK`].
+pub fn wake() {
+    wake_signal().notify_one();
+}
+
+/// Next safety-tick period: fast only while something is still pending.
+fn tick_after(pending: bool) -> Duration {
+    if pending {
+        TICK
+    } else {
+        IDLE_TICK
+    }
+}
+
 /// Start the sweep loop. Returns the task handle (kept alive by the daemon).
 pub fn spawn(ctx: ServerCtx) -> tokio::task::JoinHandle<()> {
     let mut rx = ctx.events.subscribe();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(TICK);
-        tick.tick().await; // consume the immediate first tick
+        // A deadline, not a per-iteration sleep: unrelated bus traffic must
+        // not keep pushing the tick out. Start fast so boot-time leftovers
+        // are swept promptly.
+        let mut next = tokio::time::Instant::now() + TICK;
         loop {
             tokio::select! {
                 ev = rx.recv() => match ev {
-                    Ok(Event::SessionStatus { session_id, status, .. }) => match status {
-                        SessionStatus::Working => {
-                            note_working(&session_id);
-                            sweep_session(&ctx, &session_id).await;
+                    Ok(Event::SessionStatus { session_id, status, .. }) => {
+                        let pending = match status {
+                            SessionStatus::Working => {
+                                note_working(&session_id);
+                                sweep_session(&ctx, &session_id).await
+                            }
+                            SessionStatus::Idle | SessionStatus::Running => {
+                                sweep_session(&ctx, &session_id).await
+                            }
+                            SessionStatus::Exited | SessionStatus::Reconnectable => {
+                                forget(&session_id);
+                                false
+                            }
+                        };
+                        if pending {
+                            next = next.min(tokio::time::Instant::now() + TICK);
                         }
-                        SessionStatus::Idle | SessionStatus::Running => sweep_session(&ctx, &session_id).await,
-                        SessionStatus::Exited | SessionStatus::Reconnectable => forget(&session_id),
-                    },
+                    }
                     Ok(Event::SessionRemoved { session_id, .. }) => forget(&session_id),
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },
-                _ = tick.tick() => sweep_all(&ctx).await,
+                _ = wake_signal().notified() => {
+                    next = next.min(tokio::time::Instant::now() + TICK);
+                }
+                _ = tokio::time::sleep_until(next) => {
+                    let pending = sweep_all(&ctx).await;
+                    next = tokio::time::Instant::now() + tick_after(pending);
+                }
             }
         }
     })
 }
 
-/// Deliver every due nudge across all sessions.
-pub async fn sweep_all(ctx: &ServerCtx) {
+/// Deliver every due nudge across all sessions. Returns whether any nudge was
+/// pending (so the caller keeps the fast tick for deferred ones).
+pub async fn sweep_all(ctx: &ServerCtx) -> bool {
     let repo = ActivityRepo::new(ctx.pool.clone());
     let pending = match repo.pending_nudges(None).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("nudge sweep: query failed: {e}");
-            return;
+            return true; // keep retrying at the fast cadence
         }
     };
+    let any = !pending.is_empty();
     let mut sessions: Vec<Id> = pending.iter().map(|p| p.session_id.clone()).collect();
     sessions.sort();
     sessions.dedup();
     for sid in sessions {
         sweep_session(ctx, &sid).await;
     }
+    any
 }
 
-/// Deliver the due nudges of one session (if any).
-pub async fn sweep_session(ctx: &ServerCtx, session_id: &Id) {
+/// Deliver the due nudges of one session (if any). Returns whether the
+/// session had pending nudges when the sweep started (conservative: one extra
+/// fast tick after the last delivery, never a missed deferred nudge).
+pub async fn sweep_session(ctx: &ServerCtx, session_id: &Id) -> bool {
     let repo = ActivityRepo::new(ctx.pool.clone());
     let pending = match repo.pending_nudges(Some(session_id)).await {
         Ok(p) if !p.is_empty() => p,
-        Ok(_) => return,
+        Ok(_) => return false,
         Err(e) => {
             tracing::warn!(session = %session_id, "nudge sweep: query failed: {e}");
-            return;
+            return true;
         }
     };
+    deliver(ctx, &repo, session_id, &pending).await;
+    true
+}
+
+/// The gated delivery of `pending` (all of one session's pending nudges).
+async fn deliver(ctx: &ServerCtx, repo: &ActivityRepo, session_id: &Id, pending: &[PendingNudge]) {
     let Ok(session) = ctx.manager.get(session_id).await else {
         return;
     };
@@ -379,6 +434,13 @@ pub fn strip_ansi(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safety_tick_is_fast_only_while_pending() {
+        assert_eq!(tick_after(true), TICK);
+        assert_eq!(tick_after(false), IDLE_TICK);
+        assert!(IDLE_TICK >= TICK * 10);
+    }
 
     #[test]
     fn nudge_text_is_the_contract_line() {

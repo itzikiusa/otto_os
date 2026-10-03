@@ -8,11 +8,18 @@ import * as browserApi from '../api/browser';
 import { nativeBrowserAvailable } from '../nativeBrowser';
 import { browserLive } from './browserLive.svelte';
 import type { BrowserAnnotation, BrowserAskReq, BrowserPage, BrowserTab, OttoEvent } from '../api/types';
+import { announceModule } from '../lazyModule';
 
 /** localStorage key for the agent session the Browser page's dock is attached
  *  to — per workspace, so switching workspaces re-attaches to that
  *  workspace's own browser agent (or none). */
 const agentKey = (wsId: string) => `otto_browser_agent_${wsId}`;
+
+/** How long a per-tab cached reader page is shown without revalidating —
+ *  matches the daemon's own page-cache TTL. */
+const PAGE_CACHE_FRESH_MS = 60_000;
+/** Most reader pages the per-tab cache keeps (markdown only, no html). */
+const PAGE_CACHE_MAX = 16;
 
 function lsGet(key: string): string | null {
   try {
@@ -128,7 +135,20 @@ class BrowserStore {
     // A live tab that's actually rendered natively skips the reader fetch —
     // off Tauri it still falls back to reader (isNativeLive is false there).
     if (tab && !isNativeLive(tab)) {
-      void this.loadPage(tab.url);
+      // Switching back to a tab is instant from the per-tab page cache; only
+      // an entry older than PAGE_CACHE_FRESH_MS revalidates (in the
+      // background — the cached page stays on screen meanwhile).
+      const hit = this.cachedPage(tab.url);
+      if (hit) {
+        this.pageSeq++;
+        this.page = hit.page;
+        this.pageError = '';
+        this.loadingPage = false;
+        void this.loadAnnotations(tab.url);
+        if (Date.now() - hit.at > PAGE_CACHE_FRESH_MS) void this.loadPage(tab.url, { background: true });
+      } else {
+        void this.loadPage(tab.url);
+      }
     } else {
       this.pageSeq++;
       this.page = null;
@@ -223,24 +243,52 @@ class BrowserStore {
     this.tabs = this.tabs.map((t) => (t.id === patched.id ? patched : t));
   }
 
-  async loadPage(url: string): Promise<void> {
+  /** Per-tab reader page cache, keyed `ws\nurl`, newest last (Map order) and
+   *  capped at PAGE_CACHE_MAX entries — re-selecting a tab doesn't re-render. */
+  private pageCache = new Map<string, { page: BrowserPage; at: number }>();
+
+  private cachedPage(url: string): { page: BrowserPage; at: number } | undefined {
+    return this.pageCache.get(`${this.wsId}\n${url}`);
+  }
+
+  private rememberPage(ws: string, url: string, page: BrowserPage): void {
+    const key = `${ws}\n${url}`;
+    this.pageCache.delete(key);
+    this.pageCache.set(key, { page, at: Date.now() });
+    while (this.pageCache.size > PAGE_CACHE_MAX) {
+      const oldest = this.pageCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.pageCache.delete(oldest);
+    }
+  }
+
+  /** Fetch `url` into the reader. `fresh` bypasses both the per-tab cache and
+   *  the daemon's one-minute page cache (Retry); `background` keeps the page
+   *  that's on screen (no spinner, no error swap) while revalidating. */
+  async loadPage(url: string, opts: { fresh?: boolean; background?: boolean } = {}): Promise<void> {
     const mine = ++this.pageSeq;
     const ws = this.wsId;
     const current = () => mine === this.pageSeq && ws === this.wsId;
-    this.loadingPage = true;
-    this.pageError = '';
+    if (!opts.background) {
+      this.loadingPage = true;
+      this.pageError = '';
+    }
     try {
-      const page = await browserApi.getPage(ws, url);
-      const annotations = await browserApi.listAnnotations(ws, url).catch(() => [] as BrowserAnnotation[]);
+      // Page + annotations in parallel — they're independent reads.
+      const [page, annotations] = await Promise.all([
+        browserApi.getPage(ws, url, { fresh: opts.fresh }),
+        browserApi.listAnnotations(ws, url).catch(() => [] as BrowserAnnotation[]),
+      ]);
+      this.rememberPage(ws, url, page);
       if (!current()) return;
       this.page = page;
       this.annotations = annotations;
     } catch (e) {
-      if (!current()) return;
+      if (!current() || opts.background) return;
       this.page = null;
       this.pageError = e instanceof Error ? e.message : 'Failed to load page';
     } finally {
-      if (current()) this.loadingPage = false;
+      if (current() && !opts.background) this.loadingPage = false;
     }
   }
 
@@ -357,3 +405,6 @@ class BrowserStore {
 }
 
 export const browser = new BrowserStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf H1): let it see this store
+// however it was first imported.
+announceModule('browser', browser);

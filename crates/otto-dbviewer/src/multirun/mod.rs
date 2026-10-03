@@ -317,6 +317,13 @@ pub struct MultiRunJobView {
     pub summary: MultiRunSummary,
     pub targets: Vec<PlannedTarget>,
     pub items: Vec<MultiRunItemView>,
+    /// Change counter: pass it back as `?since=` to get only what changed.
+    #[serde(default)]
+    pub seq: u64,
+    /// `items` holds only the runs changed after `since` and `targets` is
+    /// empty — merge into the previous view by `index`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
 }
 
 /// `GET /db/multi-runs` — the caller's recent multi-runs (no items).

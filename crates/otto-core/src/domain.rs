@@ -180,7 +180,7 @@ pub struct Session {
 /// **foreground** session: one listed in the sidebar's "Agents" group.
 ///
 /// THIS ARRAY IS THE SINGLE SOURCE OF TRUTH. The UI mirror
-/// (`BACKGROUND_SOURCES` in `ui/src/lib/stores/workspace.svelte.ts`) must be
+/// (`BACKGROUND_SOURCES` in `ui/src/lib/stores/sessionBuckets.ts`) must be
 /// kept byte-identical, and every engine that stamps a `meta.source` on the
 /// sessions it owns must list that source here — otherwise its sessions render
 /// as foreground agents AND become durable (exempt from volume cleanup).

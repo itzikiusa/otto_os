@@ -290,6 +290,32 @@ pub trait Driver: Send + Sync {
         self.export_to_writer(cfg, statement, node, format, max_rows, w)
             .await
     }
+
+    /// Bulk catalog read for the relationship diagram / DB Assistant schema:
+    /// the whole schema's tables, columns (PK/FK flags) and FK edges in a few
+    /// set-based catalog queries instead of one `object_detail` per table.
+    ///
+    /// `Ok(None)` (the default) means "not supported" — the service then falls
+    /// back to the per-object walk. Implementations return the graph with
+    /// `truncated` set when more than `max_tables` objects exist, and do NOT
+    /// filter edges by access (the service does). `GraphTable::id` must be the
+    /// same [`NodePath`] id the lazy tree hands out for that object.
+    async fn schema_graph_bulk(
+        &self,
+        _cfg: &ResolvedConfig,
+        _schema: &str,
+        _max_tables: usize,
+    ) -> Result<Option<crate::types::SchemaGraph>> {
+        Ok(None)
+    }
+
+    /// Close cached client handles (pools, clients) unused for longer than
+    /// `idle`. Called by the service's periodic reaper so an abandoned
+    /// connection stops heartbeating (Mongo) or holding sockets. Returns how
+    /// many handles were evicted. Default: nothing cached, nothing to do.
+    async fn evict_idle(&self, _idle: std::time::Duration) -> usize {
+        0
+    }
 }
 
 #[cfg(test)]

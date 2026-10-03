@@ -68,6 +68,21 @@ export interface WsTermPauseFrame {
 export interface WsTermCreditFrame {
   type: 'credit';
   window: number;
+  /** Client → server only (perf 01 N3): send snapshots in the binary form
+   *  (`WsTermBinarySnapshotHeader` + one binary frame). Absent = base64 JSON. */
+  binary_snapshots?: boolean;
+}
+
+/** Server → client `/ws/term` (perf 01 N3), only to a client that offered
+ *  `binary_snapshots`: a `scrollback` snapshot whose bytes follow as the very
+ *  NEXT frame — one binary frame of `len` bytes. That frame is the snapshot,
+ *  not live output: it is never counted against the credit window. An empty
+ *  snapshot still uses the JSON form (`data: ""`). */
+export interface WsTermBinarySnapshotHeader {
+  type: 'scrollback';
+  epoch: number;
+  binary: true;
+  len: number;
 }
 
 /** Client → server: cumulative credited binary bytes consumed (parsed or
@@ -88,6 +103,23 @@ export type WsTermFlowFrame = WsTermPauseFrame | WsTermCreditFrame | WsTermAckFr
 export interface WsTermResyncFrame {
   type: 'resync';
   lines: number;
+  /** The client's grid (perf F1): with both set, a viewer that may resize
+   *  has the PTY + emulator resized to it BEFORE the snapshot is captured. */
+  cols?: number;
+  rows?: number;
+}
+
+/** Client → server `/ws/term` snapshot request (docs/contracts/ws.md §1):
+ *  up to `lines` rows of history + the current screen, answered with one
+ *  `scrollback`. Its `lines` is also the depth of every later server-pushed
+ *  snapshot on this socket. Sent on open WITH the measured grid (`cols` /
+ *  `rows`, perf F1) so a viewer that may resize gets the snapshot already at
+ *  its own grid — one snapshot per attach, no follow-up compact. */
+export interface WsTermScrollbackRequestFrame {
+  type: 'scrollback';
+  lines: number;
+  cols?: number;
+  rows?: number;
 }
 
 /** Client → server `/ws/term` latency probe (docs/contracts/ws.md §1
@@ -400,6 +432,17 @@ export interface McpInvokeResp {
   is_error?: boolean | null;
   /** The dry-run preview when `dry_run`. */
   preview?: unknown;
+  /** `POST /mcp/otto-tools/invoke` of an `otto.ui_*` tool from a session
+   *  credential only: that session's UI-control grant after the call. */
+  ui_granted?: boolean;
+}
+
+/** `POST /mcp/tool-calls` — the stdio bridge's own audit append (204). */
+export interface McpToolCallAuditReq {
+  tool: string;
+  arguments?: unknown;
+  ok: boolean;
+  rows?: number | null;
 }
 
 export interface McpAllowlistEntry {
@@ -555,6 +598,12 @@ export interface McpCallLogRow {
   created_at: string;
 }
 
+/** `GET /mcp/approvals/count?status=` — the badge number, with the same
+ *  visibility as `GET /mcp/approvals` but uncapped and without the rows. */
+export interface McpApprovalCount {
+  count: number;
+}
+
 /** Filters for `GET /mcp/audit`. */
 export interface McpAuditQuery {
   server_id?: string;
@@ -618,6 +667,16 @@ export interface McpOttoServerStatus {
   require_approval_dangerous?: boolean;
   /** Bare names of the mutating tools that skip the per-call approval. */
   approval_exempt_tools?: string[];
+}
+
+/** `GET /mcp/otto-server/enabled` (CP24a) — the light read behind every agent
+ *  session's `tools/list`: just the enabled full `otto.*` names, the master
+ *  switch, and whether the CALLING session holds the UI-control grant. */
+export interface McpOttoServerEnabled {
+  enabled: string[];
+  outward_enabled: boolean;
+  /** False for a credential not bound to an Otto session. */
+  ui_granted: boolean;
 }
 
 // --- MCP auto-approve rules (`/mcp/auto-approve`) ---------------------------
@@ -1247,6 +1306,24 @@ export type OttoEvent =
       session_id: Id | null;
       request_id: Id | null;
     }
+  | {
+      type: 'api_run_progress';
+      workspace_id: Id;
+      automation_id: Id;
+      run_id: Id;
+      status: ApiAutomationRun['status'];
+      steps_done: number;
+    }
+  | {
+      /** A saved request / collection / environment / automation changed —
+       *  by the UI, an agent's MCP tool or another user (perf2 N4). `id` is
+       *  null for a bulk change; an import emits one event per row. */
+      type: 'api_client_changed';
+      workspace_id: Id;
+      kind: 'request' | 'collection' | 'environment' | 'automation';
+      id: Id | null;
+      deleted: boolean;
+    }
   | { type: 'tasks_updated'; workspace_id: Id; session_id: Id; tasks: AgentTask[] }
   | { type: 'swarm_run_updated'; workspace_id: Id; swarm_id: Id; run: Record<string, unknown> }
   | {
@@ -1341,6 +1418,9 @@ export type OttoEvent =
       status: string;
       node_id?: Id | null;
       rev?: number;
+      /** The changed node's SUMMARY — the `/progress` node shape (`logs: []` +
+       *  `log_count`, `output: null` + `has_output`, `detail_version`); applied
+       *  in place on a contiguous `rev` (perf W5). */
       node?: NodeRunState | null;
       nodes_done?: number;
       nodes_total?: number;
@@ -1379,6 +1459,12 @@ export type OttoEvent =
       work_item_id: string;
       status: string;
       risk_score: number;
+      done_score?: number;
+      /** Badges after this recompute — present on current daemons; lets the
+       *  store patch the summary/list row instead of refetching. */
+      badges?: string[];
+      /** Evidence count after this recompute. */
+      artifact_count?: number;
     }
   | {
       /** A Mission Control work item was created or its normalized status
@@ -1427,14 +1513,17 @@ export type OttoEvent =
     }
   | {
       /** A message was appended to an agent room (agent via the room MCP tools,
-       *  or the user over REST). Ids only — clients re-fetch the room's messages
-       *  after their cursor. */
+       *  or the user over REST). Carries the whole message (`text`,
+       *  `created_at`), so an open room appends it with no GET; a client
+       *  re-reads the room only after a gap (reconnect / lag). */
       type: 'agent_room_message';
       workspace_id: Id;
       room_id: Id;
       message_id: Id;
       author_kind: string;
       author_id: Id;
+      text: string;
+      created_at: string;
     }
   | {
       /** A Kubernetes cluster row was created/updated/deleted — the Kubernetes
@@ -1663,6 +1752,11 @@ export type OttoEvent =
       type: 'repo_status_changed';
       workspace_id: Id;
       repo_id: Id;
+      /** Repo-relative worktree paths (files or directories) the change burst
+       *  touched, so an open diff re-reads only for its own file. Absent =
+       *  unknown (index/HEAD/branch-ref move, a rescan, > 64 paths): assume
+       *  anything changed. Present and empty: only remote refs/tags moved. */
+      paths?: string[];
     }
   | {
       /** A browser tab was created or navigated (a reader-mode navigation
@@ -1794,10 +1888,12 @@ export type OttoEvent =
     }
   | {
       /** The caller's notice list changed without a new notice (read,
-       *  read-all, dismiss, clear) — owner-only; refetch `/notifications`. */
+       *  read-all, dismiss, clear; one per bulk read / dismiss batch) —
+       *  owner-only; refetch `/notifications`. */
       type: 'notifications_changed';
       user_id: Id;
-    };
+    }
+  | WorkbenchDocChangedEvent;
 
 // ---------------------------------------------------------------------------
 // Notifications (notification center)
@@ -1829,6 +1925,13 @@ export interface Notice {
   body: string;
   source_key: string | null;
   action: NoticeAction | null;
+}
+
+/** Reply of `POST /notifications/read` / `POST /notifications/dismiss`
+ *  (`{ids}` ≤ 500): rows actually changed — foreign, global-for-non-root,
+ *  unknown and already-read ids are skipped. */
+export interface BulkNoticeResult {
+  changed: number;
 }
 
 export interface NotificationSettings {
@@ -2842,6 +2945,12 @@ export interface RepoStatusResp {
   /** Operation currently in progress (from the git dir's state files); absent/
    *  undefined when none. Conflicted files can exist without one (stash pop). */
   op_in_progress?: GitOpInProgress | null;
+  /** Total untracked paths git reported — present only when the untracked
+   *  rows in `changes` were capped (see `untracked_truncated`). */
+  untracked_total?: number | null;
+  /** True when `changes` carries only the first 5,000 untracked rows (tracked,
+   *  staged and conflicted rows are never capped). Absent/false otherwise. */
+  untracked_truncated?: boolean;
 }
 
 /** `POST /repos/{id}/pull` response: the fresh status plus an optional human
@@ -3481,9 +3590,30 @@ export interface ProofPack {
   waived_by?: string | null;
   waived_reason?: string | null;
   waived_at?: string | null;
+  /** Set by the opt-in stale-session archive; cleared when the pack changes. */
+  archived_at?: string | null;
   created_by: Id;
   created_at: string;
   updated_at: string;
+}
+
+/** `POST /workspaces/{id}/proof-packs/archive-sessions` body (opt-in, ws admin). */
+export interface ProofArchiveSessionsReq {
+  /** Default 30, minimum 7. */
+  older_than_days?: number;
+  /** Dry run (count only) unless true. */
+  apply?: boolean;
+}
+
+/** `POST /workspaces/{id}/proof-packs/archive-sessions` result. Nothing is deleted. */
+export interface ProofArchiveSessionsResp {
+  applied: boolean;
+  older_than_days: number;
+  cutoff: string;
+  /** Packs that match (stale, session, no evidence, not waived/archived). */
+  matched: number;
+  /** Packs stamped `archived_at` by this call (0 on a dry run). */
+  archived: number;
 }
 
 export interface ProofArtifact {
@@ -4808,6 +4938,28 @@ export interface ApiOverviewRequest {
   /** True when the request was created or edited through an agent session. */
   agent_authored: boolean;
   updated_at: string;
+  /** Sidebar order inside its collection (`requests/summaries`; absent from
+   *  daemons older than perf2 — the UI falls back to the list order). */
+  position?: number;
+}
+
+/** A saved request as the API page's tree, search, pickers and ⌘K hold it:
+ *  the `GET …/api-client/requests/summaries` projection (no body, headers,
+ *  scripts, docs or files) stamped with the workspace it was loaded for. The
+ *  full `ApiRequest` is fetched when a request is opened (perf2 N1). */
+export type ApiRequestItem = ApiOverviewRequest & { workspace_id: Id; position: number };
+
+/** `GET …/api-client/storage` — what this workspace's API history and
+ *  automation runs occupy (cached ≤60 s daemon-side). Retention stays opt-in;
+ *  the History list shows this and offers presets (perf2 N2). */
+export interface ApiClientStorage {
+  history_rows: number;
+  history_bytes: number;
+  run_rows: number;
+  step_rows: number;
+  run_bytes: number;
+  /** Most finished runs any one automation holds. */
+  max_runs_per_automation: number;
 }
 
 export interface ApiOverviewEnvironment {
@@ -7602,7 +7754,8 @@ export interface CaptureSnipResp {
   snip?: Snip | null;
 }
 
-/** `POST /snips` body — base64 PNG upload (also the "annotate an image" path). */
+/** `POST /snips` legacy JSON body — base64 PNG upload. Current clients send a
+ *  raw `image/png` body instead (no base64 inflation); both are accepted. */
 export interface UploadSnipReq {
   data_b64: string;
   filename?: string;
@@ -8204,9 +8357,21 @@ export interface PersonalAgentActivityApproval {
 
 export interface PersonalAgentActivity {
   now: { run: PersonalAgentRun | null; session_status: string | null };
+  /** Newest first. With `?after_seq=N`, only entries with `seq > N`. */
   items: PersonalAgentActivityItem[];
   approvals: PersonalAgentActivityApproval[];
-  runs: PersonalAgentRun[];
+  /** `null` when asked with `?runs=false` (keep the ones you have). Run
+   *  `summary` is clipped to 280 chars here. */
+  runs: PersonalAgentRun[] | null;
+  /** Cursor: the newest ring `seq` the answer covers (pass as `after_seq`). */
+  seq?: number;
+  /** The daemon boot id the cursor belongs to (pass back as `epoch`). The
+   *  ring and its `seq` restart with the daemon; a different epoch means the
+   *  cursor and items are from a previous process. */
+  epoch?: string;
+  /** The `after_seq`/`epoch` sent were stale (previous daemon process): this
+   *  is a full answer — replace the items and the cursor. */
+  reset?: boolean;
 }
 
 export type PersonalAgentMemorySource =
@@ -8317,6 +8482,26 @@ export interface AwsStatus {
   version: string | null;
   path: string | null;
   install: InstallJob;
+  /** Live counters of the daemon-wide `aws` CLI child cap. */
+  cli?: AwsCliStats;
+}
+
+/** `GET /aws/status` → `cli`: the daemon-wide `aws` child cap, live. */
+export interface AwsCliStats {
+  running: number;
+  queued: number;
+  spawned_total: number;
+  max_concurrent: number;
+  /** Of `max_concurrent`, the share background probes / fan-outs may hold. */
+  background_max?: number;
+  /** Nearest-rank percentiles (ms) over the last `samples` (≤ 256) calls. */
+  wait_ms_p50?: number;
+  wait_ms_p95?: number;
+  call_ms_p50?: number;
+  call_ms_p95?: number;
+  samples?: number;
+  /** Calls signed in-process (logs tail, query status, EC2 lists) — no child. */
+  native_total?: number;
 }
 
 /** One profile parsed from `~/.aws/config` / `~/.aws/credentials` — never key values. */
@@ -8961,6 +9146,10 @@ export interface K8sRow {
   ready?: string | null;
   restarts?: number | null;
   age_seconds: number;
+  /** perf R1: unix seconds the age counts from (creationTimestamp; an
+   *  event's last-seen time). Render Age as `now - created_at` (`rowAge`) —
+   *  `age_seconds` is frozen at list time and a 304 keeps the old rows. */
+  created_at?: number | null;
   node?: string | null;
   ip?: string | null;
   /** Millicores (metrics-server); null when unavailable. Format client-side. */
@@ -9752,6 +9941,9 @@ export interface ApiAutomationRun {
   created_by: Id; status: 'running' | 'passed' | 'failed' | 'cancelled' | 'interrupted';
   created_at: string; finished_at: string | null; stop_on_failure: boolean;
   dataset_rows: number; snapshot: unknown; report: ApiRunResult; result_rows: number[]; result_ids: Id[]; error: string | null;
+  /** Run-LIST rows only: completed / passed step counts. List rows carry no
+   *  `report.steps` and no `snapshot` — fetch the run by id for those. */
+  steps_total?: number; steps_passed?: number;
 }
 
 /** Portable saved-data archive. Authentication secrets and live processes are excluded. */
@@ -10189,6 +10381,48 @@ export interface DesignPruneReport {
   artifacts_scanned: number;
   versions: Id[];
   blobs: string[];
+  /** Bytes the removed blobs held (dry run: would free). */
+  reclaimable_bytes: number;
+  reclaimable_blobs: number;
+}
+
+/** One daily scheduled retention pass (`GET /design/admin/storage`). */
+export interface DesignScheduledPruneRun {
+  at: string;
+  versions_removed: number;
+  blobs_removed: number;
+}
+
+/** `GET /design/admin/storage` — the Design Hall blob-store gauge. */
+export interface DesignStorageReport {
+  /** Files / bytes on disk under `<data>/design/blobs` (after dedupe). */
+  blob_count: number;
+  blob_bytes: number;
+  /** Version rows and the bytes they reference (before dedupe). */
+  version_count: number;
+  version_bytes: number;
+  /** Auto-tidy is in effect: the Settings toggle, unless the env override forces it. */
+  auto_prune: boolean;
+  /** The persisted Settings → Design Hall toggle (default false — opt-in). */
+  auto_tidy: boolean;
+  /** `OTTO_DESIGN_AUTO_PRUNE` override when set (`false` = hard off, beats the toggle). */
+  auto_tidy_forced: boolean | null;
+  /** Only autosaves older than this are candidates (default 7 days). */
+  min_age_secs: number;
+  /** What a pass would reclaim right now (dry run). */
+  reclaimable: { versions: number; blobs: number; bytes: number };
+  last_prune: DesignScheduledPruneRun | null;
+}
+
+/** `PUT /design/admin/auto-tidy` — returns the refreshed `DesignStorageReport`. */
+export interface DesignAutoTidyReq {
+  enabled: boolean;
+}
+
+/** `POST /design/artifacts/{id}/versions/{v}/restore`. */
+export interface DesignRestoreReq {
+  base_version?: Id;
+  message?: string;
 }
 
 export interface CreateDesignProjectReq {
@@ -11260,4 +11494,176 @@ export interface K8sPodActionInput {
   body_template?: string | null;
 }
 
+// ── Session list query (perf: Agents page, F1/F3) ────────────────────────────
+/** Query of `GET /workspaces/{id}/sessions` (#17) and `GET /sessions` (#17b).
+ *  Every field narrows in SQL. Comma lists are sent comma-joined. */
+export interface SessionListQuery {
+  archived?: boolean;
+  kind?: 'agent' | 'connection';
+  /** Exact `meta.source`; `'none'` = no string source. */
+  source?: string;
+  status?: SessionStatus;
+  /** Newest N matching rows (1–1000), still returned oldest-first. */
+  limit?: number;
+  /** RFC 3339 cursor: rows created strictly before it. */
+  before?: string;
+  /** `true` = sidebar rows (connections + foreground agents + `with_sources`);
+   *  `false` = background agents only. */
+  foreground?: boolean;
+  /** Background sources to keep with `foreground=true` (≤ 64), e.g. `channel`. */
+  with_sources?: string[];
+  /** Fetch-by-id (≤ 64). On #17b it also lifts the `archived=false` default. */
+  ids?: Id[];
+}
+
 export type * from './maintenance-types';
+
+// --- perf K8s (UI half of review K2/K6) ---------------------------------------
+// Declaration-merged into the interfaces above so the additions stay in one block.
+
+export interface K8sResourcesResp {
+  /** Opaque version of this list (contract K2): also the quoted `ETag`; send it
+   *  back as `If-None-Match` and an unchanged list answers `304` (no body).
+   *  Optional so an older daemon's body still type-checks. */
+  version?: string;
+}
+
+/** `GET /k8s/monitor/fleet/series/batch?metrics=a,b,…` (≤ 8 metrics): one
+ *  `K8sFleetSeries` per requested metric, keyed by metric id. */
+export interface K8sFleetSeriesBatch {
+  series: Partial<Record<K8sFleetMetric, K8sFleetSeries>>;
+}
+
+// --- Workbench (scratch files with full history) -------------------------------
+// Mirrors docs/contracts/api.md "Workbench" + crates/otto-state/src/workbench.rs.
+// Docs are per-user inside a workspace; every save lands in an append-only
+// revision history that is only removed by an explicit permanent delete.
+
+/** Revision kinds: `create` (first content), `auto` (an autosave burst,
+ *  coalesced to one revision per ~60 s), `checkpoint` (⌘S save-now — always a
+ *  new revision), `restore` (content restored from an older revision),
+ *  `rename`-free: metadata changes never create revisions. */
+export type WorkbenchRevisionKind = 'create' | 'auto' | 'checkpoint' | 'restore';
+
+/** List row / metadata (no content). */
+export interface WorkbenchDoc {
+  id: Id;
+  workspace_id: Id;
+  owner_id: Id;
+  name: string;
+  /** Language id (cm-langs extension style: `json`, `md`, `sql`, `html`,
+   *  `mermaid`, `d2`, `csv`, `yaml`, `toml`, `xml`, `sh`, `py`, `js`, `ts`,
+   *  `txt`, `image`, …). `auto` = let the UI detect it from name + content. */
+  language: string;
+  pinned: boolean;
+  /** Optional folder path (`/`-separated, no leading slash); `''` = root. */
+  folder: string;
+  tags: string[];
+  /** UTF-8 byte length of the current content. */
+  size: number;
+  /** Seq of the newest revision (1-based, monotonically increasing). */
+  rev: number;
+  /** sha256 hex of the current content. */
+  content_hash: string;
+  created_at: string;
+  updated_at: string;
+  /** Set while the doc is in the trash (soft-deleted); null otherwise. */
+  deleted_at: string | null;
+}
+
+/** `GET /workbench/docs/{id}` — metadata + current content. For an `image`
+ *  doc `content` is the asset id (see `WorkbenchAsset`). */
+export interface WorkbenchDocFull extends WorkbenchDoc {
+  content: string;
+}
+
+export interface WorkbenchCreateReq {
+  name: string;
+  language?: string;
+  content?: string;
+  folder?: string;
+  tags?: string[];
+  pinned?: boolean;
+}
+
+/** `PATCH /workbench/docs/{id}` — every field optional. `content` triggers a
+ *  revision (coalesced unless `checkpoint`); metadata never does. */
+export interface WorkbenchUpdateReq {
+  content?: string;
+  name?: string;
+  language?: string;
+  pinned?: boolean;
+  folder?: string;
+  tags?: string[];
+  /** Force a fresh revision (⌘S "save now") instead of coalescing. */
+  checkpoint?: boolean;
+  /** Opaque per-window id echoed in the WS event so a window can ignore its
+   *  own writes. */
+  client_id?: string;
+}
+
+export interface WorkbenchRevision {
+  seq: number;
+  kind: WorkbenchRevisionKind;
+  /** sha256 hex of this revision's content (content-addressed blob). */
+  content_hash: string;
+  size: number;
+  /** When the revision (burst) started. */
+  created_at: string;
+  /** Last write folded into this revision (== created_at unless coalesced). */
+  updated_at: string;
+  /** Number of saves coalesced into this revision (1 = a single save). */
+  saves: number;
+  /** For `restore`: the seq whose content was restored. */
+  restored_from?: number | null;
+}
+
+export interface WorkbenchRevisionDetail extends WorkbenchRevision {
+  doc_id: Id;
+  content: string;
+}
+
+export type WorkbenchDiffOp = 'eq' | 'add' | 'del';
+
+export interface WorkbenchDiffLine {
+  op: WorkbenchDiffOp;
+  text: string;
+  /** 1-based line numbers in the old / new text (absent on the other side). */
+  old_line?: number | null;
+  new_line?: number | null;
+}
+
+/** `GET /workbench/docs/{id}/diff?from=<seq>&to=<seq|current>` (line diff).
+ *  `to` defaults to the current content. */
+export interface WorkbenchDiff {
+  doc_id: Id;
+  from: number;
+  /** A seq, or `null` when diffed against the current content. */
+  to: number | null;
+  added: number;
+  removed: number;
+  lines: WorkbenchDiffLine[];
+}
+
+/** An uploaded binary (image) stored with the workbench: `POST
+ *  /workspaces/{ws}/workbench/assets` (raw body, image/* content type). */
+export interface WorkbenchAsset {
+  id: Id;
+  mime: string;
+  size: number;
+  sha256: string;
+  created_at: string;
+}
+
+/** WS: a workbench doc changed (owner-only delivery). Invalidation cue: refetch
+ *  the list and, if open and not self-originated, the doc. */
+export interface WorkbenchDocChangedEvent {
+  type: 'workbench_doc_changed';
+  workspace_id: Id;
+  user_id: Id;
+  doc_id: Id;
+  action: 'created' | 'updated' | 'trashed' | 'restored' | 'deleted';
+  rev: number;
+  updated_at: string;
+  client_id?: string | null;
+}

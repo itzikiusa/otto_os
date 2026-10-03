@@ -352,7 +352,10 @@ pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
         }
         let token = match repo.git_account_id.as_ref() {
             Some(aid) => match ctx.git_store.get_account(aid).await {
-                Ok(acc) => ctx.secrets.get(&acc.token_ref).ok().flatten(),
+                Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
+                    .await
+                    .ok()
+                    .flatten(),
                 Err(_) => None,
             },
             None => None,

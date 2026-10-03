@@ -9,12 +9,7 @@
   import { events } from '../lib/events.svelte';
   import { git } from '../lib/stores/git.svelte';
   import { router } from '../lib/router.svelte';
-
-  let now = $state(new Date());
-  $effect(() => {
-    const t = setInterval(() => (now = new Date()), 15_000);
-    return () => clearInterval(t);
-  });
+  import { nowMinute } from '../lib/stores/now.svelte';
 
   const live = $derived(events.state === 'connected');
 
@@ -24,8 +19,10 @@
     if (router.module !== 'agents') router.go('agents');
   }
 
+  // The shared clock's minute tick (skips while the window is hidden) — no
+  // interval of our own, and the label turns over on the minute.
   const clock = $derived(
-    now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    new Date(nowMinute()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
   );
 </script>
 

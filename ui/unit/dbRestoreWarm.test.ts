@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
+import * as resultBudgetMod from '../src/lib/stores/db-result-budget.ts';
 
 type Call = { method: string; path: string; lane: 'int' | 'bg' };
 
@@ -85,9 +86,11 @@ function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}
         forgetEditorStates: noop,
         hydrateEditorHistory: async () => {},
       },
-      '../../modules/database/grid-tab-state': { dropGridState: noop },
+      '../../modules/database/grid-tab-state': { dropGridState: noop, parkedEditCount: () => 0, releaseGridResult: noop },
+      './db-result-budget': resultBudgetMod,
       '../../modules/database/error-normalize': { normalizeDbError: (_e: unknown, msg: string) => ({ title: msg }) },
       './clipHistory.svelte': { clipHistory: { setGuard: noop } },
+      '../lazyModule': { announceModule: noop },
     },
     { localStorage, crypto: globalThis.crypto, performance: globalThis.performance, sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop } },
   );

@@ -69,19 +69,40 @@ case " $* " in
   *" api-resources "*)
     printf 'applications.argoproj.io\nrollouts.argoproj.io\n' ;;
   *" get namespaces "*) echo '{{"items":[{{"metadata":{{"name":"shop"}},"status":{{"phase":"Active"}}}},{{"metadata":{{"name":"other"}},"status":{{"phase":"Active"}}}}]}}' ;;
+  *" proxy "*"persistentvolumeclaims"*)
+    # The console's list gateway: served (by a python stub on the unix
+    # socket) only for clusters whose kubeconfig is gw-kube.yaml.
+    case "$*" in *gw-kube.yaml*) exec python3 "{proxy_py}" "$@" ;; esac
+    echo 'error: proxy not available in this test' >&2; exit 1 ;;
+  *" get pods -n bigfleet "*) cat "{big}" ;;
   *" get pods "*) cat "{fx}/pods.json" ;;
   *" get secrets "*) cat "{fx}/secret_list.json" ;;
   *" get deployments "*) cat "{fx}/deployments.json" ;;
   *" rollout restart "*) echo "deployment.apps/web restarted" ;;
   *" rollout status "*) echo "Waiting for deployment \"web\" rollout to finish: 1 of 3 updated replicas are available..." >&2; exit 1 ;;
+  *"/proxy/app-404"*)
+    echo 'Error from server (NotFound): the server could not find the requested resource' >&2; exit 1 ;;
+  *"/proxy/api-denied"*)
+    echo 'Error from server (Forbidden): pods "web" is forbidden: User "dev" cannot get resource "pods/proxy" in API group "" in the namespace "shop"' >&2; exit 1 ;;
+  *"/proxy/not-listening"*)
+    echo 'Error from server (ServiceUnavailable): error trying to reach service: dial tcp 10.0.0.1:9000: connect: connection refused' >&2; exit 1 ;;
   *) echo '{{}}' ;;
 esac
 "#,
             log = log.display(),
-            fx = fixtures.display()
+            fx = fixtures.display(),
+            big = dir.join("big_pods.json").display(),
+            proxy_py = dir.join("fake_proxy.py").display()
         );
         let path = dir.join("kubectl");
         std::fs::write(&path, script).unwrap();
+        std::fs::write(
+            dir.join("fake_proxy.py"),
+            FAKE_PROXY_PY
+                .replace("@FX@", &fixtures.display().to_string())
+                .replace("@LOG@", &dir.join("proxy.log").display().to_string()),
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -93,6 +114,49 @@ esac
         Fake { bin: dir, log }
     })
 }
+
+/// A `kubectl proxy --unix-socket=…` stand-in for the console's list
+/// gateway: pods of `shop` in two pages (`continue`), metrics-server pods,
+/// a k8s `Status` 404 for anything else; every request path is logged.
+const FAKE_PROXY_PY: &str = r#"
+import json, os, socketserver, sys, http.server, urllib.parse
+sock = next(a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--unix-socket="))
+pods = json.load(open("@FX@/pods.json"))
+metrics = json.load(open("@FX@/pod_metrics.json"))
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_GET(self):
+        with open("@LOG@", "a") as f:
+            f.write(self.path + chr(10))
+        path, _, q = self.path.partition("?")
+        params = urllib.parse.parse_qs(q)
+        status, body = 200, None
+        if path == "/api/v1/namespaces/shop/pods":
+            items = pods["items"]
+            if "continue" in params:
+                body = {"kind": "PodList", "metadata": {}, "items": items[3:]}
+            else:
+                body = {"kind": "PodList", "metadata": {"continue": "page-2"}, "items": items[:3]}
+        elif path == "/apis/metrics.k8s.io/v1beta1/namespaces/shop/pods":
+            body = metrics
+        else:
+            status, body = 404, {"kind": "Status", "status": "Failure", "reason": "NotFound", "code": 404}
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+    def log_message(self, *a):
+        pass
+class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+if os.path.exists(sock):
+    os.unlink(sock)
+srv = S(sock, H)
+print("Starting to serve on " + sock, flush=True)
+srv.serve_forever()
+"#;
 
 fn argv_log() -> Vec<String> {
     std::fs::read_to_string(&fake().log)
@@ -353,12 +417,20 @@ async fn call(
 }
 
 fn kubeconfig_file(ctx: &TestCtx) -> String {
-    let p = ctx.data_dir.path().join("user-kube.yaml");
+    kubeconfig_named(ctx, "user-kube.yaml")
+}
+
+fn kubeconfig_named(ctx: &TestCtx, name: &str) -> String {
+    let p = ctx.data_dir.path().join(name);
     std::fs::write(&p, "apiVersion: v1\nkind: Config\n").unwrap();
     p.to_string_lossy().to_string()
 }
 
 async fn create_cluster(ctx: &TestCtx, user: &User) -> serde_json::Value {
+    create_cluster_at(ctx, user, kubeconfig_file(ctx)).await
+}
+
+async fn create_cluster_at(ctx: &TestCtx, user: &User, kubeconfig: String) -> serde_json::Value {
     let (st, body, text) = call(
         ctx,
         user,
@@ -367,7 +439,7 @@ async fn create_cluster(ctx: &TestCtx, user: &User) -> serde_json::Value {
         Some(serde_json::json!({
             "name": "kind",
             "source": "kubeconfig",
-            "kubeconfig_path": kubeconfig_file(ctx),
+            "kubeconfig_path": kubeconfig,
             "context_name": "kind-kind",
             "default_namespace": "shop",
             "environment": "staging",
@@ -746,6 +818,175 @@ async fn resources_pods_are_normalised_and_merged_with_metrics() {
     )
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+/// perf R1 — a REAL conditional GET (the e2e one is mocked): the second
+/// list is a cache MISS (a fresh kubectl run, rows normalised ≥ 1 s later so
+/// every `age_seconds` differs — the bug that kept the version moving) and
+/// must still answer `304` with no body for the `If-None-Match` echo.
+#[tokio::test]
+async fn resources_list_is_304_for_an_unchanged_list_across_a_cache_miss() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let uri = format!("/k8s/clusters/{id}/resources?kind=pods&ns=shop");
+    let mine = format!(
+        "--kubeconfig {} --context kind-kind --request-timeout 20s get pods -o json -n shop",
+        c["kubeconfig_path"].as_str().unwrap()
+    );
+    let lists = || argv_log().iter().filter(|l| **l == mine).count();
+    let app = || {
+        otto_k8s::api_router::<TestCtx>()
+            .layer(Extension(AuthUser(user.clone())))
+            .with_state(ctx.clone())
+    };
+    let get = |inm: Option<String>| {
+        let mut req = Request::builder().method("GET").uri(uri.clone());
+        if let Some(v) = inm {
+            req = req.header("if-none-match", v);
+        }
+        app().oneshot(req.body(Body::empty()).unwrap())
+    };
+    let first = get(None).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let etag = first.headers()["etag"].to_str().unwrap().to_string();
+    let body: serde_json::Value =
+        serde_json::from_slice(&first.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(format!("\"{}\"", body["version"].as_str().unwrap()), etag);
+    let web = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "web-5d4c-abcde")
+        .unwrap();
+    assert!(web["created_at"].is_i64(), "{web}");
+    assert_eq!(lists(), 1);
+
+    // As a poll after the TTL would: drop the cached answer, let the clock
+    // move past a second, list again.
+    otto_k8s::list_cache::forget_cluster(id);
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let second = get(Some(etag.clone())).await.unwrap();
+    assert_eq!(lists(), 2, "the second request re-listed (no cache hit)");
+    assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(second.headers()["etag"].to_str().unwrap(), etag);
+    let bytes = second.into_body().collect().await.unwrap().to_bytes();
+    assert!(bytes.is_empty(), "304 carries no body");
+
+    // A stale tag still gets the full list.
+    let third = get(Some("\"0000000000000000\"".into())).await.unwrap();
+    assert_eq!(third.status(), StatusCode::OK);
+    assert_eq!(lists(), 2, "served from the cache inside the TTL");
+}
+
+/// perf R3 — while a console lists, the cluster's GET-only list gateway
+/// pages the collection straight off the API server (`limit` + `continue`):
+/// no `kubectl get -o json` per list, one proxy process reused across lists,
+/// and metrics through the same gateway.
+#[tokio::test]
+async fn resources_list_pages_through_the_list_gateway() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster_at(&ctx, &user, kubeconfig_named(&ctx, "gw-kube.yaml")).await;
+    let id = c["id"].as_str().unwrap();
+    let mine = format!("--kubeconfig {} ", c["kubeconfig_path"].as_str().unwrap());
+    let proxy_log = || {
+        std::fs::read_to_string(fake().bin.join("proxy.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let pages_before = proxy_log()
+        .iter()
+        .filter(|l| l.starts_with("/api/v1/namespaces/shop/pods?"))
+        .count();
+    for round in 0..2 {
+        let (st, body, t) = call(
+            &ctx,
+            &user,
+            "GET",
+            &format!("/k8s/clusters/{id}/resources?kind=pods&ns=shop"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{t}");
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 7, "both pages merged: {body}");
+        assert_eq!(body["has_metrics"], true);
+        let web = items
+            .iter()
+            .find(|r| r["name"] == "web-5d4c-abcde")
+            .unwrap();
+        assert_eq!(web["cpu"], 252, "metrics via the gateway");
+        assert_eq!(web["ready"], "2/2");
+        if round == 0 {
+            otto_k8s::list_cache::forget_cluster(id);
+        }
+    }
+    let mine_lines: Vec<String> = argv_log()
+        .into_iter()
+        .filter(|l| l.contains(&mine))
+        .collect();
+    assert_eq!(
+        count_lines(&mine_lines, " proxy "),
+        1,
+        "one gateway, reused: {mine_lines:#?}"
+    );
+    assert_eq!(
+        count_lines(&mine_lines, " get pods "),
+        0,
+        "no kubectl list: {mine_lines:#?}"
+    );
+    assert_eq!(
+        count_lines(&mine_lines, "metrics.k8s.io/v1beta1/namespaces"),
+        0,
+        "{mine_lines:#?}"
+    );
+    let log = proxy_log();
+    let pages: Vec<&String> = log
+        .iter()
+        .filter(|l| l.starts_with("/api/v1/namespaces/shop/pods?"))
+        .collect();
+    assert_eq!(pages.len() - pages_before, 4, "2 lists × 2 pages: {log:#?}");
+    assert!(log
+        .iter()
+        .any(|l| l == "/api/v1/namespaces/shop/pods?limit=500"));
+    assert!(log
+        .iter()
+        .any(|l| l == "/api/v1/namespaces/shop/pods?limit=500&continue=page-2"));
+    assert!(otto_k8s::list_gateway::running() >= 1);
+}
+
+/// `GET …/metrics?ns=&pod=` asks metrics-server for that ONE pod.
+#[tokio::test]
+async fn metrics_for_one_pod_hits_the_single_pod_path() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let (st, body, t) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/metrics?ns=shop&pod=web-5d4c-abcde"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(body["available"], true, "{body}");
+    assert!(argv_log().iter().any(|l| l.contains(&format!(
+        "--kubeconfig {} ",
+        c["kubeconfig_path"].as_str().unwrap()
+    )) && l
+        .ends_with("get --raw /apis/metrics.k8s.io/v1beta1/namespaces/shop/pods/web-5d4c-abcde")));
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/metrics?ns=shop&pod=..%2F..%2Fsecrets"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -1221,6 +1462,204 @@ async fn monitor_run_now_sweeps_pods_and_writes_samples() {
         .filter(|l| l.contains("\"kind\":\"churn\"") || l.contains("\"kind\":\"restart\""))
         .count();
     assert_eq!(churn, 0);
+}
+
+/// `n` synthetic running pods in namespace `bigfleet`, 20 per Deployment.
+fn big_pods_json(n: usize) -> String {
+    let items: Vec<serde_json::Value> = (0..n)
+        .map(|i| {
+            let w = i / 20;
+            serde_json::json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {
+                    "name": format!("api-{w:03}-5d4c-{i:05}"), "namespace": "bigfleet",
+                    "uid": format!("u-{i}"), "resourceVersion": format!("{}", 1000 + i),
+                    "creationTimestamp": "2026-09-01T10:00:00Z",
+                    "labels": { "app": format!("api-{w:03}"), "pod-template-hash": "5d4c" },
+                    "ownerReferences": [{ "kind": "ReplicaSet", "name": format!("api-{w:03}-5d4c"), "controller": true }]
+                },
+                "spec": {
+                    "containers": [{ "name": "api", "image": "registry/api:1.0.0",
+                                     "ports": [{ "containerPort": 9000 }] }],
+                    "nodeName": format!("ip-10-0-{}-5", i % 50)
+                },
+                "status": {
+                    "phase": "Running", "podIP": format!("10.1.{}.{}", i / 250, i % 250),
+                    "containerStatuses": [{ "name": "api", "ready": true, "restartCount": 0,
+                                            "state": { "running": { "startedAt": "2026-09-01T10:00:05Z" } } }]
+                }
+            })
+        })
+        .collect();
+    serde_json::json!({ "items": items }).to_string()
+}
+
+/// perf R4 — the collector at 2,000 pods: kubectl spawns stay per-namespace
+/// (never per-pod), each pod's status is written once per cycle and a cycle
+/// fits a wall-time budget. (Probe scraping at scale is the pool test in
+/// `scrape.rs` plus the gateway; this bounds sweep → classify → write.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn monitor_cycle_at_2k_pods_fits_the_spawn_and_time_budget() {
+    const PODS: usize = 2_000;
+    let big = fake().bin.join("big_pods.json");
+    let tmp = fake()
+        .bin
+        .join(format!("big_pods.{}.tmp", otto_core::new_id()));
+    std::fs::write(&tmp, big_pods_json(PODS)).unwrap();
+    std::fs::rename(&tmp, &big).unwrap();
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let mine = format!("--kubeconfig {} ", c["kubeconfig_path"].as_str().unwrap());
+    let mut cfg = monitor_cfg(true, 60);
+    cfg["namespaces"] = serde_json::json!(["bigfleet"]);
+    cfg["exclusions"] = serde_json::json!([]);
+    cfg["probes"] = serde_json::json!([]);
+    let (st, _, text) = call(
+        &ctx,
+        &user,
+        "PUT",
+        &format!("/k8s/clusters/{id}/monitor"),
+        Some(cfg),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let spawns = || argv_log().iter().filter(|l| l.contains(&mine)).count();
+    let status_rows = || {
+        ctx.sink
+            .inserts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(t, _)| t == "k8s_samples")
+            .flat_map(|(_, nd)| nd.lines().map(str::to_string).collect::<Vec<_>>())
+            .filter(|l| l.contains("\"metric\":\"restarts_total\""))
+            .count()
+    };
+    let mut cycle_ms = Vec::new();
+    for cycle in 0..2 {
+        let before = spawns();
+        let rows_before = status_rows();
+        let t = std::time::Instant::now();
+        let (st, body, text) = call(
+            &ctx,
+            &user,
+            "POST",
+            &format!("/k8s/clusters/{id}/monitor/run"),
+            None,
+        )
+        .await;
+        let wall = t.elapsed();
+        assert_eq!(st, StatusCode::OK, "{text}");
+        assert_eq!(body["pods_seen"], PODS as i64, "{body}");
+        assert!(body["last_ok_at"].is_string(), "{body}");
+        let n = spawns() - before;
+        // One namespace: pods sweep + events + metrics-server + the gateway
+        // attempt (+ its fallbacks) — independent of the pod count.
+        assert!(
+            n <= 2 + 4,
+            "cycle {cycle}: {n} kubectl spawns for {PODS} pods"
+        );
+        // Run-now starts from fresh loop state, so each manual cycle is a
+        // status heartbeat: every pod's status once — never more.
+        assert_eq!(status_rows() - rows_before, PODS, "cycle {cycle}");
+        cycle_ms.push(wall.as_millis());
+    }
+    eprintln!("2k-pod cycle wall ms: {cycle_ms:?}");
+    // Budget (debug build, shared CI box): the release daemon is ~10x faster.
+    for ms in &cycle_ms {
+        assert!(*ms < 8_000, "2k-pod cycle took {ms} ms: {cycle_ms:?}");
+    }
+}
+
+/// Run one monitor cycle whose only probe hits `path`; returns the status
+/// body and this cluster's argv lines from the run.
+async fn monitor_cycle_with_probe(path: &str) -> (serde_json::Value, Vec<String>) {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let mine = format!("--kubeconfig {} ", c["kubeconfig_path"].as_str().unwrap());
+    let mut cfg = monitor_cfg(true, 60);
+    cfg["probes"] = serde_json::json!([{
+        "name": "health", "port": 9000, "path": path, "format": "health"
+    }]);
+    let (st, _, text) = call(
+        &ctx,
+        &user,
+        "PUT",
+        &format!("/k8s/clusters/{id}/monitor"),
+        Some(cfg),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "POST",
+        &format!("/k8s/clusters/{id}/monitor/run"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let lines = argv_log()
+        .into_iter()
+        .filter(|l| l.contains(&mine))
+        .collect();
+    (body, lines)
+}
+
+fn count_lines(lines: &[String], needle: &str) -> usize {
+    lines.iter().filter(|l| l.contains(needle)).count()
+}
+
+/// perf K1 — the live failure: the sample pod answered its APP's 404 through
+/// the API-server proxy, the sniff read that as "proxy unavailable" and the
+/// cycle spawned one `kubectl port-forward` per pod. An app 404 proves the
+/// proxy works: proxy is chosen and ZERO port-forwards are spawned.
+#[tokio::test]
+async fn monitor_auto_transport_keeps_proxy_on_an_app_404() {
+    let (body, lines) = monitor_cycle_with_probe("/app-404").await;
+    assert_eq!(body["transport_used"], "proxy", "{body}");
+    assert_eq!(count_lines(&lines, "port-forward"), 0, "{lines:#?}");
+    // One sniff (decisive on the first pod) + one fetch per scraped pod.
+    let targets =
+        (body["pods_scraped"].as_i64().unwrap() + body["pods_failed"].as_i64().unwrap()) as usize;
+    assert!(targets >= 2, "{body}");
+    assert_eq!(
+        count_lines(&lines, "/proxy/app-404"),
+        1 + targets,
+        "{lines:#?}"
+    );
+    // Spawn budget: the sweep (pods + events per namespace, metrics, the
+    // gateway attempt) + the sniff + the per-pod fallback fetches — no
+    // per-pod forwards on top.
+    assert!(
+        lines.len() <= 8 + targets,
+        "{} spawns: {lines:#?}",
+        lines.len()
+    );
+}
+
+/// An API-server refusal (RBAC `Forbidden` on `pods/proxy`) is what selects
+/// port-forward — decided on the first pod, no further sniffs.
+#[tokio::test]
+async fn monitor_auto_transport_uses_port_forward_when_the_api_server_denies_proxy() {
+    let (body, lines) = monitor_cycle_with_probe("/api-denied").await;
+    assert_eq!(body["transport_used"], "port_forward", "{body}");
+    assert_eq!(count_lines(&lines, "/proxy/api-denied"), 1, "{lines:#?}");
+}
+
+/// Inconclusive answers (nothing listening on the port) try up to three pods
+/// and stay on the cheap proxy path rather than forwarding every pod.
+#[tokio::test]
+async fn monitor_auto_transport_tries_several_pods_before_deciding() {
+    let (body, lines) = monitor_cycle_with_probe("/not-listening").await;
+    assert_eq!(body["transport_used"], "proxy", "{body}");
+    assert_eq!(count_lines(&lines, "port-forward"), 0, "{lines:#?}");
+    let targets =
+        (body["pods_scraped"].as_i64().unwrap() + body["pods_failed"].as_i64().unwrap()) as usize;
+    let sniffs = count_lines(&lines, "/proxy/not-listening") - targets;
+    assert_eq!(sniffs, targets.min(3), "{lines:#?}");
 }
 
 #[tokio::test]

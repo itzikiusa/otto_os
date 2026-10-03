@@ -317,3 +317,55 @@ otto-server and ottod, i.e. still the server.
 3. **Debuginfo** (`line-tables-only` for workspace crates, none for
    dependencies) for local dev builds: measure link times on an unthrottled
    host before adopting.
+
+## Runtime guard: usage tailer and embedded ClickHouse idle cost
+
+The usage section's idle and memory cost is guarded by unit tests, plus a
+scripted probe for the ClickHouse child that tests can't run:
+
+- `cargo test -p ottod --bin ottod unchanged_tree_pass` — on a 2k-Claude +
+  1.4k-Codex synthetic tree with 10 transcripts ending in a partial line, an
+  unchanged-tree pass (full listing or event-driven) issues **zero** file reads
+  and **zero** `sessions` attribution queries; one appended usage line costs
+  exactly one read and one query.
+- `cargo test -p otto-transcript --lib seen_keys_100k` — the Claude dedup set
+  at its 100k-key cap stays under 4 MiB (it was ~20 MB as two `String`
+  copies per key).
+- `cargo test -p ottod --bin ottod fsevents_watcher` — the FSEvents watcher
+  reports a new transcript (the tailer's 20 s polling is now a fallback).
+- ClickHouse idle probe (scratch data dir + spare port, never the live one):
+  start `clickhouse server --config-file=<generated config.xml>` with
+  `CLICKHOUSE_WATCHDOG_ENABLE=0`, wait 20 s, then
+  `ps -M <pid> | wc -l` and `top -l 4 -s 5 -pid <pid> -stats pid,cpu,th,mem`.
+
+Measured 2026-10-03 (ClickHouse 26.6.1, 244k-row `usage_events`, machine
+shared with other builds): the perf-wave config (memory worker 10 s, capped
+IO/parts/table-loader pools, merge selector 30 s → 5 min) idles at
+**0.4 % CPU, 71 threads, 135 MB**; the previous config at **0.5–0.6 %, 71
+threads, 134 MB** (the capped pools are created lazily, so thread count is
+unchanged at idle; the saving is wake-ups).
+
+Perf wave 2 (perf2/09), same probe with the bundled build on a scratch dir
+(50k rows, attach + `ALTER … DELETE` mutation + `OPTIMIZE FINAL` + restart
+re-attach all pass):
+
+| Config | Idle threads | CPU over 30 s | Restart → `/ping` |
+|---|---|---|---|
+| perf-wave 1 | 70 | 0.47 % | 0.62 s |
+| + `background_pool_size` 4 (paired free-entry thresholds) | 56–58 | 0.40–0.55 % | 0.46 s |
+| + idle-stop (15 min without a request) | **0** (no process) | **0 %** | wake + first summary 0.67 s |
+
+- `OTTO_PERF=1 cargo test -p otto-usage --test e2e budget -- --nocapture` —
+  the idle-thread budget (62) on the real bring-up.
+- `cargo test -p otto-usage --test e2e summary_and_report_query_budget` —
+  50k seeded rows: summary ≤ 2 statements, report ≤ 2, each reading ≤ 1.1×
+  the table (`X-ClickHouse-Summary`); by-kind + budgets after a summary run
+  0 statements (single-flight memo).
+- `cargo test -p otto-usage --test e2e idle_stop` — parks, process exits,
+  next query restarts it with the data intact.
+- `cargo test -p ottod --bin ottod streaming_passes_reuse_attribution` —
+  10 streaming passes build the tailer's attribution once; an external
+  transcript never re-queries; a sessions write + miss rebuilds once.
+- `system_metrics`: one insert per 5 min (was 1/min), and no sampling at all
+  while no session is live, nobody read `/usage/metrics` and no usage was
+  recorded in the last 10 min.

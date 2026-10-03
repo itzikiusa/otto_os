@@ -57,6 +57,49 @@ impl Default for LoopHandle {
     }
 }
 
+/// Process-wide bell rung whenever a loop's control flag is raised (perf
+/// W8). The executor / role-turn / verification waits used to re-read their
+/// flag every 25–100 ms for the whole turn (≈70 wakeups/s for a 3-executor
+/// loop); they now park on this bell and wake when a flag changes, with a
+/// [`FLAG_SAFETY`] re-check for a store that forgot to ring.
+fn flag_bell() -> &'static tokio::sync::Notify {
+    static BELL: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    BELL.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Backstop re-check interval of [`until_flag`]. Every store site rings
+/// ([`ring_flags`]), so this only bounds a missed ring; 10 s (was 1 s, perf
+/// N7) keeps an idle multi-executor loop near zero wakeups.
+const FLAG_SAFETY: Duration = Duration::from_secs(10);
+
+/// Wake every [`until_flag`] waiter to re-check its condition. Call after
+/// raising a loop control flag.
+pub(crate) fn ring_flags() {
+    flag_bell().notify_waiters();
+}
+
+/// Resolve once `raised()` is true — immediately when it already is.
+pub(crate) async fn until_flag(raised: impl Fn() -> bool) {
+    until_flag_every(raised, FLAG_SAFETY).await
+}
+
+/// [`until_flag`] with an explicit backstop (tests use a short one).
+async fn until_flag_every(raised: impl Fn() -> bool, safety: Duration) {
+    loop {
+        let rung = flag_bell().notified();
+        tokio::pin!(rung);
+        // Register BEFORE checking so a ring between check and await is kept.
+        rung.as_mut().enable();
+        if raised() {
+            return;
+        }
+        tokio::select! {
+            _ = rung => {}
+            _ = tokio::time::sleep(safety) => {}
+        }
+    }
+}
+
 /// loop_id → live controller handle.
 pub type GoalLoopRegistry = Arc<LoopRegistry>;
 
@@ -124,6 +167,7 @@ pub async fn start_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
         let mut reg = ctx.goal_loops.lock().unwrap();
         if let Some(old) = reg.insert(loop_id.to_string(), handle.clone()) {
             old.cancel.store(true, Ordering::Relaxed);
+            ring_flags();
         }
     }
     let loop_id = loop_id.clone();
@@ -151,6 +195,7 @@ pub async fn pause_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
     if let Some(h) = ctx.goal_loops.lock().unwrap().get(loop_id) {
         h.paused.store(true, Ordering::Relaxed);
         h.interrupted.store(true, Ordering::Relaxed);
+        ring_flags();
     }
     cleanup_executor_sessions(ctx, &loop_.workspace_id, loop_id).await;
     if let Some(started) = loop_.run_started_at {
@@ -171,6 +216,7 @@ pub async fn pause_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
         .await?;
     if let Some(h) = ctx.goal_loops.lock().unwrap().get(&loop_id.to_string()) {
         h.paused.store(true, Ordering::Relaxed);
+        ring_flags();
     }
     emit(
         ctx,
@@ -200,6 +246,7 @@ pub async fn stop_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
             Some(h) => {
                 h.cancel.store(true, Ordering::Relaxed);
                 h.interrupted.store(true, Ordering::Relaxed);
+                ring_flags();
                 true
             }
             None => false,
@@ -1588,10 +1635,11 @@ async fn run_executor_attempt(
     };
     tokio::select! {
         biased;
+        // No cancel flag → never resolves (as the old poll never broke).
         _ = async {
-            loop {
-                if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) { break; }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+            match cancel {
+                Some(flag) => until_flag(|| flag.load(Ordering::Relaxed)).await,
+                None => std::future::pending::<()>().await,
             }
         } => {
             let _ = ctx.manager.kill_session(&sid).await;
@@ -1644,6 +1692,47 @@ fn executor_error_note(reason: Option<FailReason>) -> String {
 #[cfg(test)]
 mod goal_loop_tests {
     use super::*;
+    /// Perf W8: a raised flag + ring wakes the waiter at once (no 25–100 ms
+    /// poll), an already-raised flag resolves immediately, and a store that
+    /// forgot to ring is still caught by the FLAG_SAFETY re-check.
+    #[tokio::test]
+    async fn until_flag_wakes_on_ring_and_backstops_a_silent_store() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let f = flag.clone();
+        let t = std::time::Instant::now();
+        let (_, ()) = tokio::join!(until_flag(|| flag.load(Ordering::Relaxed)), async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            f.store(true, Ordering::Relaxed);
+            ring_flags();
+        });
+        assert!(
+            t.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            t.elapsed()
+        );
+        let t = std::time::Instant::now();
+        until_flag(|| true).await;
+        assert!(t.elapsed() < Duration::from_millis(50));
+        // The backstop (scaled down from FLAG_SAFETY so the test stays fast).
+        let safety = Duration::from_millis(150);
+        let silent = Arc::new(AtomicBool::new(false));
+        let s2 = silent.clone();
+        let t = std::time::Instant::now();
+        let (_, ()) = tokio::join!(
+            until_flag_every(|| silent.load(Ordering::Relaxed), safety),
+            async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                s2.store(true, Ordering::Relaxed); // no ring
+            }
+        );
+        assert!(t.elapsed() >= Duration::from_millis(20));
+        assert!(t.elapsed() < safety + Duration::from_millis(500));
+        assert!(
+            FLAG_SAFETY >= Duration::from_secs(10),
+            "idle waiters re-check at most every 10 s"
+        );
+    }
+
     #[tokio::test]
     async fn lifecycle_operations_serialize_retry_approval_and_resume() {
         let registry = new_registry();

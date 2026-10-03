@@ -26,6 +26,7 @@ import {
   type ViewMode,
 } from '../stores/database.svelte';
 import { ws } from '../stores/workspace.svelte';
+import { isReleased } from '../stores/db-result-budget';
 import { ui } from '../stores/ui.svelte';
 import { router } from '../router.svelte';
 import type { Connection, DbExportFormat, QueryResult, SchemaNode, UiDbTabSummary, UiDbConnectionTabs } from '../api/types';
@@ -209,6 +210,18 @@ function summarize(
   if (t.error) base.error = t.error;
   const r: QueryResult | null = t.result;
   if (!r) return { ...base, columns: [], rows: [], loaded_rows: 0, has_result: false };
+  // The memory budget dropped this background tab's rows (db-result-budget.ts).
+  if (isReleased(r)) {
+    return {
+      ...base,
+      columns: r.columns.map((c) => ({ name: c.name, type: c.type_hint ?? null })),
+      rows: [],
+      loaded_rows: 0,
+      has_result: false,
+      released: true,
+      note: 'The result was released to save memory — run the tab again to bring the rows back.',
+    };
+  }
 
   const names = r.columns.map((c) => c.name);
   let pick = names.map((_, i) => i);

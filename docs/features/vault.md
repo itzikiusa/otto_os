@@ -191,7 +191,11 @@ chosen mode is remembered per vault.
 - **`#` tag completion** from the vault's existing tags (with counts).
 
 **Reading view** renders GFM through an **allowlist sanitizer** (no scripts,
-iframes, or event handlers survive), with the Obsidian constructs:
+iframes, or event handlers survive), with the Obsidian constructs below. A note
+over **64 KB** is parsed and highlighted in a module worker
+(`noteRender.worker.ts`; only the sanitize pass, which needs `DOMParser`, runs on
+the main thread): the pane shows the note's plain text at once and swaps in the
+rendered view when it lands, and the result joins the same 8-entry render cache.
 
 - **Wikilinks** in all forms: `[[note]]`, `[[note|alias]]`,
   `[[note#heading]]` (opens and scrolls to the heading), `[[#heading]]`
@@ -251,7 +255,13 @@ the editor are untouched. The panel holds:
   `dashboards`, plus a Service/Repository note's own title and file name.
   Names match after normalisation (`Orders-API` ≡ `orders_api`); hints under
   three characters never match. Sources the user can't access are simply
-  absent; other failures show inline with Retry. Reads are cached for 60 s.
+  absent; other failures show inline with Retry. Reads are cached per key
+  (repo directory / monitor overview / connections 60 s, a repo's `git
+  status` 15 s, the whole panel's result 15 s), so flipping between notes or
+  an Edit → Read re-mount renders with no requests. The panel loads only once
+  it is scrolled (near) into view, superseded loads are aborted, and the
+  open-PR count — a forge call — is opt-in (**Count open PRs** on the repo
+  card, cached 120 s).
 
 The layout button in the note header hides/shows the panels (a per-device
 preference).
@@ -392,7 +402,10 @@ limit (design budget: **100k nodes / 1–2M edges on an M-series laptop**):
   (render-only).
 - **Full-graph edge budget** — `mode=full` enforces a server-side,
   degree-prioritized edge budget (default 2M, `?edge_budget=` override); the
-  status strip shows a **truncated** chip when it was hit.
+  status strip shows a **truncated** chip when it was hit. The SQL reads are
+  async; the O(N+E) assembly (node table, ghost/tag nodes, BFS, degree sort)
+  runs on the blocking pool (`spawn_blocking`), so building a 10k-note graph
+  never stalls a daemon worker thread.
 - **Local graph** — the server does BFS neighborhoods (`mode=local`, `path=`,
   `depth ≤ 3`) so the common case never ships the whole graph; the GraphView
   component supports a local mode with a depth slider, and local is the
@@ -426,6 +439,14 @@ retain snapshots after an interrupted write but do not claim the edit completed.
 History begins with this feature and captures guarded writes/link rewrites;
 direct filesystem changes from other editors are detected for freshness but
 are not versioned. No history is silently pruned.
+
+Editor autosaves of one note within **5 minutes** share one revision: its
+*before* stays the content at the start of the burst and its *after* moves to
+the latest save, so a long editing session costs one revision per 5 minutes
+instead of one per typing pause. Agent writes, restores and link rewrites always
+get their own revision. Revision bodies are stored once by content hash under
+`.otto-history/.blobs/` (a revision's *before* is a hard link to the previous
+revision's *after*), and older history from before this layout still opens.
 
 Failed or conflicting saves retain the current note and tab. Closing a dirty
 last tab or switching vaults first saves successfully. Draft recovery is saved
@@ -640,9 +661,15 @@ keyword-proxy remain. Contract: `docs/contracts/api.md` → *Memory layer*.
 
 **Limitations / honest caveats**
 
-- **No filesystem watcher.** External edits are picked up by the freshness
-  model (§3): within one 5 s poll cycle while the page is open, or at the next
-  API/MCP read. They are not pushed instantly.
+- **Filesystem watcher (FSEvents).** Once a vault is read, an FSEvents watcher
+  watches its folder. Touched paths are debounced (300 ms) and checked against
+  their indexed size/mtime; only a real external change (edit, new/removed
+  note, a folder moved in or out) kicks the incremental scan, so Otto's own
+  saves and hidden folders (`.otto-history`, `.trash`, `.git`) cost nothing.
+  While the watcher is healthy the full-walk safety net runs every 10 minutes
+  instead of every 30 s; if FSEvents errors or overflows, the 30 s freshness
+  model (§3) returns. The page's 5 s status poll reuses its link/tag/attachment
+  counts until the index changes.
 - **Notes >4 MiB** are indexed by filename/hash only — no body parsing, tags, aliases, outgoing links or full-text body search.
 - **Ambiguous basenames stay unresolved** by design (never silently picked);
   fix by qualifying the link path.
@@ -724,7 +751,7 @@ PDF annotation, community plugins.
 
 Saving an existing note updates its own metadata, tags, outgoing links, search entry and directory/switcher label before success is returned. Atomic source writes, hash conflicts and recoverable before/after versions still apply. Adding/removing paths reconciles incoming and unresolved links, including ambiguous basenames; titles and YAML aliases remain search/switcher metadata rather than new link-target names.
 
-External edits are checked on the existing five-second freshness schedule. Unchanged scans retain lookup caches; incomplete directory reads never authorize pruning unseen files. File-tree refreshes fetch visible branches, and collapsed branches refresh when reopened.
+External edits are picked up by the vault's FSEvents watcher (debounced, signature-checked; the 30 s freshness walk is the fallback when no watcher is running). A scan publishes changed notes in batches of up to 200 per transaction, so a cold index of a 10k-note vault commits ~50 times rather than 10k. Unchanged scans retain lookup caches; incomplete directory reads never authorize pruning unseen files. File-tree refreshes fetch visible branches, and collapsed branches refresh when reopened.
 
 Notes larger than 4 MiB keep their original bytes and exact streamed hash but skip content parsing/indexing. The Properties panel explains this limitation; the note remains findable by filename and can still be a path-link target. Body tags, aliases, headings and outgoing links are unavailable until the file is small enough to index. Explicit raw-note reads remain complete. Preparation runs outside async workers with two active jobs and bounded admission; a busy response asks the caller to retry rather than queueing unlimited body copies.
 

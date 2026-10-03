@@ -59,6 +59,7 @@ pub mod transcript;
 pub mod ui_commands;
 pub mod usage;
 pub mod users;
+pub mod workbench;
 pub mod workflow_progress;
 pub mod workflows;
 pub mod workgraph;
@@ -263,6 +264,9 @@ pub fn protected_routes() -> Router<ServerCtx> {
         // Database maintenance (14-daemon-perf P3; root only).
         .route("/admin/db/stats", get(settings::db_stats))
         .route("/admin/db/compact", post(settings::db_compact))
+        // Secret store status + confirmed "Secure secrets…" migration (root).
+        .route("/admin/secrets/status", get(settings::secrets_status))
+        .route("/admin/secrets/secure", post(settings::secrets_secure))
         // --- Dynamic model catalog (discovered per-provider model ids) ----
         .route("/providers/models", get(crate::model_catalog::list))
         // --- Walkthrough video redirect resolver (WebKit can't follow a
@@ -339,6 +343,18 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/mcp/otto-server",
             get(crate::mcp_outward::otto_server_status)
                 .patch(crate::mcp_outward::otto_server_config),
+        )
+        // The light enabled-names read every agent session's stdio bridge
+        // polls (tools/list + governed calls), instead of the full status.
+        .route(
+            "/mcp/otto-server/enabled",
+            get(crate::mcp_outward::otto_server_enabled),
+        )
+        // perf2/10-mcp R7: the stdio bridge's tool-call audit rows go through
+        // the daemon (no per-session writer connection to the live DB).
+        .route(
+            "/mcp/tool-calls",
+            axum::routing::post(crate::mcp_outward::record_tool_call),
         )
         // MCP auto-approve rules: the explicit opt-in under which a mutating
         // otto.* tool skips the per-call approval (View reads, Admin writes).
@@ -426,6 +442,9 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/notifications/read-all",
             post(notifications::mark_all_read),
         )
+        // Bulk read / dismiss: one statement + one broadcast (perf §15 N4).
+        .route("/notifications/read", post(notifications::mark_many_read))
+        .route("/notifications/dismiss", post(notifications::dismiss_many))
         .route("/notifications/{id}/read", post(notifications::mark_read))
         .route("/notifications/{id}", delete(notifications::dismiss))
         .route(
@@ -459,6 +478,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(api_client::list_requests).post(api_client::create_request),
         )
         .route(
+            "/workspaces/{wid}/api-client/requests/summaries",
+            get(api_client::list_request_summaries),
+        )
+        .route(
             "/workspaces/{wid}/api-client/requests/{id}",
             get(api_client::get_request)
                 .patch(api_client::update_request)
@@ -487,6 +510,15 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/workspaces/{wid}/api-client/history/summaries",
             get(api_client::list_history_summaries),
+        )
+        // perf N2: storage gauge + on-demand (configured, opt-in) retention.
+        .route(
+            "/workspaces/{wid}/api-client/storage",
+            get(api_client::storage),
+        )
+        .route(
+            "/workspaces/{wid}/api-client/storage/prune",
+            post(api_client::prune_storage),
         )
         .route(
             "/workspaces/{wid}/api-client/history/{id}",
@@ -715,6 +747,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .merge(browser::routes())
         // --- Browser remote live view (daemon Chromium) ------------------
         .merge(browser_live::routes())
+        // --- Workbench (per-user scratch files with full history) --------
+        .merge(workbench::workbench_routes())
 }
 
 // ── The `scratch` workspace is a SESSION home, not a workspace API ──────────
@@ -763,6 +797,11 @@ fn scratch_path_allowed(path: &str) -> bool {
         // silently change that documented answer. `GET` is admin-gated and the
         // row has no members, so nothing leaks.
         || tail == "members"
+        // Workbench docs are owner-scoped (every query binds the caller), so
+        // the implicit scratch Editor shares nothing: scratch files work from
+        // the scratch home like any workspace.
+        || tail == "workbench"
+        || tail.starts_with("workbench/")
 }
 
 /// Minimal percent-decode for one path segment (ASCII comparison only — an

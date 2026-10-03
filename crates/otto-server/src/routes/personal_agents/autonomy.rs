@@ -4,7 +4,7 @@
 //! [`super::routes`]; every handler loads the agent and checks the caller's
 //! workspace role on ITS workspace (IDOR guard), like the parent module.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -220,18 +220,64 @@ async fn run_goal(
 
 // --- Activity ----------------------------------------------------------------
 
+/// `GET /personal-agents/{id}/activity` query (perf W4).
+#[derive(Deserialize, Default)]
+struct ActivityQuery {
+    /// Only ring entries with `seq > after_seq` (the client appends them).
+    #[serde(default)]
+    after_seq: Option<u64>,
+    /// Include `runs` (recent history). Default true; the client asks only
+    /// when a run changed.
+    #[serde(default)]
+    runs: Option<bool>,
+    /// The `epoch` the client's cursor came with (perf N1). When it is not
+    /// this daemon's boot id — or `after_seq` is ahead of anything this
+    /// process handed out — the cursor is stale: answer as a full load with
+    /// `reset: true`.
+    #[serde(default)]
+    epoch: Option<String>,
+}
+
+/// Longest run `summary` the activity feed carries (the run page has it all).
+const ACTIVITY_SUMMARY_CLIP: usize = otto_state::personal_agents::FEED_SUMMARY_CHARS;
+
 /// `GET /personal-agents/{id}/activity` — what the agent is doing now (the
 /// running run + its session's live status), its recent tool calls (allowed /
 /// blocked / needing approval), the approvals it is waiting on (with their
 /// current status), and recent run history.
+///
+/// Incremental (perf W4): `?after_seq=N` returns only newer `items`, and
+/// `?runs=false` leaves `runs` out (`null`). `seq` is the cursor for the next
+/// call, `epoch` the daemon boot id it belongs to: the ring and its counter
+/// restart with the daemon, so a cursor from a previous process is ignored
+/// (full answer, `reset: true`) instead of freezing the feed (perf N1).
+/// Approvals are read in one statement; run summaries are clipped.
 async fn activity(
     Path(id): Path<String>,
+    Query(q): Query<ActivityQuery>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Value>> {
     load(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
-    let runs = agents(&ctx).list_runs(&id, 20).await.map_err(ApiError)?;
-    let current = runs.iter().find(|r| r.status == "running").cloned();
+    let (current, runs) = if q.runs.unwrap_or(true) {
+        let mut runs = agents(&ctx)
+            .list_runs_for_feed(&id, 20)
+            .await
+            .map_err(ApiError)?;
+        for r in &mut runs {
+            clip_in_place(&mut r.summary, ACTIVITY_SUMMARY_CLIP);
+        }
+        (
+            runs.iter().find(|r| r.status == "running").cloned(),
+            Some(runs),
+        )
+    } else {
+        let mut cur = agents(&ctx).running_run(&id).await.map_err(ApiError)?;
+        if let Some(r) = cur.as_mut() {
+            clip_in_place(&mut r.summary, ACTIVITY_SUMMARY_CLIP);
+        }
+        (cur, None)
+    };
     let session_status = match current.as_ref().and_then(|r| r.session_id.clone()) {
         Some(sid) => otto_state::SessionsRepo::new(ctx.pool.clone())
             .get(&sid)
@@ -240,30 +286,71 @@ async fn activity(
             .map(|s| json!(s.status)),
         None => None,
     };
-    let items = crate::personal_agent_activity::recent(&id, 100);
+    let after_seq = q.after_seq.filter(|&after| {
+        crate::personal_agent_activity::cursor_is_current(after, q.epoch.as_deref())
+    });
+    let reset = q.after_seq.is_some() && after_seq.is_none();
+    let items = match after_seq {
+        Some(after) => crate::personal_agent_activity::recent_after(&id, after, 100),
+        None => crate::personal_agent_activity::recent(&id, 100),
+    };
+    // Every waiting approval still in the ring (not just the new items), in
+    // one statement — their statuses change independently of the ring.
+    let waiting = crate::personal_agent_activity::waiting_approval_ids(&id);
+    let waiting_items = crate::personal_agent_activity::recent(&id, 200);
+    let rows = ctx
+        .mcp
+        .approvals()
+        .get_many(&waiting)
+        .await
+        .unwrap_or_default();
     let mut approvals = Vec::new();
-    for item in items.iter().filter(|i| i.kind == "approval_waiting") {
-        let Some(aid) = item.approval_id.as_deref() else {
+    for aid in &waiting {
+        let Some(a) = rows.iter().find(|a| &a.id == aid) else {
             continue;
         };
-        if let Ok(a) = ctx.mcp.approvals().get(&aid.to_string()).await {
-            approvals.push(json!({
-                "approval_id": aid,
-                "tool": item.tool,
-                "at": item.at,
-                "status": a.status,
-                "title": a.title,
-                "detail": a.detail,
-                "risk_label": a.risk_label,
-            }));
-        }
+        let Some(item) = waiting_items
+            .iter()
+            .find(|i| i.approval_id.as_deref() == Some(aid.as_str()))
+        else {
+            continue;
+        };
+        approvals.push(json!({
+            "approval_id": aid,
+            "tool": item.tool,
+            "at": item.at,
+            "status": a.status,
+            "title": a.title,
+            "detail": a.detail,
+            "risk_label": a.risk_label,
+        }));
     }
+    let seq = items
+        .first()
+        .map(|i| i.seq)
+        .unwrap_or(after_seq.unwrap_or(0));
     Ok(Json(json!({
         "now": { "run": current, "session_status": session_status },
         "items": items,
         "approvals": approvals,
         "runs": runs,
+        "seq": seq,
+        "epoch": crate::transport::boot_id(),
+        "reset": reset,
     })))
+}
+
+/// Truncate `s` to at most `max` bytes on a char boundary, adding `…`.
+fn clip_in_place(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+    s.push('…');
 }
 
 // --- Memory inspector ----------------------------------------------------------

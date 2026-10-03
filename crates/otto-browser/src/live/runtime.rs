@@ -332,11 +332,15 @@ impl LiveRuntime {
         };
         let key = ProcessKey::for_profile(&p.workspace_id, &p.owner_id, &p.profile);
         let proc = self.process_for(key, binary, &settings).await?;
+        // Re-arm after every insert: the janitor exits once nothing is left
+        // to sweep, and may have done so between the call above and here.
+        self.ensure_janitor();
         let session =
             LiveSession::create(proc, p, self.data_dir.clone(), self.hooks.clone()).await?;
         if let Ok(mut s) = self.sessions.lock() {
             s.insert(session.tab_id.clone(), session.clone());
         }
+        self.ensure_janitor();
         self.audit(
             "browser.live.open",
             &session,
@@ -450,6 +454,18 @@ impl LiveRuntime {
                 tokio::time::sleep(SWEEP_EVERY).await;
                 let Some(rt) = weak.upgrade() else { return };
                 rt.sweep().await;
+                // Nothing left to sweep: stop waking every SWEEP_EVERY (perf
+                // F10). Checked under the janitor lock, and `open` re-arms
+                // after each insert, so a new session never goes unswept.
+                let Ok(mut j) = rt.janitor.lock() else {
+                    continue;
+                };
+                let no_sessions = rt.sessions.lock().map(|s| s.is_empty()).unwrap_or(false);
+                let no_procs = rt.procs.try_lock().map(|p| p.is_empty()).unwrap_or(false);
+                if no_sessions && no_procs {
+                    *j = None;
+                    return;
+                }
             }
         }));
     }

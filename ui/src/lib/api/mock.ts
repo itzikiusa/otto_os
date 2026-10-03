@@ -31,15 +31,9 @@ import type {
   WorkspaceWithRole,
 } from './types';
 import { base64ToText, textToBytes } from '../b64';
+import { isForeground } from '../stores/sessionBuckets';
 
-export function mockEnabled(): boolean {
-  try {
-    if (import.meta.env.VITE_OTTO_MOCK === '1') return true;
-    return localStorage.getItem('otto_mock') === '1';
-  } catch {
-    return false;
-  }
-}
+export { mockEnabled } from './mockGate';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -2405,12 +2399,32 @@ function problemStatus(): RepoStatusResp {
 /** The #17 / #17b narrowing filters (the daemon applies them in SQL). */
 function filterSessions(list: Session[], q: URLSearchParams | undefined, archivedDefault: boolean | null): Session[] {
   const a = q?.get('archived');
-  const archived = a === 'true' ? true : a === 'false' ? false : archivedDefault;
+  const idsRaw = q?.get('ids');
+  const ids = idsRaw != null ? new Set(idsRaw.split(',').filter(Boolean)) : null;
+  // A fetch-by-id ignores the archived default (an open tab may be archived).
+  const archived = a === 'true' ? true : a === 'false' ? false : ids ? null : archivedDefault;
   const kind = q?.get('kind');
   const status = q?.get('status');
-  return list.filter(
-    (s) => (archived === null || s.archived === archived) && (!kind || s.kind === kind) && (!status || s.status === status),
+  const fg = q?.get('foreground');
+  const withSources = new Set((q?.get('with_sources') ?? '').split(',').filter(Boolean));
+  // Same rule as the daemon's `foreground=` filter (connections + foreground agents).
+  const shown = (s: Session): boolean => {
+    const src = (s.meta as { source?: unknown } | null)?.source;
+    return s.kind !== 'agent' || isForeground(s) || (typeof src === 'string' && withSources.has(src));
+  };
+  let out = list.filter(
+    (s) =>
+      (archived === null || s.archived === archived) &&
+      (!kind || s.kind === kind) &&
+      (!status || s.status === status) &&
+      (!ids || ids.has(s.id)) &&
+      (fg == null || (fg === 'true' ? shown(s) : !shown(s))),
   );
+  const before = q?.get('before');
+  if (before) out = out.filter((s) => s.created_at < before);
+  const limit = Number(q?.get('limit') ?? 0);
+  if (limit > 0) out = out.slice(-limit);
+  return out;
 }
 
 // ---------------------------------------------------------------------------

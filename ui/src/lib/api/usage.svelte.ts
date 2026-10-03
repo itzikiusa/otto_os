@@ -8,6 +8,12 @@ import { toasts } from '../toast.svelte';
 import { loadErrorText } from '../loadError';
 import { exportCsv, downloadJson } from '../components/exporters';
 import type { Id } from './types';
+import { announceModule } from '../lazyModule';
+
+/** Sessions the report page loads first (one past the 100 it shows, so it
+ *  knows whether "Show more" has anything to fetch) vs the full export. */
+const REPORT_PAGE_SESSIONS = 101;
+const REPORT_FULL_SESSIONS = 1000;
 
 export interface ProviderUsage {
   provider: string;
@@ -166,8 +172,10 @@ export interface UsageReport {
   daily: DailyUsage[];
   monthly: MonthlyUsage[];
   models: ModelUsage[];
+  /** Only with `include=daily_models` (the export); empty otherwise. */
   daily_models: DailyModelUsage[];
-  /** Up to 1000 sessions, biggest first (enriched like the summary's). */
+  /** Up to `sessions_limit` (default 100, max 1000) sessions, biggest
+   *  first (enriched like the summary's). */
   sessions: SessionUsage[];
 }
 
@@ -313,6 +321,10 @@ class UsageStore {
 
   // --- Usage report (GET /usage/report) ------------------------------------
   report: UsageReport | null = $state.raw(null);
+  /** `report` is the FULL shape (up to 1000 sessions + `daily_models`) —
+   *  the page first loads a slim one (101 sessions, no day×model table) and
+   *  upgrades on "Show more" / Download. */
+  reportFull = $state(false);
   reportLoading = $state(false);
   reportError = $state<string | null>(null);
   private reportSeq = 0;
@@ -371,6 +383,12 @@ class UsageStore {
   async loadAll(): Promise<void> {
     this.loading = true;
     let mine: number | null = null;
+    // Budgets are config (not engine) data — load them whether or not the
+    // engine is available (or the summary failed) so the caps are still
+    // editable, and a skipped load never reads as "No budgets set". Started
+    // now, in parallel with status → summary, instead of after them (it was
+    // a third serial round trip on every page open). Never rejects.
+    const budgets = this.loadBudgets();
     try {
       await this.loadStatus();
       if (this.status?.available) {
@@ -396,10 +414,7 @@ class UsageStore {
       if (mine === this.summarySeq) this.summaryError = loadErrorText(e);
     }
     try {
-      // Budgets are config (not engine) data — load them whether or not the
-      // engine is available (or the summary failed) so the caps are still
-      // editable, and a skipped load never reads as "No budgets set".
-      await this.loadBudgets();
+      await budgets;
     } finally {
       this.loading = false;
     }
@@ -451,20 +466,31 @@ class UsageStore {
     await Promise.all([this.refreshSummary(), this.report ? this.loadReport() : Promise.resolve()]);
   }
 
-  /** Load the ccusage-style report for the current window + scope. */
-  async loadReport(): Promise<void> {
+  /** Load the ccusage-style report for the current window + scope. Slim by
+   *  default (the page renders ≤100 sessions and never the day×model table);
+   *  `full` (or an already-full report) asks for the export's shape. */
+  async loadReport(full = this.reportFull): Promise<void> {
     const mine = ++this.reportSeq;
     this.reportLoading = true;
+    const shape = full ? `sessions_limit=${REPORT_FULL_SESSIONS}&include=daily_models` : `sessions_limit=${REPORT_PAGE_SESSIONS}`;
     try {
-      const r = await api.get<UsageReport>(`/usage/report?${this.summaryQuery()}`);
+      const r = await api.get<UsageReport>(`/usage/report?${this.summaryQuery()}&${shape}`);
       if (mine !== this.reportSeq) return;
       this.report = r;
+      this.reportFull = full;
       this.reportError = null;
     } catch (e) {
       if (mine === this.reportSeq) this.reportError = loadErrorText(e);
     } finally {
       if (mine === this.reportSeq) this.reportLoading = false;
     }
+  }
+
+  /** The full report (export / "Show more"), loading it once if the current
+   *  one is the slim page shape. `null` when the load failed. */
+  async fullReport(): Promise<UsageReport | null> {
+    if (!this.reportFull || !this.report) await this.loadReport(true);
+    return this.reportFull ? this.report : null;
   }
 
   /** Opt-in: run `npx ccusage` through the daemon and compare (root only).
@@ -665,3 +691,6 @@ class UsageStore {
 }
 
 export const usage = new UsageStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf G2): let it see this store
+// however it was first imported.
+announceModule('usage', usage);

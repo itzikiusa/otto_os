@@ -406,6 +406,44 @@ fn assume_cache_evict(id: &Id) {
     map.remove(id);
 }
 
+/// Per-(kind, account) single-flight lock for the credential miss paths
+/// (`configure export-credentials`, `sts assume-role`). An all-regions
+/// fan-out starts up to six calls at once; on a cold or expired account each
+/// would otherwise run its own export (= its own SSO `GetRoleCredentials`).
+/// The first caller fetches, the rest wait and re-read the cache.
+fn cred_lock(kind: &'static str, id: &Id) -> Arc<tokio::sync::Mutex<()>> {
+    type Locks = Mutex<HashMap<(&'static str, Id), Arc<tokio::sync::Mutex<()>>>>;
+    static LOCKS: OnceLock<Locks> = OnceLock::new();
+    let mut map = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    // Bounded: drop locks nobody is holding or waiting on.
+    map.retain(|_, l| Arc::strong_count(l) > 1);
+    map.entry((kind, id.clone())).or_default().clone()
+}
+
+/// How often a successful call may write `last_used_at` per account. The
+/// Logs tail / Insights pollers run a call every 1–2 s; one SQLite write a
+/// minute is plenty for a "last used" column.
+const TOUCH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// `true` when `id`'s `last_used_at` is due for a write (and records it).
+pub(crate) fn touch_due(id: &Id) -> bool {
+    static LAST: OnceLock<Mutex<HashMap<Id, Instant>>> = OnceLock::new();
+    let mut map = LAST
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    match map.get(id) {
+        Some(at) if at.elapsed() < TOUCH_INTERVAL => false,
+        _ => {
+            map.insert(id.clone(), Instant::now());
+            true
+        }
+    }
+}
+
 /// `sts assume-role` JSON → temp creds.
 pub fn parse_assumed(v: &serde_json::Value) -> Option<StaticCreds> {
     let c = v.get("Credentials")?;
@@ -430,6 +468,7 @@ pub struct AwsService {
     events: broadcast::Sender<Event>,
     pub data_dir: PathBuf,
     spawner: Arc<dyn Spawner>,
+    native: crate::native::Mode,
 }
 
 impl AwsService {
@@ -441,15 +480,62 @@ impl AwsService {
             events: ctx.events().clone(),
             data_dir: ctx.data_dir().to_path_buf(),
             spawner: ctx.spawner().clone(),
+            native: ctx.aws_native(),
+        }
+    }
+
+    /// F2d: static creds + region for an in-process SigV4 call, built from the
+    /// same env a CLI child would get (cached exported / assumed / Keychain
+    /// creds). `None` ⇒ use the CLI (no static keys, custom endpoint, native
+    /// calls disabled).
+    pub async fn native_target(
+        &self,
+        account: &AwsAccountRow,
+        region: Option<&str>,
+    ) -> Result<Option<crate::native::Target>> {
+        if self.native == crate::native::Mode::Off {
+            return Ok(None);
+        }
+        let env = self.env_for(account, region).await?;
+        Ok(crate::native::target_from_env(&self.native, &env))
+    }
+
+    /// Record a successful call against `account` (rate-limited write).
+    pub(crate) async fn touch(&self, account: &AwsAccountRow) {
+        if touch_due(&account.id) {
+            self.repo.touch_used(&account.id).await;
         }
     }
 
     /// The `aws` binary, or the contract's `not installed` error.
     pub fn bin(&self) -> Result<PathBuf> {
-        install::locate(&self.data_dir).ok_or_else(|| Error::Invalid(cli::NOT_INSTALLED_MSG.into()))
+        // `locate` stats every `$PATH` entry; every CLI call asks. Reuse the
+        // last answer for a minute (re-checked with one stat), so an install
+        // or uninstall is still picked up quickly. An explicit override is
+        // authoritative and cheap — always honoured as-is.
+        type BinCache = Mutex<Option<(PathBuf, PathBuf, Instant)>>;
+        static CACHE: OnceLock<BinCache> = OnceLock::new();
+        const BIN_TTL: Duration = Duration::from_secs(60);
+        let not_installed = || Error::Invalid(cli::NOT_INSTALLED_MSG.into());
+        if std::env::var_os(install::BIN_ENV).is_some() {
+            return install::locate(&self.data_dir).ok_or_else(not_installed);
+        }
+        let cache = CACHE.get_or_init(|| Mutex::new(None));
+        if let Some((dir, bin, at)) = cache.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            if dir == &self.data_dir && at.elapsed() < BIN_TTL && bin.is_file() {
+                return Ok(bin.clone());
+            }
+        }
+        let bin = install::locate(&self.data_dir).ok_or_else(not_installed)?;
+        *cache.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((self.data_dir.clone(), bin.clone(), Instant::now()));
+        Ok(bin)
     }
 
     fn emit(&self, account_id: &Id, deleted: bool) {
+        // A changed account (profile, region, keys…) must not be answered
+        // from a cached all-regions list built with the old settings.
+        crate::regions::invalidate(account_id);
         let _ = self.events.send(Event::AwsAccountUpdated {
             account_id: account_id.clone(),
             deleted,
@@ -583,7 +669,8 @@ impl AwsService {
         crate::access::initialize(&self.pool, &user, &row.id).await?;
         let row = if let Some(s) = secret {
             let sref = secret_ref_for(&row.id);
-            self.secrets.put(&sref, &serde_json::to_string(&s)?)?;
+            otto_core::secrets::put_async(&self.secrets, &sref, &serde_json::to_string(&s)?)
+                .await?;
             self.repo
                 .update(
                     &row.id,
@@ -728,7 +815,7 @@ impl AwsService {
                 if req.auth_mode.is_some() && cur.auth_mode != "profile" {
                     // Switching away from keys: drop the secret.
                     if let Some(sref) = &cur.secret_ref {
-                        let _ = self.secrets.delete(sref);
+                        let _ = otto_core::secrets::delete_async(&self.secrets, sref).await;
                     }
                     patch.secret_ref = Some(None);
                     params.remove("access_key_id");
@@ -749,10 +836,10 @@ impl AwsService {
                     ));
                 }
                 let sref = cur.secret_ref.clone().unwrap_or_else(|| secret_ref_for(id));
-                let existing: Option<KeySecret> = self
-                    .secrets
-                    .get(&sref)?
-                    .and_then(|s| serde_json::from_str(&s).ok());
+                let existing: Option<KeySecret> =
+                    otto_core::secrets::get_async(&self.secrets, &sref)
+                        .await?
+                        .and_then(|s| serde_json::from_str(&s).ok());
                 let new_sk = req
                     .secret_access_key
                     .as_deref()
@@ -774,7 +861,12 @@ impl AwsService {
                         None => existing.and_then(|e| e.session_token),
                     },
                 };
-                self.secrets.put(&sref, &serde_json::to_string(&merged)?)?;
+                otto_core::secrets::put_async(
+                    &self.secrets,
+                    &sref,
+                    &serde_json::to_string(&merged)?,
+                )
+                .await?;
                 patch.secret_ref = Some(Some(sref));
                 if req.auth_mode.is_some() && cur.auth_mode != "access_keys" {
                     patch.profile = Some(None);
@@ -793,7 +885,7 @@ impl AwsService {
     pub async fn delete(&self, id: &Id) -> Result<()> {
         let cur = self.repo.get(id).await?;
         if let Some(sref) = &cur.secret_ref {
-            let _ = self.secrets.delete(sref);
+            let _ = otto_core::secrets::delete_async(&self.secrets, sref).await;
         }
         assume_cache_evict(id);
         crate::creds::evict(id);
@@ -805,7 +897,7 @@ impl AwsService {
     // ----- Env / run --------------------------------------------------------
 
     /// Static creds for a keys-mode account (from the Keychain).
-    fn static_creds(&self, account: &AwsAccountRow) -> Result<StaticCreds> {
+    async fn static_creds(&self, account: &AwsAccountRow) -> Result<StaticCreds> {
         let akid = account
             .params
             .get("access_key_id")
@@ -816,9 +908,8 @@ impl AwsService {
             .secret_ref
             .as_deref()
             .ok_or_else(|| Error::Invalid("account has no stored secret".into()))?;
-        let raw = self
-            .secrets
-            .get(sref)?
+        let raw = otto_core::secrets::get_async(&self.secrets, sref)
+            .await?
             .ok_or_else(|| Error::Invalid("login required: the stored secret key is missing from the Keychain — re-enter the access keys".into()))?;
         let ks: KeySecret = serde_json::from_str(&raw)?;
         Ok(StaticCreds {
@@ -839,7 +930,7 @@ impl AwsService {
         let mode = AuthMode::parse(&account.auth_mode).unwrap_or(AuthMode::Profile);
         let base_creds = match mode {
             AuthMode::Profile => None,
-            AuthMode::AccessKeys => Some(self.static_creds(account)?),
+            AuthMode::AccessKeys => Some(self.static_creds(account).await?),
         };
         let endpoint = endpoint_url_of(account);
         let mut base = build_env(
@@ -865,7 +956,15 @@ impl AwsService {
         // Profile-mode accounts whose profile already carries `role_arn` let the
         // CLI chain roles itself; an explicit params.role_arn on top is the
         // "assume this from the base creds" case, handled here.
-        let creds = match assume_cache_get(&account.id) {
+        let _assume_guard;
+        let cached = match assume_cache_get(&account.id) {
+            Some(c) => Some(c),
+            None => {
+                _assume_guard = cred_lock("assume", &account.id).lock_owned().await;
+                assume_cache_get(&account.id)
+            }
+        };
+        let creds = match cached {
             Some(c) => c,
             None => {
                 let bin = self.bin()?;
@@ -911,6 +1010,14 @@ impl AwsService {
         profile: &str,
         base: &[(String, String)],
     ) -> Result<Option<StaticCreds>> {
+        if let Some(c) = crate::creds::get(&account.id, profile) {
+            return Ok(Some(c));
+        }
+        if crate::creds::recently_failed(&account.id) {
+            return Ok(None);
+        }
+        // Single-flight: whoever got here first exports; the rest re-check.
+        let _guard = cred_lock("export", &account.id).lock_owned().await;
         if let Some(c) = crate::creds::get(&account.id, profile) {
             return Ok(Some(c));
         }
@@ -1002,7 +1109,7 @@ impl AwsService {
         let env = self.env_for(account, region).await?;
         let argv = with_json_output(args);
         let out = cli::run(&bin, &argv, &env, timeout, stdin).await;
-        if out.is_ok() {
+        if out.is_ok() && touch_due(&account.id) {
             self.repo.touch_used(&account.id).await;
         }
         out
@@ -1102,7 +1209,8 @@ impl AwsService {
             let env = env.clone();
             async move {
                 let argv = with_json_output(args);
-                cli::run_raw(&bin, &argv, &env, PROBE_TIMEOUT, None).await
+                // 7 probes per account must not crowd out user clicks (N1).
+                cli::background(cli::run_raw(&bin, &argv, &env, PROBE_TIMEOUT, None)).await
             }
         };
         let (sts, s3, sqs, ec2, athena, eks, rds) = tokio::join!(
@@ -1227,6 +1335,7 @@ pub fn with_json_output(args: &[&str]) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / secret store is fine
 mod tests {
     use super::*;
 

@@ -327,8 +327,15 @@ function decodeURIComponentSafe(s: string): string {
 
 /** Render a note body (raw markdown WITHOUT frontmatter) to sanitized HTML. */
 export function renderNote(md: string, ctx: RenderCtx): string {
+  return sanitizeHtml(renderNoteUnsanitized(md, ctx));
+}
+
+/** The DOM-free half of {@link renderNote} — markdown parse + highlight, NOT
+ *  yet sanitized. `noteRender.worker.ts` runs this off the main thread (a
+ *  worker has no `DOMParser`); the caller MUST pass the result through
+ *  `sanitizeHtml` before it reaches the DOM. */
+export function renderNoteUnsanitized(md: string, ctx: RenderCtx): string {
   void ensureHljs(); // fire the lazy load; re-render picks it up
   const cleaned = stripComments(md);
-  const html = makeMarked(ctx).parse(cleaned, { async: false }) as string;
-  return sanitizeHtml(html);
+  return makeMarked(ctx).parse(cleaned, { async: false }) as string;
 }

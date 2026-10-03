@@ -76,3 +76,25 @@ visibility, the `Grid::set_size` reflow path + helpers, and
 (`snapshot_with_history_captures_scroll_region_history`,
 `history_replay_joins_soft_wrapped_rows_for_client_reflow`,
 `history_replay_survives_narrowing_without_truncation`).
+
+## Patch 5: compact, shared scrollback rows + a runtime cap
+
+`src/grid.rs` / `src/row.rs` / `src/screen.rs` (perf review 01 F2, daemon-core F9):
+
+- Scrollback is `VecDeque<Arc<Row>>`. A row entering scrollback (scroll-up,
+  height shrink, reflow) goes through `Row::trim_for_scrollback`: a
+  NON-wrapped row drops its trailing `Cell::default()` cells (at least one
+  cell is kept — formatters index `cells[0]`); wrapped rows stay full (their
+  blanks are positions inside a logical line). Every reader already treats a
+  missing cell like a default blank: the formatters emit nothing for either,
+  reflow drops trailing defaults anyway, and rows pulled back onto the grid
+  by height growth are re-padded (`pad_to`). 4000 rows of 20-char lines at
+  200 cols drop from ~25.6 MB to ~2.4 MB of cells.
+- `Arc` makes `Screen::clone()` (otto-pty's snapshot capture, done under the
+  parser lock) refcount bumps for the history instead of a deep copy;
+  reflow/height growth take rows back with `Arc::try_unwrap` (clone only
+  when a capture still shares them).
+- `Screen::set_scrollback_len(n)` / `scrollback_len()` change the primary
+  screen's cap at runtime (otto-pty keeps a shallower history for
+  long-unviewed terminals); `Screen::scrollback_stats()` reports
+  `(rows, cells)` for memory accounting and budgets.

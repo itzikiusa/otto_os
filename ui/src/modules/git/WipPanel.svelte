@@ -47,6 +47,13 @@
   // skipped it and the commit silently left those edits out.
   const unstaged = $derived(status.changes.filter((c) => c.unstaged && c.kind !== 'conflicted'));
   const staged = $derived(status.changes.filter((c) => c.staged && c.kind !== 'conflicted'));
+  // The daemon caps untracked rows (a non-ignored build dir can hold 200k):
+  // say how many were left out instead of pretending the list is complete.
+  const hiddenUntracked = $derived(
+    status.untracked_truncated && status.untracked_total != null
+      ? Math.max(0, status.untracked_total - status.changes.filter((c) => c.kind === 'untracked').length)
+      : 0,
+  );
 
   /** Partially staged: porcelain `MM` — the index and the worktree BOTH differ.
    *  One `FileChange` carries both flags (`parse.rs` emits a single row per
@@ -180,13 +187,14 @@
   // A live on-disk change (`repo_status_changed`) re-reads the open file's
   // diff in place: the change list can stay identical (the file was already
   // modified) while its content moved on. No blanking — the old diff stays
-  // until the new one lands.
-  $effect(() => {
-    const rev = git.liveRev[repoId] ?? 0;
-    if (rev === 0) return;
-    const path = untrack(() => selectedPath);
-    const target = untrack(() => selTarget);
-    if (path === null) return;
+  // until the new one lands. Only when the change touched THIS file (the
+  // event's `paths`; unknown → yes), and only while the window is visible —
+  // a visible-but-unfocused window (the diff beside an editor) refreshes
+  // live too; a hidden one marks the diff stale and catches up once when it
+  // shows again instead of re-reading per save.
+  let diffLiveStale = false;
+  const diffLiveAllowed = (): boolean => typeof document === 'undefined' || !document.hidden;
+  function refetchOpenDiff(path: string, target: typeof selTarget): () => void {
     const ctl = new AbortController();
     void api
       .get<DiffResp>(`/repos/${repoId}/diff?target=${target}&path=${encodeURIComponent(path)}`, ctl.signal)
@@ -200,6 +208,42 @@
         /* keep the diff on screen; the next change or a reselect retries */
       });
     return () => ctl.abort();
+  }
+  $effect(() => {
+    const rev = git.liveRev[repoId] ?? 0;
+    if (rev === 0) return;
+    const path = untrack(() => selectedPath);
+    const target = untrack(() => selTarget);
+    if (path === null || !untrack(() => git.liveTouches(repoId, path))) return;
+    if (!diffLiveAllowed()) {
+      diffLiveStale = true;
+      return;
+    }
+    diffLiveStale = false;
+    return refetchOpenDiff(path, target);
+  });
+  $effect(() => {
+    // Picking another file loads it fresh, so a pending catch-up is moot.
+    void selectedPath;
+    diffLiveStale = false;
+  });
+  $effect(() => {
+    let cancel: (() => void) | null = null;
+    const catchUp = (): void => {
+      if (!diffLiveStale || !diffLiveAllowed()) return;
+      diffLiveStale = false;
+      const path = selectedPath;
+      if (path === null) return;
+      cancel?.();
+      cancel = refetchOpenDiff(path, selTarget);
+    };
+    window.addEventListener('focus', catchUp);
+    document.addEventListener('visibilitychange', catchUp);
+    return () => {
+      window.removeEventListener('focus', catchUp);
+      document.removeEventListener('visibilitychange', catchUp);
+      cancel?.();
+    };
   });
   /** Over-cap files ("Load anyway") re-fetch through the same target. */
   const loadWipFile = $derived(repoDiffFileLoader(repoId, selTarget));
@@ -754,6 +798,15 @@
         <div class="wp-list">
           {@render sectionRows(unstagedRows, 'unstaged', 'Nothing unstaged.')}
         </div>
+        {#if hiddenUntracked > 0}
+          <p class="wp-untracked-cap" role="note">
+            <Icon name="info" size={12} />
+            <span
+              >{hiddenUntracked.toLocaleString()} more untracked file{hiddenUntracked === 1 ? '' : 's'} not shown. If they're
+              build output or dependencies, add them to <code>.gitignore</code>.</span
+            >
+          </p>
+        {/if}
       {/if}
     </div>
 
@@ -1354,4 +1407,17 @@
       font-size: var(--fs-l);
     }
   }
+  .wp-untracked-cap {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 4px 10px 6px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--warning-soft);
+    color: var(--text);
+    font-size: var(--fs-xs);
+    line-height: 1.4;
+  }
+  .wp-untracked-cap code { font-size: var(--fs-xs); }
 </style>

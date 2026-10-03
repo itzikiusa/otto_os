@@ -164,6 +164,21 @@ export interface DbMultiRunJob {
   summary: DbMultiRunSummary;
   targets: DbPlannedTarget[];
   items: DbMultiRunItem[];
+  /** Change counter — poll with `?since=<seq>` to get only what changed. */
+  seq?: number;
+  /** A `?since=` answer: `items` holds only the runs changed after `since`
+   *  and `targets` is empty — merge with `mergeMultiRunJob`. */
+  partial?: boolean;
+}
+
+/** Fold a poll answer into the job held so far: a `partial` (`?since=`)
+ *  answer replaces only the runs it carries (by `index`) and keeps the
+ *  targets; a full answer (or another job) replaces everything. */
+export function mergeMultiRunJob(prev: DbMultiRunJob | null, next: DbMultiRunJob): DbMultiRunJob {
+  if (!next.partial || !prev || prev.id !== next.id) return next;
+  const items = prev.items.slice();
+  for (const it of next.items) items[it.index] = it;
+  return { ...next, targets: prev.targets, items, partial: false };
 }
 
 /** `GET /db/multi-runs` entries. */

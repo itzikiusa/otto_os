@@ -67,7 +67,12 @@
   import type { SessionStatus as ParkedStatus } from '../api/types';
   import { base64ToBytes as parkedB64 } from '../b64';
   import { snapshotApplies, withInOrderReset as parkedRis, type TermFlow as FlowT, type WriteQueue as QueueT } from './termFlow';
-  import { PARK_SCROLLBACK, TermPark } from './termPark';
+  import { PARK_CELL_BYTES, PARK_SCROLLBACK, TermPark } from './termPark';
+  import { CompactQueue } from './termCompactQueue';
+
+  /** Resize compacts for every Terminal in this window: one in flight, the
+   *  most recently focused pane first (perf F1, termCompactQueue.ts). */
+  const compactQueue = new CompactQueue();
 
   /** Everything a live Terminal hands over when it parks: the emulator, its
    *  socket and the socket's flow/snapshot state, so the adopter continues
@@ -111,7 +116,22 @@
     }
   }
 
-  const termPark = new TermPark<ParkedEngine>(disposeParked);
+  /** Estimated heap of a parked xterm (~12 B/cell), for the lot's byte
+   *  budget (perf 01 N2): a full lot of wide 4000-row panes was ~115 MB. */
+  function parkedBytes(e: ParkedEngine): number {
+    try {
+      return e.term.cols * e.term.buffer.active.length * PARK_CELL_BYTES;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** Binary snapshot headers (perf 01 N3) waiting for their payload — the
+   *  NEXT binary frame on that socket. Keyed by socket, not by component: a
+   *  park/adopt can swap the handler between the header and its payload. */
+  const binarySnapHeaders = new WeakMap<WebSocket, { epoch?: number }>();
+
+  const termPark = new TermPark<ParkedEngine>(disposeParked, undefined, undefined, undefined, undefined, parkedBytes);
 
   /** While parked the engine keeps up with its session on its own: bytes
    *  parse (the renderer is paused while detached), credit acks flow, snapshots
@@ -127,13 +147,33 @@
     e.sock.onopen = null;
     e.sock.onerror = null;
     e.sock.onclose = () => termPark.evict(key, e);
+    const applyParkedSnapshot = (epoch: number | null, snap: Uint8Array | null): void => {
+      const buffer = e.term.buffer.active;
+      const holds = () => e.term.hasSelection() || buffer.baseY - buffer.viewportY > 3;
+      if (!snapshotApplies(e, epoch, holds) || !snap?.length) return;
+      e.writes.dropQueued();
+      e.resyncPending = false;
+      if (e.writes.inflight === 0) {
+        e.term.reset();
+        e.writes.push(snap);
+      } else {
+        e.writes.push(parkedRis(snap));
+      }
+    };
     e.sock.onmessage = (ev: MessageEvent) => {
       if (ev.data instanceof ArrayBuffer) {
+        // A binary snapshot's payload (N3): not live output, never credited.
+        const hdr = binarySnapHeaders.get(e.sock);
+        if (hdr) {
+          binarySnapHeaders.delete(e.sock);
+          applyParkedSnapshot(hdr.epoch ?? null, new Uint8Array(ev.data));
+          return;
+        }
         e.writes.push(new Uint8Array(ev.data), undefined, e.flow.credit);
         return;
       }
       if (typeof ev.data !== 'string') return;
-      let msg: { type?: string; window?: unknown; epoch?: number; data?: string; status?: ParkedStatus; code?: number; message?: string };
+      let msg: { type?: string; window?: unknown; epoch?: number; data?: string; binary?: boolean; status?: ParkedStatus; code?: number; message?: string };
       try {
         msg = JSON.parse(ev.data);
       } catch {
@@ -144,18 +184,11 @@
           e.flow.granted(typeof msg.window === 'number' ? msg.window : undefined);
           break;
         case 'scrollback': {
-          const buffer = e.term.buffer.active;
-          const holds = () => e.term.hasSelection() || buffer.baseY - buffer.viewportY > 3;
-          if (!snapshotApplies(e, msg.epoch ?? null, holds) || !msg.data) break;
-          const snap = parkedB64(msg.data);
-          e.writes.dropQueued();
-          e.resyncPending = false;
-          if (e.writes.inflight === 0) {
-            e.term.reset();
-            e.writes.push(snap);
-          } else {
-            e.writes.push(parkedRis(snap));
+          if (msg.binary) {
+            binarySnapHeaders.set(e.sock, { epoch: msg.epoch });
+            break;
           }
+          applyParkedSnapshot(msg.epoch ?? null, msg.data ? parkedB64(msg.data) : null);
           break;
         }
         case 'status':
@@ -188,7 +221,8 @@
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
   import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
-  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermProbeAckFrame, WsTermProbeFrame, WsTermResyncFrame } from '../api/types';
+  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermProbeAckFrame, WsTermProbeFrame, WsTermResyncFrame, WsTermScrollbackRequestFrame } from '../api/types';
+  import type { CompactClient } from './termCompactQueue';
   import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, resizeDecision, withInOrderReset } from './termFlow';
   import { KeyLatency, ProbeClock, fmtMs, fmtPair, loopMonitor, termLatencyEnabled, type EchoStats } from './termLatency';
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
@@ -276,13 +310,13 @@
      *  this. Default false. */
     claimOnAttach?: boolean;
     /** Local xterm scrollback depth (lines). Each line costs ~12 B/cell, so
-     *  10k lines × 200 cols ≈ 24 MB of JS heap per terminal — fine for the one
-     *  primary pane, 150–360 MB across a 15-tile grid (SA-05). Default
+     *  4000 lines × 200 cols ≈ 9.6 MB of JS heap per terminal — fine for the
+     *  one primary pane, too much across a 15-tile grid (SA-05). Default
      *  EMBED_SCROLLBACK (2k): tiles and embedded previews mount many at once.
      *  PRIMARY hosts (SessionView, the share page, the DB SSH shell) pass
-     *  PRIMARY_SCROLLBACK (10k); the daemon keeps 4000 rows, so maximizing/
-     *  reconnecting still restores depth. Also the `lines` requested in every
-     *  `scrollback` snapshot. */
+     *  PRIMARY_SCROLLBACK (4000 = the daemon's own depth, perf 01 N2), so
+     *  maximizing/reconnecting restores everything the daemon has. Also the
+     *  `lines` requested in every `scrollback` snapshot. */
     scrollback?: number;
     /** Park instead of dispose on unmount / session switch (termPark.ts):
      *  the xterm and its socket stay live off-screen and the next Terminal
@@ -712,7 +746,8 @@
     if (socketFactory || readOnly) return;
     try {
       const png = await toPngBytes(file);
-      const snip = await snipApi.upload(bytesToBase64(png), file.name || 'pasted.png');
+      // Raw image/png body (no base64 inflation).
+      const snip = await snipApi.uploadPng(new Blob([png as Uint8Array<ArrayBuffer>], { type: 'image/png' }));
       // Bracketed paste: the path lands as one literal chunk the TUI will not
       // auto-submit, so the user can still type a prompt around it.
       sendJson({ type: 'input', data: textToBase64(`\x1b[200~${snip.path}\x1b[201~`) });
@@ -771,6 +806,9 @@
     snapshotEpoch = null;
     // The snapshot this socket requests on open rebuilds the screen anyway.
     localReflowed = false;
+    compactDeferred = false;
+    compactGrid = null;
+    compactQueue.cancel(compactClient);
     keyLat?.reset();
     // A fresh server stream starts unpaused. Bytes still queued in front of
     // xterm belong to the old stream and are superseded by the snapshot this
@@ -797,6 +835,51 @@
     wireSocket(sock);
   }
 
+  /** Apply a `scrollback` snapshot (JSON or binary form, perf 01 N3). */
+  function applySnapshot(epoch: number | null, snap: Uint8Array | null): void {
+    compactQueue.done(compactClient);
+    // A delayed optional compact must not erase a selection or reading
+    // position established after its request. A new process/connection still rebuilds: its
+    // epoch differs (or was cleared on connect).
+    // A `resync` reply always rebuilds: its request already dropped
+    // the queued bytes this snapshot replaces.
+    const buffer = term?.buffer.active;
+    const st = { compactPending, resyncPending, snapshotEpoch };
+    const applies = snapshotApplies(st, epoch, () =>
+      !!term?.hasSelection() || (!!buffer && buffer.baseY - buffer.viewportY > 3));
+    compactPending = st.compactPending;
+    snapshotEpoch = st.snapshotEpoch;
+    if (!applies) return;
+    // A snapshot fully reconstructs terminal state: history rows +
+    // coherent current-screen frame + input modes (bracketed paste,
+    // keypad). ALWAYS reset and rebuild from it — appending under the
+    // locally-kept scrollback stacked a duplicate copy of the whole
+    // transcript on every reconnect (the "scroll up and see the
+    // conversation N times" bug), and preserved history could belong
+    // to a dead process painted at a stale width. Deterministic
+    // rebuild keeps the buffer identical to what a fresh attach sees.
+    if (snap?.length) {
+      // Everything received before this frame is already in it: the
+      // queued part never needs to parse (A3).
+      writes.dropQueued();
+      resyncPending = false;
+      if (writes.inflight === 0) {
+        term?.reset();
+        // Snapshot is a full-screen paint already; still force a clean
+        // redraw so nothing from the previous process lingers.
+        paintPtyBytes(snap, /* alwaysRedraw */ true);
+      } else {
+        // Output is still queued inside xterm (a flow-control resume
+        // or lag resync mid-flood). term.reset() is synchronous but
+        // the queue is not cleared, so those stale bytes would parse
+        // AFTER the reset, above the rebuilt history. Reset in-order
+        // instead: RIS (ESC c) makes xterm call the same reset() when
+        // the parser reaches it, i.e. after the backlog.
+        paintPtyBytes(withInOrderReset(snap), /* alwaysRedraw */ true);
+      }
+    }
+  }
+
   /** This component's handlers on `s` — a socket it just opened, or one it
    *  adopted from the parking lot (already open: onopen never fires). */
   function wireSocket(s: WebSocket): void {
@@ -807,7 +890,9 @@
       // Credit flow control first: frames sent after the daemon's `credit`
       // reply count against the window (an older daemon ignores the offer
       // and this socket stays on pause/resume).
-      flow.offer();
+      // Binary snapshots (N3) only on a direct /ws/term socket: the room relay
+      // (socketFactory) rejects unknown fields on its `credit` frame.
+      flow.offer(!socketFactory);
       // Primary pane: take size authority BEFORE pushing our grid, so a
       // passive viewer attaching later can't stomp it (see claimOnAttach doc).
       if (claimOnAttach && !readOnly) sendJson({ type: 'claim' });
@@ -817,15 +902,38 @@
       // guarantees the freshly-(re)attached PTY gets our real grid, not the
       // server's spawn-time 80×24), then verify again as layout settles.
       safeFit();
-      sendResize(true);
+      // Attach WITH our grid (perf F1): a viewer that may resize has the
+      // daemon resize the PTY + emulator BEFORE it captures the snapshot, so
+      // the snapshot already matches this xterm and the TUI's SIGWINCH
+      // repaint arrives as live bytes. Recording the grid as sent makes the
+      // forced confirm below find nothing changed — no follow-up compact, one
+      // snapshot per attach (it used to be two: one at the old PTY grid, then
+      // a compact once the forced resize confirmed).
       const want = term?.options.scrollback ?? scrollback;
-      sendJson({ type: 'scrollback', lines: want });
+      const req: WsTermScrollbackRequestFrame = { type: 'scrollback', lines: want };
+      if (term && !readOnly) {
+        req.cols = term.cols;
+        req.rows = term.rows;
+        lastCols = term.cols;
+        lastRows = term.rows;
+        localReflowed = false;
+      }
+      sendJson(req);
+      sendResize(true);
       verifyFitSoon();
     };
 
     s.onmessage = (ev: MessageEvent) => {
       if (ev.data instanceof ArrayBuffer) {
         const bytes = new Uint8Array(ev.data);
+        // The payload of a binary snapshot header (perf 01 N3): a snapshot,
+        // not live output — never credited, never painted as a PTY burst.
+        const hdr = binarySnapHeaders.get(s);
+        if (hdr) {
+          binarySnapHeaders.delete(s);
+          applySnapshot(hdr.epoch ?? null, bytes);
+          return;
+        }
         // write() only updates the buffer + marks dirty cells; the renderer then
         // paints *those* cells. Agent TUIs rewrite status/prompt rows in place —
         // if a cell is no longer dirty, the previous frame stays (cursor ghosts,
@@ -842,50 +950,14 @@
           case 'credit':
             flow.granted(typeof msg.window === 'number' ? msg.window : undefined);
             break;
-          case 'scrollback': {
-            // A delayed optional compact must not erase a selection or reading
-            // position established after its request. A new process/connection still rebuilds: its
-            // epoch differs (or was cleared on connect).
-            // A `resync` reply always rebuilds: its request already dropped
-            // the queued bytes this snapshot replaces.
-            const buffer = term?.buffer.active;
-            const st = { compactPending, resyncPending, snapshotEpoch };
-            const applies = snapshotApplies(st, msg.epoch ?? null, () =>
-              !!term?.hasSelection() || (!!buffer && buffer.baseY - buffer.viewportY > 3));
-            compactPending = st.compactPending;
-            snapshotEpoch = st.snapshotEpoch;
-            if (!applies) break;
-            // A snapshot fully reconstructs terminal state: history rows +
-            // coherent current-screen frame + input modes (bracketed paste,
-            // keypad). ALWAYS reset and rebuild from it — appending under the
-            // locally-kept scrollback stacked a duplicate copy of the whole
-            // transcript on every reconnect (the "scroll up and see the
-            // conversation N times" bug), and preserved history could belong
-            // to a dead process painted at a stale width. Deterministic
-            // rebuild keeps the buffer identical to what a fresh attach sees.
-            if (msg.data) {
-              const snap = base64ToBytes(msg.data);
-              // Everything received before this frame is already in it: the
-              // queued part never needs to parse (A3).
-              writes.dropQueued();
-              resyncPending = false;
-              if (writes.inflight === 0) {
-                term?.reset();
-                // Snapshot is a full-screen paint already; still force a clean
-                // redraw so nothing from the previous process lingers.
-                paintPtyBytes(snap, /* alwaysRedraw */ true);
-              } else {
-                // Output is still queued inside xterm (a flow-control resume
-                // or lag resync mid-flood). term.reset() is synchronous but
-                // the queue is not cleared, so those stale bytes would parse
-                // AFTER the reset, above the rebuilt history. Reset in-order
-                // instead: RIS (ESC c) makes xterm call the same reset() when
-                // the parser reaches it, i.e. after the backlog.
-                paintPtyBytes(withInOrderReset(snap), /* alwaysRedraw */ true);
-              }
+          case 'scrollback':
+            if (msg.binary) {
+              // Header only; the bytes are the next (binary) frame.
+              binarySnapHeaders.set(s, { epoch: msg.epoch });
+              break;
             }
+            applySnapshot(msg.epoch ?? null, msg.data ? base64ToBytes(msg.data) : null);
             break;
-          }
           case 'status':
             // A live status after an `exit` means the server moved this
             // socket onto a respawned process (chat send, channel follow-up,
@@ -950,6 +1022,7 @@
 
     s.onclose = () => {
       connected = false;
+      compactQueue.cancel(compactClient);
       if (closedByUs) return;
       if (exitCode === null) {
         disconnected = true;
@@ -1034,16 +1107,38 @@
       resizeForcePending = false;
       if (defer && measured) applyGrid(measured, 'confirmed');
       const sentChanged = term.cols !== lastCols || term.rows !== lastRows;
+      const prev = { cols: lastCols, rows: lastRows };
+      const next = { cols: term.cols, rows: term.rows };
       // Forced path pushes even when unchanged: the server may hold a
       // different grid (daemon restart / another viewer) and drops same-size
       // resizes before the ioctl, so this is free when nothing changed. A
       // local reflow with an unchanged PTY grid sends nothing but still
       // compacts (resizeDecision).
-      const d = resizeDecision({ sentChanged, localReflowed, force, preferDom });
+      const d = resizeDecision({ sentChanged, localReflowed, force, preferDom, prev, next });
       localReflowed = false;
       if (d.send) {
         lastCols = term.cols;
         lastRows = term.rows;
+        // Resize-with-grid compact (perf 01 N6): a widened agent pane that
+        // can compact NOW sends ONE `scrollback` carrying the new grid
+        // through the window-wide queue — the daemon reflows + resizes the
+        // PTY and captures atomically, so there is no separate `resize`, no
+        // RESIZE_COMPACT_MS wait and no second round trip. The TUI's
+        // SIGWINCH repaint then streams in after the snapshot (as on attach).
+        // Viewers that may not resize, panes off-screen / in a hidden window
+        // or with a compact already in flight keep the resize + deferred
+        // compact path.
+        if (d.compact && preferDom && !readOnly && snapshotEpoch !== null && !compactPending && compactEligible()) {
+          compactGrid = { cols: lastCols, rows: lastRows };
+          if (resizeCompactTimer !== null) {
+            clearTimeout(resizeCompactTimer);
+            resizeCompactTimer = null;
+          }
+          compactQueue.request(compactClient);
+          return;
+        }
+        // A grid still waiting in the queue is superseded by this one.
+        compactGrid = null;
         sendJson({ type: 'resize', cols: lastCols, rows: lastRows });
       }
       if (d.compact) scheduleResizeCompact();
@@ -1093,14 +1188,88 @@
       scheduleResizeCompact();
       return;
     }
-    const buf = term.buffer.active;
-    // Preserve an active selection: rebuilding resets xterm's selection and
-    // would erase a drag just before the user copies it.
-    // Skip also when the user is CLEARLY reading scrollback — a TUI repaint
-    // routinely leaves the viewport a row or two shy of the bottom.
-    if (buf.baseY - buf.viewportY > 3 || term.hasSelection()) return;
-    compactPending = true;
-    sendJson({ type: 'scrollback', lines: term.options.scrollback ?? scrollback });
+    // Off-screen or in a hidden window: nobody sees the pane, so its 1–2 MB
+    // rebuild waits until it comes back (onCompactWake). Otherwise take a
+    // turn in the window-wide queue (one compact in flight, focused first).
+    if (!compactEligible()) {
+      compactDeferred = true;
+      return;
+    }
+    compactQueue.request(compactClient);
+  }
+
+  /** Is this pane on screen, in a visible window, with a live socket? */
+  let onScreen = true;
+  function compactEligible(): boolean {
+    return !!term && connected && onScreen && document.visibilityState === 'visible';
+  }
+  /** A compact was due while the pane was hidden / off-screen. */
+  let compactDeferred = false;
+  /** Grid riding on the queued compact instead of a `resize` (perf 01 N6). */
+  let compactGrid: { cols: number; rows: number } | null = null;
+  /** The queued compact will not carry its grid after all (declined, pane
+   *  hidden, parked): the PTY still needs the size — send it as a `resize`. */
+  function flushCompactGrid(): void {
+    const g = compactGrid;
+    compactGrid = null;
+    if (g && connected) sendJson({ type: 'resize', cols: g.cols, rows: g.rows });
+  }
+  const compactClient: CompactClient = {
+    lastFocus: () => gpuClient.lastFocus,
+    eligible: () => {
+      const ok = compactEligible();
+      if (!ok && connected) {
+        compactDeferred = true;
+        flushCompactGrid();
+      }
+      return ok;
+    },
+    run: () => {
+      if (!term || compactPending) {
+        flushCompactGrid();
+        return false;
+      }
+      const buf = term.buffer.active;
+      // Preserve an active selection: rebuilding resets xterm's selection and
+      // would erase a drag just before the user copies it.
+      // Skip also when the user is CLEARLY reading scrollback — a TUI repaint
+      // routinely leaves the viewport a row or two shy of the bottom.
+      if (buf.baseY - buf.viewportY > 3 || term.hasSelection()) {
+        flushCompactGrid();
+        return false;
+      }
+      compactPending = true;
+      const req: WsTermScrollbackRequestFrame = { type: 'scrollback', lines: term.options.scrollback ?? scrollback };
+      if (compactGrid) {
+        req.cols = compactGrid.cols;
+        req.rows = compactGrid.rows;
+        compactGrid = null;
+      }
+      sendJson(req);
+      return true;
+    },
+  };
+  /** The pane came into view / the window became visible / it was focused:
+   *  run the compact it skipped while hidden. */
+  function onCompactWake(): void {
+    if (!compactDeferred || !compactEligible()) return;
+    compactDeferred = false;
+    runResizeCompact();
+  }
+
+  // ── Ack withholding (perf F9, TermFlow.hold) ───────────────────────────────
+  // A non-focused pane in a hidden window (another Space, minimized) keeps
+  // parsing what already arrived but stops acknowledging it: the daemon
+  // stops after one credit window and, only if output overflowed meanwhile,
+  // sends ONE snapshot when the window shows again. The pane the user last
+  // worked in keeps streaming (PR A's background-latency fix).
+  function isFocusedPane(): boolean {
+    if (gpuClient.lastFocus === 0) return false;
+    for (const c of gpuClients) if (c.lastFocus > gpuClient.lastFocus) return false;
+    return true;
+  }
+  function syncAckHold(): void {
+    flow.hold(document.visibilityState === 'hidden' && !isFocusedPane());
   }
 
   function sendResize(force = false): void {
@@ -1881,6 +2050,8 @@
     // The pane the user works in renders on the GPU (L4): take a slot from
     // the least recently focused terminal when the budget is full.
     gpuClient.lastFocus = performance.now();
+    flow.hold(false);
+    onCompactWake();
     if (term && webglWanted && !webglAddon) {
       stealGpuSlotFor(gpuClient);
       retryWebglNow();
@@ -1968,7 +2139,17 @@
     // Park at the PTY's grid, not at whatever passing size the leaving layout
     // measured: a parked engine keeps parsing the TUI's cursor moves for
     // minutes, and at the wrong size they land on the wrong cells (G1).
-    let needsCompact = localReflowed;
+    let needsCompact = localReflowed || compactDeferred;
+    compactDeferred = false;
+    // A widen whose grid was riding on a queued compact (N6) still owes the
+    // PTY its size; the adopter compacts if the parked xterm needs it.
+    if (compactGrid) needsCompact = true;
+    flushCompactGrid();
+    compactQueue.cancel(compactClient);
+    // A parked engine keeps parsing what arrives but stops acknowledging it
+    // (perf F9): the daemon sends at most one credit window, and a session
+    // that overflowed meanwhile is caught up with ONE snapshot on adopt.
+    flow.hold(true);
     if (lastCols > 0 && lastRows > 0 && (t.cols !== lastCols || t.rows !== lastRows)) {
       try {
         t.resize(lastCols, lastRows);
@@ -2028,6 +2209,9 @@
     writes = e.writes;
     flow.setSink(flowSink);
     writes.rebind(writeSink, canSendNow);
+    // Report what was parsed while parked: the daemon sends what it held,
+    // or ONE snapshot if the parked stream overflowed (perf F9).
+    syncAckHold();
     wireSocket(e.sock);
     compactPending = e.compactPending;
     resyncPending = e.resyncPending;
@@ -2191,11 +2375,20 @@
     const onGpuWake = (): void => {
       if (document.visibilityState === 'visible') retryWebglNow();
     };
+    const onPageVis = (): void => {
+      syncAckHold();
+      if (document.visibilityState === 'visible') onCompactWake();
+    };
+    document.addEventListener('visibilitychange', onPageVis);
     document.addEventListener('visibilitychange', onGpuWake);
     window.addEventListener('focus', onGpuWake);
     const gpuIo = typeof IntersectionObserver === 'function'
       ? new IntersectionObserver((entries) => {
-          if (entries.some((en) => en.isIntersecting)) retryWebglNow();
+          onScreen = entries[entries.length - 1].isIntersecting;
+          if (onScreen) {
+            retryWebglNow();
+            onCompactWake();
+          }
         })
       : null;
     gpuIo?.observe(container);
@@ -2343,6 +2536,8 @@
       cancelWebglRetry();
       gpuClients.delete(gpuClient);
       document.removeEventListener('visibilitychange', onGpuWake);
+      document.removeEventListener('visibilitychange', onPageVis);
+      compactQueue.cancel(compactClient);
       window.removeEventListener('focus', onGpuWake);
       gpuIo?.disconnect();
       if (hudTimer !== null) clearInterval(hudTimer);

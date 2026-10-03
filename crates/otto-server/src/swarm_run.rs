@@ -226,7 +226,12 @@ const RESULT_SCHEMA: &str = r#"{
 
 /// Find a reusable live/resumable session for this agent, or `None`.
 async fn find_agent_session(ctx: &ServerCtx, ws: &Id, agent_id: &str) -> Option<Id> {
-    let sessions = ctx.manager.list_by_workspace(ws).await.ok()?;
+    // Targeted SQL lookup (perf §15 F7) — not the workspace's full history.
+    let sessions = ctx
+        .manager
+        .list_live_by_meta(ws, Some("agent"), "agent_id", agent_id)
+        .await
+        .ok()?;
     sessions.into_iter().find_map(|s| {
         let is_agent = s.kind == SessionKind::Agent && !s.archived;
         let mine = s.meta.get("agent_id").and_then(|v| v.as_str()) == Some(agent_id);
@@ -348,7 +353,28 @@ async fn run_turn_inner(
         project.as_ref(),
         task.as_ref(),
     );
-    crate::swarm_workspace::provision_agent(ctx, &swarm, project.as_ref(), &agent, identity, &cwd);
+    // Skills/soul/identity materialization + helper installs are a burst of
+    // blocking file writes — run them off the runtime worker (perf §15 N9).
+    {
+        let (ctx2, swarm2, project2, agent2, cwd2) = (
+            ctx.clone(),
+            swarm.clone(),
+            project.clone(),
+            agent.clone(),
+            cwd.clone(),
+        );
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::swarm_workspace::provision_agent(
+                &ctx2,
+                &swarm2,
+                project2.as_ref(),
+                &agent2,
+                identity,
+                &cwd2,
+            )
+        })
+        .await;
+    }
 
     // Board context for the brief (recent messages to/about this agent).
     let board: Vec<String> = repo
@@ -381,7 +407,8 @@ async fn run_turn_inner(
         });
 
     let out = out_path(&run.id);
-    let _ = std::fs::remove_file(&out);
+    // Off the runtime worker (perf §15 N9).
+    let _ = tokio::fs::remove_file(&out).await;
     let prompt = build_prompt(
         &agent,
         task.as_ref(),
@@ -881,9 +908,15 @@ async fn mark_run_error(ctx: &ServerCtx, run: &SwarmRun, msg: &str) {
     emit_run(ctx, &run.id).await;
 }
 
-/// Re-read a run and broadcast `SwarmRunUpdated`.
+/// Re-read a run and broadcast `SwarmRunUpdated`. The event is "lite" like
+/// the run list (perf §15 F8): `result` (~8 KB parsed turn JSON) is dropped
+/// except for `kind = 'recruit'` (the Runs list's Hire button reads it);
+/// the inspector fetches `GET /swarm/runs/{rid}` for one run's result.
 pub async fn emit_run(ctx: &ServerCtx, run_id: &str) {
-    if let Ok(run) = ctx.swarm_repo.get_run(&run_id.to_string()).await {
+    if let Ok(mut run) = ctx.swarm_repo.get_run(&run_id.to_string()).await {
+        if run.kind != "recruit" {
+            run.result = None;
+        }
         let _ = ctx.events.send(Event::SwarmRunUpdated {
             workspace_id: run.workspace_id.clone(),
             swarm_id: run.swarm_id.clone(),
@@ -1006,7 +1039,55 @@ async fn detect_shared_files(
 
 /// Forget a branch's tracked files (called when its worktree is merged/removed).
 pub(crate) fn forget_branch_files(swarm_id: &str, branch: &str) {
-    if let Some(st) = shared_files().lock().unwrap().get_mut(swarm_id) {
-        st.by_branch.remove(branch);
+    forget_branch_in(&mut shared_files().lock().unwrap(), swarm_id, branch);
+}
+
+/// Drop `branch` and the overlap announcements naming it; drop the swarm's
+/// whole entry once no branch is tracked, so the process-wide map is bounded
+/// by live swarm branches rather than every swarm/branch ever seen.
+fn forget_branch_in(map: &mut HashMap<String, SharedState>, swarm_id: &str, branch: &str) {
+    let Some(st) = map.get_mut(swarm_id) else {
+        return;
+    };
+    st.by_branch.remove(branch);
+    st.announced.retain(|k| {
+        let mut parts = k.splitn(3, '|');
+        let (a, b) = (parts.next(), parts.next());
+        a != Some(branch) && b != Some(branch)
+    });
+    if st.by_branch.is_empty() {
+        map.remove(swarm_id);
+    }
+}
+
+/// Forget everything tracked for a swarm (its run stopped or it was deleted).
+pub(crate) fn forget_swarm_files(swarm_id: &str) {
+    shared_files().lock().unwrap().remove(swarm_id);
+}
+
+#[cfg(test)]
+mod shared_files_tests {
+    use super::*;
+
+    #[test]
+    fn forgetting_the_last_branch_drops_the_swarm_entry() {
+        let mut map: HashMap<String, SharedState> = HashMap::new();
+        let st = map.entry("sw".into()).or_default();
+        for b in ["a", "b"] {
+            st.by_branch.insert(
+                b.into(),
+                BranchFiles {
+                    agent_name: b.into(),
+                    files: ["x.rs".to_string()].into_iter().collect(),
+                },
+            );
+        }
+        st.announced.insert("a|b|x.rs".into());
+        forget_branch_in(&mut map, "sw", "a");
+        assert!(map["sw"].announced.is_empty());
+        assert_eq!(map["sw"].by_branch.len(), 1);
+        forget_branch_in(&mut map, "sw", "b");
+        assert!(!map.contains_key("sw"));
+        forget_branch_in(&mut map, "missing", "a"); // no-op
     }
 }

@@ -45,7 +45,8 @@ pub fn schema_sql(retention_days: u32) -> String {
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_date)
 ORDER BY (event_date, provider, session_id, ts)
-TTL event_date + INTERVAL {ttl} DAY;
+TTL event_date + INTERVAL {ttl} DAY
+SETTINGS ttl_only_drop_parts = 1, old_parts_lifetime = 60;
 
 CREATE TABLE IF NOT EXISTS system_metrics (
     ts              DateTime64(3) DEFAULT now64(3),
@@ -62,7 +63,55 @@ CREATE TABLE IF NOT EXISTS system_metrics (
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMM(metric_date)
 ORDER BY (metric_date, ts)
-TTL metric_date + INTERVAL {ttl} DAY;"
+TTL metric_date + INTERVAL {ttl} DAY
+SETTINGS ttl_only_drop_parts = 1, old_parts_lifetime = 60;"
+    )
+}
+
+/// The two usage tables with their partition date column and sort key —
+/// what [`repartition_sql`] rebuilds a drifted table with.
+pub const PARTITIONED_TABLES: [(&str, &str, &str); 2] = [
+    (
+        "usage_events",
+        "event_date",
+        "(event_date, provider, session_id, ts)",
+    ),
+    ("system_metrics", "metric_date", "(metric_date, ts)"),
+];
+
+/// `system.tables.partition_key` of `table` (empty = unpartitioned).
+pub fn partition_key_sql(table: &str) -> String {
+    format!(
+        "SELECT partition_key FROM system.tables \
+WHERE database = currentDatabase() AND name = '{table}'"
+    )
+}
+
+/// Copy step of the one-time repartition of a table created before the DDL
+/// had `PARTITION BY` (`CREATE TABLE IF NOT EXISTS` never upgrades it, so
+/// every TTL expiry and purge mutation rewrote the whole table): build
+/// `<table>_repart` with the current DDL's partitioning and copy every row.
+/// The original is untouched until the caller verifies the row counts and
+/// swaps ([`swap_sql`]); a leftover `_repart` from a crashed attempt is
+/// dropped first, so the step is idempotent.
+pub fn repartition_sql(table: &str, date_col: &str, order_by: &str, retention_days: u32) -> String {
+    let ttl = retention_days.max(1);
+    format!(
+        "DROP TABLE IF EXISTS {table}_repart SYNC;
+CREATE TABLE {table}_repart AS {table} ENGINE = MergeTree
+PARTITION BY toYYYYMM({date_col})
+ORDER BY {order_by}
+TTL {date_col} + INTERVAL {ttl} DAY
+SETTINGS ttl_only_drop_parts = 1, old_parts_lifetime = 60;
+INSERT INTO {table}_repart SELECT * FROM {table}"
+    )
+}
+
+/// Atomic swap of the repartitioned copy into place, then drop the old data.
+pub fn swap_sql(table: &str) -> String {
+    format!(
+        "EXCHANGE TABLES {table} AND {table}_repart;
+DROP TABLE {table}_repart SYNC"
     )
 }
 
@@ -121,9 +170,12 @@ pub fn parse_ttl_days(engine_full: &str) -> Option<u32> {
 /// Short `old_parts_lifetime` for both tables, so outdated parts left behind
 /// by merges are deleted after a minute instead of eight (they were 135 MB of
 /// a 141 MB store). Idempotent; run at startup.
+///
+/// `ttl_only_drop_parts = 1`: with month partitions an expired month is
+/// dropped as whole parts instead of being rewritten row by row.
 pub fn parts_lifetime_sql() -> &'static str {
-    "ALTER TABLE usage_events MODIFY SETTING old_parts_lifetime = 60;
-ALTER TABLE system_metrics MODIFY SETTING old_parts_lifetime = 60;"
+    "ALTER TABLE usage_events MODIFY SETTING old_parts_lifetime = 60, ttl_only_drop_parts = 1;
+ALTER TABLE system_metrics MODIFY SETTING old_parts_lifetime = 60, ttl_only_drop_parts = 1;"
 }
 
 #[cfg(test)]
@@ -137,6 +189,18 @@ mod tests {
         assert!(sql.contains("event_date + INTERVAL 90 DAY"));
         assert!(sql.contains("metric_date + INTERVAL 90 DAY"));
         assert!(alter_ttl_sql(0).contains("INTERVAL 1 DAY"), "floored at 1");
+    }
+
+    #[test]
+    fn repartition_copies_into_a_partitioned_twin_then_swaps() {
+        let (t, d, o) = PARTITIONED_TABLES[0];
+        let sql = repartition_sql(t, d, o, 90);
+        assert!(sql.starts_with("DROP TABLE IF EXISTS usage_events_repart SYNC;"));
+        assert!(sql.contains("PARTITION BY toYYYYMM(event_date)"));
+        assert!(sql.contains("ttl_only_drop_parts = 1"));
+        assert!(sql.contains("INSERT INTO usage_events_repart SELECT * FROM usage_events"));
+        assert!(swap_sql(t).starts_with("EXCHANGE TABLES usage_events AND usage_events_repart;"));
+        assert!(schema_sql(30).matches("ttl_only_drop_parts = 1").count() == 2);
     }
 
     #[test]

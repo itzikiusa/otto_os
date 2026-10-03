@@ -26,7 +26,7 @@ use crate::convert::{dberr, fmt, json, ts};
 macro_rules! str_enum {
     ($(#[$m:meta])* $name:ident { $($variant:ident => $s:literal),+ $(,)? }) => {
         $(#[$m])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum $name { $($variant),+ }
         impl $name {
@@ -563,6 +563,69 @@ impl WorkGraphRepo {
             .await
             .map_err(dberr("find work item by source"))?;
         row.as_ref().map(row_to_item).transpose()
+    }
+
+    /// Batched [`Self::find_by_source`] for the reconcile sweep: the items of
+    /// `workspace_id` whose `(kind, source_id)` is among `keys`, each with
+    /// whether it already carries an artifact of `artifact_kind` (any ref).
+    /// One indexed statement per 400 distinct source ids (the
+    /// `UNIQUE(workspace_id, kind, source_id)` index + `idx_work_artifacts_item`), so an unchanged sweep
+    /// costs O(1) statements instead of a seek + an artifact probe per row.
+    pub async fn find_by_sources(
+        &self,
+        workspace_id: &Id,
+        keys: &[(WorkKind, String)],
+        artifact_kind: ArtifactKind,
+    ) -> Result<std::collections::HashMap<(WorkKind, String), (WorkItem, bool)>> {
+        let mut out = std::collections::HashMap::with_capacity(keys.len());
+        let wanted: std::collections::HashSet<&(WorkKind, String)> = keys.iter().collect();
+        let mut kinds: Vec<&'static str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        let mut sources: Vec<&str> = keys.iter().map(|(_, s)| s.as_str()).collect();
+        sources.sort_unstable();
+        sources.dedup();
+        // `kind IN (…) AND source_id IN (…)` seeks the UNIQUE(workspace_id,
+        // kind, source_id) index; a cross match (another kind sharing a source
+        // id) is dropped below.
+        let kind_marks = vec!["?"; kinds.len()].join(",");
+        for chunk in sources.chunks(400) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let q = format!(
+                "SELECT {ITEM_COLS}, EXISTS(SELECT 1 FROM work_artifacts a \
+                 WHERE a.work_item_id = work_items.id AND a.kind = ?) AS has_artifact \
+                 FROM work_items WHERE workspace_id = ? AND kind IN ({kind_marks}) \
+                 AND source_id IN ({marks})"
+            );
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(q.as_str()))
+                .bind(artifact_kind.as_str())
+                .bind(workspace_id);
+            for k in &kinds {
+                query = query.bind(*k);
+            }
+            for src in chunk {
+                query = query.bind(*src);
+            }
+            let rows = query
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("find work items by source"))?;
+            for r in &rows {
+                let item = row_to_item(r)?;
+                let has: bool = r.get::<i64, _>("has_artifact") != 0;
+                let key = (item.kind, item.source_id.clone());
+                if wanted.contains(&key) {
+                    out.insert(key, (item, has));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Would [`Self::upsert_item`] change `prev`? `false` → the upsert is a
+    /// no-op and a caller holding `prev` (the reconcile sweep) can skip it.
+    pub fn upsert_changes(prev: &WorkItem, up: &WorkItemUpsert) -> bool {
+        !upsert_is_noop(prev, up)
     }
 
     async fn get_unscoped(&self, id: &Id) -> Result<WorkItem> {
@@ -1184,15 +1247,36 @@ impl WorkGraphRepo {
         })
     }
 
+    /// `work_item_id → pending approval count` for every item in a workspace
+    /// with at least one pending approval — one grouped read (served by
+    /// `idx_work_approvals_ws(workspace_id, status)`) instead of a COUNT per
+    /// graph node.
+    async fn pending_approval_counts(
+        &self,
+        workspace_id: &Id,
+    ) -> Result<std::collections::HashMap<Id, i64>> {
+        let rows: Vec<(Id, i64)> = sqlx::query_as(
+            "SELECT work_item_id, COUNT(*) FROM work_approvals \
+             WHERE workspace_id = ? AND status = 'pending' GROUP BY work_item_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("count pending approvals"))?;
+        Ok(rows.into_iter().collect())
+    }
+
     /// Nodes + edges for the graph view. Edges are included only when BOTH
-    /// endpoints are in the returned node set.
+    /// endpoints are in the returned node set. Constant query count in the
+    /// node count: items, one grouped approval count, and the edges whose
+    /// `from_item_id` is in the node set (batched `IN`, indexed).
     pub async fn graph(&self, workspace_id: &Id, f: &MissionFilter) -> Result<GraphView> {
         let items = self.list_items(workspace_id, f).await?;
+        let pending = self.pending_approval_counts(workspace_id).await?;
         let mut ids = std::collections::HashSet::new();
         let mut nodes = Vec::with_capacity(items.len());
         for it in &items {
             ids.insert(it.id.clone());
-            let pending = self.pending_approval_count(&it.id).await?;
             nodes.push(GraphNode {
                 id: it.id.clone(),
                 kind: it.kind,
@@ -1201,27 +1285,37 @@ impl WorkGraphRepo {
                 risk_level: it.risk_level,
                 cost_so_far: it.cost_so_far,
                 owner_kind: it.owner_kind,
-                needs_approval: pending > 0,
+                needs_approval: pending.get(&it.id).copied().unwrap_or(0) > 0,
             });
         }
-        let rows = sqlx::query(
-            "SELECT from_item_id, to_item_id, relation FROM work_edges WHERE workspace_id = ?",
-        )
-        .bind(workspace_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("list edges"))?;
         let mut edges = Vec::new();
-        for r in &rows {
-            let from: Id = r.get("from_item_id");
-            let to: Id = r.get("to_item_id");
-            if ids.contains(&from) && ids.contains(&to) {
-                let rel_s: String = r.get("relation");
-                edges.push(GraphEdge {
-                    from_item_id: from,
-                    to_item_id: to,
-                    relation: parse_enum(EdgeRelation::parse(&rel_s), &rel_s, "relation")?,
-                });
+        // `list_items` caps at 1000 → at most 2 chunks; well under SQLite's
+        // bound-parameter limit.
+        for chunk in items.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let q = format!(
+                "SELECT from_item_id, to_item_id, relation FROM work_edges \
+                 WHERE workspace_id = ? AND from_item_id IN ({marks})"
+            );
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(q.as_str())).bind(workspace_id);
+            for it in chunk {
+                query = query.bind(&it.id);
+            }
+            let rows = query
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list edges"))?;
+            for r in &rows {
+                let from: Id = r.get("from_item_id");
+                let to: Id = r.get("to_item_id");
+                if ids.contains(&from) && ids.contains(&to) {
+                    let rel_s: String = r.get("relation");
+                    edges.push(GraphEdge {
+                        from_item_id: from,
+                        to_item_id: to,
+                        relation: parse_enum(EdgeRelation::parse(&rel_s), &rel_s, "relation")?,
+                    });
+                }
             }
         }
         Ok(GraphView { nodes, edges })
@@ -1706,5 +1800,182 @@ mod tests {
             "a1"
         );
         assert_eq!(repo.artifacts_for(&it.id).await.unwrap().len(), 4);
+    }
+
+    async fn plan(pool: &DbPool, sql: &str) -> String {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")))
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        rows.iter()
+            .map(|r| r.get::<String, _>("detail"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// Perf §15 F5/F6/M1: the graph flags `needs_approval` from ONE grouped
+    /// count (not one per node), its edge read is indexed, and none of its
+    /// statements sorts through a temp B-tree.
+    #[tokio::test]
+    async fn graph_grouped_approvals_and_indexed_plans() {
+        let repo = WorkGraphRepo::new(mem_pool().await);
+        let ws: Id = "w1".into();
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let it = repo
+                .upsert_item(&upsert(
+                    "w1",
+                    WorkKind::Session,
+                    &format!("s{i}"),
+                    &format!("item {i}"),
+                    WorkStatus::Running,
+                ))
+                .await
+                .unwrap()
+                .item;
+            ids.push(it.id);
+        }
+        repo.add_edge(&ws, &ids[0], &ids[1], EdgeRelation::Spawned)
+            .await
+            .unwrap();
+        repo.add_edge(&ws, &ids[1], &ids[2], EdgeRelation::DependsOn)
+            .await
+            .unwrap();
+        repo.request_approval(&ws, &ids[3], None, "u1")
+            .await
+            .unwrap();
+        repo.request_approval(&ws, &ids[3], None, "u1")
+            .await
+            .unwrap();
+        // Another workspace's approvals never leak in.
+        repo.request_approval(&"w2".into(), &ids[4], None, "u1")
+            .await
+            .unwrap();
+
+        let g = repo.graph(&ws, &MissionFilter::default()).await.unwrap();
+        assert_eq!(g.nodes.len(), 5);
+        assert_eq!(g.edges.len(), 2);
+        let flagged: Vec<&Id> = g
+            .nodes
+            .iter()
+            .filter(|n| n.needs_approval)
+            .map(|n| &n.id)
+            .collect();
+        assert_eq!(flagged, vec![&ids[3]]);
+
+        // Statement budget (perf §15 N2): items + one grouped approval count +
+        // one edge batch per 500 nodes — constant in the node count.
+        let probe = repo.pool.statement_probe();
+        probe.reset();
+        repo.graph(&ws, &MissionFilter::default()).await.unwrap();
+        assert_eq!(probe.take().len(), 3, "graph budget at 5 nodes");
+        for i in 5..600 {
+            repo.upsert_item(&upsert(
+                "w1",
+                WorkKind::Session,
+                &format!("s{i}"),
+                &format!("item {i}"),
+                WorkStatus::Running,
+            ))
+            .await
+            .unwrap();
+        }
+        probe.reset();
+        let big = repo
+            .graph(
+                &ws,
+                &MissionFilter {
+                    limit: Some(1000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(big.nodes.len(), 600);
+        assert_eq!(big.edges.len(), 2);
+        let stmts = probe.take();
+        assert_eq!(
+            stmts.len(),
+            2 + 600usize.div_ceil(500),
+            "graph budget at 600: {stmts:?}"
+        );
+
+        // The reconcile's batched lookup: one statement per 400 keys, each item
+        // with its "has a session artifact" flag.
+        repo.add_artifact(&NewArtifact {
+            work_item_id: ids[0].clone(),
+            workspace_id: ws.clone(),
+            kind: ArtifactKind::Session,
+            title: "Open session".into(),
+            reference: Some("s0".into()),
+            payload: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+        let keys: Vec<(WorkKind, String)> = (0..600)
+            .map(|i| (WorkKind::Session, format!("s{i}")))
+            .chain([(WorkKind::Swarm, "s1".to_string())])
+            .collect();
+        probe.reset();
+        let known = repo
+            .find_by_sources(&ws, &keys, ArtifactKind::Session)
+            .await
+            .unwrap();
+        assert_eq!(probe.take().len(), 600usize.div_ceil(400));
+        assert_eq!(known.len(), 600, "the swarm key matches nothing");
+        assert!(known[&(WorkKind::Session, "s0".to_string())].1);
+        assert!(!known[&(WorkKind::Session, "s1".to_string())].1);
+        let (prev, _) = &known[&(WorkKind::Session, "s2".to_string())];
+        let same = upsert("w1", WorkKind::Session, "s2", "item 2", WorkStatus::Running);
+        assert!(!WorkGraphRepo::upsert_changes(prev, &same));
+        let renamed = upsert(
+            "w1",
+            WorkKind::Session,
+            "s2",
+            "renamed",
+            WorkStatus::Running,
+        );
+        assert!(WorkGraphRepo::upsert_changes(prev, &renamed));
+
+        // A node filter that drops one endpoint drops the edge.
+        let g = repo
+            .graph(
+                &ws,
+                &MissionFilter {
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(g.nodes.len(), 1);
+        assert!(g.edges.is_empty());
+
+        let pool = &repo.pool;
+        let p = plan(
+            pool,
+            "SELECT work_item_id, COUNT(*) FROM work_approvals \
+             WHERE workspace_id = 'w1' AND status = 'pending' GROUP BY work_item_id",
+        )
+        .await;
+        assert!(p.contains("USING INDEX idx_work_approvals_ws"), "{p}");
+        let p = plan(
+            pool,
+            "SELECT from_item_id, to_item_id, relation FROM work_edges \
+             WHERE workspace_id = 'w1' AND from_item_id IN ('a','b')",
+        )
+        .await;
+        assert!(p.contains("USING INDEX"), "{p}");
+        assert!(!p.contains("SCAN work_edges"), "{p}");
+        let p = plan(
+            pool,
+            &format!(
+                "SELECT {ITEM_COLS} FROM work_items WHERE workspace_id = 'w1' \
+                 ORDER BY updated_at DESC LIMIT 300"
+            ),
+        )
+        .await;
+        assert!(p.contains("USING INDEX idx_work_items_ws"), "{p}");
+        assert!(!p.contains("TEMP B-TREE"), "{p}");
     }
 }

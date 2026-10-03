@@ -25,8 +25,19 @@ pub(crate) struct IndexRecord {
     /// reserved, tags, link targets). `None` = unknown (hydrated from the DB),
     /// so the first re-index of such a note counts as a graph change.
     pub graph_sig: Option<u64>,
+    /// Lower-cased switcher candidates `[title, path, aliases…]`, built once
+    /// per (re)index instead of per record per keystroke (F8).
+    pub search_lc: Vec<String>,
 }
 impl IndexRecord {
+    pub fn with_search(mut self) -> Self {
+        self.search_lc = std::iter::once(self.title.as_deref().unwrap_or(""))
+            .chain(std::iter::once(self.path.as_str()))
+            .chain(self.aliases.iter().map(String::as_str))
+            .map(str::to_lowercase)
+            .collect();
+        self
+    }
     pub fn note(row: &NoteRow) -> Self {
         Self {
             path: row.path.clone(),
@@ -36,7 +47,9 @@ impl IndexRecord {
             reserved: row.reserved,
             aliases: serde_json::from_str(&row.aliases_json).unwrap_or_default(),
             graph_sig: None,
+            search_lc: Vec::new(),
         }
+        .with_search()
     }
     pub fn file(path: String) -> Self {
         Self {
@@ -47,6 +60,7 @@ impl IndexRecord {
             reserved: false,
             aliases: vec![],
             graph_sig: None,
+            search_lc: Vec::new(),
         }
     }
     fn entry(&self) -> DirEntry {
@@ -199,15 +213,19 @@ impl IndexState {
 
         let records: Vec<_> = notes
             .into_iter()
-            .map(|r| IndexRecord {
-                path: r.get("path"),
-                title: Some(r.get("title")),
-                kind: "note".into(),
-                okf_type: r.get("okf_type"),
-                reserved: r.get::<i64, _>("reserved") != 0,
-                aliases: serde_json::from_str(&r.get::<String, _>("aliases_json"))
-                    .unwrap_or_default(),
-                graph_sig: None,
+            .map(|r| {
+                IndexRecord {
+                    path: r.get("path"),
+                    title: Some(r.get("title")),
+                    kind: "note".into(),
+                    okf_type: r.get("okf_type"),
+                    reserved: r.get::<i64, _>("reserved") != 0,
+                    aliases: serde_json::from_str(&r.get::<String, _>("aliases_json"))
+                        .unwrap_or_default(),
+                    graph_sig: None,
+                    search_lc: Vec::new(),
+                }
+                .with_search()
             })
             .chain(files.into_iter().map(IndexRecord::file))
             .collect();

@@ -20,6 +20,7 @@ chrono.workspace = true
 dirs.workspace = true
 mime_guess.workspace = true
 rustix.workspace = true
+notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
 
 [dev-dependencies]
 tempfile.workspace = true

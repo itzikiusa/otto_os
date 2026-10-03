@@ -87,7 +87,7 @@
       .map((h) => ({
         a: h.artifact,
         session: h.artifact.created_session_id
-          ? (ws.sessions.find((s) => s.id === h.artifact.created_session_id) ?? null)
+          ? (ws.getSession(h.artifact.created_session_id) ?? null)
           : null,
       })),
   );

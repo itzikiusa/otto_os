@@ -13,6 +13,8 @@
   import { onDestroy, untrack } from 'svelte';
   import { stashGridState, takeGridState, type GridTabState } from './grid-tab-state';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { isReleased, releasedRows, resultBudget } from '../../lib/stores/db-result-budget';
   import { findInPage } from '../../lib/findinpage.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import {
@@ -29,24 +31,29 @@
   import { databaseAccessChild } from '../../lib/access-options';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import type { QueryResult, DbForeignKey } from '../../lib/api/types';
-  import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
   import ErrorPanel from './ErrorPanel.svelte';
   import GridView from './GridView.svelte';
   import VerticalView from './VerticalView.svelte';
   import JsonView from './JsonView.svelte';
   import CellViewer from './CellViewer.svelte';
-  import DocEditor from './DocEditor.svelte';
-  import RawDocViewer from './RawDocViewer.svelte';
-  import ReviewModal from './ReviewModal.svelte';
-  import ExportDialog from './ExportDialog.svelte';
+  // Modal-only children (DocEditor / RawDocViewer reach CodeEditor, the rest
+  // are dialogs) load on first open via `{#await import()}` below, so the grid
+  // — and Home's DB widget that embeds it — doesn't carry them up front.
   import MongoFilterBar from './MongoFilterBar.svelte';
-  import AggregateBuilder from './AggregateBuilder.svelte';
-  import RecordDiff from './RecordDiff.svelte';
   import { EditFlow, SET_EMPTY, SET_NULL, type RowPatch } from './EditFlow.svelte';
   import { qid, valueLiteral } from './edit-sql';
   import { ALT_BATCH, cellStr, copyText, fmtBytes, isComplex } from './results-format';
   import { newExpansionState } from './expansion-plan';
   import { cellMatchesFilter } from './grid-format';
+  import {
+    colScanFor as cachedColScan,
+    dropColScans,
+    dropScan,
+    memoFilter,
+    memoSort,
+    prebuild,
+    scanFor,
+  } from './grid-view-cache';
   import RowDetail from './RowDetail.svelte';
   import type { MenuItem } from '../../lib/contextmenu.svelte';
 
@@ -67,6 +74,12 @@
   let sendToAgentPayload = $state<unknown>(null);
   // ── WP4: aggregate pipeline builder + compare-two-records ───────────────────
   let pipelineOpen = $state(false);
+  // AggregateBuilder stays mounted once opened (it keeps its draft pipeline
+  // across close/reopen) but isn't loaded until the first open.
+  let pipelineMounted = $state(false);
+  $effect(() => {
+    if (pipelineOpen) pipelineMounted = true;
+  });
   /** liveRows indices of the two records being compared (null = closed). */
   let compare = $state<[number, number] | null>(null);
   /** A record exactly as the Vertical/JSON views build it (uniqueColNames-keyed). */
@@ -207,8 +220,17 @@
     };
     // Immediately: no "0s" flash for a run that has been going for minutes.
     tick();
-    const iv = setInterval(tick, 250);
-    return () => clearInterval(iv);
+    // The label shows whole seconds: tick once per second, aligned to the next
+    // second boundary of the run (not 4×/s).
+    let iv: ReturnType<typeof setInterval> | undefined;
+    const align = setTimeout(() => {
+      tick();
+      iv = setInterval(tick, 1000);
+    }, 1000 - ((Date.now() - start) % 1000) + 5);
+    return () => {
+      clearTimeout(align);
+      if (iv !== undefined) clearInterval(iv);
+    };
   });
 
   // ── Footer pager (single auto-limited result only) ───────────────────────────
@@ -252,7 +274,7 @@
       search: searchInput,
       sortCol,
       sortDir,
-      colFilters,
+      colFilters: colFiltersInput,
       pending: flow.pending,
     };
   }
@@ -268,6 +290,8 @@
     // un-applied edits, and bring back the incoming tab's (when its result is
     // still the one they were made on) — never carry one tab's onto another.
     const key = tabKey ?? null;
+    // Viewing a tab keeps its result resident (least-recently-VIEWED goes first).
+    if (key) resultBudget.touch(key);
     if (key !== prevTabKey) {
       if (prevTabKey) stashGridState(prevTabKey, untrack(currentGridState));
       prevTabKey = key;
@@ -276,7 +300,7 @@
         setSearch(saved.search);
         sortCol = saved.sortCol;
         sortDir = saved.sortDir;
-        colFilters = saved.colFilters;
+        setColFilters(saved.colFilters);
         detailIdx = null;
         expansion = newExpansionState();
         prevColKey = colKey;
@@ -297,7 +321,7 @@
       setSearch('');
       sortCol = null;
       sortDir = null;
-      colFilters = {};
+      setColFilters({});
       detailIdx = null;
       // A different result shape invalidates every per-path toggle.
       expansion = newExpansionState();
@@ -411,32 +435,37 @@
   const searchLc = $derived(search.trim().toLowerCase());
   const filtering = $derived(searchLc.length > 0);
 
-  // Per-row scan text, built ONCE per result rather than per keystroke. The old
-  // code re-serialized every cell on every character typed — with ~90KB Mongo
-  // documents that is megabytes of `JSON.stringify` + `toLowerCase` per keypress,
-  // which is what made the filter box lock up on fat collections.
-  //
-  // Reading `filtering` (a boolean) and not `searchLc` is deliberate: the cache is
-  // built when the box goes from empty→non-empty and then reused for every
-  // subsequent character.
-  /** Cap per row so one blob can't dominate memory; matches past it are not scanned. */
-  const SCAN_MAX = 65536;
-  const scanRows = $derived.by<string[]>(() => {
-    if (!filtering) return [];
-    return liveRows.map((row) => {
-      let s = '';
-      for (const v of row) {
-        if (v === null || v === undefined) continue;
-        s += cellStr(v) + '\u0000';
-        if (s.length >= SCAN_MAX) break;
-      }
-      return s.slice(0, SCAN_MAX).toLowerCase();
-    });
-  });
-
-  function rowMatches(idx: number): boolean {
-    return (scanRows[idx] ?? '').includes(searchLc);
+  // Per-row scan text, built ONCE per result rather than per keystroke (the
+  // old code re-serialized every cell on every character typed — megabytes of
+  // `JSON.stringify` per key on fat Mongo documents). It lives in
+  // grid-view-cache.ts, keyed by the rows array: it survives a tab switch while
+  // the tab's search is active, is pre-built in idle slices once the box is
+  // focused on a big result (so the first key finds it done), and is freed
+  // when the search is cleared or the box loses focus empty.
+  /** Big results pre-build their search / column text while the user aims at
+   *  the box (smaller ones build in one go on the first key, in < 20 ms). */
+  let cancelPrebuild: (() => void) | null = null;
+  function startPrebuild(target: 'search' | number): void {
+    cancelPrebuild?.();
+    cancelPrebuild = liveRows.length > SEARCH_DEBOUNCE_ROWS ? prebuild(liveRows, target, cellStr) : null;
   }
+  function stopPrebuild(): void {
+    cancelPrebuild?.();
+    cancelPrebuild = null;
+  }
+  $effect(() => () => stopPrebuild());
+  function onSearchFocus(): void {
+    if (!filtering) startPrebuild('search');
+  }
+  function onSearchBlur(): void {
+    stopPrebuild();
+    if (!filtering && searchInput === '') dropScan(liveRows);
+  }
+  // A cleared search frees its text (a re-seed with no search does too).
+  $effect(() => {
+    const rows = liveRows;
+    if (!filtering) untrack(() => dropScan(rows));
+  });
 
   // ── Quick-filter chips, applied CLIENT-SIDE over the loaded rows ─────────────
   // "Filter:"/"Exclude:" (database.filters) narrow the grid IMMEDIATELY here — the
@@ -477,40 +506,121 @@
   // >n / <n, NULL, !NULL). Keyed by ORIGINAL column index; cleared when the
   // result's shape changes.
   let filterRow = $state(false);
-  let colFilters = $state<Record<number, string>>({});
+  // `colFiltersInput` is what the boxes show; `colFilters` is what filters —
+  // the same split (and the same SEARCH_DEBOUNCE_ROWS rule) as the toolbar
+  // search, so typing into a header box over 100k rows doesn't run a full
+  // filter pass per key.
+  let colFiltersInput = $state.raw<Record<number, string>>({});
+  let colFilters = $state.raw<Record<number, string>>({});
+  let colFilterTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Replace BOTH maps at once (reset / tab restore) — never debounced. */
+  function setColFilters(next: Record<number, string>): void {
+    if (colFilterTimer !== null) clearTimeout(colFilterTimer);
+    colFilterTimer = null;
+    colFiltersInput = next;
+    colFilters = next;
+  }
+  function setColFilter(ci: number, text: string): void {
+    colFiltersInput = { ...colFiltersInput, [ci]: text };
+    if (colFilterTimer !== null) clearTimeout(colFilterTimer);
+    colFilterTimer = null;
+    // Clearing a box (or a small result) applies at once.
+    if (text.trim() === '' || liveRows.length <= SEARCH_DEBOUNCE_ROWS) {
+      colFilters = colFiltersInput;
+      return;
+    }
+    colFilterTimer = setTimeout(() => {
+      colFilterTimer = null;
+      colFilters = colFiltersInput;
+    }, SEARCH_DEBOUNCE_MS);
+  }
+  $effect(() => () => {
+    if (colFilterTimer !== null) clearTimeout(colFilterTimer);
+  });
   const activeColFilters = $derived(
     Object.entries(colFilters)
       .filter(([, t]) => t.trim() !== '')
       .map(([ci, t]) => [Number(ci), t] as const),
   );
-  function colFilterMatches(row: unknown[]): boolean {
+  // Per-column display text, built on a column's FIRST filtered key (or in
+  // idle slices once its box is focused on a big result) and reused for every
+  // following key and every other box until the rows change — for a JSON
+  // column `cellStr` is a full `JSON.stringify` per document. Cached per rows
+  // array in grid-view-cache.ts; columns whose filter is cleared are freed.
+  function colScanFor(ci: number): (string | null)[] {
+    return cachedColScan(liveRows, ci, cellStr);
+  }
+  /** The filter box that has focus (its column's text is being pre-built). */
+  let focusedFilterCol: number | null = null;
+  function onColFilterFocus(ci: number | null): void {
+    stopPrebuild();
+    focusedFilterCol = ci;
+    if (ci !== null && !activeColFilters.some(([c]) => c === ci)) startPrebuild(ci);
+    else if (ci === null) freeColScans(liveRows);
+  }
+  function freeColScans(rows: unknown[][]): void {
+    const keep = new Set(activeColFilters.map(([c]) => c));
+    if (focusedFilterCol !== null) keep.add(focusedFilterCol);
+    dropColScans(rows, keep);
+  }
+  $effect(() => {
+    const rows = liveRows;
+    void activeColFilters;
+    untrack(() => freeColScans(rows));
+  });
+  function colFilterMatches(idx: number): boolean {
     for (const [ci, text] of activeColFilters) {
-      const v = row[ci];
-      const isNull = v === null || v === undefined;
-      if (!cellMatchesFilter(isNull ? '' : cellStr(v), isNull, text)) return false;
+      const s = colScanFor(ci)[idx];
+      const isNull = s === null || s === undefined;
+      if (!cellMatchesFilter(isNull ? '' : s, isNull, text)) return false;
     }
     return true;
   }
   function toggleFilterRow(): void {
     filterRow = !filterRow;
-    if (!filterRow) colFilters = {};
+    if (!filterRow) setColFilters({});
+  }
+
+  // The unfiltered `{row, idx}` wrappers, memoised per rows array: switching
+  // back to a 100k-row tab used to re-allocate 100k wrappers every time.
+  const unfilteredMemo = new WeakMap<unknown[][], { row: unknown[]; idx: number }[]>();
+  function unfilteredView(rows: unknown[][]): { row: unknown[]; idx: number }[] {
+    let v = unfilteredMemo.get(rows);
+    if (!v) {
+      v = rows.map((row, idx) => ({ row, idx }));
+      unfilteredMemo.set(rows, v);
+    }
+    return v;
   }
 
   // Rows passing the filter, carrying their original index so edits target the
   // right entry in `liveRows`. Purely client-side over the fetched rows.
+  // The last filtered view is kept per rows array (grid-view-cache.ts), so a
+  // tab switch back to a filtered 100k-row result is O(1).
   const filteredRows = $derived.by<{ row: unknown[]; idx: number }[]>(() => {
     const hasChips = activeChips.length > 0;
     const hasCols = activeColFilters.length > 0;
-    if (!filtering && !hasChips && !hasCols) return liveRows.map((row, idx) => ({ row, idx }));
-    const out: { row: unknown[]; idx: number }[] = [];
-    for (let idx = 0; idx < liveRows.length; idx++) {
-      const row = liveRows[idx];
-      if (hasChips && !chipMatches(row)) continue;
-      if (hasCols && !colFilterMatches(row)) continue;
-      if (filtering && !rowMatches(idx)) continue;
-      out.push({ row, idx });
-    }
-    return out;
+    const rows = liveRows;
+    if (!filtering && !hasChips && !hasCols) return unfilteredView(rows);
+    const key = [
+      filtering ? searchLc : '',
+      JSON.stringify(activeColFilters),
+      JSON.stringify(activeChips.map((c) => (c.kind === 'col' ? [c.column, c.op, c.values] : null))),
+    ].join('\u0001');
+    return memoFilter(rows, key, () => {
+      const all = unfilteredView(rows);
+      const scan = filtering ? scanFor(rows, cellStr) : null;
+      const needle = searchLc;
+      const out: { row: unknown[]; idx: number }[] = [];
+      for (let idx = 0; idx < rows.length; idx++) {
+        const row = rows[idx];
+        if (hasChips && !chipMatches(row)) continue;
+        if (hasCols && !colFilterMatches(idx)) continue;
+        if (scan && !(scan[idx] ?? '').includes(needle)) continue;
+        out.push(all[idx]);
+      }
+      return out;
+    });
   });
 
   // ── Row detail side panel (grid view) ────────────────────────────────────────
@@ -592,11 +702,16 @@
   // Final displayed rows: filter first, then sort (stable). Both in-memory.
   // Each value's sort key (empty? / number / string) is computed ONCE per sort
   // instead of per comparison (~1.7M comparisons at 100k rows).
+  // The last sorted view is kept per rows array: switching back to a sorted
+  // tab skips the 100k-string collator sort (150–400 ms in JSC).
   const viewRows = $derived.by<{ row: unknown[]; idx: number }[]>(() => {
     const base = filteredRows;
     if (!sorting || sortCol === null || sortDir === null) return base;
     const col = sortCol;
     const factor = sortDir === 'asc' ? 1 : -1;
+    return memoSort(liveRows, base, `${col}|${sortDir}`, () => sortView(base, col, factor));
+  });
+  function sortView(base: { row: unknown[]; idx: number }[], col: number, factor: number): { row: unknown[]; idx: number }[] {
     const n = base.length;
     const empty = new Uint8Array(n);
     const nums = new Float64Array(n);
@@ -631,7 +746,7 @@
     const out = new Array<{ row: unknown[]; idx: number }>(n);
     for (let i = 0; i < n; i++) out[i] = base[order[i]];
     return out;
-  });
+  }
 
   // Filtered/sorted rows as plain objects (for the JSON / vertical views),
   // capped. `idx` is the ORIGINAL liveRows index so per-document edits can
@@ -693,6 +808,17 @@
   $effect(()=>{if(connectionId)void resourceAccess.load('connection',connectionId,accessChild);});
   $effect(()=>{if(connectionId&&editAccessChild!==accessChild)void resourceAccess.load('connection',connectionId,editAccessChild);});
 
+  // `viewOrder` per view array (memoised like `unfilteredView`): a tab switch
+  // back to an unchanged 100k-row view reuses it instead of re-mapping.
+  const viewOrderMemo = new WeakMap<{ row: unknown[]; idx: number }[], number[]>();
+  function viewOrderOf(view: { row: unknown[]; idx: number }[]): number[] {
+    let o = viewOrderMemo.get(view);
+    if (!o) {
+      o = view.map((r) => r.idx);
+      viewOrderMemo.set(view, o);
+    }
+    return o;
+  }
   const flow = new EditFlow();
   // While an error is shown, `result` is still the PREVIOUS run's while
   // `statement` is the failed one — never pair them (BUG-7: the edit flow and
@@ -710,7 +836,7 @@
       canModify,
       uniqueColNames,
       mini,
-      viewOrder: viewRows.map((r) => r.idx),
+      viewOrder: viewOrderOf(viewRows),
       resultCount: resultSets.length,
     });
   });
@@ -909,13 +1035,77 @@
   function exportRows(): unknown[][] {
     return filtering || sorting || chipFiltering ? viewRows.map((r) => r.row) : liveRows;
   }
-  function toTsv(): string {
-    if (!result) return '';
-    const header = result.columns.map((c) => c.name).join('\t');
-    const body = exportRows()
-      .map((r) => r.map((v) => exportText(v).replace(/\t/g, ' ').replace(/\n/g, ' ')).join('\t'))
-      .join('\n');
-    return `${header}\n${body}`;
+  // ── Chunked export text ─────────────────────────────────────────────────────
+  // Copy / Download of a 100k-row result used to build the whole string in ONE
+  // task (hundreds of ms of frozen UI, no feedback). Past CHUNKED_FROM rows the
+  // text is built CHUNK_ROWS at a time, yielding between chunks, behind a
+  // "Preparing…" toast; downloads hand the parts straight to a Blob (no single
+  // giant string). Small results stay synchronous.
+  const CHUNKED_FROM = 20_000;
+  const CHUNK_ROWS = 5_000;
+  const yieldTask = (): Promise<void> => new Promise((res) => setTimeout(res, 0));
+  /** `header` + one line per row (joined by `sep`), as string parts. */
+  async function buildParts(header: string, line: (r: unknown[]) => string, sep = '\n', tail = ''): Promise<string[]> {
+    const rows = exportRows();
+    const parts: string[] = [header];
+    for (let i = 0; i < rows.length; i += CHUNK_ROWS) {
+      if (i > 0) await yieldTask();
+      const chunk = rows.slice(i, i + CHUNK_ROWS).map(line).join(sep);
+      parts.push(i > 0 ? sep + chunk : chunk);
+    }
+    if (tail) parts.push(tail);
+    return parts;
+  }
+  /** Run `work` behind a "Preparing…" toast when the export is large. */
+  async function withProgress<T>(what: string, work: () => Promise<T>): Promise<T> {
+    const big = exportRows().length > CHUNKED_FROM;
+    const id = big ? toasts.info(`Preparing ${what}…`, `${exportRows().length.toLocaleString()} rows`) : null;
+    try {
+      return await work();
+    } finally {
+      if (id !== null) toasts.dismiss(id);
+    }
+  }
+  function tsvLine(r: unknown[]): string {
+    return r.map((v) => exportText(v).replace(/\t/g, ' ').replace(/\n/g, ' ')).join('\t');
+  }
+  function tsvParts(): Promise<string[]> {
+    if (!result) return Promise.resolve(['']);
+    return buildParts(`${result.columns.map((c) => c.name).join('\t')}\n`, tsvLine);
+  }
+  function csvParts(): Promise<string[]> {
+    if (!result) return Promise.resolve(['']);
+    return buildParts(`${result.columns.map((c) => csvCell(c.name)).join(',')}\n`, (r) => r.map(csvCell).join(','));
+  }
+  function jsonParts(): Promise<string[]> {
+    if (!result || exportRows().length === 0) return Promise.resolve(['[]']);
+    const names = uniqueColNames;
+    // Each element pretty-printed and indented one level: byte-identical to
+    // JSON.stringify(array, null, 2).
+    return buildParts(
+      '[\n',
+      (r) => '  ' + JSON.stringify(Object.fromEntries(names.map((n, i) => [n, r[i] ?? null])), null, 2).replace(/\n/g, '\n  '),
+      ',\n',
+      '\n]',
+    );
+  }
+  /**
+   * Copy text that may take a while to build. WebKit only honours a clipboard
+   * write inside the click's activation, so the write starts NOW with a
+   * promised ClipboardItem; browsers without it fall back to writeText.
+   */
+  async function copyBuilt(build: () => Promise<string[]>): Promise<void> {
+    const text = build().then((p) => p.join(''));
+    const CI = (globalThis as { ClipboardItem?: typeof ClipboardItem }).ClipboardItem;
+    if (CI && navigator.clipboard?.write) {
+      try {
+        await navigator.clipboard.write([new CI({ 'text/plain': text.then((t) => new Blob([t], { type: 'text/plain' })) })]);
+        return;
+      } catch {
+        /* fall through to writeText */
+      }
+    }
+    await navigator.clipboard.writeText(await text);
   }
   function csvCell(v: unknown): string {
     let s = exportText(v);
@@ -924,18 +1114,6 @@
     // Non-string values (a bare -5 is data, not a formula) are left alone.
     if (typeof v === 'string' && /^[=+\-@]/.test(s)) s = `'${s}`;
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  }
-  function toCsv(): string {
-    if (!result) return '';
-    const header = result.columns.map((c) => csvCell(c.name)).join(',');
-    const body = exportRows().map((r) => r.map(csvCell).join(',')).join('\n');
-    return `${header}\n${body}`;
-  }
-  function toJson(): string {
-    if (!result) return '[]';
-    const names = uniqueColNames;
-    const objs = exportRows().map((r) => Object.fromEntries(names.map((n, i) => [n, r[i] ?? null])));
-    return JSON.stringify(objs, null, 2);
   }
 
   const exportScope = $derived.by(() => {
@@ -947,14 +1125,14 @@
 
   async function copyTsv(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(toTsv());
+      await withProgress('TSV', () => copyBuilt(tsvParts));
       toasts.success('Copied', `Result copied as TSV${exportScope}`);
     } catch {
       toasts.error('Copy failed');
     }
   }
-  function download(text: string, name: string, mime: string): void {
-    const blob = new Blob([text], { type: mime });
+  function download(parts: string[], name: string, mime: string): void {
+    const blob = new Blob(parts, { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -964,18 +1142,18 @@
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
-  function exportCsv(): void {
+  async function exportCsv(): Promise<void> {
     if (!canExport) return;
-    download(toCsv(), 'result.csv', 'text/csv');
+    download(await withProgress('CSV', csvParts), 'result.csv', 'text/csv');
   }
-  function exportJson(): void {
+  async function exportJson(): Promise<void> {
     if (!canExport) return;
-    download(toJson(), 'result.json', 'application/json');
+    download(await withProgress('JSON', jsonParts), 'result.json', 'application/json');
   }
   async function copyAs(kind: 'csv' | 'json' | 'columns'): Promise<void> {
-    const text = kind === 'csv' ? toCsv() : kind === 'json' ? toJson() : (result?.columns ?? []).map((c) => c.name).join(', ');
     try {
-      await navigator.clipboard.writeText(text);
+      if (kind === 'columns') await navigator.clipboard.writeText((result?.columns ?? []).map((c) => c.name).join(', '));
+      else await withProgress(kind.toUpperCase(), () => copyBuilt(kind === 'csv' ? csvParts : jsonParts));
       const what = kind === 'columns' ? 'Column names copied' : `Result copied as ${kind.toUpperCase()}${exportScope}`;
       toasts.success('Copied', what);
     } catch {
@@ -1220,6 +1398,23 @@
       </div>
     {/if}
   {/if}
+{:else if isReleased(resultProp)}
+  <!-- The memory budget released this hidden tab's rows (db-result-budget.ts):
+       columns/stats survive, the rows come back by re-running the statement. -->
+  {#if running}
+    {#if !mini}{@render loadingFrame()}{/if}
+  {:else if !mini}
+    <div class="grid-released" data-testid="db-result-released">
+      <EmptyState
+        icon="refresh"
+        title="Result released to save memory"
+        body={`${releasedRows(resultProp).toLocaleString()} rows were dropped while this tab was in the background. Re-run the query to bring them back.`}
+        actionLabel={hosted && statement ? 'Re-run' : undefined}
+        actionIcon="play"
+        onaction={() => void database.rerunReleased()}
+      />
+    </div>
+  {/if}
 {:else if !result || result.columns.length === 0}
   {#if running && !mini}
     {@render loadingFrame()}
@@ -1250,6 +1445,8 @@
             aria-label="Search rows"
             value={searchInput}
             oninput={(e) => setSearch(e.currentTarget.value, true)}
+            onfocus={onSearchFocus}
+            onblur={onSearchBlur}
             spellcheck="false"
             autocomplete="off"
           />
@@ -1436,8 +1633,9 @@
           {sortDir}
           resetToken={colKey}
           filterRow={filterRow && !mini}
-          {colFilters}
-          oncolfilter={(ci, t) => (colFilters = { ...colFilters, [ci]: t })}
+          colFilters={colFiltersInput}
+          oncolfilter={setColFilter}
+          oncolfocus={onColFilterFocus}
           onfocusrow={(i) => { if (i !== null) detailIdx = i; }}
           oncellmenu={cellMenu}
           onheadermenu={headerMenu}
@@ -1563,29 +1761,32 @@
 {/if}
 
 {#if flow.docEditor}
-  <DocEditor {flow} />
+  {#await import('./DocEditor.svelte') then m}<m.default {flow} />{/await}
 {/if}
 
 {#if flow.rawDoc}
-  <RawDocViewer {flow} />
+  {#await import('./RawDocViewer.svelte') then m}<m.default {flow} />{/await}
 {/if}
 
 {#if showExportDialog && connectionId && statement}
-  <ExportDialog {statement} {connectionId} node={ranNode} {canExport} onclose={() => (showExportDialog = false)} />
+  {#await import('./ExportDialog.svelte') then m}<m.default {statement} {connectionId} node={ranNode} {canExport} onclose={() => (showExportDialog = false)} />{/await}
 {/if}
 
 {#if compare && result}
-  <RecordDiff
+  {#await import('./RecordDiff.svelte') then m}
+  <m.default
     left={objRowAt(compare[0])}
     right={objRowAt(compare[1])}
     leftLabel={`#${compare[0] + 1}`}
     rightLabel={`#${compare[1] + 1}`}
     onclose={() => (compare = null)}
   />
+  {/await}
 {/if}
 
-{#if connectionId}
-  <AggregateBuilder
+{#if connectionId && pipelineMounted}
+  {#await import('./AggregateBuilder.svelte') then m}
+  <m.default
     collection={engine === 'mongodb' ? flow.editTable : null}
     open={pipelineOpen}
     connId={connectionId}
@@ -1593,10 +1794,12 @@
     oninsert={(stmt) => database.setStatement(stmt)}
     onrun={(stmt) => { database.setStatement(stmt); void database.runQuery(stmt); }}
   />
+  {/await}
 {/if}
 
 {#if flow.reviewSql}
-  <ReviewModal
+  {#await import('./ReviewModal.svelte') then m}
+  <m.default
     title={flow.reviewSql.title}
     sql={flow.reviewSql.sql}
     diff={flow.reviewSql.diff}
@@ -1605,16 +1808,19 @@
     onrun={() => void flow.runReview()}
     onclose={() => flow.closeReview()}
   />
+  {/await}
 {/if}
 
 {#if sendToAgentOpen && ws.current && sendToAgentPayload !== null}
-  <ContextPacketDialog
+  {#await import('../../lib/components/ContextPacketDialog.svelte') then m}
+  <m.default
     workspaceId={ws.current.id}
     sessionId={ws.targetAgentId}
     kind="db"
     payload={sendToAgentPayload}
     onclose={() => (sendToAgentOpen = false)}
   />
+  {/await}
 {/if}
 
 <style>
@@ -1779,6 +1985,11 @@
     padding: 28px 16px;
     color: var(--text-dim);
     font-size: var(--fs-s);
+  }
+  .grid-released {
+    display: flex;
+    justify-content: center;
+    padding-block-start: 10vh;
   }
   .grid-empty.idle {
     flex-direction: column;

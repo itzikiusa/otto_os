@@ -66,6 +66,66 @@ pub async fn mark_read(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Most ids one bulk call may carry (the UI sends ≤ 25; the cap keeps the
+/// statement well under SQLite's bound-parameter limit).
+pub const BULK_MAX: usize = 500;
+
+/// Body of the bulk read / dismiss calls.
+#[derive(Debug, serde::Deserialize)]
+pub struct BulkIds {
+    pub ids: Vec<Id>,
+}
+
+/// Reply of the bulk read / dismiss calls: rows actually changed (foreign,
+/// global-for-non-root, unknown and already-read ids are skipped).
+#[derive(Debug, serde::Serialize)]
+pub struct BulkResult {
+    pub changed: u64,
+}
+
+fn check_bulk(ids: &[Id]) -> ApiResult<()> {
+    if ids.len() > BULK_MAX {
+        return Err(crate::error::ApiError(otto_core::Error::Invalid(format!(
+            "at most {BULK_MAX} ids per call"
+        ))));
+    }
+    Ok(())
+}
+
+/// `POST /api/v1/notifications/read` `{ids}` — mark a batch read in one
+/// statement with ONE `notifications_changed` broadcast (perf §15 N4).
+pub async fn mark_many_read(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<BulkIds>,
+) -> ApiResult<Json<BulkResult>> {
+    check_bulk(&body.ids)?;
+    let changed_n = NotificationsRepo::new(ctx.pool.clone())
+        .mark_many_read(&body.ids, &access_for(&user))
+        .await?;
+    if changed_n > 0 {
+        changed(&ctx, &user);
+    }
+    Ok(Json(BulkResult { changed: changed_n }))
+}
+
+/// `POST /api/v1/notifications/dismiss` `{ids}` — dismiss a batch in one
+/// statement with ONE `notifications_changed` broadcast.
+pub async fn dismiss_many(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<BulkIds>,
+) -> ApiResult<Json<BulkResult>> {
+    check_bulk(&body.ids)?;
+    let changed_n = NotificationsRepo::new(ctx.pool.clone())
+        .dismiss_many(&body.ids, &access_for(&user))
+        .await?;
+    if changed_n > 0 {
+        changed(&ctx, &user);
+    }
+    Ok(Json(BulkResult { changed: changed_n }))
+}
+
 /// `POST /api/v1/notifications/read-all`
 pub async fn mark_all_read(
     State(ctx): State<ServerCtx>,

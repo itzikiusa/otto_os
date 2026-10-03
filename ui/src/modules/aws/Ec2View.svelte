@@ -203,6 +203,7 @@
   filterPlaceholder="Filter name, id, IP, tag…"
   {loading}
   bind:auto
+  {region}
   onrefresh={() => void load()}
 >
   <RegionPicker {account} service="ec2" bind:region allowAll />

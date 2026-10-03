@@ -70,14 +70,17 @@ test('swarm board: project change clears selection from the old board', async ({
   const tasks = await (await ctx.get(`${base}/api/v1/swarm/projects/${projectId}/tasks`)).json();
   expect(tasks.length).toBeGreaterThan(0);
   await ctx.dispose();
-  let secondLoaded!: () => void;
-  const secondReady = new Promise<void>(resolve => { secondLoaded = resolve; });
-  await page.route(`**/api/v1/swarm/projects/${second.id}/tasks`, async r => { await r.fulfill({ json: [] }); secondLoaded(); });
-  await page.route(`**/api/v1/swarm/projects/${projectId}/tasks`, async r => {
-    await secondReady;
-    // Complete the empty sibling first; the populated result must merge into the current cache.
-    await new Promise(resolve => setTimeout(resolve, 150));
+  // Opening the swarm loads every project's tasks in ONE request (perf §15
+  // N5) and groups them client-side; no per-project GET fan-out.
+  let swarmWide = 0;
+  const perProjectGets: string[] = [];
+  await page.route(`**/api/v1/swarm/swarms/${swarmId}/tasks`, async r => {
+    swarmWide++;
     await r.fulfill({ json: tasks });
+  });
+  await page.route(`**/api/v1/swarm/projects/*/tasks`, async r => {
+    if (r.request().method() === 'GET') perProjectGets.push(r.request().url());
+    await r.continue();
   });
   await page.goto('/#/swarm');
   await page.getByRole('tab', { name: 'Board', exact: true }).click();
@@ -86,6 +89,8 @@ test('swarm board: project change clears selection from the old board', async ({
   await expect(page.getByText('1 selected', { exact: true })).toBeVisible();
   await page.getByLabel('Project', { exact: true }).selectOption(second.id);
   await expect(page.getByText('1 selected', { exact: true })).toHaveCount(0);
+  expect(swarmWide).toBeGreaterThanOrEqual(1);
+  expect(perProjectGets).toEqual([]);
 });
 
 test('rooms: pending creation prevents duplicate Enter and preserves newer name', async ({ page }) => {

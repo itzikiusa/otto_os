@@ -82,6 +82,7 @@ pub(super) async fn run(
         .map(|v| v.0)
 }
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod tests {
     use super::*;
     #[tokio::test]

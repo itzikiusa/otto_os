@@ -41,6 +41,11 @@ const POOL_MAX_CONNECTIONS: u32 = 6;
 /// Drop idle pooled connections after this long so a long-lived cached pool
 /// doesn't pin server-side connections forever.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a request waits for a pooled session before failing with a clear
+/// "connection busy" error instead of sqlx's silent 30 s default.
+const POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upper bound on the out-of-band `KILL QUERY` (its own short-lived connection).
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// MySQL driver. Holds a per-`cache_key` pool cache so connections are reused
 /// across calls instead of re-handshaking every time. `Mutex<HashMap>` is
@@ -426,8 +431,10 @@ impl Driver for MysqlDriver {
 
         let pool = self.pool(cfg).await?;
 
+        // The four catalog reads are independent: one concurrent wave (pool of
+        // 6) instead of four back-to-back round trips.
         // Columns from information_schema.
-        let col_rows: Vec<ColumnRow> = sqlx::query_as(
+        let cols_q = sqlx::query_as::<_, ColumnRow>(
             // CAST text columns to CHAR (MySQL 8 returns information_schema text
             // as VARBINARY); keep the original names so FromRow still matches.
             "SELECT CAST(column_name AS CHAR) AS column_name, \
@@ -444,9 +451,21 @@ impl Driver for MysqlDriver {
         )
         .bind(&db)
         .bind(&table)
-        .fetch_all(&pool)
-        .await
-        .map_err(types::upstream)?;
+        .fetch_all(&pool);
+
+        let (col_rows, indexes, foreign_keys, ddl) = tokio::join!(
+            cols_q,
+            // Indexes via SHOW INDEX, grouped by Key_name (ordered by Seq_in_index).
+            self.indexes_of(&pool, &db, &table),
+            // Foreign keys (CRITICAL for the JOIN builder).
+            self.foreign_keys_of(&pool, &db, &table),
+            // DDL via SHOW CREATE TABLE / VIEW (2nd column).
+            self.show_create(&pool, &db, &table, is_view),
+        );
+        let col_rows = col_rows.map_err(types::upstream)?;
+        let indexes = indexes?;
+        let foreign_keys = foreign_keys?;
+        let ddl = ddl.ok();
 
         let mut columns = Vec::with_capacity(col_rows.len());
         let mut primary_key = Vec::new();
@@ -470,18 +489,9 @@ impl Driver for MysqlDriver {
             });
         }
 
-        // Indexes via SHOW INDEX, grouped by Key_name (ordered by Seq_in_index).
-        let indexes = self.indexes_of(&pool, &db, &table).await?;
-
-        // Foreign keys (CRITICAL for the JOIN builder).
-        let foreign_keys = self.foreign_keys_of(&pool, &db, &table).await?;
-
         // Row count is intentionally left empty: the only cheap source here is
         // information_schema.tables.table_rows, which is an InnoDB *estimate*
         // (often wildly off) — the user doesn't want estimated counts shown.
-
-        // DDL via SHOW CREATE TABLE / VIEW (2nd column).
-        let ddl = self.show_create(&pool, &db, &table, is_view).await.ok();
 
         let mut detail = ObjectDetail::new(
             table,
@@ -566,6 +576,123 @@ impl Driver for MysqlDriver {
         self.completions.invalidate(cache_key);
     }
 
+    /// Drop cached pools nobody acquired for `idle`. Only the cache's handle is
+    /// dropped (no explicit `close`): a query running longer than the window
+    /// holds its own clone, so it finishes and the pool goes with the last
+    /// clone; idle sessions are then closed by sqlx.
+    async fn evict_idle(&self, idle: Duration) -> usize {
+        // Same 5-minute tick: expired completion snapshots go too (DB2-07).
+        self.completions.sweep();
+        self.pools.take_idle(idle).len()
+    }
+
+    /// The whole database's diagram in three concurrent `information_schema`
+    /// queries (tables, columns with their `PRI` key flag, FK key columns)
+    /// instead of one `object_detail` (4 sequential queries) per table.
+    async fn schema_graph_bulk(
+        &self,
+        cfg: &ResolvedConfig,
+        schema: &str,
+        max_tables: usize,
+    ) -> Result<Option<types::SchemaGraph>> {
+        use crate::drivers::postgres::{assemble_bulk_graph, BulkCol, BulkFk, BulkRel};
+        let pool = self.pool(cfg).await?;
+        // Same objects and order as the lazy tree's Tables then Views folders.
+        let rels_q = sqlx::query_as::<_, (String, String)>(
+            "SELECT CAST(table_name AS CHAR), CAST(table_type AS CHAR) \
+             FROM information_schema.tables \
+             WHERE table_schema = ? AND table_type IN ('BASE TABLE', 'VIEW') \
+             ORDER BY (table_type = 'VIEW'), table_name",
+        )
+        .bind(schema)
+        .fetch_all(&pool);
+        let cols_q = sqlx::query_as::<_, (String, String, String, String, Option<String>)>(
+            "SELECT CAST(table_name AS CHAR), CAST(column_name AS CHAR), \
+                    CAST(COALESCE(NULLIF(column_type, ''), data_type) AS CHAR), \
+                    CAST(is_nullable AS CHAR), CAST(column_key AS CHAR) \
+             FROM information_schema.columns \
+             WHERE table_schema = ? \
+             ORDER BY table_name, ordinal_position",
+        )
+        .bind(schema)
+        .fetch_all(&pool);
+        #[allow(clippy::type_complexity)]
+        let fks_q = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            "SELECT CAST(kcu.table_name AS CHAR), CAST(kcu.constraint_name AS CHAR), \
+                    CAST(kcu.column_name AS CHAR), \
+                    CAST(kcu.referenced_table_schema AS CHAR), \
+                    CAST(kcu.referenced_table_name AS CHAR), \
+                    CAST(kcu.referenced_column_name AS CHAR) \
+             FROM information_schema.key_column_usage kcu \
+             JOIN information_schema.referential_constraints rc \
+               ON rc.constraint_schema = kcu.table_schema \
+              AND rc.constraint_name = kcu.constraint_name \
+             WHERE kcu.table_schema = ? AND kcu.referenced_table_name IS NOT NULL \
+             ORDER BY kcu.table_name, kcu.constraint_name, kcu.ordinal_position",
+        )
+        .bind(schema)
+        .fetch_all(&pool);
+        let (rels, cols, fks) = tokio::try_join!(rels_q, cols_q, fks_q).map_err(types::upstream)?;
+
+        let db = NodePath::parse(&format!("db:{schema}"));
+        let rels = rels
+            .into_iter()
+            .map(|(name, table_type)| {
+                let (seg, kind) = if table_type.eq_ignore_ascii_case("VIEW") {
+                    ("view", NodeKind::View)
+                } else {
+                    ("table", NodeKind::Table)
+                };
+                BulkRel {
+                    id: db.child(seg, &name).to_id(),
+                    name,
+                    kind,
+                }
+            })
+            .collect();
+        let cols = cols
+            .into_iter()
+            .map(|(table, name, data_type, nullable, key)| BulkCol {
+                table,
+                name,
+                data_type,
+                nullable: nullable.eq_ignore_ascii_case("YES"),
+                primary_key: key.as_deref() == Some("PRI"),
+            })
+            .collect();
+        let fks = fks
+            .into_iter()
+            .filter_map(|(table, name, column, ref_schema, ref_table, ref_column)| {
+                Some(BulkFk {
+                    table,
+                    name,
+                    column,
+                    ref_schema,
+                    ref_table: ref_table?,
+                    ref_column: ref_column?,
+                })
+            })
+            .collect();
+        Ok(Some(assemble_bulk_graph(
+            schema,
+            rels,
+            cols,
+            &[],
+            fks,
+            max_tables,
+        )))
+    }
+
     async fn run_tracked(
         &self,
         cfg: &ResolvedConfig,
@@ -627,7 +754,7 @@ impl Driver for MysqlDriver {
                 ri.sql.clone()
             };
             (
-                run_read(&pool, &sql, max_rows, active_db, token).await,
+                run_read(&pool, &sql, max_rows, ri.limited, active_db, token).await,
                 // Report the user-visible page size (max_rows), not the +1 probe.
                 ri.limited.then_some(max_rows as u64),
             )
@@ -661,9 +788,25 @@ impl Driver for MysqlDriver {
         let sql = format!("KILL QUERY {conn_id}");
         // Best-effort: an already-finished query yields "Unknown thread id 1234"
         // — that's a successful no-op cancel, not a failure to report.
-        let _ = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-            .execute(&pool)
-            .await;
+        // Never wait in the pool's queue: Stop matters most exactly when every
+        // pooled session is busy. Use an idle one if there is one right now,
+        // else a one-off connection built from the pool's own options.
+        let cancel = async {
+            if let Some(mut conn) = pool.try_acquire() {
+                let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
+                    .execute(&mut *conn)
+                    .await;
+                return;
+            }
+            let opts = pool.connect_options();
+            if let Ok(mut conn) = sqlx::MySqlConnection::connect_with(&opts).await {
+                let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
+                    .execute(&mut conn)
+                    .await;
+                let _ = conn.close().await;
+            }
+        };
+        let _ = tokio::time::timeout(CANCEL_TIMEOUT, cancel).await;
         Ok(())
     }
 
@@ -681,7 +824,7 @@ impl Driver for MysqlDriver {
         }
         let pool = self.pool(cfg).await?;
         let node = node.map(str::trim).filter(|s| !s.is_empty());
-        let mut conn = acquire_scoped(&pool, effective_db(node, cfg)).await?;
+        let mut conn = acquire_scoped(&pool, effective_db(node, cfg), None).await?;
         let mut conn = conn
             .begin_with("START TRANSACTION READ ONLY")
             .await
@@ -775,7 +918,7 @@ impl Driver for MysqlDriver {
 
         let pool = self.pool(cfg).await?;
         let node = node.map(str::trim).filter(|s| !s.is_empty());
-        let mut conn = acquire_scoped(&pool, effective_db(node, cfg)).await?;
+        let mut conn = acquire_scoped(&pool, effective_db(node, cfg), None).await?;
         let mut conn = conn
             .begin_with("START TRANSACTION READ ONLY")
             .await
@@ -1361,7 +1504,7 @@ impl MysqlDriver {
         db: &str,
         name: &str,
     ) -> Result<Option<String>> {
-        let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        let mut conn = acquire(pool).await?;
         (&mut *conn)
             .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(use_db_sql(db))))
             .await
@@ -1632,20 +1775,27 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::MySqlPool> {
     MySqlPoolOptions::new()
         .max_connections(POOL_MAX_CONNECTIONS)
         .idle_timeout(POOL_IDLE_TIMEOUT)
+        .acquire_timeout(POOL_ACQUIRE_TIMEOUT)
         .after_connect(move |conn, _meta| {
-            let tz_stmt = format!("SET time_zone = '{}'", tz.replace('\'', "''"));
+            let setup = connect_setup_sql(&tz);
+            let fallback = connect_setup_fallback_sql(&tz);
             Box::pin(async move {
-                // Best-effort: ignore errors (e.g. a named zone when the server's
-                // tz tables aren't loaded) so a bad zone never breaks the session.
-                let _ = sqlx::query(sqlx::AssertSqlSafe(tz_stmt.as_str()))
+                // ONE round trip, unprepared (COM_QUERY): both settings in a
+                // single statement. Best-effort: ignore errors so a bad zone
+                // never breaks the session — on failure retry the variables
+                // one by one (a server lacking the stats var, or one whose tz
+                // tables aren't loaded, must still get the other setting).
+                if sqlx::raw_sql(sqlx::AssertSqlSafe(setup.as_str()))
                     .execute(&mut *conn)
-                    .await;
-                // Use cached information_schema statistics (avoids the expensive
-                // per-table stats recomputation that slows the tree on big
-                // servers). Best-effort: harmless if the server lacks the var.
-                let _ = sqlx::query("SET SESSION information_schema_stats_expiry = 86400")
-                    .execute(&mut *conn)
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    for stmt in fallback {
+                        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(stmt.as_str()))
+                            .execute(&mut *conn)
+                            .await;
+                    }
+                }
                 Ok(())
             })
         })
@@ -1657,6 +1807,25 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::MySqlPool> {
 /// The MySQL `SET time_zone` value for a connection. Defaults to UTC
 /// (`+00:00`); `UTC` is normalized to the offset form, anything else (offset
 /// like `+03:00` or a named zone) is passed through.
+/// The per-connection session setup as ONE statement (one round trip): the
+/// session time zone plus cached `information_schema` statistics (avoids the
+/// expensive per-table stats recomputation that slows the tree on big servers).
+fn connect_setup_sql(tz: &str) -> String {
+    format!(
+        "SET time_zone = '{}', SESSION information_schema_stats_expiry = 86400",
+        tz.replace('\'', "''")
+    )
+}
+
+/// The same settings one per statement — used only when the combined `SET`
+/// failed (MySQL applies a multi-assignment `SET` all-or-nothing).
+fn connect_setup_fallback_sql(tz: &str) -> [String; 2] {
+    [
+        format!("SET time_zone = '{}'", tz.replace('\'', "''")),
+        "SET SESSION information_schema_stats_expiry = 86400".to_string(),
+    ]
+}
+
 fn mysql_session_tz(cfg: &ResolvedConfig) -> String {
     match cfg.param_str("timezone") {
         Some(tz) if !tz.eq_ignore_ascii_case("UTC") => tz,
@@ -1704,17 +1873,53 @@ fn first_keyword(statement: &str) -> String {
         .to_ascii_uppercase()
 }
 
-/// Read the backend connection id (`CONNECTION_ID()`) for the acquired session
-/// and record it in `token`, so a concurrent cancel can `KILL QUERY <id>` this
-/// exact connection. Best-effort: a failure leaves the token empty (the query
-/// just can't be server-cancelled), never an error to the caller.
-async fn capture_conn_id(conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>, token: &CancelToken) {
-    if let Ok(id) = sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()")
-        .fetch_one(&mut **conn)
-        .await
-    {
-        token.set(QueryHandle::MysqlConnId(id));
+/// Acquire a pooled session, mapping sqlx's pool timeout to a clear message.
+async fn acquire(pool: &sqlx::MySqlPool) -> Result<sqlx::pool::PoolConnection<sqlx::MySql>> {
+    pool.acquire().await.map_err(acquire_error)
+}
+
+/// `PoolTimedOut` means every pooled session stayed busy for
+/// [`POOL_ACQUIRE_TIMEOUT`]: say so instead of sqlx's generic text.
+fn acquire_error(e: sqlx::Error) -> otto_core::Error {
+    match e {
+        sqlx::Error::PoolTimedOut => types::upstream(format!(
+            "connection busy: all {POOL_MAX_CONNECTIONS} sessions to this server are in use \
+             (waited {}s); stop a running query or retry",
+            POOL_ACQUIRE_TIMEOUT.as_secs()
+        )),
+        other => types::upstream(other),
     }
+}
+
+/// The ONE text-protocol round trip that scopes a pooled session for a
+/// request and reads what cancel / the no-default-db check need:
+///
+/// - `db` → `USE` it and read `CONNECTION_ID()`;
+/// - none → read `CONNECTION_ID()` and `DATABASE()` (the caller retires a
+///   session that still carries a default database).
+///
+/// It used to be two or three trips (`USE` / `SELECT DATABASE()`, then
+/// `SELECT CONNECTION_ID()`). Text protocol is required: MySQL rejects `USE`
+/// as a prepared statement (see [`use_db_sql`]); sqlx enables
+/// `CLIENT_MULTI_STATEMENTS`, so the pair travels as one `COM_QUERY`.
+fn session_setup_sql(db: Option<&str>) -> String {
+    match db {
+        Some(db) => format!("{}; SELECT CONNECTION_ID(), DATABASE()", use_db_sql(db)),
+        None => "SELECT CONNECTION_ID(), DATABASE()".to_string(),
+    }
+}
+
+/// `CONNECTION_ID()` from a text-protocol row (decoded as whichever integer /
+/// string form the server sent).
+fn conn_id_of(row: &MySqlRow) -> Option<u64> {
+    row.try_get::<u64, _>(0)
+        .ok()
+        .or_else(|| row.try_get::<i64, _>(0).ok().map(|n| n as u64))
+        .or_else(|| {
+            row.try_get::<String, _>(0)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+        })
 }
 
 /// The database a request runs in: the selected one, else the profile default
@@ -1736,25 +1941,30 @@ fn effective_db<'a>(active_db: Option<&'a str>, cfg: &'a ResolvedConfig) -> Opti
 async fn acquire_scoped(
     pool: &sqlx::MySqlPool,
     db: Option<&str>,
+    token: Option<&CancelToken>,
 ) -> Result<sqlx::pool::PoolConnection<sqlx::MySql>> {
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
-    if let Some(db) = db {
-        (&mut *conn)
-            .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(use_db_sql(db))))
-            .await
-            .map_err(types::upstream)?;
-        return Ok(conn);
-    }
+    let setup = session_setup_sql(db);
+    let mut conn = acquire(pool).await?;
     for _ in 0..=POOL_MAX_CONNECTIONS {
-        let current: Option<String> = sqlx::query_scalar("SELECT DATABASE()")
-            .fetch_one(&mut *conn)
+        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(setup.as_str()))
+            .fetch_all(&mut *conn)
             .await
             .map_err(types::upstream)?;
-        if current.is_none() {
+        let row = rows.last();
+        // Whether the session still carries a default database: judged on the
+        // raw NULL flag, so a value that won't decode as text can't pass as
+        // "none".
+        let has_default_db = row
+            .and_then(|r| r.try_get_raw(1).ok())
+            .is_some_and(|v| !sqlx::ValueRef::is_null(&v));
+        if db.is_some() || !has_default_db {
+            if let (Some(token), Some(id)) = (token, row.and_then(conn_id_of)) {
+                token.set(QueryHandle::MysqlConnId(id));
+            }
             return Ok(conn);
         }
         let _ = conn.close().await;
-        conn = pool.acquire().await.map_err(types::upstream)?;
+        conn = acquire(pool).await?;
     }
     Err(types::upstream(
         "mysql: could not obtain a session without a default database",
@@ -1765,16 +1975,16 @@ async fn run_read(
     pool: &sqlx::MySqlPool,
     statement: &str,
     max_rows: usize,
+    server_bounded: bool,
     active_db: Option<&str>,
     token: &CancelToken,
 ) -> Result<QueryResult> {
     // Acquire a single connection so the `USE <db>` and the statement share
     // the same session — the default schema must apply to the query.
-    let mut conn = acquire_scoped(pool, active_db).await?;
-    // Capture this connection's backend id so a concurrent cancel can
-    // `KILL QUERY <id>` it. Best-effort — a query with no captured id simply
-    // can't be server-cancelled.
-    capture_conn_id(&mut conn, token).await;
+    // The backend id is captured in the same round trip as the `USE`, so a
+    // concurrent cancel can `KILL QUERY <id>` it. Best-effort — a query with
+    // no captured id simply can't be server-cancelled.
+    let mut conn = acquire_scoped(pool, active_db, Some(token)).await?;
     // Reads leave no session state, except the explicit lock functions.
     if types::sql_leaves_session_state(statement) {
         conn.close_on_drop();
@@ -1783,12 +1993,14 @@ async fn run_read(
         &mut conn,
         statement,
         max_rows,
+        server_bounded,
         &mut types::ByteBudget::default(),
     )
     .await?;
     if out.unread {
         // Rows left on the wire: discard the session instead of letting its
-        // next use drain them.
+        // next use drain them. (A server-bounded read at the row cap drains
+        // its leftover and keeps the session — DB2-01.)
         conn.close_on_drop();
     }
     Ok(out.result)
@@ -1801,8 +2013,7 @@ async fn run_write(
     token: &CancelToken,
 ) -> Result<QueryResult> {
     // Same as run_read: `USE <db>` and the statement must share one session.
-    let mut conn = acquire_scoped(pool, active_db).await?;
-    capture_conn_id(&mut conn, token).await;
+    let mut conn = acquire_scoped(pool, active_db, Some(token)).await?;
     // A `SET`/`BEGIN`/`LOCK`/… would outlive this request on a pooled session:
     // close it afterwards instead of returning it to the pool.
     if types::sql_leaves_session_state(statement) {
@@ -1826,8 +2037,7 @@ async fn run_batch(
     active_db: Option<&str>,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    let mut conn = acquire_scoped(pool, active_db).await?;
-    capture_conn_id(&mut conn, token).await;
+    let mut conn = acquire_scoped(pool, active_db, Some(token)).await?;
     if spans
         .iter()
         .any(|span| types::sql_leaves_session_state(&span.text))
@@ -1841,7 +2051,7 @@ async fn run_batch(
         let stmt = span.text.as_str();
         let started = Instant::now();
         let outcome = if is_read_statement(stmt) {
-            exec_read_conn(&mut conn, stmt, max_rows, &mut budget)
+            exec_read_conn(&mut conn, stmt, max_rows, false, &mut budget)
                 .await
                 .map(|out| {
                     // A LATER statement would drain the unread rows anyway (same
@@ -1897,7 +2107,15 @@ struct ReadOut {
 ///   rest: a non-LIMIT-able read (UNION, a batch statement, SHOW…) past the cap
 ///   used to fetch and discard the WHOLE server result (~1.5 µs/row — a 50M-row
 ///   UNION took over a minute to show 1,000 rows). The caller closes the session
-///   when `unread`.
+///   when `unread` — EXCEPT a `server_bounded` read (injected `LIMIT
+///   max_rows+1`) stopped at the row cap: the probe row was the server's last,
+///   so the reader drains the end-of-result packet ([`types::drain_leftover`])
+///   and the session goes back to the pool. Without that, the default "open
+///   table" view and every page closed its session and the next Run paid a
+///   full reconnect (DB2-01).
+/// - Ad-hoc SQL is NOT kept in the statement cache (`persistent(false)`): every
+///   distinct statement/page used to be cached per session, evicting the
+///   tree/completion statements that are actually reused (DB2-02).
 /// - Each column's decoder is chosen ONCE from its type ([`CellDecoder`]), not by
 ///   trying up to 11 typed `try_get`s per cell (2.1–2.5 s → ~0.2 s CPU per
 ///   100k×30 rows) — which also stops text that merely LOOKS like JSON being
@@ -1907,11 +2125,14 @@ async fn exec_read_conn(
     conn: &mut sqlx::MySqlConnection,
     statement: &str,
     max_rows: usize,
+    server_bounded: bool,
     budget: &mut types::ByteBudget,
 ) -> Result<ReadOut> {
     use futures_util::TryStreamExt as _;
 
-    let mut stream = sqlx::query(sqlx::AssertSqlSafe(statement)).fetch(&mut *conn);
+    let mut stream = sqlx::query(sqlx::AssertSqlSafe(statement))
+        .persistent(false)
+        .fetch(&mut *conn);
     let mut columns: Vec<Column> = Vec::new();
     let mut decoders: std::sync::Arc<[CellDecoder]> = std::sync::Arc::from(Vec::new());
     let mut chunk: Vec<MySqlRow> = Vec::new();
@@ -1928,9 +2149,12 @@ async fn exec_read_conn(
             decoders = column_decoders(&row).into();
         }
         if kept >= max_rows {
-            // Row max_rows+1 exists: the result is capped. Stop here.
+            // Row max_rows+1 exists: the result is capped. Stop here — and,
+            // when the server bounded the result, finish it so the session
+            // stays poolable.
             truncated = true;
-            unread = true;
+            unread = !(server_bounded
+                && types::drain_leftover(&mut stream, types::LEFTOVER_DRAIN_ROWS).await);
             break;
         }
         // Budget on the raw wire size, per row, BEFORE decoding. Always keep
@@ -2545,8 +2769,8 @@ async fn governed_read(
     token: &CancelToken,
 ) -> Result<QueryResult> {
     let scope_db = req.scope_database();
-    let mut conn = acquire_scoped(pool, effective_db(scope_db.as_deref(), cfg)).await?;
-    capture_conn_id(&mut conn, token).await;
+    let mut conn =
+        acquire_scoped(pool, effective_db(scope_db.as_deref(), cfg), Some(token)).await?;
     let mut tx = conn
         .begin_with("START TRANSACTION READ ONLY")
         .await
@@ -2577,7 +2801,8 @@ async fn governed_read(
                 );
             }
         }
-        let out = match exec_read_conn(&mut tx, &sql, max_rows, &mut budget).await {
+        let bounded = single && limited.limited;
+        let out = match exec_read_conn(&mut tx, &sql, max_rows, bounded, &mut budget).await {
             Ok(out) => out,
             // A batch keeps its completed results and flags the failing
             // statement (same contract as `run_batch`); a single statement's
@@ -2795,6 +3020,44 @@ mod cache_isolation_tests {
         assert_eq!(effective_db(None, &cfg), None);
         cfg.database = None;
         assert_eq!(effective_db(None, &cfg), None);
+    }
+
+    /// DB-02 round-trip guard: scoping a pooled session and capturing its
+    /// cancel id is ONE text-protocol `COM_QUERY` (it used to be `USE` or
+    /// `SELECT DATABASE()`, then `SELECT CONNECTION_ID()`).
+    #[test]
+    fn per_run_setup_is_one_round_trip() {
+        assert_eq!(
+            session_setup_sql(Some("sh`op")),
+            "USE `sh``op`; SELECT CONNECTION_ID(), DATABASE()"
+        );
+        assert_eq!(
+            session_setup_sql(None),
+            "SELECT CONNECTION_ID(), DATABASE()"
+        );
+        for sql in [session_setup_sql(Some("x")), session_setup_sql(None)] {
+            assert_eq!(sql.matches("SELECT").count(), 1, "{sql}");
+        }
+    }
+
+    /// DB2-01 round-trip guard: a NEW connection's setup is ONE `SET` (it was
+    /// two sequential prepared statements), escaped, with a per-variable
+    /// fallback for servers that reject one of the settings.
+    #[test]
+    fn connect_setup_is_one_statement() {
+        let sql = connect_setup_sql("Europe/O'X");
+        assert_eq!(
+            sql,
+            "SET time_zone = 'Europe/O''X', SESSION information_schema_stats_expiry = 86400"
+        );
+        assert_eq!(sql.matches("SET ").count(), 1, "{sql}");
+        assert!(
+            !sql.contains(';'),
+            "one statement, no multi-statement batch"
+        );
+        let [tz, stats] = connect_setup_fallback_sql("+00:00");
+        assert_eq!(tz, "SET time_zone = '+00:00'");
+        assert!(stats.contains("information_schema_stats_expiry"));
     }
 
     #[test]

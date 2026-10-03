@@ -71,16 +71,12 @@ pub async fn run(
         ..Default::default()
     };
     let handle = ctx.goal_loops.lock().unwrap().get(&loop_.id).cloned();
-    let cancelled = async {
-        loop {
-            if handle.as_ref().is_some_and(|h| {
-                h.cancel.load(Ordering::Relaxed) || h.paused.load(Ordering::Relaxed)
-            }) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    };
+    // Parks on the loop flag bell (perf W8) instead of a 100 ms poll.
+    let cancelled = crate::goal_loop::until_flag(|| {
+        handle
+            .as_ref()
+            .is_some_and(|h| h.cancel.load(Ordering::Relaxed) || h.paused.load(Ordering::Relaxed))
+    });
     let turn = async {
         crate::agent_session::run_session_turn_with(
             ctx,

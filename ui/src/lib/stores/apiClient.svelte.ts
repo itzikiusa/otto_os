@@ -9,12 +9,15 @@ import type {
   ApiAuth,
   ApiAutomation,
   ApiBodyMode,
+  ApiClientStorage,
   ApiCollection,
   ApiEnvironment,
   ApiHistoryEntry,
   ApiHistorySummary,
   ApiKeyVal,
+  ApiOverviewRequest,
   ApiRequest,
+  ApiRequestItem,
   ApiRequestExtras,
   ApiResponse,
   ApiRunResult,
@@ -32,6 +35,7 @@ import type {
 import { isSecretRef } from '../api/types';
 import { forDuplicate, stripSecretsForStorage, unmaskHistory } from '../api/apiSecretShapes';
 import { ws } from './workspace.svelte';
+import { announceModule } from '../lazyModule';
 import { HistoryRefresh, HistoryDetail } from './apiHistory';
 import { toasts } from '../toast.svelte';
 import type { PreRequestReq, TestResult } from '../api/scripts';
@@ -237,6 +241,41 @@ function extrasToDraft(d: ApiDraft, extras: ApiRequestExtras | null | undefined)
 function tabsKey(wid: Id): string {
   return `otto_api_tabs_v1:${wid}`;
 }
+/** Fallback delta-poll interval for a running automation; progress normally
+ *  arrives as `api_run_progress` WS events (perf F2). */
+const RUN_POLL_FALLBACK_MS = 2000;
+/** Re-entering the API page within this long of a successful load reuses it. */
+const RELOAD_FRESH_MS = 60_000;
+/** Minimum gap between a running automation's delta fetches: a fast run
+ *  emits `api_run_progress` per step; the view refetches at most 4×/s
+ *  (a terminal status skips the wait — perf2 N3). */
+const RUN_DELTA_MIN_MS = 250;
+/** Full saved requests kept after open (tabs' rows are always kept). */
+const FULL_REQUESTS_MAX = 64;
+
+/** The tree/search row of a full saved request (see `ApiRequestItem`). */
+export function requestItem(r: ApiRequest): ApiRequestItem {
+  return {
+    id: r.id,
+    workspace_id: r.workspace_id,
+    name: r.name,
+    method: r.method,
+    url: r.url,
+    collection_id: r.collection_id ?? null,
+    auth_type: r.auth?.type ?? 'none',
+    has_ssh: !!r.ssh_connection_id,
+    agent_authored: !!(r.extras && typeof r.extras === 'object' && 'agent' in r.extras && r.extras.agent),
+    updated_at: r.updated_at,
+    position: r.position,
+  };
+}
+
+/** `requests/summaries` rows → items (`position` falls back to list order,
+ *  which the daemon sorts by position, for daemons that omit it). */
+function summaryItems(rows: ApiOverviewRequest[], wid: Id): ApiRequestItem[] {
+  return rows.map((r, i) => ({ ...r, workspace_id: wid, position: r.position ?? i }));
+}
+
 /** Debounce for tab writes — the draft setter fires on every keystroke. */
 const TABS_WRITE_DELAY_MS = 250;
 /** Body ceiling for the quota-exceeded fallback rewrite (chars). */
@@ -291,8 +330,16 @@ function errMsg(e: unknown): string {
 }
 
 class ApiClientStore {
-  collections: ApiCollection[] = $state([]);
-  requests: ApiRequest[] = $state([]);
+  // Raw: both lists are replaced wholesale (map/filter/spread), and a deep
+  // proxy made every tree filter read 3k proxied rows per keystroke.
+  collections: ApiCollection[] = $state.raw([]);
+  /** Saved requests as summaries (tree, search, pickers) — perf2 N1. The full
+   *  row of an opened request lives in `fullRequests`. */
+  requests: ApiRequestItem[] = $state.raw([]);
+  /** id → full saved request, for open tabs (dirty check, secret stripping,
+   *  history unmask) and recently opened rows. Replaced wholesale. */
+  fullRequests: Map<Id, ApiRequest> = $state.raw(new Map());
+  private fullInflight = new Map<Id, Promise<ApiRequest | null>>();
   environments: ApiEnvironment[] = $state([]);
   history: ApiHistorySummary[] = $state([]);
   historyLoadingId: string | null = $state(null);
@@ -415,7 +462,7 @@ class ApiClientStore {
     // persisted copy (see stripSecretsForStorage).
     const blob: PersistedTabs = {
       tabs: ($state.snapshot(this.tabs) as ApiDraft[]).map((t) =>
-        stripSecretsForStorage(t, t.requestId ? this.requests.find((r) => r.id === t.requestId) : undefined),
+        stripSecretsForStorage(t, t.requestId ? this.fullRequests.get(t.requestId) : undefined),
       ),
       active: this.activeTab,
     };
@@ -449,6 +496,7 @@ class ApiClientStore {
     this.flushTabsWrite();
     this.resetResponses();
     this.running = false; this.lastRun = null; this.currentRun = null; this.automationRuns = [];
+    this.storage = null; this.storageAt = null;
     this.tabsWid = wid;
     let next: ApiDraft[] = [];
     let active = 0;
@@ -593,27 +641,45 @@ class ApiClientStore {
 
   // ── Loading ───────────────────────────────────────────────────────────────
 
-  /** Load everything for the current workspace (collections + requests + envs + history). */
-  async loadAll(): Promise<void> {
+  /** When this workspace's lists last loaded successfully (stale-while-
+   *  revalidate for page re-entry — perf F4). Cleared on a failed load. */
+  private loadedAt: { wid: Id; at: number } | null = null;
+  private automationsLoadedAt: { base: string; at: number } | null = null;
+
+  /** Load everything for the current workspace (collections + requests + envs + history).
+   *  Re-entering the API page within RELOAD_FRESH_MS of a successful load
+   *  skips the refetch (`force` overrides) — local edits update the store
+   *  directly and history arrives live over `api_history_appended`. */
+  async loadAll(opts: { force?: boolean } = {}): Promise<void> {
     const wid = this.wsId();
     const base = this.base();
     if (!wid || !base) return;
     // Restore this workspace's persisted open tabs up front (works even when
     // the fetches below fail — the drafts are device-local, not server data).
     this.restoreTabs(wid);
+    if (
+      !opts.force &&
+      this.loadedAt?.wid === wid &&
+      Date.now() - this.loadedAt.at < RELOAD_FRESH_MS &&
+      !this.requestsLoadError &&
+      !this.envLoadError
+    ) {
+      return;
+    }
+    this.loadedAt = null;
     this.loading = true;
     this.requestsLoadError = null;
     this.envLoadError = null;
     try {
       const [collections, requests, environments] = await Promise.all([
         api.get<ApiCollection[]>(`${base}/collections`),
-        api.get<ApiRequest[]>(`${base}/requests`),
+        api.get<ApiOverviewRequest[]>(`${base}/requests/summaries`),
         api.get<ApiEnvironment[]>(`${base}/environments`),
         this.loadHistory(),
       ]);
       if (this.wsId() !== wid) return;
       this.collections = collections;
-      this.requests = requests;
+      this.requests = summaryItems(requests, wid);
       this.environments = environments;
       // Unlink restored drafts whose saved request no longer exists, so their
       // "Save" creates anew instead of PATCHing a deleted id.
@@ -624,6 +690,9 @@ class ApiClientStore {
         );
         this.persistTabs();
       }
+      this.loadedAt = { wid, at: Date.now() };
+      // Open tabs' saved rows (dirty dots, secret stripping) — one GET each.
+      for (const t of this.tabs) if (t.requestId) void this.ensureRequest(t.requestId);
     } catch (e) {
       if (this.wsId() === wid) {
         this.requestsLoadError = errMsg(e);
@@ -674,7 +743,9 @@ class ApiClientStore {
     const base = this.base();
     if (!base) return;
     try {
-      this.requests = await api.get<ApiRequest[]>(`${base}/requests`);
+      const wid = this.wsId();
+      const rows = await api.get<ApiOverviewRequest[]>(`${base}/requests/summaries`);
+      if (wid && this.base() === base) this.requests = summaryItems(rows, wid);
       this.requestsLoadError = null;
     } catch (e) {
       this.refreshFailed('requests', 'requests', this.collections.length === 0 && this.requests.length === 0, e);
@@ -732,9 +803,115 @@ class ApiClientStore {
     return api.get<ApiHistorySummary[]>(`/workspaces/${wid}/api-client/history/summaries?${query}`, signal);
   }
 
-  /** Direct sends and WS append events share one metadata-only refresh. */
+  /** Direct sends and WS append events share one metadata-only refresh —
+   *  only once this workspace's list was asked for (loaded, failed, or in
+   *  flight): a store some other surface loaded has no list on screen, and
+   *  an automation run appends one entry per step (perf H1). */
   noteHistoryAppended(workspaceId: string, entryId?: string): void {
-    if (workspaceId === this.wsId()) void this.historyRefresh.request(entryId);
+    if (workspaceId !== this.wsId()) return;
+    if (!this.historyLoaded && this.historyLoadError === null && this.historyRefresh.idle) return;
+    void this.historyRefresh.request(entryId);
+  }
+
+  // ── Storage gauge (perf2 N2) ──────────────────────────────────────────────
+  /** What this workspace's history + automation runs occupy (History list). */
+  storage: ApiClientStorage | null = $state.raw(null);
+  private storageAt: { wid: Id; at: number } | null = null;
+
+  /** Load the gauge (at most once a minute per workspace; the daemon caches
+   *  it too). Best-effort: no gauge just hides the line. */
+  async loadStorage(opts: { force?: boolean } = {}): Promise<void> {
+    const wid = this.wsId();
+    const base = this.base();
+    if (!wid || !base) return;
+    if (!opts.force && this.storageAt?.wid === wid && Date.now() - this.storageAt.at < RELOAD_FRESH_MS) return;
+    this.storageAt = { wid, at: Date.now() };
+    try {
+      const s = await api.get<ApiClientStorage>(`${base}/storage`);
+      if (this.wsId() === wid) this.storage = s;
+    } catch {
+      if (this.wsId() === wid) this.storage = null;
+    }
+  }
+
+  /** Apply the workspace's (just saved) retention now and refresh the gauge
+   *  and the history list. Only deletes what the configured limits say. */
+  async applyRetention(): Promise<boolean> {
+    const wid = this.wsId();
+    const base = this.base();
+    if (!wid || !base) return false;
+    try {
+      const s = await api.post<ApiClientStorage>(`${base}/storage/prune`, {});
+      if (this.wsId() !== wid) return true;
+      this.storage = s;
+      this.storageAt = { wid, at: Date.now() };
+      void this.historyRefresh.request();
+      return true;
+    } catch (e) {
+      toasts.error('Couldn’t apply retention', errMsg(e));
+      return false;
+    }
+  }
+
+  // ── Changes made elsewhere (perf2 N4) ─────────────────────────────────────
+  private changeQueue: { kinds: Set<string>; requests: Map<Id, boolean>; wid: Id } | null = null;
+  private changeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Imports in flight in this window — their echoes are skipped. */
+  private bulkWrites = 0;
+
+  /** `api_client_changed`: a request / collection / environment / automation
+   *  changed (an agent's MCP tool, another user, or our own save echoing).
+   *  Another workspace's change just expires its 60 s reuse window; the
+   *  loaded workspace is patched — one GET per changed request, one list
+   *  reload per other kind — coalesced over 300 ms (an import is N events). */
+  noteClientChanged(ev: { workspace_id: Id; kind: string; id: Id | null; deleted: boolean }): void {
+    if (this.loadedAt?.wid !== ev.workspace_id || this.wsId() !== ev.workspace_id) {
+      if (this.loadedAt?.wid === ev.workspace_id) this.loadedAt = null;
+      if (ev.kind === 'automation') this.automationsLoadedAt = null;
+      return;
+    }
+    // A request/collection echo of our own import: its final reload covers it.
+    if (this.bulkWrites > 0 && (ev.kind === 'request' || ev.kind === 'collection')) return;
+    const q = this.changeQueue?.wid === ev.workspace_id
+      ? this.changeQueue
+      : (this.changeQueue = { kinds: new Set(), requests: new Map(), wid: ev.workspace_id });
+    if (ev.kind === 'request' && ev.id && q.requests.size < 50) q.requests.set(ev.id, ev.deleted);
+    else q.kinds.add(ev.kind);
+    if (this.changeTimer === null) this.changeTimer = setTimeout(() => void this.flushClientChanges(), 300);
+  }
+
+  private async flushClientChanges(): Promise<void> {
+    this.changeTimer = null;
+    const q = this.changeQueue;
+    this.changeQueue = null;
+    if (!q || this.wsId() !== q.wid) return;
+    const base = this.base();
+    if (q.kinds.has('request')) await this.loadRequests();
+    else {
+      for (const [id, deleted] of q.requests) {
+        if (deleted) {
+          this.dropRequest(id);
+          continue;
+        }
+        const known = this.fullRequests.get(id);
+        try {
+          const r = await api.get<ApiRequest>(`${base}/requests/${encodeURIComponent(id)}`);
+          if (this.base() !== base) return;
+          // Our own save echoing back: same row, nothing to patch.
+          if (known && known.updated_at === r.updated_at) continue;
+          this.upsertRequest(r);
+        } catch {
+          // Gone or unreadable: the next full load reconciles.
+          this.loadedAt = null;
+        }
+      }
+    }
+    if (q.kinds.has('collection')) await this.loadCollections();
+    if (q.kinds.has('environment')) await this.loadEnvironments();
+    if (q.kinds.has('automation')) {
+      if (this.automationsLoadedAt?.base === base) await this.loadAutomations({ force: true });
+      else this.automationsLoadedAt = null;
+    }
   }
 
   historySource(h: ApiHistorySummary): ApiHistorySummary['source'] {
@@ -831,6 +1008,9 @@ class ApiClientStore {
     let failed = 0;
     let firstError = '';
     const note = (e: unknown): void => { failed++; firstError ||= errMsg(e); };
+    // Our own N creates echo back as N `api_client_changed` events: the one
+    // reload below covers them (see noteClientChanged).
+    this.bulkWrites++;
     try {
       for (const req of parsed.requests) {
         if (this.base() !== base) break; // workspace switched mid-import
@@ -855,6 +1035,7 @@ class ApiClientStore {
       }
     } finally {
       await Promise.all([this.loadCollections(), this.loadRequests()]);
+      this.bulkWrites--;
     }
     if (failed > 0) {
       toasts.error(`${failed} item(s) of “${parsed.name}” weren’t imported`, firstError);
@@ -960,11 +1141,13 @@ class ApiClientStore {
       toasts.error('Nothing to push', 'No collections to export.');
       return false;
     }
-    const files = roots.map((c) => ({
-      name: `${c.name.replace(/[^\w.-]+/g, '_')}.postman_collection.json`,
-      content: JSON.stringify(collectionToPostman(c.id, this.collections, this.requests), null, 2),
-    }));
     try {
+      // Export needs bodies/scripts: the one action that reads every full row.
+      const full = await api.get<ApiRequest[]>(`${this.base()}/requests`);
+      const files = roots.map((c) => ({
+        name: `${c.name.replace(/[^\w.-]+/g, '_')}.postman_collection.json`,
+        content: JSON.stringify(collectionToPostman(c.id, this.collections, full), null, 2),
+      }));
       const res = await api.post<{ commit: string; files: number }>(`/repos/${repoId}/api-collections/push`, {
         files, message: message || 'Update API collections', branch: branch || null,
       });
@@ -992,6 +1175,11 @@ class ApiClientStore {
       this.requests = this.requests.map((r) =>
         r.collection_id && removed.has(r.collection_id) ? { ...r, collection_id: null } : r,
       );
+      if ([...this.fullRequests.values()].some((r) => r.collection_id && removed.has(r.collection_id))) {
+        this.fullRequests = new Map(
+          [...this.fullRequests].map(([k, r]) => [k, r.collection_id && removed.has(r.collection_id) ? { ...r, collection_id: null } : r]),
+        );
+      }
     } catch (e) {
       toasts.error('Delete collection failed', errMsg(e));
     }
@@ -1007,9 +1195,7 @@ class ApiClientStore {
         ? await api.patch<ApiRequest>(`${base}/requests/${id}`, req)
         : await api.post<ApiRequest>(`${base}/requests`, req);
       if (this.base() !== base) return saved;
-      this.requests = this.requests.some((r) => r.id === saved.id)
-        ? this.requests.map((r) => (r.id === saved.id ? saved : r))
-        : [...this.requests, saved];
+      this.upsertRequest(saved);
       return saved;
     } catch (e) {
       toasts.error('Save request failed', errMsg(e));
@@ -1025,7 +1211,7 @@ class ApiClientStore {
       ? {...tab,auth:{...request.auth}} : tab;
     if (this.tabsWid === wid) {
       this.tabs = this.tabs.map(update); this.persistTabs();
-      if (this.wsId() === wid) this.requests = this.requests.map(r => r.id === request.id ? request : r);
+      if (this.wsId() === wid) this.upsertRequest(request);
     } else {
       try {
         const raw = localStorage.getItem(tabsKey(wid));
@@ -1079,7 +1265,7 @@ class ApiClientStore {
     if (!base) return;
     try {
       await api.del(`${base}/requests/${id}`);
-      this.requests = this.requests.filter((r) => r.id !== id);
+      this.dropRequest(id);
       if (this.draft.requestId === id) this.draft = { ...this.draft, requestId: null };
     } catch (e) {
       toasts.error('Delete request failed', errMsg(e));
@@ -1412,11 +1598,14 @@ class ApiClientStore {
 
   // ── Automations (collection runner) ───────────────────────────────────────
 
-  async loadAutomations(): Promise<void> {
+  async loadAutomations(opts: { force?: boolean } = {}): Promise<void> {
     const base = this.base();
     if (!base) return;
+    const last = this.automationsLoadedAt;
+    if (!opts.force && last?.base === base && Date.now() - last.at < RELOAD_FRESH_MS) return;
     try {
       this.automations = await api.get<ApiAutomation[]>(`${base}/automations`);
+      this.automationsLoadedAt = { base, at: Date.now() };
     } catch (e) {
       toasts.error('Could not load automations', errMsg(e));
     }
@@ -1454,6 +1643,61 @@ class ApiClientStore {
     }
   }
 
+  /** The in-flight `runAutomation` loop's wake-up, armed while it waits. */
+  private runWake: { runId: Id; wake: (final: boolean) => void } | null = null;
+
+  /** Progress that arrived while no waiter was armed (the delta GET was in
+   *  flight) — latched so the loop doesn't sleep through it (perf2 N3). */
+  private runPending: { runId: Id; final: boolean } | null = null;
+
+  /** `api_run_progress` for run `runId`: wake the running view's delta fetch
+   *  (or latch it for the loop's next wait). `status` other than `running`
+   *  skips the loop's minimum gap. */
+  noteRunProgress(runId: Id, status?: string): void {
+    const final = !!status && status !== 'running';
+    if (this.runWake?.runId === runId) this.runWake.wake(final);
+    else if (this.running) {
+      this.runPending = { runId, final: final || (this.runPending?.runId === runId && this.runPending.final) };
+    }
+  }
+
+  /** Wait for the next progress of run `runId`: a WS wake (or one latched
+   *  while the last GET was in flight), at least RUN_DELTA_MIN_MS after the
+   *  previous fetch unless the run ended; RUN_POLL_FALLBACK_MS if the socket
+   *  is quiet. */
+  private async waitRunProgress(runId: Id, lastFetch: number): Promise<void> {
+    let final = false;
+    const pending = this.runPending?.runId === runId ? this.runPending : null;
+    this.runPending = null;
+    if (pending) final = pending.final;
+    else {
+      final = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => done(false), RUN_POLL_FALLBACK_MS);
+        const done = (f: boolean): void => { clearTimeout(timer); this.runWake = null; resolve(f); };
+        this.runWake = { runId, wake: done };
+      });
+    }
+    const gap = RUN_DELTA_MIN_MS - (performance.now() - lastFetch);
+    if (!final && gap > 0) {
+      // Coalesce: wakes during the gap fold into this fetch (a terminal one
+      // cuts the gap short).
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(done, gap);
+        function done(): void { clearTimeout(timer); resolve(); }
+        this.runWake = { runId, wake: (f) => { if (f) done(); } };
+      });
+      this.runWake = null;
+      this.runPending = null;
+    }
+  }
+
+  /** One whole run (every step + snapshot) — run-list rows carry neither. */
+  async getAutomationRun(id: Id): Promise<ApiAutomationRun | null> {
+    const base = this.base(); if (!base) return null;
+    try {return await api.get<ApiAutomationRun>(`${base}/automation-runs/${id}`);}
+    catch (e) {toasts.error('Could not load run',errMsg(e)); return null;}
+  }
+
   async loadAutomationRuns(automationId?: Id, before?: Id): Promise<void> {
     const base = this.base(); if (!base) return;
     const query = new URLSearchParams();
@@ -1475,22 +1719,25 @@ class ApiClientStore {
     try {
       let run = await api.post<ApiAutomationRun>(`${base}/automations/${id}/runs`,options);
       this.currentRun = run; this.lastRun = run.report;
+      this.runPending = null;
+      let lastFetch = 0;
       while (base === this.base()) {
         if (run.status !== 'running') {void this.loadAutomationRuns(id); return run.report;}
-        await new Promise(resolve => setTimeout(resolve,500));
+        await this.waitRunProgress(run.id, lastFetch);
         if (base !== this.base()) break;
         // Delta poll: only the steps after the ones we have (+ status); the
         // snapshot is not re-sent. Nothing new → no reassignment, no re-render.
         const have = run.report.steps.length;
+        lastFetch = performance.now();
         const delta = await api.get<ApiAutomationRun>(`${base}/automation-runs/${run.id}?after=${have}`);
         if (delta.report.steps.length === 0 && delta.status === run.status && delta.error === run.error) continue;
-        run = {
-          ...delta,
-          snapshot: run.snapshot,
-          report: { ...delta.report, steps: [...run.report.steps, ...delta.report.steps] },
-          result_rows: [...run.result_rows, ...delta.result_rows],
-          result_ids: [...run.result_ids, ...delta.result_ids],
-        };
+        // Append in place: the arrays are this loop's own (raw state, so the
+        // reassignment below is what re-renders) — O(delta), not O(run).
+        const steps = run.report.steps;
+        for (const s of delta.report.steps) steps.push(s);
+        for (const r of delta.result_rows) run.result_rows.push(r);
+        for (const r of delta.result_ids) run.result_ids.push(r);
+        run = { ...delta, snapshot: run.snapshot, report: { ...delta.report, steps }, result_rows: run.result_rows, result_ids: run.result_ids };
         this.currentRun = run; this.lastRun = run.report;
       }
       return null;
@@ -1534,7 +1781,9 @@ class ApiClientStore {
       }
     }
     // A tab with a send in flight is never repurposed — its result has a home.
-    if (this.isDirty(this.draft) || this.slot(this.draft.tabId)?.sending) {
+    // Nor is one whose saved row isn't loaded yet (its dirtiness is unknown).
+    const unknown = !!this.draft.requestId && !this.fullRequests.has(this.draft.requestId);
+    if (unknown || this.isDirty(this.draft) || this.slot(this.draft.tabId)?.sending) {
       this.openTab(d);
       return;
     }
@@ -1545,6 +1794,8 @@ class ApiClientStore {
 
   /** Load a saved request into the builder (persisted extras included). */
   loadRequestIntoDraft(r: ApiRequest): void {
+    // The tab's saved baseline (dirty check, secret stripping).
+    if (this.fullRequests.get(r.id) !== r) this.cacheFull(r);
     this.placeDraft(extrasToDraft(
       {
         tabId: crypto.randomUUID(),
@@ -1566,11 +1817,88 @@ class ApiClientStore {
     ));
   }
 
+  /** Open a saved request by id: its full row is fetched (or reused from
+   *  `fullRequests`) first; a tab already showing it is focused at once. */
+  async openRequest(id: Id): Promise<boolean> {
+    const open = this.tabs.findIndex((t) => t.requestId === id);
+    if (open >= 0) {
+      this.switchTab(open);
+      return true;
+    }
+    const wid = this.wsId();
+    const full = await this.ensureRequest(id);
+    if (!full || this.wsId() !== wid) return false;
+    this.loadRequestIntoDraft(full);
+    return true;
+  }
+
+  /** The full saved request `id` — cached, else one `GET requests/{id}`
+   *  (concurrent callers share it). Null (with a toast) when it can't load. */
+  async ensureRequest(id: Id): Promise<ApiRequest | null> {
+    const have = this.fullRequests.get(id);
+    if (have) return have;
+    const base = this.base();
+    if (!base) return null;
+    let p = this.fullInflight.get(id);
+    if (!p) {
+      p = api
+        .get<ApiRequest>(`${base}/requests/${encodeURIComponent(id)}`)
+        .then((r) => {
+          if (this.base() === base) this.cacheFull(r);
+          return r;
+        })
+        .catch((e: unknown) => {
+          toasts.error('Could not open the saved request', errMsg(e));
+          return null;
+        })
+        .finally(() => this.fullInflight.delete(id));
+      this.fullInflight.set(id, p);
+    }
+    return p;
+  }
+
+  /** Cache a full row; beyond FULL_REQUESTS_MAX the oldest entries not open
+   *  in a tab are dropped. */
+  private cacheFull(r: ApiRequest): void {
+    const next = new Map(this.fullRequests);
+    next.delete(r.id);
+    next.set(r.id, r);
+    if (next.size > FULL_REQUESTS_MAX) {
+      const open = new Set(this.tabs.map((t) => t.requestId));
+      for (const k of next.keys()) {
+        if (next.size <= FULL_REQUESTS_MAX) break;
+        if (!open.has(k)) next.delete(k);
+      }
+    }
+    this.fullRequests = next;
+  }
+
+  /** A saved (or re-fetched) full request: cache it and patch its tree row. */
+  private upsertRequest(r: ApiRequest): void {
+    this.cacheFull(r);
+    const item = requestItem(r);
+    this.requests = this.requests.some((x) => x.id === r.id)
+      ? this.requests.map((x) => (x.id === r.id ? item : x))
+      : [...this.requests, item];
+  }
+
+  private dropRequest(id: Id): void {
+    this.requests = this.requests.filter((r) => r.id !== id);
+    if (this.fullRequests.has(id)) {
+      const next = new Map(this.fullRequests);
+      next.delete(id);
+      this.fullRequests = next;
+    }
+  }
+
   /** True when a tab's draft differs from its saved request (or is a
    * non-empty unsaved draft) — includes the extras fields (scripts / docs /
    * settings / GraphQL variables / transport). Drives the tab's unsaved dot. */
   isDirty(d: ApiDraft): boolean {
-    const saved = d.requestId ? this.requests.find((r) => r.id === d.requestId) : undefined;
+    const saved = d.requestId ? this.fullRequests.get(d.requestId) : undefined;
+    // Saved row not fetched yet (a restored tab, loading): not dirty for the
+    // dot — `placeDraft` treats it as dirty so it never reuses the tab.
+    if (d.requestId && !saved && this.requests.some((r) => r.id === d.requestId)) return false;
     if (!saved) {
       // Unsaved draft: dirty once anything meaningful was entered.
       return Boolean(
@@ -1599,15 +1927,18 @@ class ApiClientStore {
    *  saved request the entry ran (by `request_id`, else the one saved request
    *  with the same method + URL), otherwise blanked with a re-enter hint —
    *  the mask itself is never sent as a credential. */
-  loadHistoryIntoDraft(h: ApiHistoryEntry): void {
+  async loadHistoryIntoDraft(h: ApiHistoryEntry): Promise<void> {
     const snap = (h.request ?? {}) as Partial<ExecuteApiReq> & { request_id?: Id | null };
     const method = snap.method ?? h.method;
     const url = snap.url ?? h.url;
-    let saved = snap.request_id ? this.requests.find((r) => r.id === snap.request_id) : undefined;
-    if (!saved) {
+    let savedId = snap.request_id && this.requests.some((r) => r.id === snap.request_id) ? snap.request_id : undefined;
+    if (!savedId) {
       const same = this.requests.filter((r) => r.method === method && r.url === url);
-      if (same.length === 1) saved = same[0];
+      if (same.length === 1) savedId = same[0].id;
     }
+    const wid = this.wsId();
+    const saved = savedId ? (await this.ensureRequest(savedId)) ?? undefined : undefined;
+    if (this.wsId() !== wid) return;
     const un = unmaskHistory(
       { auth: snap.auth ?? { type: 'none' }, headers: snap.headers ?? [], query: snap.query ?? [] },
       saved,
@@ -1699,3 +2030,6 @@ export function historyResponse(h: Pick<ApiHistoryEntry, 'response' | 'status' |
 }
 
 export const apiClient = new ApiClientStore();
+// `api_client_changed` is routed with `peek()` (events.svelte.ts): announce
+// so a statically imported store still sees it.
+announceModule('apiClient', apiClient);

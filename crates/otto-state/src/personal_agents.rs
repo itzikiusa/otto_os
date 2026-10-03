@@ -21,6 +21,56 @@ use sqlx::Row;
 
 use crate::convert::{dberr, fmt, json};
 
+/// Process cache of [`PersonalAgentsRepo::autonomy`] keyed by (database
+/// handle, agent id) — perf N4. Capped (cleared when full: it is a hit-rate
+/// aid, not state) and generation-checked so a read that overlapped an
+/// invalidation never re-inserts the old config.
+mod autonomy_cache {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
+
+    use super::AgentAutonomy;
+
+    const CAP: usize = 512;
+    type Key = (u64, String);
+
+    static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+    fn map() -> &'static Mutex<HashMap<Key, AgentAutonomy>> {
+        static MAP: OnceLock<Mutex<HashMap<Key, AgentAutonomy>>> = OnceLock::new();
+        MAP.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn generation() -> u64 {
+        GENERATION.load(Ordering::Acquire)
+    }
+
+    pub(super) fn get(key: &Key) -> Option<AgentAutonomy> {
+        map().lock().ok()?.get(key).cloned()
+    }
+
+    /// Cache `cfg` unless an invalidation happened since `generation` was
+    /// read (the row may have changed under the read).
+    pub(super) fn put(key: Key, cfg: AgentAutonomy, generation: u64) {
+        let Ok(mut m) = map().lock() else { return };
+        if GENERATION.load(Ordering::Acquire) != generation {
+            return;
+        }
+        if m.len() >= CAP && !m.contains_key(&key) {
+            m.clear();
+        }
+        m.insert(key, cfg);
+    }
+
+    pub(super) fn invalidate(pool: u64, agent_id: &str) {
+        GENERATION.fetch_add(1, Ordering::AcqRel);
+        if let Ok(mut m) = map().lock() {
+            m.remove(&(pool, agent_id.to_string()));
+        }
+    }
+}
+
 // --- Domain --------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +417,17 @@ fn row_to_schedule(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgentSchedule>
     })
 }
 
+/// Longest run `summary` (in characters) the Activity feed shows; the feed
+/// projection reads one more so the clip can mark the cut.
+pub const FEED_SUMMARY_CHARS: usize = 280;
+
+/// Every `personal_agent_runs` column [`row_to_run`] reads, with `summary`
+/// cut to [`FEED_SUMMARY_CHARS`] + 1 characters (perf N5).
+const FEED_RUN_COLS: &str = "id, agent_id, schedule_id, workspace_id, status, trigger, \
+     started_at, finished_at, substr(summary, 1, 281) AS summary, report_path, report_rel, \
+     delivered, delivery_error, error, session_id, report_hash, attempts, skipped_delivery, \
+     mode, goal_id, read_only, created_at";
+
 fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgentRun> {
     Ok(PersonalAgentRun {
         id: r.get("id"),
@@ -557,6 +618,8 @@ impl PersonalAgentsRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("delete personal agent"))?;
+        // The autonomy row cascaded with the agent.
+        autonomy_cache::invalidate(self.pool.id(), id);
         Ok(())
     }
 
@@ -623,21 +686,37 @@ impl PersonalAgentsRepo {
     pub async fn list_enabled_schedules(
         &self,
     ) -> Result<Vec<(PersonalAgentSchedule, PersonalAgent)>> {
-        let rows = sqlx::query(
-            "SELECT s.id AS s_id, a.id AS a_id FROM personal_agent_schedules s \
+        // Perf W3: TWO set queries whatever N is (it was 1 + 2N per minute),
+        // reusing the row parsers. A row that fails to parse — or an agent
+        // deleted between the reads — is skipped, never failing the tick.
+        let sched_rows = sqlx::query(
+            "SELECT s.* FROM personal_agent_schedules s \
              JOIN personal_agents a ON a.id = s.agent_id \
              WHERE s.enabled = 1 AND a.enabled = 1",
         )
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list enabled personal agent schedules"))?;
-        let mut out = Vec::with_capacity(rows.len());
-        for r in &rows {
-            let sid: String = r.get("s_id");
-            let aid: String = r.get("a_id");
-            out.push((self.get_schedule(&sid).await?, self.get(&aid).await?));
+        if sched_rows.is_empty() {
+            return Ok(vec![]);
         }
-        Ok(out)
+        let agent_rows = sqlx::query(
+            "SELECT a.* FROM personal_agents a WHERE a.enabled = 1 AND EXISTS \
+             (SELECT 1 FROM personal_agent_schedules s WHERE s.agent_id = a.id AND s.enabled = 1)",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list enabled personal agents"))?;
+        let agents: std::collections::HashMap<String, PersonalAgent> = agent_rows
+            .iter()
+            .filter_map(|r| row_to_agent(r).ok())
+            .map(|a| (a.id.clone(), a))
+            .collect();
+        Ok(sched_rows
+            .iter()
+            .filter_map(|r| row_to_schedule(r).ok())
+            .filter_map(|s| agents.get(&s.agent_id).cloned().map(|a| (s, a)))
+            .collect())
     }
 
     pub async fn update_schedule(
@@ -808,6 +887,39 @@ impl PersonalAgentsRepo {
         Ok(())
     }
 
+    /// Proactive runs started at/after `since` (RFC3339), per agent, for
+    /// every agent in `agent_ids` in ONE statement (perf N6: the proactive
+    /// tick used to ask per agent per minute). Agents without such a run are
+    /// absent (count 0). Walks `idx_par_agent` per listed agent.
+    pub async fn count_proactive_runs_since(
+        &self,
+        agent_ids: &[&str],
+        since: &str,
+    ) -> Result<HashMap<String, i64>> {
+        if agent_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let q = format!(
+            "SELECT agent_id, COUNT(*) AS n FROM personal_agent_runs \
+             WHERE agent_id IN ({}) AND mode = 'proactive' AND started_at >= ? \
+             GROUP BY agent_id",
+            vec!["?"; agent_ids.len()].join(",")
+        );
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(q.as_str()));
+        for id in agent_ids {
+            query = query.bind(*id);
+        }
+        let rows = query
+            .bind(since)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("count proactive personal agent runs"))?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<String, _>("agent_id"), r.get::<i64, _>("n")))
+            .collect())
+    }
+
     /// Runs of `mode` started at/after `since` (RFC3339) — the proactive
     /// daily budget counter.
     pub async fn count_runs_since(&self, agent_id: &str, mode: &str, since: &str) -> Result<i64> {
@@ -862,15 +974,28 @@ impl PersonalAgentsRepo {
     }
 
     /// The agent's autonomy config (defaults when no row exists).
+    ///
+    /// Cached per database handle (perf N4): the governed pipeline asks for an
+    /// agent's rules on EVERY tool call its sessions make, and the config only
+    /// changes through [`Self::save_autonomy`] / [`Self::delete`] (the row
+    /// cascades with its agent), which invalidate it. A read that raced a
+    /// write never caches its (possibly stale) answer.
     pub async fn autonomy(&self, agent_id: &str) -> Result<AgentAutonomy> {
+        let key = (self.pool.id(), agent_id.to_string());
+        let generation = autonomy_cache::generation();
+        if let Some(hit) = autonomy_cache::get(&key) {
+            return Ok(hit);
+        }
         let row = sqlx::query("SELECT config_json FROM personal_agent_autonomy WHERE agent_id = ?")
             .bind(agent_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(dberr("get agent autonomy"))?;
-        Ok(row
+        let cfg: AgentAutonomy = row
             .and_then(|r| serde_json::from_str(&r.get::<String, _>("config_json")).ok())
-            .unwrap_or_default())
+            .unwrap_or_default();
+        autonomy_cache::put(key, cfg.clone(), generation);
+        Ok(cfg)
     }
 
     /// Replace the agent's autonomy config.
@@ -888,6 +1013,7 @@ impl PersonalAgentsRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("save agent autonomy"))?;
+        autonomy_cache::invalidate(self.pool.id(), agent_id);
         Ok(())
     }
 
@@ -932,6 +1058,42 @@ impl PersonalAgentsRepo {
             .await
             .map_err(dberr("personal agent run not found"))?;
         row_to_run(&row)
+    }
+
+    /// The agent's newest `running` run, if any (the activity feed's "Now"
+    /// without listing history — perf W4). `summary` is cut in SQL to
+    /// [`FEED_SUMMARY_CHARS`] + 1 characters (perf N5) — enough for the
+    /// feed's clip to know it was longer.
+    pub async fn running_run(&self, agent_id: &str) -> Result<Option<PersonalAgentRun>> {
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {FEED_RUN_COLS} FROM personal_agent_runs \
+             WHERE agent_id = ? AND status = 'running' ORDER BY started_at DESC LIMIT 1"
+        )))
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("running personal agent run"))?;
+        row.as_ref().map(row_to_run).transpose()
+    }
+
+    /// [`Self::list_runs`] for the Activity feed (perf N5): the same rows,
+    /// with `summary` cut in SQL to [`FEED_SUMMARY_CHARS`] + 1 characters, so
+    /// a long report summary is not read and copied only to be clipped.
+    pub async fn list_runs_for_feed(
+        &self,
+        agent_id: &str,
+        limit: i64,
+    ) -> Result<Vec<PersonalAgentRun>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {FEED_RUN_COLS} FROM personal_agent_runs \
+             WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?"
+        )))
+        .bind(agent_id)
+        .bind(limit.max(1))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list personal agent runs (feed)"))?;
+        rows.iter().map(row_to_run).collect()
     }
 
     pub async fn list_runs(&self, agent_id: &str, limit: i64) -> Result<Vec<PersonalAgentRun>> {
@@ -1101,13 +1263,13 @@ impl AgentRoomsRepo {
     }
 
     /// Message count + newest message time of every room in workspace `ws`
-    /// that has messages, keyed by room id (rides `idx_arm_room`).
+    /// that has messages, keyed by room id. Reads the activity denormalized
+    /// onto `agent_rooms` (migration 0165, kept by [`Self::add_message`]) —
+    /// one indexed pass over the workspace's rooms, never over their messages.
     pub async fn activity_by_workspace(&self, ws: &str) -> Result<HashMap<String, RoomActivity>> {
         let rows = sqlx::query(
-            "SELECT m.room_id, COUNT(*) AS n, MAX(m.created_at) AS last_at \
-               FROM agent_room_messages m \
-              WHERE m.room_id IN (SELECT id FROM agent_rooms WHERE workspace_id = ?) \
-              GROUP BY m.room_id",
+            "SELECT id, message_count, last_message_at FROM agent_rooms \
+              WHERE workspace_id = ? AND message_count > 0",
         )
         .bind(ws)
         .fetch_all(&self.pool)
@@ -1117,14 +1279,34 @@ impl AgentRoomsRepo {
             .iter()
             .map(|r| {
                 (
-                    r.get::<String, _>("room_id"),
+                    r.get::<String, _>("id"),
                     RoomActivity {
-                        message_count: r.get("n"),
-                        last_message_at: r.get("last_at"),
+                        message_count: r.get("message_count"),
+                        last_message_at: r.get("last_message_at"),
                     },
                 )
             })
             .collect())
+    }
+
+    /// Re-derive the denormalized `message_count` / `last_message_at` of every
+    /// room whose stored count drifted from its rows — call after deleting
+    /// messages outside [`Self::add_message`] (retention pruning). Returns the
+    /// number of rooms corrected.
+    pub async fn recount_activity(&self) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE agent_rooms \
+                SET message_count = (SELECT COUNT(*) FROM agent_room_messages m \
+                                      WHERE m.room_id = agent_rooms.id), \
+                    last_message_at = (SELECT MAX(m.created_at) FROM agent_room_messages m \
+                                        WHERE m.room_id = agent_rooms.id) \
+              WHERE message_count != (SELECT COUNT(*) FROM agent_room_messages m \
+                                       WHERE m.room_id = agent_rooms.id)",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("recount agent room activity"))?;
+        Ok(res.rows_affected())
     }
 
     pub async fn rename(&self, id: &str, name: &str) -> Result<AgentRoom> {
@@ -1198,9 +1380,17 @@ impl AgentRoomsRepo {
 
     // -- Messages ------------------------------------------------------------
 
+    /// Append a message and bump the room's denormalized activity in the same
+    /// transaction (the rooms list reads `agent_rooms.message_count` /
+    /// `last_message_at` instead of scanning messages).
     pub async fn add_message(&self, m: NewRoomMessage) -> Result<AgentRoomMessage> {
         let id = new_id();
         let now = fmt(Utc::now());
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("add agent room message tx"))?;
         sqlx::query(
             "INSERT INTO agent_room_messages (id, room_id, author_kind, author_id, text, created_at) \
              VALUES (?, ?, ?, ?, ?, ?)",
@@ -1211,15 +1401,44 @@ impl AgentRoomsRepo {
         .bind(&m.author_id)
         .bind(&m.text)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("add agent room message"))?;
-        let row = sqlx::query("SELECT * FROM agent_room_messages WHERE id = ?")
-            .bind(&id)
-            .fetch_one(&self.pool)
+        sqlx::query(
+            "UPDATE agent_rooms SET message_count = message_count + 1, last_message_at = ? \
+              WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(&m.room_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(dberr("bump agent room activity"))?;
+        tx.commit()
             .await
-            .map_err(dberr("agent room message not found"))?;
-        row_to_message(&row)
+            .map_err(dberr("add agent room message commit"))?;
+        Ok(AgentRoomMessage {
+            id,
+            room_id: m.room_id,
+            author_kind: m.author_kind,
+            author_id: m.author_id,
+            text: m.text,
+            created_at: now,
+        })
+    }
+
+    /// The insertion `rowid` of message `id` IN room `room_id` (`None` when
+    /// unknown here) — the paging cursor, resolved once so the page read is
+    /// a plain `(room_id, rowid)` range scan on `idx_arm_room_seq`.
+    async fn cursor_seq(&self, room_id: &str, id: &str) -> Result<Option<i64>> {
+        let row = sqlx::query(
+            "SELECT rowid AS seq FROM agent_room_messages WHERE id = ? AND room_id = ?",
+        )
+        .bind(id)
+        .bind(room_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("agent room message cursor"))?;
+        Ok(row.map(|r| r.get("seq")))
     }
 
     /// Chronological page: messages after the `after` message, oldest first,
@@ -1236,16 +1455,17 @@ impl AgentRoomsRepo {
         after: Option<&str>,
         limit: i64,
     ) -> Result<Vec<AgentRoomMessage>> {
+        let from = match after {
+            Some(a) => self.cursor_seq(room_id, a).await?.unwrap_or(0),
+            None => 0,
+        };
         let rows = sqlx::query(
             "SELECT * FROM agent_room_messages \
-             WHERE room_id = ? \
-               AND rowid > COALESCE((SELECT rowid FROM agent_room_messages \
-                                      WHERE id = ? AND room_id = ?), 0) \
+             WHERE room_id = ? AND rowid > ? \
              ORDER BY rowid ASC LIMIT ?",
         )
         .bind(room_id)
-        .bind(after.unwrap_or(""))
-        .bind(room_id)
+        .bind(from)
         .bind(limit.clamp(1, 500))
         .fetch_all(&self.pool)
         .await
@@ -1263,23 +1483,29 @@ impl AgentRoomsRepo {
         before: Option<&str>,
         limit: i64,
     ) -> Result<Vec<AgentRoomMessage>> {
-        let rows = sqlx::query(
-            "SELECT * FROM (SELECT m.*, m.rowid AS seq FROM agent_room_messages m \
-               WHERE m.room_id = ? \
-                 AND (? IS NULL OR m.rowid < \
-                      COALESCE((SELECT rowid FROM agent_room_messages \
-                                WHERE id = ? AND room_id = ?), 0)) \
-               ORDER BY m.rowid DESC LIMIT ?) \
-             ORDER BY seq ASC",
+        // Two plain statements instead of one `? IS NULL OR …` predicate, so
+        // the planner sees a bound range and walks `idx_arm_room_seq`
+        // backwards from the cursor (no temp B-tree over the whole room).
+        let upto = match before {
+            // An unknown cursor reads nothing (it is not in this room).
+            Some(b) => match self.cursor_seq(room_id, b).await? {
+                Some(seq) => seq,
+                None => return Ok(Vec::new()),
+            },
+            None => i64::MAX,
+        };
+        let mut rows = sqlx::query(
+            "SELECT * FROM agent_room_messages \
+              WHERE room_id = ? AND rowid < ? \
+              ORDER BY rowid DESC LIMIT ?",
         )
         .bind(room_id)
-        .bind(before)
-        .bind(before.unwrap_or(""))
-        .bind(room_id)
+        .bind(upto)
         .bind(limit.clamp(1, 500))
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list agent room messages before"))?;
+        rows.reverse();
         rows.iter().map(row_to_message).collect()
     }
 }
@@ -1426,6 +1652,188 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(repo.list_enabled_schedules().await.unwrap().len(), 0);
+    }
+
+    /// Perf W3/W12 budget: the scheduler's per-minute scan is a constant
+    /// TWO statements whatever the number of schedules (it was 1 + 2N), and
+    /// returns each schedule paired with its own agent.
+    #[tokio::test]
+    async fn schedule_scan_is_two_queries_for_any_n() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = PersonalAgentsRepo::new(p.clone());
+        for i in 0..6 {
+            let a = repo
+                .create(new_agent("ws1", &format!("Agent {i}")))
+                .await
+                .unwrap();
+            for j in 0..2 {
+                repo.create_schedule(NewAgentSchedule {
+                    agent_id: a.id.clone(),
+                    schedule: json!({"cadence":"interval","every_min": 15 + j}),
+                    timezone: "UTC".into(),
+                    directive: format!("d{i}-{j}"),
+                    enabled: true,
+                })
+                .await
+                .unwrap();
+            }
+        }
+        let probe = p.statement_probe();
+        probe.reset();
+        let pairs = repo.list_enabled_schedules().await.unwrap();
+        assert_eq!(pairs.len(), 12);
+        assert!(pairs.iter().all(|(s, a)| s.agent_id == a.id));
+        let stmts = probe.take();
+        assert_eq!(stmts.len(), 2, "tick scan budget: {stmts:?}");
+        // Nothing enabled → a single statement.
+        sqlx::query("UPDATE personal_agents SET enabled = 0")
+            .execute(&p)
+            .await
+            .unwrap();
+        probe.reset();
+        assert!(repo.list_enabled_schedules().await.unwrap().is_empty());
+        assert_eq!(probe.take().len(), 1);
+    }
+
+    /// Perf N4: the governed pipeline's per-call autonomy read is served from
+    /// the cache, and a save / delete is visible at once.
+    #[tokio::test]
+    async fn autonomy_is_cached_and_invalidated_on_save_and_delete() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = PersonalAgentsRepo::new(p.clone());
+        let a = repo.create(new_agent("ws1", "Cached")).await.unwrap();
+        let probe = p.statement_probe();
+        assert!(repo.autonomy(&a.id).await.unwrap().rules.is_empty());
+        probe.reset();
+        for _ in 0..10 {
+            repo.autonomy(&a.id).await.unwrap();
+        }
+        assert!(probe.take().is_empty(), "served from the cache");
+        let cfg = AgentAutonomy {
+            rules: vec![AgentRule {
+                id: "r1".into(),
+                text: "Ask before prod".into(),
+                enforce: None,
+            }],
+            ..Default::default()
+        };
+        // A fresh repo handle on the same database sees the save.
+        repo.save_autonomy(&a.id, &cfg).await.unwrap();
+        let other = PersonalAgentsRepo::new(p.clone());
+        assert_eq!(other.autonomy(&a.id).await.unwrap().rules.len(), 1);
+        repo.delete(&a.id).await.unwrap();
+        assert!(repo.autonomy(&a.id).await.unwrap().rules.is_empty());
+        // Another database never sees this one's entry.
+        let p2 = pool().await;
+        assert!(PersonalAgentsRepo::new(p2)
+            .autonomy(&a.id)
+            .await
+            .unwrap()
+            .rules
+            .is_empty());
+    }
+
+    /// Perf N6: the proactive tick's budget counts are ONE statement for any
+    /// number of agents, counting only proactive runs inside the window.
+    #[tokio::test]
+    async fn proactive_counts_are_one_query_for_any_n() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = PersonalAgentsRepo::new(p.clone());
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let a = repo
+                .create(new_agent("ws1", &format!("P{i}")))
+                .await
+                .unwrap();
+            for j in 0..i {
+                let r = repo
+                    .create_run(NewAgentRun {
+                        agent_id: a.id.clone(),
+                        schedule_id: None,
+                        workspace_id: "ws1".into(),
+                        trigger: "proactive".into(),
+                    })
+                    .await
+                    .unwrap();
+                let mode = if j == 0 { "directed" } else { "proactive" };
+                repo.set_run_mode(&r.id, mode, true, None).await.unwrap();
+            }
+            ids.push(a.id);
+        }
+        let since = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let probe = p.statement_probe();
+        probe.reset();
+        let counts = repo
+            .count_proactive_runs_since(&refs, &since)
+            .await
+            .unwrap();
+        assert_eq!(probe.take().len(), 1, "one statement for 5 agents");
+        for (i, id) in ids.iter().enumerate() {
+            let want = i.saturating_sub(1) as i64; // the first run is directed
+            assert_eq!(counts.get(id).copied().unwrap_or(0), want, "agent {i}");
+            assert_eq!(
+                repo.count_runs_since(id, "proactive", &since)
+                    .await
+                    .unwrap(),
+                want,
+                "matches the per-agent count"
+            );
+        }
+        let future = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(repo
+            .count_proactive_runs_since(&refs, &future)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(repo
+            .count_proactive_runs_since(&[], &since)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Perf N5: the feed projection reads every column `row_to_run` needs and
+    /// cuts the summary in SQL, one character past the feed's clip.
+    #[tokio::test]
+    async fn feed_projection_cuts_the_summary_in_sql() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = PersonalAgentsRepo::new(p.clone());
+        let a = repo.create(new_agent("ws1", "Feed")).await.unwrap();
+        let r = repo
+            .create_run(NewAgentRun {
+                agent_id: a.id.clone(),
+                schedule_id: None,
+                workspace_id: "ws1".into(),
+                trigger: "manual".into(),
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE personal_agent_runs SET summary = ? WHERE id = ?")
+            .bind("é".repeat(5_000))
+            .bind(&r.id)
+            .execute(&p)
+            .await
+            .unwrap();
+        assert!(FEED_RUN_COLS.contains(&format!("substr(summary, 1, {})", FEED_SUMMARY_CHARS + 1)));
+        let cur = repo.running_run(&a.id).await.unwrap().unwrap();
+        assert_eq!(cur.summary.chars().count(), FEED_SUMMARY_CHARS + 1);
+        let feed = repo.list_runs_for_feed(&a.id, 20).await.unwrap();
+        assert_eq!(feed[0].summary.chars().count(), FEED_SUMMARY_CHARS + 1);
+        let full = repo.list_runs(&a.id, 20).await.unwrap();
+        assert_eq!(full[0].summary.chars().count(), 5_000);
+        let (mut f, mut g) = (feed[0].clone(), full[0].clone());
+        f.summary.clear();
+        g.summary.clear();
+        assert_eq!(
+            serde_json::to_value(f).unwrap(),
+            serde_json::to_value(g).unwrap(),
+            "every other field identical"
+        );
     }
 
     #[tokio::test]
@@ -1772,5 +2180,102 @@ mod tests {
         assert!(repo.list_runs(&a.id, 10).await.unwrap().is_empty());
         assert!(repo.list_schedules(&a.id).await.unwrap().is_empty());
         assert!(repo.get(&a.id).await.unwrap().chat_session_id.is_none());
+    }
+
+    /// R5: the denormalized room activity tracks `add_message`, and
+    /// `recount_activity` heals drift after an out-of-band delete (retention).
+    #[tokio::test]
+    async fn room_activity_is_denormalized_and_recountable() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let rooms = AgentRoomsRepo::new(p.clone());
+        let room = rooms.create("ws1", "r", None).await.unwrap();
+        let empty = rooms.create("ws1", "empty", None).await.unwrap();
+        let mut last = None;
+        for i in 0..3 {
+            last = Some(
+                rooms
+                    .add_message(NewRoomMessage {
+                        room_id: room.id.clone(),
+                        author_kind: "user".into(),
+                        author_id: "u1".into(),
+                        text: format!("m{i}"),
+                    })
+                    .await
+                    .unwrap(),
+            );
+        }
+        let last = last.unwrap();
+        // The returned message is the stored row.
+        let stored = rooms.list_messages_before(&room.id, None, 1).await.unwrap();
+        assert_eq!(stored[0].id, last.id);
+        assert_eq!(stored[0].created_at, last.created_at);
+        let act = rooms.activity_by_workspace("ws1").await.unwrap();
+        assert_eq!(act[&room.id].message_count, 3);
+        assert_eq!(
+            act[&room.id].last_message_at.as_deref(),
+            Some(&*last.created_at)
+        );
+        assert!(!act.contains_key(&empty.id), "empty rooms are omitted");
+        assert_eq!(rooms.recount_activity().await.unwrap(), 0, "no drift");
+
+        sqlx::query("DELETE FROM agent_room_messages WHERE text = 'm0'")
+            .execute(p.writer())
+            .await
+            .unwrap();
+        assert_eq!(rooms.recount_activity().await.unwrap(), 1);
+        let act = rooms.activity_by_workspace("ws1").await.unwrap();
+        assert_eq!(act[&room.id].message_count, 2);
+        assert_eq!(
+            act[&room.id].last_message_at.as_deref(),
+            Some(&*last.created_at)
+        );
+    }
+
+    async fn plan(p: &DbPool, sql: &str) -> String {
+        let rows: Vec<(i64, i64, i64, String)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")))
+                .fetch_all(p.writer())
+                .await
+                .unwrap();
+        rows.into_iter()
+            .map(|r| r.3)
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// R1 / M1: the room tail, the before-cursor page and the after-cursor
+    /// page are range scans on `idx_arm_room_seq` — no temp B-tree sort over
+    /// the room — and the rooms-list activity never touches the messages.
+    #[tokio::test]
+    async fn room_reads_use_the_rowid_index() {
+        let p = pool().await;
+        for sql in [
+            "SELECT * FROM agent_room_messages WHERE room_id = 'r' AND rowid > 5 \
+             ORDER BY rowid ASC LIMIT 100",
+            "SELECT * FROM agent_room_messages WHERE room_id = 'r' AND rowid < 9223372036854775807 \
+             ORDER BY rowid DESC LIMIT 100",
+        ] {
+            let got = plan(&p, sql).await;
+            assert!(got.contains("idx_arm_room_seq"), "{sql}: {got}");
+            assert!(!got.contains("TEMP B-TREE"), "{sql}: {got}");
+        }
+        let cursor = plan(
+            &p,
+            "SELECT rowid AS seq FROM agent_room_messages WHERE id = 'x' AND room_id = 'r'",
+        )
+        .await;
+        assert!(
+            cursor.contains("INDEX") || cursor.contains("PRIMARY KEY"),
+            "{cursor}"
+        );
+        let act = plan(
+            &p,
+            "SELECT id, message_count, last_message_at FROM agent_rooms \
+              WHERE workspace_id = 'w' AND message_count > 0",
+        )
+        .await;
+        assert!(act.contains("idx_agent_rooms_ws"), "{act}");
+        assert!(!act.contains("agent_room_messages"), "{act}");
     }
 }

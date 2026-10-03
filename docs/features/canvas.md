@@ -217,6 +217,32 @@ restore is itself undoable.
 `note` is the agent's one-line description (or an error explanation when nothing
 was drawn).
 
+**Storage (migration 0159).** Each version records its `format` and byte `size`
+as columns at snapshot time, so opening the history never parses up to 30 stored
+documents. An Excalidraw board's pasted images (`files[*].dataURL`, base64) are
+moved into a content-addressed `canvas_files` table (one row per sha256) when a
+version is taken — 30 versions of a board with one 3 MB screenshot store the
+screenshot once, not 30 times. Restore puts the image back inline; pruning past
+30 versions or deleting the scene garbage-collects files nothing references.
+Saves store the `doc` JSON text exactly as sent (no server-side re-parse into a
+tree and re-serialise; bodies over 1 MB are validated on the blocking pool), and
+the editor drops a queued autosave whose document a newer one superseded.
+
+**Images out of the live document (migration 0163).** The LIVE scene document
+keeps images as `otto-canvas-file:<sha256>` refs too: every write moves inline
+`dataURL`s into `canvas_files` (a doc without inline images is only
+byte-scanned, never parsed) and records the scene's refs in
+`canvas_scene_files`, so garbage collection keeps a file while any scene or
+version cites it. Older scenes convert on their next save. The editor opens a
+scene with `?files=ref`, fetches each image once from the immutable
+`GET /canvas/files/{sha}` (cached by the webview, so a reopened board fetches
+nothing), and autosaves refs: a pasted image goes up inline exactly once, then
+the editor learns its sha (sha256 of the data-URL text, the same address the
+server uses) and every later autosave of a board with a 3 MB screenshot is a few
+KB, with no main-thread stringify of the base64. Other readers (export,
+duplicate, agents, the side panel) get a self-contained doc with images inline
+unless they pass `?files=ref`.
+
 ### The prompts (mode hint)
 
 `build_assist_prompt` emits an `OTTO_TASK: canvas_assist` sentinel (which routes
@@ -265,9 +291,13 @@ its native export menu). Behavior:
 - **Live agent edits** arrive over `canvas_updated` and reload in place.
 - On a phone the board is read-only (`viewModeEnabled`); tablets/desktops edit.
 
-> The Excalidraw font/asset bundle is loaded from a CDN
-> (`EXCALIDRAW_ASSET_PATH = unpkg.com/@excalidraw/excalidraw@0.18.1/…`) on first
-> use, so an Excalidraw board needs network access the first time it mounts.
+> Excalidraw's hand-drawn fonts are served by Otto itself
+> (`EXCALIDRAW_ASSET_PATH = <base>assets/excalidraw/`): the UI build copies them
+> from the package into `dist/assets/excalidraw/fonts/` (`vite.config.ts`
+> `excalidrawFonts`; Vite dev serves them from `node_modules`) and the daemon
+> serves those content-hashed files `immutable`. No CDN, so a board works offline
+> and under the desktop CSP (`font-src 'self'`). The 12 MB CJK face (Xiaolai) is
+> not bundled: CJK text tries the package's CDN fallback, else the system font.
 
 ### Mermaid board (`MermaidCanvas.svelte`)
 
@@ -413,8 +443,8 @@ that lists the Canvas scenes linked to a story.
   scenes.
 - **Mermaid and D2 are fully offline** (`mermaid` and `@terrastruct/d2` are both
   bundled and lazy-loaded, no CDN — D2's ~7.8 MB WASM chunk downloads once on
-  first use of a D2 scene, then stays cached for the session). **Excalidraw loads
-  its asset/font bundle from the unpkg CDN** on first mount.
+  first use of a D2 scene, then stays cached for the session). Excalidraw's fonts are
+  served locally too (all but the CJK Xiaolai face).
 - **No Present mode in the current canvas.** Present mode (PowerPoint-style slide
   stepping) and the top **Toolbar** (Undo/Redo, **Export JSON**, Present) belong to
   the older node-graph design and are **not wired** into the shipping file-backed
@@ -484,9 +514,10 @@ that lists the Canvas scenes linked to a story.
   file the agent left; an agent turn that rewrites the whole file replaces hand
   layout. Use the Mermaid **Code** panel / Excalidraw edits *between* turns, and ask
   the agent to "refine" rather than "redraw".
-- **The Excalidraw board is blank / fonts look wrong.** Its asset bundle loads from
-  the unpkg CDN on first mount; confirm the daemon host has network access, or that
-  `EXCALIDRAW_ASSET_PATH` is reachable.
+- **The Excalidraw board's fonts look wrong.** Fonts load from
+  `/assets/excalidraw/fonts/` on the daemon; a 404 there means the UI was built
+  without the `excalidrawFonts` copy step (rebuild the UI). CJK text uses the system
+  font unless the CDN fallback is reachable.
 - **A scene I created in another workspace isn't in the list.** It is — the page
   lists *your* scenes across all workspaces (`GET /canvas/scenes`); use search.
 

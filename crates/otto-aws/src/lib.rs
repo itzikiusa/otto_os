@@ -1,7 +1,8 @@
 //! AWS console — see `docs/features/aws-console.md` and the build contract
 //! `docs/design/aws-k8s-consoles.md` (§1, §2).
 //!
-//! Everything goes through the `aws` CLI v2 (`cli.rs`); accounts are DB rows
+//! Everything goes through the `aws` CLI v2 (`cli.rs`) except the few per-tick
+//! calls `native.rs` signs in-process (F2d); accounts are DB rows
 //! (`otto_state::AwsAccountsRepo`) + Keychain secrets (`accounts.rs`); the CLI
 //! is located / installed on demand (`install.rs`); each AWS service has its
 //! own module with pure normalizers over the CLI's JSON. Server-side wiring
@@ -18,6 +19,7 @@ pub mod http;
 pub mod install;
 pub mod logs;
 pub mod metrics;
+pub mod native;
 pub mod paths;
 pub mod rds;
 pub mod regions;
@@ -44,6 +46,11 @@ pub trait AwsCtx: Clone + Send + Sync + 'static {
     /// `<data_dir>/kube`.
     fn data_dir(&self) -> &std::path::Path;
     fn spawner(&self) -> &Arc<dyn Spawner>;
+    /// Whether the high-frequency calls (logs tail, query status polls, EC2
+    /// lists) go through the in-process SigV4 client instead of the CLI.
+    fn aws_native(&self) -> native::Mode {
+        native::Mode::from_env()
+    }
 }
 
 /// All `/aws/*` routes (handler-relative templates; nested under `/api/v1`).

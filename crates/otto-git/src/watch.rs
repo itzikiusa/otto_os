@@ -18,8 +18,9 @@
 //!
 //! Bounded: at most [`MAX_WATCHED`] repos (least recently used evicted), a
 //! watcher idles out after [`IDLE_TTL`] without a status/fetch request, and a
-//! repo emits at most one event per [`MIN_GAP`] (trailing edge, so the last
-//! change of a burst is never lost).
+//! repo emits at most one event per [`event_gap`] — [`MIN_GAP`], or twice the
+//! repo's last status duration when that is longer, capped at [`MAX_GAP`]
+//! (trailing edge, so the last change of a burst is never lost).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use otto_core::event::Event;
+use otto_core::event::{Event, REPO_CHANGED_MAX_PATHS};
 use otto_core::Id;
 use tokio::sync::{broadcast, mpsc};
 
@@ -37,6 +38,18 @@ use tokio::sync::{broadcast, mpsc};
 const DEBOUNCE: Duration = Duration::from_millis(150);
 /// Minimum spacing between two events for the same repo.
 const MIN_GAP: Duration = Duration::from_millis(400);
+/// Ceiling of the adaptive spacing ([`event_gap`]).
+const MAX_GAP: Duration = Duration::from_secs(5);
+
+/// Spacing between two events for a repo whose last full `git status` took
+/// `last_status`: twice that, at least [`MIN_GAP`], at most [`MAX_GAP`]. A
+/// 100k-file tree whose status takes 900 ms would otherwise be re-walked
+/// back-to-back for as long as a build keeps writing non-ignored paths.
+pub(crate) fn event_gap(last_status: Option<Duration>) -> Duration {
+    last_status
+        .map(|d| (d * 2).clamp(MIN_GAP, MAX_GAP))
+        .unwrap_or(MIN_GAP)
+}
 /// Drop a watcher nobody has asked about for this long.
 const IDLE_TTL: Duration = Duration::from_secs(15 * 60);
 /// Hard cap on simultaneously watched repositories.
@@ -65,7 +78,74 @@ struct RepoState {
     ignore: RwLock<Gitignore>,
     /// Set by the first change of a burst, cleared when its event is sent.
     pending: AtomicBool,
+    /// The burst's changed paths ([`Touched`]), taken when its event is sent.
+    touched: Mutex<Touched>,
     last_emit: Mutex<Option<Instant>>,
+}
+
+/// What one burst touched, as `RepoStatusChanged.paths` reports it.
+#[derive(Debug, PartialEq)]
+enum Touched {
+    /// These repo-relative worktree paths (deduped, at most
+    /// [`REPO_CHANGED_MAX_PATHS`]).
+    Paths(Vec<String>),
+    /// Unknown — overflow, a rescan, or index/HEAD/branch-ref state that
+    /// changes every file's diff.
+    Any,
+}
+
+impl Default for Touched {
+    fn default() -> Self {
+        Touched::Paths(Vec::new())
+    }
+}
+
+impl Touched {
+    fn add(&mut self, rel: String) {
+        if let Touched::Paths(v) = self {
+            if v.contains(&rel) {
+                return;
+            }
+            if v.len() >= REPO_CHANGED_MAX_PATHS {
+                *self = Touched::Any;
+            } else {
+                v.push(rel);
+            }
+        }
+    }
+
+    fn into_wire(self) -> Option<Vec<String>> {
+        match self {
+            Touched::Paths(v) => Some(v),
+            Touched::Any => None,
+        }
+    }
+}
+
+/// Fold one relevant `path` into the burst's [`Touched`] set.
+fn note_touched(root: &Path, git_dir: &Path, path: &Path, t: &mut Touched) {
+    if let Ok(rel) = path.strip_prefix(git_dir) {
+        // Remote-tracking refs and tags move status' ahead/behind, never a
+        // file's diff; everything else in .git (index, HEAD, branch refs,
+        // merge state) can change every file's staged/unstaged side.
+        let mut c = rel.components().map(|c| c.as_os_str());
+        let diff_neutral = c.next().is_some_and(|f| f == "refs")
+            && c.next().is_some_and(|s| s == "remotes" || s == "tags");
+        if !diff_neutral {
+            *t = Touched::Any;
+        }
+        return;
+    }
+    match path.strip_prefix(root) {
+        Ok(rel) if !rel.as_os_str().is_empty() => {
+            let rel: Vec<_> = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect();
+            t.add(rel.join("/"));
+        }
+        _ => *t = Touched::Any,
+    }
 }
 
 struct Entry {
@@ -98,8 +178,9 @@ impl RepoWatchers {
                 tokio::spawn(async move {
                     let wait = {
                         let last = state.last_emit.lock().unwrap_or_else(|e| e.into_inner());
+                        let min_gap = event_gap(crate::status_cache::last_status(&state.repo_id));
                         let gap = last
-                            .map(|t| MIN_GAP.saturating_sub(t.elapsed()))
+                            .map(|t| min_gap.saturating_sub(t.elapsed()))
                             .unwrap_or_default();
                         gap.max(DEBOUNCE)
                     };
@@ -107,11 +188,21 @@ impl RepoWatchers {
                     // Clear BEFORE sending: a change landing after this point
                     // schedules the next event instead of being swallowed.
                     state.pending.store(false, Ordering::SeqCst);
+                    // Taken AFTER `pending` is cleared: a change racing in
+                    // between lands in this event (its own then reports an
+                    // empty set), never in a set nobody will send.
+                    let touched = std::mem::take(
+                        &mut *state.touched.lock().unwrap_or_else(|e| e.into_inner()),
+                    );
                     *state.last_emit.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(Instant::now());
+                    // Invalidate the shared status memo BEFORE anyone hears
+                    // of the change, so no reader is served the old tree.
+                    crate::status_cache::bump(&state.repo_id);
                     let _ = events.send(Event::RepoStatusChanged {
                         workspace_id: state.workspace_id.clone(),
                         repo_id: state.repo_id.clone(),
+                        paths: touched.into_wire(),
                     });
                 });
             }
@@ -181,6 +272,7 @@ impl RepoWatchers {
             root: root.clone(),
             git_dir: git_dir.clone(),
             pending: AtomicBool::new(false),
+            touched: Mutex::new(Touched::default()),
             last_emit: Mutex::new(None),
         });
         let cb_state = state;
@@ -203,10 +295,16 @@ impl RepoWatchers {
                 let ignore = cb_state.ignore.read().unwrap_or_else(|e| e.into_inner());
                 if relevant(&cb_state.root, &cb_state.git_dir, p, &ignore) {
                     hit = true;
-                    break;
+                    let mut t = cb_state.touched.lock().unwrap_or_else(|e| e.into_inner());
+                    note_touched(&cb_state.root, &cb_state.git_dir, p, &mut t);
                 }
             }
             // A rescan request (dropped kernel events) may hide anything.
+            if ev.need_rescan() {
+                *cb_state.touched.lock().unwrap_or_else(|e| e.into_inner()) = Touched::Any;
+            }
+            // Recorded BEFORE `pending` is set, so the dispatcher that wakes
+            // for this burst always sees the path.
             if (hit || ev.need_rescan()) && !cb_state.pending.swap(true, Ordering::SeqCst) {
                 let _ = tx.send(cb_state.clone());
             }
@@ -325,11 +423,59 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn event_gap_adapts_to_status_cost() {
+        assert_eq!(event_gap(None), MIN_GAP);
+        assert_eq!(event_gap(Some(Duration::from_millis(50))), MIN_GAP);
+        assert_eq!(
+            event_gap(Some(Duration::from_millis(900))),
+            Duration::from_millis(1800)
+        );
+        assert_eq!(event_gap(Some(Duration::from_secs(9))), MAX_GAP);
+    }
+
+    #[test]
+    fn touched_paths_are_relative_deduped_and_capped() {
+        let root = Path::new("/r");
+        let git_dir = Path::new("/r/.git");
+        let mut t = Touched::default();
+        note_touched(root, git_dir, Path::new("/r/src/a.rs"), &mut t);
+        note_touched(root, git_dir, Path::new("/r/src/a.rs"), &mut t);
+        note_touched(root, git_dir, Path::new("/r/b.txt"), &mut t);
+        // Remote-tracking refs move ahead/behind, not a file's diff.
+        note_touched(
+            root,
+            git_dir,
+            Path::new("/r/.git/refs/remotes/origin/main"),
+            &mut t,
+        );
+        assert_eq!(t, Touched::Paths(vec!["src/a.rs".into(), "b.txt".into()]));
+        // The index (a `git add`) can change every file's diff.
+        note_touched(root, git_dir, Path::new("/r/.git/index"), &mut t);
+        assert_eq!(t.into_wire(), None);
+
+        let mut t = Touched::default();
+        for i in 0..=REPO_CHANGED_MAX_PATHS {
+            note_touched(root, git_dir, &root.join(format!("f{i}")), &mut t);
+        }
+        assert_eq!(t, Touched::Any, "past the cap the set is unknown");
+        assert_eq!(Touched::default().into_wire(), Some(vec![]));
+    }
+
     async fn next_change(rx: &mut broadcast::Receiver<Event>, within: Duration) -> Option<Id> {
+        next_change_paths(rx, within).await.map(|(id, _)| id)
+    }
+
+    async fn next_change_paths(
+        rx: &mut broadcast::Receiver<Event>,
+        within: Duration,
+    ) -> Option<(Id, Option<Vec<String>>)> {
         let deadline = tokio::time::Instant::now() + within;
         loop {
             match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Ok(Event::RepoStatusChanged { repo_id, .. })) => return Some(repo_id),
+                Ok(Ok(Event::RepoStatusChanged { repo_id, paths, .. })) => {
+                    return Some((repo_id, paths))
+                }
                 Ok(Ok(_)) => continue,
                 _ => return None,
             }
@@ -379,6 +525,19 @@ mod tests {
             extra += 1;
         }
         assert!(extra <= 2, "burst produced {extra} extra events");
+
+        // A single edit names its file, so an open diff of ANOTHER file can
+        // skip its re-read.
+        std::fs::write(root.join("only.rs"), b"x").unwrap();
+        let (_, paths) = next_change_paths(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("an event for the edit");
+        let paths = paths.expect("a worktree-only burst lists its paths");
+        assert!(paths.iter().any(|p| p == "only.rs"), "{paths:?}");
+        while next_change(&mut rx, Duration::from_millis(800))
+            .await
+            .is_some()
+        {}
 
         // Touching again keeps one watcher; forget drops it.
         w.touch(&"r1".to_string(), &"w1".to_string(), &root, None);

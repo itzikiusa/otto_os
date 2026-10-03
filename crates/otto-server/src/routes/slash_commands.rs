@@ -129,6 +129,7 @@ fn clip(s: String) -> String {
 
 /// `<dir>/**/<name>.md` → `/name` (subdirs namespaced as `dir:name`, the
 /// Claude convention). Depth-limited; symlinks are followed by `read_dir`.
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 fn scan_commands(
     dir: &Path,
     prefix: &str,
@@ -167,6 +168,7 @@ fn scan_commands(
 }
 
 /// `<dir>/<name>/SKILL.md` → `/name`.
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 fn scan_skills(dir: &Path, source: &'static str, out: &mut BTreeMap<String, SlashCommand>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;

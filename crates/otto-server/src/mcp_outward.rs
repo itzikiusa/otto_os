@@ -16,6 +16,7 @@ use axum::Json;
 use otto_core::api::CreateMcpTokenReq;
 use otto_core::auth::{AuthContext, McpScope};
 use otto_core::domain::WorkspaceRole;
+use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_mcp::{canonical_hash, InvokeCtx};
 use otto_rbac::AuthRepo;
@@ -256,7 +257,7 @@ pub(crate) fn tool_category(bare: &str) -> Option<&'static str> {
     static INDEX: OnceLock<HashMap<String, String>> = OnceLock::new();
     INDEX
         .get_or_init(|| {
-            otto_tool_specs()
+            otto_tool_specs_cached()
                 .iter()
                 .filter_map(|s| {
                     let name = s["name"].as_str()?;
@@ -277,7 +278,7 @@ pub(crate) fn tool_category(bare: &str) -> Option<&'static str> {
 /// auto-approve rule can name.
 pub(crate) fn mutating_categories() -> Vec<(String, Vec<String>)> {
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
-    for spec in otto_tool_specs() {
+    for spec in otto_tool_specs_cached() {
         let Some(name) = spec["name"].as_str() else {
             continue;
         };
@@ -331,29 +332,42 @@ pub(crate) const REPO_REF_TOOLS: &[&str] = &[
 ];
 
 /// Shared schema text for [`REPO_REF_TOOLS`]' `repo_id`.
-const REPO_REF_DESC: &str = "Otto repo id — or a repo name, local path, or remote (`owner/repo` or URL). Resolved across EVERY workspace you can read, not just the current one. Omit it inside an Otto session to use the repo the session is working in. An ambiguous or unknown reference returns the candidates to pick from.";
+///
+/// Kept SHORT on purpose (perf2/10-mcp R2): these strings repeat in every
+/// schema property that takes a reference, and Codex re-reads the whole
+/// catalog every turn. Resolution details live once in the list tools.
+const REPO_REF_DESC: &str =
+    "Repo id, name, path or remote (any readable workspace). Omit = this session's repo.";
 
 /// Shared schema text for the friendly-reference id arguments resolved by
 /// [`fill_refs`] (see `agent_refs`): the id OR a human field, across every
 /// workspace the caller can read, with candidates listed on a miss.
-const WS_DIR_DESC: &str = "Optional: only this workspace (id or name). Omit to list every workspace you can read (your current one first).";
-const WORKFLOW_REF_DESC: &str = "Workflow id or name — names resolve across every workspace you can read (otto.list_workflows); an ambiguous or unknown one returns the candidates.";
+const WS_DIR_DESC: &str = "Optional workspace id or name; omit = all you can read.";
+const WORKFLOW_REF_DESC: &str = "Workflow id or name (otto.list_workflows).";
 const BROKER_REF_DESC: &str = "Broker cluster id or name (otto.list_broker_clusters).";
-const CONNECTION_REF_DESC: &str =
-    "Connection id or name (otto.list_connections) — resolved across every workspace you can read.";
+const CONNECTION_REF_DESC: &str = "Connection id or name (otto.list_connections).";
 const API_REQUEST_REF_DESC: &str =
     "Saved request id or name (otto.api_list), within `workspace_id`.";
-const ISSUE_ACCOUNT_REF_DESC: &str = "Your Jira/Confluence account: id, label, email or base URL (otto.list_issue_accounts). Omit it when you have exactly one account.";
-const PAGE_REF_DESC: &str = "Confluence page id, or the page URL (…/pages/<id>/… or ?pageId=<id>).";
+const ISSUE_ACCOUNT_REF_DESC: &str =
+    "Jira/Confluence account id, label, email or URL; omit if you have one.";
+const PAGE_REF_DESC: &str = "Confluence page id or URL.";
 const SWARM_REF_DESC: &str = "Swarm id or name (otto.list_swarms).";
 const VAULT_REF_DESC: &str = "Vault id (integer) or vault name (otto.vault_list).";
-const DESIGN_REF_DESC: &str =
-    "Design artifact id or its exact title (otto.design_list / otto.design_search).";
+const DESIGN_REF_DESC: &str = "Design artifact id or exact title.";
 const ROOM_REF_DESC: &str = "Agent room id or name (otto.list_agent_rooms).";
 const TASK_REF_DESC: &str = "Scheduled task id or name (otto.list_scheduled_tasks).";
 const AWS_ACCOUNT_REF_DESC: &str = "AWS account id or name (otto.aws_list_accounts).";
 const K8S_CLUSTER_REF_DESC: &str = "Kubernetes cluster id or name (otto.k8s_list_clusters).";
 const PR_NUMBER_DESC: &str = "Pull request number (otto.list_prs).";
+
+/// [`otto_tool_specs`] built ONCE per process. The catalog is static (~216
+/// `json!` literals, ~100 KB serialized); every status read, `tools/list` and
+/// validation used to rebuild it. Hot paths read this; `otto_tool_specs()`
+/// stays for callers that want an owned copy.
+pub fn otto_tool_specs_cached() -> &'static [Value] {
+    static SPECS: std::sync::LazyLock<Vec<Value>> = std::sync::LazyLock::new(otto_tool_specs);
+    &SPECS
+}
 
 /// Static catalog of the outward `otto.*` tools. Each entry carries a `category`
 /// so the control-plane UI can group the (now large) checklist. Adding a tool here
@@ -631,53 +645,53 @@ pub fn otto_tool_specs() -> Vec<Value> {
         // ================= Vault (docs home) =================
         json!({"name":"otto.vault_list","mutating":false,"category":"Vault",
             "description":"List markdown doc vaults (id, name, root, OKF flag, note/link counts). Vaults are a global library — every workspace sees them all. Read-only.",
-            "inputSchema":{"type":"object","required":[],"properties":{"workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."}}}}),
+            "inputSchema":{"type":"object","required":[],"properties":{"workspace_id":{"type":"string","description":"Optional; vaults are global."}}}}),
         json!({"name":"otto.vault_dir","mutating":false,"category":"Vault",
             "description":"One level of a vault's folder tree (folders, notes, attachments). Read-only.",
             "inputSchema":{"type":"object","required":["vault_id"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
         json!({"name":"otto.vault_read","mutating":false,"category":"Vault",
             "description":"A note's raw markdown + metadata + outgoing links. Read-only.",
             "inputSchema":{"type":"object","required":["vault_id","path"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
         json!({"name":"otto.vault_search","mutating":false,"category":"Vault",
             "description":"Full-text (FTS5) search over a vault's notes with snippets; tag:/path:/type: operators. Read-only.",
             "inputSchema":{"type":"object","required":["vault_id","query"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"query":{"type":"string"},"limit":{"type":"integer"}}}}),
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"query":{"type":"string"},"limit":{"type":"integer"}}}}),
         json!({"name":"otto.vault_backlinks","mutating":false,"category":"Vault",
             "description":"Notes linking TO a given note, with context snippets. Read-only.",
             "inputSchema":{"type":"object","required":["vault_id","path"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
         json!({"name":"otto.vault_tags","mutating":false,"category":"Vault",
             "description":"Every tag in a vault with note counts. Read-only.",
             "inputSchema":{"type":"object","required":["vault_id"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC}}}}),
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC}}}}),
         json!({"name":"otto.vault_graph","mutating":false,"category":"Vault",
             "description":"The vault link graph (compact arrays; local neighborhood when `path` given). Read-only.",
             "inputSchema":{"type":"object","required":["vault_id"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"mode":{"type":"string"},"path":{"type":"string"},"depth":{"type":"integer"}}}}),
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"mode":{"type":"string"},"path":{"type":"string"},"depth":{"type":"integer"}}}}),
         json!({"name":"otto.vault_okf_validate","mutating":false,"category":"Vault",
             "description":"Deterministic OKF v0.1 conformance report (E1-E3 errors, W1-W5 warnings). Read-only.",
             "inputSchema":{"type":"object","required":["vault_id"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC}}}}),
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC}}}}),
         json!({"name":"otto.vault_write","mutating":true,"category":"Vault",
             "description":"Create/update a markdown note in a doc vault (OKF preferred). DANGEROUS: writes files — approval-gated.",
             "inputSchema":{"type":"object","required":["vault_id","path","content"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"},
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"},
                 "content":{"type":"string"},"if_hash":{"type":"string"}}}}),
         json!({"name":"otto.vault_write_file","mutating":true,"category":"Vault",
             "description":"Create/update a guarded UTF-8 documentation artifact in a vault — OpenAPI YAML, JSON, D2, Mermaid, text or CSV (`path` ending .yaml/.yml/.json/.d2/.mmd/.txt/.csv; markdown notes use otto.vault_write). Pass `if_hash` for optimistic concurrency. DANGEROUS: writes files — approval-gated.",
             "inputSchema":{"type":"object","required":["vault_id","path","content"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"},
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"},
                 "content":{"type":"string"},"if_hash":{"type":"string"}}}}),
         json!({"name":"otto.vault_rename","mutating":true,"category":"Vault",
             "description":"Rename/move a note or folder; rewrites every referencing link across the vault. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["vault_id","from","to"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"from":{"type":"string"},"to":{"type":"string"}}}}),
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"from":{"type":"string"},"to":{"type":"string"}}}}),
         json!({"name":"otto.vault_delete","mutating":true,"category":"Vault",
             "description":"Soft-delete a note into the vault's .trash/ (never destroys files). DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["vault_id","path"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
         // ================= Design Hall (artifact graph) =================
         // Read-only: find and cite earlier design work (the References drawer's
         // library). The design library is global; `workspace_id` only narrows.
@@ -841,17 +855,17 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["text"],"properties":{
                 "text":{"type":"string"},"kind":{"type":"string","description":"fact | decision | learning … (default fact)"},
                 "tags":{"type":"array","items":{"type":"string"}},
-                "session_id":{"type":"string","description":"the calling assistant session (injected automatically by Otto's MCP bridge)"}}}}),
+                "session_id":{"type":"string","description":"the calling assistant session (injected by Otto)"}}}}),
         json!({"name":"otto.assistant_forget","mutating":true,"category":"Assistant",
             "description":"Forget the user's assistant memories that match `query` (up to 10; each can be restored with its undo token). DANGEROUS: erases personal memory — approval-gated.",
             "inputSchema":{"type":"object","required":["query"],"properties":{
                 "query":{"type":"string"},
-                "session_id":{"type":"string","description":"the calling assistant session (injected automatically by Otto's MCP bridge)"}}}}),
+                "session_id":{"type":"string","description":"the calling assistant session (injected by Otto)"}}}}),
         json!({"name":"otto.assistant_recall","mutating":false,"category":"Assistant",
             "description":"Recall the user's profile and the assistant memories matching `query` (keyword recall; omit `query` for the most recent). Read-only; off by default (personal content).",
             "inputSchema":{"type":"object","properties":{
                 "query":{"type":"string"},"k":{"type":"integer","description":"max memories (1..20, default 10)"},
-                "session_id":{"type":"string","description":"the calling assistant session (injected automatically by Otto's MCP bridge)"}}}}),
+                "session_id":{"type":"string","description":"the calling assistant session (injected by Otto)"}}}}),
         json!({"name":"otto.list_agent_rooms","mutating":false,"category":"Personal Agents",
             "description":"List agent rooms across EVERY workspace you can read — `{items, …}` with id, name, workspace_id + workspace_name. Pass a room's id OR name as `room_id` to otto.room_read / otto.room_post. Read-only.",
             "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
@@ -1034,16 +1048,23 @@ pub fn otto_tool_specs() -> Vec<Value> {
 /// saved the enabled-tool list (see [`merge_enabled`]).
 const UI_TOOLS_KNOWN_KEY: &str = "mcp_otto_server_ui_tools_known";
 
+/// How long the governed pipeline's settings reads may be served from the
+/// per-process cache ([`SettingsRepo::get_cached`]). Every governed call read
+/// 4–5 settings rows; a write through `SettingsRepo` (the `PATCH
+/// /mcp/otto-server` and `PUT /settings` paths) invalidates at once, so this
+/// only bounds staleness for out-of-process writes.
+const SETTINGS_TTL: Duration = Duration::from_secs(2);
+
 async fn enabled_tools(ctx: &ServerCtx) -> Vec<String> {
     let settings = SettingsRepo::new(ctx.pool.clone());
     let stored = settings
-        .get("mcp_otto_server_tools")
+        .get_cached("mcp_otto_server_tools", SETTINGS_TTL)
         .await
         .ok()
         .flatten()
         .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok());
     let ui_known = settings
-        .get(UI_TOOLS_KNOWN_KEY)
+        .get_cached(UI_TOOLS_KNOWN_KEY, SETTINGS_TTL)
         .await
         .ok()
         .flatten()
@@ -1082,7 +1103,7 @@ fn merge_enabled(
 
 async fn outward_enabled(ctx: &ServerCtx) -> bool {
     SettingsRepo::new(ctx.pool.clone())
-        .get("mcp_otto_server_enabled")
+        .get_cached("mcp_otto_server_enabled", SETTINGS_TTL)
         .await
         .ok()
         .flatten()
@@ -1111,7 +1132,7 @@ fn mcp_tool_enabled_for_token(
 
 async fn require_approval_dangerous(ctx: &ServerCtx) -> bool {
     SettingsRepo::new(ctx.pool.clone())
-        .get("mcp_require_approval_dangerous")
+        .get_cached("mcp_require_approval_dangerous", SETTINGS_TTL)
         .await
         .ok()
         .flatten()
@@ -1127,7 +1148,7 @@ async fn require_approval_dangerous(ctx: &ServerCtx) -> bool {
 /// write-scoped tokens too.
 async fn trust_token_write_grant(ctx: &ServerCtx) -> bool {
     SettingsRepo::new(ctx.pool.clone())
-        .get("mcp_trust_token_write_grant")
+        .get_cached("mcp_trust_token_write_grant", SETTINGS_TTL)
         .await
         .ok()
         .flatten()
@@ -1194,7 +1215,7 @@ fn normalize_exempt_tools(requested: &[String]) -> Result<Vec<String>, Error> {
             .unwrap_or(t.trim())
             .to_string();
         if !DANGEROUS.contains(&bare.as_str()) {
-            let known = otto_tool_specs()
+            let known = otto_tool_specs_cached()
                 .iter()
                 .any(|s| s["name"].as_str() == Some(&format!("otto.{bare}")));
             return Err(Error::Invalid(if known {
@@ -1508,7 +1529,7 @@ pub async fn otto_tools_invoke(
     CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<OttoInvokeReq>,
 ) -> ApiResult<Json<Value>> {
-    governed_invoke(
+    let mut env = governed_invoke(
         &ctx,
         &auth,
         &req.tool,
@@ -1516,8 +1537,27 @@ pub async fn otto_tools_invoke(
         req.dry_run,
         req.wait_seconds,
     )
-    .await
-    .map(Json)
+    .await?;
+    // perf2/10-mcp R4: a UI tool's reply carries the calling session's UI
+    // grant AFTER the call (it may just have been allowed or revoked), so the
+    // stdio bridge re-lists from this field instead of a second request to
+    // `GET /mcp/otto-server/enabled`.
+    let bare = req.tool.strip_prefix("otto.").unwrap_or(&req.tool);
+    if crate::ui_commands::is_ui_tool(bare) {
+        if let (Some(sid), Some(obj)) = (
+            crate::ui_bridge::calling_session(&auth),
+            env.as_object_mut(),
+        ) {
+            let granted = ctx
+                .manager
+                .get(sid)
+                .await
+                .ok()
+                .is_some_and(|s| crate::ui_bridge::grant_state(&s.meta) == Some(true));
+            obj.insert("ui_granted".into(), json!(granted));
+        }
+    }
+    Ok(Json(env))
 }
 
 /// The governed choke point for every `otto.*` tool call, shared by the bespoke
@@ -1565,11 +1605,13 @@ pub(crate) async fn governed_invoke(
     // The calling session's workspace: the audit row's workspace when the
     // call itself names none, so the row is scoped to a workspace (and never
     // falls into the NULL-workspace bucket every MCP viewer could read).
-    let session_ws = if audit.caller_session_id.is_some() {
-        crate::agent_refs::caller_session_ws(ctx, auth).await
-    } else {
-        None
+    // The calling session's row, read ONCE per call: its workspace here, and
+    // the personal-agent policy below (which used to read it again).
+    let calling_session = match &audit.caller_session_id {
+        Some(sid) => ctx.manager.get(sid).await.ok(),
+        None => None,
     };
+    let session_ws = calling_session.as_ref().map(|s| s.workspace_id.clone());
     audit.workspace_id = arguments
         .get("workspace_id")
         .and_then(Value::as_str)
@@ -1617,8 +1659,14 @@ pub(crate) async fn governed_invoke(
     // enable gate and BEFORE reference resolution (like the scope check, a
     // refused call never resolves anything); rules and the sensitive check
     // read the caller's own arguments (the names it typed, e.g. `prod-api`).
-    let (agent_gate, calling_agent) =
-        crate::personal_agent_policy::evaluate(ctx, auth, &short, arguments).await;
+    let (agent_gate, calling_agent) = crate::personal_agent_policy::evaluate_with(
+        ctx,
+        auth,
+        &short,
+        arguments,
+        calling_session.as_ref(),
+    )
+    .await;
     if let crate::personal_agent_policy::AgentGate::Deny(reason) = &agent_gate {
         return Ok(deny_audit(ctx, &mut audit, reason).await);
     }
@@ -2015,28 +2063,70 @@ async fn unresolved_audit(ctx: &ServerCtx, audit: &mut NewCallLog, err: &Error) 
     json!({"decision":"error","executed":false,"is_error":true,"content":{"error":msg}})
 }
 
-/// Poll an approval up to a bounded wait. `Some(true)`=approved, `Some(false)`=denied,
-/// `None`=still pending after the wait (caller resubmits later).
+/// Wait (bounded) for a human decision on an approval. `Some(true)`=approved,
+/// `Some(false)`=denied/expired/cancelled, `None`=still pending after the wait
+/// (caller resubmits later).
+///
+/// Event-driven: it subscribes to the bus BEFORE the first status read, then
+/// re-reads only when an `mcp_approval_changed` names this approval (or a bulk
+/// expiry, `approval_id: None`) — so a decision resumes the call immediately
+/// instead of up to 1 s late, and a waiting call issues a few reads instead
+/// of one per second. A slow fallback re-read ([`APPROVAL_FALLBACK_TICK`])
+/// covers a writer that bypassed the hook (another process) and a lagged or
+/// closed receiver.
 async fn wait_for_decision(
     ctx: &ServerCtx,
     approval_id: &str,
     wait_seconds: Option<u64>,
 ) -> Option<bool> {
-    let budget = wait_seconds.unwrap_or(0).min(MAX_WAIT_SECS);
-    let mut waited = 0u64;
+    let budget = Duration::from_secs(wait_seconds.unwrap_or(0).min(MAX_WAIT_SECS));
+    wait_for_decision_within(ctx, approval_id, budget, APPROVAL_FALLBACK_TICK).await
+}
+
+/// Fallback re-read period for [`wait_for_decision`] when no event arrives.
+const APPROVAL_FALLBACK_TICK: Duration = Duration::from_secs(5);
+
+async fn wait_for_decision_within(
+    ctx: &ServerCtx,
+    approval_id: &str,
+    budget: Duration,
+    fallback: Duration,
+) -> Option<bool> {
+    let mut rx = ctx.events.subscribe();
+    let deadline = tokio::time::Instant::now() + budget;
+    let id = approval_id.to_string();
     loop {
-        if let Ok(a) = ctx.mcp.approvals().get(&approval_id.to_string()).await {
+        if let Ok(a) = ctx.mcp.approvals().get(&id).await {
             match a.status.as_str() {
                 "approved" => return Some(true),
                 "denied" | "expired" | "cancelled" => return Some(false),
                 _ => {}
             }
         }
-        if waited >= budget {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
             return None;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        waited += 1;
+        let tick = (now + fallback).min(deadline);
+        // Wait for a relevant change, the fallback tick, or the deadline —
+        // whichever is first — then re-read.
+        loop {
+            tokio::select! {
+                ev = rx.recv() => match ev {
+                    Ok(Event::McpApprovalChanged { approval_id, .. })
+                        if approval_id.as_deref().is_none_or(|a| a == id) => break,
+                    Ok(_) => continue,
+                    // Lagged: a change may have been dropped — re-read now.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                    // Bus gone: plain polling at the fallback period.
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tokio::time::sleep_until(tick).await;
+                        break;
+                    }
+                },
+                _ = tokio::time::sleep_until(tick) => break,
+            }
+        }
     }
 }
 
@@ -4860,8 +4950,8 @@ pub async fn otto_server_status(
         .list()
         .await
         .map_err(ApiError)?;
-    let tools: Vec<Value> = otto_tool_specs()
-        .into_iter()
+    let tools: Vec<Value> = otto_tool_specs_cached()
+        .iter()
         .map(|t| {
             let name = t["name"].as_str().unwrap_or("").to_string();
             let short = name.strip_prefix("otto.").unwrap_or(&name).to_string();
@@ -4904,6 +4994,97 @@ pub async fn otto_server_status(
         "require_approval_dangerous": require_dangerous,
         "approval_exempt_tools": exempt,
     })))
+}
+
+/// `GET /mcp/otto-server/enabled` — the LIGHT read behind every agent
+/// session's `tools/list` and governed stdio call: just the ENABLED full
+/// `otto.*` names (catalog order), the master switch, and whether the CALLING
+/// session holds the per-session "Allow UI control" grant (`ui_granted`;
+/// false for a credential not bound to a session). Same MCP View policy as
+/// [`otto_server_status`], which also builds per-tool rule badges, the token
+/// prefix and ~100 KB of descriptions the bridge threw away. Never a gate by
+/// itself: `governed_invoke` re-checks the enable list on every call, and the
+/// UI bridge re-checks the grant.
+pub async fn otto_server_enabled(
+    State(ctx): State<ServerCtx>,
+    CurrentAuthContext(auth): CurrentAuthContext,
+) -> ApiResult<Json<Value>> {
+    let on = enabled_tools(&ctx).await;
+    let outward_on = outward_enabled(&ctx).await;
+    let enabled: Vec<&str> = otto_tool_specs_cached()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .filter(|name| {
+            on.iter()
+                .any(|e| e == name.strip_prefix("otto.").unwrap_or(name))
+        })
+        .collect();
+    let ui_granted = match crate::ui_bridge::calling_session(&auth) {
+        Some(sid) => ctx
+            .manager
+            .get(sid)
+            .await
+            .ok()
+            .is_some_and(|s| crate::ui_bridge::grant_state(&s.meta) == Some(true)),
+        None => false,
+    };
+    Ok(Json(json!({
+        "enabled": enabled,
+        "outward_enabled": outward_on,
+        "ui_granted": ui_granted,
+    })))
+}
+
+/// Body of `POST /mcp/tool-calls` — one stdio-bridge tool call.
+#[derive(Deserialize)]
+pub struct ToolCallAuditReq {
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: Value,
+    pub ok: bool,
+    #[serde(default)]
+    pub rows: Option<i64>,
+}
+
+/// `POST /mcp/tool-calls` — append one row to the stdio bridge's tool-call
+/// ledger (`mcp_tool_calls`), on behalf of the CALLING agent session
+/// (perf2/10-mcp R7). The bridge used to open its own writer connection to
+/// the live database for this — one per agent session, contending with the
+/// daemon's writers. Only a session credential may append, and the row is
+/// stamped with that session and its workspace (never a body field), so a
+/// session cannot write rows for another. Arguments are redacted here and
+/// capped by the repo. `204` on success.
+pub async fn record_tool_call(
+    State(ctx): State<ServerCtx>,
+    CurrentAuthContext(auth): CurrentAuthContext,
+    Json(req): Json<ToolCallAuditReq>,
+) -> ApiResult<axum::http::StatusCode> {
+    let Some(sid) = crate::ui_bridge::calling_session(&auth) else {
+        return Err(ApiError(otto_core::Error::Forbidden(
+            "only an agent session's credential records its tool calls".into(),
+        )));
+    };
+    let tool = req.tool.trim();
+    if tool.is_empty() || tool.len() > 200 {
+        return Err(ApiError(otto_core::Error::Invalid(
+            "tool must be 1–200 characters".into(),
+        )));
+    }
+    let workspace_id = ctx.manager.get(sid).await.ok().map(|s| s.workspace_id);
+    otto_state::McpAuditRepo::new(ctx.pool.clone())
+        .record(otto_state::NewMcpToolCall {
+            workspace_id,
+            session_id: Some(sid.clone()),
+            tool: tool.to_string(),
+            args_json: otto_core::redact::redact_json(&req.arguments)
+                .value
+                .to_string(),
+            ok: req.ok,
+            rows: req.rows,
+        })
+        .await
+        .map_err(ApiError)?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -4961,7 +5142,7 @@ pub async fn otto_server_config(
             .map_err(ApiError)?;
     }
     if let Some(tools) = &req.tools {
-        let known: Vec<String> = otto_tool_specs()
+        let known: Vec<String> = otto_tool_specs_cached()
             .iter()
             .filter_map(|t| {
                 t["name"]
@@ -5054,8 +5235,8 @@ pub async fn otto_server_config(
 /// (so clients can introspect); execution still honours it in [`governed_invoke`].
 pub(crate) async fn mcp_tools_list(ctx: &ServerCtx, scope: Option<&McpScope>) -> Vec<Value> {
     let enabled = enabled_tools(ctx).await;
-    otto_tool_specs()
-        .into_iter()
+    otto_tool_specs_cached()
+        .iter()
         .filter(|s| {
             let name = s.get("name").and_then(Value::as_str).unwrap_or("");
             let bare = name.strip_prefix("otto.").unwrap_or(name);
@@ -5108,7 +5289,7 @@ pub async fn create_mcp_token(
     // silently produce a token that reaches nothing / drifts from the UI.
     let scope = req.scope.clone().unwrap_or_else(McpScope::unrestricted);
     if let Some(tools) = &scope.tools {
-        let known: Vec<String> = otto_tool_specs()
+        let known: Vec<String> = otto_tool_specs_cached()
             .iter()
             .filter_map(|t| {
                 t["name"]
@@ -5200,6 +5381,9 @@ pub async fn gateway_tools(
         .await
         .map_err(ApiError)?;
     let mut tools: Vec<Value> = Vec::new();
+    // The caller's capability / groups / membership: read once for every
+    // server below, not once per server (perf2/10-mcp R1).
+    let mut access = otto_mcp::CallerAccess::default();
     for s in servers.into_iter().filter(|s| s.enabled) {
         let policy = otto_state::ResourceAccessRepo::new(ctx.pool.clone())
             .get_live_policy(otto_core::access::ResourceKind::McpServer, &s.id)
@@ -5207,16 +5391,19 @@ pub async fn gateway_tools(
         if !s.managed && policy.mode == otto_core::access::AccessMode::Legacy {
             continue;
         }
+        // The live policy loaded above serves every check for this server
+        // (server discover + per-tool discover/invoke/configure), so a server
+        // costs a fixed handful of statements, not ~5–8 per tool × op.
         if !ctx
             .mcp
-            .resource_allowed(&s, &user, "discover", None)
-            .await?
+            .resource_allowed_with(&mut access, &policy, &s, &user, &[("discover", None)])
+            .await?[0]
         {
             continue;
         }
         for t in ctx
             .mcp
-            .visible_tools(&s, &user)
+            .visible_tools_with(&mut access, &policy, &s, &user)
             .await
             .map_err(ApiError)?
             .into_iter()

@@ -382,3 +382,63 @@ fn a_newer_adoption_supersedes_the_old_client_without_ending_the_session() {
     drop(new);
     wait_until("child gone", Duration::from_secs(10), || !pid_alive(child));
 }
+
+/// Perf 01 N1: the daemon's unviewed-history cap reaches the HOLDER's
+/// emulator — the copy a future adoption is rebuilt from — and restoring the
+/// cap lets the holder's history grow back.
+#[test]
+fn history_cap_reaches_the_holder_emulator_and_regrows() {
+    use otto_pty::{EMULATOR_SCROLLBACK_LINES, UNVIEWED_SCROLLBACK_LINES};
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    // 1500 history rows, then (on the first input line) 1500 more.
+    let spec = sh(
+        "i=1; while [ $i -le 1500 ]; do printf 'H%04d\\n' $i; i=$((i+1)); done; echo READY; \
+         read x; i=1; while [ $i -le 1500 ]; do printf 'J%04d\\n' $i; i=$((i+1)); done; echo DONE; exec cat",
+    );
+    let full = |h: &PtyHandle| {
+        String::from_utf8_lossy(&h.snapshot_with_history(EMULATOR_SCROLLBACK_LINES)).into_owned()
+    };
+    let first =
+        PtyHandle::spawn_held(&cfg, &spec, 80, 24, serde_json::json!({})).expect("spawn held");
+    wait_until("READY", Duration::from_secs(20), || {
+        full(&first).contains("READY")
+    });
+    assert!(
+        full(&first).contains("H0001"),
+        "the full cap keeps all 1500 rows"
+    );
+
+    // Unviewed: shrink. The daemon mirror drops the oldest rows now…
+    first.set_history_cap(UNVIEWED_SCROLLBACK_LINES);
+    assert!(!full(&first).contains("H0001"));
+    // …and so does the holder: a re-adoption is rebuilt without them.
+    std::thread::sleep(Duration::from_millis(200));
+    first.detach();
+    drop(first);
+    let second = PtyHandle::adopt(&only_socket(&cfg)).expect("adopt");
+    let text = full(&second);
+    assert!(text.contains("H1500"), "recent history survives");
+    assert!(
+        !text.contains("H0400"),
+        "the holder dropped rows past the {UNVIEWED_SCROLLBACK_LINES}-row cap"
+    );
+
+    // Viewed again: the cap is restored in the holder too (the new handle
+    // has never told it anything, so the first call is always sent).
+    second.set_history_cap(EMULATOR_SCROLLBACK_LINES);
+    std::thread::sleep(Duration::from_millis(200));
+    second.write(b"go\n").expect("write");
+    wait_until("DONE", Duration::from_secs(20), || {
+        full(&second).contains("DONE")
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    second.detach();
+    drop(second);
+    let third = PtyHandle::adopt(&only_socket(&cfg)).expect("re-adopt");
+    assert!(
+        full(&third).contains("J0001"),
+        "history regrew past {UNVIEWED_SCROLLBACK_LINES} rows in the holder"
+    );
+    drop(third);
+}

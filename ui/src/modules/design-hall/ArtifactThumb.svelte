@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import { putThumbnail } from '../../lib/api/design';
   // Thumbnail cache shared by every card on screen: object URLs (thumbnails,
   // images) and small text sources (live previews), keyed by the version they
   // came from so a new head re-fetches. Bounded — the oldest entries are
@@ -28,9 +29,74 @@
     return p;
   }
 
+  // Object URLs are reference-counted by the cards that show them (DH-12):
+  // evicting a cache entry used to revoke a URL a mounted <img> still
+  // displayed, so the card broke / re-fetched. Eviction now only revokes a URL
+  // nobody holds; a held one is revoked when its last card lets go.
+  const holders = new Map<string, number>();
+  const evicted = new Set<string>();
+  function hold(u: string): void {
+    holders.set(u, (holders.get(u) ?? 0) + 1);
+  }
+  function release(u: string): void {
+    const n = (holders.get(u) ?? 1) - 1;
+    if (n > 0) {
+      holders.set(u, n);
+      return;
+    }
+    holders.delete(u);
+    if (evicted.delete(u)) URL.revokeObjectURL(u);
+  }
   const revoke = (u: string | null) => {
-    if (u) URL.revokeObjectURL(u);
+    if (!u) return;
+    if (holders.has(u)) evicted.add(u);
+    else URL.revokeObjectURL(u);
   };
+
+  // Persisted thumbnails: a rendered diagram is rasterized ONCE and stored
+  // (`PUT …/thumbnail`), so later loads show a cached PNG instead of
+  // re-fetching the source and re-running mermaid/D2 per card. Tried once per
+  // artifact version per session; a viewer (403) or a tainted canvas
+  // (foreignObject labels) just keeps the live render.
+  const persisted = new Set<string>();
+  async function persistSvgThumb(id: string, key: string, svg: string): Promise<void> {
+    if (persisted.has(key) || typeof document === 'undefined') return;
+    persisted.add(key);
+    const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+    try {
+      const img = new Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('svg load'));
+        img.src = url;
+      });
+      const W = 640;
+      const H = 400;
+      const c = document.createElement('canvas');
+      c.width = W;
+      c.height = H;
+      const g = c.getContext('2d');
+      if (!g) return;
+      g.fillStyle = 'white'; // a design thumbnail is a picture of the design, not themed chrome
+      g.fillRect(0, 0, W, H);
+      const iw = img.naturalWidth || W;
+      const ih = img.naturalHeight || H;
+      const k = Math.min((W * 0.92) / iw, (H * 0.92) / ih);
+      g.drawImage(img, (W - iw * k) / 2, (H - ih * k) / 2, iw * k, ih * k);
+      const png = await new Promise<Blob | null>((resolve) => {
+        try {
+          c.toBlob(resolve, 'image/png');
+        } catch {
+          resolve(null); // tainted canvas
+        }
+      });
+      if (png && png.size > 0 && png.size <= 2 * 1024 * 1024) await putThumbnail(id, png);
+    } catch {
+      /* best effort — the live render stays */
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
 
   // Live previews are full documents (style, layout, paint — at 1280 px — per
   // card). They render only while the card is on (or near) screen, and at
@@ -81,9 +147,10 @@
   /** This card holds one of the LIVE_CAP iframe slots. */
   let hasSlot = $state(false);
 
+  // Every card (live or not) fetches only once it is near the viewport.
   $effect(() => {
     const el = box;
-    if (!el || !live) return;
+    if (!el) return;
     if (typeof IntersectionObserver === 'undefined') {
       visible = true;
       return;
@@ -152,12 +219,13 @@
     // Live sources are fetched/rendered only once the card is near the
     // viewport; an off-screen card keeps whatever it already has.
     const liveNow = live && visible;
-    if (live && !visible && !(a.thumb_blob && !v)) return;
+    if (!visible) return; // off-screen cards keep what they have and fetch nothing
     const myGen = ++gen;
     void (async () => {
       let next: Pic = { kind: 'none' };
       if (a.thumb_blob && !v) {
-        const u = await remember(urls, `t:${a.id}:${a.thumb_blob}`, () => thumbnailUrl(a.id).catch(() => null), revoke);
+        const sha = a.thumb_blob;
+        const u = await remember(urls, `t:${a.id}:${sha}`, () => thumbnailUrl(a.id, sha).catch(() => null), revoke);
         if (u) next = { kind: 'img', src: u };
       } else if (liveNow && isImageFormat(a.format)) {
         const u = await remember(
@@ -177,6 +245,9 @@
             const key = `${rk}:${a.id}:${v ?? a.head_version_id}`;
             const html = await remember(diagrams, key, async () => {
               const r = rk === 'mermaid' ? await renderMermaid(`dh-thumb-${a.id}-${v ?? 'h'}`, src, { isStale }) : await renderD2(a.id, src, { isStale });
+              // Head renders become a stored thumbnail (once), so the next
+              // load skips the source fetch + render entirely.
+              if (r.svg && !v) void persistSvgThumb(a.id, key, r.svg);
               return r.svg ? svgDoc(r.svg) : null;
             });
             // A skipped (stale) or failed render must not stick in the cache.
@@ -188,6 +259,14 @@
       // Same picture → keep the object, so the iframe srcdoc never reloads.
       if (myGen === gen && !untrack(() => samePic(pic, next))) pic = next;
     })();
+  });
+
+  // Hold the object URL this card shows (released on change / destroy).
+  $effect(() => {
+    if (pic.kind !== 'img') return;
+    const src = pic.src;
+    hold(src);
+    return () => release(src);
   });
 
   // HTML previews render at a 1280px desktop width, scaled to the card.

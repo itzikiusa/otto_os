@@ -13,7 +13,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { sentenceCase } from '../../lib/status';
-  import { TASK_COLUMNS, type SwarmProject, type SwarmTask, type TaskStatus, type SwarmUtilization, type TaskWaiting } from './types';
+  import { TASK_COLUMNS, type SwarmProject, type SwarmTask, type TaskStatus, type SwarmWaiting, type TaskWaiting } from './types';
   import { api } from '../../lib/api/client';
   import { rel } from '../../lib/stores/now.svelte';
   import { pollWhileVisible, type Poller } from '../../lib/poll';
@@ -50,15 +50,15 @@
   });
 
   // Why each ready "To do" card isn't starting (12-mcp W1): the coordinator
-  // records a reason per ready task every tick; read it from the utilization
-  // endpoint while the swarm is active — on task changes (debounced) and every
+  // records a reason per ready task every tick; read it from the in-memory
+  // `/waiting` endpoint (not the heavier utilization snapshot) while the swarm is active — on task changes (debounced) and every
   // 15 s while the page is visible. Best effort: a failed read keeps the last
   // reasons and never surfaces an error (the board itself is unaffected).
   let waiting: Record<string, TaskWaiting> = $state({});
   const activeSid = $derived(swarm.detail?.status === 'active' ? swarm.detail.id : null);
   async function loadWaiting(sid: string, signal?: AbortSignal) {
     try {
-      const u = await api.get<SwarmUtilization>(`/swarm/swarms/${sid}/utilization`, signal);
+      const u = await api.get<SwarmWaiting>(`/swarm/swarms/${sid}/waiting`, signal);
       if (sid === activeSid) waiting = u.waiting ?? {};
     } catch {
       /* keep the last reasons */

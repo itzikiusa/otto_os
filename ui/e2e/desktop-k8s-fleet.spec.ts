@@ -134,6 +134,11 @@ test.beforeEach(async ({ page }, info) => {
     const u = new URL(r.request().url());
     r.fulfill(json(fx.series(u.searchParams.get('metric') ?? 'restarts')));
   });
+  // perf K8s: the overview reads every chart in one batch call.
+  await page.route('**/api/v1/k8s/monitor/fleet/series/batch*', (r) => {
+    const metrics = (new URL(r.request().url()).searchParams.get('metrics') ?? '').split(',').filter(Boolean);
+    r.fulfill(json({ series: Object.fromEntries(metrics.map((m) => [m, fx.series(m)])) }));
+  });
   await page.route('**/api/v1/k8s/monitor/fleet/events*', (r) => r.fulfill(json(fx.events)));
   await page.route('**/api/v1/k8s/monitor/fleet/requests*', (r) => r.fulfill(json(fx.requests(requestLabelsOn))));
 });
@@ -198,18 +203,18 @@ test('filters: cluster pills, namespace/workload selects hit the API and persist
 test('table: sortable by every column (server-side), group by pods, row drill-down', async ({ page }) => {
   await boot(page, 'kubernetes/monitor/fleet/table');
   const table = page.getByTestId('k8s-fleet-table');
-  await expect(table.locator('tbody tr')).toHaveCount(3);
+  await expect(table.getByTestId('k8s-fleet-row')).toHaveCount(3);
   await expect(page.getByTestId('k8s-fleet-table-count')).toContainText('3 workloads');
   // Every header is a sort control; clicking one re-queries with sort + dir.
-  await expect(table.locator('thead .th-btn')).toHaveCount(12);
+  await expect(table.locator('.vt-head .th-btn')).toHaveCount(12);
   for (const [label, key, first] of [['Memory', 'mem_last', 'desc'], ['5xx', 'err_pct', 'desc'], ['Namespace', 'namespace', 'asc']] as const) {
     const req = page.waitForRequest((r) => r.url().includes('/fleet/table?') && r.url().includes(`sort=${key}`) && r.url().includes(`dir=${first}`));
-    await table.locator('thead .th-btn', { hasText: label }).click();
+    await table.locator('.vt-head .th-btn', { hasText: label }).click();
     await req;
   }
   // Second click flips the direction.
   const flip = page.waitForRequest((r) => r.url().includes('sort=namespace') && r.url().includes('dir=desc'));
-  await table.locator('thead .th-btn', { hasText: 'Namespace' }).click();
+  await table.locator('.vt-head .th-btn', { hasText: 'Namespace' }).click();
   await flip;
   // Persisted.
   await page.reload();
@@ -221,7 +226,7 @@ test('table: sortable by every column (server-side), group by pods, row drill-do
   const podReq = page.waitForRequest((r) => r.url().includes('/fleet/table?') && r.url().includes('group=pod'));
   await page.getByRole('radio', { name: 'Pods' }).click();
   await podReq;
-  await expect(page.getByTestId('k8s-fleet-table').locator('tbody tr')).toHaveCount(2);
+  await expect(page.getByTestId('k8s-fleet-table').getByTestId('k8s-fleet-row')).toHaveCount(2);
   await expect(page.getByTestId('k8s-fleet-table')).toContainText('web-1');
   await page.getByRole('radio', { name: 'Workloads' }).click();
   // Drill-down: a workload row narrows the filters and switches to pods.
@@ -238,7 +243,7 @@ test('table: sortable by every column (server-side), group by pods, row drill-do
 test('events: cross-cluster rows, class filter and sort hit the API', async ({ page }) => {
   await boot(page, 'kubernetes/monitor/fleet/events');
   const ev = page.getByTestId('k8s-fleet-events');
-  await expect(ev.locator('tbody tr')).toHaveCount(2);
+  await expect(ev.getByTestId('k8s-fleet-event-row')).toHaveCount(2);
   await expect(ev).toContainText('STG AWS');
   await expect(ev).toContainText('Groove STG');
   await expect(ev).toContainText('OOMKilled');
@@ -247,7 +252,7 @@ test('events: cross-cluster rows, class filter and sort hit the API', async ({ p
   await page.getByRole('combobox', { name: 'Event class' }).selectOption('oom');
   await req;
   const sortReq = page.waitForRequest((r) => r.url().includes('/fleet/events?') && r.url().includes('sort=workload') && r.url().includes('dir=asc'));
-  await ev.locator('thead .th-btn', { hasText: 'Workload' }).click();
+  await ev.locator('.vt-head .th-btn', { hasText: 'Workload' }).click();
   await sortReq;
 });
 

@@ -30,6 +30,7 @@ import type {
   SqsQueueAttributesResp,
   UpsertAwsAccountReq,
 } from '../api/types';
+import { announceModule } from '../lazyModule';
 
 /** Athena catalog for one account (databases → tables → columns). */
 export interface AthenaCatalog {
@@ -385,4 +386,7 @@ class AwsStore {
 }
 
 export const aws = new AwsStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf H1): let it see this store
+// however it was first imported.
+announceModule('aws', aws);
 resourceAccess.subscribe(change=>aws.onAccessChange(change));

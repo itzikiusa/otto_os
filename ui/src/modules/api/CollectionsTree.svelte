@@ -13,7 +13,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import type { ApiCollection, ApiRequest } from '../../lib/api/types';
+  import type { ApiCollection, ApiRequestItem as ApiRequest } from '../../lib/api/types';
 
   interface Props {
     /** A request was opened / created (the page shows the editor). */
@@ -70,10 +70,25 @@
   function matchesTokens(hay: string): boolean {
     return tokens.every((t) => hay.includes(t));
   }
-  const hay = $derived(new Map(apiClient.requests.map((r) => [r.id, `${r.method} ${r.name} ${r.url}`.toLowerCase()])));
-  function requestMatches(r: ApiRequest): boolean {
-    return matchesTokens(hay.get(r.id) ?? '');
-  }
+  // Haystacks aligned with `apiClient.requests` (a raw array: plain reads).
+  const hay = $derived(apiClient.requests.map((r) => `${r.method} ${r.name} ${r.url}`.toLowerCase()));
+  // The matching request ids, computed ONCE per query in one plain loop — the
+  // tree filter below then only does Set lookups (it used to read two derived
+  // signals per request per filter pass: ~25 ms of a 50 ms frame at 3k).
+  const matched = $derived.by(() => {
+    if (tokens.length === 0) return null;
+    const toks = tokens;
+    const h = hay;
+    const reqs = apiClient.requests;
+    const out = new Set<string>();
+    for (let i = 0; i < reqs.length; i++) {
+      const s = h[i];
+      let ok = true;
+      for (const t of toks) if (!s.includes(t)) { ok = false; break; }
+      if (ok) out.add(reqs[i].id);
+    }
+    return out;
+  });
 
   // Index once per list change: O(R log R + C log C), instead of re-filtering
   // every request and collection for every collection (O(C·(R+C))).
@@ -114,20 +129,20 @@
   // Prune the tree to matching branches: keep a node when its own name matches
   // (all items kept), when any of its requests match (only those kept), or when
   // a descendant survives — so ancestor folders stay visible as context.
-  function filterTree(nodes: TreeNode[]): TreeNode[] {
+  function filterTree(nodes: TreeNode[], hit: Set<string>): TreeNode[] {
     return nodes.flatMap((node) => {
       if (matchesTokens(node.col.name.toLowerCase())) return [node];
-      const items = node.items.filter(requestMatches);
-      const children = filterTree(node.children);
+      const items = node.items.filter((r) => hit.has(r.id));
+      const children = filterTree(node.children, hit);
       if (items.length === 0 && children.length === 0) return [];
       return [{ col: node.col, items, children, count: items.length + children.reduce((n, c) => n + c.count, 0) }];
     });
   }
   const fullTree = $derived(buildTree(null, new Set()));
-  const tree = $derived(tokens.length ? filterTree(fullTree) : fullTree);
+  const tree = $derived(matched ? filterTree(fullTree, matched) : fullTree);
   const ungrouped = $derived(
     apiClient.requests
-      .filter((r) => !r.collection_id && (tokens.length === 0 || requestMatches(r)))
+      .filter((r) => !r.collection_id && (matched === null || matched.has(r.id)))
       .sort((a, b) => a.name.localeCompare(b.name)),
   );
   const isEmpty = $derived(apiClient.collections.length === 0 && apiClient.requests.length === 0);
@@ -204,9 +219,9 @@
     await apiClient.deleteRequest(r.id);
   }
 
-  function openRequest(r: ApiRequest): void {
-    apiClient.loadRequestIntoDraft(r);
-    onopen?.();
+  // The tree holds summaries; the full row is fetched on open (perf2 N1).
+  async function openRequest(r: ApiRequest): Promise<void> {
+    if (await apiClient.openRequest(r.id)) onopen?.();
   }
 
   function newRequestIn(col: ApiCollection): void {
@@ -254,7 +269,7 @@
 
   function requestMenu(e: MouseEvent | KeyboardEvent, r: ApiRequest): void {
     const items: MenuItem[] = [
-      { label: 'Open', icon: 'external', action: () => openRequest(r) },
+      { label: 'Open', icon: 'external', action: () => void openRequest(r) },
       ...(canEdit
         ? [{ separator: true }, { label: 'Delete…', icon: 'trash', danger: true, action: () => void deleteRequest(r) }]
         : []),

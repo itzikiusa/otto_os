@@ -13,6 +13,10 @@ tracing.workspace = true
 # Artifact ids are `sha1(kind + ':' + path)` (design §3); already in the lockfile
 # via tokio-tungstenite.
 sha1 = "0.11.0"
+# Usage dedup set: one 16-byte xxh3-128 hash per response key in an ordered
+# set (FIFO eviction) — both already in the lockfile.
+indexmap = "2.14.2"
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -22,6 +22,11 @@ pub struct SchemaRegistry {
     /// schema id → PARSED Avro schema (parsing per consumed message was the
     /// hot cost of an Avro peek).
     parsed: DashMap<i32, std::sync::Arc<apache_avro::Schema>>,
+    /// schema id → (retry-after instant, error) for ids whose lookup FAILED.
+    /// Keys that merely look Confluent-framed (first byte 0x00) would otherwise
+    /// cost a registry round trip (often through the SSH tunnel) on every 3 s
+    /// live-tail tick. Bounded in practice by the distinct ids seen.
+    negative: DashMap<i32, (std::time::Instant, String)>,
     /// Last subject listing + when it was fetched (`SUBJECTS_TTL`).
     subjects_cache: std::sync::Mutex<Option<(std::time::Instant, Vec<SchemaSubject>)>>,
 }
@@ -30,6 +35,15 @@ pub struct SchemaRegistry {
 const SUBJECTS_TTL: Duration = Duration::from_secs(60);
 /// Concurrent `GET /subjects/{s}/versions/latest` requests while listing.
 const SUBJECTS_CONCURRENCY: usize = 8;
+/// How long a definitive failure (4xx — unknown id — or a schema that is not
+/// valid Avro; registries are append-only, so neither heals quickly) is
+/// remembered before the id is asked about again.
+const NEGATIVE_TTL: Duration = Duration::from_secs(60);
+/// How long a transient failure (transport error, 5xx) is remembered: long
+/// enough that a tail ticking every 3 s doesn't hammer a struggling registry.
+const TRANSIENT_NEGATIVE_TTL: Duration = Duration::from_secs(10);
+/// Concurrent schema-id lookups per consumed batch.
+const IDS_CONCURRENCY: usize = 8;
 
 impl SchemaRegistry {
     pub fn new(
@@ -77,6 +91,7 @@ impl SchemaRegistry {
             via_tunnel,
             cache: DashMap::new(),
             parsed: DashMap::new(),
+            negative: DashMap::new(),
             subjects_cache: std::sync::Mutex::new(None),
         })
     }
@@ -107,27 +122,90 @@ impl SchemaRegistry {
             .map_err(|m| Error::Forbidden(format!("schema registry blocked: {m}")))
     }
 
-    /// Fetch (and cache) the schema document for a registry schema id.
+    /// A remembered failure for `id`, while its TTL runs.
+    fn negative_hit(&self, id: i32) -> Option<Error> {
+        let hit = self.negative.get(&id).map(|e| e.value().clone());
+        match hit {
+            Some((until, msg)) if std::time::Instant::now() < until => Some(Error::Upstream(msg)),
+            Some(_) => {
+                self.negative.remove(&id);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn remember_failure(&self, id: i32, ttl: Duration, err: &Error) {
+        let msg = match err {
+            Error::Upstream(m) => m.clone(),
+            other => other.to_string(),
+        };
+        self.negative
+            .insert(id, (std::time::Instant::now() + ttl, msg));
+    }
+
+    /// Fetch (and cache) the schema document for a registry schema id. A
+    /// failed lookup is remembered (`NEGATIVE_TTL` for 4xx,
+    /// `TRANSIENT_NEGATIVE_TTL` otherwise) and answered from memory meanwhile.
     pub async fn schema_by_id(&self, id: i32) -> Result<String> {
         if let Some(s) = self.cache.get(&id) {
             return Ok(s.clone());
         }
+        if let Some(e) = self.negative_hit(id) {
+            return Err(e);
+        }
         let url = format!("{}/schemas/ids/{id}", self.base);
+        // An SSRF refusal is policy, not a registry failure: never cached.
         self.guard(&url).await?;
-        let resp = self.get(url).send().await.map_err(up)?;
-        if !resp.status().is_success() {
-            return Err(Error::Upstream(format!(
-                "schema registry returned {} for id {id}",
-                resp.status()
-            )));
+        let resp = match self.get(url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let e = up(e);
+                self.remember_failure(id, TRANSIENT_NEGATIVE_TTL, &e);
+                return Err(e);
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let e = Error::Upstream(format!("schema registry returned {status} for id {id}"));
+            let ttl = if status.is_client_error() {
+                NEGATIVE_TTL
+            } else {
+                TRANSIENT_NEGATIVE_TTL
+            };
+            self.remember_failure(id, ttl, &e);
+            return Err(e);
         }
         #[derive(serde::Deserialize)]
         struct SchemaResp {
             schema: String,
         }
-        let body: SchemaResp = resp.json().await.map_err(up)?;
+        let body: SchemaResp = match resp.json().await {
+            Ok(b) => b,
+            Err(e) => {
+                let e = up(e);
+                self.remember_failure(id, TRANSIENT_NEGATIVE_TTL, &e);
+                return Err(e);
+            }
+        };
         self.cache.insert(id, body.schema.clone());
         Ok(body.schema)
+    }
+
+    /// Resolve a batch of schema ids, `IDS_CONCURRENCY` lookups at a time
+    /// (was one awaited round trip per id). Ids that fail are left out; their
+    /// failure is negatively cached by `schema_by_id`/`parsed_schema_by_id`.
+    pub async fn parsed_schemas_by_ids(
+        &self,
+        ids: impl IntoIterator<Item = i32>,
+    ) -> std::collections::HashMap<i32, std::sync::Arc<apache_avro::Schema>> {
+        use futures_util::stream::{self, StreamExt};
+        stream::iter(ids)
+            .map(|sid| async move { self.parsed_schema_by_id(sid).await.ok().map(|s| (sid, s)) })
+            .buffer_unordered(IDS_CONCURRENCY)
+            .filter_map(|r| async move { r })
+            .collect()
+            .await
     }
 
     /// The parsed Avro schema for a registry id (fetched + parsed once).
@@ -138,9 +216,18 @@ impl SchemaRegistry {
         if let Some(s) = self.parsed.get(&id) {
             return Ok(s.clone());
         }
+        if let Some(e) = self.negative_hit(id) {
+            return Err(e);
+        }
         let doc = self.schema_by_id(id).await?;
-        let schema = apache_avro::Schema::parse_str(&doc)
-            .map_err(|e| Error::Upstream(format!("schema {id} is not valid Avro: {e}")))?;
+        let schema = match apache_avro::Schema::parse_str(&doc) {
+            Ok(s) => s,
+            Err(e) => {
+                let e = Error::Upstream(format!("schema {id} is not valid Avro: {e}"));
+                self.remember_failure(id, NEGATIVE_TTL, &e);
+                return Err(e);
+            }
+        };
         let schema = std::sync::Arc::new(schema);
         self.parsed.insert(id, schema.clone());
         Ok(schema)
@@ -368,4 +455,135 @@ fn urlenc(s: &str) -> String {
 
 fn up(e: reqwest::Error) -> Error {
     Error::Upstream(format!("schema registry: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A loopback "registry": answers `GET /schemas/ids/{id}` with a valid
+    /// Avro schema for id 1 and 404 for anything else, counting requests.
+    async fn mock_registry() -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let h = h.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    h.fetch_add(1, Ordering::SeqCst);
+                    let (status, body) = if req.starts_with("GET /schemas/ids/1 ") {
+                        ("200 OK", r#"{"schema":"\"string\""}"#.to_string())
+                    } else {
+                        ("404 Not Found", r#"{"error_code":40403}"#.to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    fn registry(base: &str) -> SchemaRegistry {
+        SchemaRegistry {
+            base: base.to_string(),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            auth: None,
+            // Loopback mock: skip the SSRF guard the way a tunnel does.
+            via_tunnel: true,
+            cache: DashMap::new(),
+            parsed: DashMap::new(),
+            negative: DashMap::new(),
+            subjects_cache: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// N3: an unknown id is asked about once per `NEGATIVE_TTL`, not on every
+    /// tail tick; a known id is fetched once and then served from cache.
+    #[tokio::test]
+    async fn failed_schema_ids_are_negatively_cached() {
+        let (base, hits) = mock_registry().await;
+        let reg = registry(&base);
+        assert!(reg.parsed_schema_by_id(7).await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        for _ in 0..5 {
+            let err = reg.parsed_schema_by_id(7).await.unwrap_err();
+            assert!(err.to_string().contains("404"), "{err}");
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a failed id must not be re-fetched within the TTL"
+        );
+        // Expired entries are retried.
+        reg.negative
+            .insert(7, (std::time::Instant::now(), "stale".into()));
+        assert!(reg.schema_by_id(7).await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        // A batch resolves the good id and skips the (cached) bad ones with
+        // a single new request for id 1.
+        let got = reg.parsed_schemas_by_ids([1, 7]).await;
+        assert!(got.contains_key(&1) && !got.contains_key(&7));
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        let again = reg.parsed_schemas_by_ids([1, 7]).await;
+        assert_eq!(again.len(), 1);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "warm batch makes no request"
+        );
+    }
+
+    /// The ids of one batch are looked up concurrently, not one RTT each.
+    #[tokio::test]
+    async fn schema_ids_resolve_concurrently() {
+        // Each connection stalls 300 ms before answering 404; 8 ids serially
+        // would take ≥ 2.4 s.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    let _ = sock
+                        .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                        .await;
+                });
+            }
+        });
+        let reg = registry(&format!("http://{addr}"));
+        let t = std::time::Instant::now();
+        let got = reg.parsed_schemas_by_ids(100..108).await;
+        assert!(got.is_empty());
+        assert!(
+            t.elapsed() < Duration::from_millis(1500),
+            "8 lookups took {:?}",
+            t.elapsed()
+        );
+        assert_eq!(reg.negative.len(), 8);
+    }
 }

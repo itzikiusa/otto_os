@@ -26,7 +26,7 @@
   import type { K8sContainer, K8sResourceDetail, K8sResourceKind, K8sRow } from '../../lib/api/types';
   import type { ActionDef } from './actions';
   import { actionsFor } from './actions';
-  import { clipLongScalars, formatAge, formatBytes, formatMillicores, healthClass, kindDef, podContainers } from './k8s-util';
+  import { clipLongScalars, formatAge, formatBytes, formatMillicores, healthClass, kindDef, podContainers, rowAge } from './k8s-util';
   import LogsView from './LogsView.svelte';
   import ExecView from './ExecView.svelte';
   import MetricsView from './MetricsView.svelte';
@@ -241,7 +241,7 @@
     out.push(['Status', row.status]);
     if (row.ready) out.push(['Ready', row.ready]);
     if (row.restarts != null) out.push(['Restarts', String(row.restarts)]);
-    out.push(['Age', formatAge(row.age_seconds)]);
+    out.push(['Age', formatAge(rowAge(row))]);
     if (row.node) out.push(['Node', row.node]);
     if (row.ip) out.push(['IP', row.ip]);
     if (row.cpu != null) out.push(['CPU', formatMillicores(row.cpu)]);

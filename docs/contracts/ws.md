@@ -74,16 +74,33 @@ below). Clients need no change: keep sending, and treat a dropped socket or a
 ```json
 {"type":"input","data":"<base64 bytes>","user":true}
 {"type":"resize","cols":120,"rows":32}
-{"type":"scrollback","lines":2000}
+{"type":"scrollback","lines":2000,"cols":160,"rows":48}   // snapshot request; optional grid = "resize to this first" (see below)
 {"type":"search","query":"foo"}                     // server-side ring-buffer search (see below)
 {"type":"claim"}                                    // claim size authority (sent on terminal focus)
 {"type":"pause"}                                    // flow control: stop sending me output (see below)
 {"type":"resume"}                                   // flow control: send again (+ one snapshot if anything was held back)
-{"type":"resync","lines":2000}                      // typed over a dropped local backlog: discard my queued output, send ONE snapshot (see below)
+{"type":"resync","lines":2000}                      // (optional "cols"/"rows" as on scrollback) typed over a dropped local backlog: discard my queued output, send ONE snapshot (see below)
 {"type":"credit","window":1048576}                  // credit flow control: send me at most `window` unacknowledged binary bytes (see below)
+                                                    // optional "binary_snapshots":true → snapshots in the binary form (below)
 {"type":"ack","bytes":4194304}                      // credit: cumulative binary bytes consumed (parsed or dropped) since the grant
 {"type":"probe","id":7}                             // latency probe: answered at once with `probe_ack` (see below); read-only safe
 ```
+
+**Attach with grid (`scrollback` / `resync` `cols`+`rows`).** Optional. When
+both are present and this viewer may resize (it can input and holds size
+authority — the same rule as `resize`), the server resizes the PTY and its
+emulator to that grid BEFORE capturing the snapshot, so the reply is already
+at the client's width and the TUI's SIGWINCH repaint arrives as ordinary live
+bytes after it. One attach therefore costs one snapshot (no follow-up
+"compact" once the client's resize confirms). A viewer that may not resize
+gets the snapshot at the current grid (the grid is ignored); a same-size grid
+is a no-op. Older servers ignore the fields.
+
+**History depth.** The `lines` of the client's latest `scrollback`/`resync`
+(0 → the full emulator depth, 4000; larger values are clamped to it) is also
+the depth of every snapshot the server sends on its own for this socket
+(credit skip/stall recovery, lag, `resume`, revival) — a 2000-row embed is
+never sent 4000 rows it would trim. Before the first request: 4000.
 
 **Credit flow control (`credit` / `ack`) — preferred.** `pause`/`resume`
 cannot bound the client's backlog: whatever the server sends during the
@@ -210,6 +227,13 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
 ```json
 {"type":"credit","window":1048576}                  // grant for a client `credit` offer; binary frames after it count against `window`
 {"type":"scrollback","data":"<base64 bytes>","epoch":3}  // response to scrollback request; send BEFORE live bytes resume.
+{"type":"scrollback","epoch":3,"binary":true,"len":1834012}  // binary form (perf 01 N3), only to a client whose `credit`
+                                                    // offer carried "binary_snapshots":true and only for a non-empty
+                                                    // snapshot: the VERY NEXT frame is one binary frame of `len` bytes —
+                                                    // the snapshot payload, NOT live output: it is never counted against
+                                                    // the credit window. Saves the +33 % base64 and the client's
+                                                    // multi-MB JSON.parse. Applies to every snapshot on that socket
+                                                    // (reply, resync, lag/skip resync, revival).
                                                     // `data` is a FULL rebuild: formatted history rows + a coherent
                                                     // current-screen frame + input-mode restoration (bracketed paste,
                                                     // keypad). The client MUST reset its terminal and repaint from this
@@ -227,8 +251,11 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
 {"type":"terminated"}                               // session force-terminated (admin terminate / share-link revoke); socket closes immediately after
 {"type":"error","code":"forbidden","message":"..."}
 {"type":"error","code":"input_failed","message":"..."} // input not delivered: no live process, or the process is not reading
-                                                    // its terminal (queue full / not drained in 15 s — already-queued bytes
-                                                    // are still delivered in order). Sent once per failing stretch.
+                                                    // its terminal (not drained in 15 s — already-queued bytes are still
+                                                    // delivered in order). Sent once per failing stretch. Input is never
+                                                    // dropped for volume: past 1 MiB queued per socket the server stops
+                                                    // reading client frames until the PTY drains (TCP backpressure), and
+                                                    // consecutive queued frames are coalesced into one PTY write.
 {"type":"search_result","query":"foo","matches":[{"line":42,"text":"foo bar baz"},...]}  // up to 200 matches; always valid JSON
                                                     // (text is ANSI-stripped but may contain tabs/C0 bytes, JSON-escaped)
 {"type":"probe_ack","id":7,"echo":{"last_ms":3.2,"avg_ms":4.1,"max_ms":48.0,"samples":120}}  // reply to `probe`; `echo` null with no live PTY
@@ -251,7 +278,9 @@ sample. `null` when the viewer has no live PTY. Viewers (read-only) may probe.
 Grep the persistent ring-buffer scrollback (10 000 lines, survives WS reconnects) for `query`
 (plain substring, case-insensitive, ANSI-stripped). The server replies with a single
 `{"type":"search_result","query":"…","matches":[{"line":<ring-index>,"text":"<plain>"},…]}`
-frame containing up to 200 matches in buffer order (oldest → newest). Empty `query` is
+frame containing up to 200 matches in buffer order (oldest → newest); when more
+lines match, the newest 200 are returned (the scan runs newest-first, off the
+socket's worker and outside the PTY's locks). Empty `query` is
 a no-op (no reply). This complements the xterm `SearchAddon` (which searches only the
 current emulator viewport, lost on reconnect) — use server search when the session has
 been reopened or when looking for output that scrolled off the visible viewport.
@@ -505,9 +534,9 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
 **owner-scoped events** (`assistant_turn`, `assistant_task_update`,
 `assistant_needs_you`, `assistant_limit`, `ui_control_requested`,
-`notifications_changed`) reach only the user named by their `user_id` (not root);
+`notifications_changed`, `workbench_doc_changed`) reach only the user named by their `user_id` (not root);
 **broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
-`mcp_approval_changed`) reach every authenticated client. There are 73
+`mcp_approval_changed`) reach every authenticated client. There are 74
 variants (the sections below cover them; each `## …`/`### …` heading is one
 feature family).
 
@@ -613,7 +642,9 @@ otto-state, so the row is embedded as `serde_json::Value`):
 ```
 
 - `swarm_status` — a swarm's lifecycle status changed (`active|paused|aborted`).
-- `swarm_run_updated` — a swarm run was created or changed.
+- `swarm_run_updated` — a swarm run was created or changed. `run` is lite like
+  `GET /swarm/runs`: `result` is `null` unless `kind = 'recruit'`; read one run's
+  result with `GET /swarm/runs/{rid}`.
 - `swarm_task_updated` — a swarm task was created or changed.
 - `swarm_project_cleared` — a project's board was cleared (all tasks + project-scoped
   feed deleted, in-flight runs stopped). Clients drop local task/board state for the
@@ -842,7 +873,7 @@ non-terminal so the view converges even with no WS connection.
   "status": "running|success|error|canceled",
   "node_id": "<node_id | null>",
   "rev": 7,
-  "node": { "node_id": "…", "status": "…", "logs": ["…"], "…": "…" },
+  "node": { "node_id": "…", "status": "…", "logs": [], "log_count": 12, "has_output": false, "detail_version": "<sha256>", "…": "…" },
   "nodes_done": 2,
   "nodes_total": 5,
   "waiting_approval": false
@@ -854,12 +885,17 @@ non-terminal so the view converges even with no WS connection.
 - `rev` — the run revision this event reflects (0 = unknown → refetch path).
   Clients drop events/snapshots whose rev is behind what they already show, and
   apply a node payload in place only when `rev` is exactly contiguous.
-- `node` — the changed node's full `NodeRunState`. It may carry `activity`
-  (`NodeActivity`: phase, pending task count, sub-agent rows), present only while
-  a running agent-backed step is working and cleared when it finishes. The 32 KiB
-  size rule above is unchanged: `logs` ≤ 200 lines and `activity.subagents` ≤ 40
-  (descriptions ≤ 80 chars) keep the payload bounded, so the `activity` addition
-  does not push normal steps onto the refetch path.
+- `node` — the changed node's SUMMARY: exactly the node shape
+  `GET /workflows/runs/{id}/progress` serves (`logs: []` + `log_count`,
+  `output: null` + `has_output`, `error` clipped to 1 KiB, `detail_version` =
+  hash of the full node). It may carry a bounded `activity` (`NodeActivity`:
+  phase, pending task count, ≤ 32 sub-agent rows) while a running agent-backed
+  step works. Since perf W5 (was the full `NodeRunState`, ≤ 32 KiB): the run
+  view applies a node summary in place when `rev` is exactly contiguous, the
+  run is `running`, the node is already listed and the run has no checkpointed
+  (loop) pages — skipping the `/progress` GET; anything else refetches. Full
+  logs/output still load lazily from the node-detail endpoint by
+  `detail_version`. Omitted over 32 KiB (backstop; summaries are far smaller).
 - `nodes_done`/`nodes_total` — step progress for the "Running" sidebar, updated
   in place without a second GET (`nodes_total` 0 = unknown, keep last counts).
 - `waiting_approval` — true on the pause event; the approve/reject decision
@@ -1016,13 +1052,18 @@ blind timer.
 { "type": "proof_pack_updated", "workspace_id": "<Id>", "proof_pack_id": "<Id>",
   "work_item_kind": "session|goal_loop|review|workflow_run|task|manual",
   "work_item_id": "<id>", "status": "missing|partial|passed|failed|waived",
-  "risk_score": 0, "done_score": 0 }
+  "risk_score": 0, "done_score": 0,
+  "badges": ["tests_passed"], "artifact_count": 3 }
 ```
 
 - Emitted by `otto_server::proof::recompute_and_emit` whenever a proof pack is
   created, (re)assembled, gains/loses an artifact, or is waived.
 - Scope: `Workspace` (gated on viewer access to that workspace).
-- The UI re-fetches the affected pack and refreshes the workspace proof summary.
+- `badges` / `artifact_count` (optional; added in the perf wave) are the
+  pack's values after this recompute. The UI patches its summary row and the
+  loaded list entry in place from them; it refetches only when they are absent
+  (older daemon) or the pack is not in the loaded page, and re-fetches the
+  open detail only while the Proof page is mounted.
 - `done_score` (0..100) is the done-contract readiness (added in Proof Packs v2).
 - TypeScript type: `{ type: 'proof_pack_updated'; workspace_id: Id; proof_pack_id: Id; work_item_kind: string; work_item_id: string; status: string; risk_score: number; done_score: number }`.
 
@@ -1059,6 +1100,28 @@ blind timer.
 - Ids only: the agent page's **Activity** tab re-fetches
   `GET /personal-agents/{id}/activity` on a matching tick.
 - TypeScript type: `{ type: 'personal_agent_activity'; workspace_id: Id; agent_id: Id; kind: string }`.
+
+---
+
+### `agent_room_message`
+
+```json
+{ "type": "agent_room_message", "workspace_id": "<Id>", "room_id": "<Id>",
+  "message_id": "<Id>", "author_kind": "agent|user", "author_id": "<Id>",
+  "text": "…", "created_at": "<RFC3339>" }
+```
+
+- Emitted by `POST /agent-rooms/{id}/messages` (a user post, or an agent post
+  over the room MCP tools) after the message is persisted.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- Carries the **whole message** (`message_id` is the `AgentRoomMessage.id`;
+  `text` ≤ 16 KB): an open Rooms view appends it to a held feed with no GET
+  (deduped by id). With no Rooms view mounted, or for a room never opened, the
+  client only bumps the rooms list's `message_count` / `last_message_at`. After
+  a WS gap (reconnect / lag `resync`) the shown room re-reads its tail
+  (`GET /agent-rooms/{id}/messages?tail=true`). Before 2026-10 the event was
+  ids only and every event forced a GET.
+- TypeScript type: `{ type: 'agent_room_message'; workspace_id: Id; room_id: Id; message_id: Id; author_kind: string; author_id: Id; text: string; created_at: string }`.
 
 ---
 
@@ -1139,6 +1202,61 @@ secret values.
 - TypeScript mirror: `{ type: 'api_history_appended'; workspace_id: Id;
   entry_id: Id; source: 'agent' | 'human'; session_id: Id | null;
   request_id: Id | null }`.
+
+---
+
+### `api_run_progress`
+
+Workspace-scoped. Emitted by an API automation run after each completed step
+and once when the run ends (with its final `status`). Counts and status only —
+never a step result, request, response or secret. The running view fetches
+`GET …/automation-runs/{run_id}?after=<steps it has>` on it instead of polling
+blind (the poll stays as a slow fallback).
+
+```json
+{
+  "type": "api_run_progress",
+  "workspace_id": "<Id>",
+  "automation_id": "<Id>",
+  "run_id": "<Id>",
+  "status": "running|passed|failed|cancelled|interrupted",
+  "steps_done": 12
+}
+```
+
+- Scope: `Workspace` (members with viewer+ on `workspace_id`).
+- TypeScript mirror: `{ type: 'api_run_progress'; workspace_id: Id;
+  automation_id: Id; run_id: Id; status: ApiAutomationRun['status'];
+  steps_done: number }`.
+
+---
+
+### `api_client_changed`
+
+Workspace-scoped (perf N4). Emitted after a saved API-client object is
+created, updated, deleted (or, for an environment, activated) through the
+REST routes — by a person or by an agent tool (`otto.api_upsert_request` and
+the other agent writes go through the same routes) — and once per kind after
+`POST …/secure-all` changes rows (`id: null`). Ids only. Clients that cache the
+request tree / environments / automations (the UI keeps a 60 s list cache)
+drop or patch their copy on it instead of waiting for the cache to expire.
+An import creates its requests one by one, so it arrives as a burst —
+coalesce before refetching.
+
+```json
+{
+  "type": "api_client_changed",
+  "workspace_id": "<Id>",
+  "kind": "request|collection|environment|automation",
+  "id": "<Id>|null",
+  "deleted": false
+}
+```
+
+- Scope: `Workspace` (members with viewer+ on `workspace_id`).
+- TypeScript mirror: `{ type: 'api_client_changed'; workspace_id: Id;
+  kind: 'request' | 'collection' | 'environment' | 'automation';
+  id: Id | null; deleted: boolean }`.
 
 ---
 
@@ -1295,7 +1413,7 @@ repository's working tree, index or refs change on disk: an editor save, a CLI
 `git add`, commit, checkout or branch update.
 
 ```json
-{ "type": "repo_status_changed", "workspace_id": "<Id>", "repo_id": "<Id>" }
+{ "type": "repo_status_changed", "workspace_id": "<Id>", "repo_id": "<Id>", "paths": ["src/a.rs"] }
 ```
 
 - What is watched: a repo becomes watched on `GET /repos/{id}/status` or
@@ -1311,16 +1429,25 @@ repository's working tree, index or refs change on disk: an editor save, a CLI
     `info/exclude`.
 - Timing: one event per burst, 150 ms after the first change, and at most one
   per 400 ms per repo. The last change of a burst is never dropped.
-- Payload: carries no paths. Clients re-read `GET /repos/{id}/status`, which
+- Payload: `paths` (optional) lists the repo-relative worktree paths (files or
+  directories) the burst touched, deduped. It is **absent** when the daemon
+  can't tell: more than 64 paths, a dropped-events rescan, or a change inside
+  `.git` that can alter every file's diff (`index`, `HEAD`, branch refs,
+  merge/rebase state). It is present and **empty** when only remote-tracking
+  refs or tags moved. Clients re-read `GET /repos/{id}/status` either way; it
   is local and lock-free (`GIT_OPTIONAL_LOCKS=0`), so it can't retrigger the
   watcher.
 - Scope: `Workspace`. The status read applies the per-repo role check.
 - UI routing: `events.svelte.ts` → `git.applyRepoChanged()`.
   - Refresh: the store re-reads status for any repo it shows, one read at a
     time per repo. A hidden window reads once, when it becomes visible again.
-  - Diff: the store bumps `git.liveRev[repo]`, and the WIP panel re-reads the
-    open file's diff in place.
-- TypeScript type: `{ type: 'repo_status_changed'; workspace_id: Id; repo_id: Id }`.
+  - Diff: the store unions the `paths` of coalesced events into
+    `git.liveChanged[repo]` and bumps `git.liveRev[repo]`. The WIP panel
+    re-reads the open file's diff in place only when that set is unknown or
+    contains the file (or a parent directory), and only in the focused window:
+    a visible but unfocused window marks the diff stale and re-reads it once
+    on its next focus/visibility.
+- TypeScript type: `{ type: 'repo_status_changed'; workspace_id: Id; repo_id: Id; paths?: string[] }`.
 
 ### `transcript_appended` / `transcript_live` / `artifact_added` / `history_index_progress`
 
@@ -1578,8 +1705,26 @@ each says "the list you cached changed — refetch it"; none carries the data.
   named resource (or all) instead of every resource every 15 s.
 - `notifications_changed` — the caller's notice list changed without a new
   notice (`POST /notifications/{id}/read`, `/notifications/read-all`,
-  `DELETE /notifications/{id}`, `DELETE /notifications`). **Owner-scoped**
+  `DELETE /notifications/{id}`, `DELETE /notifications`, and the bulk
+  `POST /notifications/read` / `POST /notifications/dismiss` — ONE event per
+  batch, none when the batch changed nothing). **Owner-scoped**
   (`user_id` only). Consumer: the tray's "needs you" glyph.
+
+### `workbench_doc_changed`
+
+A Workbench scratch file changed. **Owner-scoped** (`user_id` only — docs are
+per-user). Invalidation cue: refetch `GET /workspaces/{ws}/workbench/docs`
+and, if the doc is open in this window and `client_id` is not this window's
+own (the `client_id` the PATCH sent), refetch the doc.
+
+```json
+{"type":"workbench_doc_changed","workspace_id":"01J…","user_id":"01J…","doc_id":"01J…","action":"updated","rev":7,"updated_at":"2026-10-03T17:02:11Z","client_id":"w-3f2a"}
+```
+
+`action` ∈ `created` | `updated` (content, metadata or a revision restore) |
+`trashed` | `restored` | `deleted` (permanent). `client_id` is omitted unless
+the mutating request carried one. Emitted by
+`crates/otto-server/src/routes/workbench.rs`.
 
 Clients keep a slow safety poll (Otto: 5 min, `ui/src/lib/live.ts` `liveQuery`)
 and refetch after a reconnect / `resync`; while the socket is down they fall

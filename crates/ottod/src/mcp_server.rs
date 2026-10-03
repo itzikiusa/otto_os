@@ -68,9 +68,17 @@ impl Ctx {
 
     /// The MCP `tools/list`: the otto.* specs filtered to the enabled set.
     async fn tools_list(&self) -> Value {
-        // The set of currently-enabled tools (best-effort; on error list all).
-        let enabled: Option<Vec<String>> =
-            self.get_json("/mcp/otto-server").await.ok().and_then(|v| {
+        // The set of currently-enabled tools (best-effort; on error list all),
+        // from the light names-only read; a daemon older than this binary
+        // lacks it, so fall back to the full status.
+        let enabled: Option<Vec<String>> = match self.get_json("/mcp/otto-server/enabled").await {
+            Ok(v) => v.get("enabled").and_then(Value::as_array).map(|names| {
+                names
+                    .iter()
+                    .filter_map(|n| n.as_str().map(str::to_string))
+                    .collect()
+            }),
+            Err(_) => self.get_json("/mcp/otto-server").await.ok().and_then(|v| {
                 v.get("tools").and_then(Value::as_array).map(|tools| {
                     tools
                         .iter()
@@ -78,10 +86,10 @@ impl Ctx {
                         .filter_map(|t| t.get("name").and_then(Value::as_str).map(str::to_string))
                         .collect()
                 })
-            });
-        let specs = otto_server::mcp_outward::otto_tool_specs();
-        let tools: Vec<Value> = specs
-            .into_iter()
+            }),
+        };
+        let tools: Vec<Value> = otto_server::mcp_outward::otto_tool_specs_cached()
+            .iter()
             .filter(|s| {
                 let name = s.get("name").and_then(Value::as_str).unwrap_or("");
                 enabled

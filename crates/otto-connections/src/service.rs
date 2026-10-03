@@ -276,41 +276,58 @@ impl ConnectionsService {
         self.sections.reorder(ws, ids).await
     }
 
+    /// The legacy MongoDB credential still inlined in `conn_string`, if any:
+    /// `(template without the password, password)`.
+    fn inline_mongo_password(conn: &Connection) -> Result<Option<(String, String)>> {
+        if conn.kind != ConnectionKind::Mongodb {
+            return Ok(None);
+        }
+        match conn.params.get("conn_string").and_then(|v| v.as_str()) {
+            Some(uri) => otto_core::connection_credentials::extract_password(uri),
+            None => Ok(None),
+        }
+    }
+
     pub async fn get(&self, id: &Id) -> Result<Connection> {
+        // Fast path: almost every row has nothing to migrate, so read it
+        // without `credentials_lock` — transfers re-authorize every second and
+        // each SFTP op calls this, and none of them should queue behind an
+        // unrelated credential write.
+        let conn = self.repo.get(id).await?;
+        if !needs_credential_migration(&conn) {
+            return Ok(conn);
+        }
+        // Slow path (legacy Mongo row with an inline password): migrate under
+        // the lock, re-reading so a concurrent `get`/update that already moved
+        // the credential is not migrated twice.
         let _guard = self.credentials_lock.lock().await;
         let mut conn = self.repo.get(id).await?;
-        if conn.kind == ConnectionKind::Mongodb {
-            if let Some(uri) = conn.params.get("conn_string").and_then(|v| v.as_str()) {
-                if let Some((template, password)) =
-                    otto_core::connection_credentials::extract_password(uri)?
-                {
-                    // Write a fresh secret first: a failed Keychain write leaves the row
-                    // untouched, and a failed DB write cannot replace its old secret.
-                    let key = format!("conn-{}-{}", id, otto_core::new_id());
-                    self.secrets.put(&key, &password)?;
-                    let superseded = conn.secret_ref.clone();
-                    conn.params["conn_string"] = template.into();
-                    conn = self
-                        .repo
-                        .update(
-                            id,
-                            None,
-                            Some(&conn.params),
-                            Some(Some(&key)),
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                        .await?;
-                    // The row now points at the fresh key; the credential it
-                    // used to reference would otherwise linger in the Keychain
-                    // forever (nothing else ever reads or deletes it).
-                    if let Some(old) = superseded.filter(|old| *old != key) {
-                        if let Err(e) = self.secrets.delete(&old) {
-                            tracing::warn!(connection = %id, "failed to delete superseded secret: {e}");
-                        }
-                    }
+        if let Some((template, password)) = Self::inline_mongo_password(&conn)? {
+            // Write a fresh secret first: a failed Keychain write leaves the row
+            // untouched, and a failed DB write cannot replace its old secret.
+            let key = format!("conn-{}-{}", id, otto_core::new_id());
+            otto_core::secrets::put_async(&self.secrets, &key, &password).await?;
+            let superseded = conn.secret_ref.clone();
+            conn.params["conn_string"] = template.into();
+            conn = self
+                .repo
+                .update(
+                    id,
+                    None,
+                    Some(&conn.params),
+                    Some(Some(&key)),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await?;
+            // The row now points at the fresh key; the credential it
+            // used to reference would otherwise linger in the Keychain
+            // forever (nothing else ever reads or deletes it).
+            if let Some(old) = superseded.filter(|old| *old != key) {
+                if let Err(e) = otto_core::secrets::delete_async(&self.secrets, &old).await {
+                    tracing::warn!(connection = %id, "failed to delete superseded secret: {e}");
                 }
             }
         }
@@ -343,7 +360,7 @@ impl ConnectionsService {
         let connection = self.repo.get(id).await?;
         let password = if include_passwords {
             match connection.secret_ref.as_deref() {
-                Some(reference) => Some(self.secrets.get(reference)
+                Some(reference) => Some(otto_core::secrets::get_async(&self.secrets, reference).await
                     .map_err(|_| Error::Internal("Could not read a saved connection credential; no export was produced".into()))?
                     .ok_or_else(|| Error::Conflict("A saved connection credential is missing; reconnect it or export without passwords".into()))?),
                 None => None,
@@ -530,7 +547,7 @@ impl ConnectionsService {
             .await?;
         if let Some(secret) = req.secret {
             let secret_ref = secret_ref_for(&conn.id);
-            self.secrets.put(&secret_ref, &secret)?;
+            otto_core::secrets::put_async(&self.secrets, &secret_ref, &secret).await?;
             return self
                 .repo
                 .update(
@@ -593,7 +610,7 @@ impl ConnectionsService {
                 .secret_ref
                 .clone()
                 .unwrap_or_else(|| secret_ref_for(id));
-            self.secrets.put(&secret_ref, secret)?;
+            otto_core::secrets::put_async(&self.secrets, &secret_ref, secret).await?;
             new_secret_ref = Some(Some(secret_ref));
         }
 
@@ -638,7 +655,7 @@ impl ConnectionsService {
         self.authorize(id, user_id, "configure").await?;
         let conn = self.repo.get(id).await?;
         if let Some(secret_ref) = &conn.secret_ref {
-            if let Err(e) = self.secrets.delete(secret_ref) {
+            if let Err(e) = otto_core::secrets::delete_async(&self.secrets, secret_ref).await {
                 tracing::warn!(connection = %id, "failed to delete secret: {e}");
             }
         }
@@ -662,7 +679,7 @@ impl ConnectionsService {
                     .into(),
             ));
         }
-        let secret = self.fetch_secret(conn)?;
+        let secret = self.fetch_secret(conn).await?;
         let (spec, _warn_argv) = build_command(conn, secret.as_deref())?;
         let session = spawner
             .spawn_connection(
@@ -690,7 +707,7 @@ impl ConnectionsService {
     /// 10s timeout, report ok/latency and the line that explains a failure.
     pub async fn test(&self, conn: &Connection, user_id: &Id) -> Result<TestConnectionResp> {
         self.authorize(&conn.id, user_id, "configure").await?;
-        let secret = self.fetch_secret(conn)?;
+        let secret = self.fetch_secret(conn).await?;
         probe(conn, secret.as_deref()).await
     }
 
@@ -724,9 +741,9 @@ impl ConnectionsService {
         probe(&conn, None).await
     }
 
-    fn fetch_secret(&self, conn: &Connection) -> Result<Option<String>> {
+    async fn fetch_secret(&self, conn: &Connection) -> Result<Option<String>> {
         match &conn.secret_ref {
-            Some(secret_ref) => self.secrets.get(secret_ref),
+            Some(secret_ref) => otto_core::secrets::get_async(&self.secrets, secret_ref).await,
             None => Ok(None),
         }
     }
@@ -958,6 +975,7 @@ fn needs_credential_migration(conn: &Connection) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / secret store is fine
 mod tests {
     use super::*;
     use std::collections::HashMap;
@@ -1129,5 +1147,83 @@ mod tests {
             !held.contains_key("conn-legacy-old"),
             "superseded secret must be removed: {held:?}"
         );
+    }
+
+    async fn create_conn(f: &Fixture, kind: ConnectionKind, params: serde_json::Value) -> Id {
+        f.repo
+            .create(NewConnection {
+                workspace_id: None,
+                name: "c".into(),
+                kind,
+                params,
+                secret_ref: None,
+                first_command: None,
+                section_id: None,
+                environment: Default::default(),
+                read_only: false,
+                created_by: f.root.clone(),
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
+    /// F12: a plain read (nothing to migrate) never waits on
+    /// `credentials_lock`, so per-second transfer re-authorization and SFTP
+    /// ops cannot queue behind a credential write; a legacy Mongo row still
+    /// takes the lock and migrates.
+    #[tokio::test]
+    async fn get_skips_the_credentials_lock_unless_a_migration_is_due() {
+        let f = fixture().await;
+        let ssh = create_conn(&f, ConnectionKind::Ssh, serde_json::json!({"host":"h"})).await;
+        let clean_mongo = create_conn(
+            &f,
+            ConnectionKind::Mongodb,
+            serde_json::json!({"conn_string":"mongodb://app@m1:27017/db"}),
+        )
+        .await;
+        let legacy = create_conn(
+            &f,
+            ConnectionKind::Mongodb,
+            serde_json::json!({"conn_string":"mongodb://app:inline-pw@m1:27017/db"}),
+        )
+        .await;
+        let wait = std::time::Duration::from_secs(2);
+        {
+            let _held = f.svc.credentials_lock.lock().await;
+            for id in [&ssh, &clean_mongo] {
+                tokio::time::timeout(wait, f.svc.get(id))
+                    .await
+                    .expect("a non-migrating get must not wait on credentials_lock")
+                    .unwrap();
+            }
+            // The migrating read does need the lock: it blocks while held.
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), f.svc.get(&legacy))
+                    .await
+                    .is_err(),
+                "a migrating get must serialize on credentials_lock"
+            );
+        }
+        let migrated = tokio::time::timeout(wait, f.svc.get(&legacy))
+            .await
+            .unwrap()
+            .unwrap();
+        let key = migrated
+            .secret_ref
+            .clone()
+            .expect("migrated to a Keychain key");
+        assert!(!migrated.params["conn_string"]
+            .as_str()
+            .unwrap()
+            .contains("inline-pw"));
+        assert_eq!(f.secrets.get(&key).unwrap().as_deref(), Some("inline-pw"));
+        // Once migrated, the row is back on the lock-free path.
+        let _held = f.svc.credentials_lock.lock().await;
+        let again = tokio::time::timeout(wait, f.svc.get(&legacy))
+            .await
+            .expect("a migrated row reads without the lock")
+            .unwrap();
+        assert_eq!(again.secret_ref.as_deref(), Some(key.as_str()));
     }
 }

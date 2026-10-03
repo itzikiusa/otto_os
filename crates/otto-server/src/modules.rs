@@ -165,6 +165,14 @@ impl otto_sessions::SessionsCtx for ServerCtx {
         Box::pin(crate::resource_sessions::check(self, user, session))
     }
 
+    fn check_resources<'a>(
+        &'a self,
+        user: &'a otto_core::domain::User,
+        sessions: Vec<otto_core::domain::Session>,
+    ) -> BoxFuture<'a, Vec<otto_core::domain::Session>> {
+        Box::pin(crate::resource_sessions::check_many(self, user, sessions))
+    }
+
     fn resource_bound(&self, session: &otto_core::domain::Session) -> bool {
         crate::resource_sessions::binding(session).is_some()
     }
@@ -1755,9 +1763,8 @@ pub(crate) async fn resolve_provider_remote(
         .ok_or_else(|| Error::Invalid("repo has no remote url".into()))?;
     let (_, remote_ref) = otto_git::detect(remote_url)
         .ok_or_else(|| Error::Invalid(format!("unsupported remote: {remote_url}")))?;
-    let token = ctx
-        .secrets
-        .get(&account.token_ref)?
+    let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for git account {}", account.id)))?;
     Ok((otto_git::make_provider(&account, token), remote_ref))
 }
@@ -1805,6 +1812,7 @@ fn render_diff(diff: &otto_core::api::DiffResp, cap: usize) -> (String, bool) {
 /// Append every `references/*.md` file sitting beside `skill_md` to `out`
 /// (sorted for determinism), so agents that cannot read files still get the
 /// skill's full method. Best-effort: a missing/unreadable dir is ignored.
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 fn append_skill_references(out: &mut String, skill_md: &std::path::Path) {
     let Some(refs_dir) = skill_md.parent().map(|d| d.join("references")) else {
         return;
@@ -2010,6 +2018,7 @@ fn is_safe_skill_package_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 fn remove_staged_package_path(path: &std::path::Path) -> std::result::Result<(), String> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
@@ -2021,6 +2030,7 @@ fn remove_staged_package_path(path: &std::path::Path) -> std::result::Result<(),
     }
 }
 
+#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
 fn collect_staged_package_files(
     dir: &std::path::Path,
     root: &std::path::Path,
@@ -2556,6 +2566,10 @@ async fn run_review(
             .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
             .clone()
     });
+    // Unregister this run's flag on every exit path (incl. the early return).
+    let _cancel_guard = attempt_cancel
+        .as_ref()
+        .map(|f| ReviewCancelGuard::new(&ctx.review_cancels, &review_id, f));
     let result = run_review_core(
         &ctx,
         &review_id,
@@ -3100,6 +3114,44 @@ fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComment>
         tracing::warn!(review = %review_id, "failed to parse final JSON ({e}); no comments stored");
         vec![]
     })
+}
+
+/// Drops a review's cancel flag from `review_cancels` when the attempt that
+/// registered it ends — but only while the registry still holds THAT flag, so
+/// an unwinding (cancelled) attempt never removes a newer retry's entry.
+/// Without it every branch/local review and summarizer retry leaked an entry,
+/// and a tripped flag left behind could cancel a later rerun of the same id.
+pub(crate) struct ReviewCancelGuard {
+    reg: crate::skill_eval::CancelRegistry,
+    id: String,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ReviewCancelGuard {
+    pub(crate) fn new(
+        reg: &crate::skill_eval::CancelRegistry,
+        id: &str,
+        flag: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            reg: reg.clone(),
+            id: id.to_string(),
+            flag: flag.clone(),
+        }
+    }
+}
+
+impl Drop for ReviewCancelGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.reg.lock() {
+            if map
+                .get(&self.id)
+                .is_some_and(|f| Arc::ptr_eq(f, &self.flag))
+            {
+                map.remove(&self.id);
+            }
+        }
+    }
 }
 
 /// Flags stop work immediately; the durable status covers daemon/retry paths
@@ -4240,12 +4292,14 @@ async fn run_pr_review_inner(
                 let account = ctx.issues_store.get_account(&account_id).await?;
                 // S4: only the issue account's owner (or root) may use its token.
                 otto_core::auth::authorize_owner(&account, user)?;
-                let token = ctx.secrets.get(&account.token_ref)?.ok_or_else(|| {
-                    otto_core::Error::Invalid(format!(
-                        "token missing for issue account {}",
-                        account.id
-                    ))
-                })?;
+                let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
+                    .await?
+                    .ok_or_else(|| {
+                        otto_core::Error::Invalid(format!(
+                            "token missing for issue account {}",
+                            account.id
+                        ))
+                    })?;
                 let client =
                     otto_issues::JiraClient::new(&account.base_url, &account.email, &token);
                 let detail = client.get_issue(key).await?;
@@ -4297,7 +4351,10 @@ async fn run_pr_review_inner(
         // refs/remotes) and never touches a working tree.
         let git_token: Option<String> = match repo.git_account_id.as_ref() {
             Some(aid) => match ctx.git_store.get_account(aid).await {
-                Ok(acc) => ctx.secrets.get(&acc.token_ref).ok().flatten(),
+                Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
+                    .await
+                    .ok()
+                    .flatten(),
                 Err(_) => None,
             },
             None => None,
@@ -5497,16 +5554,19 @@ pub(crate) async fn pr_draft_prompt(
     let source = git.current_branch().await?;
     let resolved = git.resolve_base(base).await?;
     let base = resolved.branch.as_str();
-    let diff = git.diff_text_against(&resolved.diff_ref).await?;
+    // Cap the diff fed to the drafting agent — a title/description doesn't need
+    // every line, and a huge prompt is slow + can exceed input limits. git is
+    // stopped at twice the cap (enough to know it was cut) instead of the whole
+    // patch being buffered just to keep 40 KB of it.
+    const MAX_DIFF: usize = 40_000;
+    let (diff, _) = git
+        .diff_text_capped(Some(&resolved.diff_ref), 2 * MAX_DIFF)
+        .await?;
     if diff.trim().is_empty() {
         return Err(Error::Invalid(format!(
             "no changes between '{source}' and '{base}'"
         )));
     }
-
-    // Cap the diff fed to the drafting agent — a title/description doesn't need
-    // every line, and a huge prompt is slow + can exceed input limits.
-    const MAX_DIFF: usize = 40_000;
     let truncated = diff.len() > MAX_DIFF;
     let diff_slice = if truncated {
         let mut end = MAX_DIFF;
@@ -5697,13 +5757,18 @@ async fn draft_commit_message(
     // Prefer the staged diff (what's actually about to be committed). When the
     // index is empty, fall back to the full working diff so the button is still
     // useful before staging.
-    let staged = git
-        .staged_diff_text()
+    //
+    // Cap the diff fed to the drafting agent — a commit message doesn't need
+    // every line, and a huge prompt is slow + can exceed input limits. git is
+    // stopped at twice the cap instead of buffering the whole patch.
+    const MAX_DIFF: usize = 40_000;
+    let (staged, _) = git
+        .staged_diff_text_capped(2 * MAX_DIFF)
         .await
         .map_err(crate::error::ApiError)?;
     let (diff, from_staged) = if staged.trim().is_empty() {
-        let working = git
-            .working_diff_text()
+        let (working, _) = git
+            .diff_text_capped(None, 2 * MAX_DIFF)
             .await
             .map_err(crate::error::ApiError)?;
         (working, false)
@@ -5715,10 +5780,6 @@ async fn draft_commit_message(
             "nothing to commit — no staged or unstaged changes".into(),
         )));
     }
-
-    // Cap the diff fed to the drafting agent — a commit message doesn't need
-    // every line, and a huge prompt is slow + can exceed input limits.
-    const MAX_DIFF: usize = 40_000;
     let truncated = diff.len() > MAX_DIFF;
     let diff_slice = if truncated {
         let mut end = MAX_DIFF;
@@ -6065,6 +6126,8 @@ async fn retry_summarizer(
     let repo_id = review.repo_id.clone();
     let pr_number = review.pr_number;
     tokio::spawn(async move {
+        let _cancel_guard =
+            ReviewCancelGuard::new(&ctx_bg.review_cancels, &review_id_bg, &attempt_cancel);
         // The summarizer follows the repo's EFFECTIVE config (per-repo binding
         // resolution included), same as a fresh run would.
         let cfg = load_review_config_for_repo(&ctx_bg, &repo_id).await;
@@ -6419,10 +6482,13 @@ pub(crate) async fn cancel_running_review(ctx: &ServerCtx, review: &Review, work
     //    run_review_core skips the summarizer / finding persistence. The review-
     //    level flag gates the post-join summarizer skip; the recovery loops watch
     //    their per-agent flags (per-agent Stop), so trip those too.
-    if let Ok(mut map) = ctx.review_cancels.lock() {
-        map.entry(review_id.clone())
-            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    //    Only an attempt that is actually running has a flag; trip it, never
+    //    insert one — a tripped orphan would cancel a later rerun of this id
+    //    (the durable `cancelled` status below covers flagless paths).
+    if let Ok(map) = ctx.review_cancels.lock() {
+        if let Some(flag) = map.get(review_id.as_str()) {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
     for i in 0..review.agents.len() {
         signal_review_agent_cancel(&ctx.review_agent_cancels, &review_id, i);
@@ -6450,13 +6516,17 @@ pub(crate) async fn cancel_running_review(ctx: &ServerCtx, review: &Review, work
     //    durable prompt/diff rows (0100) — same lifecycle, cancelled runs are
     //    not retryable.
     let prefix = format!("otto-review-{review_id}");
-    if let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) {
-        for entry in rd.flatten() {
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                let _ = std::fs::remove_file(entry.path());
+    #[allow(clippy::disallowed_methods)] // runs on the blocking pool via offload::blocking
+    let () = crate::offload::blocking(move || {
+        if let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) {
+            for entry in rd.flatten() {
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
             }
         }
-    }
+    })
+    .await;
     let _ = ctx.reviews_store.delete_run_artifacts(&review_id).await;
 
     // 5. Broadcast the terminal status to subscribers.
@@ -8320,6 +8390,7 @@ mod terminal_input_access_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod readiness_tests {
     use super::local_branch_facts;
     use std::path::Path;
@@ -8410,5 +8481,39 @@ mod readiness_tests {
             local_branch_facts(path, "no-such-branch", "main").await,
             (None, "unknown")
         );
+    }
+}
+
+#[cfg(test)]
+mod review_cancel_guard_tests {
+    use super::ReviewCancelGuard;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    fn flag() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
+    #[test]
+    fn guard_unregisters_its_own_flag_on_drop() {
+        let reg: crate::skill_eval::CancelRegistry = Default::default();
+        let f = flag();
+        reg.lock().unwrap().insert("r1".into(), f.clone());
+        drop(ReviewCancelGuard::new(&reg, "r1", &f));
+        assert!(reg.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn guard_keeps_a_newer_attempts_flag() {
+        let reg: crate::skill_eval::CancelRegistry = Default::default();
+        let old = flag();
+        reg.lock().unwrap().insert("r1".into(), old.clone());
+        let guard = ReviewCancelGuard::new(&reg, "r1", &old);
+        // A retry replaces the entry while the old attempt is unwinding.
+        let newer = flag();
+        reg.lock().unwrap().insert("r1".into(), newer.clone());
+        drop(guard);
+        let map = reg.lock().unwrap();
+        assert!(Arc::ptr_eq(map.get("r1").unwrap(), &newer));
     }
 }

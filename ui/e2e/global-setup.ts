@@ -90,6 +90,9 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       // Never write test secrets into the user's macOS Keychain — file-backed
       // secrets live in the temp data dir and vanish with it.
       OTTO_SECRETS: process.env.OTTO_SECRETS ?? 'file',
+      // A release OTTO_E2E_BIN refuses plaintext without the opt-in (and would
+      // otherwise create a master key in the real Keychain).
+      OTTO_SECRETS_ALLOW_PLAINTEXT: '1',
     },
     stdio: ['ignore', 'inherit', 'inherit'],
     detached: false,

@@ -291,17 +291,12 @@ impl ActivityRepo {
             // Per session, the newest trail row via the min/max optimisation
             // on `idx_agent_trail_session` — O(sessions · log n) instead of a
             // GROUP BY over every trail row in the workspace (r3-07-04).
-            let trail_rows = sqlx::query(
-                "SELECT s.id AS session_id,
-                        (SELECT MAX(tr.ts) FROM agent_trail tr WHERE tr.session_id = s.id)
-                            AS last_ts
-                 FROM sessions s WHERE s.workspace_id = ? AND s.created_by = ?",
-            )
-            .bind(workspace_id)
-            .bind(uid)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("summary trail (user)"))?;
+            let trail_rows = sqlx::query(sqlx::AssertSqlSafe(summary_trail_sql(true)))
+                .bind(workspace_id)
+                .bind(uid)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("summary trail (user)"))?;
 
             (task_rows, trail_rows)
         } else {
@@ -314,16 +309,11 @@ impl ActivityRepo {
             .await
             .map_err(dberr("summary tasks"))?;
 
-            let trail_rows = sqlx::query(
-                "SELECT s.id AS session_id,
-                        (SELECT MAX(tr.ts) FROM agent_trail tr WHERE tr.session_id = s.id)
-                            AS last_ts
-                 FROM sessions s WHERE s.workspace_id = ?",
-            )
-            .bind(workspace_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("summary trail"))?;
+            let trail_rows = sqlx::query(sqlx::AssertSqlSafe(summary_trail_sql(false)))
+                .bind(workspace_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("summary trail"))?;
 
             (task_rows, trail_rows)
         };
@@ -718,6 +708,45 @@ impl ActivityRepo {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// SQL predicate (on alias `s`) for the sessions the sidebar shows: not
+/// archived, and a connection, a foreground agent, or a Slack/Telegram channel
+/// row — the `foreground=true&with_sources=channel` list rule. The summary's
+/// per-session `MAX(ts)` probe used to run for every row of a workspace (1.9 k
+/// hidden review agents); background panels read their own trail. The source
+/// names are compile-time constants (no quotes), so they are inlined. Reads
+/// the indexed generated `source` column (migration 0162), not the JSON.
+fn shown_sessions_sql() -> String {
+    let bg = otto_core::domain::BACKGROUND_SESSION_SOURCES
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "s.archived = 0 AND (s.kind <> 'agent' \
+         OR s.source IS NULL OR s.source NOT IN ({bg}) OR s.source = 'channel')"
+    )
+}
+
+/// The activity summary's shown-only trail statement: per shown session, its
+/// newest trail `ts`. Binds `workspace_id`, then (`owner_scoped`) the owner.
+/// A `fn` so the sessions plan test can `EXPLAIN QUERY PLAN` it — it must stay
+/// on the 0162 source index (migration 0166 dropped the prefix index the
+/// planner used to prefer, which re-parsed every row's meta JSON).
+pub(crate) fn summary_trail_sql(owner_scoped: bool) -> String {
+    format!(
+        "SELECT s.id AS session_id,
+                (SELECT MAX(tr.ts) FROM agent_trail tr WHERE tr.session_id = s.id)
+                    AS last_ts
+         FROM sessions s WHERE s.workspace_id = ? {}AND {}",
+        if owner_scoped {
+            "AND s.created_by = ? "
+        } else {
+            ""
+        },
+        shown_sessions_sql()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,6 +955,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(mine.len(), 1);
+    }
+
+    /// The trail roll-up covers only the sessions the sidebar shows: archived
+    /// rows and background agents (review, …) are skipped; channel rows and
+    /// foreground agents stay. Task rows are untouched.
+    #[tokio::test]
+    async fn workspace_summary_trail_skips_hidden_sessions() {
+        let pool = mk_pool().await;
+        seed_user(&pool, "u").await;
+        seed_workspace(&pool, "ws1").await;
+        let fg = seed_session(&pool, "ws1", "u").await;
+        let review = seed_session(&pool, "ws1", "u").await;
+        let channel = seed_session(&pool, "ws1", "u").await;
+        let archived = seed_session(&pool, "ws1", "u").await;
+        let review_task = seed_session(&pool, "ws1", "u").await;
+        for (id, meta, arch) in [
+            (&review, r#"{"source":"review"}"#, 0),
+            (&channel, r#"{"source":"channel"}"#, 0),
+            (&archived, "{}", 1),
+            (&review_task, r#"{"source":"review"}"#, 0),
+        ] {
+            sqlx::query("UPDATE sessions SET meta_json = ?, archived = ? WHERE id = ?")
+                .bind(meta)
+                .bind(arch)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for id in [&fg, &review, &channel, &archived] {
+            seed_trail(&pool, "ws1", id).await;
+        }
+        seed_task(&pool, "ws1", &review_task).await;
+        let repo = ActivityRepo::new(pool.clone());
+        let mut got: Vec<(String, bool)> = repo
+            .workspace_summary(&"ws1".into())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.session_id, s.last_ts.is_some()))
+            .collect();
+        got.sort();
+        let mut want = vec![(fg, true), (channel, true), (review_task, false)];
+        want.sort();
+        assert_eq!(got, want);
     }
 
     /// workspace_summary_for_user with no sessions for the caller returns empty.

@@ -17,6 +17,7 @@
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { api, ApiError } from '../../lib/api/client';
+  import { mergeMultiRunJob } from '../../lib/api/db-multirun-types';
   import { pollWhileVisible, type Poller } from '../../lib/poll';
   import { runStatus } from '../../lib/status';
   import { toasts } from '../../lib/toast.svelte';
@@ -206,7 +207,9 @@
   const guardedRuns = $derived(plan ? plan.runs.filter((r) => r.needs_confirm) : []);
 
   // ── Run + results ─────────────────────────────────────────────────────────
-  let job = $state<DbMultiRunJob | null>(null);
+  // `$state.raw`: the job (≤200 items + targets) is only ever REPLACED by a
+  // poll answer — a deep proxy re-wrapped the whole tree every 800 ms tick.
+  let job = $state.raw<DbMultiRunJob | null>(null);
   let starting = $state(false);
   let startError = $state<string | null>(null);
   let poller: Poller | null = null;
@@ -256,13 +259,25 @@
 
   function watch(id: string): void {
     poller?.stop();
+    // Fast while a run is young (most finish in seconds), then 2 s: a long
+    // 200-target run no longer pulls the whole job ~75×/min for its lifetime.
+    const since = Date.now();
     poller = pollWhileVisible(
       async (signal) => {
-        const j = await api.get<DbMultiRunJob>(`/db/multi-runs/${encodeURIComponent(id)}`, signal);
+        // Only the runs that changed since the last answer (`?since=`), merged
+        // by index — not all ≤200 items + targets every tick.
+        const since = job && job.id === id && job.seq !== undefined ? `?since=${job.seq}` : '';
+        const j = mergeMultiRunJob(job, await api.get<DbMultiRunJob>(`/db/multi-runs/${encodeURIComponent(id)}${since}`, signal));
         job = j;
         if (j.status !== 'running') poller?.stop();
       },
-      { ms: 800, floorMs: 500, immediate: false },
+      {
+        get ms() {
+          return Date.now() - since > 30_000 ? 2000 : 800;
+        },
+        floorMs: 500,
+        immediate: false,
+      },
     );
   }
 

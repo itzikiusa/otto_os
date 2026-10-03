@@ -43,6 +43,55 @@ pub struct DbPool {
     split: bool,
     /// Process-unique identity shared by every clone (see [`DbPool::id`]).
     id: u64,
+    /// Statements + transactions/connections handed out, shared by every
+    /// clone (see [`DbPool::op_count`]). One relaxed atomic add per statement.
+    ops: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Opt-in statement recorder shared by every clone (perf W12): unset in
+    /// the daemon (one atomic load per statement), armed by tests through
+    /// [`DbPool::statement_probe`] to assert query budgets.
+    probe: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<StatementProbe>>>,
+}
+
+/// Records the SQL of every statement routed through a [`DbPool`] once armed
+/// ([`DbPool::statement_probe`]). Statements on an explicit transaction or a
+/// raw `writer()`/`reader()` connection bypass the router and are not seen.
+#[derive(Debug, Default)]
+pub struct StatementProbe {
+    stmts: std::sync::Mutex<Vec<String>>,
+}
+
+impl StatementProbe {
+    fn record(&self, sql: &str) {
+        if let Ok(mut v) = self.stmts.lock() {
+            v.push(sql.to_string());
+        }
+    }
+
+    /// Everything recorded since the last take, oldest first.
+    pub fn take(&self) -> Vec<String> {
+        self.stmts
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+    }
+
+    /// Forget what was recorded so far.
+    pub fn reset(&self) {
+        let _ = self.take();
+    }
+
+    /// Number of statements recorded so far (not consumed).
+    pub fn count(&self) -> usize {
+        self.stmts.lock().map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Recorded statements containing `needle` (case-sensitive), not consumed.
+    pub fn matching(&self, needle: &str) -> Vec<String> {
+        self.stmts
+            .lock()
+            .map(|v| v.iter().filter(|s| s.contains(needle)).cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 fn next_id() -> u64 {
@@ -68,6 +117,8 @@ impl From<SqlitePool> for DbPool {
             write: pool,
             split: false,
             id: next_id(),
+            ops: Default::default(),
+            probe: Default::default(),
         }
     }
 }
@@ -81,6 +132,8 @@ impl DbPool {
             write,
             split: true,
             id: next_id(),
+            ops: Default::default(),
+            probe: Default::default(),
         }
     }
 
@@ -95,6 +148,19 @@ impl DbPool {
     /// many daemons' worth of state in one process).
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// How many statements this handle (and its clones) has routed, plus the
+    /// transactions and raw connections it handed out (each counts once; the
+    /// statements run on them do not pass through the router). Monotonic. A
+    /// query-budget probe for performance tests: read it before and after an
+    /// operation and assert the difference (the MCP governance path budgets).
+    pub fn op_count(&self) -> u64 {
+        self.ops.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn tick(&self) {
+        self.ops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// True when one pool serves both roles ([`From<SqlitePool>`]).
@@ -116,6 +182,7 @@ impl DbPool {
 
     /// Begin a transaction on the WRITER.
     pub async fn begin(&self) -> sqlx::Result<Transaction<'static, Sqlite>> {
+        self.tick();
         self.write.begin().await
     }
 
@@ -125,11 +192,13 @@ impl DbPool {
         &self,
         statement: impl sqlx::SqlSafeStr,
     ) -> sqlx::Result<Transaction<'static, Sqlite>> {
+        self.tick();
         self.write.begin_with(statement).await
     }
 
     /// A raw connection from the WRITER: whatever runs on it may write.
     pub async fn acquire(&self) -> sqlx::Result<sqlx::pool::PoolConnection<Sqlite>> {
+        self.tick();
         self.write.acquire().await
     }
 
@@ -144,7 +213,18 @@ impl DbPool {
         self.write.is_closed()
     }
 
+    /// Arm (once) and return this pool's statement recorder; every clone —
+    /// including ones made before arming — records into it from now on.
+    pub fn statement_probe(&self) -> std::sync::Arc<StatementProbe> {
+        self.probe
+            .get_or_init(|| std::sync::Arc::new(StatementProbe::default()))
+            .clone()
+    }
+
     fn route(&self, sql: &str) -> &SqlitePool {
+        if let Some(p) = self.probe.get() {
+            p.record(sql);
+        }
         if is_read_only_sql(sql) {
             &self.read
         } else {
@@ -206,7 +286,10 @@ impl<'p> Executor<'p> for &'p DbPool {
         E: 'q + Execute<'q, Sqlite>,
     {
         match Routed::take(query) {
-            Ok(routed) => self.route(routed.sql.as_str()).fetch_many(routed),
+            Ok(routed) => {
+                self.tick();
+                self.route(routed.sql.as_str()).fetch_many(routed)
+            }
             Err(e) => Box::pin(futures_util::stream::once(async move {
                 Err(sqlx::Error::Encode(e))
             })),
@@ -222,7 +305,10 @@ impl<'p> Executor<'p> for &'p DbPool {
         E: 'q + Execute<'q, Sqlite>,
     {
         match Routed::take(query) {
-            Ok(routed) => self.route(routed.sql.as_str()).fetch_optional(routed),
+            Ok(routed) => {
+                self.tick();
+                self.route(routed.sql.as_str()).fetch_optional(routed)
+            }
             Err(e) => Box::pin(async move { Err(sqlx::Error::Encode(e)) }),
         }
     }
@@ -253,10 +339,12 @@ impl<'a> sqlx::Acquire<'a> for &'_ DbPool {
     type Connection = sqlx::pool::PoolConnection<Sqlite>;
 
     fn acquire(self) -> BoxFuture<'static, Result<Self::Connection, sqlx::Error>> {
+        self.tick();
         Box::pin(self.write.acquire())
     }
 
     fn begin(self) -> BoxFuture<'static, Result<Transaction<'a, Sqlite>, sqlx::Error>> {
+        self.tick();
         let write = self.write.clone();
         Box::pin(async move { write.begin().await })
     }
@@ -323,6 +411,25 @@ fn has_word(upper: &str, word: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn op_count_counts_statements_and_transactions_across_clones() {
+        let pool = DbPool::connect("sqlite::memory:").await.unwrap();
+        let clone = pool.clone();
+        let before = pool.op_count();
+        let _: i64 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let _: Option<i64> = sqlx::query_scalar("SELECT 2")
+            .fetch_optional(&clone)
+            .await
+            .unwrap();
+        let tx = pool.begin().await.unwrap();
+        drop(tx);
+        assert_eq!(pool.op_count() - before, 3);
+        assert_eq!(clone.op_count(), pool.op_count());
+    }
 
     #[test]
     fn routes_only_plain_reads_to_the_reader() {

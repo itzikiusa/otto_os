@@ -239,7 +239,7 @@ pub async fn ensure_cwd_info(
                 Ok((_, branch)) => branch,
                 Err(e) => {
                     tracing::warn!("swarm: integration worktree failed ({e}); scratch fallback");
-                    return Ok(scratch_info(ctx, swarm, agent));
+                    return Ok(scratch_info(ctx, swarm, agent).await);
                 }
             };
             let wt = swarm_base(ctx, &swarm.id, &agent.id).join("wt");
@@ -281,12 +281,12 @@ pub async fn ensure_cwd_info(
     }
 
     // scratch (default, and the fallback).
-    Ok(scratch_info(ctx, swarm, agent))
+    Ok(scratch_info(ctx, swarm, agent).await)
 }
 
-fn scratch_info(ctx: &ServerCtx, swarm: &Swarm, agent: &SwarmAgent) -> CwdInfo {
+async fn scratch_info(ctx: &ServerCtx, swarm: &Swarm, agent: &SwarmAgent) -> CwdInfo {
     let scratch = swarm_base(ctx, &swarm.id, &agent.id).join("work");
-    let _ = std::fs::create_dir_all(&scratch);
+    let _ = tokio::fs::create_dir_all(&scratch).await;
     CwdInfo {
         path: scratch.to_string_lossy().to_string(),
         mode: "scratch".to_string(),

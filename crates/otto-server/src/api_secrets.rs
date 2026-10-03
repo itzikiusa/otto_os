@@ -326,6 +326,39 @@ pub fn scrub_secrets(resp: &mut ApiResponse, secrets: &[String]) {
     }
 }
 
+/// [`scrub_secrets`] on an already-serialized `ApiResponse` (the history
+/// copy): same fields, same masking, no typed clone of the body first.
+pub fn scrub_response_json(resp: &mut Value, secrets: &[String]) {
+    let Some(obj) = resp.as_object_mut() else {
+        return;
+    };
+    if let Some(Value::String(body)) = obj.get_mut("body") {
+        *body = scrub_str(body, secrets);
+    }
+    if let Some(headers) = obj.get_mut("headers").and_then(Value::as_array_mut) {
+        for header in headers {
+            let set_cookie = header
+                .get("key")
+                .and_then(Value::as_str)
+                .is_some_and(|key| key.eq_ignore_ascii_case("set-cookie"));
+            if let Some(h) = header.as_object_mut() {
+                if set_cookie {
+                    h.insert("value".into(), Value::String(MASK.into()));
+                } else if let Some(Value::String(value)) = h.get_mut("value") {
+                    *value = scrub_str(value, secrets);
+                }
+            }
+        }
+    }
+    if let Some(trace) = obj.get_mut("trace").and_then(Value::as_array_mut) {
+        for step in trace {
+            if let Some(Value::String(detail)) = step.get_mut("detail") {
+                *detail = scrub_str(detail, secrets);
+            }
+        }
+    }
+}
+
 fn jwt_parts(token: &str) -> Option<(&str, &str, &str)> {
     let mut parts = token.split('.');
     let header = parts.next()?;
@@ -454,6 +487,7 @@ pub fn mask_jwts(input: &str) -> String {
 /// entry means empty; unavailable or corrupt storage must abort the mutation.
 /// Error text deliberately excludes the secret store's potentially sensitive
 /// payload and serde's offending-value diagnostics.
+#[allow(clippy::disallowed_methods)] // pure: only called over a `Prefetched` snapshot (no backend I/O) and in tests
 pub fn load_blob_checked(
     secrets: &dyn SecretStore,
     r: &str,
@@ -468,6 +502,7 @@ pub fn load_blob_checked(
 }
 
 /// Read a Keychain blob (`member → value`); absent/corrupt → empty.
+#[allow(clippy::disallowed_methods)] // pure: only reached via resolve_auth_markers over a `Prefetched` snapshot
 pub fn load_blob(secrets: &dyn SecretStore, r: &str) -> BTreeMap<String, String> {
     secrets
         .get(r)
@@ -477,18 +512,111 @@ pub fn load_blob(secrets: &dyn SecretStore, r: &str) -> BTreeMap<String, String>
         .unwrap_or_default()
 }
 
-/// Write (or delete, when empty) a Keychain blob.
-pub fn store_blob(
-    secrets: &dyn SecretStore,
+// ---------------------------------------------------------------------------
+// Async wrappers — every request handler goes through these, so a Keychain
+// miss (IPC, or an ACL dialog waiting on a person) runs on tokio's blocking
+// pool instead of parking a runtime worker. Cache hits stay inline.
+// ---------------------------------------------------------------------------
+
+/// [`load_blob`] for async callers.
+pub async fn load_blob_async(
+    secrets: &std::sync::Arc<dyn SecretStore>,
+    r: &str,
+) -> BTreeMap<String, String> {
+    otto_core::secrets::get_async(secrets, r)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// [`load_blob_checked`] for async callers (same error texts).
+pub async fn load_blob_checked_async(
+    secrets: &std::sync::Arc<dyn SecretStore>,
+    r: &str,
+) -> otto_core::Result<BTreeMap<String, String>> {
+    let value = otto_core::secrets::get_async(secrets, r).await;
+    load_blob_checked(&Prefetched::one(r, value), r)
+}
+
+/// Write (or delete, when empty) a Keychain blob. The Keychain write runs on
+/// the blocking pool via `otto_core::secrets::{put,delete}_async`.
+pub async fn store_blob_async(
+    secrets: &std::sync::Arc<dyn SecretStore>,
     r: &str,
     blob: &BTreeMap<String, String>,
 ) -> otto_core::Result<()> {
     if blob.is_empty() {
-        secrets.delete(r)
+        otto_core::secrets::delete_async(secrets, r).await
     } else {
         let body = serde_json::to_string(blob)
             .map_err(|e| otto_core::Error::Internal(format!("secret blob serialize: {e}")))?;
-        secrets.put(r, &body)
+        otto_core::secrets::put_async(secrets, r, &body).await
+    }
+}
+
+/// [`resolve_auth_markers`] for async callers: every referenced blob is read
+/// up front via `get_async`, then the (pure) resolver runs over that snapshot.
+pub async fn resolve_auth_markers_async(
+    secrets: &std::sync::Arc<dyn SecretStore>,
+    auth: &mut Value,
+    allowed_request_ids: &[String],
+) -> Result<(), String> {
+    let refs: Vec<String> = auth
+        .as_object()
+        .map(|o| {
+            o.values()
+                .filter_map(marker_ref)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut snap = Prefetched::default();
+    // Only prefetch refs the resolver will accept — a foreign ref is rejected
+    // below without its value ever being read.
+    for r in refs.into_iter().filter(|r| {
+        parse_request_ref(r).is_some_and(|rid| allowed_request_ids.iter().any(|a| a == rid))
+    }) {
+        if let std::collections::btree_map::Entry::Vacant(slot) = snap.0.entry(r) {
+            let v = otto_core::secrets::get_async(secrets, slot.key()).await;
+            slot.insert(v);
+        }
+    }
+    resolve_auth_markers(&snap, auth, allowed_request_ids)
+}
+
+/// Read-only snapshot of already-fetched secret reads (results included, so a
+/// backend error surfaces exactly as the live store would report it). Lets the
+/// pure sync helpers above run over values fetched asynchronously.
+#[derive(Default)]
+struct Prefetched(BTreeMap<String, otto_core::Result<Option<String>>>);
+
+impl Prefetched {
+    fn one(key: &str, value: otto_core::Result<Option<String>>) -> Self {
+        Self(BTreeMap::from([(key.to_string(), value)]))
+    }
+}
+
+impl SecretStore for Prefetched {
+    fn put(&self, _key: &str, _value: &str) -> otto_core::Result<()> {
+        Err(otto_core::Error::Internal(
+            "prefetched secrets are read-only".into(),
+        ))
+    }
+    fn get(&self, key: &str) -> otto_core::Result<Option<String>> {
+        match self.0.get(key) {
+            Some(Ok(v)) => Ok(v.clone()),
+            Some(Err(_)) => Err(otto_core::Error::Internal(
+                "secret store read failed".into(),
+            )),
+            None => Ok(None),
+        }
+    }
+    fn delete(&self, _key: &str) -> otto_core::Result<()> {
+        Err(otto_core::Error::Internal(
+            "prefetched secrets are read-only".into(),
+        ))
     }
 }
 
@@ -508,6 +636,7 @@ pub fn strip_secret_variables(variables: &Value, secret_keys: &[String]) -> Valu
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod tests {
     struct ReadFixture(Option<&'static str>, bool);
     impl otto_core::secrets::SecretStore for ReadFixture {
@@ -652,6 +781,82 @@ mod tests {
         assert!(resolve_auth_markers(&store, &mut foreign, &["r1".to_string()]).is_err());
     }
 
+    /// The async resolver matches the sync one, reads each allowed ref once
+    /// through `get_async`, and never reads a foreign ref's value; the async
+    /// blob helpers round-trip and keep the "unavailable store" error.
+    #[tokio::test]
+    async fn async_helpers_match_sync_and_skip_foreign_reads() {
+        use otto_core::secrets::SecretStore;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Default)]
+        struct Counting(
+            std::sync::Mutex<BTreeMap<String, String>>,
+            AtomicUsize,
+            bool,
+        );
+        impl SecretStore for Counting {
+            fn put(&self, k: &str, v: &str) -> otto_core::Result<()> {
+                self.0.lock().unwrap().insert(k.into(), v.into());
+                Ok(())
+            }
+            fn get(&self, k: &str) -> otto_core::Result<Option<String>> {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                if self.2 {
+                    return Err(otto_core::Error::Internal("locked".into()));
+                }
+                Ok(self.0.lock().unwrap().get(k).cloned())
+            }
+            fn delete(&self, k: &str) -> otto_core::Result<()> {
+                self.0.lock().unwrap().remove(k);
+                Ok(())
+            }
+        }
+        let inner = std::sync::Arc::new(Counting::default());
+        let store: std::sync::Arc<dyn SecretStore> = inner.clone();
+        let own = request_ref("r1");
+        let blob = BTreeMap::from([
+            ("token".to_string(), "tk".to_string()),
+            ("password".to_string(), "pw".to_string()),
+        ]);
+        store_blob_async(&store, &own, &blob).await.unwrap();
+        assert_eq!(load_blob_async(&store, &own).await, blob);
+        assert_eq!(load_blob_checked_async(&store, &own).await.unwrap(), blob);
+
+        inner.1.store(0, Ordering::SeqCst);
+        let mut auth = json!({
+            "type": "basic",
+            "token": { MARKER_KEY: own.clone() },
+            "password": { MARKER_KEY: own.clone() },
+        });
+        resolve_auth_markers_async(&store, &mut auth, &["r1".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            (auth["token"].as_str(), auth["password"].as_str()),
+            (Some("tk"), Some("pw"))
+        );
+        assert_eq!(
+            inner.1.load(Ordering::SeqCst),
+            1,
+            "one read per distinct ref"
+        );
+
+        inner.1.store(0, Ordering::SeqCst);
+        let mut foreign = json!({"type": "bearer", "token": { MARKER_KEY: request_ref("r2") }});
+        assert!(
+            resolve_auth_markers_async(&store, &mut foreign, &["r1".to_string()])
+                .await
+                .is_err()
+        );
+        assert_eq!(inner.1.load(Ordering::SeqCst), 0, "foreign ref never read");
+
+        // An unavailable store is an error for the checked loader, not "empty".
+        let locked: std::sync::Arc<dyn SecretStore> =
+            std::sync::Arc::new(Counting(Default::default(), AtomicUsize::new(0), true));
+        assert!(load_blob_checked_async(&locked, &own).await.is_err());
+        assert!(load_blob_async(&locked, &own).await.is_empty());
+    }
+
     #[test]
     fn secret_shaped_names() {
         for k in [
@@ -782,5 +987,38 @@ mod tests {
         scrub_json(&mut result, &["secret-abc".into()]);
         assert!(!result.to_string().contains("secret-abc"));
         assert_eq!(result["script_tests"][0]["passed"], false);
+    }
+
+    /// perf N7: the in-place JSON scrub of the history copy redacts exactly
+    /// what the typed `scrub_secrets` does.
+    #[test]
+    fn scrub_response_json_matches_typed_scrub() {
+        use otto_core::api::{ApiResponse, TraceStep};
+        use serde_json::json;
+        let secrets = vec!["s3cr3t-value".to_string()];
+        let resp: ApiResponse = serde_json::from_value(json!({
+            "status": 200, "status_text": "OK",
+            "headers": [
+                {"key": "X-Echo", "value": "Bearer s3cr3t-value"},
+                {"key": "Set-Cookie", "value": "sid=abc"},
+            ],
+            "body": "{\"token\":\"s3cr3t-value\"}",
+            "duration_ms": 3, "size_bytes": 10, "content_type": null,
+        }))
+        .unwrap();
+        let mut resp = resp;
+        resp.trace.push(TraceStep {
+            label: "Request".into(),
+            detail: "GET https://h/?k=s3cr3t-value".into(),
+            ms: None,
+            level: "info".into(),
+        });
+        let mut typed = resp.clone();
+        super::scrub_secrets(&mut typed, &secrets);
+        let mut json = serde_json::to_value(&resp).unwrap();
+        super::scrub_response_json(&mut json, &secrets);
+        assert_eq!(json, serde_json::to_value(&typed).unwrap());
+        assert!(!json.to_string().contains("s3cr3t-value"));
+        assert!(!json.to_string().contains("sid=abc"));
     }
 }

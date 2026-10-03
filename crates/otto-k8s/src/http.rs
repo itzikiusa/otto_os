@@ -23,10 +23,12 @@ use crate::clusters::{
     self, Clusters, ImportK8sClusterReq, PatchK8sClusterReq, UpsertK8sClusterReq,
 };
 use crate::install::{self, InstallJob, Tool, ToolStatus};
+use crate::list_cache;
 use crate::logs::{self, LogTarget, LogsQuery, SelectorLogsQuery};
 use crate::resources::{self, Kind};
 use crate::sessions::{self, ExecReq, K9sReq};
 use crate::K8sCtx;
+use std::sync::Arc;
 
 /// Local problem-details mapper (orphan rule — mirrors otto-connections).
 pub(crate) struct ApiErr(pub Error);
@@ -103,6 +105,13 @@ pub struct ResourceQuery {
 #[derive(Debug, Default, Deserialize)]
 pub struct NsQuery {
     pub ns: Option<String>,
+}
+
+/// `GET …/metrics?ns=&pod=` — `pod` (with `ns`) narrows to one pod.
+#[derive(Debug, Deserialize)]
+pub struct MetricsQuery {
+    pub ns: Option<String>,
+    pub pod: Option<String>,
 }
 
 /// REST routes; the server nests this under `/api/v1` and supplies the state.
@@ -416,7 +425,8 @@ async fn list_resources<S: K8sCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<ResourcesQuery>,
-) -> ApiResult<Json<Value>> {
+    headers: axum::http::HeaderMap,
+) -> ApiResult<Response> {
     let kind =
         Kind::parse(&q.kind).ok_or_else(|| Error::Invalid(format!("unknown kind '{}'", q.kind)))?;
     crate::access::check(
@@ -434,21 +444,74 @@ async fn list_resources<S: K8sCtx>(
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
     let caps = svc.cached_capabilities(&c).await;
-    let k = clusters::kubectl_for(&ctx, &c).await?;
-    let (items, has_metrics) = resources::list(
-        &k,
-        kind,
-        q.ns.as_deref(),
+    let with_metrics = caps.metrics_server
+        && crate::access::allowed(&ctx.pool(), &user, &id, "metrics", q.ns.as_deref()).await?;
+    // 10 s cache + single-flight: concurrent viewers / agents share one
+    // kubectl list (perf K2). Access was checked above, per caller.
+    let ck = list_cache::key(
+        id.as_str(),
+        kind.as_str(),
+        if kind.namespaced() {
+            q.ns.as_deref()
+        } else {
+            None
+        },
         q.label.as_deref(),
         q.q.as_deref(),
-        caps.metrics_server
-            && crate::access::allowed(&ctx.pool(), &user, &id, "metrics", q.ns.as_deref()).await?,
+        with_metrics,
+    );
+    let listed = match list_cache::get(&ck) {
+        Some(l) => l,
+        None => {
+            let _flight = crate::monitor::cache::flight(&ck).await;
+            match list_cache::get(&ck) {
+                Some(l) => l,
+                None => {
+                    let k = clusters::kubectl_for(&ctx, &c).await?;
+                    // The cluster's GET-only list gateway while a console
+                    // polls (perf R3); `None` ⇒ kubectl.
+                    let gw = crate::list_gateway::get(c.id.as_str(), &k).await;
+                    let (items, has_metrics) = resources::list(
+                        &k,
+                        gw.as_deref(),
+                        kind,
+                        q.ns.as_deref(),
+                        q.label.as_deref(),
+                        q.q.as_deref(),
+                        with_metrics,
+                    )
+                    .await?;
+                    let kind_s = kind.as_str();
+                    let l = tokio::task::spawn_blocking(move || {
+                        list_cache::build(kind_s, &items, has_metrics)
+                    })
+                    .await
+                    .map(Arc::new)
+                    .map_err(|e| Error::Internal(format!("k8s list task: {e}")))?;
+                    list_cache::put(ck, l.clone());
+                    l
+                }
+            }
+        }
+    };
+    list_cache::touch_throttled(svc.repo(), &c.id).await;
+    let etag = format!("\"{}\"", listed.version);
+    let unchanged = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| list_cache::matches(v, &listed.version));
+    if unchanged {
+        return Ok((StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response());
+    }
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (header::ETAG, etag),
+        ],
+        listed.body.clone(),
     )
-    .await?;
-    let _ = svc.repo().touch(&c.id).await;
-    Ok(Json(
-        json!({ "kind": kind.as_str(), "items": items, "has_metrics": has_metrics }),
-    ))
+        .into_response())
 }
 
 async fn resource_detail<S: K8sCtx>(
@@ -561,12 +624,12 @@ async fn metrics<S: K8sCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
-    Query(q): Query<NsQuery>,
+    Query(q): Query<MetricsQuery>,
 ) -> ApiResult<Json<Value>> {
     crate::access::check(&ctx.pool(), &user, &id, "metrics", q.ns.as_deref()).await?;
     let c = Clusters::new(&ctx).get(&id).await?;
     let k = clusters::kubectl_for(&ctx, &c).await?;
-    let (pods, available) = resources::metrics(&k, q.ns.as_deref()).await?;
+    let (pods, available) = resources::metrics(&k, q.ns.as_deref(), q.pod.as_deref()).await?;
     Ok(Json(json!({ "pods": pods, "available": available })))
 }
 
@@ -583,7 +646,7 @@ async fn exec<S: K8sCtx>(
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
     let session = sessions::exec(&ctx, &user, &c, &req).await?;
-    let _ = svc.repo().touch(&c.id).await;
+    list_cache::touch_throttled(svc.repo(), &c.id).await;
     audit(
         &ctx,
         &user,
@@ -607,7 +670,7 @@ async fn k9s<S: K8sCtx>(
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
     let session = sessions::k9s(&ctx, &user, &c, &req).await?;
-    let _ = svc.repo().touch(&c.id).await;
+    list_cache::touch_throttled(svc.repo(), &c.id).await;
     audit(
         &ctx,
         &user,
@@ -633,7 +696,7 @@ async fn run_action<S: K8sCtx>(
     let c = svc.get(&id).await?;
     let k = clusters::kubectl_for(&ctx, &c).await?;
     let result = actions::execute_authorized(&k, &req, &ctx.pool(), &user, &id).await;
-    let _ = svc.repo().touch(&c.id).await;
+    list_cache::touch_throttled(svc.repo(), &c.id).await;
     // Audit both outcomes: a denied/failed mutation attempt is as interesting
     // as a successful one. Params are logged verbatim (they carry no secrets:
     // replicas / revision / confirm_name / flags).
@@ -641,6 +704,8 @@ async fn run_action<S: K8sCtx>(
         Ok(r) => (r.ok, None),
         Err(e) => (false, Some(e.to_string())),
     };
+    // The next list must show the action's effect, not a cached answer.
+    list_cache::forget_cluster(c.id.as_str());
     audit(
         &ctx,
         &user,
@@ -720,7 +785,7 @@ async fn pod_http<S: K8sCtx>(
     }
     let k = clusters::kubectl_for(&ctx, &c).await?;
     let result = pod_http::run(&k, c.id.as_str(), &v).await;
-    let _ = svc.repo().touch(&c.id).await;
+    list_cache::touch_throttled(svc.repo(), &c.id).await;
     let mut detail = base_detail;
     match &result {
         Ok(r) => {

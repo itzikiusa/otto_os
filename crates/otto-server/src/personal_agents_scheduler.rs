@@ -103,12 +103,22 @@ async fn proactive_tick(ctx: &ServerCtx, repo: &PersonalAgentsRepo, now: DateTim
             return;
         }
     };
+    if agents.is_empty() {
+        return;
+    }
     let since = (now - chrono::Duration::hours(24)).to_rfc3339();
+    // Every agent's budget use in ONE statement (perf N6). A failed read
+    // spends no budget this tick (fail closed, as before).
+    let ids: Vec<&str> = agents.iter().map(|(a, _)| a.id.as_str()).collect();
+    let used_by = match repo.count_proactive_runs_since(&ids, &since).await {
+        Ok(m) => m,
+        Err(e) => {
+            warn!("personal agents: proactive budget read failed: {e}");
+            return;
+        }
+    };
     for (agent, cfg) in agents {
-        let used = repo
-            .count_runs_since(&agent.id, "proactive", &since)
-            .await
-            .unwrap_or(i64::MAX);
+        let used = used_by.get(&agent.id).copied().unwrap_or(0);
         let Some(goal) = next_proactive_goal(&cfg, used, now) else {
             continue;
         };

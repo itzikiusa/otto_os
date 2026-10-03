@@ -45,9 +45,11 @@ export function closeTab(id: string) {
   return api.del<void>(`/browser/tabs/${id}`);
 }
 
-export function getPage(ws: string, url: string) {
+export function getPage(ws: string, url: string, opts: { fresh?: boolean } = {}) {
   // `include_html=0`: the reader only renders `markdown` (html is up to 2 MB).
-  return api.get<BrowserPage>(`${base(ws)}/page?url=${enc(url)}&include_html=0`);
+  // `fresh=1` bypasses the daemon's one-minute page cache (an explicit retry).
+  const fresh = opts.fresh ? '&fresh=1' : '';
+  return api.get<BrowserPage>(`${base(ws)}/page?url=${enc(url)}&include_html=0${fresh}`);
 }
 
 export function queryPage(ws: string, url: string, selector: string) {

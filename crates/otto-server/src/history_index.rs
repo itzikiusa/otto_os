@@ -80,6 +80,7 @@ fn stat(path: &Path, provider: Provider) -> Option<Found> {
 /// Every transcript file under the two roots, plus whether any directory
 /// failed to list (a transient error must never look like "everything was
 /// deleted" to the prune step).
+#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
 pub fn list_transcripts(claude_root: &Path, codex_root: &Path) -> (Vec<Found>, bool) {
     let mut out = Vec::new();
     let mut errors = false;
@@ -106,6 +107,7 @@ pub fn list_transcripts(claude_root: &Path, codex_root: &Path) -> (Vec<Found>, b
         }
     }
     // Codex: `<root>/YYYY/MM/DD/rollout-*.jsonl` (bounded walk).
+    #[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
     fn walk(dir: &Path, depth: usize, out: &mut Vec<Found>, errors: &mut bool) {
         if depth > 5 {
             return;

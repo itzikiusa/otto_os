@@ -142,3 +142,50 @@ export function liveRefreshLimit(
   if (appendInFlight || loaded > serverMax) return null;
   return Math.max(page, loaded);
 }
+
+// ── perf K8s (review K6): stable identities across live refreshes ────────────
+
+/** A fleet table row's identity: cluster / namespace / workload (/ pod in pod
+ *  grouping — empty in workload grouping, so the key reads the same there). */
+export function fleetRowKey(r: { cluster_id: string; namespace: string; workload: string; pod: string }): string {
+  return r.pod ? `${r.cluster_id}/${r.namespace}/${r.workload}/${r.pod}` : `${r.cluster_id}/${r.namespace}/${r.workload}`;
+}
+
+/** A fleet event's identity — events carry no id, so the fields that tell two
+ *  apart: when, where, what. Pair with {@link uniqueKeys} (two identical
+ *  events in one second must still get distinct keys). */
+export function fleetEventKey(e: { ts: string; cluster_id: string; namespace: string; pod: string; container?: string | null; reason: string; kind: string; class?: string }): string {
+  return `${e.ts}|${e.cluster_id}|${e.namespace}|${e.pod}|${e.container ?? ''}|${e.kind}|${e.class ?? ''}|${e.reason}`;
+}
+
+/** `keys` with duplicates suffixed (`k`, `k#2`, `k#3`…) so a keyed `{#each}`
+ *  never sees the same key twice; a unique key list comes back unchanged. */
+export function uniqueKeys(keys: readonly string[]): string[] {
+  const seen = new Map<string, number>();
+  return keys.map((k) => {
+    const n = (seen.get(k) ?? 0) + 1;
+    seen.set(k, n);
+    return n === 1 ? k : `${k}#${n}`;
+  });
+}
+
+/** `next` with every item that is UNCHANGED since `prev` (same key, same JSON)
+ *  swapped for the `prev` object, so a keyed `{#each}` skips re-rendering it.
+ *  When nothing changed at all (same keys, same order, same content) `prev`
+ *  itself comes back — assigning it to `$state.raw` is then a no-op. */
+export function reuseByKey<T>(prev: readonly T[], next: readonly T[], key: (item: T) => string): T[] {
+  if (!prev.length) return next as T[];
+  const old = new Map<string, { item: T; json: string }>();
+  for (const p of prev) old.set(key(p), { item: p, json: JSON.stringify(p) });
+  let same = prev.length === next.length;
+  const out = next.map((n, i) => {
+    const hit = old.get(key(n));
+    if (hit && hit.json === JSON.stringify(n)) {
+      if (prev[i] !== hit.item) same = false;
+      return hit.item;
+    }
+    same = false;
+    return n;
+  });
+  return same ? (prev as T[]) : out;
+}

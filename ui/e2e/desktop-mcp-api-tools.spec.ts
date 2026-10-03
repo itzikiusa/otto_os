@@ -118,7 +118,7 @@ function bridgeEnv(routing: Record<string, string>): NodeJS.ProcessEnv {
   for (const [key, value] of Object.entries(process.env)) {
     if (!key.startsWith('OTTO_')) env[key] = value;
   }
-  return { ...env, OTTO_SECRETS: process.env.OTTO_SECRETS ?? 'file', ...routing };
+  return { ...env, OTTO_SECRETS: process.env.OTTO_SECRETS ?? 'file', OTTO_SECRETS_ALLOW_PLAINTEXT: '1', ...routing };
 }
 
 test.beforeAll(async () => {

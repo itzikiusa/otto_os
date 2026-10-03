@@ -132,7 +132,7 @@ test('API request draft and focus survive all shell breakpoints', async ({ page 
   await page.addInitScript(id => { localStorage.setItem('otto_workspace', id); localStorage.setItem('otto_firstrun_dismissed', '1'); }, workspaceId);
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
-  await page.route(`**/workspaces/${workspaceId}/api-client/requests`, async route => { await gate; await route.fulfill({ json: [] }); });
+  await page.route(`**/workspaces/${workspaceId}/api-client/requests/summaries`, async route => { await gate; await route.fulfill({ json: [] }); });
   await page.goto('/#/api');
   const url = page.getByLabel('Request URL', { exact: true });
   await url.fill('https://fixture.invalid/unsaved-breakpoint-review');

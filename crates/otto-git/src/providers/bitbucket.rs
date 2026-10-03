@@ -85,7 +85,7 @@ impl Bitbucket {
     async fn paginate_values(&self, path: &str) -> Result<Vec<Value>> {
         const MAX_PAGES: usize = 20;
         let mut all: Vec<Value> = Vec::new();
-        let mut page = self.send_json(reqwest::Method::GET, path, None).await?;
+        let mut page = self.get_json_cached(path).await?;
         let mut fetched = 1usize;
         loop {
             all.extend_from_slice(varr(&page, &["values"]));
@@ -93,7 +93,7 @@ impl Bitbucket {
             let Some(next) = next.filter(|_| fetched < MAX_PAGES) else {
                 break;
             };
-            page = self.send_json(reqwest::Method::GET, &next, None).await?;
+            page = self.get_json_cached(&next).await?;
             fetched += 1;
         }
         Ok(all)
@@ -144,6 +144,24 @@ impl Bitbucket {
             return self.http.into_result(resp2).await;
         }
         self.http.into_result(resp).await
+    }
+
+    /// A read through the shared ETag/short-TTL cache (`Http::get_cached_json`),
+    /// with the same Basic → Bearer fallback as [`Self::send`]. The PR list and
+    /// detail are re-asked on every mount; a burst now costs one request.
+    async fn get_json_cached(&self, path: &str) -> Result<serde_json::Value> {
+        match self
+            .http
+            .get_cached_json(self.build(reqwest::Method::GET, path, false, None))
+            .await
+        {
+            Err(Error::Forbidden(_)) => {
+                self.http
+                    .get_cached_json(self.build(reqwest::Method::GET, path, true, None))
+                    .await
+            }
+            r => r,
+        }
     }
 
     /// Send and parse the response body as JSON.
@@ -427,7 +445,7 @@ impl super::GitProvider for Bitbucket {
         for s in states {
             path.push_str(&format!("&state={s}"));
         }
-        let v = self.send_json(reqwest::Method::GET, &path, None).await?;
+        let v = self.get_json_cached(&path).await?;
         Ok(super::PrPage {
             items: varr(&v, &["values"]).iter().map(summary_from).collect(),
             // Bitbucket's cursor: present iff another page exists.
@@ -445,7 +463,7 @@ impl super::GitProvider for Bitbucket {
             Self::pr_path(r, &format!("/{number}/comments"))
         );
         let (pr, comments_v) = tokio::join!(
-            self.send_json(reqwest::Method::GET, &pr_path, None),
+            self.get_json_cached(&pr_path),
             self.paginate_values(&comments_path),
         );
         let (pr, comments_v) = (pr?, comments_v?);
@@ -555,7 +573,7 @@ impl super::GitProvider for Bitbucket {
             if fetched >= MAX_PAGES {
                 break true;
             }
-            page = self.send_json(reqwest::Method::GET, &next, None).await?;
+            page = self.get_json_cached(&next).await?;
             fetched += 1;
         };
         let mut resp = DiffResp {
@@ -761,7 +779,7 @@ impl super::GitProvider for Bitbucket {
             "{}?pagelen=100",
             Self::pr_path(r, &format!("/{number}/commits"))
         );
-        let v = self.send_json(reqwest::Method::GET, &path, None).await?;
+        let v = self.get_json_cached(&path).await?;
         let commits = varr(&v, &["values"])
             .iter()
             .map(|c| {

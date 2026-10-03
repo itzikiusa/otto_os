@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { SIDEBAR_MODULES } from '../src/lib/sidebar.ts';
+import { chainTo, staticClosure } from './staticClosure.ts';
 
 const SRC = join(import.meta.dirname, '..', 'src');
 const read = (p: string) => readFileSync(join(SRC, p), 'utf8');
@@ -46,7 +47,68 @@ test('mermaid, sql-formatter and qrcode are never imported statically', () => {
   };
   walk(SRC);
   assert.deepEqual(offenders, [], 'import these heavy libraries with `await import(...)` (canvas/mermaid.ts for mermaid)');
-  for (const f of ['shell/Navigator.svelte', 'shell/TabBar.svelte']) {
+  for (const f of ['shell/Navigator.svelte', 'shell/TabBar.svelte', 'modules/agents/SessionView.svelte']) {
     assert.doesNotMatch(read(f), /import\s+ShareModal\s+from/, `${f}: ShareModal bundles qrcode — load it on open`);
   }
+});
+
+test('the shell chunk evaluates no page-owned store, handler file or the ui-commands catalog (perf F2)', () => {
+  const entry = join(SRC, 'shell/App.svelte');
+  const closure = staticClosure(entry);
+  const heavy = [
+    'lib/stores/database.svelte.ts',
+    'lib/stores/apiClient.svelte.ts',
+    'lib/stores/k8s.svelte.ts',
+    'lib/stores/aws.svelte.ts',
+    'lib/stores/product.svelte.ts',
+    'lib/stores/swarm.svelte.ts',
+    'lib/stores/canvas.svelte.ts',
+    'lib/uiCommands/database.ts',
+    'lib/uiCommands/catalog.ts',
+    'lib/components/CodeEditor.svelte',
+    'modules/vault/vault.svelte.ts',
+    'modules/home/home.svelte.ts',
+  ];
+  const reached = heavy
+    .filter((f) => closure.has(join(SRC, f)))
+    .map((f) => chainTo(entry, join(SRC, f), SRC).join(' → '));
+  assert.deepEqual(reached, [], 'route through lazyModule() / registerLazyUiCommands() instead of a static import');
+});
+
+test('the entry chunk never carries the mock-API fixtures (perf F10)', () => {
+  const entry = join(SRC, 'main.ts');
+  const mock = join(SRC, 'lib/api/mock.ts');
+  assert.ok(!staticClosure(entry).has(mock), chainTo(entry, mock, SRC).join(' → '));
+});
+
+test('the right activity panel loads each tab on demand (perf G1)', () => {
+  const entry = join(SRC, 'shell/RightPanel.svelte');
+  const closure = staticClosure(entry);
+  const heavy = [
+    'lib/components/CodeEditor.svelte',
+    'lib/components/Terminal.svelte',
+    'modules/git/GitPanel.svelte',
+    'modules/api/ApiPanel.svelte',
+    'modules/panels/FilesPanel.svelte',
+    'modules/panels/BrowserPanel.svelte',
+    'modules/panels/BrowserPanelV2.svelte',
+    'modules/panels/CanvasPanel.svelte',
+    'modules/panels/ActivityPanel.svelte',
+    'modules/panels/OutputsPanel.svelte',
+    'modules/panels/InfoPanel.svelte',
+  ];
+  const reached = heavy
+    .filter((f) => closure.has(join(SRC, f)))
+    .map((f) => chainTo(entry, join(SRC, f), SRC).join(' → '));
+  assert.deepEqual(reached, [], 'load the tab through PANEL_LOADERS in RightPanel.svelte');
+
+  // Every tab but Notes (inline) has a loader.
+  const src = read('shell/RightPanel.svelte');
+  const tabs = [...src.slice(src.indexOf('const tabs:')).matchAll(/\{ id: '([a-z]+)'/g)].map((m) => m[1]);
+  const loaders = src.slice(src.indexOf('PANEL_LOADERS'), src.indexOf('};', src.indexOf('PANEL_LOADERS')));
+  const keys = new Set([...loaders.matchAll(/^\s*([a-zA-Z0-9]+):\s*\(\)/gm)].map((m) => m[1]));
+  assert.ok(tabs.length >= 9, `parsed the tab list (${tabs.join()})`);
+  const missing = tabs.filter((t) => t !== 'notes' && t !== 'browser' && !keys.has(t));
+  assert.deepEqual(missing, [], 'add the tab to PANEL_LOADERS');
+  for (const k of ['browserV1', 'browserV2']) assert.ok(keys.has(k), k);
 });

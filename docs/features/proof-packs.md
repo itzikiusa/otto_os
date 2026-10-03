@@ -308,7 +308,8 @@ the artifact. The CI badges (`ci_passed`/`ci_failed`/`ci_pending`) and the
 `attach_media` stores a binary **blob** (`proof_blobs`, content-addressed by
 sha256) and creates the owning `screenshot`/`video` artifact (`ref_kind=blob`,
 `content_ref=blob:<id>`, status `info`). The endpoint (**`POST /media`**, #129)
-takes base64 (`AttachMediaReq {kind, title, mime, data_base64, metadata?}`) and
+takes a raw body (`Content-Type` = mime, `?kind=&title=` — what the UI sends) or
+the legacy base64 JSON (`AttachMediaReq {kind, title, mime, data_base64, metadata?}`) and
 enforces:
 
 - **MIME allow-list** (`ALLOWED_MEDIA_MIMES`): `image/png`, `image/jpeg`,
@@ -320,6 +321,20 @@ enforces:
 Any non-failed media artifact earns the `ui_verified` badge. The raw bytes are
 served back inline via **`GET /proof-artifacts/{id}/blob`** (#130), and the UI
 renders the image/`<video>` directly in pack detail.
+
+**Where the bytes live.** Media is kept OUT of the state SQLite file: new
+blobs are written to a content-addressed file store,
+`data_dir/proof-media/<sha[..2]>/<sha>` (tmp + fsync + rename; an identical
+screenshot attached twice is stored once), and the `proof_blobs` row keeps only
+metadata (`stored = 1`, empty `data`). Rows written before this change still
+carry their bytes inline (`stored = 0`) and are served from there; a background
+job (90 s after boot, then daily) moves them in small batches — each row's
+bytes are re-hashed, written, **read back and verified** before the row drops
+its inline copy, and a row whose bytes don't match its recorded sha is left
+untouched. The same job deletes store files no row references (artifact
+deleted) once they are over an hour old, and logs the store's file/byte count.
+Base64 decoding and hashing run on the blocking pool. The blob route answers
+with `ETag` = sha + `immutable` caching (304 on revalidation).
 
 ### 8.3 API request/response evidence
 
@@ -541,7 +556,9 @@ wiring is a follow-up, so today it's a manual `/evidence/*` call.
 
 `ui/src/modules/proof/ProofPage.svelte` is a two-pane viewer:
 
-- **Left rail** — a status filter (`all · passed · failed · partial · missing ·
+- **Left rail** — loads 100 packs at a time (keyset paging, **Load more** at
+  the bottom); a `proof_pack_updated` event patches the row and the sidebar
+  chip in place from the event's `badges` instead of refetching. A status filter (`all · passed · failed · partial · missing ·
   waived`) over the workspace's packs, each row showing its title (or
   `work_item_id`), a `ProofStatusChip` (status + risk), the `work_item_kind` tag,
   and its `ProofBadges`. A **`+`** creates a `manual` pack (a random `work_item_id`)
@@ -552,7 +569,8 @@ wiring is a follow-up, so today it's a manual `/evidence/*` call.
   grouped by kind**. Each artifact shows a status dot, its title, a
   `sha:<8 hex>…` chip, the status label; media (`screenshot`/`video`) render
   inline; a `pr_check` artifact renders its per-check breakdown; previews are
-  expandable and **"Load full"** pulls the uncapped content.
+  expandable and **"Load full"** pulls the uncapped content (the detail
+  response itself only carries the 8 KiB preview, cut in SQL).
 - **Pack actions** — **Assemble** (diff + commands), **Add artifact**,
   **Add media** (screenshot/video, ≤25 MiB), **Add evidence** (api/db/kafka),
   **PR check**, **Refresh CI** (when repo-linked), **Requirements** (edit the
@@ -563,7 +581,27 @@ Live updates arrive over the `proof_pack_updated` WS event (the store re-fetches
 the affected pack and refreshes the workspace summary). The cheap
 `GET /proof-summary` roll-up (now carrying `done_score` per row) powers compact
 status chips elsewhere in the app (e.g. alongside a session) without loading every
-pack.
+pack. The sidebar asks for exactly the sessions it lists
+(`?work_items=session:<id>,…`, only ids it has not asked for before), so the
+read is an index probe per listed session — at 10k session packs the sidebar
+still reads only its own rows. Without `work_items` the endpoint returns every
+pack in the workspace (kept as a fallback).
+
+**Archiving stale session packs (opt-in, never deletes).** Every agent session
+gets a pack, so a busy workspace accumulates thousands of empty session packs.
+A workspace admin can run **Archive stale session packs…** (Proof page header,
+⋯ menu) or `POST /workspaces/{id}/proof-packs/archive-sessions
+{older_than_days (default 30, min 7), apply}`. It is a dry run unless `apply`
+(the UI shows the count and asks first). Only `session` packs with no evidence
+artifacts, not waived, and untouched since the cutoff are stamped `archived_at`
+(migration 0164). They drop out of the summary roll-up and the default list
+(`?include_archived=true` lists them) but stay stored, and any later change to
+the pack or a new artifact clears the stamp (DB triggers), so a session that
+gets evidence reappears by itself.
+
+Review proof-pack exports (`POST /reviews/{id}/proof-pack/export`) keep every
+snapshot by default — an older snapshot is the only record of the review as it
+stood then. Pass `keep_last: N` to keep only the newest N for that review.
 
 ---
 
@@ -578,7 +616,7 @@ workspace role.
 |---|---|---|---|---|
 | 115 | `GET /workspaces/{id}/proof-packs` | ws viewer · ProofPack View | `?status & work_item_kind & work_item_id` | `ProofPackResp[]` |
 | 116 | `POST /workspaces/{id}/proof-packs` | ws editor · ProofPack Edit | `CreateProofPackReq {work_item_kind, work_item_id, title?, parent_pack_id?, repo_id?}` | `ProofPackResp` (ensure-or-create; `repo_id` links policy, strengthen-only) |
-| 117 | `GET /workspaces/{id}/proof-summary` | ws viewer · ProofPack View | — | `ProofSummaryResp {rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, done_score, badges[]}]}` |
+| 117 | `GET /workspaces/{id}/proof-summary` | ws viewer · ProofPack View | `?work_items=kind:id,…` (optional, ≤ 1000) | `ProofSummaryResp {rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, done_score, badges[]}]}` |
 | 118 | `GET /proof-packs/{id}` | ws viewer · ProofPack View | — | `ProofPackDetailResp {pack, badges[], artifacts[], children[], done_contract, snapshots[]}` (done_contract live) |
 | 119 | `PATCH /proof-packs/{id}` | ws editor · ProofPack Edit | `{title?, summary?}` | `ProofPackResp` |
 | 120 | `DELETE /proof-packs/{id}` | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts, snapshots, blobs) |

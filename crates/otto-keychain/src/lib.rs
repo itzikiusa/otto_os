@@ -1,12 +1,19 @@
 //! otto-keychain — `SecretStore` implementations.
 //!
-//! - [`KeychainStore`]: macOS Keychain via the `keyring` crate (service
-//!   `"com.otto.daemon"`). The default for normal operation.
+//! - [`EncryptedFileStore`]: `secrets.enc` under the data dir, AES-256-GCM
+//!   sealed with ONE master key kept in the macOS Keychain (see
+//!   [`encrypted`]). `OTTO_SECRETS=encrypted`, or automatically once a
+//!   plaintext store was migrated.
+//! - [`KeychainStore`]: one Keychain item per secret (service
+//!   `"com.otto.daemon"`); the historic default when `OTTO_SECRETS` is unset.
 //! - [`FileStore`]: a 0600-permission JSON file under the data dir, selected
-//!   with `OTTO_SECRETS=file` (dev/CI fallback, secrets stored in plaintext).
+//!   with `OTTO_SECRETS=file` (dev/CI/Linux fallback, secrets stored in
+//!   PLAINTEXT; release macOS builds need `OTTO_SECRETS_ALLOW_PLAINTEXT=1` or a
+//!   pre-existing legacy file). Settings ▸ Security offers the explicit
+//!   "Secure secrets…" migration ([`SecretsControl::migrate_to_encrypted`]).
 //! - [`CachingSecretStore`]: a TTL read-through cache in front of either, so
 //!   hot request paths (MCP invoke, Jira/Confluence, webhooks) don't pay a
-//!   Keychain IPC round trip — or a `secrets.json` re-parse — per call.
+//!   Keychain IPC round trip — or a file decrypt/re-parse — per call.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -17,22 +24,81 @@ use std::time::{Duration, Instant};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Result};
 
+pub mod control;
+pub mod encrypted;
+
+pub use control::{SecretsControl, SecretsMode, SecretsStatus};
+pub use encrypted::{EncryptedFileStore, KeychainMasterKey, MasterKeyCell};
+
 /// Keychain service name under which all Otto secrets are stored.
 pub const SERVICE_NAME: &str = "com.otto.daemon";
 
-/// Pick the secret store implementation from the environment:
-/// `OTTO_SECRETS=file` → [`FileStore`] under `data_dir`, anything else →
-/// [`KeychainStore`]. Either way it is fronted by a [`CachingSecretStore`]
-/// with [`DEFAULT_CACHE_TTL`].
+/// File name of the plaintext (legacy / dev) store under the data dir.
+pub const PLAINTEXT_FILE: &str = "secrets.json";
+
+/// Pick the secret store from the environment and the files on disk (see
+/// [`control::choose_mode`]), wrap it in a switchable [`SecretsControl`]
+/// (registered process-wide for the admin status/migration routes) and front
+/// it with a [`CachingSecretStore`] with [`DEFAULT_CACHE_TTL`].
+///
+/// Never touches the Keychain itself: the master key is loaded lazily, with a
+/// bounded wait, on the first encrypted read of an existing `secrets.enc`.
 pub fn from_env(data_dir: &Path) -> Arc<dyn SecretStore> {
-    let inner: Arc<dyn SecretStore> = if std::env::var("OTTO_SECRETS").as_deref() == Ok("file") {
-        tracing::info!("secret store: file ({}/secrets.json)", data_dir.display());
-        Arc::new(FileStore::new(data_dir))
-    } else {
-        tracing::info!("secret store: macOS Keychain (service {SERVICE_NAME})");
-        Arc::new(KeychainStore::new())
-    };
-    Arc::new(CachingSecretStore::new(inner, DEFAULT_CACHE_TTL))
+    let env = std::env::var("OTTO_SECRETS").ok();
+    let allow_plaintext = std::env::var("OTTO_SECRETS_ALLOW_PLAINTEXT").as_deref() == Ok("1");
+    let strict = cfg!(all(not(debug_assertions), target_os = "macos"));
+    // Finish an interrupted plaintext wipe before deciding the mode (a zeroed
+    // secrets.json next to secrets.enc must not select plaintext).
+    control::sweep_plaintext_residue(data_dir);
+    let plaintext_exists = data_dir.join(PLAINTEXT_FILE).exists();
+    let mode = control::choose_mode(control::ModeInputs {
+        env: env.as_deref(),
+        allow_plaintext,
+        strict,
+        plaintext_exists,
+        encrypted_exists: data_dir.join(encrypted::ENCRYPTED_FILE).exists(),
+    });
+    match mode {
+        SecretsMode::Plaintext => {
+            tracing::warn!(
+                "secret store: PLAINTEXT file ({}/{PLAINTEXT_FILE}) — use Settings ▸ Security ▸ \
+                 Secure secrets… to encrypt it",
+                data_dir.display()
+            );
+            if strict && !allow_plaintext {
+                tracing::warn!(
+                    "secret store: plaintext kept only because a legacy {PLAINTEXT_FILE} exists \
+                     (release builds otherwise require OTTO_SECRETS_ALLOW_PLAINTEXT=1)"
+                );
+            }
+        }
+        SecretsMode::Encrypted => {
+            if env.as_deref() == Some("file") {
+                tracing::info!(
+                    "secret store: OTTO_SECRETS=file ignored — using the encrypted store \
+                     ({}/{})",
+                    data_dir.display(),
+                    encrypted::ENCRYPTED_FILE
+                );
+            } else {
+                tracing::info!(
+                    "secret store: encrypted file ({}/{}, master key in the Keychain)",
+                    data_dir.display(),
+                    encrypted::ENCRYPTED_FILE
+                );
+            }
+        }
+        SecretsMode::Keychain => {
+            tracing::info!("secret store: macOS Keychain (service {SERVICE_NAME})");
+        }
+    }
+    let key = Arc::new(MasterKeyCell::new(
+        Arc::new(KeychainMasterKey),
+        encrypted::DEFAULT_KEY_TIMEOUT,
+    ));
+    let control = Arc::new(SecretsControl::new(data_dir, key, mode));
+    control::register(control.clone());
+    Arc::new(CachingSecretStore::new(control, DEFAULT_CACHE_TTL))
 }
 
 // ---------------------------------------------------------------------------
@@ -197,12 +263,12 @@ impl FileStore {
     /// Store secrets under `dir/secrets.json`.
     pub fn new(dir: &Path) -> Self {
         Self {
-            path: dir.join("secrets.json"),
+            path: dir.join(PLAINTEXT_FILE),
             lock: Mutex::new(()),
         }
     }
 
-    fn load(&self) -> Result<BTreeMap<String, String>> {
+    pub(crate) fn load(&self) -> Result<BTreeMap<String, String>> {
         match std::fs::read_to_string(&self.path) {
             Ok(s) => serde_json::from_str(&s)
                 .map_err(|e| Error::Internal(format!("secrets file parse: {e}"))),

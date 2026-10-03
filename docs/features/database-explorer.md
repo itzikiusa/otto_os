@@ -778,7 +778,10 @@ switch, client-side filter/sort, selection bar, pending-edits bar, footer pager)
 over three interchangeable views of the same rows:
 
 - **Grid** (`GridView.svelte`) — a **virtualized** columnar table: only the rows
-  in view are in the DOM, so 100k-row results scroll smoothly. The sticky
+  in view are in the DOM, so 100k-row results scroll smoothly. Past 40 columns
+  the **columns** are windowed too: each row mounts only the columns near the
+  viewport (spacer cells stand for the rest; the header keeps every column), so
+  a 300-column ClickHouse result scrolls like a narrow one. The sticky
   header has two lines (name, then type); numbers are right-aligned in tabular
   figures; `NULL` renders as a dim italic **NULL**. Drag a header's edge to
   resize (double-click to fit), drag the header itself to **reorder** columns.
@@ -816,6 +819,18 @@ strip (the checkbox slot is always reserved; the toolbar is one fixed row whose
 rarer verbs live in **Copy ▾ / Export ▾ / ⋯** menus; the edit verdict lands in
 the status bar). `desktop-db-layout-stability.spec.ts` pins the grid frame and
 first row from the loading frame through the probe.
+
+**Memory budget across tabs.** Every query tab keeps its last result, and a
+parked connection keeps its tabs. All resident results — across every tab and
+open connection — share one budget (`lib/stores/db-result-budget.ts`, about
+384 MB estimated; per-device override in `localStorage`
+`otto.db.resultBudgetMB`). Past it, the **least recently viewed** results are
+released: the rows are dropped, columns and stats are kept, and the tab shows
+**"Result released to save memory"** with a **Re-run** button that runs the same
+statement, scope and page again. The tab on screen, running tabs and tabs with
+un-applied edits are never released; results under 1 MB are not worth it.
+An agent reading a released tab (`otto.ui_db_get_result`) gets `released: true`
+and no rows, with a note to run the tab again.
 
 ### View mode & auto-Vertical
 
@@ -939,7 +954,10 @@ usual review modal. Whole-result import/export (files, streaming) is §10/§10b.
 ### Client-side filter & sort
 
 Filtering and sorting happen **in the browser** against the loaded rows (no
-re-query). Click a column header to cycle **none → ascending → descending →
+re-query). Over 20k rows the row search and the **Filter row** boxes apply when
+typing pauses (120 ms), not on every key; each column's display text is built
+once per result and reused for every key (a JSON column is no longer
+re-serialized per row per keystroke). Click a column header to cycle **none → ascending → descending →
 none** (type-aware: numeric vs string; nulls sort last). Header right-click adds
 **Sort ascending/descending**, **Clear sort**, **Filter by {column}…**, and
 **Copy column name**. Sort, the row search, column filters and **un-applied
@@ -1038,6 +1056,8 @@ streaming, uncapped local-file export — §10; flagged when the result is
 capped) and **Import file…** (§10b). **⋯**: Aggregate pipeline (Mongo),
 Compare two records (Vertical/JSON), Insert from JSON (editable results),
 Expand JSON cells (Grid), *Send to running agent…* and *Examine with AI*.
+Above 20k rows, copies and downloads are built 5k rows at a time behind a
+"Preparing…" toast so the window stays responsive.
 
 ### Foreign-key navigation
 
@@ -1138,13 +1158,18 @@ diagram for the active connection, backed by `POST …/db/schema-graph`:
   lets you choose which tables to render; the canvas auto-lays-out the selected
   cards (default ~12 shown) with **PK/FK-marked columns** and **FK relationship
   edges** labeled `from.col → to.col`. Pan and zoom are supported.
-- The backend walks the **same lazy schema tree** the UI browses
-  (`schema_children` + `object_detail`), so the diagram is engine-agnostic and the
-  FK data flows through the normal introspection. It introspects each object's
-  detail in parallel (concurrency 8) and **caps** the number of tables: `max_tables`
-  defaults to **60** and is clamped to **1..200** server-side. When the schema has
-  more tables than the cap, the graph is flagged **truncated** so the UI can prompt
-  you to pick a subset.
+- **MySQL, PostgreSQL and ClickHouse** read the whole schema in a few
+  set-based catalog queries (`Driver::schema_graph_bulk`: tables, columns and
+  PK/FK constraints for the schema at once). Other engines — or a bulk read the
+  credentials can't run — fall back to walking the **same lazy schema tree** the
+  UI browses (`schema_children` + `object_detail`, concurrency 8). Either way the
+  number of tables is **capped**: `max_tables` defaults to **60** and is clamped
+  to **1..200** server-side. When the schema has more tables than the cap, the
+  graph is flagged **truncated** so the UI can prompt you to pick a subset.
+- The built graph is **cached for 120 s** per connection, credentials, schema and
+  cap, and concurrent requests (Diagram, DB Assistant schema, enforced
+  completion) share **one** build. Edges are still filtered by the caller's
+  access on every request. **Refresh schema** clears the cache.
 - **Redis** returns an empty graph (its tree has no `db:`-rooted tables) and gets
   **no Diagram tab**. **MongoDB** renders collection cards but **no edges** (no FK
   metadata) and shows a **"no relationships"** hint. Both report
@@ -1184,7 +1209,11 @@ dependency) — the `DbViz` set is **`table` · `number` · `line` · `bar` · `
 | `pie` | slices with percentages (first numeric column = values) |
 
 A widget's **Refresh** button re-runs its stored statement (uncapped to 5000
-rows for rendering). Although the dashboards are framed around ClickHouse
+rows for rendering). Charts are **sampled to what a tile can show**
+(`chart-sample.ts`): bars average into at most 150 buckets, lines and areas keep
+each bucket's minimum and maximum (spikes survive), and a pie keeps its 11
+largest slices plus **Other**; the legend says how many points were averaged or
+sampled. Although the dashboards are framed around ClickHouse
 analytics, a widget runs against whatever connection it stores, through the same
 guarded execution path as a normal query.
 
@@ -1356,7 +1385,8 @@ execution/cancel/export = `ws editor` (global connections: `Database:Edit`):
 **Multi-target runs** ("Run on…", §4) — `POST /db/multi-run/plan` (preview:
 final statement per run, cluster detection), `POST /db/multi-runs` (start;
 `confirm_write` + `plan_hash`), `GET /db/multi-runs[/{rid}]` (status, summary,
-per-run detail), `GET /db/multi-runs/{rid}/items/{index}` (one run's statement +
+per-run detail; the sheet polls `?since=<seq>` and gets only the runs that
+changed, merged by index), `GET /db/multi-runs/{rid}/items/{index}` (one run's statement +
 result), `POST /db/multi-runs/{rid}/cancel`. Editor on every target connection.
 
 **Saved queries / dashboards / widgets** — workspace-scoped lists under
@@ -1593,3 +1623,49 @@ Database driver and SSH tunnel setup use independent initialization slots per co
 Closing a connection retires the generation held by already-started requests, including requests still resolving credentials/tunnels or waiting for native verification. Such requests cannot reopen a pool after close. An explicit later request can reconnect once cleanup completes; requests arriving during close receive a connection-closed error with retry guidance.
 
 Close cleanup owns the retired pools and tunnel leases independently of the HTTP caller. It attempts native cancellation before physical teardown, with separate five-second aggregate budgets for cancellation and driver shutdown. Cleanup then drops only its captured ownership; canceling the close request cannot abandon those resources or cause later cleanup to remove a new generation. Already-issued remote operations retain best-effort cancellation semantics; close is not a remote transaction rollback guarantee. Held tunnel leases remain alive while their owning operation/cancellation finishes.
+
+### Performance behaviour
+
+- **Access checks.** A Run reads the connection row and its access policy once
+  and shares them across the access gate, write guard and credential
+  resolution. While the query runs, eligibility (revoked access, a switch to
+  enforced mode, changed credentials) is re-checked every **2 s** — two indexed
+  state reads per tick on a legacy connection. Tree roots, object search and
+  diagram edges authorize all their nodes with one load, so a server with
+  hundreds of databases no longer costs two state reads per database.
+- **Idle handles.** Every five minutes the reaper drops driver handles (MySQL /
+  Postgres pools, Mongo / Redis / ClickHouse clients) unused for **30 min**. A
+  query still running keeps its own handle until it finishes.
+- **Timeouts.** MySQL/Postgres pools wait at most 10 s for a free session and
+  then report "connection busy"; Stop cancels on a separate connection, so it
+  never queues behind the busy ones. MongoDB defaults server selection and
+  connect timeouts to 8 s (15 s through an SSH SOCKS tunnel) and closes sockets
+  idle for 5 min, unless the URI sets its own values. Redis connects within
+  10 s and waits up to **30 s** for a reply (long blocking commands such as
+  `BLPOP` with a longer timeout will time out).
+- **Server-side row limits.** MongoDB aggregates get `batchSize` and a trailing
+  `$limit` of row-limit + 1 (not after `$out`/`$merge`). Redis replies are cut
+  to the row limit before conversion and count against the 32 MB response
+  budget. MongoDB results show at most 500 field columns; any further fields
+  of a document are gathered in one JSON column named `$other`.
+- **Shared Mongo sample.** Tree expand, the Structure tab and field
+  completion share one sample per collection (120 s), built once even when many
+  requests arrive together.
+- **Pooled sessions survive paging.** A MySQL/Postgres read that hits the row
+  limit (the default "open table" view and every page after it) returns its
+  session to the pool when the daemon added the `LIMIT` itself, so the next Run
+  doesn't reconnect. A statement without an injected limit (a batch, a
+  `UNION`, `SHOW`, …) that is cut at the limit still closes its session, since
+  draining the rest could take minutes. A new MySQL session is set up in one
+  round trip. Ad-hoc SQL is not kept in the per-session statement cache.
+- **ClickHouse compression.** HTTP requests ask for `zstd`-compressed replies
+  (`enable_http_compression=1`). Results and exports still stream, and arrive
+  several times faster over a tunnel. A server that doesn't compress answers
+  plainly.
+- **Schema diagram for MongoDB.** The diagram and the DB Assistant's schema
+  context sample only field names and types per collection, 8 collections at a
+  time. They no longer read indexes, stats or whole documents.
+- **Cache sweeps.** The five-minute reaper also drops expired schema diagrams
+  and completion snapshots. Postgres completion reads `pg_catalog` directly,
+  so it stays fast on catalogs with thousands of tables.
+

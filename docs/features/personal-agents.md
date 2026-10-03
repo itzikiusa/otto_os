@@ -105,6 +105,14 @@ Rooms (`agent_rooms` / `agent_room_members` / `agent_room_messages`) are the
   pages back. (It used to start from the room's first message.)
 - The rooms list shows each room's member count and last activity; names are
   capped at 120 characters.
+- **Live feed cost.** The `agent_room_message` WS event carries the whole
+  message, so an open room appends it without a request; nothing is fetched for
+  rooms you haven't opened or while the Rooms view is closed (only the list's
+  activity line moves), and leaving the view drops every held feed but the
+  selected room's. The rooms list's count / last activity are stored on the
+  room row (kept in the same transaction as each post, recounted after
+  retention prunes), and the tail / paging reads are range scans on
+  `(room_id, rowid)` — no query scans a room's whole history.
 
 ## 4b. Autonomy — permission modes, standing goals, rules, activity, memory
 
@@ -169,9 +177,15 @@ passes through this gate).
 state, **Watch session**), *Waiting for you* (approvals the agent's calls filed,
 with Sensitive / Agent-rule labels and a link to MCP → Activity), and a
 timeline merging its tool calls (called / blocked / needs approval) with its
-runs. Live over the `personal_agent_activity` WS event. The tool-call list is an
+runs. Live over the `personal_agent_activity` WS event; each event fetches only
+the entries after the tab's cursor (`?after_seq=`), run history is re-read only
+when a run changed (or once a minute), and an approval change refreshes the tab
+only when it is one of the approvals it shows (perf W4). The tool-call list is an
 in-memory view (newest 200 per agent, cleared on daemon restart);
-`mcp_call_log` remains the durable audit.
+`mcp_call_log` remains the durable audit. Because the ring's `seq` counter
+restarts with the daemon, every answer carries the daemon's boot id (`epoch`);
+the tab sends it back with its cursor, and a cursor from a previous process is
+answered in full (`reset: true`) so the list never freezes after a restart.
 
 **Memory inspector** (Memory tab, above the raw editor): every top-level bullet
 of `memory/notes.md` as an item with its **source** — agents are told to start

@@ -2,6 +2,7 @@
   // Local working-tree review panel: diff against a chosen base branch, run
   // the configured review agents, show findings with checkboxes, and hand
   // selected findings off to a new agent session.
+  import { untrack } from 'svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
   import { api, ApiError } from '../../lib/api/client';
@@ -19,6 +20,8 @@
   import FindingsBoard from './FindingsBoard.svelte';
   import { agentProviders } from '../../lib/providers';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { reviewBus } from '../../lib/events.svelte';
+  import { appLive } from '../../lib/live';
 
   interface Props {
     repoId: string;
@@ -46,7 +49,10 @@
    *  on another page for up to MAX_POLLS). */
   let alive = true;
   let pollCount = $state(0);
-  const MAX_POLLS = 90; // 3 min at 2 s each
+  /** Fallback polls before "taking too long": 3 min at 2 s with no event
+   *  socket; with one, `review_changed` drives the refresh and the 10 s
+   *  safety-net chain gives up after 15 min. */
+  const MAX_POLLS = 90;
   // Which older run indices (history[1+]) are expanded
   let historyExpanded: Record<number, boolean> = $state({});
 
@@ -77,10 +83,33 @@
     void loadRefs(repoId);
     void loadExisting(repoId);
     alive = true;
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       alive = false;
       if (pollTimer !== null) clearTimeout(pollTimer);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
+  });
+
+  // A hidden window never polls; it reads once when it is shown again.
+  function onVisibility(): void {
+    if (document.hidden) {
+      if (pollTimer !== null) clearTimeout(pollTimer);
+      pollTimer = null;
+    } else if (review?.status === 'running') {
+      void poll(true);
+    }
+  }
+
+  // `review_changed` for the running local review re-reads it at once (the
+  // shared review runner emits it per agent step), so the timer chain below
+  // is only a safety net while the event socket is up.
+  $effect(() => {
+    void reviewBus.tick;
+    const evId = reviewBus.reviewId;
+    const cur = untrack(() => review);
+    if (!evId || !cur || cur.id !== evId) return;
+    void poll(true);
   });
 
   /** Why the base-branch list or the review history failed to load — shown
@@ -156,7 +185,9 @@
   function schedulePoll(): void {
     if (!alive) return;
     if (pollTimer !== null) clearTimeout(pollTimer);
-    pollTimer = setTimeout(() => void poll(), 2000);
+    pollTimer = null;
+    if (typeof document !== 'undefined' && document.hidden) return;
+    pollTimer = setTimeout(() => void poll(), appLive.connected() ? 10_000 : 2000);
   }
 
   // A child <ReviewAgents> retried one agent: adopt the refreshed review and
@@ -168,9 +199,11 @@
     schedulePoll();
   }
 
-  async function poll(): Promise<void> {
+  /** Re-read the running review. `fromBus` (an event or a re-shown window)
+   *  doesn't count toward the fallback budget. */
+  async function poll(fromBus = false): Promise<void> {
     if (!alive) return;
-    pollCount++;
+    if (!fromBus) pollCount++;
     if (pollCount > MAX_POLLS) {
       toasts.warn('Review is taking too long', 'Try refreshing manually.');
       return;

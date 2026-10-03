@@ -912,17 +912,7 @@ impl BrowserEngine for LightpandaEngine {
     /// Caller must netguard-check `url` first — see crate docs.
     async fn query(&self, url: &str, selector: &str) -> Result<Vec<MatchedNode>, EngineError> {
         let html = self.navigate_and_snapshot(url).await?;
-        let document = scraper::Html::parse_document(&html);
-        let sel = scraper::Selector::parse(selector)
-            .map_err(|e| EngineError::Nav(format!("bad selector {selector:?}: {e:?}")))?;
-        Ok(document
-            .select(&sel)
-            .map(|el| MatchedNode {
-                selector: selector.to_string(),
-                outer_html: el.html(),
-                text: el.text().collect::<Vec<_>>().join(" "),
-            })
-            .collect())
+        crate::select_capped_blocking(html, selector).await
     }
 
     /// Caller must netguard-check `url` first — see crate docs.

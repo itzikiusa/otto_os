@@ -8,11 +8,13 @@
   import { isInertAt } from './completion-gate';
   import type { EditorState } from '@codemirror/state';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
+  import { loadCmLang } from '../../lib/components/cm-langs';
   import { sqlDialectForKind } from '../../lib/sql-dialects';
   import ResultsGrid from './ResultsGrid.svelte';
   import PlanView from './PlanView.svelte';
   import VarsPrompt from './VarsPrompt.svelte';
   import MultiRunDialog from './MultiRunDialog.svelte';
+  import { dbHandoff, prefillVarType } from './handoff.svelte';
   import { databaseAccessChild } from '../../lib/access-options';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -89,6 +91,13 @@
         ? 'js'
         : 'sql',
   );
+  // SQL / Redis packs are static in cm-langs.ts; the Mongo editor's JS pack and
+  // the document editors' JSON pack load on demand. Warm both as soon as a
+  // Mongo connection is active so the workbench doesn't open them plain.
+  $effect(() => {
+    if (lang !== 'js') return;
+    for (const ext of ['js', 'json']) void loadCmLang(ext).catch(() => {});
+  });
   // The connection's SQL dialect: it decides what the editor tokenizes as a
   // string or comment (MySQL `\'` escapes and `#` comments), which gates
   // completion inside literals and scopes the completion span to a statement.
@@ -622,6 +631,22 @@
     if (!canQuery || !hasStatement) return;
     multiRun = { statement: editorSel.text.trim() ? editorSel.text : tab.statement };
   }
+
+  // Workbench "Send to → Database — Run on…": once this connection can query,
+  // open the parked script in a NEW tab with its placeholder values and show
+  // the Run on… sheet (setup stage — nothing runs without the user).
+  $effect(() => {
+    if (!dbHandoff.pending || !canQuery) return;
+    untrack(() => {
+      const p = dbHandoff.take();
+      if (!p) return;
+      database.newTab(p.statement);
+      for (const [name, value] of Object.entries(p.vars)) {
+        if (value.trim()) database.setVar(name, { value, type: prefillVarType(value) });
+      }
+      multiRun = { statement: p.statement };
+    });
+  });
 
   // Draggable split between the editor and the results.
   //

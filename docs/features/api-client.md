@@ -97,7 +97,14 @@ Environments are edited in `EnvironmentsView.svelte` (main area);
 
 Everything for the current workspace is loaded together (collections, requests,
 environments, history) plus automations when the page mounts or the workspace
-changes (`apiClient.loadAll()` + `loadAutomations()`).
+changes (`apiClient.loadAll()` + `loadAutomations()`). Re-entering the page
+within 60 s of a successful load reuses it (no refetch) — your own edits update
+the store directly and history arrives live; a failed load always refetches on
+Retry. The tree, search, pickers and ⌘K load the scalar `GET …/requests/summaries`
+projection (no bodies, scripts or docs; also backs `/overview`); opening a
+request fetches its full row with `GET …/requests/{id}` (cached for open tabs;
+a restored tab's row is fetched once on load). Only **Sync with Git → Push**
+reads every full row.
 
 ---
 
@@ -462,14 +469,35 @@ recorded per-workspace.
   body_mode/body/auth as executed. The response pane shows the **stored
   response** (status, headers, body, timing) under a *From history · <time> ·
   Send to run it again* banner — history keeps the first 64 KB of a body, and
-  the banner says so when it was cut.
+  the banner says so when it was cut. The stored request snapshot is capped the
+  same way (64 KB of `body`, `request_truncated: true`), and multipart file
+  parts keep only their filename and size, not the file bytes.
 - **⋯ → Retention…** opens a sheet (keep the newest N / delete after D days; 0 =
-  no limit); the current policy is shown under the search. **⋯ → Clear
+  no limit — the default; Otto never deletes history until you pick a limit);
+  the current policy is shown under the search. The trim runs in the background
+  at most every 30 s per workspace, so it never slows a Send. **⋯ → Clear
   history…** empties the workspace's history (`DELETE …/history`, Editor).
 - Until the first load answers the list says *Loading history…*; a failed load
   with nothing on screen shows the error inline with **Retry** (a failed
   refresh over existing rows is a toast and keeps the rows).
 - History is bounded server-side: default **100**, max **500** entries returned.
+- **Storage gauge.** `GET …/storage` reports how much history and automation
+  run reports hold (rows and stored bytes, cached 60 s); the list's status
+  line shows the history size. Past 5,000 requests, 50 MB, or 200 runs of one
+  automation — with no limit set for that part — an inline notice offers
+  **Keep 1,000 / Keep 5,000 / Keep 30 days / Custom…** (Editors; dismissible
+  per workspace). Retention is still opt-in: a preset is applied only after a
+  confirmation that says what is deleted and that it applies to everyone in
+  the workspace. It writes the same settings as the Retention sheet
+  (`history_max_rows` / `history_max_days`, and `automation_runs_keep` = 200
+  when no run limit is set) and `POST …/storage/prune` applies it at once
+  rather than on the next Send or run. The Retention sheet also sets the runs
+  kept per automation and shows the current sizes.
+- Saved requests, collections, environments and automations changed anywhere
+  (another window, an agent's `otto.api_upsert_request`) push an
+  `api_client_changed` WebSocket event. The loaded workspace patches the one
+  request (`GET …/requests/{id}`) or reloads that list, coalesced over 300 ms;
+  another workspace's 60 s reuse window is expired instead.
 - Agent executions carry `request.source = {kind:"agent", session_id}` and show an
   *Agent* chip. Use the **Agent runs only** filter to show only those rows.
 - New rows refresh live through the workspace-scoped `api_history_appended`
@@ -521,7 +549,7 @@ variables for later steps (request chaining).
 
 ### Running
 
-**Run** (saves first if dirty) starts `POST …/automations/{id}/runs`, then polls the saved report. The daemon:
+**Run** (saves first if dirty) starts `POST …/automations/{id}/runs`, then follows the saved report: each completed step pushes an `api_run_progress` WebSocket event and the view fetches just the new steps (`?after=N`) — at most one fetch per 250 ms however fast the steps come, a final event that lands while a fetch is in flight is kept (not lost), and a finished run skips the wait; a 2 s poll is only the fallback. Each step is stored as its own row (migration 0166), so a 1000-step run writes each result once instead of re-saving the whole report after every step. The daemon:
 
 - Seeds variables from the explicitly selected environment (or the active environment at start).
 - Pins the saved request definitions and runs steps in order through the shared HTTP send path. **Stop at the first failed step** is optional; otherwise all steps run. Errors are retained in the report.
@@ -544,7 +572,12 @@ Extracted variables are local to the run; saved environment values are not modif
 
 Use **Run once per data row (advanced)** to provide an array of objects. Each row overlays the selected environment independently; extracted variables chain only within that row. Dataset values stay in memory. Runs accept at most 1 MiB of dataset JSON and 1000 total step executions.
 
-**Run history** retains the latest 50 reports with **Load older runs** pagination, request versions at start, row indices, status, assertions and errors. Each completed step also gets a correlated request-history row. Completed results are saved before the next request starts. **Cancel run** stops waiting on the active request and skips remaining work; a request already sent may have reached its server. After daemon restart unfinished runs become `interrupted`, retain completed steps, and are never automatically replayed. Cancellation and restarting are separate actions.
+**Run history** lists the latest 50 reports as summaries (status, step count) with **Load older runs** pagination; selecting one loads the full report with request versions at start, row indices, status, assertions and errors. Each completed step also gets a correlated request-history row. Completed results are saved before the next request starts. **Cancel run** stops waiting on the active request and skips remaining work; a request already sent may have reached its server. After daemon restart unfinished runs become `interrupted`, retain completed steps, and are never automatically replayed. Cancellation and restarting are separate actions.
+
+Run reports are kept indefinitely by default. A workspace can opt in to
+retention with `settings.api_client.automation_runs_keep` (keep the newest N
+finished runs per automation, pruned when a run ends; a running run is never
+pruned).
 
 ---
 
@@ -565,6 +598,7 @@ mutations and execution require Editor.** Cross-workspace IDs 404
 | `GET /collections/{id}/openapi` | Viewer | → OpenAPI 3 JSON |
 | `GET /overview` (`?q&collection_id&kind=all\|requests\|environments\|automations`) | Viewer | → `ApiOverview {collections, requests, environments, automations}`; request metadata and masked environment variables only |
 | `GET /requests` (`?collection_id`) | Viewer | → `Request[]` |
+| `GET /requests/summaries` (`?collection_id`) | Viewer | → `ApiOverviewRequest[]` — id, name, method, url, collection, auth type, SSH flag, agent stamp, updated_at; no body/headers/scripts/docs |
 | `POST /requests` | Editor | `UpsertApiRequestReq` → `Request` |
 | `GET /requests/{id}` (`?shape=agent`) | Viewer | → `Request`; agent shape redacts auth and sensitive header/query values and caps the body at 64 KiB |
 | `PATCH /requests/{id}` | Editor | `UpsertApiRequestReq` → `Request` |
@@ -577,6 +611,8 @@ mutations and execution require Editor.** Cross-workspace IDs 404
 | `GET /history` (`?limit&q&status&request_id&source=agent\|human`) | Viewer | → filtered `ApiHistoryEntry[]` |
 | `GET /history/{id}` | Viewer | → `ApiHistoryEntry` |
 | `DELETE /history` | Editor | → 204 |
+| `GET /storage` | Viewer | → `ApiClientStorage {history_rows, history_bytes, run_rows, step_rows, run_bytes, max_runs_per_automation}` (cached 60 s) |
+| `POST /storage/prune` | Editor | → `ApiClientStorage`; applies the configured (opt-in) retention now |
 | `POST /execute` | Editor | `ExecuteApiReq` → `ApiResponse` |
 | `POST /requests/{id}/execute` | Editor | `{environment_id?, vars?, timeout_ms?, confirm?, confirm_new_host?, shape?, decode_jwt?}` → `{history_id, request_id, name, response, resolved, jwt_claims?, warnings, script_tests}`; nested `{{` vars → 400, unsafe method/new host without its confirm flag → 409, send failure → 502 |
 | `POST /grpc/describe` | Editor | `{proto}` → service/method descriptors |
@@ -788,7 +824,7 @@ with matching `otto.api_*` tools on the governed outward MCP server:
 |---|---|
 | `otto_api_list` | Discover collections, saved requests, environments, and automations; metadata and environment values are masked. |
 | `otto_api_get_request` | Read one saved request in the 64 KiB agent shape with auth and sensitive fields masked. |
-| `otto_api_history` | Filter past runs, or fetch one response by history id. |
+| `otto_api_history` | Filter past runs (summary rows from `/history/summaries`: method, url, status, duration, source — no bodies), or fetch one whole entry with its response by history id. |
 | `otto_api_execute` | Execute one saved request; unsafe methods and new hosts use explicit confirm flags. |
 | `otto_api_upsert_request` | Create or update a saved request. |
 | `otto_api_run_automation` | Run a saved automation and return its step report. |

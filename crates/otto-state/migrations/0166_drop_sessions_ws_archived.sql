@@ -1,0 +1,12 @@
+-- 0002's `(workspace_id, archived)` index is a strict prefix of 0162's
+-- `idx_sessions_ws_arch_created_src (workspace_id, archived, created_at, id,
+-- kind, source)`. For the shown-row statements with no ORDER BY —
+-- `SessionsRepo::visible_ids` and the activity summary's shown-only trail —
+-- the planner kept picking the narrower 0002 index (ANALYZE doesn't change
+-- the pick), so it fetched every row of the workspace and computed the
+-- virtual `source` from `meta_json` (~3 ms on the field DB vs ~0.6 ms with
+-- the predicate decided from the 0162 index entry). Every other
+-- `workspace_id + archived` sessions query already uses 0162 (or a
+-- `last_active_at` index) and keeps the same equality prefix without it, so
+-- the old index is pure write cost. Pinned by the plan test in sessions.rs.
+DROP INDEX IF EXISTS idx_sessions_ws_archived;

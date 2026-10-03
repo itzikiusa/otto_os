@@ -314,12 +314,13 @@ where
             None
         };
         // Unguarded this stat never happens — the legacy path is untouched.
-        let out_exists = guarded && out_path.exists();
+        let out_exists = guarded && tokio::fs::try_exists(out_path).await.unwrap_or(false);
         let pending = scan.as_ref().map(|s| s.pending.len()).unwrap_or(0);
         let decision = match scan.as_ref() {
             Some(s) if out_exists => {
                 if !s.pending.is_empty() && held_since.is_none() {
-                    held_since = std::fs::metadata(out_path)
+                    held_since = tokio::fs::metadata(out_path)
+                        .await
                         .and_then(|m| m.modified())
                         .ok()
                         .or_else(|| Some(SystemTime::now()));
@@ -330,8 +331,8 @@ where
         };
 
         if decision != GuardDecision::Hold {
-            if let Ok(text) = std::fs::read_to_string(out_path) {
-                let _ = std::fs::remove_file(out_path);
+            if let Ok(text) = tokio::fs::read_to_string(out_path).await {
+                let _ = tokio::fs::remove_file(out_path).await;
                 if decision == GuardDecision::AdoptAfterCap {
                     warn!(
                         "agent_run: adopting findings after {}m with {pending} task(s) still pending",
@@ -378,12 +379,12 @@ where
                 "findings written — {pending} sub-agents still running"
             ))
         } else if !guard.lens_files.is_empty() {
-            let done: Vec<String> = guard
-                .lens_files
-                .iter()
-                .filter(|(_, p)| p.exists())
-                .map(|(slug, _)| slug.clone())
-                .collect();
+            let mut done: Vec<String> = Vec::new();
+            for (slug, p) in &guard.lens_files {
+                if tokio::fs::try_exists(p).await.unwrap_or(false) {
+                    done.push(slug.clone());
+                }
+            }
             Some(lens_progress_note(&done, guard.lens_files.len(), pending))
         } else {
             None

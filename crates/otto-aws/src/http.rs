@@ -235,9 +235,9 @@ fn tag<T>(per_region: Vec<(String, Vec<T>)>) -> Vec<Regional<T>> {
 
 /// Session info is computed for profile accounts only (keys accounts have no
 /// sign-in to expire).
-fn attach_session(account: &mut AwsAccount) {
+fn attach_session(index: &crate::creds::SsoIndex, account: &mut AwsAccount) {
     if account.auth_mode == crate::accounts::AuthMode::Profile {
-        account.session = crate::creds::session_info(&account.id, account.profile.as_deref());
+        account.session = index.session_info(&account.id, account.profile.as_deref());
     }
 }
 
@@ -356,9 +356,11 @@ async fn list_accounts<S: AwsCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<Vec<AwsAccount>>> {
     let mut visible = Vec::new();
+    // One off-worker read of the ini files + SSO cache for the whole list.
+    let index = crate::creds::SsoIndex::load_async().await;
     for mut account in AwsService::from_ctx(&ctx).list().await? {
         if crate::access::allowed(&ctx.pool(), &user, &account.id, "discover", None).await? {
-            attach_session(&mut account);
+            attach_session(&index, &mut account);
             if !crate::access::can_configure(&ctx.pool(), &user, &account.id).await? {
                 account.redact_configuration();
             }
@@ -386,7 +388,7 @@ async fn get_account<S: AwsCtx>(
 ) -> ApiResult<Json<AwsAccount>> {
     crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
     let mut account = AwsService::from_ctx(&ctx).get(&id).await?;
-    attach_session(&mut account);
+    attach_session(&crate::creds::SsoIndex::load_async().await, &mut account);
     if !crate::access::can_configure(&ctx.pool(), &user, &id).await? {
         account.redact_configuration();
     }
@@ -619,9 +621,9 @@ async fn s3_download<S: AwsCtx>(
 }
 
 /// PUT /aws/accounts/{id}/s3/buckets/{bucket}/object?key=&overwrite= — AwsS3:Edit
-/// (`s3_write`, audited). The raw request body is spooled to an Otto-owned
-/// temp file (≤ 5 GiB) and uploaded with `aws s3 cp`. An existing key is a 409
-/// unless `overwrite=true`.
+/// (`s3_write`, audited). A body with a Content-Length (≤ 5 GiB) streams into
+/// `aws s3 cp - …` with no temp copy; a chunked body is spooled to an
+/// Otto-owned temp file first. An existing key is a 409 unless `overwrite=true`.
 async fn s3_upload<S: AwsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -630,8 +632,6 @@ async fn s3_upload<S: AwsCtx>(
     headers: axum::http::HeaderMap,
     body: axum::body::Body,
 ) -> ApiResult<(StatusCode, Json<s3::UploadResp>)> {
-    use futures_util::StreamExt;
-    use tokio::io::AsyncWriteExt;
     crate::access::check(&ctx.pool(), &user, &id, "s3_write", Some(&bucket)).await?;
     s3::validate_bucket(&bucket)?;
     s3::validate_key(&q.key)?;
@@ -646,6 +646,80 @@ async fn s3_upload<S: AwsCtx>(
         ))
         .into());
     }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|c| !c.starts_with("application/x-www-form-urlencoded"));
+    let too_large = || {
+        Error::PayloadTooLarge(format!(
+            "in-app uploads are capped at {} GiB — use `aws s3 cp` for bigger files",
+            s3::UPLOAD_CAP / (1024 * 1024 * 1024)
+        ))
+    };
+    let declared_len = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    // F9: a body with a known length streams straight into `s3 cp -` — no
+    // temp copy of up to 5 GiB first. An interrupted body (client gone) kills
+    // the child before EOF and aborts the multipart upload it started.
+    let size = if let Some(len) = declared_len {
+        if len > s3::UPLOAD_CAP {
+            return Err(too_large().into());
+        }
+        s3::upload_stream(
+            &svc,
+            &a,
+            &bucket,
+            &q.key,
+            body.into_data_stream(),
+            len,
+            content_type,
+            q.region.as_deref(),
+        )
+        .await?
+    } else {
+        spool_and_upload(
+            &svc,
+            &a,
+            &bucket,
+            &q.key,
+            body,
+            content_type,
+            q.region.as_deref(),
+        )
+        .await?
+    };
+    audit(
+        &ctx,
+        &user.id,
+        "aws.s3.upload",
+        format!("s3://{bucket}/{}", q.key),
+        serde_json::json!({ "account_id": id, "bytes": size, "overwrite": q.overwrite.unwrap_or(false) }),
+    )
+    .await;
+    Ok((
+        StatusCode::CREATED,
+        Json(s3::UploadResp {
+            key: q.key.clone(),
+            size,
+        }),
+    ))
+}
+
+/// Chunked body without a Content-Length: spool to an Otto-owned temp file
+/// (≤ 5 GiB), then `aws s3 cp <tmp>` outside the CLI cap.
+async fn spool_and_upload(
+    svc: &AwsService,
+    a: &otto_state::AwsAccountRow,
+    bucket: &str,
+    key: &str,
+    body: axum::body::Body,
+    content_type: Option<&str>,
+    region: Option<&str>,
+) -> otto_core::Result<u64> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
     let tmp_dir = crate::paths::owned_dir(&svc.data_dir, "tmp")?;
     let tmp = crate::paths::owned_file(&tmp_dir, &otto_core::new_id(), "")?;
     // Remove the spool file however this handler exits.
@@ -668,8 +742,7 @@ async fn s3_upload<S: AwsCtx>(
             return Err(Error::PayloadTooLarge(format!(
                 "in-app uploads are capped at {} GiB — use `aws s3 cp` for bigger files",
                 s3::UPLOAD_CAP / (1024 * 1024 * 1024)
-            ))
-            .into());
+            )));
         }
         file.write_all(&chunk)
             .await
@@ -679,35 +752,8 @@ async fn s3_upload<S: AwsCtx>(
         .await
         .map_err(|e| Error::Internal(format!("flush upload spool file: {e}")))?;
     drop(file);
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .filter(|c| !c.starts_with("application/x-www-form-urlencoded"));
-    s3::upload_file(
-        &svc,
-        &a,
-        &bucket,
-        &q.key,
-        &tmp,
-        content_type,
-        q.region.as_deref(),
-    )
-    .await?;
-    audit(
-        &ctx,
-        &user.id,
-        "aws.s3.upload",
-        format!("s3://{bucket}/{}", q.key),
-        serde_json::json!({ "account_id": id, "bytes": size, "overwrite": q.overwrite.unwrap_or(false) }),
-    )
-    .await;
-    Ok((
-        StatusCode::CREATED,
-        Json(s3::UploadResp {
-            key: q.key.clone(),
-            size,
-        }),
-    ))
+    s3::upload_file(svc, a, bucket, key, &tmp, content_type, region).await?;
+    Ok(size)
 }
 
 /// DELETE /aws/accounts/{id}/s3/buckets/{bucket}/object?key=&confirm= — AwsS3:Edit
@@ -957,20 +1003,23 @@ async fn ec2_instances<S: AwsCtx>(
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     if regions::is_all(q.region.as_deref()) {
-        let list = regions::enabled_regions(&svc, &a).await?;
-        let (ok, region_errors) = regions::fan_out(list, |region| {
-            let (svc, a, mut q) = (svc.clone(), a.clone(), q.clone());
-            q.region = Some(region);
-            async move { ec2::list_instances(&svc, &a, &q).await.map(|r| r.instances) }
-        })
-        .await?;
-        return Ok(Json(
+        let key = regions::all_key(&id, "ec2", &q);
+        let v = regions::cached_all(key, || async {
+            let list = regions::enabled_regions(&svc, &a).await?;
+            let (ok, region_errors) = regions::fan_out(list, |region| {
+                let (svc, a, mut q) = (svc.clone(), a.clone(), q.clone());
+                q.region = Some(region);
+                async move { ec2::list_instances(&svc, &a, &q).await.map(|r| r.instances) }
+            })
+            .await?;
             serde_json::to_value(AllRegions {
                 instances: tag(ok),
                 region_errors,
             })
-            .map_err(Error::from)?,
-        ));
+            .map_err(Error::from)
+        })
+        .await?;
+        return Ok(Json(v));
     }
     Ok(Json(
         serde_json::to_value(ec2::list_instances(&svc, &a, &q).await?).map_err(Error::from)?,
@@ -1021,6 +1070,8 @@ async fn ec2_power<S: AwsCtx>(
     let a = svc.get_row(id).await?;
     let confirm = body.and_then(|Json(b)| b.confirm_id);
     let resp = ec2::power(&svc, &a, instance_id, action, confirm.as_deref(), region).await?;
+    // The next all-regions refresh must show the new state, not a cached one.
+    regions::invalidate(id);
     audit(
         ctx,
         user,
@@ -1223,23 +1274,26 @@ async fn eks_clusters<S: AwsCtx>(
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     if regions::is_all(q.region.as_deref()) {
-        let list = regions::enabled_regions(&svc, &a).await?;
-        let (ok, region_errors) = regions::fan_out(list, |region| {
-            let (svc, a) = (svc.clone(), a.clone());
-            async move {
-                eks::list_clusters(&svc, &a, Some(&region))
-                    .await
-                    .map(|r| r.clusters)
-            }
-        })
-        .await?;
-        return Ok(Json(
+        let key = regions::all_key(&id, "eks", &q);
+        let v = regions::cached_all(key, || async {
+            let list = regions::enabled_regions(&svc, &a).await?;
+            let (ok, region_errors) = regions::fan_out(list, |region| {
+                let (svc, a) = (svc.clone(), a.clone());
+                async move {
+                    eks::list_clusters(&svc, &a, Some(&region))
+                        .await
+                        .map(|r| r.clusters)
+                }
+            })
+            .await?;
             serde_json::to_value(AllRegionsClusters {
                 clusters: tag(ok),
                 region_errors,
             })
-            .map_err(Error::from)?,
-        ));
+            .map_err(Error::from)
+        })
+        .await?;
+        return Ok(Json(v));
     }
     Ok(Json(
         serde_json::to_value(eks::list_clusters(&svc, &a, q.region.as_deref()).await?)
@@ -1318,20 +1372,23 @@ async fn rds_instances<S: AwsCtx>(
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     if regions::is_all(q.region.as_deref()) {
-        let list = regions::enabled_regions(&svc, &a).await?;
-        let (ok, region_errors) = regions::fan_out(list, |region| {
-            let (svc, a, mut q) = (svc.clone(), a.clone(), q.clone());
-            q.region = Some(region);
-            async move { rds::list_instances(&svc, &a, &q).await.map(|r| r.instances) }
-        })
-        .await?;
-        return Ok(Json(
+        let key = regions::all_key(&id, "rds", &q);
+        let v = regions::cached_all(key, || async {
+            let list = regions::enabled_regions(&svc, &a).await?;
+            let (ok, region_errors) = regions::fan_out(list, |region| {
+                let (svc, a, mut q) = (svc.clone(), a.clone(), q.clone());
+                q.region = Some(region);
+                async move { rds::list_instances(&svc, &a, &q).await.map(|r| r.instances) }
+            })
+            .await?;
             serde_json::to_value(AllRegions {
                 instances: tag(ok),
                 region_errors,
             })
-            .map_err(Error::from)?,
-        ));
+            .map_err(Error::from)
+        })
+        .await?;
+        return Ok(Json(v));
     }
     Ok(Json(
         serde_json::to_value(rds::list_instances(&svc, &a, &q).await?).map_err(Error::from)?,

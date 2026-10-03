@@ -11,13 +11,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{
-    AddRepoReq, BranchInfo, CheckoutReq, CleanupBaseResp, Collaborator, CommitInfo, CommitReq,
-    ConflictFile, CreateGitAccountReq, CreatePrReq, DiffResp, GitAccountTestResp, MergeBranchReq,
-    MergeCommitReq, MergeConflictStatus, MergePrReq, MergePreview, MergePreviewReq, MergeResult,
-    NewPrCommentReq, PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem, RefsResp,
-    RepoStatusResp, RequestChangesReq, ResolveConflictReq, ResolvePrThreadReq, SetCleanupBaseReq,
-    StagePathsReq, StashInfo, SubmoduleInfo, TestGitAccountReq, UpdateGitAccountReq, UpdatePrReq,
-    UpdateRepoReq, WorktreeInfo,
+    AddRepoReq, BranchInfo, CheckoutReq, CleanupBaseResp, Collaborator, CommitReq, ConflictFile,
+    CreateGitAccountReq, CreatePrReq, DiffResp, GitAccountTestResp, MergeBranchReq, MergeCommitReq,
+    MergeConflictStatus, MergePrReq, MergePreview, MergePreviewReq, MergeResult, NewPrCommentReq,
+    PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem, RefsResp, RepoStatusResp,
+    RequestChangesReq, ResolveConflictReq, ResolvePrThreadReq, SetCleanupBaseReq, StagePathsReq,
+    StashInfo, SubmoduleInfo, TestGitAccountReq, UpdateGitAccountReq, UpdatePrReq, UpdateRepoReq,
+    WorktreeInfo,
 };
 use otto_core::auth::{authorize_owner, AuthUser, RoleChecker};
 use otto_core::domain::{GitAccount, GitProviderKind, Repo, WorkspaceRole};
@@ -195,6 +195,34 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .merge(crate::history::router::<S>())
         .merge(crate::ops::router::<S>())
         .merge(crate::recovery::router::<S>())
+        .layer(axum::middleware::from_fn(invalidate_status_after_write))
+}
+
+/// Every non-GET under `/repos/{id}/…` (stage, commit, checkout, stash, PR
+/// merge, …) invalidates that repo's status memo once it has run, so the
+/// status read right after a mutation never comes from before it — without
+/// waiting for the watcher's event.
+async fn invalidate_status_after_write(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let write = !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    let id = write.then(|| repo_id_of(req.uri().path())).flatten();
+    let resp = next.run(req).await;
+    if let Some(id) = id {
+        crate::status_cache::bump(&id);
+    }
+    resp
+}
+
+/// The `{id}` of a `…/repos/{id}/…` request path.
+fn repo_id_of(path: &str) -> Option<String> {
+    let mut segs = path.split('/');
+    segs.by_ref().find(|s| *s == "repos")?;
+    segs.next().filter(|s| !s.is_empty()).map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -452,6 +480,57 @@ pub(crate) fn repo_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
     map.entry(id.to_string())
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone()
+}
+
+/// Per-repo locks for the NETWORK legs (push, tag push, fetch, pull), kept
+/// apart from [`repo_lock`] so a push — up to the 180 s remote budget — no
+/// longer queues stage/commit/discard behind it. A push writes only
+/// `refs/remotes/*` (plus `branch.*` config for `--set-upstream`, under git's
+/// own `config.lock`); it never touches the index or the worktree, which is
+/// what `repo_lock` protects. Two remote operations still serialise (push vs
+/// fetch both rewrite the tracking refs).
+///
+/// Lock order is ALWAYS `repo_lock` → `remote_lock` (pull holds both: it
+/// writes the worktree and the tracking refs); nothing takes them the other
+/// way round, so the pair cannot deadlock.
+fn remote_locks() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
+    static LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    LOCKS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Return (creating if needed) the network-leg mutex of repo `id`.
+pub(crate) fn remote_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = remote_locks().lock().expect("remote_locks poisoned");
+    map.entry(id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Forget a deleted repo's locks (both maps otherwise only ever grow). An
+/// in-flight holder keeps its own `Arc`, so dropping the entry is safe.
+fn forget_repo_locks(id: &Id) {
+    repo_locks()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(id.as_str());
+    remote_locks()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(id.as_str());
+}
+
+/// The fresh status a mutating route answers with, read AFTER its lock is
+/// released. `status()` is lock-free (`GIT_OPTIONAL_LOCKS=0`: it never takes
+/// `index.lock`), so a stage queued behind this route starts while the walk
+/// runs instead of waiting for it; the read may already include that next
+/// write, which only makes it fresher.
+pub(crate) async fn status_after_release(
+    git: &LocalGit,
+    guard: tokio::sync::MutexGuard<'_, ()>,
+) -> ApiResult<Json<RepoStatusResp>> {
+    drop(guard);
+    Ok(Json(git.status().await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1183,6 +1262,7 @@ async fn delete_repo<S: GitCtx>(
     // Unregister only — never touch the files on disk.
     s.store().delete_repo(&id).await?;
     crate::watch::global(s.events()).forget(&id);
+    forget_repo_locks(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1194,10 +1274,13 @@ async fn repo_status<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
-) -> ApiResult<Json<RepoStatusResp>> {
+) -> ApiResult<Response> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     watch_repo(&s, &repo, &git).await;
-    Ok(Json(git.status().await?))
+    // Shared across windows: one walk per change, a 1 s memo between (see
+    // `status_cache`). Tagged `x-otto-status-cache: hit|miss`.
+    let (body, cache) = crate::status_cache::status_body(&id, &git).await?;
+    Ok(json_tagged(body, "x-otto-status-cache", cache))
 }
 
 /// Keep the repo's working-tree watcher armed (see `watch.rs`): the client
@@ -1212,6 +1295,10 @@ async fn watch_repo<S: GitCtx>(s: &S, repo: &Repo, git: &LocalGit) {
         PathBuf::from(&repo.path),
     );
     tokio::task::spawn_blocking(move || registry.touch(&id, &ws, &root, git_dir.as_deref()));
+    // The session's first status also seeds a missing commit-graph (once,
+    // guarded): a never-fetched repo otherwise never gets one, and the
+    // graph's `log --all --date-order` walks all history without it.
+    git.seed_commit_graph();
 }
 
 async fn repo_branches<S: GitCtx>(
@@ -1281,8 +1368,12 @@ async fn repo_fetch<S: GitCtx>(
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     watch_repo(&s, &repo, &git).await;
     let token = optional_token(&s, &user, &repo).await?;
+    // Fetch and push both rewrite the tracking refs: one at a time per repo,
+    // so neither dies on "cannot lock ref". The worktree lock is not needed.
+    let lock = remote_lock(&id);
+    let _g = lock.lock().await;
     git.fetch(token).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -1306,7 +1397,7 @@ async fn repo_log<S: GitCtx>(
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<LogQuery>,
-) -> ApiResult<Json<Vec<CommitInfo>>> {
+) -> ApiResult<Response> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     // No server-side ceiling: `limit=0` (or an explicit large limit) returns the
     // full reachable history. The graph pages through history with skip/limit and
@@ -1329,7 +1420,9 @@ async fn repo_log<S: GitCtx>(
         author: blank(&q.author),
         until: blank(&q.until),
     };
-    Ok(Json(git.log_with(&opts).await?))
+    let commits = git.log_with(&opts).await?;
+    let est = commits.len() * 256;
+    Ok(json_off_runtime(commits, est).await?)
 }
 
 #[derive(Deserialize)]
@@ -1385,6 +1478,40 @@ fn json_body(body: axum::body::Bytes, cache: &'static str) -> Response {
         body,
     )
         .into_response()
+}
+
+/// `application/json` from serialized bytes plus one diagnostic header.
+fn json_tagged(body: axum::body::Bytes, name: &'static str, value: &'static str) -> Response {
+    use axum::http::header::{HeaderName, HeaderValue, CONTENT_TYPE};
+    (
+        [
+            (CONTENT_TYPE, HeaderValue::from_static("application/json")),
+            (
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// Serialize any response body off the async workers once its estimated
+/// size (`est` bytes) is big enough to matter — a 10k-commit graph page or a
+/// big blame is several MB of JSON that axum's `Json` would encode inline.
+pub(crate) async fn json_off_runtime<T: serde::Serialize + Send + 'static>(
+    value: T,
+    est: usize,
+) -> Result<Response> {
+    use axum::http::header::{HeaderValue, CONTENT_TYPE};
+    let body = crate::local::off_runtime(est, move || serde_json::to_vec(&value))
+        .await?
+        .map_err(|e| Error::Internal(format!("json: {e}")))?;
+    Ok((
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        axum::body::Bytes::from(body),
+    )
+        .into_response())
 }
 
 /// Serialize a diff off the async workers once it is big enough to matter.
@@ -1499,7 +1626,7 @@ async fn repo_stage<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.stage(&req.paths).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 async fn repo_unstage<S: GitCtx>(
@@ -1512,7 +1639,7 @@ async fn repo_unstage<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.unstage(&req.paths).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 /// `POST /repos/{id}/discard` body: [`StagePathsReq`] plus `keep_staged`,
@@ -1534,7 +1661,7 @@ async fn repo_discard<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.discard_with(&req.paths, req.keep_staged).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 async fn repo_commit<S: GitCtx>(
@@ -1571,7 +1698,9 @@ async fn repo_push<S: GitCtx>(
     Path(id): Path<Id>,
     body: Option<Json<PushReq>>,
 ) -> ApiResult<Json<RepoStatusResp>> {
-    let lock = repo_lock(&id);
+    // The network-leg lock, NOT `repo_lock`: a slow push must not queue
+    // stage/commit behind it (see `remote_lock`).
+    let lock = remote_lock(&id);
     let _g = lock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
@@ -1584,7 +1713,7 @@ async fn repo_push<S: GitCtx>(
     }
     git.push_with(token, branch, force).await?;
     // Return the FRESH status so the UI's ahead/behind chip updates after push.
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 /// Optional pull body: `auto_stash` wraps the pull in stash → pull → pop when
@@ -1606,8 +1735,12 @@ async fn repo_pull<S: GitCtx>(
     Path(id): Path<Id>,
     body: Option<Json<PullReq>>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Pull writes the worktree AND the tracking refs: both locks, in the
+    // fixed `repo_lock` → `remote_lock` order.
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
+    let rlock = remote_lock(&id);
+    let _rg = rlock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
     // Pull, then return the FRESH status so the UI's branch chip clears its
@@ -1632,6 +1765,8 @@ async fn repo_pull<S: GitCtx>(
         git.pull_outcome_mode(token, mode).await?;
         None
     };
+    drop(_rg);
+    drop(_g);
     Ok(Json(serde_json::json!({
         "status": git.status().await?,
         "note": note,
@@ -1648,6 +1783,8 @@ async fn repo_collections_pull<S: GitCtx>(
 ) -> ApiResult<Json<serde_json::Value>> {
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
+    let rlock = remote_lock(&id);
+    let _rg = rlock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
     let _ = git.pull(token).await; // best-effort; report read result regardless
@@ -1694,6 +1831,8 @@ async fn repo_collections_push<S: GitCtx>(
 ) -> ApiResult<Json<serde_json::Value>> {
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
+    let rlock = remote_lock(&id);
+    let _rg = rlock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     if let Some(branch) = req.branch.as_deref().filter(|b| !b.is_empty()) {
         git.checkout(branch, true).await?;
@@ -1751,7 +1890,7 @@ async fn repo_checkout<S: GitCtx>(
     } else {
         git.checkout(branch, req.create).await?;
     }
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1778,7 +1917,7 @@ async fn repo_cherry_pick<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.cherry_pick(req.sha.trim()).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -1799,7 +1938,7 @@ async fn repo_revert<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.revert(req.sha.trim()).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -1834,7 +1973,7 @@ async fn repo_branch_create<S: GitCtx>(
         req.checkout.unwrap_or(false),
     )
     .await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -1856,7 +1995,7 @@ async fn repo_branch_rename<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.rename_branch(req.from.trim(), req.to.trim()).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -1909,7 +2048,7 @@ async fn repo_branch_delete<S: GitCtx>(
         let token = optional_token(&s, &user, &repo).await?;
         git.delete_remote_branch(name, token).await?;
     }
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -1953,7 +2092,7 @@ async fn repo_tag_create<S: GitCtx>(
         let token = optional_token(&s, &user, &repo).await?;
         git.push_tag(name, token).await?;
     }
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -1973,8 +2112,10 @@ async fn repo_tag_push<S: GitCtx>(
     }
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
+    let lock = remote_lock(&id);
+    let _g = lock.lock().await;
     git.push_tag(name, token).await?;
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 #[derive(Deserialize)]
@@ -2003,7 +2144,7 @@ async fn repo_tag_delete<S: GitCtx>(
         let token = optional_token(&s, &user, &repo).await?;
         git.delete_remote_tag(name, token).await?;
     }
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 /// List stashes (read-only). Viewer role — no working-tree mutation.
@@ -2188,7 +2329,7 @@ async fn repo_stash<S: GitCtx>(
         }
         other => return Err(Error::Invalid(format!("bad stash op: {other}")).into()),
     }
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2287,7 +2428,7 @@ async fn repo_conflict_resolve<S: GitCtx>(
         Some(side) => git.resolve_take_side(&req.path, side).await?,
         None => git.write_resolution(&req.path, &req.content).await?,
     }
-    Ok(Json(git.status().await?))
+    status_after_release(&git, _g).await
 }
 
 // ---------------------------------------------------------------------------
@@ -3493,6 +3634,110 @@ mod tests {
             "a clean pop leaves no stash entry"
         );
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// R1: a push holds only the network-leg lock. A stage issued while a
+    /// push is stuck on a slow remote (a `pre-receive` hook that sleeps)
+    /// returns at once instead of queueing for the whole round-trip; the
+    /// push still lands and answers with the post-push status.
+    #[tokio::test]
+    async fn stage_is_not_blocked_by_a_slow_push() {
+        let (_pool, ctx, user, ws) = fixture().await;
+        let dir = init_git_repo().await;
+        let remote = dir.with_extension("remote.git");
+        let sh = |cwd: &std::path::Path, args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        sh(&dir, &["config", "user.email", "otto@test.local"]);
+        sh(&dir, &["config", "user.name", "Otto Test"]);
+        sh(&dir, &["config", "commit.gpgsign", "false"]);
+        sh(&dir, &["checkout", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        sh(&dir, &["add", "-A"]);
+        sh(&dir, &["commit", "-q", "-m", "init"]);
+        sh(
+            dir.parent().unwrap(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        sh(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        sh(&dir, &["push", "-q", "-u", "origin", "main"]);
+        // From now on every push parks in the remote for ~3 s, after
+        // leaving a marker so the test knows the push is in flight.
+        let marker = dir.with_extension("pushing");
+        let hook = remote.join("hooks/pre-receive");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nsleep 3\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "b\n").unwrap();
+        sh(&dir, &["commit", "-q", "-am", "second"]);
+        std::fs::write(dir.join("c.txt"), "new\n").unwrap();
+
+        let repo = ctx
+            .store
+            .create_repo(NewRepo {
+                workspace_id: ws.clone(),
+                name: "slow-push".into(),
+                path: dir.to_string_lossy().into_owned(),
+                remote_url: None,
+                provider: None,
+                git_account_id: None,
+            })
+            .await
+            .unwrap();
+
+        let push = tokio::spawn(repo_push(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            None,
+        ));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !marker.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "push never reached the remote"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let t0 = std::time::Instant::now();
+        let st = repo_stage(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            Json(StagePathsReq {
+                paths: vec!["c.txt".into()],
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let took = t0.elapsed();
+        assert!(
+            !push.is_finished(),
+            "the push should still be parked in the hook"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(1),
+            "stage waited {took:?} behind the push"
+        );
+        assert!(st.changes.iter().any(|c| c.path == "c.txt" && c.staged));
+
+        let after = push.await.unwrap().unwrap().0;
+        assert_eq!(after.ahead, 0, "the push landed");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let _ = tokio::fs::remove_dir_all(&remote).await;
+        let _ = std::fs::remove_file(&marker);
     }
 
     /// `/diff` end to end through the handler: summary, the cache (hit on

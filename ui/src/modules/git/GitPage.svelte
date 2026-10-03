@@ -17,13 +17,18 @@
   import RepoView from './RepoView.svelte';
   import { graphCache } from './graph-cache';
   import FocusView from './FocusView.svelte';
-  import PrDetail from './PrDetail.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+
+  // The PR detail (+ its review panel, comment threads and merge dialog) is a
+  // deep-linked route most Git visits never open: its own chunk (perf R7).
+  const PrDetailLazy = lazyComponent(() => import('./PrDetail.svelte'));
 
   // Route awareness is now limited to PR detail + deep-links into a repo tab.
   const routeRepoId = $derived(router.parts[1] ?? null);
@@ -308,7 +313,7 @@
 {#if prRepo && isPr}
   <!-- PR detail is still routed (deep-linkable). -->
   {#key `${prRepo.id}:${router.parts[3]}`}
-    <PrDetail repoId={prRepo.id} number={Number(router.parts[3])} />
+    <LazyMount lazy={PrDetailLazy} what="the pull request" props={{ repoId: prRepo.id, number: Number(router.parts[3]) }} />
   {/key}
 {:else}
   <div class="gitpage">

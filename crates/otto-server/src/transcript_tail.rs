@@ -494,14 +494,17 @@ async fn run(ctx: ServerCtx, session: Session, live: Arc<Live>) {
             }
             let parts = screen_parts(&h.screen_rows());
             if last_live.as_ref() != Some(&parts) {
-                let _ = ctx.events.send(Event::TranscriptLive {
-                    workspace_id: wid.clone(),
-                    session_id: sid.clone(),
-                    text: parts.draft.clone(),
-                    input: parts.input.clone(),
-                    status: parts.status.clone(),
-                    branch: branch.clone(),
-                });
+                crate::ws_fanout::publish_stream(
+                    &ctx.events,
+                    Event::TranscriptLive {
+                        workspace_id: wid.clone(),
+                        session_id: sid.clone(),
+                        text: parts.draft.as_str().into(),
+                        input: parts.input.as_str().into(),
+                        status: parts.status.as_str().into(),
+                        branch: branch.clone(),
+                    },
+                );
                 last_live = Some(parts);
             }
         }
@@ -522,12 +525,19 @@ async fn run(ctx: ServerCtx, session: Session, live: Arc<Live>) {
         let Some(out) = out else {
             continue;
         };
-        let _ = ctx.events.send(Event::TranscriptAppended {
-            workspace_id: wid.clone(),
-            session_id: sid.clone(),
-            cursor: out.cursor,
-            turns: if out.oversize { Vec::new() } else { out.turns },
-        });
+        crate::ws_fanout::publish_stream(
+            &ctx.events,
+            Event::TranscriptAppended {
+                workspace_id: wid.clone(),
+                session_id: sid.clone(),
+                cursor: out.cursor,
+                turns: if out.oversize {
+                    Vec::new().into()
+                } else {
+                    out.turns.into()
+                },
+            },
+        );
         for a in &out.new_artifacts {
             let _ = ctx.events.send(Event::ArtifactAdded {
                 workspace_id: wid.clone(),
@@ -738,6 +748,7 @@ pub fn live_draft(rows: &[String]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod tests {
     use super::*;
 

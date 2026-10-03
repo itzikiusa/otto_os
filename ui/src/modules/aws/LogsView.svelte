@@ -2,9 +2,10 @@
   // CloudWatch Logs: log groups (server-side prefix search, paged) on the left;
   // on the right either the Events view — stream picker, time-range presets,
   // filter pattern, a windowed event table with a JSON-aware detail pane and a
-  // live tail (poll every 2 s while visible, forward from the newest timestamp
-  // seen, deduped by event id, ring buffer of 5 000) — or Logs Insights: a
-  // query over one or more groups, polled every 1.5 s until done, rendered with
+  // live tail (poll every 2 s while events keep arriving, backing off to 10 s
+  // when idle, only while visible; forward from the newest timestamp seen,
+  // deduped by event id, ring buffer of 5 000) — or Logs Insights: a query over
+  // one or more groups, polled on a 1,1,2,2,3,5 s backoff until done, rendered with
   // the DB Explorer ResultsGrid; saved queries live in localStorage per account.
   // Deep link: `#/aws/<id>/logs/<group>/<region>` (a trailing `/` on the group
   // means "prefix": the list is filtered and the first match selected).
@@ -16,6 +17,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { pollWhileVisible, type Poller } from '../../lib/poll';
+  import { adaptiveCadence, statusPollMs } from '../../lib/pollBackoff';
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import { exportCsv } from '../../lib/components/exporters';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -39,8 +41,11 @@
   let { account, onsignin }: Props = $props();
 
   const RING = 5000;
-  const TAIL_MS = 2000;
-  const INSIGHTS_POLL_MS = 1500;
+  // Each tail tick / Insights status poll spawns an `aws` CLI process on the
+  // daemon: the tail runs at 2 s while events arrive and doubles to 10 s when
+  // idle; Insights uses the shared 1,1,2,2,3,5 s status backoff (lib/pollBackoff).
+  const TAIL_MIN_MS = 2000;
+  const TAIL_MAX_MS = 10_000;
   const RANGES: { id: string; label: string; ms: number }[] = [
     { id: '5m', label: '5m', ms: 5 * 60_000 },
     { id: '15m', label: '15m', ms: 15 * 60_000 },
@@ -159,9 +164,10 @@
     detail = null;
   }
 
-  function pushEvents(list: AwsLogEvent[]): void {
+  /** Append unseen events; returns how many were new. */
+  function pushEvents(list: AwsLogEvent[]): number {
     const fresh = list.filter((e) => !seen.has(e.id));
-    if (!fresh.length) return;
+    if (!fresh.length) return 0;
     for (const e of fresh) seen.add(e.id);
     let next = [...events, ...fresh];
     if (next.length > RING) {
@@ -169,6 +175,7 @@
       next = next.slice(next.length - RING);
     }
     events = next;
+    return fresh.length;
   }
 
   async function loadEvents(more = false): Promise<void> {
@@ -221,10 +228,13 @@
   }
 
   // Live tail: forward from the newest timestamp seen; ids dedupe the overlap.
+  // Adaptive cadence: the overlap event comes back on every tick, so "got
+  // data" means FRESH events after dedupe, not a non-empty response.
   let tailPoller: Poller | null = null;
   $effect(() => {
     if (!tail || !selected || tab !== 'events') return;
     const g = selected;
+    const cadence = adaptiveCadence({ min: TAIL_MIN_MS, max: TAIL_MAX_MS });
     tailPoller = pollWhileVisible(
       async (signal) => {
         const newest = events.length ? events[events.length - 1].timestamp : Date.now() - 60_000;
@@ -233,9 +243,14 @@
           { group: g, streams: stream ? [stream] : undefined, pattern: appliedPattern, start: newest, max: 500, region },
           signal,
         );
-        if (selected === g) pushEvents(r.events);
+        if (selected === g) cadence.record(pushEvents(r.events) > 0);
       },
-      { ms: TAIL_MS, immediate: false },
+      {
+        get ms() {
+          return cadence.ms;
+        },
+        immediate: false,
+      },
     );
     return () => {
       tailPoller?.stop();
@@ -331,6 +346,8 @@
   let iError = $state('');
   let ranQuery = $state('');
   let iPoll: ReturnType<typeof setTimeout> | null = null;
+  /** Status polls issued for the current query (indexes the backoff). */
+  let iPollN = 0;
 
   function stopPolling(): void {
     if (iPoll) clearTimeout(iPoll);
@@ -353,11 +370,9 @@
       iRunning = false;
       return;
     }
-    if (document.hidden) {
-      document.addEventListener('visibilitychange', () => void pollResults(id), { once: true });
-      return;
-    }
-    iPoll = setTimeout(() => void pollResults(id), INSIGHTS_POLL_MS);
+    // Same backoff as Athena: 1,1,2,2,3,5 s…, 15 s while the window is hidden
+    // (was a fixed 1.5 s — a long query burned a core in `aws` processes).
+    iPoll = setTimeout(() => void pollResults(id), statusPollMs(iPollN++, document.visibilityState === 'hidden'));
   }
 
   async function runInsights(): Promise<void> {
@@ -375,6 +390,7 @@
         region,
       );
       qid = r.query_id;
+      iPollN = 0;
       void pollResults(r.query_id);
     } catch (e) {
       iRunning = false;
@@ -528,7 +544,7 @@
             />
             <button class="btn small" type="submit">Apply</button>
           </form>
-          <button class="btn small" class:primary={tail} aria-pressed={tail} onclick={() => (tail = !tail)} title="Poll for new events every 2 s while this window is visible">
+          <button class="btn small" class:primary={tail} aria-pressed={tail} onclick={() => (tail = !tail)} title="Poll for new events every 2 s (backing off to 10 s while nothing arrives) while this window is visible">
             <Icon name={tail ? 'pause' : 'play'} size={12} /> {tail ? 'Tailing' : 'Live tail'}
           </button>
           <button class="icon-btn" onclick={exportEvents} disabled={!events.length} aria-label="Export events as CSV" title="Export events as CSV"><Icon name="download" size={13} /></button>

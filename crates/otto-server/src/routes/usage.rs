@@ -88,17 +88,42 @@ pub async fn status(
     Ok(Json(st))
 }
 
-/// Every session, read once per request: feeds the enrichment, the per-kind
-/// rollup and (non-root) the caller's own-session scope.
-async fn all_sessions(ctx: &ServerCtx) -> Vec<otto_core::domain::Session> {
+/// How long the session-label projection is reused across usage requests
+/// (summary, by-kind and report open together; budgets poll).
+const USAGE_LABELS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+type UsageLabels = std::sync::Arc<Vec<otto_state::UsageLabelRow>>;
+
+static USAGE_LABELS_CACHE: std::sync::Mutex<Option<(std::time::Instant, UsageLabels)>> =
+    std::sync::Mutex::new(None);
+
+/// Every session's label inputs, read once per request (and memoised for
+/// USAGE_LABELS_TTL): feeds the enrichment, the per-kind rollup and
+/// (non-root) the caller's own-session scope. A narrow projection — it used
+/// to decode every full session row (meta JSON included) to label ≤50 (R4).
+async fn all_sessions(ctx: &ServerCtx) -> UsageLabels {
+    if let Some((at, rows)) = USAGE_LABELS_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+    {
+        if at.elapsed() < USAGE_LABELS_TTL {
+            return std::sync::Arc::clone(rows);
+        }
+    }
     match otto_state::SessionsRepo::new(ctx.pool.clone())
-        .list_all()
+        .list_usage_labels()
         .await
     {
-        Ok(rows) => rows,
+        Ok(rows) => {
+            let rows = std::sync::Arc::new(rows);
+            *USAGE_LABELS_CACHE.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some((std::time::Instant::now(), std::sync::Arc::clone(&rows)));
+            rows
+        }
         Err(e) => {
             tracing::warn!("usage: could not list sessions for enrichment: {e}");
-            Vec::new()
+            std::sync::Arc::new(Vec::new())
         }
     }
 }
@@ -107,7 +132,7 @@ async fn all_sessions(ctx: &ServerCtx) -> Vec<otto_core::domain::Session> {
 /// root (everything).
 fn own_session_ids(
     user: &otto_core::domain::User,
-    all: &[otto_core::domain::Session],
+    all: &[otto_state::UsageLabelRow],
 ) -> Option<Vec<String>> {
     own_ids(
         user.is_root,
@@ -142,34 +167,66 @@ pub async fn summary(
 ) -> ApiResult<Json<UsageSummary>> {
     let days = q.days.unwrap_or(30).clamp(1, 3650);
     // ONE unfiltered sessions scan feeds the enrichment, the per-kind rollup
-    // and the scope (it used to run twice per summary — perf O6).
-    let all_sessions = all_sessions(&ctx).await;
-    let own = own_session_ids(&user, &all_sessions);
-    // A non-root view never includes external (machine-wide) sessions.
-    let otto_only = own.is_some() || q.otto_only.unwrap_or(true);
-    let scope = match &own {
-        Some(ids) => UsageScope::Sessions(ids),
-        None => UsageScope::All,
+    // and the scope (it used to run twice per summary — perf O6). Root needs
+    // no scope from it, so the label read and both ClickHouse scans (the
+    // grouped one + the per-session totals the by-kind rollup reuses) run
+    // CONCURRENTLY (R4); a non-root scope must know its own ids first.
+    let (all_sessions, own, otto_only, summary) = if user.is_root {
+        let otto_only = q.otto_only.unwrap_or(true);
+        let (all, summary) = tokio::join!(
+            all_sessions(&ctx),
+            ctx.usage.summary_scoped(days, otto_only, UsageScope::All)
+        );
+        (all, None, otto_only, summary)
+    } else {
+        let all = all_sessions(&ctx).await;
+        let own = own_session_ids(&user, &all);
+        // A non-root view never includes external (machine-wide) sessions.
+        let otto_only = true;
+        let scope = UsageScope::Sessions(own.as_deref().unwrap_or_default());
+        let summary = ctx.usage.summary_scoped(days, otto_only, scope).await;
+        (all, own, otto_only, summary)
     };
-    let mut summary = ctx
-        .usage
-        .summary_scoped(days, otto_only, scope)
-        .await
-        .map_err(ApiError)?;
+    let mut summary = summary.map_err(ApiError)?;
     enrich_sessions(&ctx, &mut summary.sessions, &all_sessions).await;
     summary.by_kind =
         by_kind_rollup_with(&ctx, days, otto_only, &all_sessions, own.as_deref()).await;
     Ok(Json(summary))
 }
 
-/// `GET /usage/report?days=N&otto_only=B` — the ccusage-style report
-/// (daily / monthly / model / session tables). Scoped like the summary.
+#[derive(Debug, Deserialize)]
+pub struct ReportQuery {
+    pub days: Option<u32>,
+    pub otto_only: Option<bool>,
+    /// Session leaderboard cap (default 100, max 1000 — the export's).
+    pub sessions_limit: Option<u32>,
+    /// Comma list of opt-in tables; `daily_models` (the export's day×model
+    /// table) is the only one.
+    pub include: Option<String>,
+}
+
+/// Default report session cap: the page renders 100 at a time.
+const REPORT_DEFAULT_SESSIONS: u32 = 100;
+
+/// `GET /usage/report?days=N&otto_only=B&sessions_limit=N&include=daily_models`
+/// — the ccusage-style report (daily / monthly / model / session tables).
+/// Scoped like the summary. Slim by default (100 sessions, no day×model).
 pub async fn report(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-    Query(q): Query<WindowDays>,
+    Query(q): Query<ReportQuery>,
 ) -> ApiResult<Json<UsageReport>> {
     let days = q.days.unwrap_or(30).clamp(1, 3650);
+    let opts = otto_usage::ReportOptions {
+        sessions_limit: q
+            .sessions_limit
+            .unwrap_or(REPORT_DEFAULT_SESSIONS)
+            .clamp(1, otto_usage::REPORT_SESSION_LIMIT),
+        daily_models: q
+            .include
+            .as_deref()
+            .is_some_and(|i| i.split(',').any(|t| t.trim() == "daily_models")),
+    };
     let all_sessions = all_sessions(&ctx).await;
     let own = own_session_ids(&user, &all_sessions);
     let otto_only = own.is_some() || q.otto_only.unwrap_or(true);
@@ -179,7 +236,7 @@ pub async fn report(
     };
     let mut report = ctx
         .usage
-        .report(days, otto_only, scope)
+        .report_with(days, otto_only, scope, opts)
         .await
         .map_err(ApiError)?;
     enrich_sessions(&ctx, &mut report.sessions, &all_sessions).await;
@@ -225,7 +282,7 @@ async fn by_kind_rollup_with(
     ctx: &ServerCtx,
     days: u32,
     otto_only: bool,
-    all_sessions: &[otto_core::domain::Session],
+    all_sessions: &[otto_state::UsageLabelRow],
     // `Some(ids)`: only these sessions count (a non-root caller's own).
     own: Option<&[String]>,
 ) -> Vec<FeatureUsage> {
@@ -271,9 +328,9 @@ async fn by_kind_rollup_with(
 async fn enrich_sessions(
     ctx: &ServerCtx,
     sessions: &mut [otto_usage::SessionUsage],
-    // `list_all` — the unfiltered cross-workspace read; it's root-only at the
-    // route, so no ownership narrowing is needed here.
-    all_sessions: &[otto_core::domain::Session],
+    // The unfiltered cross-workspace label read; rows are already scoped by
+    // the route, so no ownership narrowing is needed here.
+    all_sessions: &[otto_state::UsageLabelRow],
 ) {
     if sessions.is_empty() {
         return;
@@ -282,7 +339,7 @@ async fn enrich_sessions(
     let needed_ids: std::collections::HashSet<String> =
         sessions.iter().map(|s| s.session_id.clone()).collect();
 
-    let sess_map: std::collections::HashMap<String, &otto_core::domain::Session> = all_sessions
+    let sess_map: std::collections::HashMap<String, &otto_state::UsageLabelRow> = all_sessions
         .iter()
         .filter(|s| needed_ids.contains(&s.id))
         .map(|s| (s.id.clone(), s))
@@ -319,14 +376,15 @@ async fn enrich_sessions(
 /// Derive a short usage-kind label for an Otto session: prefer the meta `source`
 /// tag set by the review/product/channel runners, else fall back to the session
 /// kind.
-fn session_kind_label(s: &otto_core::domain::Session) -> String {
-    if let Some(src) = s.meta.get("source").and_then(Value::as_str) {
+fn session_kind_label(s: &otto_state::UsageLabelRow) -> String {
+    if let Some(src) = s.source.as_deref() {
         return match src {
             "product-analysis" | "product-plan" => "product".to_string(),
             other => other.to_string(), // "review", "channel"
         };
     }
-    format!("{:?}", s.kind).to_lowercase()
+    // `sessions.kind` is the lowercase SessionKind (`agent` / `connection`).
+    s.kind.clone()
 }
 
 /// `GET /usage/metrics?minutes=N` — system metrics time-series (root).
@@ -974,13 +1032,14 @@ pub async fn workspace_sessions_usage(
         || crate::auth::require_ws_role(&ctx, &user, &wid, WorkspaceRole::Admin)
             .await
             .is_ok();
-    let sessions = if admin {
-        repo.list_by_workspace(&wid).await
-    } else {
-        repo.list_by_workspace_for_user(&wid, &user.id).await
-    }
-    .map_err(ApiError)?;
-    let visible: std::collections::HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    // Only the ids of the sessions the sidebar shows (live, foreground +
+    // channel rows): it used to decode every row of the workspace — meta and
+    // 1.9 k hidden review agents included — and return usage for all of them.
+    let ids = repo
+        .visible_ids(&wid, (!admin).then_some(&user.id))
+        .await
+        .map_err(ApiError)?;
+    let visible: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
     let rows = cached_session_totals(&ctx, days).await?;
     Ok(Json(WorkspaceSessionsUsage {
         available: true,
@@ -1005,6 +1064,7 @@ mod session_usage_tests {
             cache_write_tokens: 0,
             total_tokens: tokens,
             cost_usd: 0.5,
+            ..Default::default()
         }
     }
 

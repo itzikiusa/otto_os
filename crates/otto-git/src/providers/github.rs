@@ -85,7 +85,7 @@ impl Github {
 
     async fn pr_raw(&self, r: &RemoteRef, number: u64) -> Result<Value> {
         self.http
-            .json(self.req(
+            .get_cached_json(self.req(
                 reqwest::Method::GET,
                 &format!("{}/{number}", Self::prs_path(r)),
             ))
@@ -136,9 +136,44 @@ impl Github {
         Ok(v)
     }
 
+    /// Where the review-thread memo lives in the GET cache: a synthetic URL
+    /// under the repo's REST scope, so any write to the repo (an inline
+    /// comment, a review) clears it with the rest of the repo's reads.
+    fn threads_memo_url(&self, r: &RemoteRef, number: u64) -> String {
+        format!(
+            "{}/repos/{}/{}/pulls/{number}/review-threads#graphql",
+            self.base, r.owner, r.repo
+        )
+    }
+
     /// Review threads with resolution state — REST doesn't expose `isResolved`,
     /// so this is the one GraphQL read. Returns the `reviewThreads.nodes` array.
+    /// Memoised for the GET cache's short TTL (a PR re-open, or the detail in
+    /// two windows, costs one POST); a resolve/unresolve or any REST write to
+    /// the repo drops it.
     async fn fetch_review_threads(&self, r: &RemoteRef, number: u64) -> Result<Vec<Value>> {
+        let memo_url = self.threads_memo_url(r, number);
+        let auth = format!("Bearer {}", self.token);
+        if let Some(body) = crate::providers::client::memo_read(&memo_url, &auth) {
+            if let Ok(nodes) = serde_json::from_str::<Vec<Value>>(&body) {
+                return Ok(nodes);
+            }
+        }
+        // Captured before the POST: a resolve or comment landing while it is
+        // in flight must not see the pre-write threads re-memoised.
+        let generation = crate::providers::client::write_generation(&memo_url);
+        let nodes = self.fetch_review_threads_uncached(r, number).await?;
+        if let Ok(body) = serde_json::to_string(&nodes) {
+            crate::providers::client::memo_store(&memo_url, &auth, body, generation);
+        }
+        Ok(nodes)
+    }
+
+    async fn fetch_review_threads_uncached(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+    ) -> Result<Vec<Value>> {
         const Q: &str = "query($owner:String!,$name:String!,$number:Int!){\
             repository(owner:$owner,name:$name){pullRequest(number:$number){\
             reviewThreads(first:100){nodes{id isResolved \
@@ -187,7 +222,11 @@ impl Github {
             "/repos/{}/{}/commits/{sha}/check-runs?per_page=100",
             r.owner, r.repo
         );
-        let v = match self.http.json(self.req(reqwest::Method::GET, &path)).await {
+        let v = match self
+            .http
+            .get_cached_json(self.req(reqwest::Method::GET, &path))
+            .await
+        {
             Ok(v) => v,
             Err(_) => return CiStatus::none(),
         };
@@ -240,7 +279,11 @@ impl Github {
             "/repos/{}/{}/commits/{sha}/statuses?per_page=100",
             r.owner, r.repo
         );
-        let v = match self.http.json(self.req(reqwest::Method::GET, &path)).await {
+        let v = match self
+            .http
+            .get_cached_json(self.req(reqwest::Method::GET, &path))
+            .await
+        {
             Ok(v) => v,
             Err(_) => return CiStatus::none(),
         };
@@ -558,18 +601,18 @@ impl super::GitProvider for Github {
             PrState::All => "all",
         };
         // ONE request per page — the client pages, not the daemon.
-        let resp = self
+        // Through the ETag cache: a remount / second window within the TTL
+        // makes no request, and a revalidation 304 is free of rate-limit cost.
+        let (body, next) = self
             .http
-            .send(self.req(reqwest::Method::GET, &Self::prs_path(r)).query(&[
+            .get_cached_page(self.req(reqwest::Method::GET, &Self::prs_path(r)).query(&[
                 ("state", gh_state.to_string()),
                 ("per_page", per_page.to_string()),
                 ("page", page.to_string()),
             ]))
             .await?;
-        let has_more = super::client::parse_next_link(resp.headers()).is_some();
-        let v: Value = resp
-            .json()
-            .await
+        let has_more = next.is_some();
+        let v: Value = serde_json::from_str(&body)
             .map_err(|e| Error::Upstream(format!("github: bad json: {e}")))?;
         let mut items: Vec<PrSummary> = varr(&v, &[]).iter().map(summary_from).collect();
         // GitHub has no "merged"/"declined" filter — both are `closed`; the
@@ -590,7 +633,7 @@ impl super::GitProvider for Github {
         // thread-resolution probe and CI are independent once the PR is in
         // hand, so they run together (≈1 forge RTT instead of 5–6 in a row).
         let list = |p: String| {
-            self.http.paginate_json(
+            self.http.paginate_json_cached(
                 self.req(reqwest::Method::GET, &p)
                     .query(&[("per_page", "100")]),
                 self.http.client(),
@@ -854,8 +897,8 @@ impl super::GitProvider for Github {
     /// is the reviewThread node id from `get_pr` (not a REST comment id).
     async fn resolve_pr_thread(
         &self,
-        _r: &RemoteRef,
-        _number: u64,
+        r: &RemoteRef,
+        number: u64,
         thread_id: &str,
         resolved: bool,
     ) -> Result<()> {
@@ -864,9 +907,16 @@ impl super::GitProvider for Github {
         } else {
             "mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{id}}}"
         };
-        self.graphql(m, json!({ "id": thread_id }))
+        let out = self
+            .graphql(m, json!({ "id": thread_id }))
             .await
-            .map(|_| ())
+            .map(|_| ());
+        // GraphQL writes skip the automatic scope clear (the endpoint also
+        // serves reads): drop this repo's cached reads, the thread memo with
+        // them, so the next PR read shows the new state. Even on an error —
+        // the mutation may have landed.
+        crate::providers::client::invalidate_scope(&self.threads_memo_url(r, number));
+        out
     }
 
     async fn approve(&self, r: &RemoteRef, number: u64) -> Result<()> {
@@ -964,7 +1014,7 @@ impl super::GitProvider for Github {
         // (GitHub itself caps this list at 250).
         let rows = self
             .http
-            .paginate_json(
+            .paginate_json_cached(
                 self.req(
                     reqwest::Method::GET,
                     &format!("{}/{number}/commits", Self::prs_path(r)),

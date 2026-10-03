@@ -35,16 +35,16 @@ Contract: `docs/contracts/api.md` → "Monitoring". Design spec:
    runs every `interval_secs` (default 60).
 
 Enable on a staging cluster first. The collector is read-only, but it does
-open one `kubectl port-forward` per pod per cycle when the API-server proxy is
-denied (see Transport).
+keep up to 32 `kubectl port-forward` processes open when the API server
+denies the pod proxy (see Transport).
 
 ## What a cycle does
 
 ```
-sweep pods (kubectl get pods -o json)          → status samples per pod
-events (last cycle → now)                       → OOMKilling / Killing / Unhealthy / Scaling…
+sweep pods (kubectl get pods -o json)          → status samples for pods that changed
+events (incremental watch from the last version) → OOMKilling / Killing / Unhealthy / Scaling…
 metrics-server (re-probed, never cached)        → cpu_millis, mem_working_set_bytes
-pick transport (auto: proxy? else port-forward) → one decision per cycle
+pick transport (auto: cached per cluster)       → re-sniffed hourly or on failure
 scrape every running, non-excluded pod          → probe samples (bounded concurrency)
 classify restarts + churn vs previous snapshot  → k8s_events rows
 write ClickHouse → status row → WS k8s_monitor_cycle
@@ -152,7 +152,19 @@ twice and an interrupted backfill simply reruns — and raw days older than 2
 days are dropped.
 
 Status series written from the sweep alone: `restarts_total`, `ready`,
-`phase_running`, `mem_limit_bytes`, `cpu_request_millis`, `pod_age_seconds`.
+`phase_running`, `mem_limit_bytes`, `cpu_request_millis` (and
+`pod_age_seconds`). They feed only the generic series picker, so a pod's rows
+are written when one of the first five changed and for every pod at least
+every 15 minutes (and on the loop's first cycle) — not 6 rows per pod per
+cycle. Restarts, limits and pod counts on the dashboards come from events,
+the wide rows and the snapshot.
+
+Events are read incrementally: after the first full list per namespace the
+collector resumes a short watch (`watch=1&resourceVersion=<last>`, closed by
+the API server after 1 s) through the cluster's `kubectl proxy`, so only new
+events cross the wire; an expired version relists. metrics-server is read per
+namespace in parallel through the same proxy. Without the proxy both fall
+back to `kubectl`.
 
 ## Probes
 
@@ -176,18 +188,36 @@ status shows `series_capped` when a probe overflows — tighten the globs).
 
 ## Transport
 
-`auto` tries `GET /api/v1/namespaces/…/pods/<pod>:<port>/proxy<path>` once per
-cycle. If the API server answers, every probe goes through the proxy. The
+`auto` tries `GET /api/v1/namespaces/…/pods/<pod>:<port>/proxy<path>` (see
+below for how the answer is judged and cached). If the API server proxies it,
+every probe goes through the proxy. The
 collector keeps ONE long-lived `kubectl proxy` per monitored cluster (on a
 Unix socket in a private `0700` temp directory, accepting only pod-proxy GETs)
-and sends each probe to it as a pooled HTTP request — no process per pod. The
+and sends each probe to it as a pooled HTTP request — no process per pod
+(the same proxy also serves the read-only events and metrics-server lists). The
 proxy is restarted when it exits or its credentials change (kubeconfig or
 token overlay rewritten), and stops with the loop; if it cannot start, each
-probe falls back to a short `kubectl get --raw`. If the proxy is denied — Rancher-managed clusters
-typically deny `pods/proxy` — the collector falls back to
-`kubectl port-forward pod/<pod> 0:<port>` with `concurrency` parallel
-forwards (default 8, max 32) and a plain HTTP GET on loopback. 230 pods at
-concurrency 8 take roughly 30 seconds; if `cycle_ms` exceeds the interval,
+probe falls back to a short `kubectl get --raw`. `auto` sniffs up to 3 pods (spread over the target list) and only an
+**API-server** refusal selects port-forward: a Kubernetes `Status` answer
+with reason `Forbidden`/`Unauthorized`, or a broken hop to the API server.
+The app's own answer — a 404 from `/actuator/info`, a 500 — proves the proxy
+works and keeps it; a pod that vanished or is not listening is inconclusive
+and the next pod is tried (all inconclusive ⇒ proxy, re-sniffed next cycle).
+A conclusive decision is cached per cluster and re-sniffed hourly, on a
+transport/config change, or when every pod failed over it. If the proxy is
+denied — Rancher-managed clusters typically deny `pods/proxy` — the collector
+uses `kubectl port-forward pod/<pod> 0:<port>` with `concurrency` parallel
+pods (default 8, max 32) and a plain HTTP GET on loopback. Forwards are kept
+open across cycles in a **bounded pool** (one per pod/port, at most 32 alive;
+closed when the pod leaves the target list, the forward breaks, or nobody used
+it for two intervals) with one shared HTTP client, so a steady cluster of up
+to 32 scraped pods spawns no processes per cycle. Above the cap the pool keeps
+a stable resident set and the remaining pods get a one-shot forward (spawned,
+used, killed — never more than `concurrency` at once), and the status line
+says `port-forward: N pods rotate through a pool of 32`; each resident
+kubectl costs ~30 MB and one process against the per-user limit, which is
+why it is capped. If a port-forward cycle still exceeds the
+interval, the status line says so (`port-forward transport: cycle took …`);
 raise concurrency or the interval.
 
 ## Restart classes
@@ -287,7 +317,7 @@ are **persisted per device** and survive a reload.
   path labels* on at least one cluster; the tab links to each cluster's
   settings until then.
 
-Routes: `GET /k8s/monitor/fleet/{filters,table,series,events,requests}` — see
+Routes: `GET /k8s/monitor/fleet/{filters,table,series,series/batch,events,requests}` — see
 the contract for the exact shapes and the identifier / sort-key allow-lists.
 
 Health badge: `incident` when a pod is in CrashLoopBackOff / Failed, or an
@@ -338,8 +368,8 @@ routes `GET /k8s/monitor/fleet/{filters,table,series,events,requests}`, WS
   window.
 - Kubernetes keeps events for about an hour on EKS; a 60 s interval loses
   nothing, an interval above 1 h can miss the `Unhealthy`/`Killing` pair.
-- Port-forward transport spawns one `kubectl` per pod per cycle; on very large
-  namespaces prefer granting `pods/proxy`.
+- Port-forward transport keeps one `kubectl port-forward` process per scraped
+  pod open; on very large namespaces prefer granting `pods/proxy`.
 
 ## Troubleshooting
 

@@ -107,3 +107,31 @@ test('session attach writes the per-workspace map', async ({ page }) => {
     await ctx.dispose();
   }
 });
+
+// perf2/10-mcp R7: the badge reads the count route (no 200-row list), and the
+// audit log pages with offset + "Load more".
+test('pending badge uses the count route and the audit log pages', async ({ page }) => {
+  const row = (i: number) => ({
+    id: `call-${i}`, workspace_id: workspaceA, server_id: null, server_name: 'otto', tool: `otto.tool_${i}`,
+    direction: 'inbound', caller_user_id: null, caller_kind: 'agent', args_redacted_json: '{}',
+    decision: 'allowed', decision_reason: null, risk_label: 'read', injection_risk: 'low', dry_run: false,
+    ok: true, error: null, latency_ms: 3, bytes: 120, rows: null, approval_id: null, caller_session_id: null,
+    created_at: new Date(Date.now() - i * 1000).toISOString(),
+  });
+  const offsets: number[] = [];
+  await page.route('**/api/v1/mcp/approvals/count?*', (route) => route.fulfill({ json: { count: 4 } }));
+  await page.route('**/api/v1/mcp/audit?*', (route) => {
+    const offset = Number(new URL(route.request().url()).searchParams.get('offset') ?? '0');
+    offsets.push(offset);
+    const n = offset === 0 ? 200 : 3;
+    return route.fulfill({ json: Array.from({ length: n }, (_, i) => row(offset + i)) });
+  });
+  await page.goto('/#/mcp/activity');
+  await expect(page.locator('[data-testid="mcp-pending-badge"]')).toHaveText('4', { timeout: 30_000 });
+  const audit = page.locator('[data-testid="mcp-audit"]');
+  await expect(audit.locator('.count')).toHaveText('200+ rows');
+  await audit.locator('[data-testid="mcp-audit-more"]').click();
+  await expect(audit.locator('.count')).toHaveText('203 rows');
+  await expect(audit.locator('[data-testid="mcp-audit-more"]')).toHaveCount(0);
+  expect(offsets).toContain(200);
+});

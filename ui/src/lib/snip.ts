@@ -7,7 +7,7 @@
 // shell, an in-window `#/snip/{id}` route in a plain browser. The daemon has
 // already put the capture on the clipboard by the time the response lands.
 
-import { api, authedBlobUrl } from './api/client';
+import { api, authedBlobUrl, postBlob } from './api/client';
 import type { CaptureSnipResp, Snip, SnipCopyResp } from './api/types';
 import { router } from './router.svelte';
 import { toasts } from './toast.svelte';
@@ -25,6 +25,14 @@ export const snipApi = {
   },
   saveAnnotated(id: string, data_b64: string): Promise<SnipCopyResp> {
     return api.post<SnipCopyResp>(`/snips/${id}/annotated`, { data_b64 });
+  },
+  /** Raw `image/png` body — the editor's path (no base64, no JSON). */
+  saveAnnotatedPng(id: string, png: Blob): Promise<SnipCopyResp> {
+    return postBlob<SnipCopyResp>(`/snips/${id}/annotated`, png, 'image/png');
+  },
+  /** Raw `image/png` upload ("annotate an existing image"). */
+  uploadPng(png: Blob): Promise<Snip> {
+    return postBlob<Snip>('/snips', png, 'image/png');
   },
   copy(id: string): Promise<SnipCopyResp> {
     return api.post<SnipCopyResp>(`/snips/${id}/copy`, {});

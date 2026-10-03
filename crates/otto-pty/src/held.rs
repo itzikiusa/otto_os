@@ -16,7 +16,7 @@
 use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -51,6 +51,10 @@ pub(crate) struct HeldConn {
     closed: AtomicBool,
     /// The holder reported the child's exit (or vanished).
     exited: AtomicBool,
+    /// Scrollback cap last delivered to the holder (`0` = unknown: a fresh
+    /// adoption, or a send that failed mid-reconnect). The daemon's status
+    /// tick re-asserts the cap every 2 s; only a change is sent.
+    history_cap: AtomicUsize,
 }
 
 impl HeldConn {
@@ -83,6 +87,19 @@ impl HeldConn {
 
     pub(crate) fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
         self.send(frame::RESIZE, &frame::grid(cols, rows))
+    }
+
+    /// Mirror a scrollback-cap change into the holder's own emulator (perf
+    /// 01 N1). Best-effort: a failed send is retried on the next change or
+    /// re-assertion.
+    pub(crate) fn set_history_cap(&self, lines: usize) {
+        if self.history_cap.swap(lines, Ordering::SeqCst) == lines {
+            return;
+        }
+        let payload = (lines.min(u32::MAX as usize) as u32).to_be_bytes();
+        if self.send(frame::HISTORY_CAP, &payload).is_err() {
+            self.history_cap.store(0, Ordering::SeqCst);
+        }
     }
 
     pub(crate) fn kill(&self) -> io::Result<()> {
@@ -267,6 +284,7 @@ pub(crate) fn adopt(path: &Path) -> Result<PtyHandle, AdoptError> {
         detached: AtomicBool::new(false),
         closed: AtomicBool::new(false),
         exited: AtomicBool::new(false),
+        history_cap: AtomicUsize::new(0),
     });
     let exit = ExitSignal {
         child_state: Arc::clone(&child_state),
@@ -325,7 +343,7 @@ impl ExitSignal {
 fn reader_loop(mut stream: UnixStream, conn: Arc<HeldConn>, mirror: Mirror, exit: ExitSignal) {
     loop {
         match frame::read_sync(&mut stream) {
-            Ok((frame::OUTPUT, data)) => mirror.feed(&data),
+            Ok((frame::OUTPUT, data)) => mirror.feed_bytes(data.into()),
             Ok((frame::SNAPSHOT, payload)) => {
                 if let Some((cols, rows, data)) = frame::parse_grid(&payload) {
                     mirror.reset_to(cols, rows, data);

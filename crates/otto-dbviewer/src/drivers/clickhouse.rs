@@ -16,6 +16,7 @@
 //! truncation, and completion logic are shared between them.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,9 +33,9 @@ use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, CancelToken, Capabilities, Column, ColumnDef, CompletionContext, CompletionResponse,
-    DbQueryPlan, Engine, NodeKind, NodePath, ObjectDetail, ObjectHit, ObjectSearchReq,
-    ObjectSearchResult, QueryHandle, QueryRequest, QueryResult, QueryStats, ResolvedConfig,
-    SchemaNode, TestResult,
+    DbQueryPlan, Engine, GraphColumn, GraphTable, NodeKind, NodePath, ObjectDetail, ObjectHit,
+    ObjectSearchReq, ObjectSearchResult, QueryHandle, QueryRequest, QueryResult, QueryStats,
+    ResolvedConfig, SchemaGraph, SchemaNode, TestResult,
 };
 
 /// ClickHouse driver. Caches one transport handle per [`ResolvedConfig::cache_key`]:
@@ -52,6 +53,11 @@ pub struct ClickhouseDriver {
     native: ResourceCache<Arc<klickhouse::Client>>,
     /// Per-connection schema snapshot cache backing smart completion.
     completions: crate::complete::CompletionCache,
+    /// Per-cache-key "this server refuses `readonly=2`" memo (DB-02). A user
+    /// whose profile is already read-only gets a refusal for touching the
+    /// setting; the first refusal flips the flag so every later read-only
+    /// request skips the param instead of paying a failed round trip first.
+    readonly_refused: std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 // --- Transport selection ----------------------------------------------------
@@ -106,6 +112,20 @@ const HTTP_RESPONSE_BYTE_CAP: usize = 128 * 1024 * 1024;
 /// Replies at least this big are JSON-decoded on the blocking pool.
 const OFF_RUNTIME_PARSE_BYTES: usize = 1024 * 1024;
 
+/// The streaming run reader ([`Conn::query_json_capped`]) hands complete lines
+/// to the row decoder in batches of about this many bytes; a batch this big
+/// is decoded on the blocking pool so no runtime worker parses megabytes.
+const STREAM_PARSE_CHUNK_BYTES: usize = 256 * 1024;
+
+/// Native transport: once the row cap is reached, drain at most this many
+/// further blocks (the injected LIMIT normally ends the stream right away).
+/// Past that the stream is dropped and the cached client evicted, so the
+/// server-side query dies with its connection instead of being drained whole.
+const NATIVE_DRAIN_BLOCKS: usize = 8;
+
+/// Native blocks with at least this many cells are decoded on the blocking pool.
+const NATIVE_OFF_RUNTIME_CELLS: usize = 16 * 1024;
+
 /// Server-side `max_execution_time` (seconds) for an HTTP request whose tab
 /// sets no timeout — just under the client's default 60s wall clock, so the
 /// server stops the query itself instead of running on after the client left.
@@ -119,6 +139,14 @@ struct RawRows {
     meta: Vec<(String, String)>,
     data: Vec<Vec<Value>>,
     bytes_read: u64,
+    /// The rows are already cell-capped and charged against the response
+    /// [`types::ByteBudget`] (the streaming HTTP reader does this as it goes).
+    prepared: bool,
+    /// The reader stopped because the byte budget ran out (more rows existed).
+    truncated_bytes: bool,
+    /// The reader stopped before the end of the reply, so the trailing
+    /// statistics (`bytes_read`) are unknown.
+    partial: bool,
 }
 
 impl RawRows {
@@ -157,6 +185,13 @@ struct Conn {
     /// classifier. `2`, not `1`, because `1` also forbids the per-request
     /// settings sent here (`session_timezone`, `max_execution_time`).
     readonly: bool,
+    /// Shared per-cache-key memo: the server refused `readonly=2` once, so
+    /// skip the param (see [`ClickhouseDriver::readonly_refused`]).
+    readonly_refused: Arc<AtomicBool>,
+    /// Server-side row cap for the run path: sent as `max_result_rows` +
+    /// `result_overflow_mode=break` so the server stops producing rows. Only
+    /// set for single-SELECT statements the LIMIT injector couldn't rewrite.
+    result_row_cap: Option<usize>,
 }
 
 /// The shape of a `FORMAT JSONCompact` reply.
@@ -195,6 +230,7 @@ impl JsonResponse {
             meta: self.meta.into_iter().map(|m| (m.name, m.ty)).collect(),
             data: self.data,
             bytes_read: self.statistics.bytes_read,
+            ..RawRows::default()
         }
     }
 }
@@ -226,15 +262,15 @@ impl ClickhouseDriver {
     ) -> Option<crate::complete::SchemaSnapshot> {
         use crate::complete::{FieldSnap, ObjKind, ObjectSnap, Rank, SchemaSnapshot};
 
-        let databases: Vec<String> = self
-            .query_rows(cfg, "SELECT name FROM system.databases ORDER BY name")
-            .await
-            .ok()?
-            .first_col_strs()
-            .map(str::to_string)
-            .collect();
-
+        const DB_SQL: &str = "SELECT name FROM system.databases ORDER BY name";
         if db.is_empty() {
+            let databases: Vec<String> = self
+                .query_rows(cfg, DB_SQL)
+                .await
+                .ok()?
+                .first_col_strs()
+                .map(str::to_string)
+                .collect();
             return Some(SchemaSnapshot {
                 databases,
                 objects: Vec::new(),
@@ -246,15 +282,11 @@ impl ClickhouseDriver {
             "SELECT name, engine FROM system.tables WHERE database = '{}' ORDER BY name",
             esc(db)
         );
-        let tables = self.query_rows(cfg, &tbl_sql).await.ok()?;
-
         let col_sql = format!(
             "SELECT table, name, type, is_in_primary_key FROM system.columns \
              WHERE database = '{}' ORDER BY table, position",
             esc(db)
         );
-        let cols = self.query_rows(cfg, &col_sql).await.ok()?;
-
         // Data-skipping indexes: mark any column whose name appears in an index
         // expression as `Index` (best-effort token match; CH index exprs can be
         // arbitrary, but the common case is a bare column).
@@ -262,11 +294,17 @@ impl ClickhouseDriver {
             "SELECT table, expr FROM system.data_skipping_indices WHERE database = '{}'",
             esc(db)
         );
-        let skip = self.query_rows(cfg, &idx_sql).await.unwrap_or(RawRows {
-            meta: Vec::new(),
-            data: Vec::new(),
-            bytes_read: 0,
-        });
+        // The four catalog reads are independent: one round-trip wave (DB-08).
+        let (dbs, tables, cols, skip) = tokio::join!(
+            self.query_rows(cfg, DB_SQL),
+            self.query_rows(cfg, &tbl_sql),
+            self.query_rows(cfg, &col_sql),
+            self.query_rows(cfg, &idx_sql),
+        );
+        let databases: Vec<String> = dbs.ok()?.first_col_strs().map(str::to_string).collect();
+        let tables = tables.ok()?;
+        let cols = cols.ok()?;
+        let skip = skip.unwrap_or_default();
         // (table_lc) → set of indexed column names referenced by skip-index exprs.
         let mut skip_exprs: HashMap<String, Vec<String>> = HashMap::new();
         for row in &skip.data {
@@ -374,7 +412,21 @@ impl ClickhouseDriver {
         timeout_secs: Option<u64>,
     ) -> Result<Conn> {
         let client = self.client(cfg).await?;
-        Self::connection_from_client(cfg, active_db, query_id, timeout_secs, client)
+        let mut conn =
+            Self::connection_from_client(cfg, active_db, query_id, timeout_secs, client)?;
+        if conn.readonly {
+            conn.readonly_refused = self.readonly_memo(&cfg.cache_key());
+        }
+        Ok(conn)
+    }
+
+    /// The shared "server refuses `readonly`" flag for one cache key.
+    fn readonly_memo(&self, cache_key: &str) -> Arc<AtomicBool> {
+        let mut map = self
+            .readonly_refused
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Arc::clone(map.entry(cache_key.to_string()).or_default())
     }
 
     fn connection_from_client(
@@ -426,6 +478,8 @@ impl ClickhouseDriver {
                 .get("__read_only_execution")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true),
+            readonly_refused: Arc::new(AtomicBool::new(false)),
+            result_row_cap: None,
         })
     }
 
@@ -474,6 +528,7 @@ impl ClickhouseDriver {
 
         let mut meta: Vec<(String, String)> = Vec::new();
         let mut data: Vec<Vec<Value>> = Vec::new();
+        let mut drained = 0usize;
         while let Some(block) = stream.next().await {
             let block = block.map_err(native_err)?;
             // The first non-empty block establishes the column order/types; the
@@ -489,36 +544,37 @@ impl ClickhouseDriver {
             if block.rows == 0 {
                 continue;
             }
-            // Past the cap: keep draining the stream (so the multiplexed
-            // connection finishes the query cleanly) without decoding/retaining.
+            // Past the cap: drain a few blocks undecoded (the injected LIMIT
+            // normally ends the stream here, keeping the cached connection
+            // reusable). A statement still streaming after that is abandoned:
+            // drop the stream (klickhouse discards the rest) and evict the
+            // cached client, so later queries don't queue behind it and the
+            // server query dies with the connection once in-flight users finish.
             if row_cap.is_some_and(|cap| data.len() >= cap) {
-                continue;
-            }
-            // Decode column-major `column_data` into row-major JSON. Columns are
-            // ordered by `column_types` (an IndexMap preserves SELECT order).
-            let order: Vec<&String> = block.column_types.keys().collect();
-            for r in 0..block.rows as usize {
-                if row_cap.is_some_and(|cap| data.len() >= cap) {
+                drained += 1;
+                if drained > NATIVE_DRAIN_BLOCKS {
+                    drop(stream);
+                    drop(self.native.remove(&cfg.cache_key()));
                     break;
                 }
-                let mut row = Vec::with_capacity(order.len());
-                for name in &order {
-                    let cell = block
-                        .column_data
-                        .get(*name)
-                        .and_then(|col| col.get(r))
-                        .map(value_to_json)
-                        .unwrap_or(Value::Null);
-                    row.push(cell);
-                }
-                data.push(row);
+                continue;
             }
+            let take = row_cap.map_or(usize::MAX, |cap| cap - data.len());
+            let cells = (block.rows as usize).saturating_mul(block.column_types.len());
+            let rows = if cells >= NATIVE_OFF_RUNTIME_CELLS {
+                tokio::task::spawn_blocking(move || decode_native_block(&block, take))
+                    .await
+                    .map_err(|e| types::upstream(format!("clickhouse: decode task failed: {e}")))?
+            } else {
+                decode_native_block(&block, take)
+            };
+            data.extend(rows);
         }
 
         Ok(RawRows {
             meta,
             data,
-            bytes_read: 0,
+            ..RawRows::default()
         })
     }
 
@@ -560,15 +616,17 @@ impl ClickhouseDriver {
         query_id: Option<String>,
         timeout_secs: Option<u64>,
     ) -> Result<RawRows> {
-        self.query_rows_db_capped(cfg, sql, active_db, query_id, timeout_secs, None)
+        self.query_rows_db_capped(cfg, sql, active_db, query_id, timeout_secs, None, false)
             .await
     }
 
-    /// Full-fat variant: `row_cap` bounds how many rows the NATIVE transport
-    /// materialises (the HTTP transport is bounded by [`HTTP_RESPONSE_BYTE_CAP`]
-    /// instead). The native transport has no server-side `max_execution_time`
-    /// or cancellable `query_id`, so `timeout_secs` is enforced there as a
-    /// client-side wall clock around the whole query.
+    /// Full-fat variant: `row_cap` bounds how many rows either transport
+    /// materialises. Over HTTP a capped read streams the reply row by row and
+    /// stops at the cap or the response byte budget (killing the server query);
+    /// `server_cap` additionally asks the server to stop producing rows
+    /// (`max_result_rows` + `result_overflow_mode=break`). The native transport
+    /// has no server-side `max_execution_time` or cancellable `query_id`, so
+    /// `timeout_secs` is enforced there as a client-side wall clock.
     #[allow(clippy::too_many_arguments)]
     async fn query_rows_db_capped(
         &self,
@@ -578,13 +636,22 @@ impl ClickhouseDriver {
         query_id: Option<String>,
         timeout_secs: Option<u64>,
         row_cap: Option<usize>,
+        server_cap: bool,
     ) -> Result<RawRows> {
         match transport_for(cfg) {
             Transport::Http => {
-                let conn = self
+                let mut conn = self
                     .connect_id_timeout(cfg, active_db, query_id, timeout_secs)
                     .await?;
-                Ok(conn.query_json(sql).await?.into_raw())
+                match row_cap {
+                    Some(cap) => {
+                        if server_cap {
+                            conn.result_row_cap = Some(cap);
+                        }
+                        conn.query_json_capped(sql, cap).await
+                    }
+                    None => Ok(conn.query_json(sql).await?.into_raw()),
+                }
             }
             Transport::Native => {
                 native_with_timeout(timeout_secs, self.native_query_capped(cfg, sql, row_cap)).await
@@ -647,6 +714,7 @@ impl ClickhouseDriver {
     /// Run one row-returning statement and shape it into a `QueryResult`,
     /// capping at `max_rows` (flagging `truncated`) and capping oversized cells.
     /// Shared by the single-statement fast path and the batch loop.
+    #[allow(clippy::too_many_arguments)]
     async fn exec_ch_read(
         &self,
         cfg: &ResolvedConfig,
@@ -655,10 +723,15 @@ impl ClickhouseDriver {
         query_id: Option<String>,
         timeout_secs: Option<u64>,
         max_rows: usize,
+        limited: bool,
     ) -> Result<QueryResult> {
         let started = Instant::now();
-        // Native transport: materialise at most max_rows+1 rows (the +1 flags
-        // truncation); HTTP is bounded by the response byte cap instead.
+        // Materialise at most max_rows+1 rows (the +1 flags truncation) on
+        // both transports. When the LIMIT injector couldn't bound the statement
+        // (FORMAT/SETTINGS/…), also ask the server to stop at the cap — only
+        // for a single SELECT: `max_result_rows` is checked for subqueries
+        // too, and `break` would silently clip an `IN (SELECT …)` / UNION arm.
+        let server_cap = !limited && single_select(sql);
         let resp = self
             .query_rows_db_capped(
                 cfg,
@@ -667,6 +740,7 @@ impl ClickhouseDriver {
                 query_id,
                 timeout_secs,
                 Some(max_rows.saturating_add(1)),
+                server_cap,
             )
             .await?;
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -684,17 +758,30 @@ impl ClickhouseDriver {
         // the MySQL/Postgres readers (at least one row is always kept).
         let mut budget = types::ByteBudget::default();
         let mut truncated_reason = None;
-        let mut rows: Vec<Vec<Value>> = Vec::with_capacity(total.min(max_rows));
-        for row in resp.data.into_iter().take(max_rows) {
-            let row: Vec<Value> = row.into_iter().map(cap_cell).collect();
-            let size = row.iter().map(|v| types::approx_json_len(v) + 1).sum();
-            if !budget.charge(size) && !rows.is_empty() {
+        let bytes_read = (!resp.partial).then_some(resp.bytes_read);
+        let rows: Vec<Vec<Value>> = if resp.prepared {
+            // The streaming reader already capped cells and charged the budget.
+            if resp.truncated_bytes {
                 truncated = true;
                 truncated_reason = Some(types::TruncatedReason::Bytes);
-                break;
             }
-            rows.push(row);
-        }
+            let mut data = resp.data;
+            data.truncate(max_rows);
+            data
+        } else {
+            let mut rows = Vec::with_capacity(total.min(max_rows));
+            for row in resp.data.into_iter().take(max_rows) {
+                let row: Vec<Value> = row.into_iter().map(cap_cell).collect();
+                let size = row.iter().map(|v| types::approx_json_len(v) + 1).sum();
+                if !budget.charge(size) && !rows.is_empty() {
+                    truncated = true;
+                    truncated_reason = Some(types::TruncatedReason::Bytes);
+                    break;
+                }
+                rows.push(row);
+            }
+            rows
+        };
         let row_count = rows.len();
 
         Ok(QueryResult {
@@ -703,7 +790,7 @@ impl ClickhouseDriver {
             stats: QueryStats {
                 duration_ms,
                 row_count,
-                bytes_read: Some(resp.bytes_read),
+                bytes_read,
             },
             truncated,
             truncated_reason,
@@ -760,8 +847,16 @@ impl ClickhouseDriver {
                 token.set(QueryHandle::ClickhouseQueryId(query_id.clone()));
             }
             let outcome = if returns_rows(stmt) {
-                self.exec_ch_read(cfg, stmt, active_db, Some(query_id), timeout_secs, max_rows)
-                    .await
+                self.exec_ch_read(
+                    cfg,
+                    stmt,
+                    active_db,
+                    Some(query_id),
+                    timeout_secs,
+                    max_rows,
+                    false,
+                )
+                .await
             } else {
                 self.exec_ch_write(cfg, stmt, active_db, Some(query_id), timeout_secs)
                     .await
@@ -841,25 +936,38 @@ impl Conn {
         self.post(sql.to_string()).await
     }
 
-    /// POST a body to the HTTP interface; map non-2xx replies to a 502 carrying
-    /// the server's error text. A read-only connection asks for `readonly=2`;
-    /// a user whose server profile is ALREADY read-only may not touch that
-    /// setting at all, and the server enforcing read-only is exactly the
-    /// guarantee wanted — so that one refusal is retried without it.
+    /// POST a body to the HTTP interface and read the reply under the hard
+    /// [`HTTP_RESPONSE_BYTE_CAP`]; non-2xx replies map to a 502 carrying the
+    /// server's error text.
     async fn post(&self, body: String) -> Result<String> {
-        if !self.readonly {
-            return self.post_once(body, false).await;
+        let resp = self.send_checked(body).await?;
+        self.read_capped(resp).await
+    }
+
+    /// Send a body, honouring the read-only mode. A read-only connection asks
+    /// for `readonly=2`; a user whose server profile is ALREADY read-only may
+    /// not touch that setting at all, and the server enforcing read-only is
+    /// exactly the guarantee wanted — so that refusal is retried without it,
+    /// and remembered per cache key (DB-02) so later requests skip the doomed
+    /// first attempt (and the body copy it needs).
+    async fn send_checked(&self, body: String) -> Result<reqwest::Response> {
+        if !self.readonly || self.readonly_refused.load(Ordering::Relaxed) {
+            return self.send(body, false).await;
         }
-        match self.post_once(body.clone(), true).await {
+        match self.send(body.clone(), true).await {
             Err(e) if is_readonly_setting_refused(&e.to_string()) => {
-                self.post_once(body, false).await
+                self.readonly_refused.store(true, Ordering::Relaxed);
+                self.send(body, false).await
             }
             other => other,
         }
     }
 
-    async fn post_once(&self, body: String, readonly: bool) -> Result<String> {
-        let mut req = self.client.post(&self.base).headers(self.headers.clone());
+    /// One POST with every request setting attached; returns the response
+    /// once its status is a success (an error status reads the small body
+    /// and maps it to the server's message).
+    async fn send(&self, body: String, readonly: bool) -> Result<reqwest::Response> {
+        let mut req = compressed(self.client.post(&self.base).headers(self.headers.clone()));
         if readonly {
             req = req.query(&[("readonly", "2")]);
         }
@@ -876,6 +984,14 @@ impl Conn {
             // Tag the server-side query so `KILL QUERY WHERE query_id = '<id>'`
             // can target it from another connection.
             req = req.query(&[("query_id", qid.as_str())]);
+        }
+        if let Some(cap) = self.result_row_cap {
+            // Server-side row cap: the server stops producing rows at (about —
+            // block granularity) `cap` instead of streaming the whole result.
+            req = req.query(&[
+                ("max_result_rows", cap.to_string().as_str()),
+                ("result_overflow_mode", "break"),
+            ]);
         }
         // `max_execution_time` is a ClickHouse per-query setting (seconds,
         // integer; 0 = unlimited — the guard in `run_tracked` ensures only
@@ -897,14 +1013,23 @@ impl Conn {
                 return Err(req_err(e));
             }
         };
-        let status = resp.status();
-        // Read the body with a hard byte cap instead of `text()`: statements the
-        // auto-LIMIT injector bails on (FORMAT/SETTINGS/UNION, batches) can
-        // return an unbounded body that would otherwise be buffered whole into
-        // daemon RAM. Exceeding the cap is a clear error, not an OOM. Error
-        // bodies are small and unaffected.
+        if !resp.status().is_success() {
+            let text = self.read_capped(resp).await?;
+            return Err(otto_core::Error::Upstream(crate::errors::clean_ch_message(
+                text.trim(),
+            )));
+        }
+        Ok(resp)
+    }
+
+    /// Read a body with a hard byte cap instead of `text()`: statements the
+    /// auto-LIMIT injector bails on (FORMAT/SETTINGS/UNION, batches) can
+    /// return an unbounded body that would otherwise be buffered whole into
+    /// daemon RAM. Exceeding the cap is a clear error, not an OOM.
+    async fn read_capped(&self, resp: reqwest::Response) -> Result<String> {
         use futures_util::StreamExt as _;
         let mut buf: Vec<u8> = Vec::new();
+        let mut body = BodyDecoder::for_response(&resp)?;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = match chunk {
@@ -914,25 +1039,109 @@ impl Conn {
                     return Err(req_err(e));
                 }
             };
+            let chunk = body.decode(&chunk)?;
             if buf.len() + chunk.len() > HTTP_RESPONSE_BYTE_CAP {
-                return Err(types::upstream(format!(
-                    "clickhouse: response larger than the {} MiB interactive cap — \
-                     narrow the query, add a LIMIT, or use export",
-                    HTTP_RESPONSE_BYTE_CAP / (1024 * 1024)
-                )));
+                return Err(response_cap_error());
             }
             buf.extend_from_slice(&chunk);
         }
         // Valid UTF-8 (the normal case) moves the buffer; only a broken body
         // pays the lossy copy.
-        let text = String::from_utf8(buf)
-            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-        if !status.is_success() {
-            return Err(otto_core::Error::Upstream(crate::errors::clean_ch_message(
-                text.trim(),
-            )));
+        Ok(String::from_utf8(buf)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
+    }
+
+    /// The run path's reader (DB-01): `FORMAT JSONCompact` parsed row by row
+    /// straight off the response stream. Cells are capped and charged against
+    /// the response [`types::ByteBudget`] as they arrive; reading stops at
+    /// `row_cap` rows or when the budget runs out, the response is dropped and
+    /// the server query killed by `query_id` — so a statement the LIMIT
+    /// injector couldn't bound costs `row_cap` rows of RAM, not 128 MiB.
+    async fn query_json_capped(&self, sql: &str, row_cap: usize) -> Result<RawRows> {
+        use futures_util::StreamExt as _;
+        let resp = self
+            .send_checked(format!("{sql}\nFORMAT JSONCompact"))
+            .await?;
+        let mut state = CompactStream::new(Some(row_cap));
+        // `carry` = bytes after the last newline seen; `pending` = complete
+        // lines not yet decoded.
+        let mut carry: Vec<u8> = Vec::new();
+        let mut pending: Vec<u8> = Vec::new();
+        let mut body = BodyDecoder::for_response(&resp)?;
+        let mut stream = resp.bytes_stream();
+        let mut exhausted = true;
+        while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    self.kill_after_client_timeout(&e).await;
+                    return Err(req_err(e));
+                }
+            };
+            let chunk = match body.decode(&chunk) {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    self.spawn_kill();
+                    return Err(e);
+                }
+            };
+            match chunk.iter().rposition(|&b| b == b'\n') {
+                Some(i) => {
+                    pending.append(&mut carry);
+                    pending.extend_from_slice(&chunk[..=i]);
+                    carry.extend_from_slice(&chunk[i + 1..]);
+                }
+                None => carry.extend_from_slice(&chunk),
+            }
+            if carry.len() > HTTP_RESPONSE_BYTE_CAP || state.buffered() > HTTP_RESPONSE_BYTE_CAP {
+                self.spawn_kill();
+                return Err(response_cap_error());
+            }
+            if pending.len() >= STREAM_PARSE_CHUNK_BYTES {
+                state = feed_compact(state, std::mem::take(&mut pending)).await?;
+                if state.stopped {
+                    exhausted = false;
+                    break;
+                }
+            }
         }
-        Ok(text)
+        drop(stream);
+        if exhausted {
+            if !carry.is_empty() {
+                pending.append(&mut carry);
+                pending.push(b'\n');
+            }
+            if !pending.is_empty() {
+                state = feed_compact(state, pending).await?;
+            }
+        } else {
+            // We hung up mid-reply; make sure the server stops too.
+            self.spawn_kill();
+        }
+        state.finish().map_err(otto_core::Error::Upstream)
+    }
+
+    /// `KILL QUERY` for this request's `query_id`, as a ready-to-send request.
+    fn kill_request(&self) -> Option<reqwest::RequestBuilder> {
+        let qid = self.query_id.as_ref()?;
+        let sql = format!("KILL QUERY WHERE query_id = '{}'", esc(qid));
+        Some(
+            self.client
+                .post(&self.base)
+                .headers(self.headers.clone())
+                .timeout(Duration::from_secs(10))
+                .body(sql),
+        )
+    }
+
+    /// Fire-and-forget `KILL QUERY` (the result is already in hand; don't make
+    /// the caller wait on the kill round trip).
+    fn spawn_kill(&self) {
+        if let Some(req) = self.kill_request() {
+            tokio::spawn(async move {
+                let _ = req.send().await;
+            });
+        }
     }
 
     /// The client gave up on a tagged query (its wall clock expired, while
@@ -944,18 +1153,9 @@ impl Conn {
         if !e.is_timeout() {
             return;
         }
-        let Some(qid) = &self.query_id else {
-            return;
-        };
-        let sql = format!("KILL QUERY WHERE query_id = '{}'", esc(qid));
-        let _ = self
-            .client
-            .post(&self.base)
-            .headers(self.headers.clone())
-            .timeout(Duration::from_secs(10))
-            .body(sql)
-            .send()
-            .await;
+        if let Some(req) = self.kill_request() {
+            let _ = req.send().await;
+        }
     }
 
     /// POST a body and return the streaming `reqwest::Response` (for
@@ -964,7 +1164,7 @@ impl Conn {
     /// server's message; on success the body is left unread for the caller to
     /// stream chunk-by-chunk to disk.
     async fn post_stream(&self, body: String) -> Result<reqwest::Response> {
-        let mut req = self.client.post(&self.base).headers(self.headers.clone());
+        let mut req = compressed(self.client.post(&self.base).headers(self.headers.clone()));
         if let Some(tz) = &self.timezone {
             req = req.query(&[("session_timezone", tz.as_str())]);
         }
@@ -980,7 +1180,8 @@ impl Conn {
         req = req.timeout(Duration::from_secs(24 * 60 * 60));
         let resp = req.body(body).send().await.map_err(req_err)?;
         if !resp.status().is_success() {
-            let text = resp.text().await.map_err(types::upstream)?;
+            // Capped AND decoded (the error body may be compressed too).
+            let text = self.read_capped(resp).await?;
             return Err(otto_core::Error::Upstream(crate::errors::clean_ch_message(
                 text.trim(),
             )));
@@ -1156,6 +1357,313 @@ fn decode_json_reply(text: &str) -> std::result::Result<JsonResponse, String> {
             None => Err(e.to_string()),
         },
     }
+}
+
+fn response_cap_error() -> otto_core::Error {
+    types::upstream(format!(
+        "clickhouse: response larger than the {} MiB interactive cap — \
+         narrow the query, add a LIMIT, or use export",
+        HTTP_RESPONSE_BYTE_CAP / (1024 * 1024)
+    ))
+}
+
+/// Where the streaming `JSONCompact` reader is in the reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamPhase {
+    /// Before `"data":` — buffering the `meta` header.
+    Head,
+    /// Inside the `data` array: one row per line.
+    Data,
+    /// After the `data` array: `rows`, `statistics`, maybe `exception`.
+    Tail,
+    /// The reply isn't laid out one row per line (e.g. a server with JSON
+    /// pretty-printing off): buffer it whole and decode it at the end.
+    Whole,
+}
+
+/// Incremental decoder for a `FORMAT JSONCompact` reply (DB-01). ClickHouse
+/// writes that format one data row per line, so rows can be decoded as they
+/// arrive and reading can stop at the row cap / byte budget instead of
+/// buffering the full body. Anything not laid out that way falls back to the
+/// whole-body decoder ([`decode_json_reply`]).
+struct CompactStream {
+    phase: StreamPhase,
+    /// Header text (Head), trailer text (Tail) or the whole body (Whole).
+    text: String,
+    meta: Vec<(String, String)>,
+    rows: Vec<Vec<Value>>,
+    row_cap: Option<usize>,
+    budget: types::ByteBudget,
+    truncated_bytes: bool,
+    /// Enough rows are held: further data rows are skipped undecoded (the
+    /// network loop hangs up at the next batch boundary; a reply already fully
+    /// received is still walked to its trailer for `statistics`).
+    stopped: bool,
+}
+
+impl CompactStream {
+    fn new(row_cap: Option<usize>) -> Self {
+        Self {
+            phase: StreamPhase::Head,
+            text: String::new(),
+            meta: Vec::new(),
+            rows: Vec::new(),
+            row_cap,
+            budget: types::ByteBudget::default(),
+            truncated_bytes: false,
+            stopped: false,
+        }
+    }
+
+    /// Bytes of reply text held undecoded (bounded by the caller).
+    fn buffered(&self) -> usize {
+        self.text.len()
+    }
+
+    /// Feed one complete line (no trailing newline).
+    fn push_line(&mut self, line: &str) -> std::result::Result<(), String> {
+        match self.phase {
+            StreamPhase::Head => {
+                self.text.push_str(line);
+                self.text.push('\n');
+                if line.trim() == "\"data\":" {
+                    // `{ "meta": [...], "data":` + `[]}` is a complete object.
+                    let probe = format!("{}[]}}", self.text);
+                    match serde_json::from_str::<JsonResponse>(&probe) {
+                        Ok(head) => {
+                            self.meta = head.meta.into_iter().map(|m| (m.name, m.ty)).collect();
+                            self.text.clear();
+                            self.phase = StreamPhase::Data;
+                        }
+                        Err(_) => self.phase = StreamPhase::Whole,
+                    }
+                } else if self.text.len() > OFF_RUNTIME_PARSE_BYTES {
+                    // A metadata header is never this big: not the layout we know.
+                    self.phase = StreamPhase::Whole;
+                }
+            }
+            StreamPhase::Data => {
+                let t = line.trim();
+                if t.is_empty() || t == "[" {
+                    return Ok(());
+                }
+                if t == "]" || t == "]," {
+                    self.phase = StreamPhase::Tail;
+                    return Ok(());
+                }
+                if self.stopped {
+                    return Ok(());
+                }
+                let cells = t.strip_suffix(',').unwrap_or(t);
+                match serde_json::from_str::<Vec<Value>>(cells) {
+                    Ok(row) => self.accept_row(row),
+                    // A mid-stream failure with in-band exceptions off: the
+                    // server appended its raw `Code: N. DB::Exception: …` text.
+                    Err(e) => {
+                        return Err(match crate::errors::ch_trailing_exception(line) {
+                            Some(ex) => {
+                                crate::errors::ch_midstream_message(&ex, Some(self.rows.len()))
+                            }
+                            None => format!("clickhouse: undecodable result row: {e}"),
+                        })
+                    }
+                }
+            }
+            StreamPhase::Tail | StreamPhase::Whole => {
+                self.text.push_str(line);
+                self.text.push('\n');
+            }
+        }
+        Ok(())
+    }
+
+    fn accept_row(&mut self, row: Vec<Value>) {
+        let row: Vec<Value> = row.into_iter().map(cap_cell).collect();
+        let size = row.iter().map(|v| types::approx_json_len(v) + 1).sum();
+        // At least one row is always kept, like the MySQL/Postgres readers.
+        if !self.budget.charge(size) && !self.rows.is_empty() {
+            self.truncated_bytes = true;
+            self.stopped = true;
+            return;
+        }
+        self.rows.push(row);
+        if self.row_cap.is_some_and(|cap| self.rows.len() >= cap) {
+            self.stopped = true;
+        }
+    }
+
+    /// Feed a batch of complete lines.
+    fn push_lines(&mut self, bytes: &[u8]) -> std::result::Result<(), String> {
+        for line in bytes.split(|&b| b == b'\n') {
+            let line = String::from_utf8_lossy(line);
+            self.push_line(line.strip_suffix('\r').unwrap_or(&line))?;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> std::result::Result<RawRows, String> {
+        // Hung up (or the reply ended) inside the rows after the cap was hit:
+        // the rows held are good, the trailing statistics are unknown.
+        if self.stopped && self.phase != StreamPhase::Tail {
+            return Ok(RawRows {
+                meta: self.meta,
+                data: self.rows,
+                bytes_read: 0,
+                prepared: true,
+                truncated_bytes: self.truncated_bytes,
+                partial: true,
+            });
+        }
+        match self.phase {
+            // Never saw a row-per-line layout: decode the body whole.
+            StreamPhase::Head | StreamPhase::Whole => {
+                decode_json_reply(&self.text).map(JsonResponse::into_raw)
+            }
+            StreamPhase::Data => Err(crate::errors::ch_trailing_exception(&self.text)
+                .map(|ex| crate::errors::ch_midstream_message(&ex, Some(self.rows.len())))
+                .unwrap_or_else(|| "clickhouse: reply ended inside the result rows".to_string())),
+            StreamPhase::Tail => {
+                // `"rows": n, "statistics": {…}[, "exception": "…"]` + `}`.
+                let tail = format!("{{{}", self.text);
+                let bytes_read = match serde_json::from_str::<JsonResponse>(&tail) {
+                    Ok(reply) => {
+                        if let Some(ex) = &reply.exception {
+                            return Err(crate::errors::ch_midstream_message(
+                                ex,
+                                Some(self.rows.len()),
+                            ));
+                        }
+                        reply.statistics.bytes_read
+                    }
+                    Err(_) => {
+                        if let Some(ex) = crate::errors::ch_trailing_exception(&self.text) {
+                            return Err(crate::errors::ch_midstream_message(
+                                &ex,
+                                Some(self.rows.len()),
+                            ));
+                        }
+                        0
+                    }
+                };
+                Ok(RawRows {
+                    meta: self.meta,
+                    data: self.rows,
+                    bytes_read,
+                    prepared: true,
+                    truncated_bytes: self.truncated_bytes,
+                    partial: false,
+                })
+            }
+        }
+    }
+}
+
+/// Decode a batch of lines into `state` — on the blocking pool when the batch
+/// is big, inline otherwise.
+async fn feed_compact(mut state: CompactStream, bytes: Vec<u8>) -> Result<CompactStream> {
+    if bytes.len() < STREAM_PARSE_CHUNK_BYTES {
+        state
+            .push_lines(&bytes)
+            .map_err(otto_core::Error::Upstream)?;
+        return Ok(state);
+    }
+    tokio::task::spawn_blocking(move || state.push_lines(&bytes).map(|()| state))
+        .await
+        .map_err(|e| types::upstream(format!("clickhouse: decode task failed: {e}")))?
+        .map_err(otto_core::Error::Upstream)
+}
+
+/// Decode up to `take` rows of a native column-major block into row-major
+/// JSON. The column vectors are resolved once per block (not per cell).
+fn decode_native_block(block: &klickhouse::block::Block, take: usize) -> Vec<Vec<Value>> {
+    // Columns are ordered by `column_types` (an IndexMap preserves SELECT order).
+    let cols: Vec<Option<&Vec<klickhouse::Value>>> = block
+        .column_types
+        .keys()
+        .map(|name| block.column_data.get(name))
+        .collect();
+    let n = (block.rows as usize).min(take);
+    let mut out = Vec::with_capacity(n);
+    for r in 0..n {
+        out.push(
+            cols.iter()
+                .map(|col| {
+                    col.and_then(|c| c.get(r))
+                        .map(value_to_json)
+                        .unwrap_or(Value::Null)
+                })
+                .collect(),
+        );
+    }
+    out
+}
+
+/// Shape the `system.tables` + `system.columns` rows of
+/// [`ClickhouseDriver::schema_graph_bulk`] into a [`SchemaGraph`]. Node ids
+/// match [`ClickhouseDriver::schema_children`] (`db:<db>/table:<name>`).
+fn build_bulk_graph(
+    schema: &str,
+    tables: &RawRows,
+    columns: &RawRows,
+    max_tables: usize,
+) -> SchemaGraph {
+    let mut by_table: HashMap<&str, Vec<GraphColumn>> = HashMap::new();
+    for row in &columns.data {
+        let (Some(table), Some(name)) = (
+            row.first().and_then(Value::as_str),
+            row.get(1).and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let data_type = row.get(2).and_then(Value::as_str).unwrap_or("").to_string();
+        by_table.entry(table).or_default().push(GraphColumn {
+            name: name.to_string(),
+            nullable: data_type.starts_with("Nullable("),
+            data_type,
+            primary_key: row.get(3).is_some_and(cell_truthy),
+            foreign_key: false,
+        });
+    }
+    let truncated = tables.data.len() > max_tables;
+    let tables = tables
+        .data
+        .iter()
+        .take(max_tables)
+        .filter_map(|row| {
+            let name = row.first().and_then(Value::as_str)?;
+            let engine = row.get(1).and_then(Value::as_str).unwrap_or("");
+            Some(GraphTable {
+                id: format!("db:{schema}/table:{name}"),
+                schema: schema.to_string(),
+                name: name.to_string(),
+                kind: if engine.ends_with("View") {
+                    NodeKind::View
+                } else {
+                    NodeKind::Table
+                },
+                columns: by_table.remove(name).unwrap_or_default(),
+            })
+        })
+        .collect();
+    SchemaGraph {
+        schema: schema.to_string(),
+        tables,
+        edges: Vec::new(),
+        // Same as the per-object walk (`capabilities().joins`), so the UI's
+        // "no relationships" hint doesn't change with the code path.
+        relationships: true,
+        truncated,
+    }
+}
+
+/// True when the statement contains exactly one `SELECT` keyword (no
+/// subquery / UNION arm a server-side `max_result_rows` + `break` could clip).
+/// Over-counting (a literal mentioning "select") only disables the cap.
+fn single_select(sql: &str) -> bool {
+    sql.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|tok| tok.eq_ignore_ascii_case("select"))
+        .count()
+        == 1
 }
 
 /// Map a `klickhouse` error to an Upstream error (a 502 — the database's fault).
@@ -1658,7 +2166,30 @@ impl Driver for ClickhouseDriver {
             esc(db),
             esc(table)
         );
-        let cols = self.query_rows(cfg, &col_sql).await?;
+        // Table-level metadata.
+        let tbl_sql = format!(
+            "SELECT engine, partition_key, sorting_key, primary_key, total_rows \
+             FROM system.tables WHERE database = '{}' AND name = '{}'",
+            esc(db),
+            esc(table)
+        );
+        // DDL via SHOW CREATE (raw text, tab-separated raw so we get it verbatim
+        // over HTTP; over native it comes back as a single string cell).
+        let ddl_sql = format!(
+            "SHOW CREATE TABLE `{}`.`{}` FORMAT TabSeparatedRaw",
+            esc_ident(db),
+            esc_ident(table)
+        );
+        // The three catalog reads are independent: one round-trip wave, not
+        // three (DB-08). A failed SHOW CREATE only drops the DDL.
+        let (cols, tbl, ddl) = tokio::try_join!(
+            self.query_rows(cfg, &col_sql),
+            self.query_rows(cfg, &tbl_sql),
+            async { Ok::<_, otto_core::Error>(self.query_text(cfg, &ddl_sql).await.ok()) },
+        )?;
+        let ddl = ddl
+            .map(|s| s.trim_end().to_string())
+            .filter(|s| !s.is_empty());
         let mut columns = Vec::new();
         let mut primary_key = Vec::new();
         for row in &cols.data {
@@ -1703,14 +2234,6 @@ impl Driver for ClickhouseDriver {
             });
         }
 
-        // Table-level metadata.
-        let tbl_sql = format!(
-            "SELECT engine, partition_key, sorting_key, primary_key, total_rows \
-             FROM system.tables WHERE database = '{}' AND name = '{}'",
-            esc(db),
-            esc(table)
-        );
-        let tbl = self.query_rows(cfg, &tbl_sql).await?;
         let row = tbl.data.first();
         let engine = row
             .and_then(|r| r.first())
@@ -1742,20 +2265,6 @@ impl Driver for ClickhouseDriver {
         } else {
             NodeKind::Table
         };
-
-        // DDL via SHOW CREATE (raw text, tab-separated raw so we get it verbatim
-        // over HTTP; over native it comes back as a single string cell).
-        let ddl_sql = format!(
-            "SHOW CREATE TABLE `{}`.`{}` FORMAT TabSeparatedRaw",
-            esc_ident(db),
-            esc_ident(table)
-        );
-        let ddl = self
-            .query_text(cfg, &ddl_sql)
-            .await
-            .ok()
-            .map(|s| s.trim_end().to_string())
-            .filter(|s| !s.is_empty());
 
         let mut detail = ObjectDetail::new(table, kind);
         detail.columns = columns;
@@ -1796,6 +2305,59 @@ impl Driver for ClickhouseDriver {
         self.clients.remove(cache_key);
         self.native.remove(cache_key);
         self.completions.invalidate(cache_key);
+        self.readonly_refused
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(cache_key);
+    }
+
+    /// Detach handles idle past `idle` and DROP the cache's reference — never
+    /// close explicitly: a query running longer than the window holds its own
+    /// clone, and the handle goes away with the last clone.
+    async fn evict_idle(&self, idle: Duration) -> usize {
+        // Same 5-minute tick: expired completion snapshots go too (DB2-07).
+        self.completions.sweep();
+        let http = self.clients.take_idle(idle);
+        let native = self.native.take_idle(idle);
+        let mut memo = self
+            .readonly_refused
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (key, _) in &http {
+            memo.remove(key);
+        }
+        http.len() + native.len()
+    }
+
+    /// Diagram / assistant schema in two set-based catalog reads (DB-03)
+    /// instead of an `object_detail` (3 round trips) per table. ClickHouse has
+    /// no foreign keys, so the graph has no edges.
+    async fn schema_graph_bulk(
+        &self,
+        cfg: &ResolvedConfig,
+        schema: &str,
+        max_tables: usize,
+    ) -> Result<Option<SchemaGraph>> {
+        let db = esc(schema);
+        // One extra row tells us whether the list was clipped.
+        let tables_sql = format!(
+            "SELECT name, engine FROM system.tables WHERE database = '{db}' \
+             ORDER BY name LIMIT {}",
+            max_tables.saturating_add(1)
+        );
+        let columns_sql = format!(
+            "SELECT table, name, type, is_in_primary_key FROM system.columns \
+             WHERE database = '{db}' AND table IN \
+             (SELECT name FROM system.tables WHERE database = '{db}' ORDER BY name LIMIT {max_tables}) \
+             ORDER BY table, position"
+        );
+        let (tables, columns) = tokio::try_join!(
+            self.query_rows(cfg, &tables_sql),
+            self.query_rows(cfg, &columns_sql),
+        )?;
+        Ok(Some(build_bulk_graph(
+            schema, &tables, &columns, max_tables,
+        )))
     }
 
     async fn run_tracked(
@@ -1850,6 +2412,7 @@ impl Driver for ClickhouseDriver {
                     Some(query_id),
                     timeout_secs,
                     max_rows,
+                    ri.limited,
                 )
                 .await?;
             // Report the user-visible page size (max_rows), not the +1 probe.
@@ -2076,14 +2639,103 @@ impl ClickhouseDriver {
         let resp = conn.post_stream(body).await?;
 
         let mut sink = ExportSink::new(w, format);
+        let mut body = BodyDecoder::for_response(&resp)?;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(req_err)?;
+            let chunk = body.decode(&chunk)?;
             sink.write_raw(&chunk)
                 .map_err(|e| otto_core::Error::Internal(format!("write export chunk: {e}")))?;
         }
         sink.finish()
             .map_err(|e| otto_core::Error::Internal(format!("finish export file: {e}")))
+    }
+}
+
+// --- HTTP response compression (DB2-05) -------------------------------------
+
+/// Ask ClickHouse to compress the response body: `enable_http_compression=1`
+/// plus `Accept-Encoding: zstd`. `FORMAT JSONCompact` / TSV / CSV compress
+/// 5–10× and a tunnel/WAN link is bandwidth-bound, so a page or an export
+/// arrives several times faster. Decoded by [`BodyDecoder`] — NOT by
+/// enabling reqwest's `zstd`/`gzip` features, which would switch on silent
+/// auto-decompression for every other reqwest user in the daemon (the API
+/// client must show the wire as-is). A server that ignores the request
+/// answers uncompressed (no `Content-Encoding`) and that passes through.
+fn compressed(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    req.header(reqwest::header::ACCEPT_ENCODING, "zstd")
+        .query(&[("enable_http_compression", "1")])
+}
+
+/// Streaming decoder for a ClickHouse response body (see [`compressed`]):
+/// chunk in, decompressed bytes out, so the line-by-line JSONCompact reader,
+/// the capped reader and the export sink stay streaming.
+enum BodyDecoder {
+    Identity,
+    Zstd {
+        dec: Box<zstd::stream::raw::Decoder<'static>>,
+        /// Reused output window.
+        window: Vec<u8>,
+    },
+}
+
+/// Output window per `Decoder::run` call.
+const ZSTD_WINDOW: usize = 128 * 1024;
+/// Most one network chunk may decode to. Totals stay bounded by each reader's
+/// own cap (the run path's row/byte budget, [`HTTP_RESPONSE_BYTE_CAP`]); this
+/// stops a single decompression bomb chunk before it reaches them.
+const ZSTD_CHUNK_DECODE_CAP: usize = 64 * 1024 * 1024;
+
+impl BodyDecoder {
+    fn for_response(resp: &reqwest::Response) -> Result<Self> {
+        Self::for_encoding(
+            resp.headers()
+                .get(reqwest::header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+        )
+    }
+
+    fn for_encoding(encoding: Option<&str>) -> Result<Self> {
+        match encoding.map(|e| e.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("identity") => Ok(Self::Identity),
+            Some("zstd") => Ok(Self::Zstd {
+                dec: Box::new(zstd::stream::raw::Decoder::new().map_err(|e| {
+                    otto_core::Error::Internal(format!("clickhouse: zstd decoder: {e}"))
+                })?),
+                window: vec![0u8; ZSTD_WINDOW],
+            }),
+            Some(other) => Err(otto_core::Error::Upstream(format!(
+                "clickhouse: unsupported response encoding '{other}'"
+            ))),
+        }
+    }
+
+    /// Decode one body chunk (identity borrows it unchanged).
+    fn decode<'a>(&mut self, chunk: &'a [u8]) -> Result<std::borrow::Cow<'a, [u8]>> {
+        use zstd::stream::raw::{InBuffer, Operation as _, OutBuffer};
+        let (dec, window) = match self {
+            Self::Identity => return Ok(std::borrow::Cow::Borrowed(chunk)),
+            Self::Zstd { dec, window } => (dec, window),
+        };
+        let mut out = Vec::with_capacity(chunk.len().saturating_mul(4));
+        let mut input = InBuffer::around(chunk);
+        loop {
+            let mut output = OutBuffer::around(&mut window[..]);
+            dec.run(&mut input, &mut output).map_err(|e| {
+                otto_core::Error::Upstream(format!("clickhouse: corrupt zstd response: {e}"))
+            })?;
+            let n = output.pos();
+            out.extend_from_slice(&window[..n]);
+            if out.len() > ZSTD_CHUNK_DECODE_CAP {
+                return Err(response_cap_error());
+            }
+            // Input consumed and the window not filled ⇒ everything decodable
+            // so far has been flushed.
+            if input.pos() == chunk.len() && n < window.len() {
+                break;
+            }
+        }
+        Ok(std::borrow::Cow::Owned(out))
     }
 }
 
@@ -2536,5 +3188,555 @@ mod tests {
         );
         assert_eq!(json_cell_to_text(&json!(42)), "42");
         assert_eq!(json_cell_to_text(&Value::Null), "");
+    }
+
+    // --- Streaming run reader / readonly memo / bulk graph (perf wave) ------
+
+    /// A `FORMAT JSONCompact` reply laid out the way ClickHouse writes it.
+    fn compact_reply(rows: &[&str], tail_extra: &str) -> String {
+        let mut s = String::from(
+            "{\n\t\"meta\":\n\t[\n\t\t{\n\t\t\t\"name\": \"n\",\n\t\t\t\"type\": \"UInt64\"\n\t\t},\n\t\t{\n\t\t\t\"name\": \"s\",\n\t\t\t\"type\": \"String\"\n\t\t}\n\t],\n\n\t\"data\":\n\t[\n",
+        );
+        s.push_str(
+            &rows
+                .iter()
+                .map(|r| format!("\t\t{r}"))
+                .collect::<Vec<_>>()
+                .join(",\n"),
+        );
+        s.push_str("\n\t],\n\n\t\"rows\": 2,\n");
+        s.push_str(tail_extra);
+        s.push_str("\n\t\"statistics\":\n\t{\n\t\t\"elapsed\": 0.001,\n\t\t\"rows_read\": 2,\n\t\t\"bytes_read\": 16\n\t}\n}\n");
+        s
+    }
+
+    fn feed_all(state: &mut CompactStream, body: &str) -> std::result::Result<(), String> {
+        state.push_lines(body.as_bytes())
+    }
+
+    #[test]
+    fn compact_stream_decodes_rows_meta_and_statistics() {
+        let body = compact_reply(&[r#"[1, "a"]"#, r#"[2, "b,]"]"#], "");
+        let mut st = CompactStream::new(Some(10));
+        feed_all(&mut st, &body).unwrap();
+        let raw = st.finish().unwrap();
+        assert_eq!(
+            raw.meta,
+            vec![("n".into(), "UInt64".into()), ("s".into(), "String".into())]
+        );
+        assert_eq!(
+            raw.data,
+            vec![vec![json!(1), json!("a")], vec![json!(2), json!("b,]")]]
+        );
+        assert_eq!(raw.bytes_read, 16);
+        assert!(raw.prepared && !raw.partial && !raw.truncated_bytes);
+    }
+
+    #[test]
+    fn compact_stream_stops_at_the_row_cap() {
+        let body = compact_reply(&["[1, \"a\"]", "[2, \"b\"]"], "");
+        let mut st = CompactStream::new(Some(1));
+        feed_all(&mut st, &body).unwrap();
+        assert!(st.stopped);
+        let raw = st.finish().unwrap();
+        assert_eq!(raw.data.len(), 1);
+        // The whole reply was in hand, so the trailer still yields statistics.
+        assert!(!raw.partial && raw.prepared);
+        assert_eq!(raw.bytes_read, 16);
+
+        // Hanging up inside the rows: rows kept, statistics unknown.
+        let cut = &body[..body.rfind("\n\t],").unwrap()];
+        let mut st = CompactStream::new(Some(1));
+        feed_all(&mut st, cut).unwrap();
+        let raw = st.finish().unwrap();
+        assert_eq!(raw.data.len(), 1);
+        assert!(raw.partial);
+    }
+
+    #[test]
+    fn compact_stream_stops_at_the_byte_budget_keeping_at_least_one_row() {
+        let body = compact_reply(&["[1, \"aaaaaaaaaa\"]", "[2, \"bbbbbbbbbb\"]"], "");
+        let mut st = CompactStream::new(Some(10));
+        st.budget = types::ByteBudget::new(5);
+        feed_all(&mut st, &body).unwrap();
+        let raw = st.finish().unwrap();
+        assert_eq!(raw.data.len(), 1);
+        assert!(raw.truncated_bytes && !raw.partial);
+    }
+
+    #[test]
+    fn compact_stream_in_band_exception_is_an_error() {
+        let body = compact_reply(
+            &["[1, \"a\"]"],
+            "\t\"exception\": \"Code: 241. DB::Exception: Memory limit exceeded. (MEMORY_LIMIT_EXCEEDED)\",",
+        );
+        let mut st = CompactStream::new(Some(10));
+        feed_all(&mut st, &body).unwrap();
+        let err = st.finish().unwrap_err();
+        assert!(err.contains("MEMORY_LIMIT_EXCEEDED"), "{err}");
+        assert!(err.ends_with("STREAMED_ROWS: 1"), "{err}");
+    }
+
+    #[test]
+    fn compact_stream_raw_trailing_exception_mid_rows_is_an_error() {
+        let mut body = compact_reply(&["[1, \"a\"]"], "");
+        body.truncate(body.rfind("\n\t],").unwrap());
+        body.push_str(",\nCode: 241. DB::Exception: Memory limit exceeded. (MEMORY_LIMIT_EXCEEDED) (version 24.8)\n");
+        let mut st = CompactStream::new(Some(10));
+        let err = feed_all(&mut st, &body).unwrap_err();
+        assert!(err.contains("MEMORY_LIMIT_EXCEEDED"), "{err}");
+    }
+
+    #[test]
+    fn compact_stream_falls_back_to_whole_body_for_single_line_json() {
+        let body = r#"{"meta":[{"name":"x","type":"UInt8"}],"data":[[1],[2]],"rows":2,"statistics":{"bytes_read":7}}"#;
+        let mut st = CompactStream::new(Some(10));
+        feed_all(&mut st, body).unwrap();
+        let raw = st.finish().unwrap();
+        assert_eq!(raw.data.len(), 2);
+        assert_eq!(raw.bytes_read, 7);
+        // The whole-body path leaves capping/budgeting to `exec_ch_read`.
+        assert!(!raw.prepared);
+    }
+
+    #[test]
+    fn single_select_counts_select_keywords() {
+        assert!(single_select("SELECT * FROM t FORMAT JSON"));
+        assert!(single_select("select 1 settings max_threads = 1"));
+        assert!(!single_select("SELECT 1 UNION ALL SELECT 2"));
+        assert!(!single_select(
+            "SELECT * FROM t WHERE id IN (SELECT id FROM u)"
+        ));
+        assert!(!single_select("SHOW TABLES"));
+        assert!(single_select("SELECT selected_at FROM t"));
+    }
+
+    #[test]
+    fn bulk_graph_groups_columns_and_flags_truncation() {
+        let tables = RawRows {
+            data: vec![
+                vec![json!("a"), json!("MergeTree")],
+                vec![json!("b_mv"), json!("MaterializedView")],
+                vec![json!("c"), json!("MergeTree")],
+            ],
+            ..RawRows::default()
+        };
+        let columns = RawRows {
+            data: vec![
+                vec![json!("a"), json!("id"), json!("UInt64"), json!(1)],
+                vec![
+                    json!("a"),
+                    json!("note"),
+                    json!("Nullable(String)"),
+                    json!(0),
+                ],
+                vec![json!("b_mv"), json!("x"), json!("Int32"), json!("0")],
+            ],
+            ..RawRows::default()
+        };
+        let g = build_bulk_graph("shop", &tables, &columns, 2);
+        assert!(g.truncated);
+        assert_eq!(g.tables.len(), 2);
+        assert_eq!(g.tables[0].id, "db:shop/table:a");
+        assert_eq!(g.tables[0].columns.len(), 2);
+        assert!(g.tables[0].columns[0].primary_key);
+        assert!(g.tables[0].columns[1].nullable && !g.tables[0].columns[1].primary_key);
+        assert_eq!(g.tables[1].kind, NodeKind::View);
+        assert!(g.edges.is_empty());
+        let g = build_bulk_graph("shop", &tables, &columns, 3);
+        assert!(!g.truncated);
+        assert!(g.tables[2].columns.is_empty());
+    }
+
+    /// One request seen by [`FakeCh`]: (request target, body).
+    type Seen = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+    /// Minimal HTTP/1.1 server standing in for ClickHouse: records every
+    /// request and hands the socket to `respond` to write the reply.
+    async fn fake_ch<F, Fut>(respond: F) -> (std::net::SocketAddr, Seen)
+    where
+        F: Fn(String, String, tokio::net::TcpStream) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Seen = Arc::default();
+        let seen2 = Arc::clone(&seen);
+        let respond = Arc::new(respond);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let seen = Arc::clone(&seen2);
+                let respond = Arc::clone(&respond);
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    let head_end = loop {
+                        let n = sock.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                    let len = head
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < head_end + len {
+                        let n = sock.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let target = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                    let body = String::from_utf8_lossy(&buf[head_end..]).to_string();
+                    seen.lock().unwrap().push((target.clone(), body.clone()));
+                    respond(target, body, sock).await;
+                });
+            }
+        });
+        (addr, seen)
+    }
+
+    async fn reply(mut sock: tokio::net::TcpStream, status: &str, body: &str) {
+        use tokio::io::AsyncWriteExt;
+        let msg = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = sock.write_all(msg.as_bytes()).await;
+        let _ = sock.shutdown().await;
+    }
+
+    fn test_conn(addr: std::net::SocketAddr) -> Conn {
+        Conn {
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            base: format!("http://{addr}/"),
+            headers: HeaderMap::new(),
+            timezone: None,
+            database: None,
+            query_id: Some("otto-q1".into()),
+            timeout_secs: None,
+            readonly: false,
+            readonly_refused: Arc::new(AtomicBool::new(false)),
+            result_row_cap: None,
+        }
+    }
+
+    /// DB-01: a ~200 MB reply resolves to `row_cap` rows, the reader hangs up
+    /// long before the server finishes writing, and the query is KILLed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capped_run_reader_stops_early_on_a_huge_reply_and_kills_the_query() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::AsyncWriteExt;
+        const TOTAL_ROWS: usize = 200_000;
+        let written = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicBool::new(false));
+        let (w, f) = (Arc::clone(&written), Arc::clone(&finished));
+        let (addr, seen) = fake_ch(move |_target, body, mut sock| {
+            let (written, finished) = (Arc::clone(&w), Arc::clone(&f));
+            async move {
+                if body.starts_with("KILL QUERY") {
+                    return reply(sock, "200 OK", "").await;
+                }
+                let head = compact_reply(&[], "");
+                let head = &head[..head.rfind("\t[\n").unwrap() + 3];
+                let pad = "x".repeat(1000);
+                let mut out = format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{head}");
+                for i in 0..TOTAL_ROWS {
+                    out.push_str(&format!("\t\t[{i}, \"{pad}\"],\n"));
+                    if out.len() >= 64 * 1024 {
+                        if sock.write_all(out.as_bytes()).await.is_err() {
+                            break;
+                        }
+                        out.clear();
+                    }
+                    written.store(i + 1, Ordering::Relaxed);
+                }
+                finished.store(true, Ordering::Relaxed);
+            }
+        })
+        .await;
+
+        let conn = test_conn(addr);
+        let raw = conn
+            .query_json_capped("SELECT * FROM big", 101)
+            .await
+            .unwrap();
+        assert_eq!(raw.data.len(), 101);
+        assert!(raw.prepared && raw.partial && !raw.truncated_bytes);
+        assert_eq!(raw.data[100][0], json!(100));
+
+        // The server's writer sees the hang-up and stops well short of the end.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !finished.load(Ordering::Relaxed) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let rows_written = written.load(Ordering::Relaxed);
+        assert!(
+            rows_written < TOTAL_ROWS / 4,
+            "reader consumed too much: server wrote {rows_written} rows"
+        );
+        // …and the server-side query is killed by its query_id.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let killed = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, b)| b == "KILL QUERY WHERE query_id = 'otto-q1'");
+            if killed {
+                break;
+            }
+            assert!(Instant::now() < deadline, "no KILL QUERY was sent");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// DB-01 server-side cap: `max_result_rows` + `result_overflow_mode=break`
+    /// ride on the request only when `result_row_cap` is set.
+    #[tokio::test]
+    async fn server_row_cap_is_sent_as_request_settings() {
+        let body = compact_reply(&["[1, \"a\"]"], "");
+        let (addr, seen) = fake_ch(move |_t, _b, sock| {
+            let body = body.clone();
+            async move { reply(sock, "200 OK", &body).await }
+        })
+        .await;
+        let mut conn = test_conn(addr);
+        conn.query_json_capped("SELECT 1", 5).await.unwrap();
+        conn.result_row_cap = Some(5);
+        let raw = conn.query_json_capped("SELECT 1", 5).await.unwrap();
+        assert_eq!(raw.data.len(), 1);
+        assert_eq!(raw.bytes_read, 16);
+        let seen = seen.lock().unwrap();
+        assert!(!seen[0].0.contains("max_result_rows"), "{}", seen[0].0);
+        assert!(seen[1].0.contains("max_result_rows=5"), "{}", seen[1].0);
+        assert!(
+            seen[1].0.contains("result_overflow_mode=break"),
+            "{}",
+            seen[1].0
+        );
+    }
+
+    /// DB2-05: a zstd body decodes chunk by chunk to exactly the original bytes
+    /// however the network splits it; identity passes through; an encoding we
+    /// never asked for is a clear error, not garbage rows.
+    #[test]
+    fn zstd_body_decodes_across_arbitrary_chunk_splits() {
+        let rows: Vec<String> = (0..5_000).map(|i| format!("[{i}, \"row {i}\"]")).collect();
+        let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let plain = compact_reply(&refs, "");
+        let packed = zstd::stream::encode_all(plain.as_bytes(), 3).unwrap();
+        assert!(packed.len() * 5 < plain.len(), "JSONCompact compresses ≥5×");
+        for split in [1usize, 7, 4096, packed.len()] {
+            let mut dec = BodyDecoder::for_encoding(Some("zstd")).unwrap();
+            let mut out = Vec::new();
+            for chunk in packed.chunks(split) {
+                out.extend_from_slice(&dec.decode(chunk).unwrap());
+            }
+            assert_eq!(out, plain.as_bytes(), "split {split}");
+        }
+        let mut id = BodyDecoder::for_encoding(None).unwrap();
+        assert!(matches!(
+            id.decode(b"abc").unwrap(),
+            std::borrow::Cow::Borrowed(b"abc")
+        ));
+        assert!(BodyDecoder::for_encoding(Some("br")).is_err());
+        let mut dec = BodyDecoder::for_encoding(Some("zstd")).unwrap();
+        assert!(dec.decode(b"definitely not zstd").is_err());
+    }
+
+    /// DB2-05 end to end: every request asks for compression, and a compressed
+    /// JSONCompact reply streams into the same rows as a plain one.
+    #[tokio::test]
+    async fn compressed_reply_streams_into_rows() {
+        let plain = compact_reply(&["[1, \"a\"]", "[2, \"b\"]"], "");
+        let packed = zstd::stream::encode_all(plain.as_bytes(), 3).unwrap();
+        let (addr, seen) = fake_ch(move |_t, _b, mut sock| {
+            let packed = packed.clone();
+            async move {
+                use tokio::io::AsyncWriteExt;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    packed.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&packed).await;
+                let _ = sock.shutdown().await;
+            }
+        })
+        .await;
+        let conn = test_conn(addr);
+        let raw = conn.query_json_capped("SELECT 1", 10).await.unwrap();
+        assert_eq!(raw.data.len(), 2);
+        assert_eq!(raw.data[1][1], json!("b"));
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen[0].0.contains("enable_http_compression=1"),
+            "{}",
+            seen[0].0
+        );
+    }
+
+    /// DB-02: the first `readonly` refusal is remembered — later requests skip
+    /// the doomed attempt (2 round trips once, then 1 per request).
+    #[tokio::test]
+    async fn readonly_refusal_is_memoized_per_connection() {
+        let (addr, seen) = fake_ch(|target, _b, sock| async move {
+            if target.contains("readonly=2") {
+                reply(
+                    sock,
+                    "500 Internal Server Error",
+                    "Code: 164. DB::Exception: Cannot modify 'readonly' setting in readonly mode. (READONLY)",
+                )
+                .await
+            } else {
+                reply(sock, "200 OK", "1\n").await
+            }
+        })
+        .await;
+        let mut conn = test_conn(addr);
+        conn.readonly = true;
+        assert_eq!(conn.post("SELECT 1".into()).await.unwrap(), "1\n");
+        assert!(conn.readonly_refused.load(Ordering::Relaxed));
+        assert_eq!(conn.post("SELECT 1".into()).await.unwrap(), "1\n");
+        assert_eq!(conn.post("SELECT 1".into()).await.unwrap(), "1\n");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 4, "{seen:?}");
+        assert_eq!(
+            seen.iter()
+                .filter(|(t, _)| t.contains("readonly=2"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn readonly_memo_is_shared_per_cache_key() {
+        let d = ClickhouseDriver::default();
+        let a = d.readonly_memo("k1");
+        a.store(true, Ordering::Relaxed);
+        assert!(d.readonly_memo("k1").load(Ordering::Relaxed));
+        assert!(!d.readonly_memo("k2").load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn evict_idle_drops_only_stale_handles() {
+        let d = ClickhouseDriver::default();
+        let cfg = base_cfg(8123);
+        d.client(&cfg).await.unwrap();
+        assert_eq!(d.evict_idle(Duration::from_secs(3600)).await, 0);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(d.evict_idle(Duration::from_millis(1)).await, 1);
+        assert!(d.clients.get_ready(&cfg.cache_key()).is_none());
+    }
+}
+
+/// Decode timing for the streamed `JSONCompact` reader (DB2-04).
+#[cfg(test)]
+mod perf_bench {
+    use super::*;
+
+    /// A `FORMAT JSONCompact` reply laid out the way ClickHouse writes it (one
+    /// data row per line) with `rows × cols` mixed cells.
+    fn compact_body(rows: usize, cols: usize) -> String {
+        let mut s = String::from("{\n\t\"meta\":\n\t[\n");
+        let meta: Vec<String> = (0..cols)
+            .map(|c| {
+                format!("\t\t{{\n\t\t\t\"name\": \"c{c}\",\n\t\t\t\"type\": \"String\"\n\t\t}}")
+            })
+            .collect();
+        s.push_str(&meta.join(",\n"));
+        s.push_str("\n\t],\n\n\t\"data\":\n\t[\n");
+        for r in 0..rows {
+            s.push_str("\t\t[");
+            for c in 0..cols {
+                if c > 0 {
+                    s.push_str(", ");
+                }
+                match c % 3 {
+                    0 => s.push_str(&(r * 31 + c).to_string()),
+                    1 => s.push_str(&format!("\"customer-{r}-{c}@example.com\"")),
+                    _ => s.push_str("\"2026-10-03 17:14:25\""),
+                }
+            }
+            s.push(']');
+            if r + 1 < rows {
+                s.push(',');
+            }
+            s.push('\n');
+        }
+        s.push_str(&format!("\t],\n\n\t\"rows\": {rows},\n\n\t\"statistics\":\n\t{{\n\t\t\"elapsed\": 0.001,\n\t\t\"rows_read\": {rows},\n\t\t\"bytes_read\": 16\n\t}}\n}}\n"));
+        s
+    }
+
+    /// Feed in 64 KiB batches of whole lines, as the network loop does.
+    fn decode(body: &str, cap: Option<usize>) -> RawRows {
+        let mut st = CompactStream::new(cap);
+        let bytes = body.as_bytes();
+        let mut start = 0;
+        while start < bytes.len() {
+            let mut end = (start + 64 * 1024).min(bytes.len());
+            while end < bytes.len() && bytes[end - 1] != b'\n' {
+                end += 1;
+            }
+            st.push_lines(&bytes[start..end.saturating_sub(1).max(start)])
+                .unwrap();
+            start = end;
+        }
+        st.finish().unwrap()
+    }
+
+    /// CI ceiling: 10k×30 streamed decode stays well under a few seconds in a
+    /// debug build (catches an accidental quadratic re-scan of the buffer).
+    #[test]
+    fn compact_stream_10k_x_30_within_ceiling() {
+        let body = compact_body(10_000, 30);
+        let t = std::time::Instant::now();
+        let raw = decode(&body, None);
+        let took = t.elapsed();
+        assert_eq!(raw.data.len(), 10_000);
+        assert_eq!(raw.data[0].len(), 30);
+        assert!(
+            took < Duration::from_secs(5),
+            "10k×30 JSONCompact decode took {took:?} (ceiling 5 s)"
+        );
+    }
+
+    /// Bench (on demand, `-- --ignored --nocapture bench_`): 100k×30 decode,
+    /// uncapped and capped at 1,001 rows (the default page + probe row).
+    #[test]
+    #[ignore]
+    fn bench_compact_stream_100k_x_30() {
+        let body = compact_body(100_000, 30);
+        let t = std::time::Instant::now();
+        let raw = decode(&body, None);
+        eprintln!(
+            "bench CH JSONCompact decode 100k×30 ({} MB): {:?}, rows {} (byte budget hit: {})",
+            body.len() / (1024 * 1024),
+            t.elapsed(),
+            raw.data.len(),
+            raw.truncated_bytes
+        );
+        let t = std::time::Instant::now();
+        let raw = decode(&body, Some(1_001));
+        eprintln!(
+            "bench CH JSONCompact decode 100k×30 capped at 1001: {:?}, rows {}",
+            t.elapsed(),
+            raw.data.len()
+        );
     }
 }

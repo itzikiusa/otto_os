@@ -121,7 +121,11 @@ impl Gitlab {
     /// Falls back to `CiStatus::none()` on any error.
     pub async fn fetch_ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
         let path = Self::mr_path(r, &format!("/{number}/pipelines?per_page=5"));
-        let v = match self.http.json(self.req(reqwest::Method::GET, &path)).await {
+        let v = match self
+            .http
+            .get_cached_json(self.req(reqwest::Method::GET, &path))
+            .await
+        {
             Ok(v) => v,
             Err(_) => return CiStatus::none(),
         };
@@ -306,18 +310,13 @@ impl super::GitProvider for Gitlab {
             PrState::Declined => rb.query(&[("state", "closed")]),
             PrState::All => rb,
         };
-        let resp = self.http.send(rb).await?;
+        // Through the ETag cache (a remount within the TTL makes no request).
         // GitLab answers with `x-next-page` (empty on the last page); older /
-        // proxied instances only set `Link`, so accept either.
-        let has_more = resp
-            .headers()
-            .get("x-next-page")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| !v.trim().is_empty())
-            || super::client::parse_next_link(resp.headers()).is_some();
-        let v: Value = resp
-            .json()
-            .await
+        // proxied instances only set `Link` — the cached page's `next` is
+        // either one.
+        let (body, next) = self.http.get_cached_page(rb).await?;
+        let has_more = next.is_some();
+        let v: Value = serde_json::from_str(&body)
             .map_err(|e| otto_core::Error::Upstream(format!("gitlab: bad json: {e}")))?;
         Ok(super::PrPage {
             items: varr(&v, &[]).iter().map(summary_from).collect(),
@@ -334,11 +333,11 @@ impl super::GitProvider for Gitlab {
         // replies can target it (`in_reply_to`). An MR detail must be WHOLE, so
         // follow `Link rel="next"` rather than stopping at the first 100.
         let (mr, discussions, approvals, ci) = tokio::join!(
-            self.http.json(self.req(
+            self.http.get_cached_json(self.req(
                 reqwest::Method::GET,
                 &Self::mr_path(r, &format!("/{number}")),
             )),
-            self.http.paginate_json(
+            self.http.paginate_json_cached(
                 self.req(
                     reqwest::Method::GET,
                     &Self::mr_path(r, &format!("/{number}/discussions")),
@@ -347,7 +346,7 @@ impl super::GitProvider for Gitlab {
                 self.http.client(),
                 self.auth_header(),
             ),
-            self.http.json(self.req(
+            self.http.get_cached_json(self.req(
                 reqwest::Method::GET,
                 &Self::mr_path(r, &format!("/{number}/approvals")),
             )),
@@ -672,7 +671,7 @@ impl super::GitProvider for Gitlab {
     async fn list_pr_commits(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCommit>> {
         let v = self
             .http
-            .json(
+            .get_cached_json(
                 self.req(
                     reqwest::Method::GET,
                     &Self::mr_path(r, &format!("/{number}/commits")),

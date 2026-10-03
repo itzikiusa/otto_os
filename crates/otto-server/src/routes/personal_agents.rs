@@ -799,7 +799,8 @@ async fn chat_session(
 
 /// `GET /workspaces/{id}/agent-rooms` — each room with its member agent ids
 /// and its activity (`message_count`, `last_message_at`). Three queries for
-/// the whole list (rooms, members, activity), not one per room.
+/// the whole list (rooms, members, activity), not one per room; the activity
+/// is denormalized on `agent_rooms`, so no query scans the messages.
 async fn list_rooms(
     Path(ws_id): Path<String>,
     State(ctx): State<ServerCtx>,
@@ -1058,6 +1059,8 @@ async fn post_message(
         message_id: msg.id.clone(),
         author_kind: msg.author_kind.clone(),
         author_id: msg.author_id.clone(),
+        text: msg.text.clone(),
+        created_at: msg.created_at.clone(),
     });
     Ok(Json(msg))
 }

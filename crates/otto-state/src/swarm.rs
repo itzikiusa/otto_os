@@ -802,9 +802,13 @@ impl SwarmRepo {
     /// `max_total_runs` / `max_cost_usd` budget checks and the API surface.
     /// `cost_usd` sums the per-run backfilled cost (NULLs count as 0).
     pub async fn swarm_spend(&self, swarm_id: &Id) -> Result<SwarmSpend> {
+        // + the rollup of runs the retention job pruned (migration 0161), so
+        // pruning never refunds a lifetime budget.
         let row = sqlx::query(
-            "SELECT COUNT(*) AS n, COALESCE(SUM(cost_usd), 0.0) AS spend
-             FROM swarm_runs WHERE swarm_id = ?",
+            "SELECT COUNT(*) + COALESCE((SELECT pruned_runs FROM swarms WHERE id = ?1), 0) AS n,
+                    COALESCE(SUM(cost_usd), 0.0)
+                      + COALESCE((SELECT pruned_cost_usd FROM swarms WHERE id = ?1), 0.0) AS spend
+             FROM swarm_runs WHERE swarm_id = ?1",
         )
         .bind(swarm_id)
         .fetch_one(&self.pool)
@@ -1183,6 +1187,15 @@ impl SwarmRepo {
         .await
         .map_err(dberr("list tasks"))?;
         rows.iter().map(row_to_task).collect()
+    }
+
+    /// Number of tasks in a swarm (index-only count; perf §15 F4).
+    pub async fn count_tasks(&self, swarm_id: &Id) -> Result<i64> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM swarm_tasks WHERE swarm_id = ?")
+            .bind(swarm_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("count swarm tasks"))
     }
 
     pub async fn list_tasks_for_swarm(&self, swarm_id: &Id) -> Result<Vec<SwarmTask>> {
@@ -1620,6 +1633,38 @@ impl SwarmRepo {
         Ok(row.get::<i64, _>("n") > 0)
     }
 
+    /// Agents of a swarm with a live (`queued`/`running`/`waiting`) run — the
+    /// coordinator / scheduler / utilization read this ONCE per pass instead
+    /// of an [`Self::agent_has_active_run`] COUNT per ready task or agent.
+    /// One range read on `idx_swarm_runs_swarm(swarm_id, status)`.
+    pub async fn busy_agents(&self, swarm_id: &Id) -> Result<std::collections::HashSet<Id>> {
+        let ids: Vec<Id> = sqlx::query_scalar(
+            "SELECT DISTINCT agent_id FROM swarm_runs \
+             WHERE swarm_id = ? AND status IN ('queued','running','waiting')",
+        )
+        .bind(swarm_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("busy agents"))?;
+        Ok(ids.into_iter().collect())
+    }
+
+    /// Task count per status for a swarm (`COUNT … GROUP BY status`) — no
+    /// task row is decoded.
+    pub async fn task_status_counts(
+        &self,
+        swarm_id: &Id,
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT status, COUNT(*) FROM swarm_tasks WHERE swarm_id = ? GROUP BY status",
+        )
+        .bind(swarm_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("task status counts"))?;
+        Ok(rows.into_iter().collect())
+    }
+
     pub async fn list_runs(&self, f: &RunFilter) -> Result<Vec<SwarmRun>> {
         self.list_runs_projected(f, false).await
     }
@@ -1687,21 +1732,18 @@ impl SwarmRepo {
         &self,
         swarm_id: &Id,
     ) -> Result<std::collections::HashMap<String, String>> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT task_id, session_id FROM swarm_runs \
+        // One row per task (perf §15 F11): SQLite's bare-column rule takes
+        // `session_id` from the row holding `MAX(enqueued_at)`.
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT task_id, session_id, MAX(enqueued_at) FROM swarm_runs \
              WHERE swarm_id = ? AND task_id IS NOT NULL AND session_id IS NOT NULL \
-             ORDER BY enqueued_at DESC",
+             GROUP BY task_id",
         )
         .bind(swarm_id)
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("latest task sessions"))?;
-        let mut out = std::collections::HashMap::new();
-        for (tid, sid) in rows {
-            // Newest first: the first row per task wins.
-            out.entry(tid).or_insert(sid);
-        }
-        Ok(out)
+        Ok(rows.into_iter().map(|(tid, sid, _)| (tid, sid)).collect())
     }
 
     pub async fn runs_for_swarm(&self, swarm_id: &Id, limit: i64) -> Result<Vec<SwarmRun>> {
@@ -2758,5 +2800,110 @@ mod tests {
             repo.get_task(&parent.id).await.unwrap().status,
             "in_progress"
         );
+    }
+
+    /// Perf §15 F3/F2: busy agents in one read; task counts by status in SQL.
+    #[tokio::test]
+    async fn busy_agents_and_task_status_counts() {
+        let repo = SwarmRepo::new(mem_pool().await);
+        let swarm = repo.create_swarm(new_swarm(&new_id())).await.unwrap();
+        let task = repo.create_task(new_task(&swarm.id, "todo")).await.unwrap();
+        repo.create_task(new_task(&swarm.id, "todo")).await.unwrap();
+        repo.create_task(new_task(&swarm.id, "done")).await.unwrap();
+        let (a1, a2): (Id, Id) = (new_id(), new_id());
+        let mk = |agent: &Id| NewRun {
+            swarm_id: swarm.id.clone(),
+            workspace_id: swarm.workspace_id.clone(),
+            project_id: Some(task.project_id.clone()),
+            task_id: Some(task.id.clone()),
+            agent_id: agent.clone(),
+            kind: "task".into(),
+            trigger: "coordinator".into(),
+        };
+        repo.create_run(mk(&a1)).await.unwrap();
+        let r2 = repo.create_run(mk(&a2)).await.unwrap();
+        repo.update_run(
+            &r2.id,
+            RunPatch {
+                status: Some("done".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let busy = repo.busy_agents(&swarm.id).await.unwrap();
+        assert!(busy.contains(&a1));
+        assert!(
+            !busy.contains(&a2),
+            "a finished run doesn't keep its agent busy"
+        );
+        assert_eq!(
+            busy.contains(&a1),
+            repo.agent_has_active_run(&a1).await.unwrap()
+        );
+        let counts = repo.task_status_counts(&swarm.id).await.unwrap();
+        assert_eq!(counts.get("todo"), Some(&2));
+        assert_eq!(counts.get("done"), Some(&1));
+        assert_eq!(repo.count_tasks(&swarm.id).await.unwrap(), 3);
+    }
+
+    /// Perf §15 F1/M1: every per-tick / per-event swarm query is an index
+    /// range read (covering where it aggregates) — no table scan, no temp
+    /// B-tree sort.
+    #[tokio::test]
+    async fn hot_swarm_queries_use_indexes() {
+        let repo = SwarmRepo::new(mem_pool().await);
+        for (sql, want) in [
+            // workgraph projector: project cost on every swarm event
+            (
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM swarm_runs WHERE project_id = 'p'",
+                "USING COVERING INDEX idx_swarm_runs_project_cost",
+            ),
+            // swarm_spend / total_cost: every tick
+            (
+                "SELECT COUNT(*) AS n, COALESCE(SUM(cost_usd), 0.0) AS spend \
+                 FROM swarm_runs WHERE swarm_id = 's'",
+                "USING COVERING INDEX idx_swarm_runs_swarm_cost",
+            ),
+            // ready_tasks: every tick
+            (
+                "SELECT * FROM swarm_tasks WHERE swarm_id = 's' AND status = 'todo' \
+                 ORDER BY order_idx, created_at",
+                "idx_swarm_tasks_swarm_status_order",
+            ),
+            (
+                "SELECT id FROM swarm_tasks WHERE swarm_id = 's' AND status = 'done'",
+                "idx_swarm_tasks_swarm_status_order",
+            ),
+            // busy_agents: once per tick
+            (
+                "SELECT DISTINCT agent_id FROM swarm_runs \
+                 WHERE swarm_id = 's' AND status IN ('queued','running','waiting')",
+                "USING INDEX",
+            ),
+            (
+                "SELECT status, COUNT(*) FROM swarm_tasks WHERE swarm_id = 's' GROUP BY status",
+                "USING COVERING INDEX idx_swarm_tasks_swarm_status_order",
+            ),
+        ] {
+            let rows = sqlx::query(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")))
+                .fetch_all(&repo.pool)
+                .await
+                .unwrap();
+            let plan = rows
+                .iter()
+                .map(|r| r.get::<String, _>("detail"))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert!(plan.contains(want), "{sql}: {plan}");
+            assert!(!plan.contains("SCAN swarm_"), "{sql}: {plan}");
+            // Acceptable temp B-trees, bounded by the matched rows rather
+            // than the table: `ready_tasks` sorts its few `todo` rows by
+            // created_at after the index order, and `busy_agents`' DISTINCT
+            // runs over the live runs only (≤ the parallel cap).
+            if !sql.contains("created_at") && !sql.contains("DISTINCT") {
+                assert!(!plan.contains("TEMP B-TREE"), "{sql}: {plan}");
+            }
+        }
     }
 }

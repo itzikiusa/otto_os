@@ -305,6 +305,7 @@ pub struct ReportView {
 /// One report per period = one `summary-*.md` / `report-*.html` / `metrics-*.json`
 /// triple keyed by `(kind, start, end)`. We enumerate the three subdirs and
 /// build a view per discovered period, preferring the HTML mtime for `created_at`.
+#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
 pub fn list_reports(dir: &Path) -> Vec<ReportView> {
     let mut out: Vec<ReportView> = Vec::new();
     for kind in Kind::ALL {
@@ -654,7 +655,15 @@ pub fn routes() -> Router<ServerCtx> {
 
 async fn get_config(State(ctx): State<ServerCtx>) -> ApiResult<Json<InsightsConfig>> {
     let dir = insights_dir(&ctx);
-    Ok(Json(read_config(&dir)))
+    // std::fs off the async workers, like every other insights file read.
+    let cfg = tokio::task::spawn_blocking(move || read_config(&dir))
+        .await
+        .map_err(|e| {
+            ApiError(otto_core::Error::Internal(format!(
+                "read insights config: {e}"
+            )))
+        })?;
+    Ok(Json(cfg))
 }
 
 async fn put_config(
@@ -664,11 +673,16 @@ async fn put_config(
 ) -> ApiResult<Json<InsightsConfig>> {
     require_root(&user)?;
     let dir = insights_dir(&ctx);
-    write_config(&dir, &cfg).map_err(|e| {
-        ApiError(otto_core::Error::Internal(format!(
-            "write insights config: {e}"
-        )))
-    })?;
+    let to_write = cfg.clone();
+    tokio::task::spawn_blocking(move || write_config(&dir, &to_write))
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))
+        .and_then(|r| r)
+        .map_err(|e| {
+            ApiError(otto_core::Error::Internal(format!(
+                "write insights config: {e}"
+            )))
+        })?;
     Ok(Json(cfg))
 }
 
@@ -699,17 +713,23 @@ async fn get_report(
     State(ctx): State<ServerCtx>,
     Query(q): Query<ReportQuery>,
 ) -> ApiResult<Html<String>> {
-    let base = std::fs::canonicalize(insights_dir(&ctx))
-        .map_err(|e| ApiError(otto_core::Error::Internal(format!("insights dir: {e}"))))?;
-    let req = std::fs::canonicalize(Path::new(&q.path))
-        .map_err(|_| ApiError(otto_core::Error::NotFound("report".into())))?;
-    if !req.starts_with(&base) {
-        return Err(ApiError(otto_core::Error::Forbidden(
-            "path is outside the insights directory".into(),
-        )));
-    }
-    let html = std::fs::read_to_string(&req)
-        .map_err(|_| ApiError(otto_core::Error::NotFound("report".into())))?;
+    // Canonicalize + read on the blocking pool, not a runtime worker.
+    let dir = insights_dir(&ctx);
+    let html = tokio::task::spawn_blocking(move || -> Result<String, ApiError> {
+        let base = std::fs::canonicalize(dir)
+            .map_err(|e| ApiError(otto_core::Error::Internal(format!("insights dir: {e}"))))?;
+        let req = std::fs::canonicalize(Path::new(&q.path))
+            .map_err(|_| ApiError(otto_core::Error::NotFound("report".into())))?;
+        if !req.starts_with(&base) {
+            return Err(ApiError(otto_core::Error::Forbidden(
+                "path is outside the insights directory".into(),
+            )));
+        }
+        std::fs::read_to_string(&req)
+            .map_err(|_| ApiError(otto_core::Error::NotFound("report".into())))
+    })
+    .await
+    .map_err(|e| ApiError(otto_core::Error::Internal(format!("join: {e}"))))??;
     Ok(Html(html))
 }
 

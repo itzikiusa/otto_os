@@ -70,4 +70,11 @@ pub trait Adapter: Send + Sync {
     async fn typing(&self, _chat: &str) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Whether [`Adapter::typing`] does anything. The mirror skips its typing
+    /// loop entirely for adapters that keep the no-op default (Slack, webhooks)
+    /// instead of waking every few seconds to call it.
+    fn supports_typing(&self) -> bool {
+        false
+    }
 }

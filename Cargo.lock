@@ -3719,6 +3719,9 @@ dependencies = [
  "otto-pty",
  "otto-rbac",
  "otto-state",
+ "reqwest",
+ "ring",
+ "roxmltree",
  "serde",
  "serde_json",
  "sqlx",
@@ -3774,6 +3777,7 @@ dependencies = [
  "ego-tree",
  "futures-util",
  "hex",
+ "html5ever",
  "libc",
  "otto-core",
  "otto-netguard",
@@ -3918,6 +3922,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "webpki-roots 1.0.9",
+ "zstd",
 ]
 
 [[package]]
@@ -4040,9 +4045,13 @@ dependencies = [
 name = "otto-keychain"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "keyring",
  "otto-core",
+ "ring",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -4189,6 +4198,7 @@ dependencies = [
  "chrono-tz",
  "dirs 7.0.0",
  "futures-util",
+ "h2",
  "hex",
  "hmac",
  "http-body-util",
@@ -4353,11 +4363,13 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "hex",
+ "indexmap",
  "serde",
  "serde_json",
  "sha1 0.11.0",
  "tempfile",
  "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -4366,6 +4378,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
+ "futures-util",
  "otto-core",
  "otto-transcript",
  "reqwest",
@@ -4386,6 +4399,7 @@ dependencies = [
  "dirs 7.0.0",
  "hex",
  "mime_guess",
+ "notify",
  "otto-core",
  "otto-state",
  "rustix",
@@ -4420,6 +4434,7 @@ dependencies = [
  "axum",
  "axum-server",
  "dirs 7.0.0",
+ "notify",
  "otto-brokers",
  "otto-channels",
  "otto-connections",
@@ -4449,6 +4464,7 @@ dependencies = [
  "rustls-pemfile",
  "serde_json",
  "sha2 0.11.0",
+ "sqlx",
  "tokio",
  "tracing",
  "tracing-appender",

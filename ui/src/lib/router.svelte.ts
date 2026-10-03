@@ -166,6 +166,11 @@ export type RoutePrepare = (parts: readonly string[]) => Promise<void> | null;
 class Router {
   /** path segments after '#/', e.g. ['git', '01H...', 'pr', '7'] */
   parts: string[] = $state([]);
+  /** The route the router is holding for while its page chunk loads (see
+   *  {@link setPrepare}), else null. The sidebar shows it as pending after a
+   *  short delay (perf F7) — on a slow link a tap otherwise did nothing
+   *  visible until the chunk arrived. */
+  pendingTarget: string[] | null = $state(null);
 
   /** navigation history of hashes; `index` points at the current entry. */
   private stack: string[] = $state([]);
@@ -222,10 +227,14 @@ class Router {
     const wait = this.prepare?.(next) ?? null;
     if (!wait) {
       this.parts = next;
+      if (this.pendingTarget) this.pendingTarget = null;
       return;
     }
+    this.pendingTarget = next;
     void wait.then(() => {
-      if (seq === this.commitSeq) this.parts = next;
+      if (seq !== this.commitSeq) return;
+      this.parts = next;
+      this.pendingTarget = null;
     });
   }
 

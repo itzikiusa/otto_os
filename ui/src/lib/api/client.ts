@@ -295,11 +295,13 @@ async function request<T>(
   body: unknown,
   signal: AbortSignal | undefined,
   lane: Lane,
+  cond?: ConditionalOpts,
 ): Promise<T> {
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (cond?.ifNoneMatch) headers['If-None-Match'] = cond.ifNoneMatch;
 
   const resp = await laneFetch(lane, path, {
     method,
@@ -316,6 +318,13 @@ async function request<T>(
 
   if (resp.status === 401 && token && typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT, { detail: { token } }));
+  }
+
+  if (cond) {
+    cond.status = resp.status;
+    cond.etag = resp.headers.get('ETag');
+    // 304 to a conditional GET: no body to read — the caller keeps its copy.
+    if (resp.status === 304) return undefined as T;
   }
 
   if (!resp.ok) {
@@ -464,7 +473,40 @@ function send<T>(method: string, path: string, body: unknown, signal: AbortSigna
   return request<T>(method, path, body, signal, eff);
 }
 
+// --- perf K8s: conditional GET (If-None-Match → 304) -------------------------
+/** In/out bag for a conditional `request` (internal): the validator to send,
+ *  and the status + `ETag` the response carried. */
+interface ConditionalOpts {
+  ifNoneMatch?: string | null;
+  status?: number;
+  etag?: string | null;
+}
+
+/** A conditional GET's outcome ({@link api.getConditional}): `notModified`
+ *  on a 304 (no body was read — keep what you have), else the parsed body.
+ *  `etag` is the response's `ETag` when the daemon exposes it (CORS), or null. */
+export type Conditional<T> =
+  | { notModified: true; etag: string | null }
+  | { notModified: false; etag: string | null; data: T };
+
+/** `send` for a conditional GET: the same lane resolution + bg slot caps, so
+ *  it rides exactly the socket pool a plain `api.get` of `path` would. */
+function sendConditional<T>(path: string, ifNoneMatch: string | null | undefined, signal: AbortSignal | undefined, lane?: Lane): Promise<Conditional<T>> {
+  const eff = resolveLane(path, signal, lane);
+  const cond: ConditionalOpts = { ifNoneMatch };
+  const run = (): Promise<T> => request<T>('GET', path, undefined, signal, eff, cond);
+  return (eff === 'bg' ? withBgSlot(run, signal) : run()).then((data) =>
+    cond.status === 304
+      ? { notModified: true as const, etag: cond.etag ?? ifNoneMatch ?? null }
+      : { notModified: false as const, etag: cond.etag ?? null, data },
+  );
+}
+
 export const api = {
+  /** Conditional GET (perf K8s): sends `If-None-Match: <ifNoneMatch>` when
+   *  given and resolves `{ notModified: true }` on a 304 instead of throwing. */
+  getConditional: <T>(path: string, ifNoneMatch: string | null | undefined, signal?: AbortSignal) =>
+    sendConditional<T>(path, ifNoneMatch, signal),
   /** Background (poll) lane — see {@link withBgSlot}. */
   bg: {
     get: <T>(path: string, signal?: AbortSignal) => send<T>('GET', path, undefined, signal, 'bg'),
@@ -544,6 +586,29 @@ export async function authedBlobUrl(path: string): Promise<string> {
     throw new ApiError(resp.status, problem);
   }
   return URL.createObjectURL(await resp.blob());
+}
+
+/**
+ * POST a raw binary body (e.g. an `image/png` Blob) to /api/v1<path> and parse
+ * the JSON reply. Skips JSON/base64 framing entirely — a 15 MB PNG goes over
+ * the wire as 15 MB, not ~20 MB of base64 inside a JSON string. Mirrors
+ * `postForText`'s auth + error handling.
+ */
+export async function postBlob<T>(path: string, body: Blob, contentType: string): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': contentType };
+  const token = getToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const resp = await fetch(`${baseUrl()}/api/v1${path}`, { method: 'POST', headers, body });
+  if (!resp.ok) {
+    let problem: Problem = { code: 'internal', message: resp.statusText };
+    try {
+      problem = await resp.json();
+    } catch {
+      // non-JSON error body — keep statusText
+    }
+    throw new ApiError(resp.status, problem);
+  }
+  return (await resp.json()) as T;
 }
 
 /**

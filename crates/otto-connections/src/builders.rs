@@ -100,6 +100,7 @@ fn maybe_wrap_ssh_tunnel(p: &Value, spec: CommandSpec, kind_name: &str) -> Resul
         "-o".into(),
         "StrictHostKeyChecking=accept-new".into(),
     ];
+    ssh_args.extend(keepalive_opts(user_ssh_config().as_deref()));
     if let Some(identity) = opt_str(p, "identity_file") {
         ssh_args.push("-i".into());
         ssh_args.push(identity.into());
@@ -115,6 +116,43 @@ fn maybe_wrap_ssh_tunnel(p: &Value, spec: CommandSpec, kind_name: &str) -> Resul
         cwd: None,
         env: vec![],
     })
+}
+
+/// Keep-alive for interactive ssh terminals: probe every 15 s and give up
+/// after 2 missed replies, so a dead link (sleep, Wi-Fi change, a silently
+/// dropped NAT entry) ends the session in ~45 s instead of leaving a hung
+/// PTY and ssh process behind until TCP gives up hours later. Command-line
+/// `-o` wins over ssh_config, so each option is added only when the user's
+/// `~/.ssh/config` doesn't mention it at all (any value there is theirs).
+fn keepalive_opts(user_config: Option<&str>) -> Vec<String> {
+    let mentioned = |key: &str| {
+        user_config.is_some_and(|cfg| {
+            cfg.lines().any(|l| {
+                l.trim_start()
+                    .split(|c: char| c.is_whitespace() || c == '=')
+                    .next()
+                    .is_some_and(|k| k.eq_ignore_ascii_case(key))
+            })
+        })
+    };
+    let mut out = Vec::new();
+    for (key, value) in [("ServerAliveInterval", "15"), ("ServerAliveCountMax", "2")] {
+        if !mentioned(key) {
+            out.push("-o".into());
+            out.push(format!("{key}={value}"));
+        }
+    }
+    out
+}
+
+/// The user's `~/.ssh/config` (a small file, read when a terminal opens).
+/// Unit tests never read the real one, so their argv is deterministic.
+fn user_ssh_config() -> Option<String> {
+    if cfg!(test) {
+        return None;
+    }
+    let home = std::env::var_os("HOME")?;
+    std::fs::read_to_string(std::path::Path::new(&home).join(".ssh/config")).ok()
 }
 
 /// Build the terminal command for a connection. Returns the spec plus
@@ -136,6 +174,7 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                 "-o".to_string(),
                 "StrictHostKeyChecking=accept-new".to_string(),
             ];
+            args.extend(keepalive_opts(user_ssh_config().as_deref()));
             if let Some(identity) = opt_str(p, "identity_file") {
                 args.push("-i".into());
                 args.push(identity.into());
@@ -468,6 +507,10 @@ mod tests {
             vec![
                 "-o",
                 "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=2",
                 "-i",
                 "/home/me/.ssh/id_ed25519",
                 "-p",
@@ -525,13 +568,50 @@ mod tests {
         .is_ok());
     }
 
+    /// F15: keep-alive options are added unless the user's ssh_config sets
+    /// them (any value, any case, `Key value` or `Key=value`).
+    #[test]
+    fn keepalive_defers_to_the_users_ssh_config() {
+        assert_eq!(
+            keepalive_opts(None),
+            vec![
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=2"
+            ]
+        );
+        assert_eq!(
+            keepalive_opts(Some("Host *\n  serveraliveinterval 60\n")),
+            vec!["-o", "ServerAliveCountMax=2"]
+        );
+        assert!(keepalive_opts(Some(
+            "ServerAliveInterval=0\nHost x\n\tServerAliveCountMax 9\n"
+        ))
+        .is_empty());
+        // A comment or an unrelated key doesn't count.
+        assert_eq!(
+            keepalive_opts(Some("# ServerAliveInterval 5\nServerAliveIntervalX 1\n")).len(),
+            4
+        );
+    }
+
     #[test]
     fn ssh_minimal_and_missing_host() {
         let c = conn(ConnectionKind::Ssh, json!({"host":"h1"}));
         let (spec, _) = build_command(&c, None).unwrap();
         assert_eq!(
             spec.args,
-            vec!["-o", "StrictHostKeyChecking=accept-new", "--", "h1"]
+            vec![
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=2",
+                "--",
+                "h1"
+            ]
         );
 
         // No host: we don't validate — fall back to a login shell so a
@@ -772,6 +852,10 @@ mod tests {
                 "-t",
                 "-o",
                 "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=2",
                 "-i",
                 "/home/me/.ssh/id_rsa",
                 "bastion.example.com",
@@ -863,6 +947,10 @@ mod tests {
                 "-t",
                 "-o",
                 "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=2",
                 "bastion.example.com",
                 "--",
                 "redis-cli",

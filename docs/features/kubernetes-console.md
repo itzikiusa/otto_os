@@ -160,7 +160,7 @@ the active Kubernetes entry in the sidebar again for the clusters overview.
 ### Namespaces, nodes, resource kinds
 
 The top bar has a namespace filter (**All namespaces** ⇒ kubectl `-A`,
-remembered per cluster), a free-text filter, refresh + 10 s auto-refresh, the
+remembered per cluster), a free-text filter, refresh + auto-refresh (10 s; slower on big lists, see below), the
 cluster switcher and the k9s button. Namespaces are always lowercased (they
 are DNS labels; phones auto-capitalize). When the kubeconfig user can't
 `get namespaces` (Rancher project-scoped users), the picker lists the
@@ -179,6 +179,28 @@ contract for the per-kind `extra` columns). `-o wide` is never used; the
 daemon derives the columns itself so they are stable across kubectl versions.
 `q` is a case-insensitive substring match over the visible columns, applied
 daemon-side.
+
+While a console lists, the cluster gets ONE GET-only `kubectl proxy` (on a
+Unix socket in a private `0700` temp dir; it admits only the collection paths
+of the listed kinds and metrics-server pods — no single objects, no
+exec/log/proxy sub-resources, no writes). Lists are paged straight off the API
+server through it (`limit=500` + `continue`, each page parsed off the async
+runtime) instead of a `kubectl get -o json` process per list; the proxy stops
+after 2 minutes without a list, and if it cannot start (or a page fails) the
+list falls back to kubectl — retrying the proxy after 5 minutes — so errors
+keep kubectl's exact mapping.
+
+Lists are cached for 10 s (the poll floor) with single-flight, so the console,
+a second window, WorkloadPods and an agent asking for the same list share one
+kubectl call; an action on the cluster drops its cached lists. Each answer
+carries a `version` (also the `ETag`) built from every object's `uid` +
+`resourceVersion` (plus pod CPU/memory rounded to 10 m / 1 MiB) — so it only
+moves when the cluster changed, even across cache misses. The console's poll
+sends it back as `If-None-Match` and an unchanged list is a body-less 304
+that leaves the table untouched; the Age column is computed in the browser
+from each row's `created_at`, so it keeps ticking. Auto-refresh runs every 10 s below 1,000
+rows and every `max(30 s, 3 × last load time)` above, and pauses while the
+k9s terminal covers the table (one refresh when it closes).
 
 `health` colours the status cell: `ok`, `warn`, `bad`, `progressing`. For
 pods: `Terminating` when `deletionTimestamp` is set; a container waiting /
@@ -201,8 +223,10 @@ When `metrics_server` is true, pod rows get `cpu` (millicores) and `mem`
 (bytes) merged from `kubectl get --raw /apis/metrics.k8s.io/v1beta1/[namespaces/<ns>/]pods`
 — the same data `kubectl top pods` prints, already JSON. Kubernetes `Quantity`
 strings (`250m`, `1500u`, `128Mi`, `1Gi`, `1e3`, …) are parsed in Rust.
-`GET /k8s/clusters/{id}/metrics?ns=` returns per-pod and per-container usage
-for the Metrics tab; `available:false` when the API is absent.
+`GET /k8s/clusters/{id}/metrics?ns=` returns per-pod and per-container usage;
+the drawer's Metrics tab adds `&pod=<name>` so metrics-server is asked for that
+one pod, not the namespace, every 10 s. `available:false` when the API is
+absent.
 
 ### Detail drawer
 
@@ -422,7 +446,7 @@ GET    /k8s/clusters/{id}/resources?kind=&ns=&label=&q=
 GET    /k8s/clusters/{id}/resource?kind=&ns=&name=
 GET    /k8s/clusters/{id}/pods/{ns}/{name}/containers
 GET    /k8s/clusters/{id}/pods/{ns}/{name}/logs?container=&tail=&since=&previous=&follow=&timestamps=
-GET    /k8s/clusters/{id}/metrics?ns=
+GET    /k8s/clusters/{id}/metrics?ns=&pod=
 POST   /k8s/clusters/{id}/exec                       POST /k8s/clusters/{id}/k9s
 POST   /k8s/clusters/{id}/actions
 ```

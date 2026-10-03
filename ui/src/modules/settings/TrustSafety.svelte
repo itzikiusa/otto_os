@@ -17,6 +17,8 @@
   import { router } from '../../lib/router.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import SecretsStore from './SecretsStore.svelte';
 
   const PAGE_SIZE = 100;
 
@@ -231,6 +233,9 @@
     {/snippet}
   </PageHeader>
   <PageBody padded={false} fill>
+
+  <!-- Secret storage: plaintext warning + "Secure secrets…" (root only) -->
+  {#if auth.isRoot}<SecretsStore />{/if}
 
   <!-- Security posture summary -->
   <section class="posture" aria-label="Security posture">

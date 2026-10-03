@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
+import * as livePaths from '../src/lib/gitLivePaths.ts';
 
 const status = { branch: 'main', upstream: 'origin/main', ahead: 0, behind: 0, changes: [] };
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
@@ -18,6 +19,7 @@ function fixture() {
       return result.promise;
     } } },
     '../loadError': { loadErrorText: (e: unknown) => (e instanceof Error ? e.message : String(e)) },
+    '../gitLivePaths': livePaths,
   }, {
     document, Date: { now: () => now },
     setTimeout: (fn: () => void, ms: number) => { timers.set(++timerId, { at: now + ms, run: fn }); return timerId; },

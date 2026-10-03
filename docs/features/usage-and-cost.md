@@ -57,7 +57,7 @@ Two storage layers cooperate:
 
 | Layer | Crate / file | Responsibility |
 |---|---|---|
-| **Capture** | `crates/ottod/src/usage_tailer.rs` | Tails Claude/Codex transcripts every 20 s, parses per-turn tokens, attributes them to an Otto session (or `external`), and records a [`UsageEvent`]. |
+| **Capture** | `crates/ottod/src/usage_tailer.rs` | Tails Claude/Codex transcripts as they change (FSEvents; 10-min reconcile), parses per-turn tokens, attributes them to an Otto session (or `external`), and records a [`UsageEvent`]. |
 | **Engine façade** | `crates/otto-usage/src/engine.rs` (`UsageEngine`) | Owns the ClickHouse handle + a batched event writer; runs all the rollup queries; manages install / retention / status. |
 | **ClickHouse wrapper** | `crates/otto-usage/src/clickhouse.rs` | A thin async wrapper that shells out to `clickhouse local --path <dir>`. |
 | **Schema / DDL** | `crates/otto-usage/src/schema.rs` | `CREATE TABLE` for `usage_events` + `system_metrics`, TTL, and additive column migrations. |
@@ -114,7 +114,13 @@ the cumulative `total_token_usage`, to avoid double-counting:
 
 ### 3.3 Attribution (which session a turn belongs to)
 
-Each scan rebuilds an attribution index from the SQLite `sessions` table:
+The tailer keeps an attribution index built from the SQLite `sessions` table.
+It is built on the first pass that actually reads new lines and **reused across
+passes** (event-driven passes run every ~2 s while an agent streams): it is
+re-read only when it is older than 60 s, or when a lookup misses **and** a
+session was created / deleted / given its provider-session id since the index
+was built (a write generation bumped by `SessionsRepo`). A transcript that is
+simply not Otto's (external) never re-queries. Indexes:
 
 - **Claude** — by transcript filename stem (= the CLI session UUID =
   `provider_session_id` on the Otto session row).
@@ -137,16 +143,27 @@ re-counting itself — at two levels:
 - **Byte-offset cursor** (no *line* read twice). A persistent
   `absolute-path → byte offset` map lives at
   `~/Library/Application Support/Otto/usage_tailer.json` (`CursorStore`, written
-  atomically via tmp-file + rename). Only complete lines up to the last `\n` are
-  consumed; a partial trailing line is left for the next scan. A file truncation /
-  rotation (cursor > size) resets the cursor to 0.
+  atomically via tmp-file + rename) plus an append-only sidecar
+  `usage_tailer.json.log` of `path<TAB>offset` lines for the cursors that moved
+  since the last compaction (replayed over the JSON on load, last line wins;
+  compacted after 5k lines or when a dead cursor is evicted). Only complete
+  lines up to the last `\n` are consumed; a partial trailing line is left for
+  the next pass. Change detection compares a file's size with the size it had
+  when last tailed (memory only) — not with the cursor — so a file ending in a
+  partial line is read once, not every pass. A file truncation / rotation
+  (cursor > size) resets the cursor to 0. Reads are capped at 8 MiB per step
+  (a large catch-up streams in windows) and parsed on the blocking pool.
 - **Response-key dedup** (no *API response* counted twice). Claude Code writes
   one line **per content block**, so a single billed response (one
   `message.id` + `requestId`) appears on several lines, each repeating the same
   `usage` object — and resumed sessions replay old lines into the new session's
   file. Counting every line inflates real usage ~2.4×. The tailer counts a
-  response key **once**. The seen-set is persisted (`usage_tailer_seen.json`,
-  same atomic write) and FIFO-capped at 100k keys (~two months of real history).
+  response key **once**. The seen-set holds a 16-byte xxh3-128 hash per key
+  (an ordered set, ~3.6 MB at the cap instead of ~20 MB for the raw strings),
+  is persisted (`usage_tailer_seen.json` as an array of 32-hex hashes — files
+  holding raw `msg_…:req_…` keys from older builds still load — plus an
+  append-only `.log`) and FIFO-capped at 100k keys (~two months of history).
+  Downgrading to a pre-hash build would not recognise the hashed entries.
 - **Final usage per response.** While a response streams, Claude Code writes
   its early lines with `stop_reason: null` and a **partial** `output_tokens`
   (subagent transcripts: 5 → 141, 7 → 300); only the last line carries the
@@ -165,8 +182,16 @@ re-counting itself — at two levels:
   is dated when the API call actually happened. Codex lines have no usable
   per-turn timestamp; their pre-existing history is seeded away at startup
   (`cursor = file size`) exactly as before.
-- **Cadence.** The loop scans every **20 s** (`SCAN_INTERVAL`). A bad file or line
-  is logged and skipped; the loop never panics.
+- **Cadence.** Event-driven: an FSEvents watcher (`notify`) on
+  `~/.claude/projects` and `~/.codex/sessions` collects changed `*.jsonl`
+  paths; the loop wakes on them (2 s debounce) and stats/tails only those.
+  The `sessions` attribution query runs only when a pass actually reads new
+  lines. A full listing runs at boot, every 10 min, and whenever FSEvents
+  reports dropped events (dead cursors are evicted there). A 20 s timer runs
+  only while a streamed response is held (released after 15 s of quiet).
+  Without a watcher it falls back to a full scan every 20 s
+  (`SCAN_INTERVAL`). A bad file or line is logged and skipped; the loop never
+  panics.
 
 #### One-time dedup rebuild (upgrade path)
 
@@ -187,6 +212,26 @@ transcripts were deleted since (Claude Code prunes old sessions) predate the
 bound and survive untouched. `/ingest/usage` rows are safe from the purge: that
 endpoint stamps `origin: "ingest"` when the session carries no work ref.
 
+The rebuild never parks a tokio worker and never holds the whole history:
+it runs on the blocking pool in two streaming passes over the files (pass 1:
+the oldest event date that bounds the purge; pass 2: parse + per-file fold +
+cross-file dedup by key hash, handing 5k-event batches to the inserter as
+they fill). A substring prefilter skips non-usage lines without serde, and
+usage lines deserialize into a typed borrowed struct (no JSON DOM).
+
+#### One-time repartition (schema drift)
+
+Tables created before the DDL had `PARTITION BY toYYYYMM(...)` stay
+unpartitioned under `CREATE TABLE IF NOT EXISTS`, so every TTL expiry and the
+rebuild purge rewrote the whole table. At engine init — before the writer
+starts and before the engine reports ready, so nothing inserts mid-copy and
+the purge above only touches affected months — a table whose
+`system.tables.partition_key` is empty is copied into `<table>_repart` with
+the current partitioning, row counts are compared, and the copy is swapped in
+with `EXCHANGE TABLES`; the old data is then dropped. Any failure leaves the
+original untouched and retries next start. Both tables use
+`ttl_only_drop_parts = 1`.
+
 ---
 
 ## 4. The embedded ClickHouse engine
@@ -194,11 +239,19 @@ endpoint stamps `origin: "ingest"` when the session carries no work ref.
 ### 4.1 How it runs
 
 Otto ships no embedded C++; it drives the *same* `clickhouse` binary you'd install
-via `curl https://clickhouse.com/ | sh`, in **`clickhouse local --path <dir>`**
-mode — a serverless, portless, on-disk database. Because `clickhouse local` takes
-an exclusive lock on its `--path`, every call is serialized through a single mutex
-in `ClickHouse` (`crates/otto-usage/src/clickhouse.rs`); process startup is tens of
-ms, writes are batched, so this is cheap.
+via `curl https://clickhouse.com/ | sh`, as one persistent **`clickhouse server`**
+child bound to a random loopback HTTP port over the data dir
+(`crates/otto-usage/src/clickhouse.rs`). Writes are batched (usage events every
+15 s while any are buffered, system metrics every 5 min).
+
+**Idle-stop.** The server costs ~56 threads / ~100+ MB RSS even with nothing to
+do, so after **15 min** with no query, insert or DDL (and none in flight) it is
+stopped cleanly (SIGTERM) and the next request restarts it on demand — measured
+~0.5–0.7 s to the first answer on a small data dir; the usage writer and the
+metrics batch keep buffering in memory meanwhile. An idle-stopped server counts
+as alive for the self-heal check (it did not crash); a restart that fails trips
+the normal self-heal. Merge pools are sized for a few MB of data
+(`background_pool_size` 4, paired with MergeTree's free-entry thresholds).
 
 ### 4.2 On-disk layout
 
@@ -361,9 +414,12 @@ tooltip *"Estimated — model not in the rate table; priced at the Opus tier."*
 ### 5.3 Usage Report and the ccusage cross-check
 
 - **Report** (`GET /usage/report`): daily, monthly, per-model and per-session
-  (≤1000) tables over the window, tokens first and cost secondary, scoped like
-  the summary. The page's **Download HTML** writes the same tables to one
-  self-contained file (inline CSS, light/dark) for sharing or archiving.
+  tables over the window, tokens first and cost secondary, scoped like the
+  summary — two ClickHouse scans (one grouped day×provider×model scan the other
+  tables are re-aggregated from, plus the session leaderboard). The page loads
+  the slim shape (100 sessions, no day×model table); **Show more sessions** and
+  **Download HTML** fetch the full one once (`sessions_limit=1000&include=daily_models`)
+  and write every table to one self-contained file (inline CSS, light/dark).
 - **Compare with ccusage** (root, opt-in, `POST /usage/ccusage-check {days}`):
   the daemon runs `npx --yes ccusage daily --json --breakdown --since … --until …`
   on demand (no Otto dependency; npx downloads/caches ccusage on first use;
@@ -440,7 +496,13 @@ The dashboard surfaces this as the **CostForecastChip** next to the headline cos
 a short window apart, so the sample sleeps ~200 ms and runs on a blocking thread. A
 quick first sample is taken ~3 s after boot, then on the configured cadence (re-read
 each loop, so a settings change takes effect within one interval). Sampling runs only
-while `usage.available()`.
+while `usage.available()` **and something needs it**: a live session, a
+`/usage/metrics` read in the last 10 min, or usage recorded in the last 10 min — an
+idle daemon nobody watches takes no samples and broadcasts no ticks (budgets have
+nothing new to check then). One sampler lives across ticks, so the `ottod` CPU % is
+measured over the interval. Samples are buffered in memory and inserted as one batch
+every **5 min** (and on shutdown); `/usage/metrics` serves the unflushed tail from
+memory, so the sparklines stay live.
 
 Each sample → one `system_metrics` row:
 
@@ -551,7 +613,7 @@ estimated when not supplied, and work-graph dims are flattened from the session'
 
 | Event | When | Payload |
 |---|---|---|
-| `usage_metrics_tick` | After each `system_metrics` sample is stored. | `{"type":"usage_metrics_tick","ts":"<UTC ISO-8601>"}` |
+| `usage_metrics_tick` | After each `system_metrics` sample (only while sampling is wanted — see §7). | `{"type":"usage_metrics_tick","ts":"<UTC ISO-8601>"}` |
 | `budget_exceeded` | On a budget crossing (enforcement on). | see §8.1 |
 
 The UI subscribes to `usage_metrics_tick` and calls `usage.applyMetricsTick()`, which

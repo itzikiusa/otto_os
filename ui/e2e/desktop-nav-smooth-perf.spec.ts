@@ -24,6 +24,15 @@ const HEADER_BUDGET_MS = 150;
 
 let wsId = '';
 
+// No service worker. Once sw.js claims the page (its `load`-time register
+// lands well before the first click on a warm dev server), every same-origin
+// GET — the dev server's /src/* modules included — is fetched BY the worker,
+// and `page.route` never sees it: the cold-switch test's held Vault chunk then
+// loads at full speed, so the pending bar never shows. The webkit project
+// blocks it in playwright.config.ts for the same reason; this covers
+// desktop-browser too, so both engines time the same (worker-free) page.
+test.use({ serviceWorkers: 'block' });
+
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   wsId = await seedWorkspace(ctx, base);
@@ -194,4 +203,52 @@ test('sidebar switches keep the shell mounted, never blank, and paint the next h
   for (const stop of ROUTE) {
     expect(warm[stop], `${stop} header painted ${warm[stop].toFixed(1)} ms after the click`).toBeLessThanOrEqual(budgetMs(HEADER_BUDGET_MS));
   }
+});
+
+// Cold switch on a slow link (perf F7): the router holds the old page while
+// the next chunk loads, so the tapped sidebar item must say so — `aria-busy`
+// within budget of the click (it arms after 120 ms) and the thin progress bar
+// once the load passes 300 ms — and both clear when the page lands.
+test('a slow cold page switch marks the tapped item busy and shows the progress bar', async ({ page }) => {
+  test.setTimeout(90_000);
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  let holdHit = false;
+  // Hold the Vault page module (dev server URL, any query) until released.
+  await page.route(/\/src\/modules\/vault\/VaultPage\.svelte(\?|$)/, async (route) => {
+    holdHit = true;
+    await held;
+    await route.continue();
+  });
+  await page.goto('/#/agents');
+  await expect(page.locator('[data-testid="agents-history-btn"]')).toBeVisible({ timeout: 30_000 });
+  const item = page.locator('.shell .sidebar [data-nav-id="vault"]').first();
+  await page.evaluate(() => {
+    const st = { t0: 0, busyAt: -1 };
+    (window as unknown as { __pend: typeof st }).__pend = st;
+    window.addEventListener('click', () => (st.t0 = performance.now()), { capture: true, once: true });
+    new MutationObserver(() => {
+      if (st.busyAt < 0 && document.querySelector('.shell .sidebar [data-nav-id="vault"][aria-busy="true"]')) {
+        st.busyAt = performance.now() - st.t0;
+      }
+    }).observe(document.body, { attributes: true, subtree: true, attributeFilter: ['aria-busy'] });
+  });
+  await item.click();
+  await expect(item).toHaveAttribute('aria-busy', 'true', { timeout: 5_000 });
+  // The hold must be what keeps the switch pending. If the chunk bypassed the
+  // route (a service worker, or a page chunk fetched under another URL) the
+  // failure names that instead of a missing bar.
+  await expect.poll(() => holdHit, { message: 'the held VaultPage chunk was never requested through page.route', timeout: 5_000 }).toBe(true);
+  await expect(page.getByTestId('nav-pending-bar')).toBeVisible({ timeout: 5_000 });
+  const busyAt = await page.evaluate(() => (window as unknown as { __pend: { busyAt: number } }).__pend.busyAt);
+  // eslint-disable-next-line no-console
+  console.log(`[nav-pending] busy ${busyAt.toFixed(1)} ms after the click`);
+  expect(busyAt, 'pending indicator latency').toBeLessThanOrEqual(budgetMs(200));
+  // The old page is still the one on screen while the chunk is held.
+  await expect(page.locator('[data-testid="agents-history-btn"]')).toBeVisible();
+
+  release();
+  await expect(page.locator('.shell .content .vault-header')).toBeVisible({ timeout: 20_000 });
+  await expect(item).not.toHaveAttribute('aria-busy', 'true');
+  await expect(page.getByTestId('nav-pending-bar')).toHaveCount(0);
 });

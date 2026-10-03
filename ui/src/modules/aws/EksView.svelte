@@ -131,6 +131,7 @@
   filterPlaceholder="Filter clusters…"
   {loading}
   bind:auto
+  {region}
   onrefresh={() => void load()}
 >
   <RegionPicker {account} service="eks" bind:region allowAll />

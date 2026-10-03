@@ -8,6 +8,10 @@ const plain = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 const tableWindow = () =>
   loadSource(new URL('../src/lib/tableWindow.svelte.ts', import.meta.url), { svelte: { tick: async () => {} }, './findProviders': { registerFindProvider: () => () => {} } }, { requestAnimationFrame: (fn: () => void) => { fn(); return 1; } });
 
+
+/** k8s-util reads the shared clock (`rowAge`). */
+const K8S_UTIL_FIXTURES = { '../../lib/stores/now.svelte': { now: () => Date.now() } };
+
 test('TableWindow renders small lists whole and windows big ones', () => {
   const { TableWindow } = tableWindow();
   const tw = new TableWindow(400, 15);
@@ -46,7 +50,7 @@ test('TableWindow measures the real row height and resets on a new listing', () 
 });
 
 test('podContainers mirrors the daemon (init first, live state + restarts)', () => {
-  const { podContainers } = loadSource(new URL('../src/modules/kubernetes/k8s-util.ts', import.meta.url), {});
+  const { podContainers } = loadSource(new URL('../src/modules/kubernetes/k8s-util.ts', import.meta.url), K8S_UTIL_FIXTURES);
   const got = podContainers({
     spec: {
       initContainers: [{ name: 'init', image: 'busybox' }],
@@ -91,7 +95,7 @@ test('TableWindow.active gates windowing; a 5000-message peek mounts ≤ 150 row
 });
 
 test('clipLongScalars cuts only >64 KiB strings and keeps untouched subtrees (SC-19)', () => {
-  const { clipLongScalars, MANIFEST_SCALAR_MAX } = loadSource(new URL('../src/modules/kubernetes/k8s-util.ts', import.meta.url), {});
+  const { clipLongScalars, MANIFEST_SCALAR_MAX } = loadSource(new URL('../src/modules/kubernetes/k8s-util.ts', import.meta.url), K8S_UTIL_FIXTURES);
   const huge = 'x'.repeat(MANIFEST_SCALAR_MAX + 10 * 1024);
   const meta = { name: 'grafana-dashboards', labels: { app: 'grafana' } };
   const manifest = { kind: 'ConfigMap', metadata: meta, data: { 'big.json': huge, small: 'ok' }, list: [huge, 1] };
@@ -125,4 +129,18 @@ test('mergeS3Head refreshes the head and keeps the loaded pages (I9)', () => {
   const all = plain(mergeS3Head(loaded, { prefixes: [], objects: [obj('a')], is_truncated: false })) as typeof m;
   assert.deepEqual(all.objects.map((o) => o.key), ['a']);
   assert.deepEqual(all.prefixes, []);
+});
+
+test('rowAge ticks from created_at, falls back to age_seconds (perf R1)', () => {
+  let nowMs = 1_790_848_800_000 + 90_000;
+  const { rowAge } = loadSource(new URL('../src/modules/kubernetes/k8s-util.ts', import.meta.url), {
+    '../../lib/stores/now.svelte': { now: () => nowMs },
+  });
+  const row = { age_seconds: 5, created_at: 1_790_848_800 };
+  assert.equal(rowAge(row), 90);
+  nowMs += 60_000; // a 304 kept the same row: the age still moves
+  assert.equal(rowAge(row), 150);
+  assert.equal(rowAge({ age_seconds: 42 }), 42);
+  assert.equal(rowAge({ age_seconds: 42, created_at: null }), 42);
+  assert.equal(rowAge({ age_seconds: 0, created_at: 1_790_848_800 + 10_000 }), 0, 'clock skew never goes negative');
 });

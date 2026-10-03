@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{AgentTask, Notice, Session, SessionStatus, TrailEvent};
 use crate::Id;
+use std::sync::Arc;
+
+/// Most worktree paths one `RepoStatusChanged` lists before it falls back to
+/// "unknown" (`paths: None`).
+pub const REPO_CHANGED_MAX_PATHS: usize = 64;
 
 /// Daemon-wide event. Serialized as JSON with a `type` tag, one per WS message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +104,27 @@ pub enum Event {
         source: String,
         session_id: Option<Id>,
         request_id: Option<Id>,
+    },
+    /// An API automation run completed a step or finished (perf F2): the
+    /// running view fetches the new steps on this instead of polling blind.
+    /// Counts and status only — never a step result.
+    ApiRunProgress {
+        workspace_id: Id,
+        automation_id: Id,
+        run_id: Id,
+        status: String,
+        steps_done: usize,
+    },
+    /// A saved API-client object changed (perf N4): a request, collection,
+    /// environment or automation was created, updated, deleted or imported —
+    /// by a person or an agent tool. The UI drops its 60 s list cache for the
+    /// workspace on this. `kind` is `request` | `collection` | `environment` |
+    /// `automation`; `id` is `None` for bulk changes (imports). Ids only.
+    ApiClientChanged {
+        workspace_id: Id,
+        kind: String,
+        id: Option<Id>,
+        deleted: bool,
     },
     /// A swarm run was created or changed. `run` is the serialized SwarmRun row
     /// (otto-core can't depend on otto-state, so it travels as JSON).
@@ -215,8 +241,13 @@ pub enum Event {
         node_id: Option<Id>,
         #[serde(default)]
         rev: i64,
+        /// The changed node's SUMMARY — exactly the node shape
+        /// `GET /workflows/runs/{id}/progress` returns (`logs: []` +
+        /// `log_count`, `output: null` + `has_output`, `detail_version`), so
+        /// a client applies it in place without refetching (perf W5). Was the
+        /// full `NodeRunState` (≤ 32 KiB), which clients refetched anyway.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        node: Option<crate::workflows::NodeRunState>,
+        node: Option<serde_json::Value>,
         #[serde(default)]
         nodes_done: u32,
         #[serde(default)]
@@ -458,6 +489,14 @@ pub enum Event {
         /// Done-contract readiness 0..100 (see `proof::compute_done_contract`).
         #[serde(default)]
         done_score: u8,
+        /// The pack's badges after this recompute, so a listener can patch its
+        /// summary row in place instead of refetching (absent from older
+        /// emitters).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        badges: Option<Vec<String>>,
+        /// Evidence count after this recompute.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact_count: Option<u32>,
     },
     /// A scheduled-task run started, finished, or errored. The Scheduled Tasks page
     /// subscribes and re-fetches the task's run history on a matching tick instead
@@ -488,14 +527,18 @@ pub enum Event {
         kind: String,
     },
     /// A message was appended to an agent room (by an agent over the room MCP
-    /// tools, or by the user over REST). Carries ids only — clients re-fetch the
-    /// room's messages after their cursor. `author_kind` is "agent" | "user".
+    /// tools, or by the user over REST). Carries the whole message (`text`,
+    /// `created_at`) so an open room appends it without a GET; a client only
+    /// re-fetches after its cursor when it detects a gap. `author_kind` is
+    /// "agent" | "user".
     AgentRoomMessage {
         workspace_id: Id,
         room_id: Id,
         message_id: Id,
         author_kind: String,
         author_id: Id,
+        text: String,
+        created_at: String,
     },
     /// A Run with Otto run advanced a stage, errored, or finished. The Run with
     /// Otto page re-fetches the run + its timeline on a matching tick. `status` is
@@ -514,7 +557,19 @@ pub enum Event {
     /// the repo's local status instead of waiting for the next auto-fetch.
     /// Debounced per repo; only repos a client recently asked about are
     /// watched (`otto-git` `watch.rs`).
-    RepoStatusChanged { workspace_id: Id, repo_id: Id },
+    ///
+    /// `paths`: the repo-relative worktree paths (files or directories) the
+    /// burst touched, so an open diff re-reads only when ITS file changed.
+    /// Absent means "unknown — assume anything": more than
+    /// [`REPO_CHANGED_MAX_PATHS`] paths, a dropped-events rescan, or a change
+    /// inside `.git` (index / HEAD / branch refs alter every file's diff).
+    /// Present and empty: only status-level state moved (e.g. remote refs).
+    RepoStatusChanged {
+        workspace_id: Id,
+        repo_id: Id,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paths: Option<Vec<String>>,
+    },
     /// A browser tab was created, navigated, or had its mode changed. The open
     /// Browser page re-fetches (or applies in place) the matching tab. `tab` is
     /// the serialized `otto_state::browser::BrowserTab` (opaque here — otto-core
@@ -566,11 +621,14 @@ pub enum Event {
     /// sent with `turns: []` so the client re-fetches instead. Session-family
     /// scoped (owner / workspace admin / root), like `trail_appended`. `turns`
     /// travels as JSON because otto-core cannot depend on otto-transcript.
+    /// `turns` is an `Arc<[_]>`: every bus subscriber's `recv` clones the
+    /// event, and a refcount bump beats deep-copying a 64 KB JSON tree a dozen
+    /// times per frame (serializes exactly like a `Vec`).
     TranscriptAppended {
         workspace_id: Id,
         session_id: Id,
         cursor: String,
-        turns: Vec<serde_json::Value>,
+        turns: Arc<[serde_json::Value]>,
     },
     /// Conversation view: the agent's in-progress response as currently drawn
     /// on the session's terminal screen (plain text, ≤ 16 KB), pushed by the
@@ -578,19 +636,21 @@ pub enum Event {
     /// writes a transcript record only when a block COMPLETES, so this is the
     /// only sub-turn signal; clients show it as a draft below the last folded
     /// turn and drop it once the real turn lands. `text` is empty when nothing
-    /// is streaming. Session-family scoped.
+    /// is streaming. Session-family scoped. The text fields are `Arc<str>`
+    /// (cheap per-subscriber clones, same JSON string on the wire) — this is
+    /// pushed every ~700 ms per streaming session.
     TranscriptLive {
         workspace_id: Id,
         session_id: Id,
-        text: String,
+        text: Arc<str>,
         /// Text currently typed (unsent) in the terminal's input box — the
         /// chat shows it so a message sent from the chat is known to be
         /// appended to it (the CLI submits both as ONE message).
-        input: String,
+        input: Arc<str>,
         /// The terminal's status rows below the input box (the CLI's own
         /// status line: model, context %, plan limits, mode …), joined by
         /// " · ".
-        status: String,
+        status: Arc<str>,
         /// Git branch of the session cwd (from `.git/HEAD`), if any.
         branch: Option<String>,
     },
@@ -699,9 +759,34 @@ pub enum Event {
     /// read-all, dismiss, clear). Owner-only; clients refetch
     /// `GET /notifications` (the tray's "needs you" glyph).
     NotificationsChanged { user_id: Id },
+    /// A Workbench doc of `user_id` changed (create / content or metadata
+    /// update / trash / restore / permanent delete). Owner-only; an
+    /// invalidation cue — clients refetch the list and, unless `client_id` is
+    /// their own (self-echo), the open doc.
+    WorkbenchDocChanged {
+        workspace_id: Id,
+        user_id: Id,
+        doc_id: Id,
+        /// `created` | `updated` | `trashed` | `restored` | `deleted`.
+        action: String,
+        rev: i64,
+        updated_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
 }
 
 impl Event {
+    /// High-rate variants only WebSocket clients consume (perf2/03 N6):
+    /// producers publish them with `otto_server::ws_fanout::publish_stream`,
+    /// which skips the internal bus and its ~13 subscribers.
+    pub fn is_streaming(&self) -> bool {
+        matches!(
+            self,
+            Event::TranscriptLive { .. } | Event::TranscriptAppended { .. }
+        )
+    }
+
     /// The wire `type` tag (`session_status`, …) without serializing — used to
     /// filter per-connection topic subscriptions (`/ws/events` `subscribe`)
     /// before the authorization check and serialization.
@@ -721,6 +806,8 @@ impl Event {
             Event::TrailAppended { .. } => "trail_appended",
             Event::TasksUpdated { .. } => "tasks_updated",
             Event::ApiHistoryAppended { .. } => "api_history_appended",
+            Event::ApiRunProgress { .. } => "api_run_progress",
+            Event::ApiClientChanged { .. } => "api_client_changed",
             Event::SwarmRunUpdated { .. } => "swarm_run_updated",
             Event::SwarmTaskUpdated { .. } => "swarm_task_updated",
             Event::SwarmProjectCleared { .. } => "swarm_project_cleared",
@@ -782,6 +869,7 @@ impl Event {
             Event::McpApprovalChanged { .. } => "mcp_approval_changed",
             Event::ResourceAccessChanged { .. } => "resource_access_changed",
             Event::NotificationsChanged { .. } => "notifications_changed",
+            Event::WorkbenchDocChanged { .. } => "workbench_doc_changed",
         }
     }
 }
@@ -789,6 +877,63 @@ impl Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every bus subscriber deep-clones the `Event` it receives (tokio
+    /// broadcast semantics), so the enum must stay small and big payloads must
+    /// live behind an `Arc`/`Box`. A new variant that inlines a large struct
+    /// trips this; box its payload instead of raising the bound.
+    #[test]
+    fn event_stays_small_for_cheap_bus_clones() {
+        let size = std::mem::size_of::<Event>();
+        assert!(size <= EVENT_SIZE_BUDGET, "size_of::<Event>() = {size}");
+    }
+
+    /// Bytes; see `event_stays_small_for_cheap_bus_clones`.
+    const EVENT_SIZE_BUDGET: usize = 512;
+
+    /// The `Arc` payloads serialize byte-identically to the old `Vec`/`String`
+    /// shape and round-trip through serde.
+    #[test]
+    fn transcript_events_keep_their_wire_shape() {
+        let ev = Event::TranscriptAppended {
+            workspace_id: "w".into(),
+            session_id: "s".into(),
+            cursor: "3".into(),
+            turns: vec![serde_json::json!({"id": "t1", "text": "hi"})].into(),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"type": "transcript_appended", "workspace_id": "w",
+                "session_id": "s", "cursor": "3", "turns": [{"id": "t1", "text": "hi"}]})
+        );
+        let back: Event = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), v);
+
+        let ev = Event::TranscriptLive {
+            workspace_id: "w".into(),
+            session_id: "s".into(),
+            text: "draft".into(),
+            input: "".into(),
+            status: "opus · 12%".into(),
+            branch: None,
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"type": "transcript_live", "workspace_id": "w",
+                "session_id": "s", "text": "draft", "input": "",
+                "status": "opus · 12%", "branch": null})
+        );
+        let back: Event = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), v);
+        // A clone shares the payload instead of copying it.
+        if let (Event::TranscriptLive { text: a, .. }, Event::TranscriptLive { text: b, .. }) =
+            (&ev, &ev.clone())
+        {
+            assert!(Arc::ptr_eq(a, b));
+        }
+    }
 
     /// `type_name()` must equal the serde tag for every variant (it is
     /// generated from the variant names; this pins the snake_case rule incl.
@@ -821,6 +966,7 @@ mod tests {
             Event::RepoStatusChanged {
                 workspace_id: "w".into(),
                 repo_id: "r".into(),
+                paths: Some(vec!["src/a.rs".into()]),
             },
             Event::McpApprovalChanged {
                 approval_id: None,
@@ -833,6 +979,15 @@ mod tests {
             },
             Event::NotificationsChanged {
                 user_id: "u".into(),
+            },
+            Event::WorkbenchDocChanged {
+                workspace_id: "w".into(),
+                user_id: "u".into(),
+                doc_id: "d".into(),
+                action: "updated".into(),
+                rev: 2,
+                updated_at: "2026-10-03T00:00:00Z".into(),
+                client_id: None,
             },
         ];
         for e in events {
@@ -862,19 +1017,13 @@ mod tests {
             status: "running".into(),
             node_id: Some("step".into()),
             rev: 7,
-            node: Some(crate::workflows::NodeRunState {
-                node_id: "step".into(),
-                status: crate::workflows::NodeStatus::Running,
-                output: None,
-                error: None,
-                logs: vec!["▶ log started".into()],
-                started_at: None,
-                duration_ms: None,
-                attempts: None,
-                sessions: vec![],
-                review_ids: Vec::new(),
-                activity: None,
-            }),
+            node: Some(serde_json::json!({
+                "node_id": "step",
+                "status": "running",
+                "logs": [],
+                "log_count": 1,
+                "detail_version": "abc",
+            })),
             nodes_done: 2,
             nodes_total: 5,
             waiting_approval: false,
@@ -884,8 +1033,7 @@ mod tests {
         assert_eq!(v["rev"], 7);
         assert_eq!(v["node"]["node_id"], "step");
         assert_eq!(v["node"]["status"], "running");
-        // `started_at` is skip-if-none — a pending node stays compact.
-        assert!(v["node"].get("started_at").is_none());
+        assert_eq!(v["node"]["log_count"], 1);
         assert_eq!(v["nodes_done"], 2);
         assert_eq!(v["nodes_total"], 5);
 

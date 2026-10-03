@@ -6,7 +6,31 @@ use std::path::{Path, PathBuf};
 
 use otto_core::domain::ImprovementTarget;
 use otto_core::{Error, Result};
-use otto_orchestrator::claude_pty::project_dir;
+
+/// Claude's per-project dir for `root` (`~/.claude/projects/<enc(root)>`).
+///
+/// Unit tests resolve it under a process-wide temp HOME instead: the engine
+/// tests seed transcripts and apply/roll back memory edits there, and doing
+/// that under the real `~/.claude/projects` left fixture dirs behind that the
+/// usage tailer then re-stat'd (and, lacking a trailing newline, re-read)
+/// every scan forever.
+pub(crate) fn project_dir(root: &str) -> PathBuf {
+    let real = otto_orchestrator::claude_pty::project_dir(root);
+    #[cfg(test)]
+    {
+        static TEST_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        let home = TEST_HOME.get_or_init(|| {
+            let dir =
+                std::env::temp_dir().join(format!("otto-improve-test-home-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        });
+        if let Some(name) = real.file_name() {
+            return home.join(".claude").join("projects").join(name);
+        }
+    }
+    real
+}
 
 /// A skill `target_ref` must be a single safe name segment.
 fn is_safe_segment(s: &str) -> bool {

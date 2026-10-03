@@ -5,6 +5,7 @@
 import { scheduledTasksApi, type ScheduledTaskInput } from '../api/scheduledTasks';
 import type { OttoEvent, ScheduledTask, ScheduledTaskPreset, ScheduledTaskRun } from '../api/types';
 import { loadErrorText } from '../loadError';
+import { announceModule } from '../lazyModule';
 
 class ScheduledTasksStore {
   list: ScheduledTask[] = $state([]);
@@ -102,3 +103,6 @@ class ScheduledTasksStore {
 }
 
 export const scheduledTasks = new ScheduledTasksStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf H1): let it see this store
+// however it was first imported.
+announceModule('scheduledTasks', scheduledTasks);

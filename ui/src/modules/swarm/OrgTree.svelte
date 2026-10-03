@@ -5,6 +5,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { sentenceCase } from '../../lib/status';
   import { swarm } from '../../lib/stores/swarm.svelte';
+  import { onMount } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -36,6 +37,10 @@
   let showCompleted = $state(false);
 
   // Sessions this agent holds (tagged at spawn with meta.swarm_id + meta.agent_id).
+  // Swarm role sessions are background (`meta.source = 'swarm'`): the main
+  // session list carries them only while a swarm view asks for them.
+  onMount(() => ws.includeSources('swarm'));
+
   function agentSessions(agentId: string) {
     const sid = swarm.detail?.id;
     return ws.sessions.filter((s) => {

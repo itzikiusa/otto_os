@@ -22,6 +22,8 @@ export interface GraphSnapshot {
 /** Repos kept. Each snapshot holds at most what the graph had paged in
  *  (10k commits ≈ a few MB), so a handful of open tabs stays cheap. */
 const MAX_REPOS = 4;
+/** Commits kept per snapshot (~4 MB). */
+export const MAX_COMMITS = 20_000;
 const snapshots = new Map<string, GraphSnapshot>();
 
 export const graphCache = {
@@ -34,6 +36,12 @@ export const graphCache = {
     return s;
   },
   set(repoId: string, snap: GraphSnapshot): void {
+    // Cap what a snapshot keeps: a user who paged a huge repo to 100k commits
+    // must not pin ~20 MB per tab. A restored, truncated history just pages
+    // back in from the cut (hasMore + skip cursor follow the cut).
+    if (snap.commits.length > MAX_COMMITS) {
+      snap = { ...snap, commits: snap.commits.slice(0, MAX_COMMITS), hasMore: true, skipCursor: MAX_COMMITS };
+    }
     snapshots.delete(repoId);
     snapshots.set(repoId, snap);
     while (snapshots.size > MAX_REPOS) {

@@ -122,7 +122,7 @@ impl CredentialMonitor {
             GitProviderKind::Github | GitProviderKind::Gitlab
         );
         if auto_capable {
-            match self.secrets_token(&account.token_ref) {
+            match self.secrets_token(&account.token_ref).await {
                 Some(token) => {
                     let provider = make_provider(account, token);
                     match provider.token_expiry().await {
@@ -259,7 +259,8 @@ impl CredentialMonitor {
     async fn check_agent_clis(&self) {
         self.check_agent(
             "claude",
-            claude_credentials_present(),
+            // `security` subprocess: blocking pool, not a runtime worker.
+            crate::offload::blocking(claude_credentials_present).await,
             "Claude: re-login needed",
             "Claude credentials are missing. Run `claude login` to re-authenticate.",
             "agent_auth:claude",
@@ -309,8 +310,11 @@ impl CredentialMonitor {
         }
     }
 
-    fn secrets_token(&self, token_ref: &str) -> Option<String> {
-        self.ctx.secrets.get(token_ref).ok().flatten()
+    async fn secrets_token(&self, token_ref: &str) -> Option<String> {
+        otto_core::secrets::get_async(&self.ctx.secrets, token_ref)
+            .await
+            .ok()
+            .flatten()
     }
 }
 
@@ -341,6 +345,7 @@ enum AgentHealth {
 /// errSecItemNotFound (exit 44) ⇒ missing; anything else ⇒ unknown (skip, so we
 /// never false-alarm on a transient error).
 #[cfg(target_os = "macos")]
+#[allow(clippy::disallowed_methods)] // sync helper: check_agent_clis runs it via offload::blocking
 fn claude_credentials_present() -> AgentHealth {
     let status = std::process::Command::new("/usr/bin/security")
         .args(["find-generic-password", "-s", "Claude Code-credentials"])
@@ -469,17 +474,29 @@ pub fn spawn_usage_recorder(ctx: ServerCtx) {
 /// `system_metrics` table. Re-reads the configured interval each tick so a
 /// settings change takes effect without a restart. The sample itself is
 /// blocking (it sleeps a CPU-refresh window), so it runs on a blocking thread.
+///
+/// Idle cost (R1a/R1b): a tick only samples while something needs it — a
+/// live session, a recent `/usage/metrics` reader, or recently recorded usage
+/// ([`otto_usage::UsageEngine::sampler_wanted`]); otherwise it skips the
+/// sample AND the `UsageMetricsTick` broadcast (nothing changed for budgets
+/// or sparklines to react to). Samples are buffered by the engine and
+/// inserted in 5-minute batches. ONE `MetricsSampler` lives across ticks, so
+/// the process CPU % is measured over the tick interval (a fresh sampler per
+/// tick saw a single refresh and reported ~0).
 pub fn spawn_metrics_sampler(ctx: ServerCtx) {
     tokio::spawn(async move {
         // A quick first sample so the dashboard has a data point seconds after
         // open, then sample on the configured cadence (re-read each loop so a
         // settings change takes effect within one interval).
         tokio::time::sleep(Duration::from_secs(3)).await;
+        let sampler = std::sync::Arc::new(std::sync::Mutex::new(otto_usage::MetricsSampler::new()));
         loop {
-            if ctx.usage.available() {
-                let active = ctx.manager.live_count() as u32;
+            let live = ctx.manager.live_count();
+            if ctx.usage.available() && ctx.usage.sampler_wanted(live) {
+                let active = live as u32;
+                let s = std::sync::Arc::clone(&sampler);
                 match tokio::task::spawn_blocking(move || {
-                    otto_usage::MetricsSampler::new().sample(active)
+                    s.lock().unwrap_or_else(|p| p.into_inner()).sample(active)
                 })
                 .await
                 {
@@ -755,7 +772,7 @@ pub struct AuthScanner {
     flagged: Mutex<std::collections::HashSet<Id>>,
     /// Per-session rolling tail of recent output (needles can straddle chunk
     /// boundaries). Bounded to the last few hundred bytes.
-    tails: Mutex<HashMap<Id, String>>,
+    tails: Mutex<HashMap<Id, Vec<u8>>>,
 }
 
 impl AuthScanner {
@@ -775,25 +792,14 @@ impl AuthScanner {
 /// Max retained tail bytes per session (covers the longest needle + slack).
 const TAIL_CAP: usize = 256;
 
-/// Trim `buf` in place to at most `cap` bytes, keeping the most-recent content and
-/// NEVER splitting a UTF-8 code point. Terminal output routinely contains
-/// multi-byte glyphs (e.g. the Powerline prompt separator U+E0B0 ``), so a naive
-/// `buf[buf.len() - cap..]` byte slice can land mid-char and panic the worker
-/// thread. We advance the cut forward to the next char boundary instead — keeping
-/// ≤ `cap` bytes, which still comfortably covers the longest needle.
-fn trim_tail(buf: &mut String, cap: usize) {
-    if buf.len() <= cap {
-        return;
-    }
-    let mut cut = buf.len() - cap;
-    while cut < buf.len() && !buf.is_char_boundary(cut) {
-        cut += 1;
-    }
-    buf.replace_range(..cut, "");
-}
-
 impl OutputScanner for AuthScanner {
     fn on_output(&self, session_id: &Id, provider: &str, chunk: &[u8]) {
+        // A plain shell is not an agent CLI with a login to renew, and its
+        // arbitrary output (curl/git/ssh "not authenticated", …) only ever
+        // produced false re-auth alerts — skip the scan (perf 01 F6).
+        if provider == "shell" {
+            return;
+        }
         // Already flagged this session → nothing to do.
         {
             let flagged = match self.flagged.lock() {
@@ -805,20 +811,18 @@ impl OutputScanner for AuthScanner {
             }
         }
 
-        // Append to the rolling tail and search the combined window.
-        let text = String::from_utf8_lossy(chunk).to_lowercase();
-        let combined = {
+        // Search the rolling tail + the WHOLE chunk, then keep a short tail
+        // (perf 01 F6: the old append-trim-search order cut a phrase early in
+        // a large chunk off before looking, and lowercased bytes it dropped).
+        let hit = {
             let mut tails = match self.tails.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
             let buf = tails.entry(session_id.clone()).or_default();
-            buf.push_str(&text);
-            trim_tail(buf, TAIL_CAP);
-            buf.clone()
+            otto_sessions::tail_scan::scan_chunk(buf, chunk, REAUTH_NEEDLES, TAIL_CAP)
         };
-
-        if !REAUTH_NEEDLES.iter().any(|n| combined.contains(n)) {
+        if hit.is_none() {
             return;
         }
 
@@ -908,7 +912,18 @@ async fn check_budgets(ctx: &ServerCtx, dedup: &mut otto_usage::BudgetDedup) {
         dedup.clear();
         return;
     }
+    // Spend only moves when usage is written (or the window rolls / config
+    // changes): skip the scan otherwise, so a metrics tick never wakes an
+    // idle-stopped ClickHouse (perf3 N1). Stamped BEFORE the scan.
+    let stamp = otto_usage::BudgetCheckStamp::now(
+        ctx.usage.usage_generation(),
+        serde_json::to_string(&cfg).unwrap_or_default(),
+    );
+    if dedup.unchanged_since_last_check(&stamp) {
+        return;
+    }
     let status = crate::routes::usage::budget_status_pub(ctx, cfg).await;
+    dedup.mark_checked(stamp);
     for row in &status.rows {
         let signal = dedup.apply(&row.scope, &row.key, row.exceeded);
         let direction = match signal {
@@ -944,48 +959,54 @@ async fn check_budgets(ctx: &ServerCtx, dedup: &mut otto_usage::BudgetDedup) {
 
 #[cfg(test)]
 mod tests {
-    use super::trim_tail;
+    use super::{REAUTH_NEEDLES, TAIL_CAP};
+    use otto_sessions::tail_scan::scan_chunk;
 
     /// Regression: the rolling tail must never panic when the cut point lands
-    /// inside a multi-byte glyph. The Powerline separator U+E0B0 (`\u{e0b0}`) is
-    /// 3 bytes, so a buffer of them has cut points that are NOT char boundaries.
+    /// inside a multi-byte glyph (the Powerline separator U+E0B0 is 3 bytes);
+    /// the byte tail stays bounded and a later needle is still found.
     #[test]
-    fn trim_tail_handles_multibyte_glyphs() {
-        let glyph = '\u{e0b0}';
-        let mut s = String::new();
-        for _ in 0..200 {
-            s.push(glyph); // 600 bytes — well over the cap
-        }
-        trim_tail(&mut s, 256); // must not panic on a mid-char byte index
-        assert!(s.len() <= 256, "tail trimmed to within the cap");
-        assert!(
-            s.chars().all(|c| c == glyph),
-            "no split/garbled code points"
+    fn tail_survives_multibyte_glyphs() {
+        let mut tail = Vec::new();
+        let glyphs = "\u{e0b0}".repeat(200);
+        assert_eq!(
+            scan_chunk(&mut tail, glyphs.as_bytes(), REAUTH_NEEDLES, TAIL_CAP),
+            None
         );
+        assert!(tail.len() <= TAIL_CAP);
+        assert!(scan_chunk(
+            &mut tail,
+            b"Please Sign In to continue",
+            REAUTH_NEEDLES,
+            TAIL_CAP
+        )
+        .is_some());
     }
 
+    /// Perf 01 F6: a re-auth line at the START of a large chunk was trimmed
+    /// away before the search (append → trim to 256 → search).
     #[test]
-    fn trim_tail_is_a_noop_below_cap() {
-        let mut s = "needs reauthentication".to_string();
-        trim_tail(&mut s, 256);
-        assert_eq!(s, "needs reauthentication");
+    fn reauth_line_early_in_a_large_chunk_is_detected() {
+        let mut chunk = b"Session expired. Run `claude login`\n".to_vec();
+        chunk.extend(std::iter::repeat_n(b'.', 8000));
+        let mut tail = Vec::new();
+        assert!(scan_chunk(&mut tail, &chunk, REAUTH_NEEDLES, TAIL_CAP).is_some());
+        assert!(tail.len() <= TAIL_CAP, "only a short tail is kept");
     }
 
+    /// A needle split across two chunks is still found from the kept tail.
     #[test]
-    fn trim_tail_keeps_the_most_recent_bytes() {
-        // 1000 ASCII bytes; trimming must retain the *newest* tail (a needle that
-        // just arrived must survive), not the oldest.
-        let mut s: String = (0..1000).map(|i| (b'a' + (i % 26) as u8) as char).collect();
-        let want_tail: String = s
-            .chars()
-            .rev()
-            .take(50)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        trim_tail(&mut s, 256);
-        assert!(s.len() <= 256);
-        assert!(s.ends_with(&want_tail), "kept the most recent content");
+    fn reauth_line_split_across_chunks_is_detected() {
+        let mut tail = Vec::new();
+        let mut first = vec![b'x'; 5000];
+        first.extend_from_slice(b"you are not log");
+        assert_eq!(
+            scan_chunk(&mut tail, &first, REAUTH_NEEDLES, TAIL_CAP),
+            None
+        );
+        assert_eq!(
+            scan_chunk(&mut tail, b"ged in\n", REAUTH_NEEDLES, TAIL_CAP),
+            Some("you are not logged in")
+        );
     }
 }

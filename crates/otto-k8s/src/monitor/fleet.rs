@@ -55,6 +55,7 @@ pub fn routes<S: K8sCtx>() -> Router<S> {
         .route("/k8s/monitor/fleet/filters", get(filters::<S>))
         .route("/k8s/monitor/fleet/table", get(table::<S>))
         .route("/k8s/monitor/fleet/series", get(series::<S>))
+        .route("/k8s/monitor/fleet/series/batch", get(series_batch::<S>))
         .route("/k8s/monitor/fleet/events", get(events::<S>))
         .route("/k8s/monitor/fleet/requests", get(requests::<S>))
 }
@@ -589,7 +590,7 @@ pub fn requests_in(span: &Span, f: &FleetFilter) -> String {
 // Handlers
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct FleetQuery {
     pub window: Option<String>,
     pub cluster: Option<String>,
@@ -604,6 +605,8 @@ pub struct FleetQuery {
     pub offset: Option<u32>,
     // series
     pub metric: Option<String>,
+    /// `series/batch`: comma list of metrics (perf K6).
+    pub metrics: Option<String>,
     pub by: Option<String>,
     pub step: Option<u32>,
     // events
@@ -1007,6 +1010,54 @@ async fn series<S: K8sCtx>(
     let names = cluster_names(&ctx).await;
     let key = format!("fleet:series:{q:?}:{}", registry_stamp(&names));
     cached(key, || series_body(ctx, q, names)).await
+}
+
+/// Most metrics one `series/batch` request may name.
+const SERIES_BATCH_MAX: usize = 8;
+
+/// `GET /k8s/monitor/fleet/series/batch?metrics=a,b,…` — the Fleet overview's
+/// charts in ONE request (it was 5 parallel requests per tick, most of the
+/// browser's connection budget). Each metric runs concurrently through the
+/// same cache key + single-flight as `/series?metric=`.
+async fn series_batch<S: K8sCtx>(
+    State(ctx): State<S>,
+    Query(q): Query<FleetQuery>,
+) -> ApiResult<Json<Value>> {
+    let mut list: Vec<String> = Vec::new();
+    for m in q.metrics.as_deref().unwrap_or("").split(',').map(str::trim) {
+        if !m.is_empty() && !list.iter().any(|x| x == m) {
+            list.push(m.to_string());
+        }
+    }
+    if list.is_empty() || list.len() > SERIES_BATCH_MAX {
+        return Err(Error::Invalid(format!(
+            "metrics must name 1–{SERIES_BATCH_MAX} series metrics"
+        ))
+        .into());
+    }
+    for m in &list {
+        SeriesMetric::parse(m)?;
+    }
+    let names = cluster_names(&ctx).await;
+    let stamp = registry_stamp(&names);
+    let futs = list.into_iter().map(|m| {
+        let mut one = q.clone();
+        one.metrics = None;
+        one.metric = Some(m.clone());
+        // Byte-identical to the single route's key: both share one answer.
+        let key = format!("fleet:series:{one:?}:{stamp}");
+        let (ctx, names) = (ctx.clone(), names.clone());
+        async move {
+            cached(key, || series_body(ctx, one, names))
+                .await
+                .map(|Json(v)| (m, v))
+        }
+    });
+    let out: serde_json::Map<String, Value> = futures_util::future::try_join_all(futs)
+        .await?
+        .into_iter()
+        .collect();
+    Ok(Json(json!({ "series": out })))
 }
 
 async fn series_body<S: K8sCtx>(

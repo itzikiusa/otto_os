@@ -16,7 +16,6 @@
   import AttachProductStory from './AttachProductStory.svelte';
   import Handover from './Handover.svelte';
   import HandoverDeliveryPanel from './HandoverDeliveryPanel.svelte';
-  import ShareModal from './ShareModal.svelte';
   import { ws, isForeground } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
@@ -74,7 +73,7 @@
     dragKey?: string;
     /** Drag lifecycle, so the host can arm its drop targets while one is in flight. */
     ondragpane?: (phase: 'start' | 'end') => void;
-    /** Local terminal scrollback depth; unset = PRIMARY_SCROLLBACK (10k — a
+    /** Local terminal scrollback depth; unset = PRIMARY_SCROLLBACK (4000 — a
      *  SessionView is a pane the user works in, while the bare Terminal
      *  defaults to the 2k embed depth). The tiled grid passes the smaller
      *  depth — 15 live tiles × 10k lines was 150–360 MB of xterm buffers (SA-05). */
@@ -88,7 +87,7 @@
 
   const maximized = $derived(ws.maximizedId === sessionId);
 
-  const session = $derived(ws.sessions.find((s) => s.id === sessionId) ?? null);
+  const session = $derived(ws.getSession(sessionId) ?? null);
   const status = $derived(ws.statusMap[sessionId] ?? session?.status ?? 'idle');
 
   // "X min idle / suspends in N" countdown hint for idle agent sessions.
@@ -187,6 +186,17 @@
   let attachProductOpen = $state(false);
   let handoverOpen = $state(false);
   let shareOpen = $state(false);
+  // Loaded on first use: ShareModal bundles the QR encoder (qrcode), which
+  // the Agents chunk — the default landing page — otherwise carries.
+  let ShareModal = $state<typeof import('./ShareModal.svelte').default | null>(null);
+  async function openShare(): Promise<void> {
+    try {
+      ShareModal ??= (await import('./ShareModal.svelte')).default;
+      shareOpen = true;
+    } catch (e) {
+      toasts.error("Couldn't open sharing", e instanceof Error ? e.message : String(e));
+    }
+  }
   let roomOpen = $state(false);
   /** ⋯ → Network profile…: show the network strip for a session without a
    *  profile (it is hidden then — see the markup). */
@@ -206,8 +216,13 @@
       : null,
   );
   const handoverFrom = $derived(
-    handoverFromId ? (ws.sessions.find((s) => s.id === handoverFromId) ?? null) : null,
+    handoverFromId ? (ws.getSession(handoverFromId) ?? null) : null,
   );
+  // The source may not be a sidebar session (the list carries only those):
+  // fetch it by id once so the breadcrumb resolves.
+  $effect(() => {
+    if (handoverFromId && !ws.getSession(handoverFromId)) void ws.ensureSession(handoverFromId);
+  });
   const handoverPending = $derived(session?.meta?.handover_pending === true);
 
   // --- Additional directories editor (meta.extra_dirs → `--add-dir` args) -----
@@ -467,14 +482,33 @@
     }
   }
 
-  // Per-session tokens + cost (A5): loaded while the pane is focused (at most
-  // once a minute — the store throttles) and whenever the details open.
+  // Per-session tokens + cost (A5), event-driven (perf R5): loaded when the
+  // pane gains focus (the store throttles to once a minute), again when a
+  // turn ENDS (working → idle/exited — that is when the totals move), and
+  // whenever the details open. A slow safety tick runs only while the agent
+  // is working; an idle focused pane used to re-fetch every 60 s regardless.
   const canUsage = $derived(auth.can('usage', 'view'));
   const usageLabel = $derived(canUsage ? sessionUsageLabel(sessionUsage.bySession[sessionId]) : null);
+  const usageLive = $derived(isAgent && focused && canUsage);
   $effect(() => {
-    if (!isAgent || !focused || !canUsage) return;
+    if (!usageLive) return;
     const id = sessionId;
-    const p = pollWhileVisible(() => sessionUsage.loadSession(id), { ms: 60_000 });
+    untrack(() => void sessionUsage.loadSession(id));
+  });
+  let usagePrevStatus: SessionStatus | null = null;
+  $effect(() => {
+    const st = status;
+    const prev = usagePrevStatus;
+    usagePrevStatus = st;
+    if (usageLive && prev === 'working' && (st === 'idle' || st === 'exited')) {
+      const id = sessionId;
+      untrack(() => void sessionUsage.loadSession(id, true));
+    }
+  });
+  $effect(() => {
+    if (!usageLive || status !== 'working') return;
+    const id = sessionId;
+    const p = pollWhileVisible(() => sessionUsage.loadSession(id), { ms: 300_000, immediate: false });
     return () => p.stop();
   });
 
@@ -635,7 +669,7 @@
             // Parity with the tab's right-click menu — a tiled/split pane has no
             // tab to right-click, so Share was unreachable from here.
             ...((session?.kind === 'agent') ? [{ label: 'Start room…', icon: 'people', action: () => (roomOpen = true) } as MenuItem] : []),
-            { label: 'Share…', icon: 'share', action: () => (shareOpen = true) } as MenuItem,
+            { label: 'Share…', icon: 'share', action: () => void openShare() } as MenuItem,
             { separator: true } as MenuItem,
             {
               label: attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…',
@@ -944,7 +978,7 @@
 {/if}
 
 {#if roomOpen}<StartRoomModal {sessionId} onclose={() => (roomOpen = false)} />{/if}
-{#if shareOpen}
+{#if shareOpen && ShareModal}
   <ShareModal {sessionId} onclose={() => (shareOpen = false)} />
 {/if}
 

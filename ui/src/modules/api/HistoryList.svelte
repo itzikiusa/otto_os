@@ -15,6 +15,8 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { splitUrl } from '../../lib/api/apiVars';
   import type { ApiHistorySummary } from '../../lib/api/types';
+  import { RETENTION_PRESETS, formatBytes, suggestRetention, type RetentionPreset } from './storageGauge';
+  import { toasts } from '../../lib/toast.svelte';
 
   interface Props { onopen?: () => void }
   let { onopen }: Props = $props();
@@ -91,6 +93,49 @@
       : 'Keeping every request',
   );
 
+  // Storage gauge (perf2 N2): how big history + runs are, and — past a size
+  // with no limit set — an inline offer of retention presets. Opt-in only:
+  // nothing is deleted until someone picks a preset and confirms.
+  $effect(() => {
+    if (ws.currentId) void apiClient.loadStorage();
+  });
+  const gauge = $derived(apiClient.storage);
+  const dismissKey = $derived(`otto_api_storage_banner_dismissed:${ws.currentId ?? ''}`);
+  let dismissed = $state(false);
+  $effect(() => {
+    try { dismissed = localStorage.getItem(dismissKey) === '1'; } catch { dismissed = false; }
+  });
+  const showBanner = $derived(
+    !dismissed && suggestRetention(gauge, { rows: retention.rows, days: retention.days, runsKeep: ws.apiRunsKeep }),
+  );
+  function dismissBanner(): void {
+    dismissed = true;
+    try { localStorage.setItem(dismissKey, '1'); } catch { /* this session only */ }
+  }
+  let applying = $state(false);
+  async function applyPreset(p: RetentionPreset): Promise<void> {
+    if (!canEdit || applying) return;
+    const what = [
+      p.rows ? `keeps the newest ${p.rows.toLocaleString()} requests` : '',
+      p.days ? `deletes requests older than ${p.days} days` : '',
+      p.runsKeep ? `keeps the newest ${p.runsKeep} runs of each automation` : '',
+    ].filter(Boolean).join(', ');
+    if (!(await confirmer.ask(
+      `This workspace’s history ${what}. Older entries, with their stored responses, are deleted now and after every request — for everyone in the workspace. Saved requests are not affected.`,
+      { title: `Retention: ${p.label}`, confirmLabel: 'Apply retention' },
+    ))) return;
+    applying = true;
+    try {
+      await ws.setApiHistoryRetention(p.rows, p.days);
+      if (p.runsKeep !== null && !ws.apiRunsKeep) await ws.setApiRunsKeep(p.runsKeep);
+      if (await apiClient.applyRetention()) toasts.success('Retention applied', p.label);
+    } catch (e) {
+      toasts.error('Couldn’t save retention', e instanceof Error ? e.message : String(e));
+    } finally {
+      applying = false;
+    }
+  }
+
   function menu(e: MouseEvent): void {
     ctxMenu.show(e, [
       { label: 'Retention…', icon: 'clock', action: () => (retentionOpen = true), disabled: !canEdit },
@@ -127,8 +172,25 @@
       title="Show only requests that agents sent through Otto’s tools"
       onclick={() => (apiClient.historyAgentOnly = !apiClient.historyAgentOnly)}
     >Agent runs only</button>
-    <span class="ret" title="History retention (workspace setting)">{retentionText}</span>
+    <span class="ret" title="History retention (workspace setting)">{retentionText}{#if gauge} · {formatBytes(gauge.history_bytes)}{/if}</span>
   </div>
+  {#if showBanner && gauge}
+    <div class="size-banner" role="status">
+      <div class="sb-text">
+        History is using <strong>{formatBytes(gauge.history_bytes + gauge.run_bytes)}</strong>
+        ({gauge.history_rows.toLocaleString()} requests, {gauge.run_rows.toLocaleString()} automation runs). Everything is kept until you set a limit.
+      </div>
+      <div class="sb-actions">
+        {#if canEdit}
+          {#each RETENTION_PRESETS as p (p.label)}
+            <button class="btn small" disabled={applying} onclick={() => void applyPreset(p)}>{p.label}</button>
+          {/each}
+          <button class="btn small ghost" onclick={() => (retentionOpen = true)}>Custom…</button>
+        {/if}
+        <button class="icon-btn sb-dismiss" onclick={dismissBanner} aria-label="Dismiss storage notice" title="Dismiss"><Icon name="x" size={12} /></button>
+      </div>
+    </div>
+  {/if}
 
   {#if apiClient.historyLoadingId}<div class="state" role="status">Loading request…</div>{/if}
 
@@ -172,6 +234,28 @@
 {#if retentionOpen}<RetentionDialog onclose={() => (retentionOpen = false)} />{/if}
 
 <style>
+  .size-banner {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-block: 4px 6px;
+    margin-inline: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--info-soft);
+    font-size: var(--fs-s);
+    color: var(--text);
+  }
+  .sb-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .sb-dismiss {
+    margin-inline-start: auto;
+  }
   .hist-wrap {
     display: flex;
     flex-direction: column;

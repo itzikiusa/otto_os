@@ -66,6 +66,7 @@ import type {
   BlenderStatus,
   BlenderJob,
 } from '../../modules/product/types';
+import { announceModule } from '../lazyModule';
 
 /** One epic's subtree in the derived {@link ProductStore.tree}: folders in
  *  first-seen order (the unfiled `''` folder first when present). */
@@ -1112,6 +1113,9 @@ class ProductStore {
 }
 
 export const product = new ProductStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf H1): let it see this store
+// however it was first imported.
+announceModule('product', product);
 
 if (typeof window !== 'undefined') {
   window.addEventListener('otto:auth-changed', () => product.resetContentContext());

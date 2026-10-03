@@ -1017,6 +1017,7 @@ fn scan_dbeaver() -> ImportScanResult {
 
 /// All `.dbeaver/data-sources.json` files under one DBeaver workspace dir:
 /// `<ws>/.dbeaver/…` plus each `<ws>/<project>/.dbeaver/…`.
+#[allow(clippy::disallowed_methods)] // sync helper: only reached via scan_source, which http.rs runs in spawn_blocking
 fn dbeaver_candidates(ws: &Path) -> Vec<PathBuf> {
     let mut out = vec![ws.join(".dbeaver/data-sources.json")];
     if let Ok(rd) = std::fs::read_dir(ws) {
@@ -1102,6 +1103,7 @@ fn empty_scan(source: ImportSource) -> ImportScanResult {
 }
 
 /// Immediate child dirs of `base` whose name starts with `prefix`.
+#[allow(clippy::disallowed_methods)] // sync helper: only reached via scan_source, which http.rs runs in spawn_blocking
 fn glob_dirs(base: &Path, prefix: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(base) {
@@ -1140,6 +1142,7 @@ const MAX_IDEA_FILES: usize = 50;
 
 /// Bounded BFS of `$HOME` (maxdepth 4) for `.idea/dataSources.xml`, skipping
 /// the heavy/system dirs in [`SKIP_DIRS`]. Capped at [`MAX_IDEA_FILES`].
+#[allow(clippy::disallowed_methods)] // sync helper: only reached via scan_source, which http.rs runs in spawn_blocking
 fn find_idea_datasources() -> Vec<PathBuf> {
     let root = home();
     let mut found = Vec::new();

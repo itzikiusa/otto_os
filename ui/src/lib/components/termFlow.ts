@@ -5,9 +5,12 @@ import type { WsTermFlowFrame } from '../api/types';
 
 /** xterm scrollback depth (lines) for a PRIMARY terminal — the one pane the
  *  user works in (SessionView: agents main/split panes, the maximized tile,
- *  swarm/loop session panes; the share page; the DB SSH shell). Each line
- *  costs ~12 B/cell, so 10k × 200 cols ≈ 24 MB of JS heap. */
-export const PRIMARY_SCROLLBACK = 10_000;
+ *  swarm/loop session panes; the share page; the DB SSH shell). Equal to the
+ *  daemon emulator's depth (otto-pty EMULATOR_SCROLLBACK_LINES, perf 01 N2):
+ *  every snapshot, resync or compact replaces the buffer with at most this
+ *  many rows, so rows past it only lived until the next rebuild while costing
+ *  ~12 B/cell (10k × 200 cols was ≈ 24 MB of JS heap; 4000 is ≈ 9.6 MB). */
+export const PRIMARY_SCROLLBACK = 4000;
 /** Default depth for every other Terminal: grid tiles and the embedded
  *  previews that mount several terminals at once (review/docs/analysis/run
  *  agents, assistant panels, docks, exec views). 10k there was 150–360 MB
@@ -67,6 +70,13 @@ export class TermFlow {
   /** Ack step for the granted window (≤ window/4, per the contract). */
   private ackStep = CREDIT_ACK_STEP;
   private lastPauseAt = 0;
+  /** Acks withheld (perf F9): a parked engine or a non-focused pane in a
+   *  hidden window keeps parsing what already arrived but stops reporting
+   *  it, so the daemon stops sending after one window and — only if output
+   *  overflowed meanwhile — owes ONE snapshot. `hold(false)` reports the
+   *  withheld total at once, which brings that snapshot (or the held bytes)
+   *  on return. */
+  held = false;
   private send: (frame: WsTermFlowFrame) => void;
   private readonly now: () => number;
 
@@ -83,9 +93,26 @@ export class TermFlow {
     this.send = send;
   }
 
-  /** Ask the daemon for credit flow control (first frame on a new socket). */
-  offer(): void {
-    this.send({ type: 'credit', window: CREDIT_WINDOW });
+  /** Withhold (`true`) or resume (`false`) credit acks — see `held`.
+   *  Releasing sends one cumulative ack for everything consumed meanwhile.
+   *  Pause-mode streams (no grant) are unaffected. */
+  hold(on: boolean): void {
+    if (this.held === on) return;
+    this.held = on;
+    if (!on && this.credit && this.consumed > this.reported) {
+      this.reported = this.consumed;
+      this.send({ type: 'ack', bytes: this.consumed });
+    }
+  }
+
+  /** Ask the daemon for credit flow control (first frame on a new socket).
+   *  `binarySnapshots` (perf 01 N3): also take snapshots as a JSON header +
+   *  ONE raw binary frame instead of base64 inside JSON. Only for a direct
+   *  `/ws/term` socket — the room relay rejects unknown fields. */
+  offer(binarySnapshots = false): void {
+    this.send(binarySnapshots
+      ? { type: 'credit', window: CREDIT_WINDOW, binary_snapshots: true }
+      : { type: 'credit', window: CREDIT_WINDOW });
   }
 
   /** The daemon's `credit` reply (its granted `window`): count this stream's
@@ -122,7 +149,7 @@ export class TermFlow {
     if (this.credit) {
       if (stream !== this.credit) return;
       this.consumed += n;
-      if (this.consumed - this.reported >= this.ackStep) {
+      if (!this.held && this.consumed - this.reported >= this.ackStep) {
         this.reported = this.consumed;
         this.send({ type: 'ack', bytes: this.consumed });
       }
@@ -438,9 +465,23 @@ export function resizeDecision(o: {
   localReflowed: boolean;
   force: boolean;
   preferDom: boolean;
+  /** The grid last sent / the grid about to be sent (perf F1). When given, a
+   *  CHANGED grid compacts only when it is a meaningful change for a
+   *  bottom-anchored TUI: wider (the widen-leaves-a-void case), or more than
+   *  `COMPACT_ROW_DELTA` rows taller/shorter. A narrower grid is repainted by
+   *  the TUI's own SIGWINCH redraw. An unknown previous grid (0) compacts. */
+  prev?: { cols: number; rows: number };
+  next?: { cols: number; rows: number };
 }): { send: boolean; compact: boolean } {
+  let significant = true;
+  if (o.sentChanged && o.prev && o.next && o.prev.cols > 0 && o.prev.rows > 0) {
+    significant = o.next.cols > o.prev.cols || Math.abs(o.next.rows - o.prev.rows) > COMPACT_ROW_DELTA;
+  }
   return {
     send: o.sentChanged || o.force,
-    compact: o.preferDom && (o.sentChanged || o.localReflowed),
+    compact: o.preferDom && (o.sentChanged ? significant : o.localReflowed),
   };
 }
+
+/** Row change (either way) below which a confirmed resize does not compact. */
+export const COMPACT_ROW_DELTA = 2;

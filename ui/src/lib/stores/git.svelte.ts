@@ -4,6 +4,7 @@
 
 import { api } from '../api/client';
 import { loadErrorText } from '../loadError';
+import { mergeTouched, touches, type TouchedPaths } from '../gitLivePaths';
 import type {
   ConflictFile,
   Id,
@@ -46,6 +47,8 @@ const OPEN_TABS_KEY = 'otto_git_open_tabs';
 const AUTO_FETCH_KEY = 'otto_git_auto_fetch';
 const DEFAULT_AUTO_FETCH_SEC = 120;
 const ACTIVE_AUTO_FETCH_SEC = 30;
+/** A status read younger than this is shared by a new caller (same burst). */
+const STATUS_SHARE_MS = 300;
 const DEFAULT_SUB: GitSubTab = 'graph';
 
 /** May an auto-fetch round run right now?
@@ -58,7 +61,7 @@ const DEFAULT_SUB: GitSubTab = 'graph';
  *  H4/WP3). So we also require FOCUS: exactly the window the user is looking at
  *  polls. `hasFocus` is absent in SSR/jsdom — treat that as "allowed" so tests
  *  and headless renders behave as before. */
-function autoFetchAllowed(): boolean {
+export function autoFetchAllowed(): boolean {
   if (typeof document === 'undefined') return true;
   if (document.hidden) return false;
   return typeof document.hasFocus === 'function' ? document.hasFocus() : true;
@@ -435,8 +438,28 @@ class GitStore {
     return true;
   }
 
-  /** Fetch (cheap, local) status for a repo and store it. */
-  async refreshStatus(repoId: string): Promise<void> {
+  /** In-flight status reads per repo. RepoView's mount, `ensureStatus` and a
+   *  live refresh used to overlap into 2–3 identical GETs (and each one a full
+   *  `git status` walk on the daemon). */
+  private statusFlights = new Map<string, { p: Promise<void>; at: number; next?: Promise<void> }>();
+
+  /** Fetch (cheap, local) status for a repo and store it. Callers within
+   *  STATUS_SHARE_MS of an in-flight read share it; a later caller (whose
+   *  change may postdate that read) shares ONE trailing read instead. */
+  refreshStatus(repoId: string): Promise<void> {
+    const f = this.statusFlights.get(repoId);
+    if (f) {
+      if (Date.now() - f.at < STATUS_SHARE_MS) return f.p;
+      return (f.next ??= f.p.then(() => this.refreshStatus(repoId)));
+    }
+    const p: Promise<void> = this.readStatus(repoId).finally(() => {
+      if (this.statusFlights.get(repoId)?.p === p) this.statusFlights.delete(repoId);
+    });
+    this.statusFlights.set(repoId, { p, at: Date.now() });
+    return p;
+  }
+
+  private async readStatus(repoId: string): Promise<void> {
     try {
       const s = await api.get<RepoStatusResp>(`/repos/${repoId}/status`);
       this.setStatus(repoId, s);
@@ -459,14 +482,22 @@ class GitStore {
   /** Bumped per applied change, so views showing file CONTENT (the open diff)
    *  can re-read it even when the change list itself is unchanged. */
   liveRev: Record<string, number> = $state({});
+  /** The repo-relative paths the latest `liveRev` bump covers (`null` =
+   *  unknown: re-read anything). Set BEFORE the bump; see `liveTouches`. */
+  liveChanged: Record<string, string[] | null> = $state({});
+  /** Paths of events not yet taken by a refresh (union; `null` = unknown). */
+  private livePending = new Map<string, TouchedPaths>();
   private liveInFlight = new Set<string>();
   private liveDirty = new Set<string>();
   private liveHiddenWait = false;
 
-  /** A watched repo changed on disk: re-read its local status if we show it. */
-  applyRepoChanged(repoId: string): void {
+  /** A watched repo changed on disk: re-read its local status if we show it.
+   *  `paths` (absent = unknown) is what the burst touched, so the open diff
+   *  re-reads only when its file is among them (`liveTouches`). */
+  applyRepoChanged(repoId: string, paths?: string[] | null): void {
     const shown = this.openRepoIds.includes(repoId) || this.primary?.id === repoId || repoId in this.statusById;
     if (!shown) return;
+    this.livePending.set(repoId, mergeTouched(this.livePending.get(repoId), paths));
     if (typeof document !== 'undefined' && document.hidden) {
       // Hidden window: remember it, read once when it's visible again.
       this.liveDirty.add(repoId);
@@ -496,13 +527,23 @@ class GitStore {
       return;
     }
     this.liveInFlight.add(repoId);
+    // Taken BEFORE the read: a change landing during it stays pending for the
+    // dirty re-run (whose diff read then comes after it).
+    const taken = this.livePending.has(repoId) ? this.livePending.get(repoId) : new Set<string>();
+    this.livePending.delete(repoId);
     try {
       await this.refreshStatus(repoId);
+      this.liveChanged = { ...this.liveChanged, [repoId]: taken == null ? null : [...taken] };
       this.liveRev = { ...this.liveRev, [repoId]: (this.liveRev[repoId] ?? 0) + 1 };
     } finally {
       this.liveInFlight.delete(repoId);
       if (this.liveDirty.delete(repoId)) void this.liveRefresh(repoId);
     }
+  }
+
+  /** Did the latest live change of `repoId` touch `path`? (Unknown → yes.) */
+  liveTouches(repoId: string, path: string): boolean {
+    return touches(this.liveChanged[repoId], path);
   }
 
   /** Lazily load a repo's status once (used by the tab strip). `null` marks an

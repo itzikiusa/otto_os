@@ -393,8 +393,9 @@
           const result = await api.get<{ status: string; error?: string }>(`/workspaces/${wid}/api-client/oauth2/flows/${flow.flow_id}`);
           if (result.status === 'failed') throw new Error(result.error || 'Authorization failed');
           if (result.status === 'completed') {
-            const requests = await api.get<import('../../lib/api/types').ApiRequest[]>(`/workspaces/${wid}/api-client/requests`);
-            const request = requests.find((r) => r.id === saved.id);
+            const request = await api
+              .get<import('../../lib/api/types').ApiRequest>(`/workspaces/${wid}/api-client/requests/${encodeURIComponent(saved.id)}`)
+              .catch(() => null);
             if (request) {
               apiClient.applySavedAuth(wid, request, saved.auth);
               toasts.success('Signed in', 'The access token is stored in the Keychain.');

@@ -495,6 +495,21 @@ pub async fn preview(
     validate_bucket(bucket)?;
     validate_key(key)?;
     let max = max_bytes.unwrap_or(PREVIEW_DEFAULT).clamp(1, PREVIEW_CAP);
+    // One spawn instead of two when the key already looks like text: the
+    // ranged get-object's own JSON carries ContentType + ContentRange, which
+    // is everything the head call would have told us. Unknown extensions
+    // still head first so a 2 GB binary is never range-read for nothing.
+    if is_texty(None, key) {
+        match ranged_get(svc, a, bucket, key, max, region).await {
+            Ok((bytes, meta)) => {
+                let size = meta.total_size();
+                return Ok(preview_from_bytes(&bytes, meta.content_type, size, key));
+            }
+            // An empty object cannot satisfy `bytes=0-N`: take the head path.
+            Err(Error::Invalid(m)) if is_invalid_range(&m) => {}
+            Err(e) => return Err(e),
+        }
+    }
     let head = head_object(svc, a, bucket, key, region).await?;
     if !is_texty(head.content_type.as_deref(), key) {
         return Ok(PreviewResp {
@@ -506,6 +521,61 @@ pub async fn preview(
             size: Some(head.size),
         });
     }
+    if head.size == 0 {
+        return Ok(preview_from_bytes(&[], head.content_type, Some(0), key));
+    }
+    let (bytes, _) = ranged_get(svc, a, bucket, key, max, region).await?;
+    Ok(preview_from_bytes(
+        &bytes,
+        head.content_type,
+        Some(head.size),
+        key,
+    ))
+}
+
+/// What a ranged `get-object` printed about the object.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RangedMeta {
+    pub content_type: Option<String>,
+    pub content_length: Option<u64>,
+    /// `bytes 0-99/12345`.
+    pub content_range: Option<String>,
+}
+
+impl RangedMeta {
+    pub fn from_json(v: &Value) -> Self {
+        Self {
+            content_type: s(v, "ContentType"),
+            content_length: v.get("ContentLength").and_then(|x| x.as_u64()),
+            content_range: s(v, "ContentRange"),
+        }
+    }
+
+    /// The whole object's size: the `/total` of ContentRange, else (no range
+    /// applied — the object fit) ContentLength.
+    pub fn total_size(&self) -> Option<u64> {
+        self.content_range
+            .as_deref()
+            .and_then(|r| r.rsplit('/').next())
+            .and_then(|t| t.trim().parse().ok())
+            .or(self.content_length)
+    }
+}
+
+fn is_invalid_range(msg: &str) -> bool {
+    msg.contains("InvalidRange") || msg.contains("not satisfiable")
+}
+
+/// Ranged `get-object` into a temp file under `<data_dir>/tmp` (the CLI's
+/// `get-object` insists on an outfile); returns the bytes + the call's JSON.
+async fn ranged_get(
+    svc: &AwsService,
+    a: &AwsAccountRow,
+    bucket: &str,
+    key: &str,
+    max: u64,
+    region: Option<&str>,
+) -> Result<(Vec<u8>, RangedMeta)> {
     // Scratch file at an Otto-owned location: <data_dir>/tmp/<fresh ULID>.
     // `bucket`/`key` only ever travel as argv to the CLI, never into the path.
     let tmp_dir = crate::paths::owned_dir(&svc.data_dir, "tmp")?;
@@ -529,15 +599,14 @@ pub async fn preview(
             ],
         )
         .await;
-    let bytes = std::fs::read(&tmp).unwrap_or_default();
-    let _ = std::fs::remove_file(&tmp);
-    res?;
-    Ok(preview_from_bytes(
-        &bytes,
-        head.content_type,
-        Some(head.size),
-        key,
-    ))
+    // Async fs: up to 1 MB must not be read on a runtime worker thread.
+    let bytes = tokio::fs::read(&tmp).await.unwrap_or_default();
+    let _ = tokio::fs::remove_file(&tmp).await;
+    let out = res?;
+    let meta = crate::cli::parse_stdout(&out.stdout)
+        .map(|v| RangedMeta::from_json(&v))
+        .unwrap_or_default();
+    Ok((bytes, meta))
 }
 
 /// A running `aws s3 cp s3://b/k -` whose stdout is streamed to the client;
@@ -557,6 +626,22 @@ pub async fn download(
 ) -> Result<DownloadStream> {
     validate_bucket(bucket)?;
     validate_key(key)?;
+    // The `cp` starts right away and the head runs alongside it (two Python
+    // start-ups overlap instead of queueing). Until the head clears the caps
+    // the child only fills its pipe buffer; an over-cap object or a failed
+    // head drops `child`, and `kill_on_drop` ends it.
+    let (bin, env) = svc.bin_and_env(a, region).await?;
+    let uri = format!("s3://{bucket}/{key}");
+    let mut child = tokio::process::Command::new(&bin)
+        .args(["s3", "cp", &uri, "-", "--no-progress"])
+        .env_remove("AWS_PROFILE") // same rule as `cli::run_raw`
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| Error::Internal(format!("spawn aws s3 cp: {e}")))?;
     let head = head_object(svc, a, bucket, key, region).await?;
     if inline && head.size > INLINE_PREVIEW_CAP {
         return Err(Error::PayloadTooLarge(format!(
@@ -571,18 +656,6 @@ pub async fn download(
             head.size
         )));
     }
-    let (bin, env) = svc.bin_and_env(a, region).await?;
-    let uri = format!("s3://{bucket}/{key}");
-    let mut child = tokio::process::Command::new(&bin)
-        .args(["s3", "cp", &uri, "-", "--no-progress"])
-        .env_remove("AWS_PROFILE") // same rule as `cli::run_raw`
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| Error::Internal(format!("spawn aws s3 cp: {e}")))?;
     let stdout = child
         .stdout
         .take()
@@ -656,8 +729,270 @@ pub async fn upload_file(
     if let Some(ct) = ct {
         args.extend(["--content-type", ct]);
     }
-    svc.run_with(a, region, &args, UPLOAD_TIMEOUT, None).await?;
+    // An hour-long upload must not pin one of the 10 list slots (N2).
+    crate::cli::uncapped(svc.run_with(a, region, &args, UPLOAD_TIMEOUT, None)).await?;
     Ok(())
+}
+
+/// Stream a request body of exactly `len` bytes into `aws s3 cp - s3://b/k`
+/// (F9): no temp-file copy, no CLI-cap slot (N2). The CLI reads stdin in
+/// multipart-sized chunks, so the daemon holds one chunk at a time and
+/// back-pressure reaches the client through the pipe.
+///
+/// If the body ends early, errors, or this future is dropped (client
+/// disconnect), the child is killed BEFORE stdin reaches EOF — so `s3 cp`
+/// never completes a truncated object — and a detached cleanup aborts any
+/// multipart upload it had started for this key, so no orphaned parts are
+/// left behind to be billed.
+#[allow(clippy::too_many_arguments)]
+pub async fn upload_stream<St, E>(
+    svc: &AwsService,
+    a: &AwsAccountRow,
+    bucket: &str,
+    key: &str,
+    body: St,
+    len: u64,
+    content_type: Option<&str>,
+    region: Option<&str>,
+) -> Result<u64>
+where
+    St: futures_util::Stream<Item = std::result::Result<bytes::Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    use futures_util::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    validate_bucket(bucket)?;
+    validate_key(key)?;
+    if key.ends_with('/') {
+        return Err(Error::Invalid(
+            "the object key ends with '/' — add a file name".into(),
+        ));
+    }
+    let (bin, env) = svc.bin_and_env(a, region).await?;
+    let uri = format!("s3://{bucket}/{key}");
+    let size = len.to_string();
+    let mut args: Vec<&str> = vec![
+        "s3",
+        "cp",
+        "-",
+        &uri,
+        "--no-progress",
+        "--expected-size",
+        &size,
+    ];
+    let ct = content_type
+        .map(str::trim)
+        .filter(|c| !c.is_empty() && c.len() <= 255 && !c.chars().any(char::is_control));
+    if let Some(ct) = ct {
+        args.extend(["--content-type", ct]);
+    }
+    let started = chrono::Utc::now();
+    let mut child = tokio::process::Command::new(&bin)
+        .args(&args)
+        .env_remove("AWS_PROFILE") // same rule as `cli::run_raw`
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| Error::Internal(format!("spawn aws s3 cp: {e}")))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| Error::Internal("no stdin on aws s3 cp".into()))?;
+    let stderr = child.stderr.take();
+    // Drained alongside so a chatty child never blocks on a full stderr pipe.
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        if let Some(e) = stderr {
+            let _ = e.take(64 * 1024).read_to_string(&mut buf).await;
+        }
+        buf
+    });
+    let mut guard = AbortOnDrop {
+        child: Some(child),
+        bin,
+        env,
+        bucket: bucket.to_string(),
+        key: key.to_string(),
+        started,
+        armed: true,
+    };
+    let pump = async {
+        let mut body = body;
+        let mut sent: u64 = 0;
+        let mut broken = false;
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.map_err(|e| Error::Invalid(format!("upload interrupted: {e}")))?;
+            sent += chunk.len() as u64;
+            if sent > len {
+                return Err(Error::Invalid(
+                    "upload body is longer than its Content-Length".into(),
+                ));
+            }
+            if stdin.write_all(&chunk).await.is_err() {
+                // The child exited (bad credentials, denied…): its status and
+                // stderr below say why.
+                broken = true;
+                break;
+            }
+        }
+        if !broken && sent != len {
+            return Err(Error::Invalid(format!(
+                "upload interrupted: received {sent} of {len} bytes"
+            )));
+        }
+        // EOF only for a complete body — this is what lets `s3 cp` finish.
+        drop(stdin);
+        let child = guard.child.as_mut().expect("child present until disarmed");
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| Error::Internal(format!("aws s3 cp: {e}")))?;
+        Ok::<_, Error>((status.code().unwrap_or(-1), sent))
+    };
+    let (code, sent) = match tokio::time::timeout(UPLOAD_TIMEOUT, pump).await {
+        Ok(r) => r?,
+        Err(_) => {
+            return Err(Error::Upstream(format!(
+                "aws s3 cp timed out after {}s",
+                UPLOAD_TIMEOUT.as_secs()
+            )))
+        }
+    };
+    let stderr = stderr_task.await.unwrap_or_default();
+    if code != 0 {
+        // A failed `s3 cp` aborts its own multipart upload; the armed guard
+        // re-checks anyway.
+        return Err(crate::cli::error_for(&crate::cli::CliOutput {
+            status: code,
+            stdout: String::new(),
+            stderr,
+            duration_ms: 0,
+        }));
+    }
+    guard.armed = false;
+    svc.repo.touch_used(&a.id).await;
+    Ok(sent)
+}
+
+/// Kills an unfinished `s3 cp -` and aborts the multipart upload(s) it opened
+/// for its key — on any early exit, including the handler future being dropped
+/// when the client disconnects.
+struct AbortOnDrop {
+    child: Option<tokio::process::Child>,
+    bin: std::path::PathBuf,
+    env: Vec<(String, String)>,
+    bucket: String,
+    key: String,
+    started: chrono::DateTime<chrono::Utc>,
+    armed: bool,
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return; // runtime shutting down: kill_on_drop still ends the child
+        };
+        let (bin, env) = (std::mem::take(&mut self.bin), std::mem::take(&mut self.env));
+        let (bucket, key, started) = (
+            std::mem::take(&mut self.bucket),
+            std::mem::take(&mut self.key),
+            self.started,
+        );
+        rt.spawn(async move {
+            // Kill and reap first: once the child is gone it can no longer
+            // create or complete an upload behind our back.
+            let _ = child.kill().await;
+            match abort_orphan_uploads(&bin, &env, &bucket, &key, started).await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(bucket, n, "aborted interrupted S3 multipart upload"),
+                Err(e) => tracing::warn!(
+                    bucket,
+                    "could not abort an interrupted S3 multipart upload: {e}"
+                ),
+            }
+        });
+    }
+}
+
+/// Abort the multipart uploads for exactly `key` that were initiated at or
+/// after `since` (minus clock slack). Returns how many were aborted.
+pub async fn abort_orphan_uploads(
+    bin: &std::path::Path,
+    env: &[(String, String)],
+    bucket: &str,
+    key: &str,
+    since: chrono::DateTime<chrono::Utc>,
+) -> Result<usize> {
+    let argv = |a: &[&str]| -> Vec<String> {
+        a.iter()
+            .map(|s| s.to_string())
+            .chain(["--output".to_string(), "json".to_string()])
+            .collect()
+    };
+    let list = argv(&[
+        "s3api",
+        "list-multipart-uploads",
+        "--bucket",
+        bucket,
+        "--prefix",
+        key,
+    ]);
+    let v = crate::cli::background(crate::cli::run_json(
+        bin,
+        &list,
+        env,
+        crate::cli::DEFAULT_TIMEOUT,
+    ))
+    .await?;
+    let ids = orphan_upload_ids(&v, key, since - chrono::Duration::seconds(30));
+    for id in &ids {
+        let abort = argv(&[
+            "s3api",
+            "abort-multipart-upload",
+            "--bucket",
+            bucket,
+            "--key",
+            key,
+            "--upload-id",
+            id,
+        ]);
+        crate::cli::background(crate::cli::run(
+            bin,
+            &abort,
+            env,
+            crate::cli::DEFAULT_TIMEOUT,
+            None,
+        ))
+        .await?;
+    }
+    Ok(ids.len())
+}
+
+/// Upload ids in a `list-multipart-uploads` answer for exactly `key`,
+/// initiated at/after `since` — never someone else's older upload of the key.
+fn orphan_upload_ids(v: &Value, key: &str, since: chrono::DateTime<chrono::Utc>) -> Vec<String> {
+    v.get("Uploads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|u| u.get("Key").and_then(Value::as_str) == Some(key))
+        .filter(|u| {
+            u.get("Initiated")
+                .and_then(Value::as_str)
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .is_some_and(|t| t >= since)
+        })
+        .filter_map(|u| u.get("UploadId").and_then(Value::as_str).map(String::from))
+        .collect()
 }
 
 pub async fn delete_object(
@@ -726,6 +1061,20 @@ pub async fn presign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranged_meta_total_size() {
+        let m = RangedMeta::from_json(&serde_json::json!({
+            "ContentType": "text/plain", "ContentLength": 100, "ContentRange": "bytes 0-99/12345"
+        }));
+        assert_eq!(m.total_size(), Some(12345));
+        assert_eq!(m.content_type.as_deref(), Some("text/plain"));
+        let small = RangedMeta::from_json(&serde_json::json!({"ContentLength": 11}));
+        assert_eq!(small.total_size(), Some(11));
+        assert_eq!(RangedMeta::default().total_size(), None);
+        assert!(is_invalid_range("An error occurred (InvalidRange) when calling the GetObject operation: The requested range is not satisfiable"));
+        assert!(!is_invalid_range("NoSuchKey"));
+    }
 
     #[test]
     fn preview_kind_and_inline_types() {
@@ -860,5 +1209,23 @@ mod tests {
         assert!(validate_key("a/b c.txt").is_ok());
         assert!(validate_key("").is_err());
         assert!(validate_key("a\nb").is_err());
+    }
+
+    #[test]
+    fn orphan_upload_ids_only_match_this_key_and_this_attempt() {
+        let since = chrono::DateTime::parse_from_rfc3339("2026-10-03T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let v = serde_json::json!({ "Uploads": [
+            { "Key": "a/b.bin", "UploadId": "mine", "Initiated": "2026-10-03T10:00:05+00:00" },
+            { "Key": "a/b.bin", "UploadId": "older", "Initiated": "2026-10-03T09:00:00+00:00" },
+            { "Key": "a/b.bin.bak", "UploadId": "other-key", "Initiated": "2026-10-03T10:00:05+00:00" },
+            { "Key": "a/b.bin", "UploadId": "no-time" }
+        ]});
+        assert_eq!(
+            orphan_upload_ids(&v, "a/b.bin", since),
+            vec!["mine".to_string()]
+        );
+        assert!(orphan_upload_ids(&serde_json::json!({}), "a/b.bin", since).is_empty());
     }
 }

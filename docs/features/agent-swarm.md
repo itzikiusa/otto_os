@@ -247,8 +247,14 @@ work in a real terminal (§5.3).
 ## 4. The coordinator (how autonomous work actually runs)
 
 When a swarm is **active**, `start_coordinator` spawns a per-swarm background loop
-(`swarm_runtime::coordinator_loop`) that **ticks every 5 seconds** (with
-responsive 500 ms cancel slices). Each tick:
+(`swarm_runtime::coordinator_loop`) that ticks **when something changed** — a
+`swarm_task_updated`, `swarm_run_updated`, `swarm_status`, `swarm_goal_updated`
+or `swarm_project_cleared` event for the swarm rings its bell
+(`swarm_wake.rs`), at most once per 2 s — plus a **60 s safety tick** (was a
+fixed 5 s poll; stop/restart still wakes it at once). The bell exists only
+while a coordinator loop runs (registered before its first tick, dropped when
+the loop returns), so events for a swarm without a coordinator cost nothing
+and leave nothing behind. Each tick:
 
 1. **Re-reads the swarm.** If it isn't `active`, the tick no-ops.
 2. **Checks budgets first.** If any per-swarm budget is exhausted
@@ -379,8 +385,9 @@ how long): *No available agent fits this task*, *&lt;agent&gt; is busy with
 another task*, *&lt;agent&gt;'s branch is being verified*, *All n/n parallel
 slots are busy*, or *Run budget reached*. The coordinator rebuilds these
 reasons every tick (in memory) and serves them as `waiting` on
-`GET /swarm/swarms/{sid}/utilization`; the board re-reads them when tasks
-change and every 15 s while the page is visible.
+`GET /swarm/swarms/{sid}/utilization` and, alone, on the cheap
+`GET /swarm/swarms/{sid}/waiting` (no DB work); the board re-reads the latter
+when tasks change and every 15 s while the page is visible.
 
 **Runs (`RunsList.svelte`).** A filterable table of every run: columns Agent,
 Work (kind + summary), Status, Started, Tokens (`in/out`), Actions. Filter by
@@ -519,6 +526,7 @@ authoritative spec is `docs/contracts/api.md` (#59–#86 + "Swarm lifecycle") an
 | 72 | `PATCH /swarm/projects/{pid}` | editor | `UpdateProjectReq` → `SwarmProject` |
 | 73 | `DELETE /swarm/projects/{pid}` | editor | → 204 |
 | 75 | `GET /swarm/projects/{pid}/tasks` | viewer | → `SwarmTask[]` |
+| 75b | `GET /swarm/swarms/{sid}/tasks` | viewer | → `SwarmTask[]` — every project's tasks in one read; opening a swarm uses this instead of one request per project |
 | 76 | `POST /swarm/projects/{pid}/tasks` | editor | `CreateTaskReq` → `SwarmTask` |
 | 77 | `PATCH /swarm/tasks/{tid}` | editor | `UpdateTaskReq` → `SwarmTask` |
 | 78 | `DELETE /swarm/tasks/{tid}` | editor | → 204 |

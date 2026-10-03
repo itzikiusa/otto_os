@@ -44,6 +44,8 @@
     /** Per-column filter text, keyed by ORIGINAL column index. */
     colFilters?: Record<number, string>;
     oncolfilter?: (ci: number, text: string) => void;
+    /** A filter box gained (column index) or lost (null) focus. */
+    oncolfocus?: (ci: number | null) => void;
     /** The keyboard/click cursor moved onto a row (its liveRows index). */
     onfocusrow?: (idx: number | null) => void;
     oncellmenu: (e: MouseEvent, ci: number, v: unknown, rowIdx: number) => void;
@@ -65,6 +67,7 @@
     filterRow = false,
     colFilters = {},
     oncolfilter,
+    oncolfocus,
     onfocusrow,
     oncellmenu,
     onheadermenu,
@@ -83,6 +86,38 @@
   let scrollTop = $state(0);
   let viewportH = $state(0);
   const virtualize = $derived(!mini);
+  // ── Column (horizontal) virtualisation ──────────────────────────────────────
+  // A 200–300-column ClickHouse result used to mount every column of every
+  // windowed row (10–20k cells, 12×N rebuilt per scroll step). Past HVIRT_MIN
+  // columns the body renders only the columns near the viewport: a leading
+  // spacer cell spanning (colspan) the columns before the window, the window's
+  // real cells, a trailing spacer for the rest. The header and filter rows
+  // are windowed the same way: a `<colgroup>` carries every column's width
+  // and the table switches to `table-layout: fixed` with a definite width, so
+  // the grid no longer depends on 300 header cells. Those header cells (a
+  // button + four spans each) used to be re-laid out on EVERY vertical step —
+  // measured in WebKit at 15 of the 33 ms a 300 px step cost on a 300-column
+  // result, vs 5 ms with only the window's headers mounted. Column edges are
+  // arithmetic (prefix sums of the widths in ch × a measured px-per-ch), never
+  // a read of N header cells. Cells keep their real `data-p` (display
+  // position), so delegated clicks, the keyboard cursor and find are
+  // unaffected. RTL works the same way: the edges are measured from the
+  // table's inline START, and RTL's scrollLeft runs 0 → negative, so the
+  // window reads |scrollLeft|. Off for mini grids.
+  const HVIRT_MIN = 40;
+  /** Columns rendered beyond each side of the viewport. */
+  const COL_OVERSCAN = 3;
+  /** Window bounds snap to multiples of this, so a horizontal scroll rebuilds
+   *  the mounted rows every few columns rather than on every column edge. */
+  const COL_CHUNK = 4;
+  let scrollLeft = $state(0);
+  let viewportW = $state(0);
+  let rtl = $state(false);
+  /** Rendered px per `ch` of a column width and the row-number column's px
+   *  width — measured once per width change (see the effect below); the
+   *  defaults only place the very first window. */
+  let pxPerCh = $state(7.2);
+  let rnPx = $state(60);
 
   // Track the scroll viewport height with a ResizeObserver rather than a plain
   // `bind:clientHeight`. On mobile the flex height chain isn't settled at first
@@ -94,8 +129,11 @@
     const el = scrollEl;
     if (!el) return;
     viewportH = el.clientHeight;
+    viewportW = el.clientWidth;
+    rtl = getComputedStyle(el).direction === 'rtl';
     const ro = new ResizeObserver(() => {
       viewportH = el.clientHeight;
+      viewportW = el.clientWidth;
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -169,7 +207,86 @@
   const padBottom = $derived(Math.max(0, (total - endIdx) * ROW_H));
 
   function onScroll(): void {
-    if (scrollEl) scrollTop = scrollEl.scrollTop;
+    if (!scrollEl) return;
+    scrollTop = scrollEl.scrollTop;
+    if (hvirt) scrollLeft = scrollEl.scrollLeft;
+  }
+
+  const hvirt = $derived(virtualize && result.columns.length > HVIRT_MIN);
+  /** Horizontal scroll offset from the inline start (RTL scrolls negative). */
+  const inlineScroll = $derived(Math.abs(scrollLeft));
+  /** Right edge (px, from the table's start) of each display position:
+   *  row-number width + prefix sum of the column widths. Pure arithmetic —
+   *  recomputed when widths / order change, never per scroll step. */
+  const colEdges = $derived.by<number[]>(() => {
+    if (!hvirt) return [];
+    const edges = new Array<number>(cols.length);
+    let x = rnPx;
+    for (let p = 0; p < cols.length; p++) {
+      x += widthsCh[cols[p]] * pxPerCh;
+      edges[p] = x;
+    }
+    return edges;
+  });
+  // Calibrate px-per-ch from the laid-out table (two layout reads, after the
+  // DOM settles) whenever the widths or the font can change.
+  $effect(() => {
+    if (!hvirt) return;
+    void widthsCh;
+    void filterRow;
+    const el = scrollEl;
+    let live = true;
+    void tick().then(() => {
+      if (!live || !el) return;
+      const table = el.querySelector<HTMLElement>('table');
+      const rn = el.querySelector<HTMLElement>('thead th.rownum');
+      if (!table || !rn) return;
+      let sum = 0;
+      for (const w of widthsCh) sum += w;
+      const rnW = rn.offsetWidth;
+      const per = sum > 0 ? (table.offsetWidth - rnW) / sum : 0;
+      if (rnW > 0 && Math.abs(rnW - rnPx) >= 0.5) rnPx = rnW;
+      if (per > 0 && Math.abs(per - pxPerCh) > 0.01) pxPerCh = per;
+    });
+    return () => {
+      live = false;
+    };
+  });
+  /** First display position whose right edge is past `x` (binary search). */
+  function colAt(x: number): number {
+    let lo = 0;
+    let hi = colEdges.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (colEdges[mid] < x) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+  /** [colStart, colEnd) — the display positions the body renders. */
+  const colWindow = $derived.by<[number, number]>(() => {
+    const n = cols.length;
+    if (!hvirt || colEdges.length !== n || n === 0) return [0, n];
+    const first = colAt(inlineScroll);
+    const last = colAt(inlineScroll + Math.max(viewportW, 1));
+    const start = Math.max(0, Math.floor((first - COL_OVERSCAN) / COL_CHUNK) * COL_CHUNK);
+    const end = Math.min(n, Math.ceil((last + 1 + COL_OVERSCAN) / COL_CHUNK) * COL_CHUNK);
+    return [start, end];
+  });
+  const colStart = $derived(colWindow[0]);
+  const colEnd = $derived(colWindow[1]);
+  /** Bring display column `pos` into the horizontal viewport (keyboard cursor). */
+  function ensureColVisible(pos: number): void {
+    if (!scrollEl || !hvirt) return;
+    const right = colEdges[pos];
+    if (right === undefined) return;
+    const left = pos > 0 ? colEdges[pos - 1] : 0;
+    const rn = (scrollEl.querySelector<HTMLElement>('thead th.rownum')?.offsetWidth ?? 0);
+    const cur = Math.abs(scrollEl.scrollLeft);
+    const sign = rtl ? -1 : 1;
+    if (left - rn < cur) scrollEl.scrollLeft = sign * Math.max(0, left - rn);
+    else if (right > cur + viewportW) scrollEl.scrollLeft = sign * (right - viewportW);
+    scrollLeft = scrollEl.scrollLeft;
   }
 
   // ⌘F over every row (lib/findProviders.ts): the body mounts ~40 of 100k
@@ -249,6 +366,15 @@
     const name = result?.columns[colIndex]?.name ?? '';
     return colWidths[name] ?? autoWidths[colIndex] ?? MIN_CH;
   }
+  /** Width (ch) per ORIGINAL column index, and the cell style per DISPLAY
+   *  position — built once per width / order change, so a scroll step's new
+   *  rows read an array instead of re-deriving 300 widths through the
+   *  `colWidths` proxy each. */
+  const widthsCh = $derived(result.columns.map((_c, ci) => widthFor(ci)));
+  const widthStyles = $derived(cols.map((ci) => widthStyle(widthsCh[ci])));
+  /** The display positions the header + filter row mount (all of them unless
+   *  the column window is on). */
+  const headCols = $derived(hvirt ? cols.slice(colStart, colEnd) : cols);
 
   // Pointer-drag resize on a header's right edge.
   let dragName = $state<string | null>(null);
@@ -396,6 +522,8 @@
   function rowCells(row: unknown[], idx: number): Attachment<HTMLTableRowElement> {
     return (tr) => {
       const order = cols;
+      const cs = colStart;
+      const ce = colEnd;
       const columns = result.columns;
       const kindsNow = kinds;
       const editableNow = editableCols;
@@ -404,44 +532,98 @@
       const editCol = ed && ed.rowIdx === idx ? ed.colIdx : -1;
       const needle = filtering ? searchLc : null;
       const expand = expandJson;
-      const pv = order.map((ci) => (pendingOn ? flow.pendingValue(idx, ci) : undefined));
-      const under = order.map((ci, p) =>
-        pendingOn && pv[p] === undefined ? flow.hasPendingUnder(idx, columns[ci].name) : false,
-      );
-      const cells = untrack(() => {
+      const pv = new Array<string | undefined>(order.length);
+      const under = new Array<boolean>(order.length);
+      for (let p = cs; p < ce; p++) {
+        const ci = order[p];
+        pv[p] = pendingOn ? flow.pendingValue(idx, ci) : undefined;
+        under[p] = pendingOn && pv[p] === undefined ? flow.hasPendingUnder(idx, columns[ci].name) : false;
+      }
+      untrack(() => {
+        // A horizontal step only moves the column window: when nothing else
+        // the cells render from changed, keep the cells still in the window
+        // where they are and build only the columns entering it (a 400 px
+        // step swaps ~4 of ~20 columns instead of rebuilding every row).
+        const sig: unknown[] = [row, order, columns, kindsNow, editableNow, editCol, editCol >= 0 ? ed : null, needle, expand];
+        const prev = rowState.get(tr);
+        const reuse = prev && !pendingOn && !prev.pending && sameSig(prev.sig, sig) ? prev.cells : null;
         const focusPos = focusIdx === idx ? (focusCell?.c ?? -1) : -1;
-        const frag = document.createDocumentFragment();
-        const out: HTMLTableCellElement[] = [];
-        order.forEach((ci, pos) => {
+        const cells = new Map<number, HTMLTableCellElement>();
+        const kept: HTMLTableCellElement[] = [];
+        if (prev) {
+          for (const pad of prev.pads) pad.remove();
+          for (const [pos, td] of prev.cells) if (!reuse || pos < cs || pos >= ce) td.remove();
+        }
+        // The kept cells are one contiguous run of positions (two windows
+        // intersect in one interval), already in display order in the row.
+        if (reuse)
+          for (let pos = cs; pos < ce; pos++) {
+            const td = reuse.get(pos);
+            if (td) {
+              cells.set(pos, td);
+              kept.push(td);
+            }
+          }
+        const firstKept = kept.length ? Number(kept[0].dataset.p) : ce;
+        const front = document.createDocumentFragment();
+        const back = document.createDocumentFragment();
+        const pads: HTMLTableCellElement[] = [];
+        if (cs > 0) pads.push(front.appendChild(hpadCell(cs)));
+        for (let pos = cs; pos < ce; pos++) {
+          if (cells.has(pos)) continue;
+          const ci = order[pos];
           const td =
             ci === editCol
-              ? editorCell(ci)
+              ? editorCell(ci, pos)
               : buildCell(row[ci], idx, ci, pos, {
                   kind: kindsNow[ci],
                   editable: editableNow[ci],
-                  widthCh: widthFor(ci),
+                  widthCh: widthsCh[ci],
                   pv: pv[pos],
                   pendingUnder: under[pos],
                   needle,
                   expandJson: expand,
                   focused: pos === focusPos,
                 });
-          out.push(td);
-          frag.append(td);
-        });
-        tr.append(frag);
-        return out;
+          cells.set(pos, td);
+          (pos < firstKept ? front : back).append(td);
+        }
+        if (ce < order.length) pads.push(back.appendChild(hpadCell(order.length - ce)));
+        tr.insertBefore(front, kept[0] ?? null);
+        if (kept.length) kept[kept.length - 1].after(back);
+        else tr.append(back);
+        rowState.set(tr, { sig, cells, pads, pending: pendingOn });
       });
-      return () => {
-        for (const td of cells) td.remove();
-      };
+      // Cells stay for the next run to reuse; an unmounted row takes them
+      // with it. A replaced row value (`row` in the signature) rebuilds.
     };
+  }
+  /** Per mounted row: the cells `rowCells` built last and what they were built from. */
+  const rowState = new WeakMap<
+    HTMLTableRowElement,
+    { sig: unknown[]; cells: Map<number, HTMLTableCellElement>; pads: HTMLTableCellElement[]; pending: boolean }
+  >();
+  function sameSig(a: unknown[], b: unknown[]): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  /** A spacer cell standing for `span` columns outside the column window. */
+  function hpadCell(span: number): HTMLTableCellElement {
+    const td = document.createElement('td');
+    td.className = 'hpad';
+    td.colSpan = span;
+    td.setAttribute('aria-hidden', 'true');
+    td.dataset.findSkip = '';
+    return td;
   }
 
   /** The open inline editor (the old `bind:value` + `use:focusEditor` input). */
-  function editorCell(ci: number): HTMLTableCellElement {
+  function editorCell(ci: number, pos: number): HTMLTableCellElement {
     const td = document.createElement('td');
     td.className = 'cell editing';
+    td.dataset.p = String(pos);
     td.setAttribute('style', widthStyle(widthFor(ci)));
     const input = document.createElement('input');
     input.className = 'cell-input mono';
@@ -458,12 +640,16 @@
 
   /** Keep a row's cell widths in step with auto widths / drag-resizes. */
   const rowWidths: Attachment<HTMLTableRowElement> = (tr) => {
-    const styles = cols.map((ci) => widthStyle(widthFor(ci)));
+    const styles = widthStyles;
     const tds = tr.cells;
-    // cells[0] is the row-number column; data cells follow in display order.
-    for (let p = 0; p < styles.length && p + 1 < tds.length; p++) {
-      const td = tds[p + 1];
-      if (td.getAttribute('style') !== styles[p]) td.setAttribute('style', styles[p]);
+    // cells[0] is the row-number column; data cells carry their display
+    // position (the column window may start past 0, behind a spacer).
+    for (let i = 1; i < tds.length; i++) {
+      const td = tds[i];
+      const p = td.dataset.p;
+      if (p === undefined) continue;
+      const style = styles[Number(p)];
+      if (style !== undefined && td.getAttribute('style') !== style) td.setAttribute('style', style);
     }
   };
 
@@ -516,6 +702,7 @@
         c: Math.max(0, Math.min(nCols - 1, c)),
       };
       ensureRowVisible(focusCell.r);
+      ensureColVisible(focusCell.c);
       e.preventDefault();
     };
     switch (e.key) {
@@ -574,8 +761,17 @@
     class="grid mono"
     class:expanded={expandJson}
     class:mini
+    class:hv={hvirt}
     style="--last:{result.columns.length}; --row-h:{ROW_H}px; --rn-w:calc({rnCh}ch + 30px)"
   >
+    {#if hvirt}
+      <!-- Column window on: the widths live here (fixed layout), so the header
+           can mount only the columns in view. -->
+      <colgroup>
+        <col class="rn-col" />
+        {#each cols as ci (ci)}<col style="width:{widthsCh[ci]}ch" />{/each}
+      </colgroup>
+    {/if}
     <thead>
       <tr>
         <th class="rownum">
@@ -594,7 +790,9 @@
           </span>
           <span class="rownum-n">#</span>
         </th>
-        {#each cols as ci, pos (ci)}
+        {#if colStart > 0}<th class="hpad" colspan={colStart} aria-hidden="true"></th>{/if}
+        {#each headCols as ci, k (ci)}
+          {@const pos = colStart + k}
           {@const c = result.columns[ci]}
           {@const isPk = flow.editable && flow.editPkCols.includes(c.name)}
           <th
@@ -650,13 +848,15 @@
             {/if}
           </th>
         {/each}
+        {#if colEnd < cols.length}<th class="hpad" colspan={cols.length - colEnd} aria-hidden="true"></th>{/if}
       </tr>
       {#if filterRow && !mini}
         <!-- Per-column filter (client-side, over the loaded rows). `td`, not
              `th`, so header counts stay one per column. -->
         <tr class="filter-row">
           <td class="rownum"><Icon name="filter" size={12} /></td>
-          {#each cols as ci (ci)}
+          {#if colStart > 0}<td class="hpad" colspan={colStart} aria-hidden="true"></td>{/if}
+          {#each headCols as ci (ci)}
             {@const c = result.columns[ci]}
             <td style="width:{widthFor(ci)}ch; max-width:{widthFor(ci)}ch;">
               <input
@@ -669,9 +869,12 @@
                 aria-label="Filter {c.name}"
                 title="Contains · =exact · >n <n · NULL · !NULL"
                 oninput={(e) => oncolfilter?.(ci, e.currentTarget.value)}
+                onfocus={() => oncolfocus?.(ci)}
+                onblur={() => oncolfocus?.(null)}
               />
             </td>
           {/each}
+          {#if colEnd < cols.length}<td class="hpad" colspan={cols.length - colEnd} aria-hidden="true"></td>{/if}
         </tr>
       {/if}
     </thead>
@@ -772,6 +975,24 @@
     width: max-content;
     min-width: 100%;
     user-select: text;
+  }
+  /* Column window on (see HVIRT_MIN): fixed layout from the <colgroup>. A
+     definite (tiny) width makes the table fixed-layout; its used width is
+     then the sum of the column widths (or 100% when that is narrower). */
+  .grid.hv {
+    table-layout: fixed;
+    width: 1px;
+  }
+  .grid col {
+    /* `ch` resolves against the cells' font size, as the cell widths do. */
+    font-size: var(--fs-s);
+  }
+  .grid col.rn-col {
+    width: var(--rn-w);
+  }
+  .grid thead th.hpad,
+  .filter-row td.hpad {
+    padding: 0;
   }
   .grid thead th {
     position: sticky;
@@ -999,6 +1220,10 @@
     background: transparent;
     height: auto;
   }
+  /* Column-window spacer (see HVIRT_MIN): spans the unrendered columns. */
+  .grid tbody :global(td.hpad) {
+    padding: 0;
+  }
   .rownum {
     color: var(--text-dim);
     text-align: end;
@@ -1183,7 +1408,8 @@
     .grid thead th {
       font-size: var(--fs-m);
     }
-    .grid :global(td) {
+    .grid :global(td),
+    .grid col {
       font-size: var(--fs-m);
     }
   }

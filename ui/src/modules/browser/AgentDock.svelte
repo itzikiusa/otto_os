@@ -20,7 +20,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
 
   const sessionId = $derived(browser.agentSessionId);
-  const session = $derived(sessionId ? (ws.sessions.find((s) => s.id === sessionId) ?? null) : null);
+  const session = $derived(sessionId ? (ws.getSession(sessionId) ?? null) : null);
   const status = $derived(sessionId ? (ws.statusMap[sessionId] ?? session?.status ?? null) : null);
   const readOnly = $derived(ws.myRole === 'viewer');
   const open = $derived(ui.browserAgentOpen);
@@ -36,7 +36,7 @@
   // archived/deleted, or isn't an agent session any more.
   $effect(() => {
     if (!sessionId || ws.sessionsLoading) return;
-    const s = ws.sessions.find((x) => x.id === sessionId);
+    const s = ws.getSession(sessionId);
     if (!s || s.archived || s.kind !== 'agent') browser.setAgentSession(null);
   });
 

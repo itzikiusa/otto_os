@@ -16,13 +16,14 @@
   import { proof } from '../../lib/stores/proof.svelte';
   import {
     addArtifact,
+    archiveStaleSessionPacks,
     artifactBlobUrl,
     artifactContent,
     assembleProof,
     attachApiEvidence,
     attachDbEvidence,
     attachKafkaEvidence,
-    attachMedia,
+    attachMediaRaw,
     ciRefresh,
     createProofPack,
     deleteArtifact,
@@ -83,7 +84,6 @@
     if (!id) return;
     const f = filter;
     void loadList(id, f);
-    void proof.loadSummary(id);
   });
 
   // Event-driven list/detail refreshes run only while this page is mounted.
@@ -363,20 +363,6 @@
     mFile = null;
   }
 
-  /** Read a File → base64 (no data-URL prefix). */
-  function fileToB64(blob: Blob): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onerror = () => reject(reader.error);
-      reader.onload = () => {
-        const result = reader.result as string;
-        const idx = result.indexOf(',');
-        resolve(idx >= 0 ? result.slice(idx + 1) : result);
-      };
-      reader.readAsDataURL(blob);
-    });
-  }
-
   async function submitMedia(): Promise<void> {
     if (!detail || !mFile || !mTitle.trim()) return;
     if (mFile.size > 25 * 1024 * 1024) {
@@ -384,13 +370,14 @@
       return;
     }
     try {
-      const data_base64 = await fileToB64(mFile);
-      await attachMedia(detail.pack.id, {
-        kind: mKind === 'video' ? 'video' : 'screenshot',
-        title: mTitle.trim(),
-        mime: mFile.type || (mKind === 'video' ? 'video/mp4' : 'image/png'),
-        data_base64,
-      });
+      // Raw body: the file goes over the wire as is (no base64 / JSON).
+      await attachMediaRaw(
+        detail.pack.id,
+        mKind === 'video' ? 'video' : 'screenshot',
+        mTitle.trim(),
+        mFile,
+        mFile.type || (mKind === 'video' ? 'video/mp4' : 'image/png'),
+      );
       await proof.refreshDetail();
       mediaOpen = false;
       resetMedia();
@@ -617,6 +604,30 @@
     }
   }
 
+  // ---- opt-in archive of stale session packs (hides, never deletes) --------
+  async function archiveStaleSessions(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId) return;
+    try {
+      const dry = await archiveStaleSessionPacks(wsId, { older_than_days: 30 });
+      if (dry.matched === 0) {
+        toasts.info('Nothing to archive', 'No session proof packs older than 30 days are without evidence.');
+        return;
+      }
+      const n = dry.matched;
+      const ok = await confirmer.ask(
+        `Archive ${n} session proof pack${n === 1 ? '' : 's'} with no evidence, untouched for 30+ days? They're hidden from the Proof list and the sidebar chips, not deleted — a pack comes back by itself as soon as it changes or gets evidence.`,
+        { title: 'Archive stale session packs', confirmLabel: 'Archive' },
+      );
+      if (!ok) return;
+      const r = await archiveStaleSessionPacks(wsId, { older_than_days: 30, apply: true });
+      toasts.success('Session packs archived', `${r.archived} hidden (nothing deleted).`);
+      await loadList(wsId, filter);
+    } catch (e) {
+      toasts.error("Couldn't archive session packs", loadErrorText(e));
+    }
+  }
+
   // ---- create a manual pack ------------------------------------------------
   async function newPack(): Promise<void> {
     if (!ws.currentId) {
@@ -681,6 +692,8 @@
       {/if}
     {/snippet}
     {#snippet actions()}
+      <!-- Opt-in housekeeping: collapses into ⋯ before anything else. -->
+      <button class="icon-btn" data-overflow="-3" data-icon="archive" data-label="Archive stale session packs…" onclick={archiveStaleSessions} aria-label="Archive stale session packs" title="Archive stale session packs (hides, never deletes)"><Icon name="archive" size={14} /></button>
       {#if detail}
         <!-- Destructive first (collapses first, never beside the primary). -->
         <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete pack" onclick={removePack} aria-label="Delete pack" title="Delete pack"><Icon name="trash" size={14} /></button>
@@ -731,6 +744,12 @@
           </div>
         </button>
       {/each}
+      {#if proof.nextCursor}
+        <!-- Keyset paging: the list loads 100 packs at a time. -->
+        <button class="btn small ghost load-more" disabled={proof.loadingMore} aria-busy={proof.loadingMore} onclick={() => void proof.loadMore()}>
+          {proof.loadingMore ? 'Loading…' : 'Load more'}
+        </button>
+      {/if}
       {#if proof.packs.length === 0 && !listError}
         {#if proof.loading && !listLoaded}
           <LoadState what="proof packs" loading empty variant="compact" />
@@ -1557,5 +1576,10 @@
     .proof-page.phone .rail.hide-phone {
       display: none;
     }
+  }
+  .load-more {
+    display: block;
+    margin-block: 8px;
+    margin-inline: auto;
   }
 </style>

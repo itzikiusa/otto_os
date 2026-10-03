@@ -27,20 +27,62 @@
   let view = $state<'log' | 'stats'>('log');
   let filtersOpen = $state(false);
 
+  /** Rows per request. The server pages the ledger BEFORE its per-row
+   *  visibility check, so `offset` counts ledger rows, not shown ones. */
+  const PAGE = 200;
+  let nextOffset = 0;
+  let hasMore = $state(false);
+  let loadingMore = $state(false);
+  let moreError = $state<string | null>(null);
+  /** Bumped per (re)load so a stale "load more" never appends to new filters. */
+  let generation = 0;
+
+  function query(offset: number) {
+    return {
+      server_id: fServer || undefined,
+      tool: fTool.trim() || undefined,
+      decision: fDecision || undefined,
+      limit: PAGE,
+      offset,
+    };
+  }
+
   async function load(): Promise<void> {
+    const gen = ++generation;
     loading = true;
+    moreError = null;
     try {
-      rows = await mcpCpApi.cpAudit({
-        server_id: fServer || undefined,
-        tool: fTool.trim() || undefined,
-        decision: fDecision || undefined,
-        limit: 200,
-      });
+      const page = await mcpCpApi.cpAudit(query(0));
+      if (gen !== generation) return;
+      rows = page;
+      nextOffset = PAGE;
+      hasMore = page.length === PAGE;
       loadError = null;
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (gen === generation) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (gen === generation) loading = false;
+    }
+  }
+
+  /** The next page, appended (rows already shown — e.g. shifted by new calls
+   *  landing on top — are skipped by id). */
+  async function loadMore(): Promise<void> {
+    if (loadingMore) return;
+    const gen = generation;
+    loadingMore = true;
+    try {
+      const page = await mcpCpApi.cpAudit(query(nextOffset));
+      if (gen !== generation) return;
+      const seen = new Set(rows.map((r) => r.id));
+      rows = [...rows, ...page.filter((r) => !seen.has(r.id))];
+      nextOffset += PAGE;
+      hasMore = page.length === PAGE;
+      moreError = null;
+    } catch (e) {
+      if (gen === generation) moreError = loadErrorText(e);
+    } finally {
+      if (gen === generation) loadingMore = false;
     }
   }
 
@@ -61,7 +103,7 @@
   function callTitle(r: McpCallLogRow): string {
     const sid = r.caller_session_id;
     if (!sid) return r.tool;
-    const title = ws.sessions.find((s) => s.id === sid)?.title;
+    const title = ws.getSession(sid)?.title;
     return `${r.tool} — from session ${title ?? `${sid.slice(0, 8)}…`}`;
   }
 </script>
@@ -71,7 +113,7 @@
     <h2>Audit</h2>
     <span class="grow"></span>
     {#if view === 'log'}
-      <span class="count">{rows.length} row{rows.length === 1 ? '' : 's'}</span>
+      <span class="count">{rows.length}{hasMore ? '+' : ''} row{rows.length === 1 && !hasMore ? '' : 's'}</span>
     {/if}
     <div class="views" role="group" aria-label="Audit view">
       <button
@@ -168,6 +210,19 @@
           </div>
         {/each}
       </div>
+      {#if hasMore || moreError}
+        <div class="more">
+          {#if moreError}<span class="bad-text" role="alert">{moreError}</span>{/if}
+          <button
+            class="btn small"
+            data-testid="mcp-audit-more"
+            disabled={loadingMore}
+            onclick={() => void loadMore()}
+          >
+            {loadingMore ? 'Loading…' : moreError ? 'Retry' : 'Load more'}
+          </button>
+        </div>
+      {/if}
     {/if}
   {/if}
 </div>
@@ -315,6 +370,17 @@
   .bad {
     color: var(--danger);
     display: inline-flex;
+  }
+  .more {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 12px 14px;
+  }
+  .bad-text {
+    color: var(--danger);
+    font-size: var(--fs-s);
   }
   .muted {
     color: var(--text-dim);

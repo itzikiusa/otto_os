@@ -94,10 +94,13 @@ pub async fn start(
     if request.workspace_id != wid {
         return Err(ApiError(Error::NotFound("request".into())));
     }
-    let secret_fingerprint = fingerprint(&api_secrets::load_blob_checked(
-        ctx.secrets.as_ref(),
-        &api_secrets::request_ref(&req.request_id),
-    )?);
+    let secret_fingerprint = fingerprint(
+        &api_secrets::load_blob_checked_async(
+            &ctx.secrets,
+            &api_secrets::request_ref(&req.request_id),
+        )
+        .await?,
+    );
     let revision = request.updated_at.to_rfc3339();
     let auth = request.auth;
     if auth["type"] != "oauth2" || auth["grant"] != "authorization_code" {
@@ -257,10 +260,11 @@ async fn exchange(ctx: &ServerCtx, flow: &Flow, code: &str) -> Result<(), String
     let mut auth = flow.auth.clone();
     {
         let _guard = api_secrets::request_guard(&flow.request_id).await;
-        let blob = api_secrets::load_blob_checked(
-            ctx.secrets.as_ref(),
+        let blob = api_secrets::load_blob_checked_async(
+            &ctx.secrets,
             &api_secrets::request_ref(&flow.request_id),
         )
+        .await
         .map_err(|e| e.to_string())?;
         if fingerprint(&blob) != flow.secret_fingerprint {
             return Err("Request credentials changed. Start authorization again.".into());
@@ -373,7 +377,8 @@ async fn exchange(ctx: &ServerCtx, flow: &Flow, code: &str) -> Result<(), String
             "Saved request changed while authorization was in progress. Start again.".into(),
         );
     }
-    let old_blob = api_secrets::load_blob_checked(ctx.secrets.as_ref(), &own_ref)
+    let old_blob = api_secrets::load_blob_checked_async(&ctx.secrets, &own_ref)
+        .await
         .map_err(|e| e.to_string())?;
     if fingerprint(&old_blob) != flow.secret_fingerprint {
         return Err("Request credentials changed. Start authorization again.".into());
@@ -392,9 +397,11 @@ async fn exchange(ctx: &ServerCtx, flow: &Flow, code: &str) -> Result<(), String
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-    api_secrets::store_blob(ctx.secrets.as_ref(), &own_ref, &blob).map_err(|e| e.to_string())?;
+    api_secrets::store_blob_async(&ctx.secrets, &own_ref, &blob)
+        .await
+        .map_err(|e| e.to_string())?;
     if let Err(e) = tx.commit().await {
-        let _ = api_secrets::store_blob(ctx.secrets.as_ref(), &own_ref, &old_blob);
+        let _ = api_secrets::store_blob_async(&ctx.secrets, &own_ref, &old_blob).await;
         return Err(e.to_string());
     }
     Ok(())

@@ -88,7 +88,9 @@ pub async fn get_settings(
             .get("relay_only")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        turn_secret_configured: ctx.secrets.get(SECRET_KEY)?.is_some_and(|s| !s.is_empty()),
+        turn_secret_configured: otto_core::secrets::get_async(&ctx.secrets, SECRET_KEY)
+            .await?
+            .is_some_and(|s| !s.is_empty()),
     }))
 }
 pub async fn put_settings(
@@ -106,9 +108,9 @@ pub async fn put_settings(
             return Err(Error::Invalid("TURN secret is too long".into()).into());
         }
         if secret.is_empty() {
-            ctx.secrets.delete(SECRET_KEY)?;
+            otto_core::secrets::delete_async(&ctx.secrets, SECRET_KEY).await?;
         } else {
-            ctx.secrets.put(SECRET_KEY, secret)?;
+            otto_core::secrets::put_async(&ctx.secrets, SECRET_KEY, secret).await?;
         }
     }
     let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
@@ -138,7 +140,7 @@ pub(super) async fn configuration(ctx: &ServerCtx, member: &str) -> Result<RoomE
     let secret = if turn.is_empty() {
         None
     } else {
-        ctx.secrets.get(SECRET_KEY)?
+        otto_core::secrets::get_async(&ctx.secrets, SECRET_KEY).await?
     };
     let relay_configured = secret.as_ref().is_some_and(|s| !s.is_empty());
     if let Some(secret) = secret.filter(|s| !s.is_empty()) {

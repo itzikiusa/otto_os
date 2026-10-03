@@ -381,7 +381,16 @@ pub async fn gate(
 }
 
 fn lock_for(ctx: &ServerCtx, pack_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let mut map = ctx.proof_locks.lock().unwrap();
+    lock_in(&ctx.proof_locks, pack_id)
+}
+
+/// Get-or-create `pack_id`'s lock, pruning locks nobody holds (strong count
+/// 1 = only this map) so the registry stays bounded by in-flight recomputes
+/// instead of growing by one entry per pack ever touched. Safe: a holder
+/// always owns an `Arc` clone while it waits for / holds the guard.
+fn lock_in(locks: &ProofLocks, pack_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = locks.lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|id, l| id == pack_id || Arc::strong_count(l) > 1);
     map.entry(pack_id.to_string())
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone()
@@ -411,7 +420,8 @@ pub async fn recompute_and_emit(ctx: &ServerCtx, pack_id: &str) -> Result<ProofP
     let _guard = lock.lock().await;
 
     let pack = ctx.proof_repo.get_pack(pack_id).await?;
-    let arts = ctx.proof_repo.list_artifacts(pack_id).await?;
+    // Status/risk/done/badges never read `content_ref` — metadata only.
+    let arts = ctx.proof_repo.list_artifacts_meta(pack_id).await?;
     let policy = policy_for_pack(ctx, &pack).await;
     let status = derive_status_with_policy(&pack, &arts, &policy);
     let risk = compute_risk(&arts);
@@ -419,6 +429,13 @@ pub async fn recompute_and_emit(ctx: &ServerCtx, pack_id: &str) -> Result<ProofP
     ctx.proof_repo
         .set_status_risk_done(pack_id, status, risk, done)
         .await?;
+    // The event carries the fresh badges + count so listeners patch their
+    // summary row in place instead of refetching the whole workspace.
+    let mut fresh = pack.clone();
+    fresh.status = status;
+    fresh.risk_score = risk;
+    fresh.done_score = done;
+    let badges = badge_strings(&fresh, &arts);
 
     let _ = ctx.events.send(Event::ProofPackUpdated {
         workspace_id: pack.workspace_id.clone(),
@@ -428,6 +445,8 @@ pub async fn recompute_and_emit(ctx: &ServerCtx, pack_id: &str) -> Result<ProofP
         status: status.as_str().to_string(),
         risk_score: risk,
         done_score: done,
+        badges: Some(badges),
+        artifact_count: Some(arts.len() as u32),
     });
 
     ctx.proof_repo.get_pack(pack_id).await
@@ -637,7 +656,11 @@ pub async fn attach_media(
     extra: Value,
     by: &str,
 ) -> Result<ProofArtifact> {
-    let sha = otto_core::proof::bytes_sha256(data);
+    // Hashing up to 25 MiB is CPU work — keep it off the async workers.
+    let owned = data.to_vec();
+    let sha = tokio::task::spawn_blocking(move || otto_core::proof::bytes_sha256(&owned))
+        .await
+        .map_err(|e| Error::Internal(format!("media hash join: {e}")))?;
     let meta = merge_meta(
         extra,
         json!({"ref_kind": "blob", "mime": mime, "size_bytes": data.len(), "sha256": sha}),
@@ -701,8 +724,8 @@ pub async fn run_pr_check(
             deletions = r.files.iter().filter_map(|f| f.deleted).sum();
         }
     }
-    // Test evidence already on the pack.
-    let arts = ctx.proof_repo.list_artifacts(&pack.id).await?;
+    // Test evidence already on the pack (kind/title/status only).
+    let arts = ctx.proof_repo.list_artifacts_meta(&pack.id).await?;
     let has_passing_tests = arts
         .iter()
         .any(|a| otto_core::proof::is_test_artifact(a) && a.status == ProofArtifactStatus::Passed);
@@ -921,6 +944,59 @@ pub async fn pack_for_work_item(
 }
 
 // ---------------------------------------------------------------------------
+// Media store maintenance
+// ---------------------------------------------------------------------------
+
+/// Background upkeep for the proof media file store: shortly after boot, move
+/// legacy inline BLOBs out of the state DB (verified, in small batches that
+/// yield the writer), then GC files no row references; repeat daily. A no-op
+/// when the repo has no media dir.
+pub fn spawn_media_maintenance(repo: otto_state::ProofRepo) {
+    if repo.media_dir().is_none() {
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(90)).await;
+        loop {
+            let mut cursor: Option<String> = None;
+            let mut moved = 0usize;
+            loop {
+                match repo.migrate_media_batch(cursor.as_deref(), 8).await {
+                    Ok((n, next)) => {
+                        moved += n;
+                        match next {
+                            Some(c) => cursor = Some(c),
+                            None => break,
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("proof media migration batch failed: {e}");
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            let removed = repo
+                .gc_media_files(Duration::from_secs(3600))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("proof media gc failed: {e}");
+                    0
+                });
+            let (files, bytes) = repo.media_store_size().await;
+            tracing::info!(
+                moved,
+                removed,
+                files,
+                bytes,
+                "proof media store maintenance"
+            );
+            tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Session gate (the all-done edge)
 // ---------------------------------------------------------------------------
 
@@ -1124,6 +1200,18 @@ pub fn ignore_err<T>(r: Result<T>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proof_locks_prune_unheld_entries() {
+        let locks = new_locks();
+        let held = lock_in(&locks, "p1");
+        drop(lock_in(&locks, "p2"));
+        // p2 is unheld → pruned by the next insert; p1 (held) survives and is
+        // handed out again as the SAME mutex.
+        let again = lock_in(&locks, "p1");
+        assert!(Arc::ptr_eq(&held, &again));
+        assert_eq!(locks.lock().unwrap().len(), 1);
+    }
 
     #[test]
     fn risky_file_segments_not_substrings() {

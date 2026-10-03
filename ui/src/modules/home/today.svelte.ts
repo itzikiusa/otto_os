@@ -22,11 +22,12 @@ import { missionControlApi } from '../../lib/api/missionControl';
 import { scheduledTasksApi } from '../../lib/api/scheduledTasks';
 import type { IconName } from '../../lib/components/Icon.svelte';
 import type { AssistantTask, DesignArtifact, McpApproval, Notice, ScheduledTask, WorkItem } from '../../lib/api/types';
+import { untrack } from 'svelte';
 import { router } from '../../lib/router.svelte';
 import { auth } from '../../lib/stores/auth.svelte';
 import { assistant } from '../../lib/stores/assistant.svelte';
 import { notifications } from '../../lib/stores/notifications.svelte';
-import { isForeground, ws } from '../../lib/stores/workspace.svelte';
+import { ws } from '../../lib/stores/workspace.svelte';
 import { livePoll, type Poller } from './boxes/poll';
 
 /** One glance row. `open` runs on click; `live` pulses its dot. */
@@ -103,7 +104,7 @@ class TodayStore {
   private seq = 0;
 
   /** Sessions blocked on the operator (foreground only, like the sidebar). */
-  waiting = $derived(ws.sessions.filter((s) => !s.archived && ws.needsYou[s.id] === true && isForeground(s)));
+  waiting = $derived(ws.foregroundActive.filter((s) => ws.needsYou[s.id] === true));
 
   needs: TodayRow[] = $derived.by(() => {
     const rows: TodayRow[] = [];
@@ -180,8 +181,8 @@ class TodayStore {
         at: t.updated_at,
         open: () => openAssistant(t),
       }));
-    const rows: TodayRow[] = ws.sessions
-      .filter((s) => !s.archived && ws.statusMap[s.id] === 'working' && isForeground(s))
+    const rows: TodayRow[] = ws.foregroundActive
+      .filter((s) => ws.statusMap[s.id] === 'working')
       .map((s) => ({
         id: `session:${s.id}`,
         title: s.title,
@@ -264,8 +265,10 @@ class TodayStore {
     const mine = ++this.seq;
     // The assistant store stays live over the WS once loaded; this re-syncs it
     // on the same quiet cadence (its loaders guard their own stale results).
-    void assistant.loadNeedsYou();
-    void assistant.loadTasks();
+    // A FIRST load already in flight (the event socket's first connect loads
+    // the needs-you badge) is joined, not repeated, during the cold boot.
+    if (untrack(() => assistant.needsState) !== 'loading') void assistant.loadNeedsYou();
+    if (untrack(() => assistant.tasks.state) !== 'loading') void assistant.loadTasks();
     const wsId = ws.currentId;
     const can = (f: Parameters<typeof auth.can>[0]) => auth.can(f, 'view');
     const settle = <T>(p: Promise<T>, fallback: T): Promise<{ ok: boolean; v: T }> =>
@@ -305,6 +308,9 @@ class TodayStore {
         debounceMs: 3000,
         maxWaitMs: 15_000,
         minIntervalMs: 15_000,
+        // Cold boot: wait for the workspace list (HomeToday refreshes when it
+        // settles) — an unscoped first load was repeated scoped right after.
+        immediate: untrack(() => ws.listSettled),
       },
     );
   }

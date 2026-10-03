@@ -11,6 +11,13 @@ use crate::convert::{dberr, fmt};
 use otto_core::finding::ReviewProofPackExport;
 use otto_core::{new_id, Result};
 
+/// A suggested `keep_last` for the OPT-IN export cap (PP-08). Each export
+/// stores the whole rendered markdown and an older snapshot is the only record
+/// of the review as it stood then, so [`ReviewProofPacksRepo::create`] never
+/// prunes on its own — the caller asks (`POST …/proof-pack/export
+/// {keep_last}`) and [`ReviewProofPacksRepo::prune`] runs.
+pub const KEEP_EXPORTS_PER_REVIEW: u32 = 5;
+
 #[derive(Clone)]
 pub struct ReviewProofPacksRepo {
     pool: DbPool,
@@ -56,6 +63,23 @@ impl ReviewProofPacksRepo {
             markdown: content.to_string(),
             created_at: now,
         })
+    }
+
+    /// Keep only the newest `keep` export snapshots of a review. Returns how
+    /// many were deleted. Walks `idx_review_proof_packs_review`.
+    pub async fn prune(&self, review_id: &str, keep: u32) -> Result<u64> {
+        let r = sqlx::query(
+            "DELETE FROM review_proof_packs WHERE review_id = ? AND id NOT IN ( \
+               SELECT id FROM review_proof_packs WHERE review_id = ? \
+               ORDER BY created_at DESC, id DESC LIMIT ?)",
+        )
+        .bind(review_id)
+        .bind(review_id)
+        .bind(keep.max(1) as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("prune review proof packs"))?;
+        Ok(r.rows_affected())
     }
 
     /// Snapshots for a review, newest first.
@@ -120,5 +144,35 @@ mod tests {
         let list = repo.list_for_review("rev1").await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].review_id, "rev1");
+    }
+
+    #[tokio::test]
+    async fn proof_exports_keep_everything_unless_pruned_on_request() {
+        let repo = ReviewProofPacksRepo::new(mem_pool().await);
+        let mut last = String::new();
+        for i in 0..(KEEP_EXPORTS_PER_REVIEW + 3) {
+            last = repo
+                .create("rev1", "ws1", "markdown", &format!("# {i}"), "{}", "u1")
+                .await
+                .unwrap()
+                .id;
+        }
+        repo.create("rev2", "ws1", "markdown", "# other", "{}", "u1")
+            .await
+            .unwrap();
+        // Default: nothing is deleted behind the user's back.
+        assert_eq!(
+            repo.list_for_review("rev1").await.unwrap().len(),
+            KEEP_EXPORTS_PER_REVIEW as usize + 3
+        );
+        // Opt-in cap: only the newest `keep` survive, other reviews untouched.
+        assert_eq!(
+            repo.prune("rev1", KEEP_EXPORTS_PER_REVIEW).await.unwrap(),
+            3
+        );
+        let list = repo.list_for_review("rev1").await.unwrap();
+        assert_eq!(list.len(), KEEP_EXPORTS_PER_REVIEW as usize);
+        assert!(list.iter().any(|e| e.id == last));
+        assert_eq!(repo.list_for_review("rev2").await.unwrap().len(), 1);
     }
 }

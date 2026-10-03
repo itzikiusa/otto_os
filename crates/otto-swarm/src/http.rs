@@ -104,6 +104,8 @@ pub fn router<S: SwarmCtx>() -> Router<S> {
             "/swarm/projects/{pid}/tasks",
             get(list_tasks::<S>).post(create_task::<S>),
         )
+        // Every project's tasks in one read — the board's open path (perf §15 N5).
+        .route("/swarm/swarms/{sid}/tasks", get(list_swarm_tasks::<S>))
         .route(
             "/swarm/tasks/{tid}",
             axum::routing::patch(update_task::<S>).delete(delete_task::<S>),
@@ -330,6 +332,18 @@ async fn list_tasks<S: SwarmCtx>(
     let project = s.swarm().get_project(&pid).await?;
     check(&s, &user, &project.workspace_id, WorkspaceRole::Viewer).await?;
     Ok(Json(s.swarm().list_tasks(&pid).await?))
+}
+
+/// `GET /swarm/swarms/{sid}/tasks` — every task of the swarm (all projects),
+/// ordered like the per-project list; the board groups them by `project_id`.
+async fn list_swarm_tasks<S: SwarmCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(sid): Path<Id>,
+) -> ApiResult<Json<Vec<SwarmTask>>> {
+    let swarm = s.swarm().get_swarm(&sid).await?;
+    check(&s, &user, &swarm.workspace_id, WorkspaceRole::Viewer).await?;
+    Ok(Json(s.swarm().list_tasks_for_swarm(&sid).await?))
 }
 
 async fn create_task<S: SwarmCtx>(

@@ -100,7 +100,7 @@ pub use browser_credentials::{
 };
 pub use connection_sections::ConnectionSectionsRepo;
 pub use connections::{ConnectionsRepo, NewConnection};
-pub use db::open;
+pub use db::{open, open_existing};
 // Re-exported so daemon-side background tasks can name the pool type without
 // taking a direct sqlx dependency.
 pub use db_explorer::{
@@ -112,7 +112,7 @@ pub use goal_loops::{GoalLoopsRepo, NewGoalLoop};
 pub use grants::{capability_for_role, GrantCache, GrantsRepo, GRANT_CACHE_TTL};
 pub use name_themes::{CustomTheme, NameThemesRepo};
 pub use pool::DbPool;
-pub use proof::{ProofBlob, ProofRepo, ProofSnapshotRow};
+pub use proof::{PackCursor, ProofBlob, ProofRepo, ProofSnapshotRow};
 pub use provider_models::{ProviderModel, ProviderModelsRepo};
 // The raw sqlx pool type, for callers that build their own (tests, tools);
 // daemon code holds a `DbPool`.
@@ -185,6 +185,7 @@ pub use scheduled_tasks::{
 };
 pub use sessions::{
     DormantPass, NewSession, SessionListFilter, SessionScope, SessionsRepo, UsageAttrRow,
+    UsageLabelRow,
 };
 pub use settings::{
     otto_mcp_enabled_for, pr_draft_model_from, SettingsRepo, OTTO_MCP_ENABLED_KEY,
@@ -221,3 +222,10 @@ pub mod workflow_progress;
 
 pub mod network_profiles;
 pub mod pool;
+
+// --- Workbench (scratch files with full history) ------------------------------
+pub mod workbench;
+pub use workbench::{
+    NewWorkbenchDoc, WorkbenchAsset, WorkbenchDiff, WorkbenchDoc, WorkbenchDocFull, WorkbenchPatch,
+    WorkbenchRepo, WorkbenchRevision, WorkbenchRevisionDetail,
+};

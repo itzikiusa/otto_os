@@ -1022,3 +1022,287 @@ async fn rename_survives_a_failed_link_rewrite() {
         "# Before\n[[b]]"
     );
 }
+
+/// F1: 100 autosaves of one note inside the coalescing window make ONE
+/// revision directory and a bounded set of bodies; the revision still
+/// restores the original `before` and the latest `after`.
+#[tokio::test]
+async fn autosaves_coalesce_into_one_deduped_revision() {
+    let (e, dir, id) = fixture().await;
+    let root = dir.path().join(".otto-history");
+    let mut last = String::new();
+    for i in 0..100 {
+        last = format!("# Before\n[[b]]\nedit {i}");
+        e.write_note_opts("ws", id, "a.md", &last, None, true)
+            .await
+            .unwrap();
+    }
+    let revision_dirs = std::fs::read_dir(&root)
+        .unwrap()
+        .filter_map(|d| d.ok())
+        .filter(|d| !d.file_name().to_string_lossy().starts_with('.'))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        revision_dirs.len(),
+        1,
+        "one revision per window, not per save"
+    );
+    let files_in_dir = std::fs::read_dir(revision_dirs[0].path())
+        .unwrap()
+        .filter_map(|d| d.ok())
+        .count();
+    assert_eq!(
+        files_in_dir, 2,
+        "meta.json + the latest after; superseded afters retired"
+    );
+    let blobs = std::fs::read_dir(root.join(".blobs")).unwrap().count();
+    assert_eq!(blobs, 1, "only the original before is a blob");
+    let revs = e.revisions("ws", id, Some("a.md")).await.unwrap();
+    assert_eq!(revs.len(), 1);
+    assert!(revs[0].committed);
+    let detail = e.revision("ws", id, &revs[0].id).await.unwrap();
+    assert_eq!(detail.before.as_deref(), Some("# Before\n[[b]]"));
+    assert_eq!(detail.after, last);
+
+    // An agent (non-autosave) write gets its own revision; its `before` is
+    // hard-linked from the coalesced revision's `after` (no new bytes).
+    e.write_note("ws", id, "a.md", "# Agent", None)
+        .await
+        .unwrap();
+    let revs = e.revisions("ws", id, Some("a.md")).await.unwrap();
+    assert_eq!(revs.len(), 2);
+    let agent = e.revision("ws", id, &revs[0].id).await.unwrap();
+    assert_eq!(agent.before.as_deref(), Some(last.as_str()));
+    assert_eq!(agent.after, "# Agent");
+    let blob = root
+        .join(".blobs")
+        .join(revs[0].before_hash.as_deref().unwrap());
+    let linked = std::fs::read_dir(root.join(&revs[1].id))
+        .unwrap()
+        .filter_map(|d| d.ok())
+        .find(|d| d.file_name().to_string_lossy().starts_with("a-"))
+        .unwrap()
+        .path();
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        std::fs::metadata(&blob).unwrap().ino(),
+        std::fs::metadata(&linked).unwrap().ino(),
+        "the next before is a hard link to the previous after"
+    );
+    // Autosave right after an agent write does not coalesce INTO it.
+    e.write_note_opts("ws", id, "a.md", "# Agent\nmore", None, true)
+        .await
+        .unwrap();
+    assert_eq!(e.revisions("ws", id, Some("a.md")).await.unwrap().len(), 3);
+}
+
+/// F1: legacy revisions (in-dir `before`/`after` copies) still read back.
+#[tokio::test]
+async fn legacy_revision_layout_still_restores() {
+    let (e, dir, id) = fixture().await;
+    let rev_dir = dir.path().join(".otto-history").join("legacy-1");
+    std::fs::create_dir_all(&rev_dir).unwrap();
+    std::fs::write(rev_dir.join("before"), "old").unwrap();
+    std::fs::write(rev_dir.join("after"), "new").unwrap();
+    let hash = |s: &str| hex_sha256(s.as_bytes());
+    let meta = VaultRevision {
+        id: "legacy-1".into(),
+        path: "a.md".into(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        before_hash: Some(hash("old")),
+        after_hash: hash("new"),
+        reason: "note write".into(),
+        committed: true,
+    };
+    std::fs::write(
+        rev_dir.join("meta.json"),
+        serde_json::to_vec(&meta).unwrap(),
+    )
+    .unwrap();
+    let detail = e.revision("ws", id, "legacy-1").await.unwrap();
+    assert_eq!(detail.before.as_deref(), Some("old"));
+    assert_eq!(detail.after, "new");
+}
+
+/// F2: repeated status polls run the aggregate COUNTs once per index
+/// generation, and with a healthy watcher they never walk the vault.
+#[tokio::test]
+async fn status_polls_reuse_counts_and_skip_walks_when_watched() {
+    let (e, dir, id) = fixture().await;
+    e.watch_enabled.store(true, Relaxed);
+    e.status("ws", id).await.unwrap(); // starts the watcher
+    for _ in 0..50 {
+        if e.stale_after(id).is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(e.stale_after(id).is_some(), "watcher should be running");
+    // Force "stale by the 30 s rule" — a watched vault must not walk.
+    e.last_scan_cell(id)
+        .store(chrono::Utc::now().timestamp() - 120, Relaxed);
+    let walks = e.walks.load(Relaxed);
+    let counts = e.store.status_count_reads.load(Relaxed);
+    for _ in 0..10 {
+        e.status("ws", id).await.unwrap();
+    }
+    tokio::task::yield_now().await;
+    assert_eq!(
+        e.walks.load(Relaxed),
+        walks,
+        "watched vault: no polling walks"
+    );
+    assert!(
+        e.store.status_count_reads.load(Relaxed) <= counts + 1,
+        "status COUNTs cached per generation"
+    );
+    // Our own guarded write re-indexes the path; the watcher's probe sees a
+    // matching signature and does not kick a scan.
+    let kicks = e.watch_kicks.load(Relaxed);
+    e.write_note("ws", id, "a.md", "# Self write", None)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert_eq!(
+        e.watch_kicks.load(Relaxed),
+        kicks,
+        "self-writes do not rescan"
+    );
+    // An external edit does.
+    std::fs::write(dir.path().join("c.md"), "# External").unwrap();
+    let mut seen = false;
+    for _ in 0..100 {
+        if e.store.note_meta(id, "c.md").await.is_ok() {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(seen, "external note indexed by the watcher-triggered scan");
+    assert!(e.watch_kicks.load(Relaxed) > kicks);
+}
+
+/// F11: a scale fixture — `n` linked notes, cold-indexed — with wall-clock
+/// budgets for the hot reads. Budgets are deliberately loose (shared CI
+/// runners); the counters are the strict part.
+async fn scale_vault(
+    n: usize,
+) -> (
+    Arc<VaultEngine>,
+    tempfile::TempDir,
+    i64,
+    std::time::Duration,
+) {
+    let engine = Arc::new(VaultEngine::new(otto_state::db::test_pool().await));
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("bulk")).unwrap();
+    for i in 0..n {
+        std::fs::write(
+            dir.path().join(format!("bulk/note-{i}.md")),
+            format!(
+                "---\ntitle: Note {i}\ntags: [t{}]\n---\nSynthetic note {i}. Links [[note-{}]].\n",
+                i % 50,
+                (i + 1) % n
+            ),
+        )
+        .unwrap();
+    }
+    let id = engine
+        .store
+        .create_vault("ws", "Scale", dir.path().to_str().unwrap(), false)
+        .await
+        .unwrap();
+    let t0 = std::time::Instant::now();
+    engine.scan(id).await.unwrap();
+    (engine, dir, id, t0.elapsed())
+}
+
+async fn assert_scale_budgets(n: usize, read_budget_ms: u128) {
+    let (e, _dir, id, cold) = scale_vault(n).await;
+    let commits = e.store.index_commits.load(Relaxed);
+    assert!(
+        commits <= n / 200 + 5,
+        "cold scan batches note publication: {commits} commits for {n} notes"
+    );
+    let mut worst = [0u128; 3];
+    for i in 0..20 {
+        let k = (i * 331) % n;
+        let t = std::time::Instant::now();
+        assert!(!e
+            .switcher("ws", id, &format!("Note {k}"))
+            .await
+            .unwrap()
+            .is_empty());
+        worst[0] = worst[0].max(t.elapsed().as_millis());
+        let t = std::time::Instant::now();
+        let req = SearchReq {
+            query: format!("Synthetic {k}"),
+            tag: None,
+            path_prefix: None,
+            okf_type: None,
+            limit: 20,
+        };
+        e.search("ws", id, &req).await.unwrap();
+        worst[1] = worst[1].max(t.elapsed().as_millis());
+        let t = std::time::Instant::now();
+        e.note("ws", id, &format!("bulk/note-{k}.md"))
+            .await
+            .unwrap();
+        worst[2] = worst[2].max(t.elapsed().as_millis());
+    }
+    let walks = e.walks.load(Relaxed);
+    let t = std::time::Instant::now();
+    for _ in 0..10 {
+        e.status("ws", id).await.unwrap();
+    }
+    let status_ms = t.elapsed().as_millis();
+    eprintln!(
+        "[vault-scale n={n}] cold index {:?}; worst switcher={}ms search={}ms open={}ms; 10 status={}ms",
+        cold, worst[0], worst[1], worst[2], status_ms
+    );
+    assert_eq!(
+        e.walks.load(Relaxed),
+        walks,
+        "fresh vault: status polls never walk"
+    );
+    for w in worst {
+        assert!(w < read_budget_ms, "hot read over budget: {worst:?}");
+    }
+    assert!(
+        status_ms < read_budget_ms * 2,
+        "status polls: {status_ms}ms"
+    );
+}
+
+#[tokio::test]
+async fn scale_1k_notes_hot_reads_within_budget() {
+    assert_scale_budgets(1_000, 500).await;
+}
+
+/// `cargo test -p otto-vault --lib scale_10k -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "scale bench: 10k-note cold index (~tens of seconds)"]
+async fn scale_10k_notes_hot_reads_within_budget() {
+    assert_scale_budgets(10_000, 150).await;
+}
+
+/// F9: creating a note re-resolves only links that mention its stem — no
+/// global link read — and still captures a previously unresolved link.
+#[tokio::test]
+async fn new_note_reconciles_only_candidate_links() {
+    let (e, _dir, id) = fixture().await;
+    e.write_note("ws", id, "b.md", "# Target\n[[Fresh-Note]] [[other]]", None)
+        .await
+        .unwrap();
+    let passes = e.store.link_reads.load(Relaxed);
+    e.write_note("ws", id, "sub/fresh-note.md", "# Fresh", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        e.store.link_reads.load(Relaxed),
+        passes,
+        "no full link scan"
+    );
+    let back = e.store.backlinks(id, "sub/fresh-note.md").await.unwrap();
+    assert_eq!(back.len(), 1, "[[Fresh-Note]] now resolves to the new note");
+}

@@ -12,7 +12,7 @@
   // Resources ↔ Monitor and reloads; picking a namespace here also sets it in Resources.
   // Cross-links: workload → its pods, a pod row → its drawer (Metrics), an
   // event → the pod drawer's Events tab.
-  import { untrack, onDestroy } from 'svelte';
+  import { untrack, onDestroy, tick } from 'svelte';
   import { router } from '../../../lib/router.svelte';
   import { k8s } from '../../../lib/stores/k8s.svelte';
   import { viewport } from '../../../lib/stores/viewport.svelte';
@@ -30,11 +30,16 @@
   import { envTone } from '../../../lib/status';
   import Sparkline from './Sparkline.svelte';
   import MonitorSettings from './MonitorSettings.svelte';
-  import MonitorInsights from './MonitorInsights.svelte';
+  import LazyMount from '../../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../../lib/lazy-component.svelte';
+  import { tableWindow, WINDOW_MIN_ROWS } from './tableWindow';
   import K8sViewSwitch from '../K8sViewSwitch.svelte';
   import { monitorPath, resourcesPath } from '../viewState';
   import type { K8sDrawerTab } from '../../../lib/stores/k8s.svelte';
   import { WINDOWS, classColor, classLabel, collectorLine, fmtMs, fmtPct, fmtRate, isWindow, rbacMessage } from './monitor-util';
+
+  // The Insights tab renders markdown (`marked`): load it on first open.
+  const MonitorInsightsLazy = lazyComponent(() => import('./MonitorInsights.svelte'));
 
   interface Props {
     cluster: K8sCluster;
@@ -195,8 +200,9 @@
     } catch {
       /* ignore */
     }
+    // Events load from their own effect below (class filter + window) — one
+    // fetch per change, not two.
     if (t === 'workloads') untrack(() => void loadWorkloads());
-    if (t === 'events') untrack(() => void loadEvents());
     untrack(() => {
       // The first run is the restored view — keep its expanded row.
       if (firstReset) {
@@ -264,20 +270,23 @@
     await loadTrends(r);
   }
 
+  let seriesAbort: AbortController | null = null;
   async function loadTrends(r: K8sMonitorWorkloadRow): Promise<void> {
     const request = ++seriesRequest;
+    seriesAbort?.abort();
+    const ctrl = (seriesAbort = new AbortController());
     seriesLoading = true;
     seriesError = '';
     series = { mem: null, rps: null, err: null };
     try {
       const memMetric = status?.metrics_server === 'ok' ? 'mem_working_set_bytes' : 'mem_sys_bytes';
       const [mem, rps] = await Promise.all([
-        k8sApi.monitorSeries(cluster.id, { metric: memMetric, workload: r.workload, window }),
-        k8sApi.monitorSeries(cluster.id, { metric: 'http_requests_total', workload: r.workload, window }),
+        k8sApi.monitorSeries(cluster.id, { metric: memMetric, workload: r.workload, window }, ctrl.signal),
+        k8sApi.monitorSeries(cluster.id, { metric: 'http_requests_total', workload: r.workload, window }, ctrl.signal),
       ]);
       if (request === seriesRequest) series = { mem, rps, err: null };
     } catch (e) {
-      if (request === seriesRequest) seriesError = e instanceof Error ? e.message : String(e);
+      if (request === seriesRequest && !ctrl.signal.aborted) seriesError = e instanceof Error ? e.message : String(e);
     } finally {
       if (request === seriesRequest) seriesLoading = false;
     }
@@ -290,17 +299,20 @@
   let classFilter = $state(saved.classFilter);
   const CLASS_OPTIONS = ['', 'oom', 'crash', 'probe', 'unknown', 'planned', 'completed', 'version', 'k8s_event'];
 
+  let eventsAbort: AbortController | null = null;
   async function loadEvents(quiet = false): Promise<void> {
     const request = ++eventsRequest;
+    eventsAbort?.abort();
+    const ctrl = (eventsAbort = new AbortController());
     if (!quiet) eventsLoading = true;
     try {
-      const next = await k8sApi.monitorEvents(cluster.id, { window, class: classFilter || undefined, limit: 300 });
+      const next = await k8sApi.monitorEvents(cluster.id, { window, class: classFilter || undefined, limit: 300 }, ctrl.signal);
       if (request !== eventsRequest) return;
       events = next;
       eventsError = '';
       restoreScroll();
     } catch (e) {
-      if (request !== eventsRequest) return;
+      if (request !== eventsRequest || ctrl.signal.aborted) return;
       eventsError = e instanceof Error ? e.message : String(e);
     } finally {
       if (request === eventsRequest) eventsLoading = false;
@@ -309,13 +321,73 @@
   $effect(() => {
     const c = classFilter;
     void c;
+    void window;
+    void cluster.id;
     if (activeTab === 'events') untrack(() => void loadEvents());
   });
 
   onDestroy(() => {
     abort?.abort();
+    eventsAbort?.abort();
+    seriesAbort?.abort();
     eventsRequest++;
     seriesRequest++;
+  });
+
+  // --- workloads table windowing (perf K8s R5) ------------------------------------
+  // Only the rows near the viewport render (two SVG sparklines each); the
+  // page body is the scroll host. Small tables render whole.
+  let tbodyEl = $state<HTMLTableSectionElement | null>(null);
+  let viewTop = $state(0);
+  let viewH = $state(800);
+  let rowH = $state(52);
+  let detailH = $state(0);
+  const expandedIdx = $derived(expanded ? visible.findIndex((r) => `${r.namespace}/${r.workload}` === expanded) : -1);
+  const win = $derived(
+    visible.length > WINDOW_MIN_ROWS ? tableWindow({ count: visible.length, rowH, viewTop, viewH, expanded: expandedIdx, detailH }) : null,
+  );
+  const shown = $derived(win ? visible.slice(win.start, win.end) : visible);
+  function measure(): void {
+    const host = scrollHost();
+    if (!host || !tbodyEl) return;
+    viewTop = host.getBoundingClientRect().top - tbodyEl.getBoundingClientRect().top;
+    viewH = host.clientHeight || 800;
+    const rowEls = tbodyEl.querySelectorAll<HTMLElement>(':scope > tr.wl-row');
+    if (rowEls.length) {
+      let sum = 0;
+      rowEls.forEach((el) => (sum += el.offsetHeight));
+      const avg = Math.round(sum / rowEls.length);
+      if (avg > 0 && Math.abs(avg - rowH) > 2) rowH = avg;
+    }
+    const d = tbodyEl.querySelector<HTMLElement>(':scope > tr.detail');
+    if (d) detailH = d.offsetHeight;
+  }
+  $effect(() => {
+    const host = scrollHost();
+    if (!host || !tbodyEl) return;
+    let raf = 0;
+    const onMove = (): void => {
+      if (raf || !win) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        measure();
+      });
+    };
+    host.addEventListener('scroll', onMove, { passive: true });
+    globalThis.addEventListener('resize', onMove);
+    onMove();
+    return () => {
+      host.removeEventListener('scroll', onMove);
+      globalThis.removeEventListener('resize', onMove);
+      if (raf) cancelAnimationFrame(raf);
+    };
+  });
+  // Re-measure once the rendered slice / expanded detail changes.
+  $effect(() => {
+    void shown;
+    void expanded;
+    void seriesLoading;
+    if (win) void tick().then(() => untrack(measure));
   });
 
   function fmtTs(ts: string): string {
@@ -382,7 +454,7 @@
   {#if activeTab === 'settings'}
     <MonitorSettings {cluster} {canEdit} onsaved={(c, s) => { enabled = c.enabled; status = s; }} />
   {:else if activeTab === 'insights'}
-    <MonitorInsights />
+    <LazyMount lazy={MonitorInsightsLazy} what="the insights report" variant="panel" />
   {:else if activeTab === 'events'}
     <div class="toolbar">
       <select class="input" bind:value={classFilter} aria-label="Event class">
@@ -440,7 +512,7 @@
       <EmptyState icon="clock" title="No data yet" body="The first cycle runs within the configured interval. Use “Run once” in Settings to collect immediately." />
     {:else}
       <div class="tablewrap card">
-        <table class="wl" data-testid="k8s-monitor-workloads">
+        <table class="wl" data-testid="k8s-monitor-workloads" aria-rowcount={win ? visible.length + 1 : undefined}>
           <thead>
             <tr>
               <th aria-sort={sortKey === 'workload' ? (sortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="th-btn" onclick={() => sortBy('workload')}>Workload</button></th>
@@ -460,11 +532,12 @@
               <th>Versions</th>
             </tr>
           </thead>
-          <tbody>
-            {#each visible as r (`${r.namespace}/${r.workload}`)}
+          <tbody bind:this={tbodyEl}>
+            {#if win && win.padTop > 0}<tr class="spacer" aria-hidden="true" style="height:{win.padTop}px"><td colspan="11"></td></tr>{/if}
+            {#each shown as r, j (`${r.namespace}/${r.workload}`)}
               {@const key = `${r.namespace}/${r.workload}`}
               {@const total = restartsTotal(r)}
-              <tr class="wl-row" class:open={expanded === key} onclick={() => void toggle(r)} oncontextmenu={(e) => rowMenu(e, r)}>
+              <tr class="wl-row" aria-rowindex={win ? win.start + j + 2 : undefined} class:open={expanded === key} onclick={() => void toggle(r)} oncontextmenu={(e) => rowMenu(e, r)}>
                 <td>
                   <div class="wlname"><button class="workload-toggle" aria-expanded={expanded === key} onclick={(e) => { e.stopPropagation(); void toggle(r); }}>{r.workload}</button><span class="dim small"> {r.kind}{namespaces.length > 1 ? ` · ${r.namespace}` : ''}</span></div>
                   {#if r.crashloop}<span class="chip bad">CrashLoopBackOff ×{r.crashloop}</span>{/if}
@@ -548,6 +621,7 @@
                 </tr>
               {/if}
             {/each}
+            {#if win && win.padBottom > 0}<tr class="spacer" aria-hidden="true" style="height:{win.padBottom}px"><td colspan="11"></td></tr>{/if}
           </tbody>
         </table>
       </div>
@@ -713,6 +787,11 @@
   }
   .wl-row.open {
     background: var(--surface-2);
+  }
+  /* Windowing spacers (perf K8s R5): reserve the off-screen rows' height. */
+  .wl tr.spacer td {
+    padding: 0;
+    border: 0;
   }
   .num {
     text-align: end;

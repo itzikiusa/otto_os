@@ -137,8 +137,18 @@ enum ClientFrame {
     // coherent current-screen frame. Honors the requested `lines`. The client
     // treats every snapshot as a full rebuild (reset + repaint), so this must
     // always carry the complete retained history.
+    //
+    // Optional `cols`/`rows` (perf 01 F1): the client's measured grid. When
+    // this viewer may resize, the PTY + emulator are resized to it BEFORE the
+    // capture, so the snapshot is already at the client's width (no second
+    // "compact" snapshot after the resize confirms) and the TUI's SIGWINCH
+    // repaint arrives as ordinary live bytes after it.
     Scrollback {
         lines: usize,
+        #[serde(default)]
+        cols: Option<u16>,
+        #[serde(default)]
+        rows: Option<u16>,
     },
     // Server-side search: grep the ring-buffer scrollback for `query` (plain
     // substring, case-insensitive). The server replies with a JSON
@@ -173,6 +183,10 @@ enum ClientFrame {
     Resync {
         #[serde(default)]
         lines: usize,
+        #[serde(default)]
+        cols: Option<u16>,
+        #[serde(default)]
+        rows: Option<u16>,
     },
     // Credit-based flow control (supersedes `pause`/`resume` for clients that
     // opt in). Sent once, first thing on a new socket: from the server's
@@ -181,6 +195,10 @@ enum ClientFrame {
     Credit {
         #[serde(default)]
         window: u64,
+        /// The client takes snapshots as a header + ONE binary frame (perf
+        /// 01 N3, [`Snap`]). Absent (older clients) = base64-in-JSON.
+        #[serde(default)]
+        binary_snapshots: bool,
     },
     // Cumulative binary bytes (since the `credit` reply) the client's emulator
     // has parsed OR the client dropped. Sent every ~64 KB consumed.
@@ -266,6 +284,64 @@ fn scrollback_frame(data: &[u8], epoch: u64) -> String {
     )
 }
 
+/// A built `scrollback` reply (perf 01 N3). A client that offered
+/// `binary_snapshots` on its `credit` frame gets the bytes as ONE binary WS
+/// frame behind a small JSON header — no +33 % base64, no `format!` copy, and
+/// no multi-MB `JSON.parse` on the client's main thread. Everyone else (and an
+/// empty snapshot) gets the original base64-in-JSON frame.
+enum Snap {
+    Json(String),
+    Binary { data: Bytes, epoch: u64 },
+}
+
+impl Snap {
+    /// Encode `data` for this connection. Runs inside [`off_worker`] so the
+    /// base64 pass of the JSON form stays off the async workers.
+    fn build(data: Vec<u8>, epoch: u64, binary: bool) -> Self {
+        if binary && !data.is_empty() {
+            Snap::Binary {
+                data: Bytes::from(data),
+                epoch,
+            }
+        } else {
+            Snap::Json(scrollback_frame(&data, epoch))
+        }
+    }
+
+    /// The binary form's header: `{"type":"scrollback","epoch":E,"binary":true,"len":L}`.
+    /// The very next frame on the socket is the binary payload of `len` bytes;
+    /// the client must not count it against the credit window (it never went
+    /// through the [`CreditGate`]).
+    fn header(len: usize, epoch: u64) -> String {
+        format!(r#"{{"type":"scrollback","epoch":{epoch},"binary":true,"len":{len}}}"#)
+    }
+
+    /// Send it. Header and payload go out back to back from the socket's own
+    /// loop, so no live output can land between them. `Err` = socket gone.
+    async fn send(self, socket: &mut WebSocket) -> std::result::Result<(), ()> {
+        match self {
+            Snap::Json(frame) => socket.send(Message::Text(frame.into())).await,
+            Snap::Binary { data, epoch } => {
+                let header = Self::header(data.len(), epoch);
+                if socket.send(Message::Text(header.into())).await.is_err() {
+                    return Err(());
+                }
+                socket.send(Message::Binary(data)).await
+            }
+        }
+        .map_err(|_| ())
+    }
+
+    /// The JSON form (tests that inspect a reply built without the capability).
+    #[cfg(test)]
+    fn json(&self) -> &str {
+        match self {
+            Snap::Json(frame) => frame,
+            Snap::Binary { .. } => panic!("binary snapshot"),
+        }
+    }
+}
+
 /// Snapshot builds allowed at once (r3-06-02). Each copies the emulator
 /// state (up to ~25 MB for 4000 × 200 cells) and formats + base64-encodes it
 /// on the blocking pool; a tiled overview attaching 15 terminals at once must
@@ -300,12 +376,12 @@ fn pty_capture(h: &Arc<PtyHandle>, lines: usize) -> impl FnOnce() -> Capture + S
 
 /// A `scrollback` reply built off the async worker. The live stream is left
 /// untouched (the client may skip an optional compact and keep streaming).
-async fn snapshot_frame(h: &Arc<PtyHandle>, lines: usize) -> String {
+async fn snapshot_frame(h: &Arc<PtyHandle>, lines: usize, binary: bool) -> Snap {
     let h = Arc::clone(h);
     let epoch = h.spawn_seq();
-    off_worker(move || scrollback_frame(&h.snapshot_with_history(lines), epoch))
+    off_worker(move || Snap::build(h.snapshot_with_history(lines), epoch, binary))
         .await
-        .unwrap_or_else(|| scrollback_frame(&[], epoch))
+        .unwrap_or_else(|| Snap::build(Vec::new(), epoch, false))
 }
 
 /// Replace this viewer's backlog with a fresh full snapshot. The capture
@@ -319,10 +395,11 @@ async fn snapshot_frame(h: &Arc<PtyHandle>, lines: usize) -> String {
 async fn resync_frame(
     rx: &mut broadcast::Receiver<Bytes>,
     capture: impl FnOnce() -> Capture + Send + 'static,
-) -> String {
+    binary: bool,
+) -> Snap {
     let built = off_worker(move || {
         let (data, epoch, output) = capture();
-        (scrollback_frame(&data, epoch), output)
+        (Snap::build(data, epoch, binary), output)
     })
     .await;
     match built {
@@ -334,7 +411,7 @@ async fn resync_frame(
         // is ignored by the client, which keeps its screen.
         None => {
             drain_backlog(rx);
-            scrollback_frame(&[], 0)
+            Snap::build(Vec::new(), 0, false)
         }
     }
 }
@@ -345,9 +422,10 @@ async fn resync_frame(
 async fn resume_frame(
     rx: &mut broadcast::Receiver<Bytes>,
     capture: impl FnOnce() -> Capture + Send + 'static,
-) -> Option<String> {
+    binary: bool,
+) -> Option<Snap> {
     if drain_backlog(rx) {
-        Some(resync_frame(rx, capture).await)
+        Some(resync_frame(rx, capture, binary).await)
     } else {
         None
     }
@@ -360,9 +438,10 @@ async fn client_resync_frame(
     flow: &mut FlowGate,
     rx: &mut broadcast::Receiver<Bytes>,
     capture: impl FnOnce() -> Capture + Send + 'static,
-) -> String {
+    binary: bool,
+) -> Snap {
     flow.resume();
-    resync_frame(rx, capture).await
+    resync_frame(rx, capture, binary).await
 }
 
 /// Default / bounds for a client-proposed credit window (`credit` frame).
@@ -475,13 +554,14 @@ impl CreditGate {
     }
 
     /// New live output for this viewer (one coalesced chunk).
-    pub fn push(&mut self, chunk: Vec<u8>, now: tokio::time::Instant) -> CreditStep {
+    pub fn push(&mut self, chunk: impl Into<Bytes>, now: tokio::time::Instant) -> CreditStep {
+        let chunk: Bytes = chunk.into();
         let step = if self.skipped {
             CreditStep::Idle
         } else if self.held.is_empty() && chunk.len() <= self.available() {
             // Fast path (all normal output): straight through, no copy.
             self.sent += chunk.len() as u64;
-            CreditStep::Send(Bytes::from(chunk))
+            CreditStep::Send(chunk)
         } else {
             self.held.extend_from_slice(&chunk);
             if self.held.len() as u64 > self.window {
@@ -582,19 +662,22 @@ async fn apply_credit_step(
     socket: &mut WebSocket,
     out_rx: &mut Option<broadcast::Receiver<Bytes>>,
     handle: Option<&Arc<PtyHandle>>,
+    history: usize,
+    binary: bool,
 ) -> std::result::Result<(), ()> {
-    let msg = match step {
-        CreditStep::Idle => return Ok(()),
-        CreditStep::Send(bytes) => Message::Binary(bytes),
+    match step {
+        CreditStep::Idle => Ok(()),
+        CreditStep::Send(bytes) => socket.send(Message::Binary(bytes)).await.map_err(|_| ()),
         CreditStep::Resync => {
             let (Some(rx), Some(h)) = (out_rx.as_mut(), handle) else {
                 return Ok(());
             };
-            let frame = resync_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await;
-            Message::Text(frame.into())
+            resync_frame(rx, pty_capture(h, history), binary)
+                .await
+                .send(socket)
+                .await
         }
-    };
-    socket.send(msg).await.map_err(|_| ())
+    }
 }
 
 /// The `search_result` reply. Built with serde_json: matched lines are
@@ -627,6 +710,16 @@ const MAX_SEARCH_RESULTS: usize = 200;
 /// emulator depth: clients rebuild from snapshots, so anything less silently
 /// truncates the user's visible scrollback.
 const DEFAULT_ATTACH_HISTORY_LINES: usize = otto_pty::EMULATOR_SCROLLBACK_LINES;
+
+/// The history depth a `scrollback`/`resync` request asks for: `0` means the
+/// full retained depth; anything larger than the emulator keeps is clamped.
+fn requested_history(lines: usize) -> usize {
+    if lines == 0 {
+        DEFAULT_ATTACH_HISTORY_LINES
+    } else {
+        lines.min(DEFAULT_ATTACH_HISTORY_LINES)
+    }
+}
 
 /// Fixed first subprotocol the browser offers alongside the token; the gate
 /// echoes it back on a successful upgrade so the handshake completes. Mirrors
@@ -974,6 +1067,7 @@ async fn next_exit(rx: &mut Option<watch::Receiver<Option<i32>>>) -> i32 {
 ///
 /// `Ok(true)` = swapped, `Ok(false)` = nothing newer is live, `Err(())` = the
 /// socket is gone.
+#[allow(clippy::too_many_arguments)]
 async fn revive_viewer<S: SessionsCtx>(
     ctx: &S,
     session_id: &Id,
@@ -981,6 +1075,8 @@ async fn revive_viewer<S: SessionsCtx>(
     handle: &mut Option<Arc<PtyHandle>>,
     out_rx: &mut Option<broadcast::Receiver<Bytes>>,
     exit_rx: &mut Option<watch::Receiver<Option<i32>>>,
+    history: usize,
+    binary: bool,
 ) -> std::result::Result<bool, ()> {
     let Some(fresh) = ctx.manager().live_handle(session_id) else {
         return Ok(false);
@@ -992,15 +1088,18 @@ async fn revive_viewer<S: SessionsCtx>(
     // `resync_frame`), built off the async worker. `epoch` = PTY spawn
     // counter: the client resets its local buffer when it changes (see the
     // Scrollback arm).
-    let capture = pty_capture(&fresh, DEFAULT_ATTACH_HISTORY_LINES);
+    let capture = pty_capture(&fresh, history);
     let (frame, output) = match off_worker(move || {
         let (data, epoch, output) = capture();
-        (scrollback_frame(&data, epoch), output)
+        (Snap::build(data, epoch, binary), output)
     })
     .await
     {
         Some(built) => built,
-        None => (scrollback_frame(&[], fresh.spawn_seq()), fresh.subscribe()),
+        None => (
+            Snap::build(Vec::new(), fresh.spawn_seq(), false),
+            fresh.subscribe(),
+        ),
     };
     *out_rx = Some(output);
     *exit_rx = Some(fresh.on_exit());
@@ -1008,9 +1107,7 @@ async fn revive_viewer<S: SessionsCtx>(
     if socket.send(Message::Text(status.into())).await.is_err() {
         return Err(());
     }
-    if socket.send(Message::Text(frame.into())).await.is_err() {
-        return Err(());
-    }
+    frame.send(socket).await?;
     *handle = Some(fresh);
     Ok(true)
 }
@@ -1031,13 +1128,16 @@ async fn next_can_input(rx: &mut watch::Receiver<bool>) -> Option<bool> {
 /// Periodic re-authorization for one attached terminal, run OFF the socket's
 /// `select!` loop so no arm of that loop ever awaits SQLite (investigation H2).
 ///
-/// It owns the `can_input` watch: each pass narrows the capability
-/// monotonically (a share downgraded mid-connection loses input and can never
-/// regain it, exactly as the old inline check did) and publishes the new value.
+/// It owns the `can_input` watch and publishes each pass's raw verdict; every
+/// subscribed socket narrows its own capability with it monotonically (a
+/// share downgraded mid-connection loses input and can never regain it,
+/// exactly as the old inline check did). Production sockets share one pass
+/// per token + session ([`shared_reauth`]); this wrapper is the unshared form.
 /// Revocation is signalled by RETURNING: dropping `can_tx` closes the channel,
 /// which the select loop reads as "evict this viewer". The task also stops the
 /// moment the socket goes away (`can_tx.closed()`), so a detached session never
 /// leaves a timer — or a DB query — behind.
+#[cfg(test)]
 async fn reauth_loop<S: SessionsCtx>(
     ctx: S,
     session_id: Id,
@@ -1045,16 +1145,97 @@ async fn reauth_loop<S: SessionsCtx>(
     can_tx: watch::Sender<bool>,
     period: Duration,
 ) {
+    reauth_loop_shared(ctx, session_id, live_auth, can_tx, period, None).await;
+}
+
+/// Key of one shared re-auth pass: the verdict is a pure function of the
+/// token and the session (and the cadence decides how stale it may get), so
+/// every socket presenting the same token to the same session can share it.
+type ReauthKey = (Id, String, Duration);
+
+/// One running re-auth pass per [`ReauthKey`] (perf 01 F8). A pane, its
+/// tile in the overview and a parked copy of it used to run three identical
+/// SQLite passes every 5 s; now they subscribe to one.
+static SHARED_REAUTH: LazyLock<dashmap::DashMap<ReauthKey, (u64, watch::Sender<bool>)>> =
+    LazyLock::new(dashmap::DashMap::new);
+
+/// Subscribe this socket to the shared re-auth pass for its token +
+/// session, starting one when none runs. The watch carries the latest raw
+/// verdict (`true` = may input); each socket narrows its own capability
+/// with it, so sharing never widens what any one socket may do. The channel
+/// closing still means "revoked: evict".
+fn shared_reauth<S: SessionsCtx>(
+    ctx: &S,
+    session_id: &Id,
+    live_auth: LiveTerminalAuth,
+    period: Duration,
+) -> watch::Receiver<bool> {
+    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let key: ReauthKey = (session_id.clone(), live_auth.token.clone(), period);
+    match SHARED_REAUTH.entry(key.clone()) {
+        dashmap::mapref::entry::Entry::Occupied(e) => e.get().1.subscribe(),
+        dashmap::mapref::entry::Entry::Vacant(v) => {
+            let (tx, rx) = watch::channel(true);
+            let generation = GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            v.insert((generation, tx.clone()));
+            tokio::spawn(reauth_loop_shared(
+                ctx.clone(),
+                session_id.clone(),
+                live_auth,
+                tx,
+                period,
+                Some((key, generation)),
+            ));
+            rx
+        }
+    }
+}
+
+/// Drop this pass's registry entry: unconditionally on revocation (sockets
+/// that arrive later must start a fresh check, not join a dying one), or —
+/// `only_if_unwatched` — only while nobody is subscribed, decided under the
+/// map's shard lock so a socket joining at that instant keeps the pass alive.
+fn unregister_reauth(
+    shared: &Option<(ReauthKey, u64)>,
+    can_tx: &watch::Sender<bool>,
+    only_if_unwatched: bool,
+) -> bool {
+    let Some((key, generation)) = shared else {
+        return true;
+    };
+    SHARED_REAUTH
+        .remove_if(key, |_, (g, _)| {
+            *g == *generation && (!only_if_unwatched || can_tx.receiver_count() == 0)
+        })
+        .is_some()
+        || !SHARED_REAUTH.get(key).is_some_and(|e| e.0 == *generation)
+}
+
+async fn reauth_loop_shared<S: SessionsCtx>(
+    ctx: S,
+    session_id: Id,
+    live_auth: LiveTerminalAuth,
+    can_tx: watch::Sender<bool>,
+    period: Duration,
+    shared: Option<(ReauthKey, u64)>,
+) {
     let mut tick = tokio::time::interval(period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await; // consume the immediate first tick — attach just authorized
     loop {
         tokio::select! {
-            _ = can_tx.closed() => return,
+            _ = can_tx.closed() => {
+                // Every socket left. Stop — unless one joined just now.
+                if unregister_reauth(&shared, &can_tx, true) {
+                    return;
+                }
+                continue;
+            }
             _ = tick.tick() => {}
         }
         let started = std::time::Instant::now();
         let Ok(current) = ctx.manager().get(&session_id).await else {
+            unregister_reauth(&shared, &can_tx, false);
             return;
         };
         let get_ms = started.elapsed().as_millis() as u64;
@@ -1069,16 +1250,17 @@ async fn reauth_loop<S: SessionsCtx>(
             );
         }
         match verdict {
-            // Capability only ever narrows for a live connection.
+            // The raw verdict; each socket narrows its own capability with
+            // it (capability only ever narrows for a live connection).
             Ok(allowed) => {
                 can_tx.send_if_modified(|cur| {
-                    let next = *cur && allowed;
-                    let changed = next != *cur;
-                    *cur = next;
+                    let changed = allowed != *cur;
+                    *cur = allowed;
                     changed
                 });
             }
             Err(_) => {
+                unregister_reauth(&shared, &can_tx, false);
                 // Access revoked mid-connection. Killing the session stays the
                 // owner-only path (unchanged): a guest losing a share must not
                 // take the owner's terminal down with it.
@@ -1106,6 +1288,268 @@ async fn next_evict(rx: &mut Option<broadcast::Receiver<()>>) {
         },
         None => std::future::pending().await,
     }
+}
+
+/// Bytes of keystrokes / pastes one connection may have queued for the PTY
+/// (perf 01 N7). Past this further `input` frames are deferred in order on
+/// the socket loop ([`DeferredInput`]) instead of dropped. Bounded by bytes,
+/// not frames: 256 one-byte keystrokes behind a slow child used to overflow a
+/// frame-count queue and lose the rest of the line.
+const INPUT_BUDGET_BYTES: usize = 1024 * 1024;
+
+/// Bytes of `input` frames the socket loop holds back while the budget above
+/// is full (perf3 R6). Below it the loop keeps READING client frames, so
+/// `ack` / `resize` / `probe` still land and output keeps flowing while a
+/// child is not reading its tty; only past it does the loop stop reading
+/// (TCP backpressure to the sender, nothing dropped).
+const INPUT_DEFER_BYTES: usize = 1024 * 1024;
+
+/// Upper bound on one coalesced PTY write: the writer joins consecutive
+/// queued frames of the same kind up to this many bytes per `human_input`.
+const INPUT_COALESCE_BYTES: usize = 64 * 1024;
+
+/// One queued `input` frame. `cost` is the budget it holds (released after
+/// the write); `prev_owner` is the size owner its optimistic authority claim
+/// replaced (user typing only), restored if the write fails.
+struct InputJob {
+    bytes: Vec<u8>,
+    user: bool,
+    cost: u32,
+    prev_owner: Option<u64>,
+}
+
+/// Per-connection input queue (perf 01 F10 + N7): `input` frames are written
+/// to the PTY in order on their own task, off the socket's `select!` loop, so
+/// a paste into a TUI that is slow to read its tty no longer freezes output.
+/// The queue never drops: it is bounded by [`INPUT_BUDGET_BYTES`], and a frame
+/// that does not fit waits in the loop's [`DeferredInput`].
+struct InputQueue {
+    tx: tokio::sync::mpsc::UnboundedSender<InputJob>,
+    budget: Arc<tokio::sync::Semaphore>,
+}
+
+impl InputQueue {
+    /// Budget a frame of `len` bytes holds. A frame larger than the whole
+    /// budget holds all of it (it waits for an empty queue, then goes alone).
+    fn cost(len: usize) -> u32 {
+        len.clamp(1, INPUT_BUDGET_BYTES) as u32
+    }
+
+    /// A job for one `input` frame, holding no budget yet.
+    fn job(bytes: Vec<u8>, user: bool, prev_owner: Option<u64>) -> InputJob {
+        InputJob {
+            cost: Self::cost(bytes.len()),
+            bytes,
+            user,
+            prev_owner,
+        }
+    }
+
+    /// Queue a frame if its budget is free now; `Err` hands it back. (The
+    /// socket loop goes through [`DeferredInput::push`], which keeps order.)
+    #[cfg(test)]
+    fn try_push(
+        &self,
+        bytes: Vec<u8>,
+        user: bool,
+        prev_owner: Option<u64>,
+    ) -> Result<(), InputJob> {
+        self.try_queue(Self::job(bytes, user, prev_owner))
+    }
+
+    /// [`InputQueue::try_push`] for a job that is already built.
+    fn try_queue(&self, job: InputJob) -> Result<(), InputJob> {
+        match self.budget.try_acquire_many(job.cost) {
+            Ok(permit) => {
+                permit.forget();
+                self.send(job);
+                Ok(())
+            }
+            Err(_) => Err(job),
+        }
+    }
+
+    /// Wait until `cost` bytes of budget are free and take them. Cancel-safe
+    /// (a dropped wait holds nothing), so it can sit in a `select!` arm.
+    async fn reserve(budget: Arc<tokio::sync::Semaphore>, cost: u32) {
+        if let Ok(permit) = budget.acquire_many_owned(cost).await {
+            permit.forget();
+        }
+    }
+
+    /// Hand a job whose budget is already reserved to the writer.
+    fn send(&self, job: InputJob) {
+        // Fails only once the writer task ended (connection teardown).
+        let _ = self.tx.send(job);
+    }
+}
+
+/// `input` frames waiting for [`InputQueue`] budget, in arrival order (perf3
+/// R6). The socket loop used to park ONE such frame and stop reading the
+/// socket until it fit — which also stopped reading `ack` frames, so once the
+/// credit window ran out output stalled behind a child that was not reading
+/// its stdin. Now the loop keeps reading: input frames queue here (bounded by
+/// [`INPUT_DEFER_BYTES`]) while every other frame is handled as it arrives.
+#[derive(Default)]
+struct DeferredInput {
+    jobs: std::collections::VecDeque<InputJob>,
+    /// Payload bytes held in `jobs`.
+    bytes: usize,
+}
+
+impl DeferredInput {
+    /// Whether the loop may read client frames: until the deferred bytes
+    /// reach their bound (then TCP backpressure, never a drop).
+    fn reading(&self) -> bool {
+        self.bytes < INPUT_DEFER_BYTES
+    }
+
+    /// Budget the oldest deferred frame needs, if any frame waits.
+    fn front_cost(&self) -> Option<u32> {
+        self.jobs.front().map(|j| j.cost)
+    }
+
+    /// Hand one `input` frame to the queue — behind anything already
+    /// deferred, so order is kept — or defer it when the budget is full.
+    fn push(&mut self, q: &InputQueue, bytes: Vec<u8>, user: bool, prev_owner: Option<u64>) {
+        let job = InputQueue::job(bytes, user, prev_owner);
+        let job = if self.jobs.is_empty() {
+            match q.try_queue(job) {
+                Ok(()) => return,
+                Err(job) => job,
+            }
+        } else {
+            job
+        };
+        self.bytes += job.bytes.len();
+        self.jobs.push_back(job);
+    }
+
+    /// The oldest frame's budget was just reserved ([`InputQueue::reserve`]
+    /// with [`DeferredInput::front_cost`]): send it, then every frame behind
+    /// it that fits now.
+    fn release(&mut self, q: &InputQueue) {
+        let Some(job) = self.jobs.pop_front() else {
+            return;
+        };
+        self.bytes -= job.bytes.len();
+        q.send(job);
+        while let Some(job) = self.jobs.pop_front() {
+            let len = job.bytes.len();
+            if let Err(job) = q.try_queue(job) {
+                self.jobs.push_front(job);
+                break;
+            }
+            self.bytes -= len;
+        }
+    }
+}
+
+/// Spawn the writer behind an [`InputQueue`]. `write` delivers one (possibly
+/// coalesced) chunk; `revert` undoes a failed chunk's optimistic size claim.
+/// Each outcome is reported on the returned receiver (`Err` = the message for
+/// the one-per-stretch `input_failed` notice). Ends when the queue is dropped.
+fn spawn_input_queue<W, Fut, R>(
+    write: W,
+    revert: R,
+) -> (
+    InputQueue,
+    tokio::sync::mpsc::Receiver<std::result::Result<(), String>>,
+)
+where
+    W: Fn(Vec<u8>, bool) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = std::result::Result<(), String>> + Send,
+    R: Fn(Option<u64>) + Send + 'static,
+{
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<InputJob>();
+    let budget = Arc::new(tokio::sync::Semaphore::new(INPUT_BUDGET_BYTES));
+    let (res_tx, res_rx) = tokio::sync::mpsc::channel(64);
+    let task_budget = budget.clone();
+    tokio::spawn(async move {
+        let mut carry: Option<InputJob> = None;
+        loop {
+            let first = match carry.take() {
+                Some(job) => job,
+                None => match rx.recv().await {
+                    Some(job) => job,
+                    None => break,
+                },
+            };
+            // Coalesce whatever queued up behind it while the last write ran:
+            // a burst of keystrokes becomes one PTY write, not N lock round
+            // trips. Only frames of the same kind join (an emulator reply is
+            // never billed as typing), and order is kept.
+            let user = first.user;
+            let prev_owner = first.prev_owner;
+            let mut cost = first.cost;
+            let mut bytes = first.bytes;
+            while bytes.len() < INPUT_COALESCE_BYTES {
+                match rx.try_recv() {
+                    Ok(job) if job.user == user => {
+                        bytes.extend_from_slice(&job.bytes);
+                        cost += job.cost;
+                    }
+                    Ok(job) => {
+                        carry = Some(job);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            let res = write(bytes, user).await;
+            task_budget.add_permits(cost as usize);
+            if res.is_err() && user {
+                revert(prev_owner);
+            }
+            // Outcomes only drive a notice: never block on a busy loop.
+            let _ = res_tx.try_send(res);
+        }
+    });
+    (InputQueue { tx, budget }, res_rx)
+}
+
+/// [`spawn_input_queue`] wired to the session manager for one connection.
+fn spawn_input_writer<S: SessionsCtx>(
+    ctx: S,
+    session_id: Id,
+    user: Id,
+    scoped: bool,
+    conn_id: u64,
+) -> (
+    InputQueue,
+    tokio::sync::mpsc::Receiver<std::result::Result<(), String>>,
+) {
+    let revert_ctx = ctx.clone();
+    let revert_id = session_id.clone();
+    spawn_input_queue(
+        move |bytes: Vec<u8>, user_input: bool| {
+            let ctx = ctx.clone();
+            let session_id = session_id.clone();
+            let user = user.clone();
+            async move {
+                let started = std::time::Instant::now();
+                let res = ctx
+                    .manager()
+                    .human_input(&session_id, &user, scoped, user_input, &bytes)
+                    .await;
+                let elapsed = started.elapsed();
+                if elapsed > INPUT_SLOW {
+                    tracing::debug!(
+                        session = %session_id,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        bytes = bytes.len(),
+                        "terminal ws: slow PTY write (child not draining its tty?)"
+                    );
+                }
+                res.map_err(|e| e.to_string())
+            }
+        },
+        move |prev| {
+            revert_ctx
+                .manager()
+                .revert_input_authority(&revert_id, conn_id, prev)
+        },
+    )
 }
 
 async fn serve_terminal<S: SessionsCtx>(
@@ -1190,13 +1634,19 @@ async fn serve_terminal<S: SessionsCtx>(
     // Credit-based flow control, once the client sends `credit` (else the
     // legacy pause gate above is all there is).
     let mut credit: Option<CreditGate> = None;
+    // Snapshot encoding this client asked for on its `credit` frame (N3).
+    let mut binary_snapshots = false;
+    // History depth this client asked for in its last `scrollback`/`resync`
+    // (perf 01 F4): every server-initiated snapshot (credit skip, lag,
+    // resume, revive) honours it instead of always sending the full 4000
+    // rows to a 2000-row embed that then trims them.
+    let mut history = DEFAULT_ATTACH_HISTORY_LINES;
 
     // Re-authorization runs OFF this loop (investigation H2): every arm here
     // must stay free of SQLite, or a slow statement elsewhere in the daemon
     // freezes the terminal in BOTH directions. The task publishes `can_input`
     // through the watch and signals revocation by dropping its sender. The
     // resource binding is read once, from the session we already have in hand.
-    let (can_tx, mut can_rx) = watch::channel(can_input);
     let reauth_period = if ctx.resource_bound(&current) {
         REAUTH_INTERVAL_RESOURCE
     } else {
@@ -1204,13 +1654,20 @@ async fn serve_terminal<S: SessionsCtx>(
     };
     let input_user = live_auth.user.id.clone();
     let input_scoped = live_auth.scoped;
-    tokio::spawn(reauth_loop(
+    let (input_q, mut input_res_rx) = spawn_input_writer(
         ctx.clone(),
         session_id.clone(),
-        live_auth,
-        can_tx,
-        reauth_period,
-    ));
+        input_user.clone(),
+        input_scoped,
+        conn_id,
+    );
+    // Input frames waiting for byte budget (perf 01 N7), in order. The socket
+    // keeps being read meanwhile (perf3 R6): acks, resizes and probes are
+    // never stuck behind a child that is not reading its stdin.
+    let mut deferred = DeferredInput::default();
+    let mut can_rx = shared_reauth(&ctx, &session_id, live_auth, reauth_period);
+    // Joining a pass that already narrowed: apply its latest verdict now.
+    can_input &= *can_rx.borrow_and_update();
 
     loop {
         tokio::select! {
@@ -1219,11 +1676,32 @@ async fn serve_terminal<S: SessionsCtx>(
             // gone) → tell the client and drop the socket.
             update = next_can_input(&mut can_rx) => {
                 match update {
-                    Some(allowed) => can_input = allowed,
+                    Some(allowed) => can_input &= allowed,
                     None => {
                         let _ = socket.send(Message::Close(None)).await;
                         return;
                     }
+                }
+            }
+
+            // Outcome of a keystroke delivered by the input task: one visible
+            // notice per stretch of failing input (reset on success).
+            Some(res) = input_res_rx.recv() => {
+                match res {
+                    Ok(()) => warned_input = false,
+                    Err(message) if !warned_input => {
+                        warned_input = true;
+                        let frame = serde_json::json!({
+                            "type": "error",
+                            "code": "input_failed",
+                            "message": message,
+                        })
+                        .to_string();
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => {}
                 }
             }
 
@@ -1234,8 +1712,8 @@ async fn serve_terminal<S: SessionsCtx>(
                 flow.resume();
                 tracing::debug!(session = %session_id, "terminal ws flow auto-resume (no resume within {FLOW_AUTO_RESUME:?})");
                 if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                    if let Some(frame) = resume_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await {
-                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                    if let Some(frame) = resume_frame(rx, pty_capture(h, history), binary_snapshots).await {
+                        if frame.send(&mut socket).await.is_err() {
                             return;
                         }
                         if let Some(c) = credit.as_mut() {
@@ -1265,23 +1743,29 @@ async fn serve_terminal<S: SessionsCtx>(
                         // Attempt a non-blocking drain to merge back-to-back
                         // chunks into one WS frame. Lagged errors are harmless
                         // (data is still in the ring buffer).
-                        let mut buf = first.to_vec();
+                        // A lone chunk (the common case) is forwarded as is —
+                        // no copy (perf 01 F11); only a burst is coalesced.
+                        let mut out = first;
                         if let Some(rx) = out_rx.as_mut() {
-                            while let Ok(more) = rx.try_recv() {
+                            if let Ok(more) = rx.try_recv() {
+                                let mut buf = bytes::BytesMut::with_capacity(out.len() + more.len());
+                                buf.extend_from_slice(&out);
                                 buf.extend_from_slice(&more);
                                 // Cap at ~64 KiB to bound latency.
-                                if buf.len() >= 64 * 1024 {
-                                    break;
+                                while buf.len() < 64 * 1024 {
+                                    let Ok(more) = rx.try_recv() else { break };
+                                    buf.extend_from_slice(&more);
                                 }
+                                out = buf.freeze();
                             }
                         }
                         // Credit mode: send only what the window allows (the
                         // rest is held, or skipped → one snapshot later).
                         let step = match credit.as_mut() {
-                            Some(c) => c.push(buf, tokio::time::Instant::now()),
-                            None => CreditStep::Send(Bytes::from(buf)),
+                            Some(c) => c.push(out, tokio::time::Instant::now()),
+                            None => CreditStep::Send(out),
                         };
-                        if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref()).await.is_err() {
+                        if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref(), history, binary_snapshots).await.is_err() {
                             return;
                         }
                     }
@@ -1295,8 +1779,8 @@ async fn serve_terminal<S: SessionsCtx>(
                         // fresh full snapshot; the client rebuilds from it.
                         tracing::debug!(session = %session_id, "terminal ws lagged by {n} chunks; resyncing from snapshot");
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                            let frame = resync_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await;
-                            if socket.send(Message::Text(frame.into())).await.is_err() {
+                            let frame = resync_frame(rx, pty_capture(h, history), binary_snapshots).await;
+                            if frame.send(&mut socket).await.is_err() {
                                 return;
                             }
                             if let Some(c) = credit.as_mut() {
@@ -1329,7 +1813,7 @@ async fn serve_terminal<S: SessionsCtx>(
             // happens while this loop holds the dead handle — `exit_rx` is the
             // reliable "my process is gone" signal.) Armed only while dead.
             _ = revive_tick.tick(), if exit_rx.is_none() || out_rx.is_none() => {
-                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx).await {
+                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx, history, binary_snapshots).await {
                     Err(()) => return,
                     Ok(true) => {
                         if let Some(c) = credit.as_mut() {
@@ -1352,7 +1836,19 @@ async fn serve_terminal<S: SessionsCtx>(
             // NOTE: no auth work here. `can_input` is whatever the attach
             // decided, narrowed by the re-auth task's watch above — a keystroke
             // must never wait on the state DB (investigation H2).
-            msg = socket.recv() => {
+            // Deferred input frames (budget full): wait for the writer to free
+            // room for the oldest, then queue it and whatever fits behind it.
+            // Every other arm keeps running, including reading client frames
+            // (below) — `ack`s must land or output stalls once credit runs out
+            // (perf3 R6). Only past INPUT_DEFER_BYTES does reading pause.
+            _ = InputQueue::reserve(
+                input_q.budget.clone(),
+                deferred.front_cost().unwrap_or(1),
+            ), if deferred.front_cost().is_some() => {
+                deferred.release(&input_q);
+            }
+
+            msg = socket.recv(), if deferred.reading() => {
                 let Some(Ok(msg)) = msg else { return };
                 let Message::Text(text) = msg else {
                     if matches!(msg, Message::Close(_)) { return; }
@@ -1380,7 +1876,7 @@ async fn serve_terminal<S: SessionsCtx>(
                             // keystroke lands); with nothing live, `input`
                             // fails and the notice below says so.
                             if exit_rx.is_none() {
-                                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx).await {
+                                match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx, history, binary_snapshots).await {
                                     Err(()) => return,
                                     Ok(true) => {
                                         if let Some(c) = credit.as_mut() {
@@ -1398,7 +1894,7 @@ async fn serve_terminal<S: SessionsCtx>(
                             // its startup, not in the prompt the user saw).
                             if wakes_on_input(view_only, user, exit_rx.is_some()) {
                                 match ctx.manager().ensure_live(&session_id).await {
-                                    Ok(()) => match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx).await {
+                                    Ok(()) => match revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx, history, binary_snapshots).await {
                                         Err(()) => return,
                                         Ok(true) => {
                                             warned_input = false;
@@ -1419,36 +1915,24 @@ async fn serve_terminal<S: SessionsCtx>(
                             if let Some(c) = credit.as_mut() {
                                 c.skip_on_input(user, tokio::time::Instant::now());
                             }
-                            // Successful explicit typing claims size authority.
-                            let started = std::time::Instant::now();
-                            let res = ctx.manager().human_input(&session_id, &input_user, input_scoped, user, &bytes).await;
-                            let elapsed = started.elapsed();
-                            if elapsed > INPUT_SLOW {
-                                tracing::debug!(
-                                    session = %session_id,
-                                    elapsed_ms = elapsed.as_millis() as u64,
-                                    "terminal ws: slow PTY write (child not draining its tty?)"
-                                );
-                            }
-                            match res {
-                                Ok(()) => {
-                                    warned_input = false;
-                                    if user { ctx.manager().note_input_authority(&session_id, conn_id); }
-                                },
-                                Err(e) if !warned_input => {
-                                    warned_input = true;
-                                    let frame = serde_json::json!({
-                                        "type": "error",
-                                        "code": "input_failed",
-                                        "message": e.to_string(),
-                                    })
-                                    .to_string();
-                                    if socket.send(Message::Text(frame.into())).await.is_err() {
-                                        return;
-                                    }
-                                }
-                                Err(_) => {}
-                            }
+                            // Delivery runs on this connection's input task
+                            // (perf 01 F10): a large paste into a TUI that is
+                            // slow to read its tty no longer freezes this
+                            // loop's output, acks and resizes. Order is kept
+                            // (one queue); results come back on `input_res_rx`.
+                            // Typing claims size authority NOW (perf 01 N7),
+                            // not when the write lands: a `resize` right behind
+                            // the first keystroke must see this viewer as owner.
+                            // A failed write reverts it.
+                            let prev_owner = if user {
+                                ctx.manager().claim_input_authority(&session_id, conn_id)
+                            } else {
+                                None
+                            };
+                            // Never dropped (N7): a frame that does not fit the
+                            // byte budget (or arrives behind one that did not)
+                            // is deferred in order until the writer frees room.
+                            deferred.push(&input_q, bytes, user, prev_owner);
                         }
                     }
                     ClientFrame::Resize { cols, rows } => {
@@ -1476,8 +1960,8 @@ async fn serve_terminal<S: SessionsCtx>(
                     ClientFrame::Resume => {
                         if flow.resume() {
                             if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                                if let Some(frame) = resume_frame(rx, pty_capture(h, DEFAULT_ATTACH_HISTORY_LINES)).await {
-                                    if socket.send(Message::Text(frame.into())).await.is_err() {
+                                if let Some(frame) = resume_frame(rx, pty_capture(h, history), binary_snapshots).await {
+                                    if frame.send(&mut socket).await.is_err() {
                                         return;
                                     }
                                     if let Some(c) = credit.as_mut() {
@@ -1487,15 +1971,17 @@ async fn serve_terminal<S: SessionsCtx>(
                             }
                         }
                     }
-                    ClientFrame::Resync { lines } => {
-                        let want = if lines == 0 {
-                            DEFAULT_ATTACH_HISTORY_LINES
-                        } else {
-                            lines
-                        };
+                    ClientFrame::Resync { lines, cols, rows } => {
+                        let want = requested_history(lines);
+                        history = want;
+                        if let (Some(c), Some(r)) = (cols, rows) {
+                            if can_input && ctx.manager().may_resize(&session_id, conn_id) {
+                                let _ = ctx.manager().human_resize(&session_id, &input_user, input_scoped, c, r).await;
+                            }
+                        }
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
-                            let frame = client_resync_frame(&mut flow, rx, pty_capture(h, want)).await;
-                            if socket.send(Message::Text(frame.into())).await.is_err() {
+                            let frame = client_resync_frame(&mut flow, rx, pty_capture(h, want), binary_snapshots).await;
+                            if frame.send(&mut socket).await.is_err() {
                                 return;
                             }
                             if let Some(c) = credit.as_mut() {
@@ -1505,7 +1991,8 @@ async fn serve_terminal<S: SessionsCtx>(
                             flow.resume();
                         }
                     }
-                    ClientFrame::Credit { window } => {
+                    ClientFrame::Credit { window, binary_snapshots: bin } => {
+                        binary_snapshots = bin;
                         let gate = CreditGate::new(window);
                         if socket.send(Message::Text(gate.grant_frame().into())).await.is_err() {
                             return;
@@ -1515,22 +2002,28 @@ async fn serve_terminal<S: SessionsCtx>(
                     ClientFrame::Ack { bytes } => {
                         if let Some(c) = credit.as_mut() {
                             let step = c.ack(bytes, tokio::time::Instant::now());
-                            if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref()).await.is_err() {
+                            if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref(), history, binary_snapshots).await.is_err() {
                                 return;
                             }
                         }
                     }
-                    ClientFrame::Scrollback { lines } => {
+                    ClientFrame::Scrollback { lines, cols, rows } => {
                         // Reproduce the live screen as one coherent frame (what
                         // tmux does on attach) PRECEDED by up to `lines` rows of
                         // scrollback history, so reconnecting restores history
                         // above the viewport instead of losing it. A `lines` of
-                        // 0 falls back to the bare current-screen snapshot.
-                        let want = if lines == 0 {
-                            DEFAULT_ATTACH_HISTORY_LINES
-                        } else {
-                            lines
-                        };
+                        // 0 falls back to the full retained depth.
+                        let want = requested_history(lines);
+                        history = want;
+                        // Attach-with-grid (perf 01 F1): reflow to the client's
+                        // grid FIRST, so this one snapshot is already at its
+                        // width (same size-authority rules as `resize`; a
+                        // same-size grid is a no-op end to end).
+                        if let (Some(c), Some(r)) = (cols, rows) {
+                            if can_input && ctx.manager().may_resize(&session_id, conn_id) {
+                                let _ = ctx.manager().human_resize(&session_id, &input_user, input_scoped, c, r).await;
+                            }
+                        }
                         // `epoch` = PTY spawn counter. When the process was
                         // respawned since the client's last attach (suspend →
                         // resume, restart, daemon restart) the client's local
@@ -1540,11 +2033,11 @@ async fn serve_terminal<S: SessionsCtx>(
                         // history. Omitted (0) when no live handle exists.
                         // Built off the async worker (r3-06-02).
                         let frame = match handle.as_ref() {
-                            Some(h) => snapshot_frame(h, want).await,
-                            None => scrollback_frame(&[], 0),
+                            Some(h) => snapshot_frame(h, want, binary_snapshots).await,
+                            None => Snap::build(Vec::new(), 0, false),
                         };
                         // Sent inline, i.e. before any subsequent live bytes.
-                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                        if frame.send(&mut socket).await.is_err() {
                             return;
                         }
                         // Output held for credit is already in this snapshot.
@@ -1566,10 +2059,20 @@ async fn serve_terminal<S: SessionsCtx>(
                         if query.trim().is_empty() {
                             continue;
                         }
-                        let matches = handle
-                            .as_ref()
-                            .map(|h| h.search(&query, MAX_SEARCH_RESULTS))
-                            .unwrap_or_default();
+                        // The scan runs on the blocking pool (perf 01 F3):
+                        // up to 10k ring lines are copied under a brief lock
+                        // and searched after it is released, so neither this
+                        // worker nor the session's PTY reader waits on it.
+                        let matches = match handle.as_ref() {
+                            Some(h) => {
+                                let lines = h.search_lines();
+                                let q = query.clone();
+                                off_worker(move || otto_pty::ring::search_lines(&lines, &q, MAX_SEARCH_RESULTS))
+                                    .await
+                                    .unwrap_or_default()
+                            }
+                            None => Vec::new(),
+                        };
                         let frame = search_result_frame(&query, matches);
                         if socket.send(Message::Text(frame.into())).await.is_err() {
                             return;
@@ -2101,6 +2604,65 @@ mod tests {
         );
     }
 
+    /// Perf 01 F8: sockets presenting the same token to the same session
+    /// share ONE re-auth pass; it stops once the last socket leaves, a later
+    /// socket starts a fresh one, and a revocation still evicts every
+    /// subscriber within a tick.
+    #[tokio::test]
+    async fn sockets_share_one_reauth_pass_per_token_and_session() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        let sid = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let st = build(&pool).await;
+        let token = mint_share(&pool, "alice", &sid, WorkspaceRole::Editor).await;
+        let user = st
+            .auth
+            .authenticate(&token)
+            .await
+            .expect("share token authenticates")
+            .effective_user;
+        let live_auth = LiveTerminalAuth {
+            scoped: true,
+            user,
+            token: token.clone(),
+            auth: st.auth.clone(),
+        };
+        let period = Duration::from_millis(25);
+        let key: ReauthKey = (sid.clone(), token.clone(), period);
+        let entries = || SHARED_REAUTH.iter().filter(|e| *e.key() == key).count();
+
+        let a = shared_reauth(&st.ctx, &sid, live_auth.clone(), period);
+        let b = shared_reauth(&st.ctx, &sid, live_auth.clone(), period);
+        assert_eq!(entries(), 1, "one pass for both sockets");
+        assert_eq!(SHARED_REAUTH.get(&key).unwrap().1.receiver_count(), 2);
+        drop(a);
+        drop(b);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while entries() > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the unwatched pass never stopped"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let mut c = shared_reauth(&st.ctx, &sid, live_auth.clone(), period);
+        let mut d = shared_reauth(&st.ctx, &sid, live_auth, period);
+        assert!(*c.borrow_and_update() && *d.borrow_and_update());
+        AuthRepo::new(pool.clone())
+            .revoke(&token)
+            .await
+            .expect("revoke the share");
+        for rx in [&mut c, &mut d] {
+            let verdict = tokio::time::timeout(Duration::from_secs(2), next_can_input(rx))
+                .await
+                .expect("every subscriber is evicted within a tick");
+            assert_eq!(verdict, None);
+        }
+        assert_eq!(entries(), 0, "a revoked pass leaves no registry entry");
+    }
+
     // ── Flow control + search_result framing (SA-02 / SA-11) ──────────────
 
     /// SA-11: a matched line with a TAB (make output, Go/Java stack traces)
@@ -2273,11 +2835,15 @@ mod tests {
         }
         assert!(gate.resume());
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let frame = resume_frame(&mut rx, test_capture(&tx, b"\x1b[Hsnapshot", 3, &calls))
-            .await
-            .expect("skipped output must be replaced by a snapshot");
+        let frame = resume_frame(
+            &mut rx,
+            test_capture(&tx, b"\x1b[Hsnapshot", 3, &calls),
+            false,
+        )
+        .await
+        .expect("skipped output must be replaced by a snapshot");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let v: serde_json::Value = serde_json::from_str(frame.json()).unwrap();
         assert_eq!(v["type"], "scrollback");
         assert_eq!(v["epoch"], 3);
         assert_eq!(
@@ -2302,11 +2868,15 @@ mod tests {
     async fn client_resync_opens_the_gate_and_replaces_the_backlog_with_one_snapshot() {
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"resync","lines":2000}"#),
-            Ok(ClientFrame::Resync { lines: 2000 })
+            Ok(ClientFrame::Resync {
+                lines: 2000,
+                cols: None,
+                rows: None
+            })
         ));
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"resync"}"#),
-            Ok(ClientFrame::Resync { lines: 0 })
+            Ok(ClientFrame::Resync { lines: 0, .. })
         ));
         let (tx, mut rx) = broadcast::channel::<Bytes>(64);
         let mut gate = FlowGate::default();
@@ -2315,12 +2885,17 @@ mod tests {
             tx.send(Bytes::from(format!("flood{i}\n"))).unwrap();
         }
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let frame =
-            client_resync_frame(&mut gate, &mut rx, test_capture(&tx, b"screen", 9, &calls)).await;
+        let frame = client_resync_frame(
+            &mut gate,
+            &mut rx,
+            test_capture(&tx, b"screen", 9, &calls),
+            false,
+        )
+        .await;
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(!gate.is_paused(), "resync leaves the paused state");
         assert!(!gate.resume(), "a trailing resume finds the gate open");
-        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let v: serde_json::Value = serde_json::from_str(frame.json()).unwrap();
         assert_eq!(v["type"], "scrollback");
         assert_eq!(v["epoch"], 9);
         assert!(matches!(
@@ -2328,9 +2903,14 @@ mod tests {
             Err(broadcast::error::TryRecvError::Empty)
         ));
         // Nothing queued and not paused: still answers with a snapshot.
-        let frame =
-            client_resync_frame(&mut gate, &mut rx, test_capture(&tx, b"s2", 9, &calls)).await;
-        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let frame = client_resync_frame(
+            &mut gate,
+            &mut rx,
+            test_capture(&tx, b"s2", 9, &calls),
+            false,
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(frame.json()).unwrap();
         assert_eq!(B64.decode(v["data"].as_str().unwrap()).unwrap(), b"s2");
         tx.send(Bytes::from_static(b"live")).unwrap();
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"live"));
@@ -2342,9 +2922,11 @@ mod tests {
     async fn resume_without_skipped_output_sends_nothing() {
         let (tx, mut rx) = broadcast::channel::<Bytes>(8);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        assert!(resume_frame(&mut rx, test_capture(&tx, b"", 0, &calls))
-            .await
-            .is_none());
+        assert!(
+            resume_frame(&mut rx, test_capture(&tx, b"", 0, &calls), false)
+                .await
+                .is_none()
+        );
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
@@ -2360,8 +2942,8 @@ mod tests {
         let (tx, mut rx) = broadcast::channel::<Bytes>(64);
         tx.send(Bytes::from_static(b"before")).unwrap();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let frame = resync_frame(&mut rx, test_capture(&tx, b"snap", 4, &calls)).await;
-        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let frame = resync_frame(&mut rx, test_capture(&tx, b"snap", 4, &calls), false).await;
+        let v: serde_json::Value = serde_json::from_str(frame.json()).unwrap();
         assert_eq!(v["epoch"], 4);
         assert!(matches!(
             rx.try_recv(),
@@ -2386,11 +2968,26 @@ mod tests {
     fn credit_and_ack_frames_parse_and_the_window_is_clamped() {
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"credit","window":1048576}"#),
-            Ok(ClientFrame::Credit { window: 1_048_576 })
+            Ok(ClientFrame::Credit {
+                window: 1_048_576,
+                binary_snapshots: false
+            })
         ));
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"credit"}"#),
-            Ok(ClientFrame::Credit { window: 0 })
+            Ok(ClientFrame::Credit {
+                window: 0,
+                binary_snapshots: false
+            })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(
+                r#"{"type":"credit","window":1048576,"binary_snapshots":true}"#
+            ),
+            Ok(ClientFrame::Credit {
+                binary_snapshots: true,
+                ..
+            })
         ));
         assert!(matches!(
             serde_json::from_str::<ClientFrame>(r#"{"type":"ack","bytes":65536}"#),
@@ -2695,5 +3292,381 @@ mod tests {
         g.superseded();
         assert!(g.held.is_empty() && !g.skipped && g.stall_deadline().is_none());
         assert_eq!(g.ack(64 * KB, now), CreditStep::Idle);
+    }
+
+    /// Attach-with-grid (perf 01 F1): `scrollback`/`resync` carry the client's
+    /// grid optionally; old clients (no grid) still parse. The requested depth
+    /// (perf 01 F4) is what later server-initiated snapshots reuse: `0` = the
+    /// full retained depth, larger values are clamped to it.
+    #[test]
+    fn scrollback_frame_carries_an_optional_grid_and_depth() {
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(
+                r#"{"type":"scrollback","lines":2000,"cols":132,"rows":40}"#
+            ),
+            Ok(ClientFrame::Scrollback {
+                lines: 2000,
+                cols: Some(132),
+                rows: Some(40)
+            })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"scrollback","lines":10000}"#),
+            Ok(ClientFrame::Scrollback {
+                lines: 10000,
+                cols: None,
+                rows: None
+            })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientFrame>(
+                r#"{"type":"resync","lines":500,"cols":80,"rows":24}"#
+            ),
+            Ok(ClientFrame::Resync {
+                lines: 500,
+                cols: Some(80),
+                rows: Some(24)
+            })
+        ));
+        assert_eq!(requested_history(0), DEFAULT_ATTACH_HISTORY_LINES);
+        assert_eq!(requested_history(2000), 2000);
+        assert_eq!(requested_history(10_000), DEFAULT_ATTACH_HISTORY_LINES);
+    }
+}
+
+#[cfg(test)]
+mod input_queue_tests {
+    //! Perf 01 N7: the per-connection input queue never loses keystrokes. It
+    //! coalesces what queued behind a slow write and bounds the backlog by
+    //! BYTES with backpressure, where round 1 dropped every frame past 256.
+
+    use super::*;
+    use std::sync::Mutex;
+
+    type Writes = Arc<Mutex<Vec<(Vec<u8>, bool)>>>;
+    type Reverts = Arc<Mutex<Vec<Option<u64>>>>;
+    type Results = tokio::sync::mpsc::Receiver<std::result::Result<(), String>>;
+
+    /// A queue whose writer blocks until `gate` has a permit per write.
+    fn gated(gate: Arc<Semaphore>, fail: bool) -> (InputQueue, Results, Writes, Reverts) {
+        let writes: Writes = Arc::default();
+        let reverts: Reverts = Arc::default();
+        let (w, r) = (writes.clone(), reverts.clone());
+        let (q, res) = spawn_input_queue(
+            move |bytes: Vec<u8>, user: bool| {
+                let gate = gate.clone();
+                let w = w.clone();
+                async move {
+                    gate.acquire().await.unwrap().forget();
+                    w.lock().unwrap().push((bytes, user));
+                    if fail {
+                        Err("not live".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            move |prev| r.lock().unwrap().push(prev),
+        );
+        (q, res, writes, reverts)
+    }
+
+    /// What the socket loop does per frame: queue it, or park it and wait.
+    async fn push(q: &InputQueue, bytes: Vec<u8>, user: bool, prev: Option<u64>) {
+        if let Err(job) = q.try_push(bytes, user, prev) {
+            InputQueue::reserve(q.budget.clone(), job.cost).await;
+            q.send(job);
+        }
+    }
+
+    async fn settle(writes: &Writes, total: usize) {
+        for _ in 0..500 {
+            if writes
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|w| w.0.len())
+                .sum::<usize>()
+                >= total
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("writer never delivered {total} bytes");
+    }
+
+    #[tokio::test]
+    async fn thousands_of_keystrokes_behind_a_stuck_write_are_all_delivered_in_order() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (q, _res, writes, _) = gated(gate.clone(), false);
+        // 5000 one-byte keystrokes while the child is not reading (the first
+        // write is stuck): 20× the old 256-frame cap. None may be dropped.
+        let expected: Vec<u8> = (0..5000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        for b in &expected {
+            push(&q, vec![*b], true, None).await;
+        }
+        gate.add_permits(Semaphore::MAX_PERMITS / 2);
+        settle(&writes, expected.len()).await;
+        let writes = writes.lock().unwrap();
+        let got: Vec<u8> = writes.iter().flat_map(|w| w.0.clone()).collect();
+        assert_eq!(got, expected, "every keystroke arrives, in order");
+        // Coalesced: the stuck first write, then the backlog in few chunks.
+        assert!(
+            writes.len() <= 1 + 5000usize.div_ceil(INPUT_COALESCE_BYTES) + 1,
+            "the backlog is coalesced, got {} writes",
+            writes.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_byte_budget_waits_instead_of_dropping() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (q, _res, writes, _) = gated(gate.clone(), false);
+        let chunk = INPUT_BUDGET_BYTES / 4;
+        // Four quarter-budget pastes fill the budget (the first sits in the
+        // stuck write and still holds its share).
+        for i in 0..4u8 {
+            assert!(q.try_push(vec![i; chunk], true, None).is_ok());
+        }
+        let Err(job) = q.try_push(vec![9; chunk], true, None) else {
+            panic!("a fifth quarter must not fit the byte budget");
+        };
+        // …so it waits, it is not dropped:
+        let wait = InputQueue::reserve(q.budget.clone(), job.cost);
+        tokio::pin!(wait);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut wait)
+                .await
+                .is_err(),
+            "the parked frame waits while the budget is full"
+        );
+        // The child reads: budget frees, the parked frame goes through.
+        gate.add_permits(Semaphore::MAX_PERMITS / 2);
+        tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .expect("budget frees once the writer drains");
+        q.send(job);
+        settle(&writes, 5 * chunk).await;
+        let got: Vec<u8> = writes
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|w| w.0.clone())
+            .collect();
+        assert_eq!(got.len(), 5 * chunk);
+        assert_eq!(got[4 * chunk], 9, "the waited frame lands last, in order");
+    }
+
+    /// Perf3 R6: with the input budget full behind a child that is not
+    /// reading its stdin, the loop must keep reading client frames. A paste
+    /// interleaved with `ack`s still frees credit, so held output flows, and
+    /// once the child reads every deferred byte arrives, in order.
+    ///
+    /// This drives the socket loop's own input/read arms (`DeferredInput`
+    /// guard + reserve/release) over a scripted client; before the fix the
+    /// read arm was disabled while a frame was parked, so the `ack` behind
+    /// the paste was never read and this timed out.
+    #[tokio::test]
+    async fn a_full_input_budget_still_reads_acks_so_output_keeps_flowing() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (q, _res, writes, _) = gated(gate.clone(), false);
+        let now = tokio::time::Instant::now();
+        let window = CREDIT_WINDOW_MIN;
+        let mut credit = CreditGate::new(window);
+        // Output producer: two windows of output, the second held for credit.
+        let mut delivered = 0usize;
+        for chunk in [vec![b'o'; window as usize], vec![b'p'; window as usize]] {
+            if let CreditStep::Send(b) = credit.push(chunk, now) {
+                delivered += b.len();
+            }
+        }
+        assert_eq!(delivered, window as usize, "one window out, one held");
+
+        // Client: six quarter-budget paste frames (four fill the budget, two
+        // are deferred), then the ack for the first window, a probe-like
+        // no-op resize, and one more keystroke.
+        let quarter = INPUT_BUDGET_BYTES / 4;
+        let mut expected: Vec<u8> = Vec::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        for i in 0..6u8 {
+            let data = vec![b'a' + i; quarter];
+            expected.extend_from_slice(&data);
+            let frame = serde_json::json!({"type": "input", "data": B64.encode(&data)});
+            tx.send(frame.to_string()).unwrap();
+        }
+        tx.send(format!(r#"{{"type":"ack","bytes":{window}}}"#))
+            .unwrap();
+        tx.send(r#"{"type":"resize","cols":80,"rows":24}"#.into())
+            .unwrap();
+        tx.send(serde_json::json!({"type": "input", "data": B64.encode(b"z")}).to_string())
+            .unwrap();
+        expected.push(b'z');
+        drop(tx);
+
+        // The loop's two input-related arms, as in `serve_terminal`.
+        let mut deferred = DeferredInput::default();
+        let (mut acks, mut resizes) = (0, 0);
+        let run = async {
+            loop {
+                tokio::select! {
+                    _ = InputQueue::reserve(q.budget.clone(), deferred.front_cost().unwrap_or(1)),
+                        if deferred.front_cost().is_some() => deferred.release(&q),
+                    msg = rx.recv(), if deferred.reading() => {
+                        let Some(text) = msg else { break };
+                        match serde_json::from_str::<ClientFrame>(&text).unwrap() {
+                            ClientFrame::Input { data, user } => {
+                                let bytes = B64.decode(data.as_bytes()).unwrap();
+                                deferred.push(&q, bytes, user, None);
+                            }
+                            ClientFrame::Ack { bytes } => {
+                                acks += 1;
+                                if let CreditStep::Send(b) = credit.ack(bytes, now) {
+                                    delivered += b.len();
+                                }
+                            }
+                            ClientFrame::Resize { .. } => resizes += 1,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("client frames behind a full input budget are still read");
+        assert_eq!((acks, resizes), (1, 1), "ack and resize processed");
+        assert_eq!(
+            delivered,
+            2 * window as usize,
+            "the ack freed credit: the held window went out"
+        );
+        assert!(
+            deferred.front_cost().is_some(),
+            "input past the budget is deferred, not dropped"
+        );
+        assert!(
+            writes.lock().unwrap().is_empty(),
+            "the child has not read yet"
+        );
+
+        // The child starts reading stdin: every deferred frame drains, in order.
+        gate.add_permits(Semaphore::MAX_PERMITS / 2);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(cost) = deferred.front_cost() {
+                InputQueue::reserve(q.budget.clone(), cost).await;
+                deferred.release(&q);
+            }
+        })
+        .await
+        .expect("deferred input drains once the child reads");
+        settle(&writes, expected.len()).await;
+        let got: Vec<u8> = writes
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|w| w.0.clone())
+            .collect();
+        assert_eq!(got.len(), expected.len(), "nothing dropped");
+        assert!(got == expected, "all input arrives in order");
+        assert_eq!(deferred.bytes, 0);
+    }
+
+    /// The deferral itself is bounded: past INPUT_DEFER_BYTES the loop stops
+    /// reading (TCP backpressure) rather than buffering without limit.
+    #[tokio::test]
+    async fn deferred_input_is_bounded_and_keeps_order() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (q, _res, _writes, _) = gated(gate, false);
+        let mut d = DeferredInput::default();
+        d.push(&q, vec![0; INPUT_BUDGET_BYTES], true, None); // takes the whole budget
+        assert!(d.front_cost().is_none() && d.reading());
+        // Everything behind a deferred frame is deferred too: order is kept.
+        d.push(&q, vec![1; INPUT_DEFER_BYTES - 1], true, None);
+        d.push(&q, vec![2], true, None);
+        assert_eq!(d.jobs.len(), 2);
+        assert!(!d.reading(), "the deferral bound pauses reading");
+    }
+
+    #[tokio::test]
+    async fn emulator_replies_never_coalesce_with_typing_and_a_failed_typing_write_reverts() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (q, mut res, writes, reverts) = gated(gate.clone(), true);
+        push(&q, b"x".to_vec(), true, Some(7)).await; // stuck write
+                                                      // Let the writer pick it up and block in the write.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        push(&q, b"a".to_vec(), true, Some(7)).await;
+        push(&q, b"b".to_vec(), true, Some(7)).await;
+        push(&q, b"\x1b[1;1R".to_vec(), false, None).await; // DSR reply
+        push(&q, b"c".to_vec(), true, Some(7)).await;
+        gate.add_permits(100);
+        settle(&writes, 3 + 6 + 1).await;
+        let kinds: Vec<(Vec<u8>, bool)> = writes.lock().unwrap().clone();
+        assert_eq!(
+            kinds,
+            vec![
+                (b"x".to_vec(), true),
+                (b"ab".to_vec(), true),
+                (b"\x1b[1;1R".to_vec(), false),
+                (b"c".to_vec(), true),
+            ]
+        );
+        for _ in 0..4 {
+            assert!(res.recv().await.unwrap().is_err());
+        }
+        // Only the three failed TYPING writes revert the size claim.
+        assert_eq!(*reverts.lock().unwrap(), vec![Some(7); 3]);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_encoding_tests {
+    //! Perf 01 N3: snapshots as a header + ONE binary frame for clients that
+    //! offered `binary_snapshots`; the base64-in-JSON form otherwise.
+
+    use super::*;
+
+    #[test]
+    fn a_binary_capable_client_gets_raw_bytes_behind_a_header() {
+        let data = b"\x1b[2J\x1b[Hhello \xff\x00 world".to_vec();
+        let Snap::Binary { data: raw, epoch } = Snap::build(data.clone(), 7, true) else {
+            panic!("binary form expected");
+        };
+        assert_eq!(&raw[..], &data[..], "bytes travel unencoded");
+        assert_eq!(epoch, 7);
+        let v: serde_json::Value = serde_json::from_str(&Snap::header(raw.len(), epoch)).unwrap();
+        assert_eq!(v["type"], "scrollback");
+        assert_eq!(v["binary"], true);
+        assert_eq!(v["len"], data.len());
+        assert_eq!(v["epoch"], 7);
+        assert!(v.get("data").is_none(), "no base64 copy in the header");
+    }
+
+    #[test]
+    fn older_clients_and_empty_snapshots_keep_the_json_form() {
+        let v: serde_json::Value =
+            serde_json::from_str(Snap::build(b"abc".to_vec(), 2, false).json()).unwrap();
+        assert_eq!(B64.decode(v["data"].as_str().unwrap()).unwrap(), b"abc");
+        // An empty snapshot (no live PTY) is ignored by clients: no payload frame.
+        let v: serde_json::Value =
+            serde_json::from_str(Snap::build(Vec::new(), 0, true).json()).unwrap();
+        assert_eq!(v["data"], "");
+    }
+
+    /// The point of N3: a 4000-row snapshot costs its own size on the wire,
+    /// not +33 % of base64 inside a JSON string the client must parse.
+    #[test]
+    fn the_binary_form_saves_the_base64_overhead() {
+        let data = vec![b'x'; 1_500_000];
+        let json = Snap::build(data.clone(), 1, false).json().len();
+        let Snap::Binary { data: raw, epoch } = Snap::build(data, 1, true) else {
+            panic!("binary form expected");
+        };
+        let binary = raw.len() + Snap::header(raw.len(), epoch).len();
+        let ratio = json as f64 / binary as f64;
+        assert!(
+            ratio > 1.33,
+            "base64-in-JSON is {ratio:.3}× the binary form (binary {binary} B, json {json} B)"
+        );
     }
 }

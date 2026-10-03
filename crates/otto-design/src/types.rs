@@ -365,6 +365,16 @@ pub struct UpdateArtifactReq {
     pub thumb_b64: Option<String>,
 }
 
+/// `POST /design/artifacts/{id}/versions/{v}/restore`.
+#[derive(Debug, Default, Deserialize)]
+pub struct RestoreReq {
+    /// Optimistic concurrency, as on `PUT …/content` (409 on mismatch).
+    #[serde(default)]
+    pub base_version: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 /// `PUT /design/artifacts/{id}/content`.
 #[derive(Debug, Default, Deserialize)]
 pub struct ContentPutReq {
@@ -568,4 +578,57 @@ pub struct PruneReport {
     pub versions: Vec<Id>,
     /// Blobs no longer referenced by any version/thumbnail (removed on apply).
     pub blobs: Vec<String>,
+    /// Bytes those blobs hold (logical size): freed on apply, or what an
+    /// apply WOULD free on a dry run.
+    #[serde(default)]
+    pub reclaimable_bytes: u64,
+    /// Blobs an apply frees (dry run: would free).
+    #[serde(default)]
+    pub reclaimable_blobs: u64,
+}
+
+/// What an auto-tidy pass would reclaim right now (`GET /design/admin/storage`).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReclaimEstimate {
+    pub versions: u64,
+    pub blobs: u64,
+    pub bytes: u64,
+}
+
+/// `PUT /design/admin/auto-tidy`.
+#[derive(Debug, Deserialize)]
+pub struct AutoTidyReq {
+    pub enabled: bool,
+}
+
+/// One scheduled retention pass (see `retention::spawn_scheduler`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduledPruneRun {
+    pub at: String,
+    pub versions_removed: usize,
+    pub blobs_removed: usize,
+}
+
+/// `GET /design/admin/storage` — the Design Hall storage gauge.
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageReport {
+    /// Files / bytes on disk under `<data>/design/blobs` (after dedupe).
+    pub blob_count: u64,
+    pub blob_bytes: u64,
+    /// Version rows and the bytes they reference (before dedupe).
+    pub version_count: i64,
+    pub version_bytes: i64,
+    /// Whether the daily auto-tidy pass is on (the toggle, unless the
+    /// `OTTO_DESIGN_AUTO_PRUNE` env override forces it).
+    pub auto_prune: bool,
+    /// The persisted Settings toggle (default false).
+    pub auto_tidy: bool,
+    /// `OTTO_DESIGN_AUTO_PRUNE` override, when set (`false` = hard off).
+    pub auto_tidy_forced: Option<bool>,
+    /// Only autosaves older than this are candidates.
+    pub min_age_secs: i64,
+    /// What a pass would reclaim right now (dry run).
+    pub reclaimable: ReclaimEstimate,
+    /// The last scheduled pass since boot, if any.
+    pub last_prune: Option<ScheduledPruneRun>,
 }

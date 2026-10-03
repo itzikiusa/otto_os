@@ -198,17 +198,7 @@ impl BrowserEngine for FallbackEngine {
 
     async fn query(&self, url: &str, selector: &str) -> Result<Vec<MatchedNode>, EngineError> {
         let html = self.raw_html(url).await?;
-        let document = Html::parse_document(&html);
-        let sel = Selector::parse(selector)
-            .map_err(|e| EngineError::Nav(format!("bad selector {selector:?}: {e:?}")))?;
-        Ok(document
-            .select(&sel)
-            .map(|el| MatchedNode {
-                selector: selector.to_string(),
-                outer_html: el.html(),
-                text: el.text().collect::<Vec<_>>().join(" "),
-            })
-            .collect())
+        select_capped_blocking(html, selector).await
     }
 
     fn name(&self) -> &'static str {
@@ -274,7 +264,18 @@ pub struct BrowserService {
     /// host → (consecutive failures, time of the last one).
     denylist: Mutex<HashMap<String, (u32, Instant)>>,
     denylist_window: Duration,
+    /// Short-lived rendered-page cache + in-flight dedupe (perf F1) — see
+    /// [`Self::page_shared`]. Shared so it outlives an idle-stopped engine
+    /// (see [`SharedPageCache`]).
+    cache: Arc<PageCache>,
 }
+
+/// A rendered-page cache that can be handed to successive
+/// [`BrowserService`]s: the daemon stops an idle Lightpanda sidecar by
+/// dropping its service (perf N6) and the next one started keeps the pages
+/// rendered before.
+#[derive(Clone, Default)]
+pub struct SharedPageCache(Arc<PageCache>);
 
 impl BrowserService {
     pub fn with_engines(engine: Arc<dyn BrowserEngine>, fallback: FallbackEngine) -> Self {
@@ -283,7 +284,73 @@ impl BrowserService {
             fallback,
             denylist: Mutex::new(HashMap::new()),
             denylist_window: DENYLIST_WINDOW,
+            cache: Arc::new(PageCache::default()),
         }
+    }
+
+    /// Use `cache` (shared with earlier/later services) as this service's
+    /// rendered-page cache.
+    pub fn with_page_cache(mut self, cache: &SharedPageCache) -> Self {
+        self.cache = cache.0.clone();
+        self
+    }
+
+    /// Whether the primary engine owns a sidecar process (Lightpanda) — the
+    /// only kind worth stopping when idle.
+    pub fn has_sidecar(&self) -> bool {
+        self.engine.owns_process()
+    }
+
+    /// [`Self::page`] behind a short-lived per-`(scope, url)` cache that also
+    /// shares an in-flight render: the agent flow `browser_navigate` →
+    /// `browser_page` → `browser_query` → `browser_summarize` used to render
+    /// the same URL up to four times (each a fresh CDP connection, browser
+    /// context and up-to-30 s navigation). Concurrent callers for one key wait
+    /// on the first caller's render instead of starting their own.
+    ///
+    /// Every render runs in its own disposed, anonymous browser context, so a
+    /// URL-keyed entry can't carry one caller's cookies to another; `scope`
+    /// (the workspace id) keys it per workspace anyway. `fresh` skips a cached
+    /// entry (an explicit reload) but still joins a render that started after
+    /// the call did. Errors are never cached.
+    ///
+    /// Caller must netguard-check `url` first — see crate docs.
+    pub async fn page_shared(
+        &self,
+        scope: &str,
+        url: &str,
+        fresh: bool,
+    ) -> Result<Arc<Page>, EngineError> {
+        let key = cache_key(scope, url);
+        let asked_at = Instant::now();
+        if !fresh {
+            if let Some(page) = self.cache.get(&key, None) {
+                return Ok(page);
+            }
+        }
+        let gate = self.cache.gate(&key);
+        let result = {
+            let _turn = gate.lock().await;
+            // Someone else rendered while we waited: a plain read takes any
+            // live entry, a `fresh` one only a render newer than the request.
+            let newer_than = fresh.then_some(asked_at);
+            match self.cache.get(&key, newer_than) {
+                Some(page) => Ok(page),
+                None => self.page(url).await.map(|page| {
+                    let page = Arc::new(page);
+                    self.cache.put(key.clone(), page.clone());
+                    page
+                }),
+            }
+        };
+        self.cache.release_gate(&key, gate);
+        result
+    }
+
+    /// Drop every cached page whose URL is on `host` (a `login()` changes
+    /// what that site serves), across all scopes.
+    pub fn invalidate_host(&self, host: &str) {
+        self.cache.invalidate_host(host);
     }
 
     /// Locate + start a lightpanda sidecar and use it as the primary engine;
@@ -351,39 +418,36 @@ impl BrowserService {
     /// plain-fetch when the primary engine is unavailable (or the host is
     /// denylisted) — same policy as [`Self::page`], sharing its denylist.
     ///
-    /// Results are capped ([`cap_matches`]) here — the ONE call site both
-    /// engines funnel through — rather than in each `BrowserEngine`
-    /// implementor, so neither backend can bypass the bound: an unqualified
-    /// selector (`div`, `*`) against a large page has no other limit on match
-    /// count or per-match `outer_html` size, and mapping every match to its
-    /// full subtree HTML is O(n²) memory against page size.
+    /// Uncached; [`Self::query_shared`] is the cached variant routes use.
     ///
     /// Caller must netguard-check `url` first — see crate docs.
     pub async fn query(&self, url: &str, selector: &str) -> Result<Vec<MatchedNode>, EngineError> {
-        let host = host_of(url);
-        if self.is_denylisted(&host) || !self.engine.is_usable() {
-            return self.fallback.query(url, selector).await.map(cap_matches);
-        }
-        let mut attempt = self.engine.query(url, selector).await;
-        if let Err(EngineError::Unavailable(_)) = attempt {
-            tokio::time::sleep(UNAVAILABLE_RETRY_DELAY).await;
-            attempt = self.engine.query(url, selector).await;
-        }
-        match attempt {
-            Ok(matches) => {
-                self.clear_failures(&host);
-                Ok(cap_matches(matches))
-            }
-            Err(EngineError::Unavailable(why)) => {
-                tracing::warn!(
-                    "browser: {} unavailable for {host} ({why}); degrading query to plain fetch",
-                    self.engine.name()
-                );
-                self.record_failure(&host);
-                self.fallback.query(url, selector).await.map(cap_matches)
-            }
-            Err(e) => Err(e),
-        }
+        parse_selector(selector)?;
+        let page = self.page(url).await?;
+        select_capped_blocking(page.html, selector).await
+    }
+
+    /// Run a CSS-selector query against the (cached, see [`Self::page_shared`])
+    /// settled page instead of navigating again: both engines' `query` was
+    /// "render the page, parse its HTML, select" — exactly what the page cache
+    /// already holds. The selector is validated BEFORE any render, and parse +
+    /// select + cap run as one bounded pass on the blocking pool
+    /// ([`select_capped`]).
+    ///
+    /// Caller must netguard-check `url` first — see crate docs.
+    pub async fn query_shared(
+        &self,
+        scope: &str,
+        url: &str,
+        selector: &str,
+        fresh: bool,
+    ) -> Result<Vec<MatchedNode>, EngineError> {
+        parse_selector(selector)?;
+        let page = self.page_shared(scope, url, fresh).await?;
+        let selector = selector.to_string();
+        tokio::task::spawn_blocking(move || select_capped(&page.html, &selector))
+            .await
+            .map_err(|e| EngineError::Nav(format!("selector query failed: {e}")))?
     }
 
     /// Fill and submit a login form at `url` with `username`/`password` and
@@ -401,7 +465,10 @@ impl BrowserService {
         username: &str,
         password: &str,
     ) -> Result<bool, EngineError> {
-        self.engine.login(url, username, password).await
+        let result = self.engine.login(url, username, password).await;
+        // Whatever happened, the site may now serve different content.
+        self.invalidate_host(&host_of(url));
+        result
     }
 
     /// Stable identifier of the primary engine currently in use (`"lightpanda"`
@@ -468,6 +535,10 @@ impl BrowserEngine for SidecarBackedEngine {
     fn is_usable(&self) -> bool {
         self.engine.is_usable()
     }
+
+    fn owns_process(&self) -> bool {
+        true
+    }
 }
 
 fn host_of(url: &str) -> String {
@@ -496,32 +567,281 @@ const QUERY_MAX_TOTAL_BYTES: usize = 1024 * 1024;
 /// was cut rather than genuinely ending there.
 const TRUNCATION_MARKER: &str = "…[truncated]";
 
-/// Bound a raw engine [`MatchedNode`] list: at most [`QUERY_MAX_MATCHES`]
-/// entries, each `outer_html` truncated to [`QUERY_MAX_OUTER_HTML_BYTES`]
-/// (at a char boundary, with [`TRUNCATION_MARKER`] appended), and collection
-/// stops as soon as total bytes gathered so far exceed
-/// [`QUERY_MAX_TOTAL_BYTES`] — applied at the single call site both engines
-/// funnel through ([`BrowserService::query`]) so neither backend can bypass
-/// it.
-fn cap_matches(matches: Vec<MatchedNode>) -> Vec<MatchedNode> {
+fn parse_selector(selector: &str) -> Result<Selector, EngineError> {
+    Selector::parse(selector)
+        .map_err(|e| EngineError::Nav(format!("bad selector {selector:?}: {e:?}")))
+}
+
+/// [`select_capped`] on the blocking pool — a 2 MB parse plus a broad
+/// selector is tens of ms of CPU that must not run on a tokio worker.
+pub(crate) async fn select_capped_blocking(
+    html: String,
+    selector: &str,
+) -> Result<Vec<MatchedNode>, EngineError> {
+    let selector = selector.to_string();
+    tokio::task::spawn_blocking(move || select_capped(&html, &selector))
+        .await
+        .map_err(|e| EngineError::Nav(format!("selector query failed: {e}")))?
+}
+
+/// Parse `html`, run `selector`, and collect a BOUNDED match list in one pass
+/// (perf F7): at most [`QUERY_MAX_MATCHES`] entries, each `outer_html`
+/// serialized into a writer that stops at [`QUERY_MAX_OUTER_HTML_BYTES`]
+/// (char-boundary safe, [`TRUNCATION_MARKER`] appended), each `text` capped
+/// at the bytes left in the budget, and collection stops as soon as the
+/// running total passes [`QUERY_MAX_TOTAL_BYTES`]. Before this every match's
+/// full subtree HTML was built first and capped afterwards — `*` on a 2 MB
+/// page materialised every subtree (O(n²) memory against page size).
+pub fn select_capped(html: &str, selector: &str) -> Result<Vec<MatchedNode>, EngineError> {
+    let sel = parse_selector(selector)?;
+    let document = Html::parse_document(html);
     let mut out = Vec::new();
     let mut total = 0usize;
-    for mut m in matches.into_iter() {
+    for el in document.select(&sel) {
         if out.len() >= QUERY_MAX_MATCHES || total >= QUERY_MAX_TOTAL_BYTES {
             break;
         }
-        if m.outer_html.len() > QUERY_MAX_OUTER_HTML_BYTES {
-            let mut cut = QUERY_MAX_OUTER_HTML_BYTES;
-            while cut > 0 && !m.outer_html.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            m.outer_html.truncate(cut);
-            m.outer_html.push_str(TRUNCATION_MARKER);
+        let outer_html = bounded_outer_html(&el, QUERY_MAX_OUTER_HTML_BYTES);
+        let text = bounded_text(&el, QUERY_MAX_TOTAL_BYTES - total);
+        total += outer_html.len() + text.len();
+        out.push(MatchedNode {
+            selector: selector.to_string(),
+            outer_html,
+            text,
+        });
+    }
+    Ok(out)
+}
+
+/// An `io::Write` that refuses to grow past `cap` bytes — html5ever's
+/// serializer aborts on the first refused write, so a huge subtree is never
+/// serialized whole.
+struct CappedBuf {
+    buf: Vec<u8>,
+    cap: usize,
+    overflowed: bool,
+}
+
+impl std::io::Write for CappedBuf {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let room = self.cap.saturating_sub(self.buf.len());
+        if data.len() > room {
+            self.buf.extend_from_slice(&data[..room]);
+            self.overflowed = true;
+            return Err(std::io::Error::other("query byte budget spent"));
         }
-        total += m.outer_html.len() + m.text.len();
-        out.push(m);
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_outer_html(el: &scraper::ElementRef<'_>, cap: usize) -> String {
+    use html5ever::serialize::{serialize, SerializeOpts, TraversalScope};
+    let mut w = CappedBuf {
+        buf: Vec::new(),
+        cap,
+        overflowed: false,
+    };
+    let opts = SerializeOpts {
+        scripting_enabled: false,
+        traversal_scope: TraversalScope::IncludeNode,
+        create_missing_parent: false,
+    };
+    let _ = serialize(&mut w, el, opts);
+    let overflowed = w.overflowed;
+    let mut s = match String::from_utf8(w.buf) {
+        Ok(s) => s,
+        // The cut landed inside a multi-byte char: keep the valid prefix.
+        Err(e) => {
+            let valid = e.utf8_error().valid_up_to();
+            let mut bytes = e.into_bytes();
+            bytes.truncate(valid);
+            String::from_utf8(bytes).unwrap_or_default()
+        }
+    };
+    if overflowed {
+        s.push_str(TRUNCATION_MARKER);
+    }
+    s
+}
+
+/// The element's text nodes joined by single spaces, stopping at `cap` bytes
+/// (char-boundary safe).
+fn bounded_text(el: &scraper::ElementRef<'_>, cap: usize) -> String {
+    let mut out = String::new();
+    for (i, chunk) in el.text().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(chunk);
+        if out.len() >= cap {
+            truncate_at_char_boundary(&mut out, cap);
+            break;
+        }
     }
     out
+}
+
+fn truncate_at_char_boundary(s: &mut String, cap: usize) {
+    if s.len() <= cap {
+        return;
+    }
+    let mut cut = cap;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
+}
+
+// ---------------------------------------------------------------------------
+// Rendered-page cache (perf F1)
+// ---------------------------------------------------------------------------
+
+/// How long a rendered page is reused before the next call re-renders it.
+const PAGE_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Most pages held at once.
+const PAGE_CACHE_MAX_ENTRIES: usize = 32;
+/// Most bytes (html + markdown) held at once.
+const PAGE_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// `scope` + the URL without its fragment (a `#section` never changes what
+/// the server renders).
+fn cache_key(scope: &str, url: &str) -> String {
+    let normalized = match reqwest::Url::parse(url) {
+        Ok(mut u) => {
+            u.set_fragment(None);
+            u.to_string()
+        }
+        Err(_) => url.to_string(),
+    };
+    format!("{scope}\n{normalized}")
+}
+
+struct CachedPage {
+    page: Arc<Page>,
+    at: Instant,
+    bytes: usize,
+}
+
+#[derive(Default)]
+struct PageCacheInner {
+    entries: HashMap<String, CachedPage>,
+    bytes: usize,
+}
+
+/// Bounded TTL cache of rendered pages plus one async gate per key in flight
+/// (single-flight: the first caller renders, the rest wait and then read the
+/// cache). Bounded by [`PAGE_CACHE_MAX_ENTRIES`] / [`PAGE_CACHE_MAX_BYTES`],
+/// evicting the oldest entry first.
+#[derive(Default)]
+struct PageCache {
+    inner: Mutex<PageCacheInner>,
+    gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Test hook: overrides [`PAGE_CACHE_TTL`].
+    ttl: Option<Duration>,
+}
+
+impl PageCache {
+    fn ttl(&self) -> Duration {
+        self.ttl.unwrap_or(PAGE_CACHE_TTL)
+    }
+
+    /// A live entry for `key` — and, with `newer_than`, only one rendered
+    /// after that instant.
+    fn get(&self, key: &str, newer_than: Option<Instant>) -> Option<Arc<Page>> {
+        let mut inner = self.inner.lock().expect("page cache poisoned");
+        let ttl = self.ttl();
+        let hit = inner.entries.get(key).and_then(|e| {
+            let live = e.at.elapsed() < ttl;
+            let new_enough = newer_than.is_none_or(|t| e.at >= t);
+            (live && new_enough).then(|| e.page.clone())
+        });
+        if hit.is_none() {
+            if let Some(e) = inner.entries.get(key) {
+                if e.at.elapsed() >= ttl {
+                    let bytes = e.bytes;
+                    inner.entries.remove(key);
+                    inner.bytes -= bytes;
+                }
+            }
+        }
+        hit
+    }
+
+    fn put(&self, key: String, page: Arc<Page>) {
+        let bytes = page.html.len() + page.markdown.len();
+        if bytes > PAGE_CACHE_MAX_BYTES {
+            return;
+        }
+        let mut inner = self.inner.lock().expect("page cache poisoned");
+        if let Some(old) = inner.entries.remove(&key) {
+            inner.bytes -= old.bytes;
+        }
+        let ttl = self.ttl();
+        inner.entries.retain(|_, e| e.at.elapsed() < ttl);
+        inner.bytes = inner.entries.values().map(|e| e.bytes).sum();
+        while inner.entries.len() >= PAGE_CACHE_MAX_ENTRIES
+            || inner.bytes + bytes > PAGE_CACHE_MAX_BYTES
+        {
+            let Some(oldest) = inner
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some(e) = inner.entries.remove(&oldest) {
+                inner.bytes -= e.bytes;
+            }
+        }
+        inner.bytes += bytes;
+        inner.entries.insert(
+            key,
+            CachedPage {
+                page,
+                at: Instant::now(),
+                bytes,
+            },
+        );
+    }
+
+    fn invalidate_host(&self, host: &str) {
+        let mut inner = self.inner.lock().expect("page cache poisoned");
+        // Match the requested URL (in the key) as well as the final one: a
+        // page asked for on the login host that redirected elsewhere still
+        // reflects the pre-login session.
+        inner.entries.retain(|key, e| {
+            let requested = key.split_once('\n').map_or("", |(_, url)| url);
+            host_of(&e.page.url) != host && host_of(requested) != host
+        });
+        inner.bytes = inner.entries.values().map(|e| e.bytes).sum();
+    }
+
+    fn gate(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self.gates.lock().expect("page cache gates poisoned");
+        gates
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Drop the gate once nobody else holds or waits on it (map + this
+    /// caller = 2), so the map only ever holds keys with a render in flight.
+    fn release_gate(&self, key: &str, gate: Arc<tokio::sync::Mutex<()>>) {
+        let mut gates = self.gates.lock().expect("page cache gates poisoned");
+        if Arc::strong_count(&gate) <= 2 {
+            gates.remove(key);
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner.lock().unwrap().entries.len()
+    }
 }
 
 #[cfg(test)]
@@ -1025,63 +1345,249 @@ mod tests {
         assert_eq!(extract_title("<html></html>"), "");
     }
 
-    fn matched(outer_html: &str, text: &str) -> MatchedNode {
-        MatchedNode {
-            selector: "div".into(),
-            outer_html: outer_html.to_string(),
-            text: text.to_string(),
-        }
-    }
-
     #[test]
-    fn cap_matches_limits_match_count() {
-        let matches: Vec<_> = (0..(QUERY_MAX_MATCHES + 50))
-            .map(|i| matched(&format!("<div>{i}</div>"), "x"))
+    fn select_capped_limits_match_count() {
+        let html: String = (0..(QUERY_MAX_MATCHES + 50))
+            .map(|i| format!("<p>{i}</p>"))
             .collect();
-        let capped = cap_matches(matches);
+        let capped = select_capped(&html, "p").unwrap();
         assert_eq!(capped.len(), QUERY_MAX_MATCHES);
     }
 
     #[test]
-    fn cap_matches_truncates_large_outer_html() {
-        let huge = "x".repeat(QUERY_MAX_OUTER_HTML_BYTES * 4);
-        let capped = cap_matches(vec![matched(&huge, "text")]);
+    fn select_capped_truncates_large_outer_html() {
+        let html = format!("<div>{}</div>", "x".repeat(QUERY_MAX_OUTER_HTML_BYTES * 4));
+        let capped = select_capped(&html, "div").unwrap();
         assert_eq!(capped.len(), 1);
         assert!(capped[0].outer_html.len() <= QUERY_MAX_OUTER_HTML_BYTES + TRUNCATION_MARKER.len());
         assert!(capped[0].outer_html.ends_with(TRUNCATION_MARKER));
+        // Small matches come back whole, unmarked.
+        let small = select_capped("<b>hi</b>", "b").unwrap();
+        assert_eq!(small[0].outer_html, "<b>hi</b>");
+        assert_eq!(small[0].text, "hi");
     }
 
     #[test]
-    fn cap_matches_stops_once_total_bytes_exceeded() {
-        // Each match is well under the per-match cap but many of them
-        // together blow past the total-bytes cap — collection must stop
-        // early rather than accumulating an unbounded response.
+    fn select_capped_stops_once_total_bytes_exceeded() {
         let per_match = QUERY_MAX_OUTER_HTML_BYTES / 4;
-        let count = (QUERY_MAX_TOTAL_BYTES / per_match) * 3; // far more than needed
-        let matches: Vec<_> = (0..count)
-            .map(|_| matched(&"y".repeat(per_match), ""))
-            .collect();
-        let capped = cap_matches(matches);
-        assert!(capped.len() < count);
+        let count = (QUERY_MAX_TOTAL_BYTES / per_match) * 3;
+        let one = format!("<i>{}</i>", "y".repeat(per_match));
+        let html = one.repeat(count.min(QUERY_MAX_MATCHES * 2));
+        let capped = select_capped(&html, "i").unwrap();
         assert!(capped.len() <= QUERY_MAX_MATCHES);
         let total: usize = capped
             .iter()
             .map(|m| m.outer_html.len() + m.text.len())
             .sum();
-        // Stops as soon as the running total crosses the cap, so it may
-        // exceed it by up to one match's size, but must stay in that ballpark.
-        assert!(total < QUERY_MAX_TOTAL_BYTES + QUERY_MAX_OUTER_HTML_BYTES);
+        assert!(total < QUERY_MAX_TOTAL_BYTES + 2 * QUERY_MAX_OUTER_HTML_BYTES);
     }
 
     #[test]
-    fn cap_matches_char_boundary_safe_on_multibyte_content() {
-        // A multi-byte char sitting right at the truncation boundary must not
-        // panic (`String::truncate` panics on a non-char-boundary index).
-        let mut huge = "a".repeat(QUERY_MAX_OUTER_HTML_BYTES - 1);
-        huge.push('€'); // 3-byte UTF-8 char straddling the cap
-        huge.push_str(&"b".repeat(1024));
-        let capped = cap_matches(vec![matched(&huge, "")]);
+    fn select_capped_char_boundary_safe_on_multibyte_content() {
+        let mut body = "a".repeat(QUERY_MAX_OUTER_HTML_BYTES - 6);
+        body.push_str(&"€".repeat(2048));
+        let html = format!("<div>{body}</div>");
+        let capped = select_capped(&html, "div").unwrap();
         assert_eq!(capped.len(), 1);
         assert!(capped[0].outer_html.ends_with(TRUNCATION_MARKER));
+    }
+
+    /// Perf guard (F7/F11): `*` on a ~2 MB deeply nested page — every element
+    /// is an ancestor of most of the page — stays inside the byte budget
+    /// instead of materialising every subtree.
+    #[test]
+    fn select_capped_star_on_a_big_nested_page_stays_in_budget() {
+        let depth = 2000;
+        let mut html = String::from("<html><body>");
+        for _ in 0..depth {
+            html.push_str("<div>");
+        }
+        html.push_str(&"z".repeat(PAGE_BYTE_CAP - 30_000));
+        for _ in 0..depth {
+            html.push_str("</div>");
+        }
+        html.push_str("</body></html>");
+        let capped = select_capped(&html, "*").unwrap();
+        let produced: usize = capped
+            .iter()
+            .map(|m| m.outer_html.len() + m.text.len())
+            .sum();
+        assert!(
+            produced < QUERY_MAX_TOTAL_BYTES + 2 * QUERY_MAX_OUTER_HTML_BYTES,
+            "produced {produced} bytes"
+        );
+        assert!(capped
+            .iter()
+            .all(|m| m.outer_html.len() <= QUERY_MAX_OUTER_HTML_BYTES + TRUNCATION_MARKER.len()));
+    }
+
+    /// Counts renders; returns a page with a `<p id=x>` in it.
+    struct Counting(Arc<std::sync::atomic::AtomicU32>, Duration);
+
+    #[async_trait::async_trait]
+    impl BrowserEngine for Counting {
+        async fn fetch_page(&self, url: &str) -> Result<Page, EngineError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(self.1).await;
+            Ok(Page {
+                url: url.into(),
+                title: "T".into(),
+                html: "<p id=\"x\">hello</p>".into(),
+                markdown: "hello".into(),
+                degraded: false,
+                engine: "mock".into(),
+            })
+        }
+        async fn query(&self, _: &str, _: &str) -> Result<Vec<MatchedNode>, EngineError> {
+            unreachable!("BrowserService queries the cached page, never engine.query")
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    fn counting_svc(delay: Duration) -> (Arc<std::sync::atomic::AtomicU32>, BrowserService) {
+        let n = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let svc = BrowserService::with_engines(
+            Arc::new(Counting(n.clone(), delay)),
+            FallbackEngine::from_static("<p>fb</p>"),
+        );
+        (n, svc)
+    }
+
+    /// Perf guard (F1/F11): navigate + page + query + summarize on one URL
+    /// render it exactly once; a `#fragment` is the same page.
+    #[tokio::test]
+    async fn page_shared_renders_a_url_once_and_query_reuses_it() {
+        let (n, svc) = counting_svc(Duration::ZERO);
+        let a = svc
+            .page_shared("ws1", "https://e.com/a", false)
+            .await
+            .unwrap();
+        let b = svc
+            .page_shared("ws1", "https://e.com/a#top", false)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+        let m = svc
+            .query_shared("ws1", "https://e.com/a", "#x", false)
+            .await
+            .unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].text, "hello");
+        assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Another workspace, a fresh reload, and a bad selector.
+        svc.page_shared("ws2", "https://e.com/a", false)
+            .await
+            .unwrap();
+        assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 2);
+        svc.page_shared("ws1", "https://e.com/a", true)
+            .await
+            .unwrap();
+        assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert!(svc
+            .query_shared("ws1", "https://e.com/new", "div[", false)
+            .await
+            .is_err());
+        assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn concurrent_page_shared_calls_share_one_render() {
+        let (n, svc) = counting_svc(Duration::from_millis(80));
+        let svc = Arc::new(svc);
+        let mut joins = Vec::new();
+        for _ in 0..5 {
+            let svc = svc.clone();
+            joins.push(tokio::spawn(async move {
+                svc.page_shared("ws", "https://e.com/x", false)
+                    .await
+                    .unwrap()
+            }));
+        }
+        for j in joins {
+            j.await.unwrap();
+        }
+        assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(svc.cache.gates.lock().unwrap().is_empty(), "gates released");
+    }
+
+    #[tokio::test]
+    async fn page_cache_expires_and_login_invalidates_the_host() {
+        let (n, mut svc) = counting_svc(Duration::ZERO);
+        Arc::get_mut(&mut svc.cache).unwrap().ttl = Some(Duration::from_millis(30));
+        svc.page_shared("ws", "https://e.com/a", false)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        svc.page_shared("ws", "https://e.com/a", false)
+            .await
+            .unwrap();
+        assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 2);
+        Arc::get_mut(&mut svc.cache).unwrap().ttl = None;
+        svc.page_shared("ws", "https://other.com/", false)
+            .await
+            .unwrap();
+        assert_eq!(svc.cache.len(), 2);
+        let _ = svc.login("https://e.com/login", "u", "p").await;
+        assert_eq!(svc.cache.len(), 1, "only e.com's entries dropped");
+    }
+
+    #[test]
+    fn page_cache_is_bounded_by_entry_count() {
+        let cache = PageCache::default();
+        for i in 0..(PAGE_CACHE_MAX_ENTRIES + 10) {
+            cache.put(
+                format!("k{i}"),
+                Arc::new(Page {
+                    url: format!("https://e.com/{i}"),
+                    title: String::new(),
+                    html: "x".into(),
+                    markdown: String::new(),
+                    degraded: false,
+                    engine: "mock".into(),
+                }),
+            );
+        }
+        assert_eq!(cache.len(), PAGE_CACHE_MAX_ENTRIES);
+        assert!(cache.get("k0", None).is_none(), "oldest evicted first");
+    }
+
+    /// N7 (low): a login invalidates pages REQUESTED on the host even when
+    /// they redirected elsewhere; perf N6: a page cache handed to a new
+    /// service (after an idle engine stop) keeps its pages.
+    #[tokio::test]
+    async fn login_drops_redirected_pages_and_shared_cache_outlives_a_service() {
+        let cache = PageCache::default();
+        let page = Page {
+            url: "https://elsewhere.com/landing".into(),
+            title: String::new(),
+            html: "x".into(),
+            markdown: String::new(),
+            degraded: false,
+            engine: "mock".into(),
+        };
+        cache.put(cache_key("ws", "https://e.com/start"), Arc::new(page));
+        cache.invalidate_host("e.com");
+        assert_eq!(cache.len(), 0, "requested-host entry dropped");
+
+        let shared = SharedPageCache::default();
+        let (n, svc) = counting_svc(Duration::ZERO);
+        let svc = svc.with_page_cache(&shared);
+        svc.page_shared("ws", "https://e.com/a", false)
+            .await
+            .unwrap();
+        drop(svc);
+        let (_, next) = counting_svc(Duration::ZERO);
+        let next = next.with_page_cache(&shared);
+        next.page_shared("ws", "https://e.com/a", false)
+            .await
+            .unwrap();
+        assert_eq!(
+            n.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "served from the shared cache"
+        );
+        assert!(!next.has_sidecar());
     }
 }

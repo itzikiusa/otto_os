@@ -35,14 +35,15 @@ mod types;
 /// view filter (see `UsageEngine::summary(_, otto_only)`).
 pub const EXTERNAL_WORKSPACE: &str = "external";
 
-pub use budget_dedup::{BudgetDedup, BudgetSignal};
+pub use budget_dedup::{BudgetCheckStamp, BudgetDedup, BudgetSignal};
 pub use clickhouse::ClickHouse;
-pub use engine::{UsageEngine, UsageScope};
+pub use engine::{ReportOptions, UsageEngine, UsageScope};
 pub use metrics::{Metric, MetricsSampler};
 pub use pricing::{estimate_cost, is_priced, PRICED_AS_OF};
 pub use tailer::{
-    merge_max, parse_claude_line, parse_codex_line, parse_codex_session_meta, ClaudeLine,
-    CodexCounterStore, CodexMeta, CursorStore, HeldResponse, ParsedUsage, ResponseFolder, SeenKeys,
+    merge_max, parse_claude_line, parse_codex_line, parse_codex_session_meta, seen_key_hash,
+    ClaudeLine, CodexCounterStore, CodexMeta, CursorStore, HeldResponse, ParsedUsage,
+    ResponseFolder, SeenKeys,
 };
 pub use types::{
     AttributionDimension, AttributionRow, CcusageCheck, CcusageCheckReq, CcusageDayRow,

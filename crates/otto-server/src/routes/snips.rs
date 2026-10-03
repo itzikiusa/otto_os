@@ -16,18 +16,21 @@
 //! *would* be on the clipboard are mirrored to `snips/clipboard-last.png`,
 //! which doubles as an observability artifact and the E2E assertion target.
 //!
-//! Uploads are base64 JSON like `product_media` (no multipart dep), PNG-only
-//! (magic-byte sniff), 25 MB raw / 40 MB body. Ids are daemon-generated ULIDs
+//! Uploads are either a raw `image/png` body (the editor's path: no base64
+//! inflation, no JSON parse) or the legacy base64 JSON like `product_media`
+//! (no multipart dep); PNG-only (magic-byte sniff), 25 MB raw / 40 MB body.
+//! Base64 decoding runs on the blocking pool, never an async worker. Ids are daemon-generated ULIDs
 //! and every path param is re-validated as plain ASCII alphanumerics before
 //! touching the filesystem, so traversal is structurally impossible.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path as AxPath, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -53,6 +56,12 @@ const RETENTION_DAYS: i64 = 14;
 /// Serialized single-flight for the interactive capture: two crosshair UIs at
 /// once is never what the user meant.
 static CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Unix seconds of the last retention sweep: a full directory walk + one
+/// sidecar read per snip ran on EVERY create; once an hour is plenty for a
+/// 14-day retention (S5).
+static LAST_PRUNE: AtomicI64 = AtomicI64::new(0);
+const PRUNE_EVERY_SECS: i64 = 3600;
 
 pub fn snips_routes() -> Router<ServerCtx> {
     Router::new()
@@ -179,6 +188,11 @@ fn decode_png(data_b64: &str) -> Result<Vec<u8>, Error> {
     let bytes = B64
         .decode(data_b64.trim())
         .map_err(|e| Error::Invalid(format!("invalid base64: {e}")))?;
+    validate_png(bytes)
+}
+
+/// Cap + magic-byte check only (header sniff — the image is never decoded).
+fn validate_png(bytes: Vec<u8>) -> Result<Vec<u8>, Error> {
     if bytes.len() > MAX_RAW_BYTES {
         return Err(Error::Invalid(format!(
             "image exceeds {} MB cap",
@@ -189,6 +203,30 @@ fn decode_png(data_b64: &str) -> Result<Vec<u8>, Error> {
         return Err(Error::Invalid("payload is not a PNG image".into()));
     }
     Ok(bytes)
+}
+
+/// The PNG bytes of an upload body: a raw `image/png` body is used as is; any
+/// other content type is the legacy JSON `{data_b64}` envelope, parsed and
+/// base64-decoded on the blocking pool.
+async fn body_png(headers: &HeaderMap, body: Bytes) -> Result<Vec<u8>, Error> {
+    let ct = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if ct.starts_with("image/png") || ct.starts_with("application/octet-stream") {
+        return validate_png(body.to_vec());
+    }
+    tokio::task::spawn_blocking(move || {
+        #[derive(Deserialize)]
+        struct Envelope {
+            data_b64: String,
+        }
+        let env: Envelope = serde_json::from_slice(&body)
+            .map_err(|e| Error::Invalid(format!("expected image/png or {{data_b64}} JSON: {e}")))?;
+        decode_png(&env.data_b64)
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("decode join: {e}")))?
 }
 
 async fn load_snip(ctx: &ServerCtx, id: &str) -> Result<Snip, Error> {
@@ -238,6 +276,15 @@ async fn store_snip(ctx: &ServerCtx, bytes: &[u8], source: &str) -> Result<Snip,
 /// `capture-*.pending.png` scratch files (a daemon killed mid-capture leaks
 /// one; they're keyed off no sidecar, so nothing else ever removes them).
 async fn prune_old(ctx: &ServerCtx) {
+    let now_s = Utc::now().timestamp();
+    let last = LAST_PRUNE.load(Ordering::Relaxed);
+    if now_s - last < PRUNE_EVERY_SECS
+        || LAST_PRUNE
+            .compare_exchange(last, now_s, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+    {
+        return;
+    }
     let cutoff = Utc::now() - chrono::Duration::days(RETENTION_DAYS);
     let cutoff_sys =
         std::time::SystemTime::now() - Duration::from_secs(60 * 60 * 24 * RETENTION_DAYS as u64);
@@ -452,14 +499,15 @@ pub async fn capture_snip(State(ctx): State<ServerCtx>) -> ApiResult<Json<Captur
     }
 }
 
-/// `POST /snips` — base64 PNG upload ("annotate an existing image", and the
-/// E2E seed path). Auto-copies like a capture.
+/// `POST /snips` — PNG upload, raw `image/png` or base64 JSON ("annotate an
+/// existing image", and the E2E seed path). Auto-copies like a capture.
 pub async fn upload_snip(
     State(ctx): State<ServerCtx>,
-    Json(req): Json<UploadSnipReq>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> ApiResult<Json<Snip>> {
-    let _ = req.filename; // metadata-only today; the on-disk name is the id
-    let bytes = decode_png(&req.data_b64).map_err(ApiError)?;
+    // `filename` (JSON form) is metadata-only today; the on-disk name is the id.
+    let bytes = body_png(&headers, body).await.map_err(ApiError)?;
     let snip = store_snip(&ctx, &bytes, "upload").await.map_err(ApiError)?;
     copy_png_to_clipboard(&ctx, &png_path(&ctx, &snip.id).map_err(ApiError)?).await;
     Ok(Json(snip))
@@ -484,6 +532,62 @@ pub async fn list_snips(State(ctx): State<ServerCtx>) -> ApiResult<Json<Vec<Snip
     Ok(Json(snips))
 }
 
+/// Weak validator from size + mtime — enough to revalidate the annotated
+/// export (rewritten in place) without reading it.
+fn file_etag(meta: &std::fs::Metadata) -> String {
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("W/\"{:x}-{:x}\"", meta.len(), mtime)
+}
+
+fn etag_matches(headers: &HeaderMap, tag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == tag))
+}
+
+/// Serve a stored PNG with caching: the original never changes after create
+/// (`immutable`); the annotated export is revalidated (`no-cache` + ETag →
+/// 304 without reading the file).
+async fn serve_cached_png(
+    path: &Path,
+    headers: &HeaderMap,
+    name: &str,
+    immutable: bool,
+    missing: impl Fn() -> Error,
+) -> ApiResult<Response> {
+    let meta = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| ApiError(missing()))?;
+    let tag = file_etag(&meta);
+    let cache = if immutable {
+        "private, max-age=31536000, immutable"
+    } else {
+        "private, no-cache"
+    };
+    if etag_matches(headers, &tag) {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, &tag)
+            .header(header::CACHE_CONTROL, cache)
+            .body(Body::empty())
+            .map_err(|e| ApiError(Error::Internal(format!("build response: {e}"))));
+    }
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|_| ApiError(missing()))?;
+    let mut resp = serve_png(bytes, name)?;
+    let h = resp.headers_mut();
+    h.insert(header::ETAG, tag.parse().expect("ascii etag"));
+    h.insert(header::CACHE_CONTROL, cache.parse().expect("ascii"));
+    Ok(resp)
+}
+
 fn serve_png(bytes: Vec<u8>, name: &str) -> ApiResult<Response> {
     Response::builder()
         .status(StatusCode::OK)
@@ -501,12 +605,14 @@ fn serve_png(bytes: Vec<u8>, name: &str) -> ApiResult<Response> {
 pub async fn snip_image(
     AxPath(id): AxPath<String>,
     State(ctx): State<ServerCtx>,
+    headers: HeaderMap,
 ) -> ApiResult<Response> {
     let snip = load_snip(&ctx, &id).await.map_err(ApiError)?;
-    let bytes = tokio::fs::read(png_path(&ctx, &snip.id).map_err(ApiError)?)
-        .await
-        .map_err(|_| ApiError(Error::NotFound(format!("snip {id}"))))?;
-    serve_png(bytes, &format!("{id}.png"))
+    let path = png_path(&ctx, &snip.id).map_err(ApiError)?;
+    serve_cached_png(&path, &headers, &format!("{id}.png"), true, || {
+        Error::NotFound(format!("snip {id}"))
+    })
+    .await
 }
 
 /// `GET /snips/{id}/annotated` — the flattened annotated export (404 until the
@@ -514,12 +620,18 @@ pub async fn snip_image(
 pub async fn snip_annotated(
     AxPath(id): AxPath<String>,
     State(ctx): State<ServerCtx>,
+    headers: HeaderMap,
 ) -> ApiResult<Response> {
     let snip = load_snip(&ctx, &id).await.map_err(ApiError)?;
-    let bytes = tokio::fs::read(annotated_path(&ctx, &snip.id).map_err(ApiError)?)
-        .await
-        .map_err(|_| ApiError(Error::NotFound(format!("snip {id} has no annotated image"))))?;
-    serve_png(bytes, &format!("{id}.annotated.png"))
+    let path = annotated_path(&ctx, &snip.id).map_err(ApiError)?;
+    serve_cached_png(
+        &path,
+        &headers,
+        &format!("{id}.annotated.png"),
+        false,
+        || Error::NotFound(format!("snip {id} has no annotated image")),
+    )
+    .await
 }
 
 /// `POST /snips/{id}/annotated` — save the flattened annotation export and put
@@ -527,10 +639,11 @@ pub async fn snip_annotated(
 pub async fn save_annotated(
     AxPath(id): AxPath<String>,
     State(ctx): State<ServerCtx>,
-    Json(req): Json<AnnotatedReq>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> ApiResult<Json<SnipCopyResp>> {
     let snip = load_snip(&ctx, &id).await.map_err(ApiError)?;
-    let bytes = decode_png(&req.data_b64).map_err(ApiError)?;
+    let bytes = body_png(&headers, body).await.map_err(ApiError)?;
     let path = annotated_path(&ctx, &snip.id).map_err(ApiError)?;
     tokio::fs::write(&path, &bytes)
         .await

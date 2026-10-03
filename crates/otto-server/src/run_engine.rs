@@ -709,7 +709,10 @@ async fn best_effort_push(ctx: &ServerCtx, run: &OttoRun) {
         return; // no bound account → can't push; the draft is still the deliverable
     };
     let token = match ctx.git_store.get_account(account_id).await {
-        Ok(acc) => ctx.secrets.get(&acc.token_ref).ok().flatten(),
+        Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
+            .await
+            .ok()
+            .flatten(),
         Err(_) => None,
     };
     let _ = otto_git::LocalGit::new(wt).push(token).await;

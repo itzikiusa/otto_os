@@ -197,6 +197,7 @@ type ProcRow = (u32, u32, u64);
 /// Snapshot the OS process table via one `ps -axo pid=,ppid=,time=` pass.
 /// Used by the idle-suspend sweep; a failed/absent `ps` yields an empty table
 /// (the sweep then behaves exactly as before the guard existed).
+#[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
 fn process_table() -> Vec<ProcRow> {
     let out = match std::process::Command::new("ps")
         .args(["-axo", "pid=,ppid=,time="])
@@ -315,6 +316,7 @@ pub fn codex_rollout_path(psid: &str) -> Option<std::path::PathBuf> {
 
 /// [`codex_rollout_path`] under an explicit sessions root.
 pub fn codex_rollout_path_under(root: &std::path::Path, psid: &str) -> Option<std::path::PathBuf> {
+    #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
     fn walk(dir: &std::path::Path, suffix: &str, depth: usize) -> Option<std::path::PathBuf> {
         if depth > 5 {
             return None;
@@ -362,15 +364,27 @@ async fn persist_transcript_path(
     provider_home: Option<&std::path::Path>,
 ) {
     let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let resolved = match provider_home {
+    // Transcript resolution walks `~/.codex/sessions` / `~/.claude/projects`
+    // with sync fs calls — run it on the blocking pool, not a runtime worker.
+    let (provider_s, cwd_s, psid_s) = (provider.to_string(), cwd.to_string(), psid.to_string());
+    let provider_home = provider_home.map(std::path::Path::to_path_buf);
+    let resolved = match tokio::task::spawn_blocking(move || match provider_home {
         Some(root) => crate::lifecycle::transcript_path_in_roots(
             &root.join("projects"),
             &root.join("sessions"),
-            provider,
-            cwd,
-            Some(psid),
+            &provider_s,
+            &cwd_s,
+            Some(&psid_s),
         ),
-        None => crate::lifecycle::transcript_path(&home, provider, cwd, Some(psid)),
+        None => crate::lifecycle::transcript_path(&home, &provider_s, &cwd_s, Some(&psid_s)),
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!(session = %id, "transcript path resolve task failed: {e}");
+            return;
+        }
     };
     match resolved {
         Ok(path) => {
@@ -580,6 +594,7 @@ async fn rollout_actively_written(
     psid: &str,
     settle: Duration,
 ) -> bool {
+    #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
     fn find(dir: &std::path::Path, psid: &str, depth: usize) -> Option<std::path::PathBuf> {
         if depth > 5 {
             return None;
@@ -605,17 +620,25 @@ async fn rollout_actively_written(
         }
         None
     }
-    let Some(path) = find(sessions_root, psid, 0) else {
+    // The recursive walk (up to 5 levels of `~/.codex/sessions`) is sync fs
+    // work: keep it off the runtime worker.
+    let (root, id) = (sessions_root.to_path_buf(), psid.to_string());
+    let Some(path) = tokio::task::spawn_blocking(move || find(&root, &id, 0))
+        .await
+        .ok()
+        .flatten()
+    else {
         return false;
     };
-    let stat = |p: &std::path::Path| {
-        std::fs::metadata(p)
+    let stat = |p: std::path::PathBuf| async move {
+        tokio::fs::metadata(p)
+            .await
             .ok()
             .map(|m| (m.len(), m.modified().ok()))
     };
-    let before = stat(&path);
+    let before = stat(path.clone()).await;
     tokio::time::sleep(settle).await;
-    let after = stat(&path);
+    let after = stat(path).await;
     before != after
 }
 
@@ -626,6 +649,7 @@ fn recent_codex_rollouts(
     root: &std::path::Path,
     cutoff: std::time::SystemTime,
 ) -> Vec<std::path::PathBuf> {
+    #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
     fn walk(
         dir: &std::path::Path,
         cutoff: std::time::SystemTime,
@@ -1043,6 +1067,13 @@ fn trail_clip(s: &str, max: usize) -> String {
 const WORKING_WINDOW: Duration = Duration::from_secs(5);
 /// Status poll interval.
 const STATUS_TICK: Duration = Duration::from_secs(2);
+
+/// A live terminal nobody has viewed for this long keeps only
+/// [`otto_pty::UNVIEWED_SCROLLBACK_LINES`] of emulator history (daemon-core
+/// perf F9): with 12 live agents the full 4000-row histories were the
+/// biggest steady memory term. The next attach restores the full cap (older
+/// rows dropped meanwhile are gone; history regrows from there).
+const UNVIEWED_HISTORY_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// How long [`SessionManager::input`] waits for its bytes to drain into the
 /// PTY before reporting "not accepting input". The write itself runs on the
@@ -2903,6 +2934,7 @@ impl SessionManager {
             session.workspace_id.clone(),
             session.provider.clone(),
             handle,
+            false,
         );
         // Providers that mint their own session id (codex): capture it from the
         // on-disk rollout now that the CLI is running, so the session becomes
@@ -3139,6 +3171,19 @@ impl SessionManager {
         self.repo.list_filtered(scopes, filter).await
     }
 
+    /// Live (non-archived, non-exited) sessions whose `meta.<meta_key>`
+    /// equals `value`, filtered in SQL (see
+    /// [`otto_state::SessionsRepo::list_live_by_meta`]).
+    pub async fn list_live_by_meta(
+        &self,
+        ws: &Id,
+        kind: Option<&str>,
+        meta_key: &'static str,
+        value: &str,
+    ) -> Result<Vec<Session>> {
+        self.repo.list_live_by_meta(ws, kind, meta_key, value).await
+    }
+
     /// True when the session has a live PTY in this daemon process.
     pub fn is_live(&self, id: &Id) -> bool {
         self.live.contains_key(id)
@@ -3152,7 +3197,18 @@ impl SessionManager {
         static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
         let conn_id = CONN_SEQ.fetch_add(1, Ordering::Relaxed);
         self.touch(id);
-        *self.attached.entry(id.clone()).or_insert(0) += 1;
+        let first = {
+            let mut n = self.attached.entry(id.clone()).or_insert(0);
+            *n += 1;
+            *n == 1
+        };
+        if first {
+            // A long-unviewed session may run with a shallow history cap
+            // (see UNVIEWED_HISTORY_AFTER): let it grow again from now.
+            if let Some(h) = self.live_handle(id) {
+                h.set_history_cap(otto_pty::EMULATOR_SCROLLBACK_LINES);
+            }
+        }
         self.attached_conns
             .entry(id.clone())
             .or_default()
@@ -3200,6 +3256,32 @@ impl SessionManager {
     /// resizes from non-owners are ignored while the owner stays attached.
     pub fn note_input_authority(&self, id: &Id, conn_id: u64) {
         self.size_owner.insert(id.clone(), conn_id);
+    }
+
+    /// Optimistic [`Self::note_input_authority`] for the terminal socket
+    /// (perf 01 N7): typing claims the size the moment the keystroke is
+    /// QUEUED, so a `resize` right behind the first keystroke is not judged
+    /// against stale authority while the PTY write is still pending. Returns
+    /// the previous owner for [`Self::revert_input_authority`].
+    pub fn claim_input_authority(&self, id: &Id, conn_id: u64) -> Option<u64> {
+        self.size_owner.insert(id.clone(), conn_id)
+    }
+
+    /// Undo an optimistic claim whose write failed — only while `conn_id`
+    /// still holds it (a newer claim by someone else stands).
+    pub fn revert_input_authority(&self, id: &Id, conn_id: u64, prev: Option<u64>) {
+        if let dashmap::mapref::entry::Entry::Occupied(mut e) = self.size_owner.entry(id.clone()) {
+            if *e.get() == conn_id {
+                match prev {
+                    Some(p) => {
+                        e.insert(p);
+                    }
+                    None => {
+                        e.remove();
+                    }
+                }
+            }
+        }
     }
 
     /// Whether `conn_id` may resize `id` under the size-authority policy:
@@ -5230,7 +5312,13 @@ impl SessionManager {
             self.stamp_suspended(&session, None).await;
         }
         self.record_lifecycle(&session, "Session resumed");
-        self.start_status_task(id.clone(), session.workspace_id, session.provider, handle);
+        self.start_status_task(
+            id.clone(),
+            session.workspace_id,
+            session.provider,
+            handle,
+            false,
+        );
         self.repo.get(id).await
     }
 
@@ -5364,6 +5452,7 @@ impl SessionManager {
                 session.workspace_id.clone(),
                 session.provider.clone(),
                 handle,
+                true,
             );
             // A codex/agy id capture that was still pending died with the old
             // daemon: re-arm it (it waits for the next input, as at spawn).
@@ -5523,12 +5612,17 @@ impl SessionManager {
     /// activity; on exit mark `exited` and stop. When an [`OutputScanner`] is
     /// configured, also spawns a sibling task that streams the PTY's live
     /// output into the scanner (mid-session re-auth detection).
+    /// `readopted`: `handle` is a held PTY re-adopted after a daemon restart.
+    /// Until it prints something new, its status ticks are corrections, not
+    /// activity, so they must not stamp `last_active_at` (A14) — the first
+    /// tick turns the adoption's `Running` into `Idle`.
     fn start_status_task(
         &self,
         id: Id,
         workspace_id: Id,
         provider: String,
         handle: Arc<PtyHandle>,
+        readopted: bool,
     ) {
         // Mid-session output scan: subscribe to the PTY broadcast and forward
         // chunks to the scanner. Ends when the PTY closes (broadcast Closed).
@@ -5565,14 +5659,29 @@ impl SessionManager {
         let passive_resume = Arc::clone(&self.passive_resume);
         let auth = self.auth.clone();
         let mcp_tokens = Arc::clone(&self.mcp_tokens);
+        let attached = Arc::clone(&self.attached);
         tokio::spawn(async move {
             let mut exit_rx = handle.on_exit();
             let mut current = SessionStatus::Running;
+            // A re-adopted handle's (back-dated) last-output clock: while it
+            // still reads this, nothing new happened since the restart.
+            let mut adopted_quiet_at = readopted.then(|| handle.last_output_at());
+            // Unviewed-history cap (UNVIEWED_HISTORY_AFTER): one in-memory map
+            // read per tick; `attach` restores the full cap.
+            let mut unviewed_since: Option<std::time::Instant> = None;
             let mut interval = tokio::time::interval(STATUS_TICK);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
+                        if attached.get(&id).is_some_and(|n| *n > 0) {
+                            unviewed_since = None;
+                        } else {
+                            let since = *unviewed_since.get_or_insert_with(std::time::Instant::now);
+                            if since.elapsed() >= UNVIEWED_HISTORY_AFTER {
+                                handle.set_history_cap(otto_pty::UNVIEWED_SCROLLBACK_LINES);
+                            }
+                        }
                         let next = if handle.last_output_at().elapsed() < WORKING_WINDOW {
                             SessionStatus::Working
                         } else {
@@ -5591,7 +5700,14 @@ impl SessionManager {
                                 continue;
                             }
                             current = next;
-                            let _ = repo.update_status(&id, next).await;
+                            let quiet = adopted_quiet_at
+                                .is_some_and(|at| handle.last_output_at() == at);
+                            if quiet {
+                                let _ = repo.update_status_keep_activity(&id, next).await;
+                            } else {
+                                adopted_quiet_at = None;
+                                let _ = repo.update_status(&id, next).await;
+                            }
                             let _ = events.send(Event::SessionStatus {
                                 session_id: id.clone(),
                                 workspace_id: workspace_id.clone(),
@@ -7136,6 +7252,36 @@ mod tests {
         assert!(mgr.may_resize(&id, pane.conn_id()));
     }
 
+    /// Perf 01 N7: the socket claims authority when a keystroke is QUEUED and
+    /// reverts only its own claim when the write fails.
+    #[tokio::test]
+    async fn optimistic_input_claim_reverts_only_its_own_claim() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, Some("sid-claim")).await;
+        let pane = mgr.attach(&id);
+        let tile = mgr.attach(&id);
+
+        // Unclaimed → claim → failed write: back to "nobody owns it".
+        assert_eq!(mgr.claim_input_authority(&id, pane.conn_id()), None);
+        assert!(!mgr.may_resize(&id, tile.conn_id()));
+        mgr.revert_input_authority(&id, pane.conn_id(), None);
+        assert!(mgr.may_resize(&id, tile.conn_id()));
+
+        // Tile owned it; the pane's failed claim hands it back to the tile.
+        mgr.note_input_authority(&id, tile.conn_id());
+        let prev = mgr.claim_input_authority(&id, pane.conn_id());
+        assert_eq!(prev, Some(tile.conn_id()));
+        mgr.revert_input_authority(&id, pane.conn_id(), prev);
+        assert!(mgr.may_resize(&id, tile.conn_id()));
+        assert!(!mgr.may_resize(&id, pane.conn_id()));
+
+        // A newer claim by someone else stands through a stale revert.
+        let prev = mgr.claim_input_authority(&id, pane.conn_id());
+        mgr.note_input_authority(&id, tile.conn_id());
+        mgr.revert_input_authority(&id, pane.conn_id(), prev);
+        assert!(mgr.may_resize(&id, tile.conn_id()));
+    }
+
     #[tokio::test]
     async fn suspend_marks_reconnectable_and_keeps_row() {
         let (mgr, repo, ws, user) = test_manager().await;
@@ -7189,6 +7335,7 @@ mod tests {
             ws.id.clone(),
             "claude".into(),
             Arc::clone(&handle),
+            false,
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -7215,7 +7362,13 @@ mod tests {
         let id = seed_session(&repo, &ws, &user, Some("sid-respawn")).await;
         let old = Arc::new(PtyHandle::spawn(&slow_hup_spec()).expect("spawn old"));
         mgr.live.insert(id.clone(), Arc::clone(&old));
-        mgr.start_status_task(id.clone(), ws.id.clone(), "claude".into(), Arc::clone(&old));
+        mgr.start_status_task(
+            id.clone(),
+            ws.id.clone(),
+            "claude".into(),
+            Arc::clone(&old),
+            false,
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // What `restart_locked` does: untrack + kill the old, track the new,
@@ -7255,6 +7408,7 @@ mod tests {
             ws.id.clone(),
             "claude".into(),
             Arc::clone(&handle),
+            false,
         );
 
         wait_child_exit_and_settle(&handle).await;

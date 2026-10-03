@@ -70,8 +70,8 @@ connection library unusable for every non-root account.)
 | 15 | GET /api/v1/workspaces/{id}/members | ws admin | — | `MemberEntry[]` |
 | 16 | PUT /api/v1/workspaces/{id}/members | ws admin | SetMembersReq | `MemberEntry[]` |
 | 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…`, plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above): every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
-| 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number`. Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table) |
-| 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
+| 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `foreground=true` = the rows the sidebar lists — every connection session plus the agents `Session::is_foreground_agent` accepts (no string `meta.source` in `BACKGROUND_SESSION_SOURCES`), plus agents whose source is in the comma list `with_sources` (≤ 64; e.g. `channel` for the Slack/Telegram groups); `foreground=false` = background agents only; `ids` = comma list of session ids (≤ 64, more → 400) — fetch-by-id for open tabs; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number`. Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table). The Agents sidebar asks for `?archived=false&foreground=true&with_sources=channel` (+ sources a mounted panel needs, e.g. `swarm`), pages the Archived section with `?archived=true&limit=100&before=…` and probes it with `?archived=true&limit=1` — a workspace's background review agents (~99 % of its rows) are never shipped to it |
+| 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here unless `ids` is given (a fetch-by-id returns the rows whatever their archived state — the UI's `ensureSession` / open-tab path) | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
 | 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session |
 | 19 | GET /api/v1/sessions/{id} | ws viewer + **session owner-or-admin** | — | Session (with transient `live` + `viewers`) |
 | 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control` and `meta.client_id` are **server-owned**: a PATCH that changes either is `403` (an unchanged round-trip is accepted and dropped). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
@@ -97,14 +97,14 @@ connection library unusable for every non-root account.)
 | 35 | POST /api/v1/workspaces/{id}/repos | ws editor | AddRepoReq | Repo (clone runs async; Notice events report progress/done) |
 | 36 | DELETE /api/v1/repos/{id} | ws editor | — | 204 (unregisters; never deletes files) |
 | 36b | PATCH /api/v1/repos/{id} | ws editor (+ account owner, S4) | UpdateRepoReq | Repo — (re)bind the repo's hosting account (see the extended row below) |
-| 37 | GET /api/v1/repos/{id}/status | ws viewer | — | RepoStatusResp. Also arms (or keeps alive) the repo's working-tree watcher, which emits `repo_status_changed` on disk changes (ws.md; `POST …/fetch` arms it too). Includes `op_in_progress` (`"merge"\|"rebase"\|"cherry_pick"\|"revert"`, absent when none), detected from the git dir's state files; conflicted files can exist without it (a conflicting stash pop). Local git refusals across the git routes (dirty tree, unresolved index, bad ref, index.lock, …) map to 409 with git's own message; 502 is reserved for genuine remote/auth failures, and forge HTTP errors map by status (401/403 → 403 credential-rejected, 404 → 404, 405/409/422 → 409). |
+| 37 | GET /api/v1/repos/{id}/status | ws viewer | — | RepoStatusResp. Also arms (or keeps alive) the repo's working-tree watcher, which emits `repo_status_changed` on disk changes (ws.md; `POST …/fetch` arms it too). Includes `op_in_progress` (`"merge"\|"rebase"\|"cherry_pick"\|"revert"`, absent when none), detected from the git dir's state files; conflicted files can exist without it (a conflicting stash pop). Untracked rows are capped at 5,000: past that `changes` carries the first 5,000 untracked rows (tracked/staged/conflicted rows are never capped) plus `untracked_truncated:true` and `untracked_total` (absent otherwise). Concurrent GETs for one repo share a single `git status` spawn, and a result is reused for up to 1 s while no `repo_status_changed` fired and no mutating route ran. Local git refusals across the git routes (dirty tree, unresolved index, bad ref, index.lock, …) map to 409 with git's own message; 502 is reserved for genuine remote/auth failures, and forge HTTP errors map by status (401/403 → 403 credential-rejected, 404 → 404, 405/409/422 → 409). |
 | 38 | GET /api/v1/repos/{id}/branches | ws viewer | — | `BranchInfo[]` |
 | 39 | GET /api/v1/repos/{id}/log?limit=50&skip=0&all=false | ws viewer | — | `CommitInfo[]` — `limit` defaults to 50 and is **uncapped**; `limit=0` means the whole reachable history (no `-n`). Page with `skip` + `limit`; ordering is stable across pages for a fixed set of refs. Also accepts `&path=<p>&follow=true&grep=<s>&author=<s>` — `path` is passed after `--` (any filename), `follow` needs exactly one path (400 otherwise), `grep`/`author` are fixed-string, case-insensitive. `until=<sha>` (4–64 hex; anything else → 400) pages TO a commit in ONE spawn: `-n` is dropped and the walk from `skip` stops right after that commit has been emitted, returning `max(limit, position + 1)` records in the same order `skip` paging would (a sha not in the walk reads to the end). The graph uses it to jump to an old ref instead of chaining 10k-commit `--skip` pages. Every git read is held to a 128 MB stdout ceiling (the process is killed there → 502 `upstream`). |
 | 40 | GET /api/v1/repos/{id}/diff?target=worktree\|working\|staged\|commit:<sha>\|range:<a>..<b>\|range:<a>...<b>&path=&old_path=&summary=&full= | ws viewer | — | DiffResp. Option-like revs (`commit:--x`, `range:--a..b`) → 400. `range:a..b` is `git diff a..b` (tree of `a` vs tree of `b` — unchanged); `range:a...b` is branch-vs-base (`b` against the merge-base of `a` and `b`). `path=` scopes to one LITERAL file; `old_path=` (a rename's origin, from the summary) is passed with it so the rename still pairs (a lone new path comes back as an add). `summary=true`: file list only from ONE `--raw --numstat -z` pass — never a patch — every file `hunks: []`, `hunks_omitted: true`, with `status`, `old_path`, `is_binary`, `added`/`deleted` (null only for binary) and `total_added`/`total_deleted` (~40–100 KB for a 1,500-file / 100k-line commit). Non-summary responses are capped: a file over 200 KB of rendered text or 5,000 lines ⇒ `too_large: true`, `hunks_omitted: true`, `hunks: []` (counts, status, fingerprint kept); a whole-response budget of 20,000 lines / 4 MB of hunks — the first file that doesn't fit and every file after it come back `hunks_omitted: true` and the response `truncated: true`. `full=true` (only with `path=`) lifts the per-file cap to a hard 50,000 lines / 5 MB (still `too_large` beyond). Rename detection is `-M -l1000` (git's default limit, pinned: above it moves show as delete + add). Commit/range responses are memoized in the daemon (keyed by the resolved commit ids + path/old_path/mode, 64 MB LRU of serialized bodies; header `x-otto-diff-cache: hit\|miss\|off`), identical concurrent requests share one computation, and a request aborted by every caller kills its `git`. `added`/`deleted`/`status` are filled on every response (binary: null counts). `renames_incomplete: true` when git reported that rename detection was skipped (more candidates than the `-l1000` limit) — some renames then appear as a delete + an add. Internal Rust callers of `LocalGit::diff` are uncapped. |
 | 41 | POST /api/v1/repos/{id}/stage | ws editor | StagePathsReq | RepoStatusResp |
 | 42 | POST /api/v1/repos/{id}/unstage | ws editor | StagePathsReq | RepoStatusResp |
 | 43 | POST /api/v1/repos/{id}/commit | ws editor | CommitReq | `{"sha":"..."}` — `sign?: bool` — `true` → `-S`, `false` → `--no-gpg-sign`, absent → repo config. |
-| 44 | POST /api/v1/repos/{id}/push | ws editor | `PushReq {branch?, force_with_lease?}` (all optional; `branch` pushes THAT branch explicitly as `refs/heads/<branch>` — Create-PR passes its source branch; absent = current branch) | RepoStatusResp — a branch with no upstream is published with `--set-upstream` (named or current). The remote rejecting a non-fast-forward (`fetch first` / `non-fast-forward`) → **409** `push rejected: the remote branch has commits yours doesn't — …` (not a 502: nothing is wrong with the provider). `force_with_lease:true` pushes with `--force-with-lease --force-if-includes` — never a bare `--force`; sent only after the user confirmed it; refused with **409** `force push refused: the remote branch moved …` when the remote changed since it was last fetched AND integrated (remote untouched); 409 on a detached HEAD. Auth failures stay 502 with a next step appended (Git Accounts token / SSH agent). |
+| 44 | POST /api/v1/repos/{id}/push | ws editor | `PushReq {branch?, force_with_lease?}` (all optional; `branch` pushes THAT branch explicitly as `refs/heads/<branch>` — Create-PR passes its source branch; absent = current branch) | RepoStatusResp — a branch with no upstream is published with `--set-upstream` (named or current). The remote rejecting a non-fast-forward (`fetch first` / `non-fast-forward`) → **409** `push rejected: the remote branch has commits yours doesn't — …` (not a 502: nothing is wrong with the provider). Holds only the repo's network-leg lock (shared with fetch, pull, tag push and remote edits), not the worktree lock, so stage/commit/discard never queue behind a slow push; the returned status is read after the lock is released (every mutating repo route does the same). `force_with_lease:true` pushes with `--force-with-lease --force-if-includes` — never a bare `--force`; sent only after the user confirmed it; refused with **409** `force push refused: the remote branch moved …` when the remote changed since it was last fetched AND integrated (remote untouched); 409 on a detached HEAD. Auth failures stay 502 with a next step appended (Git Accounts token / SSH agent). |
 | 45 | POST /api/v1/repos/{id}/pull | ws editor | `{auto_stash?, mode?}` (both optional) | `{status: RepoStatusResp, note?}` — a pull whose merge CONFLICTS is a normal 200: the fetch landed and a merge is left in progress, with the unmerged paths returned as `status.changes[].kind="conflicted"` (clients route to the conflict resolver). `auto_stash:true` wraps a dirty tree in stash → pull → pop (`note` says what happened to the stash: restored, kept because the pull conflicted, or pop conflicted); a refused auto-stash pull pops the stash back. Local refusals (dirty tree, no upstream, divergent branches, unfinished merge) are 409 with git's own line; only genuine network/auth failures are 502. Optional `mode?: "merge"\|"rebase"\|"ff_only"` (absent → the repo's `pull.rebase`/`pull.ff` config); `ff_only` on a diverged branch → 409 "Not possible to fast-forward". |
 | 46 | POST /api/v1/repos/{id}/checkout | ws editor | `CheckoutReq {branch, create?, auto_stash?}` | RepoStatusResp — **never pulls**. `branch` is always a REVISION (`checkout <b> --`): a name that is only a path (a directory `docs/`, no branch `docs`) is 409 "invalid reference" instead of silently restoring that path. `auto_stash:true` = stash -u → checkout → pop (the pop addresses the auto-stash by SHA); a conflicting pop returns 200 with `kind:"conflicted"` rows and no `op_in_progress`; a failed checkout restores the stash and returns git's 409; a failed (non-conflict) pop is 409 with the stash kept. Local git spawns are bounded (30 s local / 180 s remote, `OTTO_GIT_TIMEOUT_SECS` / `OTTO_GIT_REMOTE_TIMEOUT_SECS`); a timeout is 502 "git <verb> timed out after Ns". |
 | 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"\|"apply"\|"drop","sha"?:"..."}` (`sha` required for apply/drop — SHA-anchored, resolved to the live `stash@{N}`; conflicts on pop/apply return 200 with the tree left for resolution) | RepoStatusResp |
@@ -139,11 +139,15 @@ failure on a read returns an error (500) — never a 200 with zero totals.
   cache_write_tokens, total_tokens, cost_usd}`, biggest first) and **`daily_models:
   DailyModelUsage[]`** (`{day, provider, model, …tokens, cost_usd}`) rollups, plus
   `scope` (`"all"`|`"own"`).
-- GET /usage/report?days=N&otto_only=B → UsageReport `{days, generated_at, priced_as_of,
+- GET /usage/report?days=N&otto_only=B&sessions_limit=N&include=daily_models → UsageReport
+  `{days, generated_at, priced_as_of,
   scope, otto_only, totals: TokenTotals, daily: DailyUsage[], monthly: MonthlyUsage[]
   {month:"YYYY-MM", events, …tokens, cost_usd}, models: ModelUsage[], daily_models:
-  DailyModelUsage[], sessions: SessionUsage[]}` — the ccusage-style report (≤1000 sessions,
-  enriched like the summary's). The UI renders it as a page and as a downloadable
+  DailyModelUsage[], sessions: SessionUsage[]}` — the ccusage-style report (enriched like
+  the summary's). `sessions_limit` caps the session table (default **100**, max 1000);
+  `daily_models` is **empty unless** `include=daily_models` (only the HTML export renders
+  it — the page loads the slim shape, the export/"Show more" the full one). Two ClickHouse
+  scans: daily/monthly/model/day×model are re-aggregations of one grouped scan. The UI renders it as a page and as a downloadable
   self-contained HTML file. `TokenTotals{input_tokens, output_tokens, cache_read_tokens,
   cache_write_tokens, total_tokens, cost_usd}`.
 - POST /usage/ccusage-check `{days?}` (root) → CcusageCheck `{ran, command, duration_ms,
@@ -299,7 +303,9 @@ workspace from the row.
 | 74 | POST /api/v1/workspaces/{id}/swarm/projects/{pid}/plan | ws editor | PlanReq | `SwarmTask[]` |
 | 74b | POST /api/v1/swarm/projects/{pid}/clear | ws editor | — | `{ok, runs_stopped, tasks_deleted, messages_deleted}` — stops the project's in-flight runs, deletes ALL its tasks + project-scoped feed messages (runs/spend history kept), emits `swarm_project_cleared` |
 | 74c | GET /api/v1/swarm/swarms/{sid}/utilization | ws viewer | — | `{parallel_cap, active_runs, ready_tasks, tasks_by_status, agents:[{id,name,title,status,active_run}], waiting: {<task_id>: {code, detail, since}}}` — board-utilization snapshot (drives the 5-min manager utilization watchdog + the `swarm_utilization` MCP tool). `waiting` = why each ready task did not start on the last coordinator tick (in memory, rebuilt every tick; empty when the swarm isn't active): `code` ∈ `no_agent_fit` \| `agent_busy` \| `verifying` \| `capacity` \| `run_budget`, `detail` = board text, `since` = when it started waiting for that code. The Kanban board shows it on To-do cards |
+| 74c2 | GET /api/v1/swarm/swarms/{sid}/waiting | ws viewer | — | `{swarm_id, waiting: {<task_id>: {code, detail, since}}}` — only the coordinator's in-memory waiting reasons (same shape as `utilization.waiting`), no DB work beyond the swarm/auth lookup. The Kanban board polls this (15 s while visible + 800 ms after task changes) instead of the full utilization snapshot |
 | 75 | GET /api/v1/swarm/projects/{pid}/tasks | ws viewer | — | `SwarmTask[]` |
+| 75b | GET /api/v1/swarm/swarms/{sid}/tasks | ws viewer | — | `SwarmTask[]` — every project's tasks in ONE read (`ORDER BY order_idx, created_at`, like the per-project list); the board's open path groups them by `project_id` instead of one request per project. The per-project list stays for single-project refreshes |
 | 76 | POST /api/v1/swarm/projects/{pid}/tasks | ws editor | CreateTaskReq | SwarmTask |
 | 77 | PATCH /api/v1/swarm/tasks/{tid} | ws editor | UpdateTaskReq | SwarmTask |
 | 78 | DELETE /api/v1/swarm/tasks/{tid} | ws editor | — | 204 |
@@ -548,7 +554,7 @@ bearer token. `TrailAppended` / `TasksUpdated` events mirror writes over `/ws/ev
 | POST /workspaces/{wid}/sessions/{sid}/trail | ws editor | TrailEvent | 204 (append one trail entry) |
 | GET /workspaces/{wid}/sessions/{sid}/tasks | ws viewer | — | `AgentTask[]` (current task list) |
 | PUT /workspaces/{wid}/sessions/{sid}/tasks | ws editor | `AgentTask[]` | 204 (replace the task list) |
-| GET /workspaces/{wid}/activity/summary | ws viewer | — | per-session activity summary for the workspace |
+| GET /workspaces/{wid}/activity/summary | ws viewer | — | per-session activity summary for the workspace — task roll-ups for every session with tasks; `last_ts` (newest trail row) only for the sessions the sidebar shows (live, foreground + channel rows); sessions with neither are absent |
 
 A `TrailEvent.detail` is capped by the writer (hook ingest, Codex notify and the POST
 above) at 4 KiB of serialized JSON: a string field over 1 KiB keeps its first 1 KiB plus
@@ -1133,7 +1139,7 @@ owner-scoped (another user's job is a 404; root sees all).
 | POST /db/multi-run/plan | Database:Edit + ws editor on every target | `DbMultiRunSpec` | `DbMultiRunPlan` — the preview: the FINAL statement of every run, write / `needs_confirm` flags, per-target ClickHouse cluster facts, `plan_hash`. Runs only read-only topology probes (ClickHouse, when the script has DDL), never recorded in history. 400 on an invalid spec (see below). |
 | POST /db/multi-runs | Database:Edit + ws editor on every target | `DbStartMultiRunReq` | **202** `DbMultiRunJob` — re-plans, then runs in the background. 409 `write_blocked: …` when a run writes to a production / read-only target and `confirm_write` is not set (nothing runs); 409 `plan_changed: …` when `plan_hash` no longer matches; 403 `read_only: …` when `read_only` is set and a run is a write/DDL; 409 when 10 multi-runs are already running. |
 | GET /db/multi-runs | Database:View | — | `DbMultiRunBrief[]` — the caller's retained multi-runs, newest first |
-| GET /db/multi-runs/{rid} | Database:View + owner/root | — | `DbMultiRunJob` — status, `summary` (`total/ok/failed/running/pending/skipped/cancelled`), targets and per-run items (statement preview, status, duration, row / affected counts, message / error; no rows) |
+| GET /db/multi-runs/{rid} | Database:View + owner/root | `?since=<seq>` (optional) | `DbMultiRunJob` — status, `summary` (`total/ok/failed/running/pending/skipped/cancelled`), targets and per-run items (statement preview, status, duration, row / affected counts, message / error; no rows), plus `seq` (a change counter). With `?since=<seq>` (a `seq` from an earlier answer): `partial: true`, `items` holds only the runs changed after it (possibly none), `targets` is `[]`; status, `summary` and `finished_at` are always current. The client merges items by `index`. A `since` ahead of the job's `seq` gets the full view. |
 | GET /db/multi-runs/{rid}/items/{index} | Database:View + owner/root + ws editor on the run's connection | — | `DbMultiRunItemDetail` — the run's full final statement and retained result |
 | POST /db/multi-runs/{rid}/cancel | Database:Edit + owner/root | — | `DbMultiRunJob` — stops dispatching, marks pending runs `cancelled`, and cancels the running ones engine-natively (as `…/db/cancel`). Idempotent; a finished job is returned unchanged. |
 
@@ -1311,7 +1317,7 @@ viewer/editor.
 | POST /repo-rules/{id}/toggle | ws editor (Context) | `{enabled}` | `RepoRule` (enable/disable; re-materializes the workspace's rules block) |
 | DELETE /repo-rules/{id} | ws editor (Context) | — | 204 |
 | GET /reviews/{review_id}/proof-pack | ws viewer (Git) | — | `ReviewProofPack` (live-assembled: summary counts + per-finding evidence/timeline/artifacts + the repo rules from this review) |
-| POST /reviews/{review_id}/proof-pack/export | ws editor (Git) | `{format?}` | `ReviewProofPackExport` `{id, review_id, format, markdown, created_at}` (persists a markdown snapshot + ingests verified findings into memory; emits `proof_pack_exported`) |
+| POST /reviews/{review_id}/proof-pack/export | ws editor (Git) | `{format?, keep_last?}` | `ReviewProofPackExport` `{id, review_id, format, markdown, created_at}` (persists a markdown snapshot + ingests verified findings into memory; emits `proof_pack_exported`). Every snapshot is kept by default; `keep_last: N` (opt-in) then deletes all but the review's newest N snapshots |
 
 `Finding` fields: `id, review_id, workspace_id, repo_id, pr_number, fingerprint,
 severity` (`critical`\|`high`\|`medium`\|`low`\|`info`)`, category, path, line,
@@ -2233,6 +2239,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | DELETE /workspaces/{wid}/api-client/collections/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/collections/{id}/openapi | ws viewer | — | export the collection as OpenAPI |
 | GET /workspaces/{wid}/api-client/requests | ws viewer | — | `Request[]` |
+| GET /workspaces/{wid}/api-client/requests/summaries?collection_id= | ws viewer | — | `ApiOverviewRequest[]` (`{id, name, method, url, collection_id, auth_type, has_ssh, agent_authored, updated_at, position}`), same order as `/requests`; `position` is the row's sort position in its collection, so the UI tree builds from this projection alone and fetches `GET …/requests/{id}` only when a request is opened — a scalar projection: never the body, headers, query, auth values, scripts, docs or multipart files. `/overview` reads it too |
 | POST /workspaces/{wid}/api-client/requests | ws editor | CreateRequestReq | Request |
 | GET /workspaces/{wid}/api-client/requests/{id}?shape=full\|agent | ws viewer | — | Request. `full` is the unchanged default; `agent` masks auth/header/query secrets and caps the body at 64 KiB |
 | PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | UpdateRequestReq | Request. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, tls_verify?}`), `docs?`, `graphql_variables?` |
@@ -2261,8 +2268,8 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | DELETE /workspaces/{wid}/api-client/automations/{id} | ws editor | — | 204 |
 | POST /workspaces/{wid}/api-client/automations/{id}/run | ws editor | `StartApiAutomationRunReq?` | synchronous `ApiRunResult`; execution also persists a durable report |
 | POST /workspaces/{wid}/api-client/automations/{id}/runs | ws editor | `StartApiAutomationRunReq` | `ApiAutomationRun` immediately; runs in background. When an AGENT starts the run (this route or `…/run`), every step enforces the **Secret host binding** after its pre-request script: a step whose stored secret would leave its bound host fails with the `needs_confirm=new_host` message instead of sending |
-| GET /workspaces/{wid}/api-client/automation-runs?automation_id=&before= | ws editor | — | latest 50 `ApiAutomationRun` rows, newest id first; `before` is the last run id |
-| GET /workspaces/{wid}/api-client/automation-runs/{id}?after= | ws editor | — | `ApiAutomationRun`; foreign workspace is 404. `after=N` (delta poll while running): `report.steps`, `result_rows` and `result_ids` hold only the entries after the first N, and `snapshot` is `null` — the client appends to what it already has |
+| GET /workspaces/{wid}/api-client/automation-runs?automation_id=&before= | ws editor | — | latest 50 `ApiAutomationRun` **summary** rows, newest id first; `before` is the last run id. List rows carry `steps_total` / `steps_passed` and NO step results: `report.steps`, `result_rows`, `result_ids` are `[]` and `snapshot` is `null` — read the run by id for those |
+| GET /workspaces/{wid}/api-client/automation-runs/{id}?after= | ws editor | — | `ApiAutomationRun`; foreign workspace is 404. `after=N` (delta poll while running): `report.steps`, `result_rows` and `result_ids` hold only the entries after the first N, and `snapshot` is `null` — the client appends to what it already has. Steps are stored one row each (`api_automation_run_steps`, migration 0166) and the delta is read from that table by index; runs recorded before 0166 keep their steps inline and read the same. `steps_total`/`steps_passed` are absent on this read. Progress is pushed as the `api_run_progress` WS event (see ws.md) — clients fetch the delta on it and poll only as a fallback |
 | POST /workspaces/{wid}/api-client/automation-runs/{id}/cancel | ws editor | `{}` | current `ApiAutomationRun`; cancellation is asynchronous/idempotent |
 | POST /workspaces/{wid}/api-client/oauth2/authorize | ws editor | `{request_id}` | `{flow_id,authorization_url,redirect_uri,expires_in:600}` |
 | GET /workspaces/{wid}/api-client/oauth2/flows/{id} | initiating user + ws editor | — | `{status:pending\|exchanging\|completed\|failed,error?,request_id}`; expired/foreign flow is 404 |
@@ -2335,7 +2342,17 @@ step) the daemon trims the workspace's history: rows older than
 nothing is ever deleted until an admin picks a limit (History list → retention control, or
 `PATCH /workspaces/{id}` settings JSON). Once set, pre-existing rows beyond the limits are
 trimmed on the workspace's next run. A history row keeps at most 64 KB of the response `body`
-(`truncated: true` when cut) — the live response is unaffected. No migration.
+(`truncated: true` when cut) and at most 64 KB of the request snapshot's `body`
+(`request.request_truncated: true` when cut); a multipart `file` part keeps its `filename`
+and decoded `size` but not its base64 `value` — the live request/response are unaffected.
+The trim runs in the background, at most once per 30 s per workspace, so it never delays
+the `/execute` reply (rows over a limit can outlive it by up to that interval). There is
+still **no default row cap**: a default limit would delete user history and needs the
+user's sign-off first. No migration.
+
+**Automation run retention (opt-in).** `settings.api_client.automation_runs_keep` (integer,
+default `0` = keep every run) keeps only the newest N finished runs per automation, pruned
+when a run ends; a running run is never pruned.
 
 **Cookie jar scope.** The cookie jar is per-WORKSPACE (in-memory per daemon run): cookies
 captured executing in one workspace are never replayed for another. The cookies endpoints
@@ -2378,6 +2395,8 @@ way — it never falls back to a direct, unguarded egress.
 | GET /notifications/settings | member | — | `NotificationSettings {expiry_threshold_days, native_enabled, session_events, native_on_waiting}` — `native_on_waiting` (default `true`; absent in older rows → `true`): the UI also raises a native banner for the info "Session awaiting input" (`…:waiting`) notice when the user is not watching that session |
 | PUT /notifications/settings | member | NotificationSettings | settings |
 | POST /notifications/read-all | member | — | marks the caller's own notices read (root marks all) |
+| POST /notifications/read | member | `{ids: Id[]}` (≤ 500) | `{changed: number}` — mark a batch read in ONE statement with ONE `notifications_changed` (only when `changed > 0`); same ownership rule as the single-row call (foreign / global-for-non-root / unknown / already-read ids are skipped); > 500 ids → 400 |
+| POST /notifications/dismiss | member | `{ids: Id[]}` (≤ 500) | `{changed: number}` — dismiss a batch in ONE statement with ONE `notifications_changed`; same ownership rule as `DELETE /notifications/{id}` |
 | POST /notifications/{id}/read | member | — | mark one read (own only for non-root; global notices are read-only to them) |
 | DELETE /notifications/{id} | member | — | dismiss one (own only for non-root) |
 
@@ -2523,18 +2542,67 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /admin/db/stats | root | — | `DbStatsResp {size_bytes, free_bytes, auto_vacuum: 0\|1\|2, compacting}` |
-| POST /admin/db/compact | root | `{confirm: true}` | `DbCompactReport {before_bytes, after_bytes, freed_bytes, duration_ms, auto_vacuum}` · 400 without `confirm` · 409 while one is running |
+| GET /admin/db/stats | root | — | `DbStatsResp {size_bytes, free_bytes, auto_vacuum: 0\|1\|2, compacting, compaction_scheduled, estimated_offline_ms}` |
+| POST /admin/db/compact | root | `{confirm: true, at?: "now"\|"next_restart"\|"cancel"}` (default `now`) | `now`: `DbCompactReport {before_bytes, after_bytes, freed_bytes, duration_ms, auto_vacuum}` · `next_restart`/`cancel`: `DbCompactScheduled {compaction_scheduled, estimated_offline_ms}` · 400 without `confirm` · 409 while one is running |
 
 - `compact` is the one-time `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;` rewrite
   of `otto.db`. It holds the SQLite write lock for the whole rewrite (tens of
-  seconds on a large DB), so it never runs automatically: the UI sends it only
-  after a confirm dialog that says writes stall meanwhile. Audited as
-  `db.compact` (`detail` = the report). Once `auto_vacuum = 2`, the daemon's
-  hourly maintenance runs `PRAGMA incremental_vacuum(4000)`.
+  seconds on a large DB): the UI sends it only after a confirm dialog that
+  says writes stall meanwhile. Audited as `db.compact` (`detail` = the
+  report).
+- **Offline compaction at start (no write stall).** `at: "next_restart"`
+  writes `otto.db.compact-requested`; at the next start, BEFORE the pool
+  opens, the daemon runs `VACUUM INTO 'otto.db.compact-tmp'` (with
+  `auto_vacuum = INCREMENTAL`), verifies the copy (`quick_check`, identical
+  schema, identical row count per table), then swaps: `otto.db` →
+  `otto.db.precompact`, the copy → `otto.db`. The old file is deleted only
+  after the new one opened and migrated; a start that dies first leaves
+  `otto.db.compact-swapped`, and the following start restores the old file
+  (WAL/SHM included) and writes `otto.db.compact-failed` (no further
+  automatic attempts; an explicit request clears it — `cancel` writes the same
+  marker, so it also opts out of the automatic pass). Any failure leaves the
+  original untouched and the start continues. Audited as
+  `db.compact_scheduled` / `db.compact_cancelled`. `estimated_offline_ms` ≈
+  live bytes ÷ 150 MB/s (VACUUM INTO of a 400 MB file measured 0.7 s).
+- **Automatic.** The same offline pass runs on its own at start when the file
+  is not converted and more than 20 % and 64 MiB of it are free pages (live
+  data ≤ 4 GiB; `compaction_scheduled` is then `true`). A running daemon only
+  rewrites a SMALL file in place (live ≤ 128 MiB, hourly pass, no live
+  session); a large one is never VACUUMed under a running daemon. Once
+  `auto_vacuum = 2`, the hourly maintenance runs
+  `PRAGMA incremental_vacuum(4000)` and the trigger never fires again.
+- Boot (no endpoint): `PRAGMA analysis_limit=1000; PRAGMA optimize=0x10002`
+  right after migrations, so `sqlite_stat1` exists from the first query.
 - Hourly maintenance (no endpoint): `PRAGMA optimize`, then
-  `wal_checkpoint(TRUNCATE)` (PASSIVE when a reader pins the WAL). The writer
+  `wal_checkpoint(TRUNCATE)` with a 250 ms busy timeout (PASSIVE when a reader
+  pins the WAL, so the writer is never parked for the full 5 s). The writer
   sets `journal_size_limit = 64 MiB`.
+
+## Secret storage
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /admin/secrets/status | root | — | `SecretsStatus {mode: plaintext\|encrypted\|keychain, plaintext_file, plaintext_entries, key_state: unlocked\|locked\|not_loaded\|error, migration_available, migrating, backup_present}` · 404 when the daemon has no managed store |
+| POST /admin/secrets/secure | root | `{confirm: true}` | `SecretsMigrationReport {migrated, total, duration_ms}` · 400 without `confirm` · 409 when not in plaintext mode / already running / a key differs between the files · 502 when the Keychain is locked or a prompt is waiting (nothing changed) |
+
+- Stores (`otto_keychain`): `encrypted` = `secrets.enc` (AES-256-GCM, 0600,
+  atomic writes) sealed with ONE random master key in a single Keychain item
+  (`com.otto.daemon` / `otto-secrets-master-key-v1`); `plaintext` = legacy
+  `secrets.json`; `keychain` = one Keychain item per secret. Selected by
+  `OTTO_SECRETS` (`encrypted`/`file`/`keychain`) and the files on disk: once
+  `secrets.enc` exists and `secrets.json` is gone the encrypted store wins even
+  under a stale `OTTO_SECRETS=file`. Release macOS builds refuse `file` unless
+  `OTTO_SECRETS_ALLOW_PLAINTEXT=1` or a legacy `secrets.json` already exists.
+- Keychain access is bounded (8 s): a locked keychain / pending prompt yields
+  `key_state: locked` and a 502 "secret store locked" error instead of a
+  blocked request; one Keychain call is in flight at a time.
+- `secure` is NEVER automatic (an unattended deploy must not block on a
+  Keychain prompt). It copies every entry into `secrets.enc`, keeps an
+  encrypted backup, verifies every entry reads back, then zero-overwrites and
+  deletes `secrets.json` and switches the running daemon in-process (no
+  restart). Audited as `secrets.secure` / `secrets.secure_failed` with counts
+  only — no values, no key names. The desktop app's next plist rewrite then
+  sets `OTTO_SECRETS=encrypted`.
 
 ## Usage tracking & system metrics (embedded ClickHouse)
 
@@ -2542,7 +2610,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 |---|---|---|---|
 | GET /usage/status | Usage:View (paths redacted for non-root) | — | engine status (installed/available) |
 | GET /usage/summary | Usage:View (non-root: own sessions) | — | token-first breakdown (input/output + cache read/write, per provider/day/session/model) |
-| GET /usage/report | Usage:View (non-root: own sessions) | — | UsageReport (daily/monthly/model/session tables) |
+| GET /usage/report | Usage:View (non-root: own sessions) | `sessions_limit` (1–1000, default 100), `include=daily_models` | UsageReport (daily/monthly/model/session tables; `daily_models` only when included) |
 | POST /usage/ccusage-check | root | `{days?}` | CcusageCheck (opt-in `npx ccusage` cross-check) |
 | GET /usage/metrics | root | — | system CPU/RAM metrics |
 | PUT /usage/config | root | UsageConfig | config |
@@ -2550,7 +2618,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | GET /usage/budgets | root | — | UsageBudgetStatus (caps + live spend; enforcement opt-in, default off) |
 | PUT /usage/budgets | root | UsageBudgetConfig | UsageBudgetStatus (replace + persist budget config) |
 | GET /sessions/{id}/usage | Usage:View + ws viewer + session owner-or-admin | — | `SessionTotals \| null` — this session's token + cost totals over its whole recorded history (`{session_id, workspace_id, provider, events, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost_usd}`). `null` = nothing recorded, or usage tracking unavailable — never a misleading 0. The Agents pane's details chip shows it as "2.1M tokens · $1.24" (tokens first) |
-| GET /workspaces/{wid}/sessions/usage?days=30 | Usage:View + ws viewer | `days` 1–365 (default 30) | `{available, days, sessions: SessionTotals[]}` — one row per session of the workspace that the caller may see (workspace admin / root: all; otherwise their own) with usage in the window; sessions without usage are absent. `available: false` (and `sessions: []`) when the usage engine is unavailable — the UI then hides the tokens sort. Backed by one daemon-wide `session_totals(days)` rollup cached for 60 s (every rollup is a ClickHouse query) |
+| GET /workspaces/{wid}/sessions/usage?days=30 | Usage:View + ws viewer | `days` 1–365 (default 30) | `{available, days, sessions: SessionTotals[]}` — one row per session the workspace's sidebar lists (live connections, foreground agents and channel tickets — `SessionsRepo::visible_ids`, an id-only query) that the caller may see (workspace admin / root: all; otherwise their own) with usage in the window; background agents and archived rows are left out; sessions without usage are absent. `available: false` (and `sessions: []`) when the usage engine is unavailable — the UI then hides the tokens sort. Backed by one daemon-wide `session_totals(days)` rollup cached for 60 s (every rollup is a ClickHouse query) |
 
 ## Insights (scheduled usage reports)
 
@@ -2798,10 +2866,10 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | PATCH /workspaces/{ws}/vault/vaults/{id} | ws editor | `{name?, okf?}` | `Vault` |
 | DELETE /workspaces/{ws}/vault/vaults/{id} | ws editor | — | 204 — unregister ONLY (files on disk untouched) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rescan | ws editor | — | `VaultStatus` — full incremental rescan (awaited) |
-| GET /workspaces/{ws}/vault/vaults/{id}/status | ws viewer | — | `VaultStatus{scan_state, last_scan_at, generation, graph_generation, notes, links, unresolved, tags, attachments}`; stale (>5s) probes kick a background incremental scan |
+| GET /workspaces/{ws}/vault/vaults/{id}/status | ws viewer | — | `VaultStatus{scan_state, last_scan_at, generation, graph_generation, notes, links, unresolved, tags, attachments}`; the first probe starts the vault's FSEvents watcher (external changes kick a debounced, signature-checked incremental scan). Stale probes kick a background scan — stale = >30 s without a watcher, >10 min with a healthy one. `unresolved`/`tags`/`attachments` are cached per index generation |
 | GET /workspaces/{ws}/vault/vaults/{id}/dir | ws viewer | `?path=` | `VaultDirListing` — one level: dirs (with child counts), notes, attachments |
 | GET /workspaces/{ws}/vault/vaults/{id}/note | ws viewer | `?path=` | `VaultNote{meta, raw, outgoing}` |
-| PUT /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `{path, content, if_hash?}` | `VaultNoteMeta` — create/update; parent folders auto-created; `if_hash` mismatch → 409 (optimistic concurrency; `""` = must-not-exist) |
+| PUT /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `{path, content, if_hash?, autosave?}` | `VaultNoteMeta` — create/update; parent folders auto-created; `if_hash` mismatch → 409 (optimistic concurrency; `""` = must-not-exist). `autosave: true` (editor autosave) lets the write's history revision coalesce with the same note's open autosave revision for up to 5 min (its `after` moves forward, `before` stays); agent writes, restores and renames always get their own revision. Revision bodies are deduped (`.otto-history/.blobs/<sha>`). |
 | PUT /workspaces/{ws}/vault/vaults/{id}/file | ws editor | `{path, content, if_hash?}` | `{path,size,hash}` — create/update a guarded UTF-8 documentation artifact (`.yaml/.yml/.json/.d2/.mmd/.txt/.csv`, max 4 MiB); parent folders auto-created; same optimistic-concurrency, traversal, hidden-segment, and symlink-escape guards as note writes. Markdown stays on `/note`; binary files are rejected. |
 | DELETE /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `?path=` | 204 — soft delete → `<vault>/.trash/` (never destroys files) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rename | ws editor | `{from, to}` | `VaultRenameResult{from, to, links_updated, links_failed}` — file OR folder move; rewrites every referencing wikilink/markdown link across the vault on disk (style-preserving); case-only renames use a two-step move. All index reads run before the move; once the move succeeds the call never fails halfway — a source whose links could not be rewritten is listed in `links_failed` (left untouched), and the index is always refreshed to the new path |
@@ -3284,11 +3352,12 @@ Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The ric
 |---|---|---|---|---|
 | 102 | GET /api/v1/workspaces/{ws}/canvas/scenes | ws viewer | — | `CanvasSceneSummary[]` (newest-updated first) |
 | 103 | POST /api/v1/workspaces/{ws}/canvas/scenes | ws editor | `{title, doc?, story_id?, provider?, section?}` | CanvasScene (201; `doc` defaults to an empty scene) |
-| 104 | GET /api/v1/canvas/scenes/{id} | ws viewer | — | CanvasScene (full `doc_json`) |
-| 105 | PUT /api/v1/canvas/scenes/{id}[?summary=true] | ws editor | `{title?, doc?, thumbnail?, provider?, section?, story_id?}` | CanvasScene (partial; omitted fields unchanged, COALESCE). `?summary=true` answers with the `CanvasSceneSummary` row instead of echoing the whole document (the Canvas editor uses it). Summary `format` is a trigger-maintained column (migration 0143), no longer parsed out of `doc_json` per listed row |
+| 104 | GET /api/v1/canvas/scenes/{id}[?files=ref] | ws viewer | — | CanvasScene (full `doc_json`). Excalidraw images are stored as `otto-canvas-file:<sha256>` refs (migration 0163); by default they are put back inline (`dataURL`) so the doc is self-contained. `?files=ref` (also accepted on #103, #105 and #106b) returns the stored doc with refs — the Canvas editor's read; it resolves each ref through #106c |
+| 105 | PUT /api/v1/canvas/scenes/{id}[?summary=true] | ws editor | `{title?, doc?, thumbnail?, provider?, section?, story_id?}` | CanvasScene (partial; omitted fields unchanged, COALESCE). `doc` (here and in #103) is stored as the exact JSON text sent — validated, never re-serialised; bodies over 1 MB are scanned off the async runtime; `"doc": null` leaves the document unchanged; requires `Content-Type: application/json` (415 otherwise). `?summary=true` answers with the `CanvasSceneSummary` row instead of echoing the whole document (the Canvas editor uses it). Summary `format` is a trigger-maintained column (migration 0143), no longer parsed out of `doc_json` per listed row |
 | 106 | DELETE /api/v1/canvas/scenes/{id} | ws editor | — | 204 |
-| 106a | GET /api/v1/canvas/scenes/{id}/versions | ws viewer | — | `CanvasSceneVersion[]` newest first `{id, scene_id, origin: 'agent'\|'user'\|'restore', created_by?, format?, size, created_at}` — no documents. Each entry is the doc as it was JUST BEFORE a change: before every Ask AI commit, before a restore, and at most once per 10 min across user saves (#105 with `doc`); deduped against the newest entry; newest 30 kept (migration 0152) |
+| 106a | GET /api/v1/canvas/scenes/{id}/versions | ws viewer | — | `CanvasSceneVersion[]` newest first `{id, scene_id, origin: 'agent'\|'user'\|'restore', created_by?, format?, size, created_at}` — no documents. Each entry is the doc as it was JUST BEFORE a change: before every Ask AI commit, before a restore, and at most once per 10 min across user saves (#105 with `doc`); deduped against the newest entry; newest 30 kept (migration 0152). `format`/`size` are columns recorded at snapshot time (migration 0159) — listing never parses a document; `size` is the original doc's byte length. Excalidraw images (`files[*].dataURL`) are stored once per sha256 in `canvas_files` and referenced from versions, restored inline by #106b; pruning / scene delete garbage-collects unreferenced files |
 | 106b | POST /api/v1/canvas/scenes/{id}/versions/{vid}/restore | ws editor | — | CanvasScene — snapshots the current doc (origin `restore`, so a restore is undoable) then writes the version's doc. 404 when `vid` isn't a version of THIS scene |
+| 106c | GET /api/v1/canvas/files/{sha} | ws viewer of any workspace holding a scene (live or in history) that references the file | — | `text/plain` — the file's `data:` URL (what Excalidraw's `addFiles` takes). `ETag: "<sha>"`, `Cache-Control: private, max-age=31536000, immutable`; `If-None-Match` → 304. 400 on a non-sha256 id; 404 when missing OR not visible to the caller (a hash never reveals another workspace's image) |
 | 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview). On an Excalidraw board the agent sees only shapes/arrows/text in the simplified form; images, freedraw, lines, frames, free arrows (and anything bound to them) plus top-level `files`/`appState` are set aside and merged back into the committed scene, which may therefore mix simplified and full elements. The committed doc keeps the prior doc's extra keys (`sketch`, `positions`, …) and the pre-turn doc is recorded in #106a |
 | 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas") |
 | 145 | GET /api/v1/sessions/{sid}/canvas-refs | ws viewer | — | `CanvasSceneSummary[]` — scenes referenced by this session |
@@ -3330,8 +3399,12 @@ workspaces the caller can view (root: all). The library is global — a
 
 **Never destructive by default.** `DELETE` archives (status `archived`,
 every version kept); `?hard=true` (workspace Admin) removes the graph rows but
-never a blob. Retention is opt-in (`/design/admin/prune`, dry run unless
-`apply`). The legacy import mirrors — it never moves or edits
+never a blob. Retention: an admin's `/design/admin/prune` (dry run unless
+`apply`), plus an opt-in daily "auto-tidy" pass that only squashes `autosave`
+versions older than a week. It is a visible Settings toggle (Backup & restore →
+Design Hall storage, `PUT /design/admin/auto-tidy`), OFF by default, shown next
+to what it would reclaim; `OTTO_DESIGN_AUTO_PRUNE=0|1` hard-overrides the toggle
+(see `docs/features/design-hall.md` § Retention). The legacy import mirrors — it never moves or edits
 `product_attachments` / `canvas_scenes` rows or files.
 
 Types: `crates/otto-design/src/types.rs` ↔ `ui/src/lib/api/types.ts`
@@ -3363,23 +3436,26 @@ to (`dst_kind: "story"` — `implements` — links), sorted;
 | GET /api/v1/design/artifacts/{id} | ws viewer | `?content=true&version=v3` (optional) | `DesignArtifactDetail {artifact, head, approved, links_out, links_in, work_path, thumbnail_path, content, content_version_id, content_truncated}` — `content` (text formats, ≤ 256 KiB) only with `content=true` or `version=` |
 | PATCH /api/v1/design/artifacts/{id} | ws editor | `UpdateDesignArtifactReq {title?, project_id? ("" unfiles), studio?, status?, tags?, meta?, thumb_b64? (PNG ≤ 2 MB)}` | `DesignArtifact`. `status:"approved"` needs an approved version (use approve). A status change records a `status_change` signal (`shipped` → `shipped` signal) |
 | DELETE /api/v1/design/artifacts/{id} | ws editor (`?hard=true`: ws admin) | — | 204 — archives (every version kept). `?hard=true` deletes the artifact, its versions, outgoing links and search row; incoming links are kept and flagged `broken`; blobs are never removed here |
-| GET /api/v1/design/artifacts/{id}/content | ws viewer | — | raw bytes of the head, `Content-Type` = artifact mime, `X-Design-Version`, `X-Design-Seq`, `ETag: "<sha256>"`, `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`; 404 when no version |
+| GET /api/v1/design/artifacts/{id}/content | ws viewer | — | raw bytes of the head, `Content-Type` = artifact mime, `X-Design-Version`, `X-Design-Seq`, `ETag: "<sha256>"`, `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`; a matching `If-None-Match` answers **304** without reading the blob; 404 when no version |
 | PUT /api/v1/design/artifacts/{id}/content | ws editor | `DesignContentPutReq {content? \| content_b64?, base_version?, message?, author_kind? (user\|agent), session_id?, provenance?}` | `DesignSaveResult`. **`base_version` ≠ current head → 409** (`""` = expects no head; omitted = unconditional). Byte-identical to the head → `created:false`, no version. Validated (UTF-8 / JSON object / magic bytes, 25 MB raw; `scene3d` schema via the server hook) → 400/413. Version kind `autosave` (user) / `agent`. A user save within 2 h of an agent version records `edit_after_draft`. Mirrors the working copy, rebuilds links + search, emits `design_artifact_updated` (+ `design_link_updated` to `follow_latest` consumers). 40 MB body cap |
-| GET /api/v1/design/artifacts/{id}/thumbnail | ws viewer | — | the thumbnail blob (404 when none); `Content-Type` sniffed: `image/png` or `image/webp` |
-| PUT /api/v1/design/artifacts/{id}/thumbnail | ws editor | raw image bytes as the body (any `Content-Type`) — a PNG or WebP the UI renderer produced, ≤ 2 MB | `DesignArtifact` with the new `thumb_blob` (a content-addressed blob). The bytes are magic-byte sniffed: 415 anything else, 400 empty, 413 over 2 MB. A thumbnail is a cache, not an edit: no version, `updated_at` unchanged; the same image again is a no-op, a new one emits `design_artifact_updated {change:"thumbnail"}`. The previous blob stays until the opt-in prune GC. Agents are only handed PNG thumbnails (`render/current.png`, `refs/R<n>.png`) |
+| GET /api/v1/design/artifacts/{id}/thumbnail | ws viewer | `?v=<thumb_blob>` (optional) | the thumbnail blob (404 when none); `Content-Type` sniffed: `image/png` or `image/webp`; `ETag: "<sha256>"`, a matching `If-None-Match` is **304**. With `?v=` equal to the current `thumb_blob` the URL is content-keyed and served `Cache-Control: private, max-age=31536000, immutable`; otherwise `private, no-cache` |
+| PUT /api/v1/design/artifacts/{id}/thumbnail | ws editor | raw image bytes as the body (any `Content-Type`) — a PNG or WebP the UI renderer produced, ≤ 2 MB | `DesignArtifact` with the new `thumb_blob` (a content-addressed blob). The bytes are magic-byte sniffed: 415 anything else, 400 empty, 413 over 2 MB. A thumbnail is a cache, not an edit: no version, `updated_at` unchanged; the same image again is a no-op, a new one emits `design_artifact_updated {change:"thumbnail"}`. The previous blob is GC'd at once unless a version or another artifact still references it. Agents are only handed PNG thumbnails (`render/current.png`, `refs/R<n>.png`) |
 | GET /api/v1/design/artifacts/{id}/versions | ws viewer | `?kind=&limit=&offset=` | `DesignVersion[]` (newest `seq` first; default limit 200) |
 | POST /api/v1/design/artifacts/{id}/versions | ws editor | `DesignCommitReq {message, content? \| content_b64?, base_version?, author_kind?, session_id?, provenance?}` | 201 `DesignSaveResult` — a NAMED commit (`kind:"named"`, `agent` for agents): the given bytes, else the working copy `<data>/design/<id>/work/<file>` (what an agent edited in place), else the head re-labelled; empty message → 400 |
-| GET /api/v1/design/artifacts/{id}/versions/{v}/content | ws viewer | `{v}` = version id, `v12` or `12` | raw bytes of that version (same headers as `/content`) |
+| GET /api/v1/design/artifacts/{id}/versions/{v}/content | ws viewer | `{v}` = version id, `v12` or `12` | raw bytes of that version (same headers as `/content`, but `Cache-Control: private, max-age=31536000, immutable` — a version id / seq names fixed bytes; `If-None-Match` → 304) |
+| POST /api/v1/design/artifacts/{id}/versions/{v}/restore | ws editor | `DesignRestoreReq {base_version?, message?}`; `{v}` as above | `DesignSaveResult` — the version's blob re-committed server-side as a new `kind: "restore"` head (`provenance.restored_from`/`restored_seq`; message defaults to `Restored v<n>`); the blob is reused, nothing round-trips through the client. `base_version` ≠ head → 409 |
 | POST /api/v1/design/artifacts/{id}/approve | ws editor | `{version_id?}` (default head; id / `v12` / `12`) | `DesignArtifact` (status `approved`, `approved_version_id` moved). Records `status_change`; emits `design_artifact_updated {change:"approved"}` and `design_link_updated {reason:"target_approved"}` to every `follow_approved` consumer. Humans only — no MCP tool approves |
 | GET /api/v1/design/artifacts/{id}/links | ws viewer | `?dir=out\|in\|both` (default both) | `DesignLinksResp {links, artifacts}` — `artifacts` = the other ends the caller may view |
 | POST /api/v1/design/artifacts/{id}/links | ws editor (+ viewer on an artifact target) | `CreateDesignLinkReq {rel, dst_kind, dst_id, dst_node?, src_node?, policy?, pinned_version_id?, meta?}` | 201 `DesignLink` (`origin:"explicit"`). 400 unknown rel/dst_kind/policy or non-http(s) url; 404 missing artifact/story; **409 render cycle** (embeds/uses_component/uses_tokens) or duplicate. Default policy: render rels `follow_approved`; `derived_from`/`references`/`variant_of`/`resized_from` `pinned` (pinned to approved/head when no version given); others `follow_latest` |
 | DELETE /api/v1/design/artifacts/{id}/links/{link_id} | ws editor | — | 204; 409 for an `extracted` link (edit the document instead) |
 | GET /api/v1/design/links | design view (+ ws viewer per artifact) | `?artifact_ids=a,b,c&dir=out\|in\|both` (default both; 1–100 comma-separated ids) | `DesignLinksResp {links, artifacts}` — the links FROM (`out`) and/or TO (`in`) any of the ids in one call (Product's design strip), each link once even when both ends were requested, ordered by source (≤ 10 000 rows); ids that don't exist or whose workspace the caller can't view are skipped (never an error); `artifacts` = the OTHER ends the caller may view (not the requested ones). 400 no ids / > 100 ids / bad `dir` |
-| GET /api/v1/design/search | design view | `?q=` + the `GET /design/artifacts` filters (default limit 50) | `DesignSearchHit[] {artifact, snippet, score, reference_count, story_ids}` (enriched with one grouped query per page, not two per hit; `story_ids` sorted) — FTS5 over title, tags, extracted text (copy, layer/object names, token names), linked story keys+titles and project name; AND of terms, last term prefix-matched; shipped → approved → review → draft, then relevance. Empty `q` = filter listing. Powers the References drawer |
+| GET /api/v1/design/search | design view | `?q=` + the `GET /design/artifacts` filters (default limit 50) | `DesignSearchHit[] {artifact, snippet, score, reference_count, story_ids}` (enriched with one grouped query per page, not two per hit; `story_ids` sorted) — FTS5 over title, tags, extracted text (copy, layer/object names, token names), linked story keys+titles and project name; AND of terms, last term prefix-matched; shipped → approved → review → draft, then relevance. Empty `q` = filter listing (accepts the same keyset `cursor=<updated_at>\|<id>` as `GET /design/artifacts`). Snippets are computed for the returned page only. Powers the References drawer |
 | GET /api/v1/design/signals | design view | `?workspace_id=&artifact_id=&kind=&since=&limit=` | `DesignSignal[]` (newest first) |
 | POST /api/v1/design/signals | design edit + ws editor on the artifact | `DesignSignalReq {artifact_id, kind, version_id?, actor_kind?, session_id?, payload?}` | 201 `DesignSignal`; kinds `variant_chosen`, `variant_accepted`, `variant_rejected`, `agent_draft`, `edit_after_draft`, `review_comment`, `critique_finding`, `a11y_fix`, `brand_correction`, `rule_feedback`, `status_change`, `shipped`, `restored`, `reference_added`, `forked` (`variant_accepted` / `agent_draft` are normally server-recorded — see Design assist). The last three are client-recorded and need a payload key (400 otherwise): `restored` — `version_id` = the new head, `payload.from_version_id` = the version restored; `reference_added` — `payload.target_artifact_id` (the artifact added as a reference); `forked` — recorded on the NEW artifact, `payload.source_artifact_id` (+ optional `source_version_id`). Payload a JSON object ≤ 8 KB, ≤ 8 levels (400/413); emits `design_learning_update` |
 | POST /api/v1/design/admin/import | design admin | — | `DesignImportReport {attachments_scanned, scenes_scanned, created, synced, unchanged, skipped, links_created, errors}` — re-runs the idempotent legacy import (also runs at daemon start) |
-| POST /api/v1/design/admin/prune | design admin (+ ws admin on `artifact_id`; whole library = root) | `DesignPruneReq {artifact_id?, apply? (default false), window_secs? (default 600)}` | `DesignPruneReport {applied, artifacts_scanned, versions, blobs}` — squashes `autosave` versions to the last per window; never head, approved, link-pinned/extracted-from, published or signal-referenced versions, nor any non-autosave kind; unreferenced blobs GC'd on apply |
+| POST /api/v1/design/admin/prune | design admin (+ ws admin on `artifact_id`; whole library = root) | `DesignPruneReq {artifact_id?, apply? (default false), window_secs? (default 600)}` | `DesignPruneReport {applied, artifacts_scanned, versions, blobs, reclaimable_bytes, reclaimable_blobs}` — squashes `autosave` versions to the last per window; never head, approved, link-pinned/extracted-from, published or signal-referenced versions, nor any non-autosave kind; unreferenced blobs GC'd on apply |
+| GET /api/v1/design/admin/storage | design admin + root | — | `DesignStorageReport {blob_count, blob_bytes, version_count, version_bytes, auto_prune, auto_tidy, auto_tidy_forced: bool \| null, min_age_secs, reclaimable: {versions, blobs, bytes}, last_prune: {at, versions_removed, blobs_removed} \| null}` — the blob-store size gauge (files/bytes on disk after dedupe vs. bytes the version rows reference), the auto-tidy toggle (`auto_prune` = in effect after the env override) and a dry run of what a pass would reclaim now |
+| PUT /api/v1/design/admin/auto-tidy | design admin + root | `DesignAutoTidyReq {enabled}` | `DesignStorageReport` (refreshed) — persists the opt-in auto-tidy toggle (`settings` key `design.auto_tidy`, default false); the scheduler re-reads it hourly and runs at most one pass a day |
 
 **Link extraction** (every commit; `crates/otto-design/src/extract.rs`): html/svg
 `src=`/`data=`/`poster=` → `embeds`, other attributes → `references`
@@ -3676,10 +3752,11 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
-| 115 | GET /api/v1/workspaces/{id}/proof-packs | ws viewer · ProofPack View | query `status?`, `work_item_kind?`, `work_item_id?` | `ProofPackResp[]` |
+| 115 | GET /api/v1/workspaces/{id}/proof-packs | ws viewer · ProofPack View | query `status?`, `work_item_kind?`, `work_item_id?`, `limit?` (1..500), `cursor?`, `include_archived?` (default false — packs hidden by the opt-in session archive are left out) | `ProofPackResp[]` newest first (`updated_at DESC, id DESC`). With `limit`, a keyset page; the `x-next-cursor` response header carries the opaque cursor for the next page (absent on the last page). Without `limit`, every pack (legacy) |
 | 116 | POST /api/v1/workspaces/{id}/proof-packs | ws editor · ProofPack Edit | CreateProofPackReq `{work_item_kind, work_item_id, title?, parent_pack_id?, repo_id?}` | ProofPackResp (`repo_id` links the pack to a repo so its proof policy applies — strengthen-only) |
-| 117 | GET /api/v1/workspaces/{id}/proof-summary | ws viewer · ProofPack View | — | ProofSummaryResp `{rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, done_score, badges[]}]}` |
-| 118 | GET /api/v1/proof-packs/{id} | ws viewer · ProofPack View | — | ProofPackDetailResp `{pack, badges[], artifacts[], children[], done_contract, snapshots[]}` (done_contract computed live) |
+| 116a | POST /api/v1/workspaces/{id}/proof-packs/archive-sessions | ws admin · ProofPack Admin | `{older_than_days? (default 30, min 7; 400 below), apply? (default false)}` | `{applied, older_than_days, cutoff, matched, archived}` — OPT-IN. Dry run (count only) unless `apply`. Matches `session` packs with no evidence artifacts, not waived, not already archived, `updated_at` before the cutoff, and stamps `archived_at` (migration 0164) — nothing is deleted. Archived packs are hidden from `proof-summary` and the default pack list; any later update of the pack or a new artifact clears `archived_at` (DB triggers) |
+| 117 | GET /api/v1/workspaces/{id}/proof-summary | ws viewer · ProofPack View | query `work_items?` = `kind:id,kind:id,…` (≤ 1000; 400 on an unknown kind / malformed entry) | ProofSummaryResp `{rows:[{work_item_kind, work_item_id, proof_pack_id, status, risk_score, done_score, badges[]}]}` — with `work_items` only those work items' packs are read (index probes on `(work_item_kind, work_item_id)`; rows read = the filter, not the workspace); without it, every pack in the workspace (legacy full read). The sidebar sends the sessions it lists, incrementally |
+| 118 | GET /api/v1/proof-packs/{id} | ws viewer · ProofPack View | — | ProofPackDetailResp `{pack, badges[], artifacts[], children[], done_contract, snapshots[]}` (done_contract computed live). Each artifact's `content_ref` is cut to the preview (`PREVIEW_CAP`, 8 KiB) server-side — `truncated:true` when more is stored; fetch the full body from `/proof-artifacts/{id}/content` |
 | 119 | PATCH /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | `{title?, summary?}` | ProofPackResp |
 | 120 | DELETE /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts, snapshots, blobs) |
 | 121 | POST /api/v1/proof-packs/{id}/artifacts | ws editor · ProofPack Edit | AddArtifactReq `{kind, title, content?, content_url?, status?, metadata?}` | ProofPackResp |
@@ -3690,8 +3767,8 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 | 126 | POST /api/v1/proof-packs/{id}/snapshot | ws editor · ProofPack Edit | CreateSnapshotReq `{note?}` | ProofSnapshotResp `{…meta, bundle, report_md, report_html}` (immutable) |
 | 127 | GET /api/v1/proof-packs/{id}/snapshots | ws viewer · ProofPack View | — | `ProofSnapshotMeta[]` (newest first) |
 | 128 | GET /api/v1/proof-snapshots/{id} | ws viewer · ProofPack View | — | ProofSnapshotResp |
-| 129 | POST /api/v1/proof-packs/{id}/media | ws editor · ProofPack Edit | AttachMediaReq `{kind:screenshot\|video, title, mime, data_base64, metadata?}` (≤25 MiB) | ProofPackResp — `415` if `mime` not in the allow-list (png/jpeg/gif/webp/svg, mp4/webm); `413` if the decoded blob exceeds 25 MiB. 40 MB body cap (base64 inflation) |
-| 130 | GET /api/v1/proof-artifacts/{id}/blob | ws viewer · ProofPack View | — | raw bytes (`Content-Type` = blob mime, `Content-Disposition: inline`) |
+| 129 | POST /api/v1/proof-packs/{id}/media | ws editor · ProofPack Edit | raw body (preferred: `Content-Type` = the media mime, query `kind?` (default from the mime), `title?`) or legacy JSON AttachMediaReq `{kind:screenshot\|video, title, mime, data_base64, metadata?}` (≤25 MiB; parse + base64 decode + hashing run on the blocking pool) | ProofPackResp — `415` if `mime` not in the allow-list (png/jpeg/gif/webp/svg, mp4/webm); `413` if the decoded blob exceeds 25 MiB. 40 MB body cap (base64 inflation) |
+| 130 | GET /api/v1/proof-artifacts/{id}/blob | ws viewer · ProofPack View | — | raw bytes (`Content-Type` = blob mime, `Content-Disposition: inline`); `ETag` = the media sha256, `Cache-Control: private, max-age=31536000, immutable`, 304 on `If-None-Match`. Bytes live in the content-addressed `data_dir/proof-media/` store (deduped by sha; legacy inline BLOBs are moved there in the background and still served until then) |
 | 131 | POST /api/v1/proof-packs/{id}/evidence/api | ws editor · ProofPack Edit | ApiEvidenceReq `{title, method, url, status, duration_ms?, request?, response?, metadata?}` | ProofPackResp |
 | 132 | POST /api/v1/proof-packs/{id}/evidence/db | ws editor · ProofPack Edit | DbEvidenceReq `{title, engine?, query?, columns?, row_count?, sample?, error?, metadata?}` | ProofPackResp |
 | 133 | POST /api/v1/proof-packs/{id}/evidence/kafka | ws editor · ProofPack Edit | KafkaEvidenceReq `{title, topic, message_count?, sample?, truncated?, error?, metadata?}` | ProofPackResp |
@@ -3772,8 +3849,9 @@ enforce the entity's workspace role.
 | CP18 | POST /api/v1/mcp/policies/import | mcp:admin | `{policies, replace?}` | `{imported, replaced}` |
 | CP19 | POST /api/v1/mcp/policies/evaluate | mcp:view | `{server_id, tool, workspace_id?}` | decision preview |
 | CP20 | GET /api/v1/mcp/approvals | mcp:view (ws-filtered) | `?status=` | `McpApproval[]` — additive `requested_by_session_id?` (the agent session that raised it). A retried governed call reuses its still-pending approval (same tool + args hash + workspace + requester) instead of filing a duplicate |
+| CP20a | GET /api/v1/mcp/approvals/count | mcp:view (ws-filtered) | `?status=` | `McpApprovalCount` `{count}` — the number of approvals CP20 would show (same workspace scoping and per-(server, tool) visibility), uncapped, from one grouped count. The MCP page's pending badge reads it instead of fetching up to 200 rows |
 | CP21 | POST /api/v1/mcp/approvals/{id}/decide | mcp:admin + human credential (`403` for an agent session's / MCP / share token); approver≠requester, except agent-raised requests, which their human owner may decide | `{approved, note?}` | McpApproval |
-| CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters | `McpCallLogRow[]` — additive `caller_session_id?`; `otto.*` rows carry the resolved (else calling session's) `workspace_id`; for non-root callers a workspace-less `otto.*` row is listed only when `caller_user_id` is the caller |
+| CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters, `limit` (default 200), `offset` | `McpCallLogRow[]` — additive `caller_session_id?`; `otto.*` rows carry the resolved (else calling session's) `workspace_id`; for non-root callers a workspace-less `otto.*` row is listed only when `caller_user_id` is the caller. `limit`/`offset` page the ledger BEFORE the per-row visibility check, so a page can hold fewer than `limit` rows; the Audit tab's "Load more" advances `offset` by `limit` |
 | CP23 | GET /api/v1/mcp/stats | mcp:view (ws-filtered) | — | `McpToolStats[]` (same row scoping as CP22) |
 
 ### Otto as an MCP server (outward) + live-agent gateway
@@ -3781,8 +3859,10 @@ enforce the entity's workspace role.
 | # | Method + Path | Role | Body | Response |
 |---|---|---|---|---|
 | CP24 | GET /api/v1/mcp/otto-server | mcp:view | — | `{enabled, tools, has_token, token_prefix?, require_approval_dangerous, approval_exempt_tools}` — each tool `{name, description, mutating, category, enabled, approval_exempt, irreversible, auto_approved_by: McpAutoApproveRef[]}` |
+| CP24a | GET /api/v1/mcp/otto-server/enabled | mcp:view (or the restricted mcp token) | — | `McpOttoServerEnabled` `{enabled: string[], outward_enabled, ui_granted}` — the ENABLED full `otto.*` names in catalog order, the master switch, and whether the CALLING session holds the "Allow UI control" grant (`false` for a credential not bound to a session). The light read the stdio bridges poll per `tools/list` / governed call instead of CP24 (no descriptions, rule badges or token prefix). Never a gate: CP26 re-checks the enable list per call |
 | CP25 | PATCH /api/v1/mcp/otto-server | mcp:admin | `{enabled?, tools?, approval_exempt_tools?, rotate_token?}` | status + `token?` (shown once) |
-| CP26 | POST /api/v1/mcp/otto-tools/invoke | mcp:edit (or the restricted mcp token) | `{tool, arguments, dry_run?, wait_seconds?}` | governed result |
+| CP26 | POST /api/v1/mcp/otto-tools/invoke | mcp:edit (or the restricted mcp token) | `{tool, arguments, dry_run?, wait_seconds?}` | governed result — additive `ui_granted?: boolean` on an `otto.ui_*` call from a session credential: the calling session's "Allow UI control" grant AFTER the call, so the stdio bridge re-lists its tools without a CP24a read |
+| CP26a | POST /api/v1/mcp/tool-calls | session credential only (`403` otherwise); not feature-gated, allowed for read-only sessions and the restricted mcp token | `{tool, arguments?, ok, rows?}` | `204` — appends one row to the stdio bridge's tool-call ledger (`mcp_tool_calls`), stamped with the CALLING session and its workspace (never body fields); arguments redacted and capped. The bridge's audit path — it holds no database connection of its own |
 | CP27 | GET /api/v1/mcp/gateway/tools | mcp:view | `?workspace_id=` | `{tools}` (namespaced `mcp__server__tool`) |
 | CP28 | POST /api/v1/mcp/gateway/invoke | mcp:edit | `{server_id, tool, arguments, dry_run?, workspace_id, session_id?}` | InvokeResp (governed) |
 | CP29 | GET /api/v1/workspaces/{wid}/mcp/code-search | mcp:view + ws viewer | `?q=&path=&max=` | `{query, root, matches, truncated, stopped}` — runs off the async workers; stops early at 20 000 entries, 64 MiB read or 10 s (`truncated: true`, `stopped: "walk_limit"\|"byte_budget"\|"time_budget"`) and when the request is dropped; `stopped: null` when it covered the tree or hit `max` |
@@ -4101,7 +4181,7 @@ server-derived; a client never sets it.
 | GET /api/v1/personal-agents/{id}/autonomy | scheduled_tasks view + ws viewer | — | `PersonalAgentAutonomy` (defaults when never saved) |
 | PUT /api/v1/personal-agents/{id}/autonomy | scheduled_tasks edit + ws editor | `{proactive?: {enabled, runs_per_day (1..24), max_minutes (1..60)}, goals?: [{id?, text, enabled?}], rules?: [{id?, text}], primary?}` — partial; omitted sections kept; ≤20 goals, ≤30 rules, ≤500 chars each; a goal keeps its `last_run_at` by id; making an agent `primary` clears it on every other agent of the workspace | `PersonalAgentAutonomy` |
 | POST /api/v1/personal-agents/{id}/goals/{goal_id}/run | scheduled_tasks edit + ws editor | — | `PersonalAgentRun` (`mode: "proactive"`, read-only) — work the goal now; 409 while a run is in progress; counts against the daily budget |
-| GET /api/v1/personal-agents/{id}/activity | scheduled_tasks view + ws viewer | — | `PersonalAgentActivity` |
+| GET /api/v1/personal-agents/{id}/activity | scheduled_tasks view + ws viewer | query `after_seq?` (only ring items with `seq > after_seq`), `epoch?` (the boot id the cursor came with), `runs?` (default `true`; `false` → `runs: null`) | `PersonalAgentActivity` — plus `seq` (cursor: newest ring seq covered), `epoch` (daemon boot id; the in-memory ring and its `seq` restart with the daemon) and `reset` (`true` when the sent `epoch` is not this process's, or `after_seq` is ahead of anything it handed out: the answer is then a full one — replace items and cursor). Approvals read in one statement; run `summary` clipped to 280 chars |
 | GET /api/v1/personal-agents/{id}/memories | scheduled_tasks view + ws viewer | — | `PersonalAgentMemories` |
 | POST /api/v1/personal-agents/{id}/memories/edit | scheduled_tasks edit + ws editor | `{version, line, raw, text: string \| null}` — `text: null` forgets the item; `raw` must equal the line as listed | `PersonalAgentMemories`; 409 when the file or that line changed since it was listed |
 | POST /api/v1/personal-agents/{id}/reset | scheduled_tasks edit + ws editor | `{confirm}` — must equal the agent's name | `{ok:true}` — re-seeds `memory/notes.md`, stops + unpins the chat session, deletes schedules and run history (+ report files), clears goal cursors and live activity; keeps persona, rules, goals, model, delivery. 409 while a run is in progress |
@@ -4460,7 +4540,7 @@ automatically — capture/upload copies the original, each annotated save
 re-copies the flattened export, so the latest state is always paste-ready in an
 agent session. Storage is file-backed under `data_dir/snips/` (`{id}.png`,
 `{id}.annotated.png`, `{id}.json` sidecar; no SQLite table); snips older than
-14 days are pruned on create. The bytes last written to the clipboard are
+14 days are pruned on create (at most one sweep per hour). The bytes last written to the clipboard are
 mirrored to `data_dir/snips/clipboard-last.png` (observability + E2E sink;
 under `OTTO_E2E` only the mirror is written, the pasteboard is untouched).
 Feature gate: `Agents` (GET = View, everything else = Edit).
@@ -4468,11 +4548,11 @@ Feature gate: `Agents` (GET = View, everything else = Edit).
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /snips/capture | member (Agents:Edit) | `{}` | `CaptureSnipResp {cancelled, snip?}` — runs interactive `screencapture -i` (Esc ⇒ `cancelled:true`); 409 while another capture is on screen; 500 with a Screen-Recording hint when macOS blocks the capture |
-| POST /snips | member (Agents:Edit) | `UploadSnipReq {data_b64, filename?}` (PNG only, 25 MB raw / 40 MB body) | `Snip` |
+| POST /snips | member (Agents:Edit) | raw `image/png` body (preferred — no base64), or legacy JSON `UploadSnipReq {data_b64, filename?}`; PNG only (magic-byte sniff), 25 MB raw / 40 MB body | `Snip` |
 | GET /snips | member (Agents:View) | — | `Snip[]` (newest first, cap 100) |
-| GET /snips/{id}/image | member (Agents:View) | — | `image/png` (nosniff, inline) |
-| GET /snips/{id}/annotated | member (Agents:View) | — | `image/png`, 404 until the first annotated save |
-| POST /snips/{id}/annotated | member (Agents:Edit) | `{data_b64}` (PNG, 40 MB body) | `SnipCopyResp {copied}` — saves the flattened export and puts it on the clipboard |
+| GET /snips/{id}/image | member (Agents:View) | — | `image/png` (nosniff, inline); `Cache-Control: private, max-age=31536000, immutable` + `ETag` (304 on `If-None-Match`) — the original never changes |
+| GET /snips/{id}/annotated | member (Agents:View) | — | `image/png`, 404 until the first annotated save; `Cache-Control: private, no-cache` + weak `ETag` (304 on `If-None-Match`) |
+| POST /snips/{id}/annotated | member (Agents:Edit) | raw `image/png` body (preferred) or legacy `{data_b64}` (PNG, 40 MB body) | `SnipCopyResp {copied}` — saves the flattened export and puts it on the clipboard. The editor encodes in a worker and only posts when the annotations changed |
 | POST /snips/{id}/copy | member (Agents:Edit) | `{}` | `SnipCopyResp` — re-copy (annotated if present, else original) |
 | DELETE /snips/{id} | member (Agents:Edit) | — | 204 |
 
@@ -4528,8 +4608,8 @@ budget is wall-clock for the whole fetch (head + body). Broadcasts `browser_tab_
 | POST /api/v1/workspaces/{wid}/browser/tabs | ws editor · Browser Edit | `{url}` | `BrowserTab` (created in `mode:"reader"`) |
 | PATCH /api/v1/browser/tabs/{id} | ws editor · Browser Edit | `{url?, title?, mode?}` (`mode` ∈ `reader`\|`live`) | `BrowserTab` |
 | DELETE /api/v1/browser/tabs/{id} | ws editor · Browser Edit | — | 204 |
-| GET /api/v1/workspaces/{wid}/browser/page?url=…[&include_html=0] | ws editor · Browser Edit | — | `{url, title, markdown, html, engine, degraded}` — netguard-checked; `degraded:true` means the plain-fetch fallback ran (no JS). `include_html=0` (or `false`) returns `html: ""` — the reader UI and the `browser_page` MCP tool pass it (raw markup is up to 2 MB); default includes it |
-| GET /api/v1/workspaces/{wid}/browser/query?url=…&selector=… | ws editor · Browser Edit | — | `{matches: [{selector, outer_html, text}]}` — netguard-checked, same as `/page`; CSS-selector matches against the settled page |
+| GET /api/v1/workspaces/{wid}/browser/page?url=…[&include_html=0][&fresh=1] | ws editor · Browser Edit | — | `{url, title, markdown, html, engine, degraded}` — netguard-checked; `degraded:true` means the plain-fetch fallback ran (no JS). `include_html=0` (or `false`) returns `html: ""` — the reader UI and the `browser_page` MCP tool pass it (raw markup is up to 2 MB); default includes it. Renders are cached per workspace + URL (fragment ignored) for 60 s, concurrent requests share one in-flight render (≤32 pages / 32 MB); `fresh=1` (or `true`) forces a new render. A `/browser/login` drops that host's cached pages |
+| GET /api/v1/workspaces/{wid}/browser/query?url=…&selector=…[&fresh=1] | ws editor · Browser Edit | — | `{matches: [{selector, outer_html, text}]}` — netguard-checked, same as `/page`; CSS-selector matches against the settled page (served from the same 60 s page cache as `/page`; `fresh=1` re-renders). Bounded: ≤500 matches, `outer_html` ≤16 KB each (`…[truncated]`), ≤1 MB total |
 | GET /api/v1/workspaces/{wid}/browser/annotations | ws viewer · Browser View | query `url?` (filters to one page) | `BrowserAnnotation[]` |
 | POST /api/v1/workspaces/{wid}/browser/annotations | ws editor · Browser Edit | `{url, selector, excerpt?, text?, comment?, color?, tab_id?}` (`excerpt`/`text` default `""`, `color` defaults `"yellow"`) | `BrowserAnnotation` |
 | PATCH /api/v1/browser/annotations/{id} | ws editor · Browser Edit | `{comment}` | `BrowserAnnotation` |
@@ -4826,7 +4906,7 @@ missing credentials are `400 invalid` whose message starts with
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /aws/status | Aws:View | — | `AwsStatus { installed, version?, path?, install: InstallJob }` |
+| GET /aws/status | Aws:View | — | `AwsStatus { installed, version?, path?, install: InstallJob, cli: AwsCliStats }` — `AwsCliStats { running, queued, spawned_total, max_concurrent, background_max, wait_ms_p50, wait_ms_p95, call_ms_p50, call_ms_p95, samples, native_total }`: live counters of the daemon-wide `aws` child cap (at most `max_concurrent` = 10 CLI children at once, of which background work — permission probes, all-regions fan-outs — may hold `background_max` = 6; interactive calls own the rest and borrow free background slots; a call's timeout covers its queue wait; S3 download/upload streams and the `sso login` PTY are not counted). `wait_ms_*` / `call_ms_*` are nearest-rank percentiles of permit-queue wait and child wall time over the last `samples` (≤ 256) calls, 0 before the first. `native_total` counts calls signed in-process instead of spawning a child (F2d: `logs/events`, `logs/insights/{qid}`, `athena/query/{qid}`, `ec2/instances` when the account has static creds and no custom endpoint; `OTTO_AWS_NATIVE=off` disables) |
 | POST /aws/install | Aws:Admin | — | 202 `InstallJob` — idempotent while `running`; `brew install awscli` when brew is present, else the official `.pkg` into `~/aws-cli` + symlinks in `<data_dir>/bin`. Never `sudo`. |
 | GET /aws/discover | Aws:View | — | `{ profiles: DiscoveredProfile[] }` parsed from `~/.aws/config` + `~/.aws/credentials` — names/metadata only, **never key values** |
 | GET /aws/regions | Aws:View | — | `{ regions: { code, name }[] }` (static, 32 regions) |
@@ -4850,6 +4930,10 @@ session_token?, role_arn?, endpoint_url?, environment?, color? }` (`role_arn`
 `AWS_ENDPOINT_URL=<url>` + `AWS_EC2_METADATA_DISABLED=true` in the env of
 **every** `aws` subprocess for that account, both auth modes — LocalStack,
 VPC interface endpoints, S3-compatible stores).
+`?region=all` answers for EC2 / EKS / RDS are cached per (account, service,
+query) for 20 s with in-flight dedupe; an EC2 start/stop/reboot clears that
+account's cached answers. Credential export (`configure export-credentials`)
+and `sts assume-role` are single-flight per account.
 `InstallJob { tool: "aws", state: "idle"|"running"|"done"|"failed", log_tail,
 started_at?, finished_at?, error? }`. `DiscoveredProfile { name, region?,
 sso_start_url?, sso_session?, role_arn?, source: "config"|"credentials" }`.
@@ -4877,7 +4961,7 @@ the cache.
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/objects | `?prefix=&token=&max=&region=` (`max` 1..1000, default 500) | `{ prefixes: string[], objects: { key, size, last_modified, storage_class, etag }[], next_token?, is_truncated }` — `list-objects-v2 --delimiter /`; the prefix marker object is dropped; `token` is the CLI paginator's `NextToken` |
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/object | `?key=&region=` | `{ key, size, content_type, last_modified, etag, metadata, storage_class }` (`head-object`) |
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/preview | `?key=&max_bytes=&region=` (default 64 KiB, cap 1 MiB) | `{ text?, truncated, content_type, binary?, kind, size? }` — ranged `get-object`; non-text types (anything but `text/*`, JSON/NDJSON/XML/YAML/CSV/JS/SQL, or an `octet-stream` with a text-looking extension) and NUL-bearing bodies return `{ binary: true }` without text. `kind`: `text` (in `text`) · `image` (`image/*`, or an octet-stream key ending png/jpg/jpeg/gif/webp/svg/bmp/ico/avif) · `pdf` · `binary`; image/pdf bodies are fetched through `download?inline=true` |
-| PUT /aws/accounts/{id}/s3/buckets/{bucket}/object | **AwsS3:Edit** + `s3_write` on the bucket. `?key=&overwrite=&region=`, raw request body (≤ 5 GiB, spooled to `<data_dir>/tmp/<ulid>` and removed afterwards), `Content-Type` header becomes the object's type | 201 `{ key, size }` — `aws s3 cp <spool> s3://bucket/key` (1 h budget). An existing key → **409** "already exists — confirm to replace it" unless `overwrite=true`; a key ending in `/` → 400; over 5 GiB → 413. Audited `aws.s3.upload` (target `s3://bucket/key`, bytes, overwrite) |
+| PUT /aws/accounts/{id}/s3/buckets/{bucket}/object | **AwsS3:Edit** + `s3_write` on the bucket. `?key=&overwrite=&region=`, raw request body (≤ 5 GiB), `Content-Type` header becomes the object's type | 201 `{ key, size }`. With a `Content-Length` the body streams into `aws s3 cp - s3://bucket/key --expected-size <len>` (no temp copy, not counted against the CLI cap, 1 h budget); a body that errors, ends short of / runs past its `Content-Length`, or whose client disconnects → the child is killed before EOF (no object is written) and a detached `s3api list-multipart-uploads` + `abort-multipart-upload` removes the multipart upload it opened for that key (only uploads initiated by this attempt). Without a `Content-Length` the body is spooled to `<data_dir>/tmp/<ulid>` (removed afterwards) and sent with `aws s3 cp <spool> s3://bucket/key`. An existing key → **409** "already exists — confirm to replace it" unless `overwrite=true`; a key ending in `/` → 400; over 5 GiB → 413. Audited `aws.s3.upload` (target `s3://bucket/key`, bytes, overwrite) |
 | DELETE /aws/accounts/{id}/s3/buckets/{bucket}/object | **AwsS3:Edit** + `s3_delete` on the bucket. `?key=&confirm=&region=` | 204 — `s3api delete-object`. On a **prod** account `confirm` must equal `key` → else 400 naming the fix. Audited `aws.s3.delete` |
 | POST /aws/accounts/{id}/s3/buckets/{bucket}/presign | AwsS3:View + `s3_read` on the bucket. `{ key, expires_in? }` (seconds, default 3600, clamped 1..604800) (`?region=`) | `{ url, expires_at, warning? }` — `aws s3 presign`. `warning` is set when the account signs with temporary credentials (SSO / exported) that end before `expires_at` (the link dies with them). Audited `aws.s3.presign` |
 | GET /aws/accounts/{id}/s3/buckets/{bucket}/download | `?key=&region=&inline=` | streamed body (`aws s3 cp s3://… -` stdout), `Content-Disposition: attachment; filename="<basename>"`, `Content-Length` from the head; objects over **2 GiB** are refused with 413. The child is killed when the client disconnects. `inline=true` (in-app image/PDF preview): `Content-Disposition: inline`, a specific MIME type derived from the extension when the stored one is generic, `Content-Security-Policy: sandbox; default-src 'none'…` (an SVG/PDF never runs script), and objects over **25 MB** → 413 "use Download instead". |
@@ -4959,7 +5043,7 @@ the other rows still render. Only when **every** region fails with
 |---|---|---|
 | GET /aws/accounts/{id}/logs/groups | `?prefix=&token=&max=&region=` (`max` 1..1000, default 200) | `{ groups: { name, arn?, created_ms?, retention_days?, stored_bytes?, class? }[], next_token? }` (`logs describe-log-groups`) |
 | GET /aws/accounts/{id}/logs/streams | `?group=&prefix=&token=&max=&region=` | `{ streams: { name, created_ms?, first_event_ms?, last_event_ms?, stored_bytes? }[], next_token? }` — newest first (`--order-by LastEventTime --descending`) unless `prefix` is set (the API refuses both) |
-| GET /aws/accounts/{id}/logs/events | `?group=&streams=a,b&pattern=&start=&end=&token=&max=&region=` (`start`/`end` epoch **ms**; ≤ 100 streams) | `{ events: { id, stream, timestamp, ingestion_time?, message }[], next_token? }` (`logs filter-log-events`, ascending). Live tail = poll with `start` = the newest timestamp seen and dedupe on `id` |
+| GET /aws/accounts/{id}/logs/events | `?group=&streams=a,b&pattern=&start=&end=&token=&max=&region=` (`start`/`end` epoch **ms**; ≤ 100 streams) | `{ events: { id, stream, timestamp, ingestion_time?, message }[], next_token? }` (`FilterLogEvents`, ascending; signed in-process when the account has static creds, else `logs filter-log-events` — `next_token` is opaque and only valid for the path that minted it: native tokens start with `n1:`, and a native token the CLI path cannot resume → 400 "reload the list"). Live tail = poll with `start` = the newest timestamp seen and dedupe on `id` |
 | POST /aws/accounts/{id}/logs/insights | `{ groups: string[] (1..50), query, start, end (epoch ms, ≤ 31 days), limit? (≤ 10000, default 1000) }` (`?region=`) | `{ query_id }` (`logs start-query`; billed per GB scanned, never writes) |
 | GET /aws/accounts/{id}/logs/insights/{qid} | `?region=` | `{ status: Scheduled\|Running\|Complete\|Failed\|Cancelled\|Timeout\|Unknown, done, result: QueryResult, records_matched?, records_scanned?, bytes_scanned? }` — `result` is the DB Explorer shape; columns are the union of returned fields minus `@ptr` |
 | POST /aws/accounts/{id}/logs/insights/{qid}/stop | `?region=` | 204 (`logs stop-query`) |
@@ -5024,12 +5108,12 @@ Admin = cluster registry + installs (see `crates/otto-server/src/policy.rs`).
 | GET /k8s/clusters/{id}/capabilities?refresh= | kubernetes:View | — | `K8sCapabilities { server_version?, metrics_server, argo_rollouts, argocd, checked_at }` — cached in the row (`capabilities`), `refresh=true` re-probes (`version`, `get --raw /apis/metrics.k8s.io/v1beta1`, `api-resources --api-group=argoproj.io -o name`) |
 | GET /k8s/clusters/{id}/namespaces | kubernetes:View | — | `{ namespaces: { name, status, age_seconds }[] }` |
 | GET /k8s/clusters/{id}/nodes | kubernetes:View | — | `{ nodes: NodeRow[] }` — `get nodes` merged with metrics-server node usage when available |
-| GET /k8s/clusters/{id}/resources?kind=&ns=&label=&q= | kubernetes:View | — | `{ kind, items: K8sRow[], has_metrics }` — `kind ∈ pods, deployments, statefulsets, daemonsets, replicasets, jobs, cronjobs, services, ingresses, configmaps, secrets, pvcs, hpas, rollouts, applications, events` (short names like `po`/`deploy`/`svc` accepted); `ns` empty/absent ⇒ all namespaces (`-A`); `label` ⇒ `-l`; `q` ⇒ case-insensitive substring over name/namespace/status/node/ip/images/labels/extra; pods get `cpu`/`mem` merged from metrics-server when the cluster has it (`has_metrics`) |
+| GET /k8s/clusters/{id}/resources?kind=&ns=&label=&q= | kubernetes:View | — | `{ kind, items: K8sRow[], has_metrics }` — `kind ∈ pods, deployments, statefulsets, daemonsets, replicasets, jobs, cronjobs, services, ingresses, configmaps, secrets, pvcs, hpas, rollouts, applications, events` (short names like `po`/`deploy`/`svc` accepted); `ns` empty/absent ⇒ all namespaces (`-A`); `label` ⇒ `-l`; `q` ⇒ case-insensitive substring over name/namespace/status/node/ip/images/labels/extra; pods get `cpu`/`mem` merged from metrics-server when the cluster has it (`has_metrics`). **Cached + conditional** (perf K2): identical requests (same cluster/kind/ns/label/q and metrics visibility; the caller's access is still checked per request) share one kubectl list for 10 s — the UI's poll floor (single-flight; a k8s action drops the cluster's cached lists); the body also carries `version` and the response an `ETag: "<version>"` header; a request with `If-None-Match: "<version>"` for an unchanged list gets `304 Not Modified` with no body. Lists are paged off the API server through a per-cluster GET-only list `kubectl proxy` while a console polls (stopped after 2 min idle; kubectl fallback, perf R3). `version` hashes each object's `metadata.uid` + `resourceVersion` in list order (+ pod `cpu`/`mem` quantised to 10 m / 1 MiB) — never the rendered rows, whose `age_seconds` moves every second (perf R1); so it survives cache misses and the UI renders Age from `created_at`. `last_used_at` is written at most once a minute per cluster |
 | GET /k8s/clusters/{id}/resource?kind=&ns=&name= | kubernetes:View | — | `{ manifest, describe, events: { type, reason, message, count, last_seen }[] }` — `manifest` has `managedFields` stripped and, for Secrets, every `data`/`stringData` value (and the last-applied annotation) replaced by `"<redacted>"`; `kind` additionally accepts `nodes`/`namespaces` (then `ns` is ignored); events are selected by the object's UID, newest first |
 | GET /k8s/clusters/{id}/pods/{ns}/{name}/containers | kubernetes:View | — | `{ containers: { name, image, ready, state, restarts, init }[] }` (init containers first; `state` is `running` / `waiting:<Reason>` / `terminated:<Reason>`) |
 | GET /k8s/clusters/{id}/pods/{ns}/{name}/logs?container=&tail=500&since=&previous=&follow=&timestamps= | kubernetes:View | — | `text/plain`. Non-follow: 60 s budget, tail-capped at 5 MiB (a `[otto: output truncated …]` first line marks it). `follow=true` ⇒ chunked stream that stays open on `kubectl logs -f`; the child is killed when the client disconnects. `since` accepts a duration (`10m`) or an RFC3339 instant; `tail=-1` ⇒ no `--tail` |
 | GET /k8s/clusters/{id}/logs?ns=&selector=&container=&tail=500&since=&previous=&follow=&timestamps= | kubernetes:View | — | `text/plain` — workload-level logs: `kubectl logs -n <ns> -l <selector> --prefix --max-log-requests=100 [--all-containers]` so every line starts with `[pod/<pod>/<container>] `; same one-shot / follow / cap semantics as the per-pod route. `selector` is the workload row's `extra.selector` (`spec.selector.matchLabels` as `k=v,k=v`, present on deployments / statefulsets / daemonsets / replicasets / jobs / rollouts). 400 when `ns` or `selector` is empty |
-| GET /k8s/clusters/{id}/metrics?ns= | kubernetes:View | — | `{ pods: { name, namespace, cpu_millicores, mem_bytes, containers: { name, cpu_millicores, mem_bytes }[] }[], available }` — `available:false` (empty list) when metrics-server is absent; a cluster-RBAC denial is still a 403 |
+| GET /k8s/clusters/{id}/metrics?ns=&pod= | kubernetes:View | — | `{ pods: { name, namespace, cpu_millicores, mem_bytes, containers: { name, cpu_millicores, mem_bytes }[] }[], available }` — `available:false` (empty list) when metrics-server is absent; `pod` (needs `ns`; `[a-z0-9.-]` names, else 400) asks metrics-server for that ONE pod (`pods: []` + `available:true` when it has no sample yet) instead of the whole namespace (perf R5); a cluster-RBAC denial is still a 403 |
 | POST /k8s/clusters/{id}/exec | kubernetes:Edit | `{ workspace_id, ns, pod, container?, command?: string[] }` | 201 `Session` — PTY via `Spawner::spawn_command(provider="k8s")`: `kubectl [--kubeconfig ..] --context .. -n <ns> exec -it <pod> [-c <c>] -- sh -c 'command -v bash >/dev/null && exec bash \|\| exec sh'` (or `command`); title `"<pod> · <ns>"`, meta `{ k8s: { cluster_id, cluster_name, ns, pod, container, mode: "exec" } }`; audited as `k8s.exec` |
 | POST /k8s/clusters/{id}/k9s | kubernetes:Edit | `{ workspace_id, ns? }` | 201 `Session` — `k9s [--kubeconfig ..] --context .. [-n <ns \| default_namespace>]`; 400 `k9s not installed …` when missing; audited as `k8s.k9s` |
 | POST /k8s/clusters/{id}/actions | kubernetes:Edit | `K8sActionReq { action, kind, ns, name, params? }` | `{ ok, message, output? }` — see the action table below; audited as `k8s.action.<action>` (success AND failure, with `params`); `rollout_status` returns `ok:false` + output when the rollout has not finished within 5 s instead of failing |
@@ -5057,7 +5141,7 @@ color?, params, capabilities?: K8sCapabilities, created_by, created_at, updated_
 last_used_at? }` — `params` holds non-secret extras (`eks_region`, `eks_cluster`);
 no route ever returns kubeconfig contents.
 
-`K8sRow { name, namespace, kind, status, ready?: "n/m", restarts?, age_seconds, node?,
+`K8sRow { name, namespace, kind, status, ready?: "n/m", restarts?, age_seconds, created_at?: unix-seconds the age counts from (render `now - created_at`), node?,
 ip?, cpu? (millicores), mem? (bytes), images?: string[], labels: Record<string,string>,
 extra: Record<string,string>, health?: "ok"|"warn"|"bad"|"progressing" }`. `extra` is
 kind-specific: pods `phase, qos, containers, message?`; deployments / statefulsets /
@@ -5168,6 +5252,7 @@ for windows ≥ 24 h); rates divide by the seconds actually covered.
 | GET /k8s/monitor/fleet/filters | selection | `{ window, clusters: [{ id, name, environment, color, rows }] /* every registered cluster + any id with rows; rows = sample+event rows in the window (samples counted per hour bucket) */, namespaces: [{ cluster_id, namespace }], workloads: [{ cluster_id, namespace, workload }], pods: [{ cluster_id, namespace, workload, pod }] /* only for a narrowed selection (workload / pod, or one cluster + ns); ≤ 2000, newest first */ }` |
 | GET /k8s/monitor/fleet/table?group=workload\|pod&sort=restarts&dir=desc&limit=200&offset=0 | selection + grouping/order | `{ window, group, sort, dir, total, offset, rows: FleetRow[] }` — sorted server-side; `sort` ∈ `cluster\|namespace\|workload\|pod\|pods\|restarts\|oom\|crash\|probe\|churn\|mem_last\|mem_avg\|mem_max\|rps\|err_pct\|latency_ms` (400 otherwise); `limit` ≤ 2000 |
 | GET /k8s/monitor/fleet/series?metric=restarts&by=cluster&step= | selection + `metric` ∈ `restarts\|mem\|rps\|err\|latency`, `by` ∈ `cluster\|namespace\|workload\|pod` | `{ window, metric, unit: 'count'\|'bytes'\|'rate'\|'percent'\|'ms', by, step_secs, series: [{ key, label, points: [{ t, v }] }] }` — `restarts` is always one series per class (`by: "class"`); `step` defaults to ~60 buckets, floor 60 s, rounded up to whole minutes / 5 minutes / hours, and to whole hours (≥ 3600) for windows ≥ 24 h |
+| GET /k8s/monitor/fleet/series/batch?metrics=restarts,mem,rps,err,latency&by=&step= | selection + `metrics` = comma list (1–8) of the `series` metrics | `{ series: { [metric]: <the /fleet/series body> } }` — the Fleet overview's charts in ONE request; each metric shares the single route's cache entry + single-flight (perf K6); 400 on an empty/oversized list or unknown metric |
 | GET /k8s/monitor/fleet/events?class=&sort=ts&dir=desc&limit=200&offset=0 | selection + `class` (as the per-cluster events route, plus `churn` = churn only) | `{ window, sort, dir, total, offset, rows: (MonitorEvent & { cluster_id, cluster })[] }`; `sort` ∈ `ts\|cluster\|namespace\|workload\|pod\|kind\|class\|reason` |
 | GET /k8s/monitor/fleet/requests | selection | `{ window, enabled_on: [{ id, name }], disabled_on: [{ id, name }], rows: [{ path, method, rps, err_pct, avg_ms }] }` (≤ 500, by rps) — rows exist only for clusters with `request_labels` on |
 
@@ -5593,6 +5678,8 @@ Transcript session/history GETs reuse bounded immutable folds (32 retained entri
 
 ### API client history summaries
 
+`GET /workspaces/{wid}/api-client/storage` (perf N2; workspace Viewer) returns `ApiClientStorage` `{history_rows, history_bytes, run_rows, step_rows, run_bytes, max_runs_per_automation}`: the workspace's `api_history` row count and stored request+response snapshot bytes, its automation-run report count, recorded step count and stored bytes (headers + step rows), and the most runs any one automation holds. Sizes are `octet_length` sums answered from the record headers; the result is cached 60 s per workspace and dropped after any prune or clear. Read-only — nothing is deleted. `POST /workspaces/{wid}/api-client/storage/prune` (Editor) applies the workspace's **configured** retention immediately (`settings.api_client.history_max_rows` / `history_max_days` / `automation_runs_keep`; `0`/absent = no limit, the default) instead of on the next Send or run, and returns the fresh `ApiClientStorage`; with no limit configured it deletes nothing. Retention stays opt-in.
+
 `GET /workspaces/{wid}/api-client/history/summaries` returns `ApiHistorySummary[]` with the same workspace Viewer and API Client View permissions as full history. Optional `limit` defaults to 100 and clamps to 1–500; `q`, `status`, `request_id`, and `source` preserve full-history filtering. Results sort by `executed_at DESC, id DESC`. `q` matches literal text in method/URL (SQL wildcard characters are escaped).
 
 ```json
@@ -5751,3 +5838,47 @@ background poll or a slow call from queueing what the user just clicked:
 - **Events instead of polls.** New invalidation events `mcp_approval_changed`,
   `resource_access_changed`, `notifications_changed`, the `/ws/events`
   `subscribe` topic filter and `boot_id` (`ws.md`). No REST shape changed.
+
+## Workbench (per-user scratch files with full history)
+
+Notion/VS Code-style scratch files (scripts, JSON, Markdown, Mermaid, D2, …)
+with a FULL, append-only edit history. Workspace-scoped AND owner-scoped:
+every route answers only the caller's own docs (another user's id → `404`).
+Gated on **Agents** (`GET` = View, everything else = Edit) plus the workspace
+role (`viewer` for reads, `editor` for writes). Also served under the
+`scratch` workspace (owner-scoped, so nothing is shared). Types:
+`ui/src/lib/api/types.ts` "Workbench"; repo: `crates/otto-state/src/workbench.rs`;
+routes: `crates/otto-server/src/routes/workbench.rs` (migration 0165).
+
+History rules: every content change records a revision. Autosaves coalesce —
+a save within 60 s of an `auto` revision's first save overwrites that
+revision (`saves` += 1, so it always holds the newest content); later saves,
+`checkpoint: true` (⌘S) saves, creation (`create`) and revision restores
+(`restore`, with `restored_from`) append a new one. Saving identical content
+records nothing — except a `checkpoint` save of identical content while the
+newest revision is an open `auto` burst: that SEALS it (its kind becomes
+`checkpoint`), so the next autosave starts a new revision (⌘S always sends the
+buffer with `checkpoint: true`); metadata (name, language, pinned, folder, tags) never creates
+a revision. Content is stored content-addressed (sha256 blobs). Revisions are
+removed ONLY by the permanent delete of a trashed doc — no cascade and no
+retention job touches them. Doc content cap 5 MB; asset cap 20 MB.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{ws}/workbench/docs | member (Agents:View) | `?trash=true` lists the trash | `WorkbenchDoc[]` (no content) — live: pinned first then newest; trash: most recently trashed first |
+| POST /workspaces/{ws}/workbench/docs | member (Agents:Edit) | `WorkbenchCreateReq {name, language?='auto', content?='', folder?, tags?, pinned?}` | `201 WorkbenchDocFull` (rev 1, kind `create`) |
+| GET /workspaces/{ws}/workbench/docs/{id} | member (Agents:View) | — | `WorkbenchDocFull` (`content` = current text; for `language:"image"` the asset id) |
+| PATCH /workspaces/{ws}/workbench/docs/{id} | member (Agents:Edit) | `WorkbenchUpdateReq {content?, name?, language?, pinned?, folder?, tags?, checkpoint?, client_id?}` | `WorkbenchDoc`; `409` while trashed; `400` on validation (empty name, bad language, content > 5 MB) |
+| DELETE /workspaces/{ws}/workbench/docs/{id} | member (Agents:Edit) | `?permanent=true` = irreversible purge | soft: `200 WorkbenchDoc` (`deleted_at` set, history kept); permanent: `204` — only for a TRASHED doc (live doc → `409`), removes the doc, every revision and unreferenced blobs |
+| POST /workspaces/{ws}/workbench/docs/{id}/restore | member (Agents:Edit) | `{}` | `WorkbenchDoc` (out of the trash) |
+| GET /workspaces/{ws}/workbench/docs/{id}/revisions | member (Agents:View) | — | `WorkbenchRevision[]` newest first `{seq, kind, content_hash, size, created_at, updated_at, saves, restored_from}` |
+| GET /workspaces/{ws}/workbench/docs/{id}/revisions/{seq} | member (Agents:View) | — | `WorkbenchRevisionDetail` (revision + `doc_id` + `content`) |
+| POST /workspaces/{ws}/workbench/docs/{id}/revisions/{seq}/restore | member (Agents:Edit) | `{}` | `WorkbenchDocFull` — appends a `restore` revision; nothing is overwritten |
+| GET /workspaces/{ws}/workbench/docs/{id}/diff | member (Agents:View) | `?from=<seq>&to=<seq\|current>` (`to` omitted = current content) | `WorkbenchDiff {doc_id, from, to, added, removed, lines:[{op:eq\|add\|del, text, old_line?, new_line?}]}` — Myers line diff, exact up to 2 000 edits / 20 000 lines per side, else the changed middle as one delete + one add block |
+| POST /workspaces/{ws}/workbench/assets | member (Agents:Edit) | raw image body (PNG/JPEG/GIF/WebP by magic bytes; SVG when sent as `image/svg+xml`), ≤ 20 MB | `201 WorkbenchAsset {id, mime, size, sha256, created_at}` — identical bytes from the same owner return the existing asset |
+| GET /workspaces/{ws}/workbench/assets/{id} | member (Agents:View) | — | the image bytes with its `Content-Type`, `X-Content-Type-Options: nosniff`; SVG adds `Content-Security-Policy: sandbox` |
+
+Every mutation emits the owner-only WS event `workbench_doc_changed`
+(see ws.md). MCP (`ottod mcp-tools`): `workbench_list`, `workbench_get`
+(read-only) and `workbench_write` (MUTATING, Agents Edit — writes land as
+`checkpoint` revisions).

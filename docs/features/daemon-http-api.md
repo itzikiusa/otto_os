@@ -343,6 +343,7 @@ resolve their owning workspace from the row and role-check against it.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET /notifications` · `POST /notifications/read-all` | member | Your notices + global · mark all read |
+| `POST /notifications/read` · `POST /notifications/dismiss` | member | Mark read / dismiss a batch `{ids}` (≤ 500) in one statement + one `notifications_changed` |
 | `GET /plugins` · `GET/POST /plugin-admin` | member / root | Enabled plugins for the sidebar · install/manage sidecars |
 | `GET /admin/sessions` · `POST /admin/sessions/{id}/terminate` | Users:Admin or root | Daemon-wide session overview · force-terminate (audited) |
 | `POST /admin/impersonate/{user_id}` · `/stop` | Users:Admin or root | Mint an act-as token · end it (audited) |
@@ -498,6 +499,22 @@ the live planning sessions as they spawn.
 - **Secrets in the Keychain.** The SQLite state DB stores only opaque key
   references; tokens/passwords/app-passwords live in `otto-keychain`. The raw
   token secret is shown once and stored only as a SHA-256 hash.
+- **Encrypted secret storage.** Secrets live in `secrets.enc` (AES-256-GCM)
+  sealed with one master key held in the macOS Keychain — at most one Keychain
+  prompt per rebuild instead of one per secret. Installs that still keep the
+  legacy plaintext `secrets.json` see a warning in **Settings ▸ Trust & safety ▸
+  Secret storage** with a root-only **Secure secrets…** action
+  (`POST /admin/secrets/secure`): every secret is verified to read back from the
+  encrypted store before the plaintext file is wiped and deleted, and the
+  running daemon switches over without a restart. It never runs on its own — a
+  Keychain prompt must not block an unattended deploy. A locked Keychain shows
+  as "locked" (bounded 8 s wait, shared by all concurrent callers — the key is
+  fetched before the store's file lock), never a hung request. The plaintext
+  file is renamed aside before it is zeroed and unlinked, so a failed unlink
+  never leaves a zeroed `secrets.json` that would select plaintext mode; any
+  such residue is removed at the next start. If the final check fails AFTER
+  the switch, Settings says the secrets were encrypted and the backup
+  `secrets.migrate-backup.enc` was kept (not "nothing changed").
 - **Append-only audit log.** Security-relevant actions (login success/failure/
   lockout, token mint/revoke, settings change, listener toggle, confirmed guarded
   writes, grant changes, session terminate, impersonate start/stop) are written

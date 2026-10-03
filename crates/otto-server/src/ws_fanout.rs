@@ -124,6 +124,35 @@ pub fn subscribe(bus: &broadcast::Sender<Event>) -> broadcast::Receiver<FanItem>
     rx
 }
 
+/// Publish a STREAMING event (`Event::is_streaming`: `transcript_live`,
+/// `transcript_appended`) straight into `bus`'s socket fan-out, without the
+/// bus (perf2/03 N6). Those are the bus's hottest variants — one per ~700 ms
+/// per streaming session — and only WebSocket clients consume them; on the
+/// bus they woke all ~13 internal subscribers, each cloning and discarding
+/// them. No socket hub (nobody ever connected) or no socket listening → the
+/// event is dropped, exactly as the pump drops it. Relative order among
+/// streaming events is kept (same `tx`); a streaming event may overtake a
+/// bus event still in the pump's hop, which no client relies on (the
+/// transcript cursor, not arrival order, orders turns).
+pub fn publish_stream(bus: &broadcast::Sender<Event>, event: Event) {
+    debug_assert!(
+        event.is_streaming(),
+        "{} is not a streaming event",
+        event.type_name()
+    );
+    let tx = {
+        let hubs = hubs().lock().unwrap_or_else(|e| e.into_inner());
+        hubs.iter()
+            .find(|h| h.bus.upgrade().is_some_and(|b| b.same_channel(bus)))
+            .map(|h| h.tx.clone())
+    };
+    if let Some(tx) = tx {
+        if tx.receiver_count() > 0 {
+            let _ = tx.send(FanItem::Event(Arc::new(EventFrame::new(event))));
+        }
+    }
+}
+
 async fn pump(mut rx: broadcast::Receiver<Event>, tx: broadcast::Sender<FanItem>) {
     loop {
         match rx.recv().await {
@@ -235,5 +264,39 @@ mod tests {
         bus.send(notice("later")).unwrap();
         let f = next_frame(&mut late).await;
         assert!(f.text().unwrap().as_str().contains("later"));
+    }
+
+    /// perf2/03 N6: streaming events reach sockets without touching the bus —
+    /// an internal bus subscriber never sees them.
+    #[tokio::test]
+    async fn streaming_events_bypass_the_bus() {
+        let (bus, _) = broadcast::channel::<Event>(16);
+        let mut internal = bus.subscribe();
+        let mut sock = subscribe(&bus);
+        let live = Event::TranscriptLive {
+            workspace_id: "w".into(),
+            session_id: "s".into(),
+            text: "hi".into(),
+            input: "".into(),
+            status: "".into(),
+            branch: None,
+        };
+        assert!(live.is_streaming());
+        publish_stream(&bus, live);
+        match tokio::time::timeout(std::time::Duration::from_secs(1), sock.recv()).await {
+            Ok(Ok(FanItem::Event(f))) => assert_eq!(f.event.type_name(), "transcript_live"),
+            _ => panic!("socket did not get the streaming event"),
+        }
+        assert!(matches!(
+            internal.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        // Bus events still flow to sockets through the pump.
+        let _ = bus.send(notice("x"));
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), sock.recv()).await,
+            Ok(Ok(FanItem::Event(_)))
+        ));
+        assert!(!notice("y").is_streaming());
     }
 }

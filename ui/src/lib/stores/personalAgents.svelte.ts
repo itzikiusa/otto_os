@@ -13,6 +13,7 @@ import type {
   PersonalAgentSchedule,
 } from '../api/types';
 import { loadErrorText } from '../loadError';
+import { announceModule } from '../lazyModule';
 
 /** Room messages per request / kept in memory on live appends. */
 const ROOM_PAGE = 200;
@@ -45,6 +46,10 @@ class PersonalAgentsStore {
   messagesLoading: Record<string, boolean> = $state({});
   messagesError: Record<string, string> = $state({});
   private messageRequests = new Map<string, number>();
+  /** Rooms whose held feed may have a hole (a WS gap, or events skipped while
+   *  the Rooms page was closed): the next {@link loadMessages} re-reads the
+   *  TAIL and replaces, instead of paging forward from a stale cursor. */
+  private tailReload = new Set<string>();
   private wsId = '';
   /** Workspace each list was last loaded for (a late reply for another is dropped). */
   private agentsWs = '';
@@ -211,9 +216,10 @@ class PersonalAgentsStore {
     this.messagesError[roomId] = '';
     let have = this.messagesByRoom[roomId] ?? [];
     try {
-      if (have.length === 0) {
+      if (have.length === 0 || this.tailReload.has(roomId)) {
         const tail = await personalAgentsApi.messagesBefore(roomId, undefined, PAGE);
         if (this.messageRequests.get(roomId) !== request) return;
+        this.tailReload.delete(roomId);
         this.messagesByRoom = { ...this.messagesByRoom, [roomId]: tail };
         this.olderByRoom[roomId] = tail.length >= PAGE;
         return;
@@ -258,10 +264,32 @@ class PersonalAgentsStore {
   }
 
   async postMessage(roomId: string, text: string): Promise<void> {
-    await personalAgentsApi.postMessage(roomId, text);
-    // The WS broadcast also lands here; loadMessages appends after the cursor
-    // so the double refresh is idempotent.
-    await this.loadMessages(roomId);
+    const msg = await personalAgentsApi.postMessage(roomId, text);
+    // Append the stored message the POST returned — no refetch. The WS
+    // broadcast of the same message dedupes by id in appendMessage. A reply
+    // that isn't a message of this room falls back to the cursor fetch.
+    if (msg?.room_id === roomId && typeof msg.text === 'string') this.appendMessage(msg);
+    else await this.loadMessages(roomId);
+  }
+
+  /** Append one live message to a held feed (dedup by id, capped at
+   *  ROOM_KEEP). A room with a fetch in flight or a suspected hole re-reads
+   *  instead, so a live append never lands past a gap. */
+  private appendMessage(msg: AgentRoomMessage): void {
+    const roomId = msg.room_id;
+    const have = this.messagesByRoom[roomId];
+    if (!have) return;
+    if (this.messagesLoading[roomId] || this.tailReload.has(roomId)) {
+      void this.loadMessages(roomId);
+      return;
+    }
+    if (have.some((m) => m.id === msg.id)) return;
+    let next = have.concat(msg);
+    if (next.length > ROOM_KEEP) {
+      next = next.slice(next.length - ROOM_KEEP);
+      this.olderByRoom[roomId] = true;
+    }
+    this.messagesByRoom = { ...this.messagesByRoom, [roomId]: next };
   }
 
   // -- Live events ----------------------------------------------------------
@@ -292,7 +320,49 @@ class PersonalAgentsStore {
     if (ev.agent_id in this.schedulesByAgent) void this.loadSchedules(ev.agent_id);
   }
 
-  /** Live WS tick: fetch the room's messages after our cursor. */
+  /** Mounted Rooms views. Room events touch message feeds only while one is. */
+  private roomViewers = 0;
+  /** The room the Rooms view shows (kept across unmount; others are evicted). */
+  private activeRoom: string | null = null;
+
+  /** Register a mounted Rooms view; call the returned fn on unmount. The last
+   *  view leaving evicts every held feed but the selected room's, and marks
+   *  that one for a tail re-read (events stop applying while it's closed). */
+  watchRooms(): () => void {
+    this.roomViewers += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.roomViewers = Math.max(0, this.roomViewers - 1);
+      if (this.roomViewers > 0) return;
+      const keep = this.activeRoom;
+      const kept: Record<string, AgentRoomMessage[]> = {};
+      if (keep && this.messagesByRoom[keep]) {
+        kept[keep] = this.messagesByRoom[keep];
+        this.tailReload.add(keep);
+      }
+      this.messagesByRoom = kept;
+    };
+  }
+
+  /** The Rooms view's selection (see {@link watchRooms}). */
+  setActiveRoom(roomId: string | null): void {
+    this.activeRoom = roomId;
+  }
+
+  /** Events were missed (WS reconnect / lag): held feeds may have holes. The
+   *  shown room re-reads its tail now; the rest on their next open. */
+  resyncRooms(): void {
+    for (const id of Object.keys(this.messagesByRoom)) this.tailReload.add(id);
+    if (this.roomViewers > 0 && this.activeRoom && this.activeRoom in this.messagesByRoom) {
+      void this.loadMessages(this.activeRoom);
+    }
+  }
+
+  /** Live WS tick. The event carries the whole message: an open Rooms view
+   *  appends it to a held feed with no GET (R3); with no Rooms view mounted,
+   *  or for a room never opened, only the list's activity line moves (R2). */
   applyRoomEvent(ev: Extract<OttoEvent, { type: 'agent_room_message' }>): void {
     if (this.wsId && ev.workspace_id !== this.wsId) return;
     // Keep the rooms list's activity line current without a list reload
@@ -300,10 +370,26 @@ class PersonalAgentsStore {
     const r = this.rooms.find((x) => x.room.id === ev.room_id);
     if (r) {
       r.message_count = (r.message_count ?? 0) + 1;
-      r.last_message_at = new Date().toISOString();
+      r.last_message_at = ev.created_at ?? new Date().toISOString();
     }
-    void this.loadMessages(ev.room_id);
+    if (this.roomViewers === 0 || !(ev.room_id in this.messagesByRoom)) return;
+    // An older daemon sends ids only — fall back to the cursor fetch.
+    if (typeof ev.text !== 'string' || !ev.created_at) {
+      void this.loadMessages(ev.room_id);
+      return;
+    }
+    this.appendMessage({
+      id: ev.message_id,
+      room_id: ev.room_id,
+      author_kind: ev.author_kind === 'agent' ? 'agent' : 'user',
+      author_id: ev.author_id,
+      text: ev.text,
+      created_at: ev.created_at,
+    });
   }
 }
 
 export const personalAgents = new PersonalAgentsStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf G2): let it see this store
+// however it was first imported.
+announceModule('personalAgents', personalAgents);

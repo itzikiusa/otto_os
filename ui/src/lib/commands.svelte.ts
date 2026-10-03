@@ -53,6 +53,16 @@ class CommandRegistry {
   get all(): Command[] {
     return this.flat;
   }
+
+  /** True once a command surface (⌘K palette, the floating bar) has been
+   *  opened in this document. Command sets that cost a request to build
+   *  (connections) wait for it instead of fetching at boot (perf F8). */
+  wanted = $state(false);
+
+  /** A command surface opened: let on-demand command sets load. */
+  want(): void {
+    if (!this.wanted) this.wanted = true;
+  }
 }
 
 export const registry = new CommandRegistry();

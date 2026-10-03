@@ -33,7 +33,7 @@
     if (apiClient.requests.length > 0) {
       items.push({ separator: true, pinned: true });
       for (const r of apiClient.requests) {
-        items.push({ label: `${r.method} · ${r.name} · ${r.url}`, action: () => apiClient.loadRequestIntoDraft(r) });
+        items.push({ label: `${r.method} · ${r.name} · ${r.url}`, action: () => void apiClient.openRequest(r.id) });
       }
     }
     ctxMenu.show(e, items, { filter: true, filterPlaceholder: 'Search saved requests', maxVisible: 50 });

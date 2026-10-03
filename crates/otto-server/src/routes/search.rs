@@ -147,7 +147,9 @@ pub async fn search(
     // --- 3. API-client saved requests -------------------------------------
     {
         let repo = ApiClientRepo::new(ctx.pool.clone());
-        if let Ok(reqs) = repo.list_requests(&ws_id, None).await {
+        // Summaries (scalar projection), not full rows: a search keystroke
+        // must not load every saved body, script and doc (perf N7).
+        if let Ok(reqs) = repo.list_request_summaries(&ws_id, None).await {
             for r in reqs
                 .into_iter()
                 .filter(|r| matches_title_or_sub(&r.name, &format!("{} {}", r.method, r.url), &q))

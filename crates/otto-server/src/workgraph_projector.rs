@@ -136,7 +136,16 @@ pub fn spawn(ctx: ServerCtx) -> tokio::task::JoinHandle<()> {
         let mut live = LiveState::default();
         loop {
             match rx.recv().await {
-                Ok(ev) => handle_event(&ctx, &mut live, ev).await,
+                Ok(ev) => {
+                    // Perf §15 M1: surface slow projections (one per event,
+                    // serial — a slow one delays every later event).
+                    let started = std::time::Instant::now();
+                    handle_event(&ctx, &mut live, ev).await;
+                    let ms = started.elapsed().as_millis() as u64;
+                    if ms >= 25 {
+                        tracing::debug!(elapsed_ms = ms, "workgraph projector: slow event");
+                    }
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!("workgraph projector lagged {n} events; reconcile will heal");
                 }
@@ -305,9 +314,11 @@ async fn ingest_trail(
 // Per-kind upserts (used by both the event loop and the backfill)
 // ---------------------------------------------------------------------------
 
-async fn upsert_session(ctx: &ServerCtx, session: &Session) {
+/// The work-item upsert a session projects to, or `None` for a session the
+/// graph doesn't surface on its own ([`SessionClass::Skip`]).
+fn session_upsert(session: &Session) -> Option<WorkItemUpsert> {
     let (kind, owner, owner_kind) = match classify(session) {
-        SessionClass::Skip => return,
+        SessionClass::Skip => return None,
         SessionClass::Normal => (
             WorkKind::Session,
             Some(session.created_by.clone()),
@@ -322,7 +333,7 @@ async fn upsert_session(ctx: &ServerCtx, session: &Session) {
     };
     let status = WorkStatus::from_source(kind, &enum_str(&session.status));
     let ctx_summary = format!("{} session · {}", session.provider, session.cwd);
-    let up = WorkItemUpsert {
+    Some(WorkItemUpsert {
         workspace_id: session.workspace_id.clone(),
         kind,
         source_id: session.id.clone(),
@@ -338,26 +349,104 @@ async fn upsert_session(ctx: &ServerCtx, session: &Session) {
         result_summary: None,
         context_summary: Some(ctx_summary),
         started_by_id: None,
+    })
+}
+
+/// A session links to itself in the UI via a deep-link artifact (evidence).
+/// Keyed by the WORK ITEM's id — `work_items.id` is a fresh id, not the source
+/// id, so attaching by `session.id` failed the foreign key and every such
+/// artifact was silently dropped.
+fn session_artifact(item: &otto_state::WorkItem, session: &Session) -> NewArtifact {
+    NewArtifact {
+        work_item_id: item.id.clone(),
+        workspace_id: session.workspace_id.clone(),
+        kind: ArtifactKind::Session,
+        title: "Open session".into(),
+        reference: Some(session.id.clone()),
+        payload: json!({ "session_id": session.id }),
+    }
+}
+
+/// Live path (a session event). The deep-link artifact is attached when the
+/// item is CREATED; an existing item skips the "already attached?" probe — the
+/// reconcile sweep heals one that predates the artifact (perf §15 N1).
+async fn upsert_session(ctx: &ServerCtx, session: &Session) {
+    let Some(up) = session_upsert(session) else {
+        return;
     };
-    match ctx.workgraph.record(up).await {
+    match ctx.workgraph.record_created(up).await {
         Err(e) => tracing::debug!("workgraph upsert_session: {e}"),
-        // A session links to itself in the UI via a deep-link artifact (evidence).
-        // Keyed by the WORK ITEM's id — `work_items.id` is a fresh id, not the
-        // source id, so attaching by `session.id` failed the foreign key and
-        // every such artifact was silently dropped.
-        Ok(item) => {
-            add_artifact_if_absent(
-                ctx,
-                NewArtifact {
-                    work_item_id: item.id.clone(),
-                    workspace_id: session.workspace_id.clone(),
-                    kind: ArtifactKind::Session,
-                    title: "Open session".into(),
-                    reference: Some(session.id.clone()),
-                    payload: json!({ "session_id": session.id }),
-                },
-            )
-            .await;
+        Ok((item, true)) => {
+            let _ = ctx
+                .workgraph
+                .add_artifact(session_artifact(&item, session))
+                .await;
+        }
+        Ok((_, false)) => {}
+    }
+}
+
+/// Reconcile path for one workspace's sessions. Only live agent sessions are
+/// read (filtered in SQL — the sweep used to decode the workspace's whole
+/// history, archived rows included, every 5 min), their existing items + "has
+/// artifact" flags come back in one batched statement, and only a changed or
+/// new item, or one missing its artifact, issues a write. An unchanged
+/// workspace costs two statements whatever its session count (perf §15 N1).
+async fn reconcile_sessions(ctx: &ServerCtx, ws_id: &Id) {
+    let sessions = match ctx
+        .manager
+        .list_filtered(
+            &[otto_state::SessionScope {
+                workspace_id: ws_id.clone(),
+                owner: None,
+            }],
+            &otto_state::SessionListFilter {
+                archived: Some(false),
+                kind: Some("agent".into()),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("workgraph reconcile sessions: {e}");
+            return;
+        }
+    };
+    let ups: Vec<(&Session, WorkItemUpsert)> = sessions
+        .iter()
+        .filter_map(|s| session_upsert(s).map(|u| (s, u)))
+        .collect();
+    if ups.is_empty() {
+        return;
+    }
+    let keys: Vec<(WorkKind, String)> = ups
+        .iter()
+        .map(|(_, u)| (u.kind, u.source_id.clone()))
+        .collect();
+    let known = ctx
+        .workgraph
+        .repo()
+        .find_by_sources(ws_id, &keys, ArtifactKind::Session)
+        .await
+        .unwrap_or_default();
+    for (session, up) in ups {
+        let prev = known.get(&(up.kind, up.source_id.clone()));
+        let item = match prev {
+            Some((item, _)) if !otto_state::WorkGraphRepo::upsert_changes(item, &up) => {
+                item.clone()
+            }
+            _ => match ctx.workgraph.record(up).await {
+                Ok(item) => item,
+                Err(e) => {
+                    tracing::debug!("workgraph reconcile session: {e}");
+                    continue;
+                }
+            },
+        };
+        if !prev.is_some_and(|(_, has)| *has) {
+            add_artifact_if_absent(ctx, session_artifact(&item, session)).await;
         }
     }
 }
@@ -678,9 +767,10 @@ async fn upsert_product_story_row(ctx: &ServerCtx, story: &otto_state::ProductSt
 
 /// Re-derive the whole graph for every workspace. Idempotent; heals
 /// missed/lagged events. SQLite-only (NO usage/ClickHouse) so it is safe to run
-/// every 60 s on the reconcile loop without contending with the usage engine's
-/// `clickhouse local` queries — cost is refreshed on-demand (item detail) and on
-/// the user-triggered backfill, not on a background sweep.
+/// on every reconcile pass (5 min by default, `OTTO_WORKGRAPH_RECONCILE_SECS`)
+/// without contending with the usage engine's `clickhouse local` queries — cost
+/// is refreshed on-demand (item detail) and on the user-triggered backfill, not
+/// on a background sweep.
 pub async fn backfill_all(ctx: &ServerCtx) {
     let workspaces = match ctx.workspaces.list_all().await {
         Ok(w) => w,
@@ -723,11 +813,7 @@ pub async fn refresh_item_cost(ctx: &ServerCtx, workspace_id: &Id, item: &otto_s
 
 async fn backfill_workspace(ctx: &ServerCtx, ws_id: &Id, all_stories: &[otto_state::ProductStory]) {
     // Sessions (+ external triggers).
-    if let Ok(sessions) = ctx.manager.list_by_workspace(ws_id).await {
-        for s in &sessions {
-            upsert_session(ctx, s).await;
-        }
-    }
+    reconcile_sessions(ctx, ws_id).await;
     // Swarm projects.
     if let Ok(swarms) = ctx.swarm_repo.list_swarms(ws_id).await {
         for sw in &swarms {
@@ -868,5 +954,117 @@ mod tests {
         ] {
             assert_eq!(pr_item_status(settled), WorkStatus::Done);
         }
+    }
+
+    /// perf §15 N1/N2: the reconcile reads only live agent sessions (archived
+    /// history and connection rows are filtered in SQL) and an unchanged pass
+    /// costs a constant two statements — the session list plus one batched
+    /// item/artifact lookup — however many sessions the workspace holds.
+    #[tokio::test]
+    async fn reconcile_sessions_statement_budget() {
+        use crate::routes::browser::tests::{mem_pool, test_ctx};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, created_at) VALUES ('u1','u1','',?)",
+        )
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES ('w1','w','/tmp',?)",
+        )
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // 3 live agents (one channel-spawned, one review sub-agent that the
+        // graph skips), 60 archived agents and a connection session.
+        let mut n = 0;
+        let mut add = |kind: &str, archived: bool, meta: &str| {
+            n += 1;
+            (
+                format!("s{n:03}"),
+                kind.to_string(),
+                archived,
+                meta.to_string(),
+            )
+        };
+        let mut rows = vec![
+            add("agent", false, "{}"),
+            add("agent", false, r#"{"source":"channel","channel":"slack"}"#),
+            add("agent", false, r#"{"source":"review"}"#),
+            add("connection", false, "{}"),
+        ];
+        for _ in 0..60 {
+            rows.push(add("agent", true, "{}"));
+        }
+        for (id, kind, archived, meta) in &rows {
+            sqlx::query(
+                "INSERT INTO sessions (id, workspace_id, kind, provider, title, status, cwd, \
+                 created_by, created_at, last_active_at, meta_json, archived) \
+                 VALUES (?, 'w1', ?, 'claude', ?, 'idle', '/r', 'u1', ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(kind)
+            .bind(id)
+            .bind(&now)
+            .bind(&now)
+            .bind(meta)
+            .bind(*archived as i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let ws: Id = "w1".into();
+
+        // First pass creates the two surfaced items + their deep-link artifacts.
+        reconcile_sessions(&ctx, &ws).await;
+        let items = ctx
+            .workgraph
+            .repo()
+            .list_items(&ws, &MissionFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 2, "{items:?}");
+        for it in &items {
+            let arts = ctx.workgraph.repo().artifacts_for(&it.id).await.unwrap();
+            assert_eq!(arts.len(), 1, "artifact for {}", it.source_id);
+        }
+
+        // An unchanged pass: two statements, no writes, no per-row probes.
+        let probe = pool.statement_probe();
+        probe.reset();
+        reconcile_sessions(&ctx, &ws).await;
+        let stmts = probe.take();
+        assert_eq!(stmts.len(), 2, "reconcile budget: {stmts:#?}");
+        assert!(
+            stmts[0].contains("archived = ") && stmts[0].contains("kind = "),
+            "sessions filtered in SQL: {}",
+            stmts[0]
+        );
+
+        // A changed session costs its own upsert; the artifact probe stays
+        // skipped (the batched lookup already said it is attached).
+        sqlx::query("UPDATE sessions SET title = 'renamed' WHERE id = 's001'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        probe.reset();
+        reconcile_sessions(&ctx, &ws).await;
+        let stmts = probe.take();
+        assert!(
+            stmts
+                .iter()
+                .all(|s| !s.contains("FROM work_artifacts WHERE")),
+            "{stmts:#?}"
+        );
+        assert!(
+            stmts.iter().any(|s| s.starts_with("UPDATE work_items")),
+            "{stmts:#?}"
+        );
     }
 }
