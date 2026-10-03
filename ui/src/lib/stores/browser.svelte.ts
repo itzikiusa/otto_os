@@ -8,6 +8,7 @@ import * as browserApi from '../api/browser';
 import { nativeBrowserAvailable } from '../nativeBrowser';
 import { browserLive } from './browserLive.svelte';
 import type { BrowserAnnotation, BrowserAskReq, BrowserPage, BrowserTab, OttoEvent } from '../api/types';
+import { announceModule } from '../lazyModule';
 
 /** localStorage key for the agent session the Browser page's dock is attached
  *  to — per workspace, so switching workspaces re-attaches to that
@@ -404,3 +405,6 @@ class BrowserStore {
 }
 
 export const browser = new BrowserStore();
+// Routed by `peek()` in lib/events.svelte.ts (perf H1): let it see this store
+// however it was first imported.
+announceModule('browser', browser);

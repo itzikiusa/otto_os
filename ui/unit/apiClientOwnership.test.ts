@@ -380,3 +380,18 @@ test('opening a history entry shows its stored response, flagged as from history
   assert.equal(v.responseFromHistory.at, '2026-10-01T10:00:00Z');
   assert.equal(v.responseFromHistory.truncated, true);
 });
+
+test('api_history_appended refetches only a history list someone asked for (perf H1)', async () => {
+  const gets: string[] = [];
+  const {v} = setup({get: async (url: string) => { gets.push(url); return []; }});
+  const summaries = () => gets.filter((g) => g.includes('/history/summaries')).length;
+  // Loaded by another surface (⌘K, an agent UI command): no list on screen.
+  for (const id of ['h1', 'h2', 'h3']) v.noteHistoryAppended('A', id);
+  await new Promise((r) => setTimeout(r, 250));
+  assert.equal(summaries(), 0, 'an automation run must not refetch history per step');
+  await v.loadHistory();
+  assert.equal(summaries(), 1);
+  v.noteHistoryAppended('A', 'h4');
+  await new Promise((r) => setTimeout(r, 250));
+  assert.equal(summaries(), 2, 'the History list stays live once loaded');
+});

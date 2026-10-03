@@ -803,9 +803,14 @@ class ApiClientStore {
     return api.get<ApiHistorySummary[]>(`/workspaces/${wid}/api-client/history/summaries?${query}`, signal);
   }
 
-  /** Direct sends and WS append events share one metadata-only refresh. */
+  /** Direct sends and WS append events share one metadata-only refresh —
+   *  only once this workspace's list was asked for (loaded, failed, or in
+   *  flight): a store some other surface loaded has no list on screen, and
+   *  an automation run appends one entry per step (perf H1). */
   noteHistoryAppended(workspaceId: string, entryId?: string): void {
-    if (workspaceId === this.wsId()) void this.historyRefresh.request(entryId);
+    if (workspaceId !== this.wsId()) return;
+    if (!this.historyLoaded && this.historyLoadError === null && this.historyRefresh.idle) return;
+    void this.historyRefresh.request(entryId);
   }
 
   // ── Storage gauge (perf2 N2) ──────────────────────────────────────────────

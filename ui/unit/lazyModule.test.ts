@@ -66,8 +66,15 @@ test('events: reconnect / restart / periodic events peek page stores instead of 
     'databaseStore.peek()?.onDaemonRestart()',
     'usageStore.peek()?.applyMetricsTick()',
     'swarmStore.peek()?.applyEvent(parsed)',
-    "if (parsed.type === 'k8s_monitor_cycle') k8sStore.peek()?.applyEvent(parsed)",
+    'k8sStore.peek()?.applyEvent(parsed)',
     'personalAgentsStore.peek()?.resyncRooms()',
+    // perf H1: per-event page-store handlers.
+    'apiClientStore.peek()?.noteHistoryAppended(parsed.workspace_id, parsed.entry_id)',
+    'apiClientStore.peek()?.noteRunProgress(parsed.run_id, parsed.status)',
+    'runWithOttoStore.peek()?.applyEvent(parsed)',
+    'awsStore.peek()?.applyEvent(parsed)',
+    'personalAgentsStore.peek()?.applyRunEvent(parsed)',
+    'personalAgentsStore.peek()?.applyRoomEvent(parsed)',
   ]) {
     assert.ok(ev.includes(call), `expected ${call}`);
   }
@@ -81,9 +88,43 @@ test('events: reconnect / restart / periodic events peek page stores instead of 
     usage: 'lib/api/usage.svelte.ts',
     personalAgents: 'lib/stores/personalAgents.svelte.ts',
     k8s: 'lib/stores/k8s.svelte.ts',
+    apiClient: 'lib/stores/apiClient.svelte.ts',
+    runWithOtto: 'lib/stores/runWithOtto.svelte.ts',
+    aws: 'lib/stores/aws.svelte.ts',
+    scheduledTasks: 'lib/stores/scheduledTasks.svelte.ts',
+    product: 'lib/stores/product.svelte.ts',
+    loops: 'lib/stores/loops.svelte.ts',
+    browser: 'lib/stores/browser.svelte.ts',
+    browserLive: 'lib/stores/browserLive.svelte.ts',
   };
   for (const [key, file] of Object.entries(files)) {
     assert.match(ev, new RegExp(`const ${key}Store = lazyModule\\([^\\n]*, '${key}'\\);`), `${key}Store needs its key`);
     assert.match(readFileSync(join(src, file), 'utf8'), new RegExp(`^announceModule\\('${key}', ${key}\\);$`, 'm'), file);
   }
+});
+
+// perf H1: `use()` imports a page store into every document — main window,
+// pop-out, side pane — that receives the event. Only events whose payload must
+// survive until the page mounts (an agent session / proposal to attach) may do
+// that; every other handler peeks. A new `.use(` fails here until it is
+// justified and added to the list.
+test('events: only allow-listed events load a page store (`.use`)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const ev = readFileSync(join(import.meta.dirname, '..', 'src', 'lib/events.svelte.ts'), 'utf8');
+  const sites: string[] = [];
+  for (const m of ev.matchAll(/(\w+)Store\.use\(/g)) {
+    // The branch condition the call sits in: from its `if (` to the call.
+    const head = ev.slice(ev.lastIndexOf('if (', m.index), m.index);
+    const types = [...head.matchAll(/parsed\.type === '(\w+)'/g)].map((t) => t[1]);
+    assert.ok(types.length > 0, `.use( at offset ${m.index} is not inside an event branch`);
+    for (const t of types) sites.push(`${t} → ${m[1]}`);
+  }
+  assert.deepEqual(sites.sort(), [
+    'canvas_session_started → canvas',
+    'db_assist_session_started → database',
+    'db_assist_updated → database',
+    'mockup_session_started → mockupAssist',
+    'mockup_updated → mockupAssist',
+  ]);
 });

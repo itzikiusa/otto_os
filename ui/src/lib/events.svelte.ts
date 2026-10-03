@@ -26,20 +26,28 @@ import { lazyModule } from './lazyModule';
 // and evaluate the database / apiClient / product / k8s / … stores before the
 // shell could paint. The shell-owned stores above stay static (the sidebar,
 // status bar and session view read them from the first frame).
+//
+// Most handlers `peek()` (perf G2/H1): a page imports its store statically
+// and loads its own data on mount, so a document that never opened the page
+// has nothing to patch — `use()` there imported the store into every window
+// and, for API history / Run with Otto / AWS, fetched per event. `use()` is
+// kept only where the event's payload must survive until the page mounts
+// (an agent session or proposal to attach); `unit/lazyModule.test.ts` holds
+// that allow-list.
 const swarmStore = lazyModule(() => import('./stores/swarm.svelte').then((m) => m.swarm), 'swarm');
-const loopsStore = lazyModule(() => import('./stores/loops.svelte').then((m) => m.loops));
+const loopsStore = lazyModule(() => import('./stores/loops.svelte').then((m) => m.loops), 'loops');
 const usageStore = lazyModule(() => import('./api/usage.svelte').then((m) => m.usage), 'usage');
-const productStore = lazyModule(() => import('./stores/product.svelte').then((m) => m.product));
+const productStore = lazyModule(() => import('./stores/product.svelte').then((m) => m.product), 'product');
 const canvasStore = lazyModule(() => import('./stores/canvas.svelte').then((m) => m.canvas));
 const mockupAssistStore = lazyModule(() => import('./stores/mockup-assist.svelte').then((m) => m.mockupAssist));
 const databaseStore = lazyModule(() => import('./stores/database.svelte').then((m) => m.database), 'database');
-const scheduledTasksStore = lazyModule(() => import('./stores/scheduledTasks.svelte').then((m) => m.scheduledTasks));
-const runWithOttoStore = lazyModule(() => import('./stores/runWithOtto.svelte').then((m) => m.runWithOtto));
-const browserStore = lazyModule(() => import('./stores/browser.svelte').then((m) => m.browser));
-const browserLiveStore = lazyModule(() => import('./stores/browserLive.svelte').then((m) => m.browserLive));
+const scheduledTasksStore = lazyModule(() => import('./stores/scheduledTasks.svelte').then((m) => m.scheduledTasks), 'scheduledTasks');
+const runWithOttoStore = lazyModule(() => import('./stores/runWithOtto.svelte').then((m) => m.runWithOtto), 'runWithOtto');
+const browserStore = lazyModule(() => import('./stores/browser.svelte').then((m) => m.browser), 'browser');
+const browserLiveStore = lazyModule(() => import('./stores/browserLive.svelte').then((m) => m.browserLive), 'browserLive');
 const personalAgentsStore = lazyModule(() => import('./stores/personalAgents.svelte').then((m) => m.personalAgents), 'personalAgents');
 const k8sStore = lazyModule(() => import('./stores/k8s.svelte').then((m) => m.k8s), 'k8s');
-const awsStore = lazyModule(() => import('./stores/aws.svelte').then((m) => m.aws));
+const awsStore = lazyModule(() => import('./stores/aws.svelte').then((m) => m.aws), 'aws');
 const apiClientStore = lazyModule(() => import('./stores/apiClient.svelte').then((m) => m.apiClient), 'apiClient');
 import {
   handleUiFrame,
@@ -641,11 +649,13 @@ class EventsClient {
         } else if (parsed.type === 'api_history_appended') {
           // API Client history is shared across human sends and agent MCP runs.
           // Refresh once after a burst so the current workspace stays live.
-          apiClientStore.use((apiClient) => apiClient.noteHistoryAppended(parsed.workspace_id, parsed.entry_id));
+          // Automation runs emit one per step / row: only a loaded store
+          // with a loaded history list refetches.
+          apiClientStore.peek()?.noteHistoryAppended(parsed.workspace_id, parsed.entry_id);
         } else if (parsed.type === 'api_run_progress') {
           // A running automation finished a step: fetch its delta now
           // instead of waiting for the fallback poll.
-          apiClientStore.use((apiClient) => apiClient.noteRunProgress(parsed.run_id, parsed.status));
+          apiClientStore.peek()?.noteRunProgress(parsed.run_id, parsed.status);
         } else if (parsed.type === 'api_client_changed') {
           // Requests / collections / envs / automations changed (maybe by an
           // agent): keep the API store's 60 s reuse window honest. A store
@@ -668,10 +678,10 @@ class EventsClient {
           usageStore.peek()?.applyMetricsTick();
         } else if (parsed.type === 'product_changed') {
           // Let product section tabs know a run completed (kills a poll cycle).
-          productStore.use((product) => product.applyEvent(parsed));
+          productStore.peek()?.applyEvent(parsed);
         } else if (parsed.type === 'plan_run') {
           // Multi-agent plan kickoff: the Plan tab tiles the live sessions.
-          productStore.use((product) => product.applyPlanRun(parsed));
+          productStore.peek()?.applyPlanRun(parsed);
         } else if (parsed.type === 'improvement_updated') {
           // Let the Self-Improvement pane refresh without waiting for its poll.
           improvementBus.apply(parsed.kind, parsed.id);
@@ -730,7 +740,7 @@ class EventsClient {
           missionControlBus.apply(parsed.workspace_id, parsed.item_id, parsed.status);
         } else if (parsed.type === 'goal_loop_updated') {
           // Goal Loops: update the list row + bump the open detail's re-fetch tick.
-          loopsStore.use((loops) => loops.applyEvent(parsed));
+          loopsStore.peek()?.applyEvent(parsed);
         } else if (parsed.type === 'canvas_updated') {
           // Live canvas edits: the open Canvas editor re-renders the matching scene.
           canvasDocBus.apply(parsed.scene_id, parsed.doc);
@@ -788,19 +798,19 @@ class EventsClient {
           proof.applyEvent(parsed);
         } else if (parsed.type === 'scheduled_task_run_updated') {
           // Scheduled Tasks page refreshes the affected task's runs + list status.
-          scheduledTasksStore.use((scheduledTasks) => scheduledTasks.applyEvent(parsed));
+          scheduledTasksStore.peek()?.applyEvent(parsed);
         } else if (parsed.type === 'otto_run_updated') {
           // Run with Otto page refreshes the affected run + the workspace list.
-          runWithOttoStore.use((runWithOtto) => runWithOtto.applyEvent(parsed));
+          runWithOttoStore.peek()?.applyEvent(parsed);
         } else if (
           parsed.type === 'browser_tab_updated' ||
           parsed.type === 'browser_annotation_added'
         ) {
           // Browser page: tab strip / annotation list refresh in place.
-          browserStore.use((browser) => browser.applyEvent(parsed));
+          browserStore.peek()?.applyEvent(parsed);
         } else if (parsed.type === 'browser_engine_install_updated') {
           // Browser page / Settings → Browser: Chromium download progress.
-          browserLiveStore.use((browserLive) => browserLive.applyEvent(parsed));
+          browserLiveStore.peek()?.applyEvent(parsed);
         } else if (
           parsed.type === 'assistant_turn' ||
           parsed.type === 'assistant_task_update' ||
@@ -811,23 +821,22 @@ class EventsClient {
           assistant.applyEvent(parsed);
         } else if (parsed.type === 'personal_agent_run_updated') {
           // Personal Agents page refreshes the agent's runs + schedule cursors.
-          personalAgentsStore.use((personalAgents) => personalAgents.applyRunEvent(parsed));
+          personalAgentsStore.peek()?.applyRunEvent(parsed);
         } else if (parsed.type === 'agent_room_message') {
           // Agent-room feeds append the event's message (open Rooms view only).
-          personalAgentsStore.use((personalAgents) => personalAgents.applyRoomEvent(parsed));
+          personalAgentsStore.peek()?.applyRoomEvent(parsed);
         } else if (
           parsed.type === 'k8s_cluster_updated' ||
           parsed.type === 'k8s_install_updated' ||
           parsed.type === 'k8s_monitor_cycle'
         ) {
           // Kubernetes console: cluster list refetch / installer state tick.
-          // Monitor cycles tick per cluster on a schedule: they only feed an
-          // open console. Cluster/installer changes still load the store.
-          if (parsed.type === 'k8s_monitor_cycle') k8sStore.peek()?.applyEvent(parsed);
-          else k8sStore.use((k8s) => k8s.applyEvent(parsed));
+          // The console and the Home box load both on mount: a document
+          // without the store has nothing to refresh.
+          k8sStore.peek()?.applyEvent(parsed);
         } else if (parsed.type === 'aws_account_updated' || parsed.type === 'aws_install_updated') {
           // AWS console: account rows changed / the CLI installer advanced.
-          awsStore.use((aws) => aws.applyEvent(parsed));
+          awsStore.peek()?.applyEvent(parsed);
         } else if (
           parsed.type === 'transcript_appended' ||
           parsed.type === 'transcript_live' ||
