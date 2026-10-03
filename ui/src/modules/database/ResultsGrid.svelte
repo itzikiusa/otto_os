@@ -13,6 +13,8 @@
   import { onDestroy, untrack } from 'svelte';
   import { stashGridState, takeGridState, type GridTabState } from './grid-tab-state';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { isReleased, releasedRows, resultBudget } from '../../lib/stores/db-result-budget';
   import { findInPage } from '../../lib/findinpage.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import {
@@ -268,6 +270,8 @@
     // un-applied edits, and bring back the incoming tab's (when its result is
     // still the one they were made on) — never carry one tab's onto another.
     const key = tabKey ?? null;
+    // Viewing a tab keeps its result resident (least-recently-VIEWED goes first).
+    if (key) resultBudget.touch(key);
     if (key !== prevTabKey) {
       if (prevTabKey) stashGridState(prevTabKey, untrack(currentGridState));
       prevTabKey = key;
@@ -989,13 +993,77 @@
   function exportRows(): unknown[][] {
     return filtering || sorting || chipFiltering ? viewRows.map((r) => r.row) : liveRows;
   }
-  function toTsv(): string {
-    if (!result) return '';
-    const header = result.columns.map((c) => c.name).join('\t');
-    const body = exportRows()
-      .map((r) => r.map((v) => exportText(v).replace(/\t/g, ' ').replace(/\n/g, ' ')).join('\t'))
-      .join('\n');
-    return `${header}\n${body}`;
+  // ── Chunked export text ─────────────────────────────────────────────────────
+  // Copy / Download of a 100k-row result used to build the whole string in ONE
+  // task (hundreds of ms of frozen UI, no feedback). Past CHUNKED_FROM rows the
+  // text is built CHUNK_ROWS at a time, yielding between chunks, behind a
+  // "Preparing…" toast; downloads hand the parts straight to a Blob (no single
+  // giant string). Small results stay synchronous.
+  const CHUNKED_FROM = 20_000;
+  const CHUNK_ROWS = 5_000;
+  const yieldTask = (): Promise<void> => new Promise((res) => setTimeout(res, 0));
+  /** `header` + one line per row (joined by `sep`), as string parts. */
+  async function buildParts(header: string, line: (r: unknown[]) => string, sep = '\n', tail = ''): Promise<string[]> {
+    const rows = exportRows();
+    const parts: string[] = [header];
+    for (let i = 0; i < rows.length; i += CHUNK_ROWS) {
+      if (i > 0) await yieldTask();
+      const chunk = rows.slice(i, i + CHUNK_ROWS).map(line).join(sep);
+      parts.push(i > 0 ? sep + chunk : chunk);
+    }
+    if (tail) parts.push(tail);
+    return parts;
+  }
+  /** Run `work` behind a "Preparing…" toast when the export is large. */
+  async function withProgress<T>(what: string, work: () => Promise<T>): Promise<T> {
+    const big = exportRows().length > CHUNKED_FROM;
+    const id = big ? toasts.info(`Preparing ${what}…`, `${exportRows().length.toLocaleString()} rows`) : null;
+    try {
+      return await work();
+    } finally {
+      if (id !== null) toasts.dismiss(id);
+    }
+  }
+  function tsvLine(r: unknown[]): string {
+    return r.map((v) => exportText(v).replace(/\t/g, ' ').replace(/\n/g, ' ')).join('\t');
+  }
+  function tsvParts(): Promise<string[]> {
+    if (!result) return Promise.resolve(['']);
+    return buildParts(`${result.columns.map((c) => c.name).join('\t')}\n`, tsvLine);
+  }
+  function csvParts(): Promise<string[]> {
+    if (!result) return Promise.resolve(['']);
+    return buildParts(`${result.columns.map((c) => csvCell(c.name)).join(',')}\n`, (r) => r.map(csvCell).join(','));
+  }
+  function jsonParts(): Promise<string[]> {
+    if (!result || exportRows().length === 0) return Promise.resolve(['[]']);
+    const names = uniqueColNames;
+    // Each element pretty-printed and indented one level: byte-identical to
+    // JSON.stringify(array, null, 2).
+    return buildParts(
+      '[\n',
+      (r) => '  ' + JSON.stringify(Object.fromEntries(names.map((n, i) => [n, r[i] ?? null])), null, 2).replace(/\n/g, '\n  '),
+      ',\n',
+      '\n]',
+    );
+  }
+  /**
+   * Copy text that may take a while to build. WebKit only honours a clipboard
+   * write inside the click's activation, so the write starts NOW with a
+   * promised ClipboardItem; browsers without it fall back to writeText.
+   */
+  async function copyBuilt(build: () => Promise<string[]>): Promise<void> {
+    const text = build().then((p) => p.join(''));
+    const CI = (globalThis as { ClipboardItem?: typeof ClipboardItem }).ClipboardItem;
+    if (CI && navigator.clipboard?.write) {
+      try {
+        await navigator.clipboard.write([new CI({ 'text/plain': text.then((t) => new Blob([t], { type: 'text/plain' })) })]);
+        return;
+      } catch {
+        /* fall through to writeText */
+      }
+    }
+    await navigator.clipboard.writeText(await text);
   }
   function csvCell(v: unknown): string {
     let s = exportText(v);
@@ -1004,18 +1072,6 @@
     // Non-string values (a bare -5 is data, not a formula) are left alone.
     if (typeof v === 'string' && /^[=+\-@]/.test(s)) s = `'${s}`;
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  }
-  function toCsv(): string {
-    if (!result) return '';
-    const header = result.columns.map((c) => csvCell(c.name)).join(',');
-    const body = exportRows().map((r) => r.map(csvCell).join(',')).join('\n');
-    return `${header}\n${body}`;
-  }
-  function toJson(): string {
-    if (!result) return '[]';
-    const names = uniqueColNames;
-    const objs = exportRows().map((r) => Object.fromEntries(names.map((n, i) => [n, r[i] ?? null])));
-    return JSON.stringify(objs, null, 2);
   }
 
   const exportScope = $derived.by(() => {
@@ -1027,14 +1083,14 @@
 
   async function copyTsv(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(toTsv());
+      await withProgress('TSV', () => copyBuilt(tsvParts));
       toasts.success('Copied', `Result copied as TSV${exportScope}`);
     } catch {
       toasts.error('Copy failed');
     }
   }
-  function download(text: string, name: string, mime: string): void {
-    const blob = new Blob([text], { type: mime });
+  function download(parts: string[], name: string, mime: string): void {
+    const blob = new Blob(parts, { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1044,18 +1100,18 @@
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
-  function exportCsv(): void {
+  async function exportCsv(): Promise<void> {
     if (!canExport) return;
-    download(toCsv(), 'result.csv', 'text/csv');
+    download(await withProgress('CSV', csvParts), 'result.csv', 'text/csv');
   }
-  function exportJson(): void {
+  async function exportJson(): Promise<void> {
     if (!canExport) return;
-    download(toJson(), 'result.json', 'application/json');
+    download(await withProgress('JSON', jsonParts), 'result.json', 'application/json');
   }
   async function copyAs(kind: 'csv' | 'json' | 'columns'): Promise<void> {
-    const text = kind === 'csv' ? toCsv() : kind === 'json' ? toJson() : (result?.columns ?? []).map((c) => c.name).join(', ');
     try {
-      await navigator.clipboard.writeText(text);
+      if (kind === 'columns') await navigator.clipboard.writeText((result?.columns ?? []).map((c) => c.name).join(', '));
+      else await withProgress(kind.toUpperCase(), () => copyBuilt(kind === 'csv' ? csvParts : jsonParts));
       const what = kind === 'columns' ? 'Column names copied' : `Result copied as ${kind.toUpperCase()}${exportScope}`;
       toasts.success('Copied', what);
     } catch {
@@ -1299,6 +1355,23 @@
         <span class="ge-body">Run a query with <kbd>⌘↵</kbd> — the statement under the cursor, or your selection.</span>
       </div>
     {/if}
+  {/if}
+{:else if isReleased(resultProp)}
+  <!-- The memory budget released this hidden tab's rows (db-result-budget.ts):
+       columns/stats survive, the rows come back by re-running the statement. -->
+  {#if running}
+    {#if !mini}{@render loadingFrame()}{/if}
+  {:else if !mini}
+    <div class="grid-released" data-testid="db-result-released">
+      <EmptyState
+        icon="refresh"
+        title="Result released to save memory"
+        body={`${releasedRows(resultProp).toLocaleString()} rows were dropped while this tab was in the background. Re-run the query to bring them back.`}
+        actionLabel={hosted && statement ? 'Re-run' : undefined}
+        actionIcon="play"
+        onaction={() => void database.rerunReleased()}
+      />
+    </div>
   {/if}
 {:else if !result || result.columns.length === 0}
   {#if running && !mini}
@@ -1859,6 +1932,11 @@
     padding: 28px 16px;
     color: var(--text-dim);
     font-size: var(--fs-s);
+  }
+  .grid-released {
+    display: flex;
+    justify-content: center;
+    padding-block-start: 10vh;
   }
   .grid-empty.idle {
     flex-direction: column;
