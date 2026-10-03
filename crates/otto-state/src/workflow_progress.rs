@@ -169,6 +169,38 @@ pub fn progress_write(id: &str, nodes: &[NodeRunState]) -> Result<(String, Strin
     Ok((nodes_json, projection))
 }
 
+/// [`node_summary`] for node `index` of run `run_id`, served from the
+/// projection [`progress_write`] memoized when it persisted that node (perf
+/// N3): the engine emits a live node right after writing it, so the
+/// summary — `to_value`, projection and the SHA-256 `detail_version` — is
+/// already computed. The memo entry is used only when the node's serialized
+/// JSON still matches it (one serialization pass, no hash); otherwise the
+/// summary is computed as before. Returns the summary and its serialized
+/// length (the event size rule, without re-serializing).
+pub fn memoized_node_summary(
+    run_id: &str,
+    index: usize,
+    node: &NodeRunState,
+) -> Result<(Value, usize)> {
+    let part = serde_json::to_string(node).map_err(json_error)?;
+    let key = (fingerprint(&part), part.len());
+    let hit = {
+        let memo = projection_memo().lock().unwrap_or_else(|e| e.into_inner());
+        memo.0
+            .get(run_id)
+            .and_then(|nodes| nodes.get(index))
+            .filter(|(h, l, _)| (*h, *l) == key)
+            .map(|(_, _, p)| p.clone())
+    };
+    if let Some(p) = hit {
+        let v: Value = serde_json::from_str(&p).map_err(json_error)?;
+        return Ok((v, p.len()));
+    }
+    let summary = node_summary(node)?;
+    let len = serde_json::to_string(&summary).map_err(json_error)?.len();
+    Ok((summary, len))
+}
+
 /// `[a,b,…]` from already-serialized elements — exactly what serde_json's
 /// compact serializer writes for a sequence.
 fn join_array<'a>(parts: impl Iterator<Item = &'a str> + Clone) -> String {
@@ -828,6 +860,37 @@ mod progress_write_tests {
         nodes.swap(0, 4);
         let (_, projection) = progress_write(run, &nodes).unwrap();
         assert_eq!(projection, nodes_projection(&nodes).unwrap());
+    }
+
+    /// Perf N3 + N2 event size: the live-event summary served from the memo
+    /// is exactly `node_summary` (hit right after the write; a node changed
+    /// since, a shifted index or an unknown run computes it afresh), and a
+    /// node with 500 log lines is announced in well under 2 KB.
+    #[test]
+    fn memoized_node_summary_is_node_summary_and_small() {
+        let run = "memoized-summary-test-run";
+        let mut nodes: Vec<NodeRunState> = (0..6)
+            .map(|i| node(&format!("n{i}"), "running", 500))
+            .collect();
+        progress_write(run, &nodes).unwrap();
+        let check = |run: &str, i: usize, n: &NodeRunState| {
+            let (v, len) = memoized_node_summary(run, i, n).unwrap();
+            assert_eq!(v, node_summary(n).unwrap(), "node {i}");
+            assert_eq!(len, serde_json::to_string(&v).unwrap().len());
+            assert!(
+                len <= 2048,
+                "event node is a summary, not logs: {len} bytes"
+            );
+            assert_eq!(v["log_count"], n.logs.len());
+        };
+        for (i, n) in nodes.iter().enumerate() {
+            check(run, i, n); // memo hit
+        }
+        nodes[2].logs.push("⏳ newer".into());
+        let (v, _) = memoized_node_summary(run, 2, &nodes[2]).unwrap();
+        assert_eq!(v["log_count"], 501, "a changed node is never served stale");
+        check(run, 3, &nodes[2]); // wrong index → recomputed
+        check("no-such-run", 0, &nodes[0]);
     }
 }
 

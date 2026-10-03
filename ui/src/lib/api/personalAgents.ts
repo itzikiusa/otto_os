@@ -85,11 +85,16 @@ export const personalAgentsApi = {
   /** Work a standing goal now (a proactive, read-only run). */
   runGoal: (agentId: string, goalId: string) =>
     api.post<PersonalAgentRun>(`/personal-agents/${agentId}/goals/${goalId}/run`, {}),
-  /** `afterSeq`: only ring entries newer than this cursor; `runs: false`
-   *  leaves the run history out (`runs: null`). */
-  activity: (agentId: string, opts: { afterSeq?: number; runs?: boolean } = {}) => {
+  /** `afterSeq`: only ring entries newer than this cursor (`epoch`: the
+   *  daemon boot id it came with); `runs: false` leaves the run history out
+   *  (`runs: null`). */
+  activity: (
+    agentId: string,
+    opts: { afterSeq?: number; epoch?: string; runs?: boolean } = {},
+  ) => {
     const q = new URLSearchParams();
     if (opts.afterSeq !== undefined) q.set('after_seq', String(opts.afterSeq));
+    if (opts.epoch) q.set('epoch', opts.epoch);
     if (opts.runs === false) q.set('runs', 'false');
     const qs = q.toString();
     return api.get<PersonalAgentActivity>(`/personal-agents/${agentId}/activity${qs ? `?${qs}` : ''}`);

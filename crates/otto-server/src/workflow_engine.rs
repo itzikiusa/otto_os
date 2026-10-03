@@ -237,10 +237,19 @@ fn emit_run_updated(
     // output stripped, `detail_version` set — so the run view applies it in
     // place instead of refetching, and the WS frame carries a few hundred
     // bytes, not up to 32 KiB of logs. Bounded by construction (error clipped,
-    // activity capped); the size rule stays as a backstop.
-    let node = node
-        .and_then(|n| otto_state::workflow_progress::node_summary(n).ok())
-        .filter(|v| v.to_string().len() <= NODE_EVENT_MAX_BYTES);
+    // activity capped); the size rule stays as a backstop. Served from the
+    // projection the write that preceded this emit memoized (perf N3): no
+    // second `to_value` + SHA-256, and the size comes with it.
+    let node = node.and_then(|n| {
+        let index = states
+            .iter()
+            .position(|s| std::ptr::eq(s, n))
+            .or_else(|| states.iter().position(|s| s.node_id == n.node_id))?;
+        otto_state::workflow_progress::memoized_node_summary(run_id, index, n)
+            .ok()
+            .filter(|(_, len)| *len <= NODE_EVENT_MAX_BYTES)
+            .map(|(v, _)| v)
+    });
     let ev = Event::WorkflowRunUpdated {
         workspace_id: workspace_id.clone(),
         run_id: run_id.clone(),
@@ -1815,10 +1824,10 @@ pub async fn run_workflow(
     // non-root editor attach to the sessions their own run spawns — those are
     // gated owner-or-admin, and the workflow's creator is usually someone else.
     let run_starter = WorkflowsRepo::new(ctx.pool.clone())
-        .get_run(&run_id)
+        .run_created_by(&run_id)
         .await
         .ok()
-        .and_then(|r| r.created_by);
+        .flatten();
     let user = resolve_run_user(&ctx, &acting_user_id(run_starter, &workflow.created_by)).await;
     // Seed the run input from the entry manual_trigger node's configured fields
     // (its inspector — prompt/working_directory/repo_id/goals/…), letting the
@@ -4135,10 +4144,10 @@ async fn execute_node(
             // every run-level key — so by the time a notify node runs at the end
             // of a graph, `input` holds only the previous node's output. Read the
             // run row instead of trusting the hop chain.
+            // One column (perf N5) — not the whole run with its nodes_json.
             let run_input = WorkflowsRepo::new(ctx.pool.clone())
-                .get_run(run_id)
+                .run_input(run_id)
                 .await
-                .map(|r| r.input)
                 .unwrap_or(Value::Null);
 
             // `{key}` substitution draws from the run input FIRST, then the node

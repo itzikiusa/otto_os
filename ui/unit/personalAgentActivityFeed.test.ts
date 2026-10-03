@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ACTIVITY_ITEM_CAP,
+  activityEpochChanged,
   approvalConcernsFeed,
   mergeActivity,
 } from '../src/modules/personal-agents/activityFeed.ts';
@@ -54,4 +55,38 @@ test('only approval events for approvals the feed shows trigger a refresh', () =
   assert.equal(approvalConcernsFeed(data, 'other'), false);
   assert.equal(approvalConcernsFeed(data, undefined), false);
   assert.equal(approvalConcernsFeed(null, 'a1'), false);
+});
+
+test('a daemon restart (new epoch) resets the cursor and items instead of freezing the feed', () => {
+  const before = mergeActivity(
+    null,
+    base({ items: [item(41), item(40)], runs: [run('r1')], seq: 41, epoch: 'boot-a' }),
+  );
+  // The new process restarted its counter at 1: under max() the cursor
+  // would stay at 41 and every later answer (seq 1, 2, …) would be dropped.
+  const after = mergeActivity(before, base({ items: [item(2), item(1)], runs: null, seq: 2, epoch: 'boot-b' }));
+  assert.deepEqual(
+    after.items.map((i) => i.seq),
+    [2, 1],
+    'old-process items dropped, new ones shown',
+  );
+  assert.equal(after.seq, 2, 'cursor follows the new process');
+  assert.equal(after.epoch, 'boot-b');
+  assert.equal(after.runs?.length, 1, 'durable run history kept when omitted');
+  const next = mergeActivity(after, base({ items: [item(3)], runs: null, seq: 3, epoch: 'boot-b' }));
+  assert.deepEqual(
+    next.items.map((i) => i.seq),
+    [3, 2, 1],
+  );
+});
+
+test('the daemon-side reset flag is honoured even without an epoch to compare', () => {
+  const before = mergeActivity(null, base({ items: [item(9)], seq: 9 }));
+  assert.equal(activityEpochChanged(before, base({ seq: 0 })), false);
+  const after = mergeActivity(before, base({ items: [item(1)], runs: null, seq: 1, reset: true }));
+  assert.deepEqual(
+    after.items.map((i) => i.seq),
+    [1],
+  );
+  assert.equal(after.seq, 1);
 });

@@ -43,7 +43,7 @@
       wantRuns = false;
       const next = await personalAgentsApi.activity(
         agentId,
-        data === null ? {} : { afterSeq: data.seq ?? 0, runs: full },
+        data === null ? {} : { afterSeq: data.seq ?? 0, epoch: data.epoch, runs: full },
       );
       if (full) lastFull = Date.now();
       data = mergeActivity(data, next);

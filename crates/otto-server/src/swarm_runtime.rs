@@ -92,7 +92,6 @@ pub fn start_coordinator(ctx: ServerCtx, swarm_id: Id) {
             crate::swarm_verify::recover(&ctx, &swarm_id).await;
         });
     }
-    crate::swarm_wake::arm(&swarm_id);
     crate::swarm_wake::ensure_listener(&ctx);
     tokio::spawn(coordinator_loop(ctx, swarm_id, handle));
 }
@@ -102,10 +101,10 @@ pub fn stop_coordinator(ctx: &ServerCtx, swarm_id: &str) {
     if let Some(h) = ctx.swarm_coords.lock().unwrap().remove(swarm_id) {
         h.cancel.cancel();
     }
-    // The run is over: drop its shared-file tracking (a restart re-detects)
-    // and its wake bell (a parked loop keeps its own clone until it exits).
+    // The run is over: drop its shared-file tracking (a restart re-detects).
+    // Its wake bell goes with the loop: the cancelled loop returns and drops
+    // its `swarm_wake::BellGuard` (bells exist only while a coordinator runs).
     crate::swarm_run::forget_swarm_files(swarm_id);
-    crate::swarm_wake::forget(swarm_id);
 }
 
 pub fn set_paused(ctx: &ServerCtx, swarm_id: &str, paused: bool) {
@@ -132,6 +131,9 @@ fn tick_lock(swarm_id: &str) -> Arc<tokio::sync::Mutex<()>> {
 }
 
 async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandle) {
+    // Hold the swarm's wake bell for the loop's life (registered before the
+    // first tick so its events are kept; released on every return — perf N7).
+    let bell = crate::swarm_wake::register(&swarm_id);
     loop {
         let ticked_at = std::time::Instant::now();
         if handle.cancel.is_cancelled() {
@@ -169,7 +171,7 @@ async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandl
         // Event-driven (perf W7): park until a swarm event rings this swarm's
         // bell (≥ MIN_GAP after the last tick) or the 60 s safety tick; was a
         // fixed 5 s poll. Stop/restart still wakes it at once.
-        if crate::swarm_wake::wait(&handle.cancel, &swarm_id, ticked_at).await {
+        if crate::swarm_wake::wait(&handle.cancel, &bell, ticked_at).await {
             return;
         }
     }

@@ -230,10 +230,16 @@ struct ActivityQuery {
     /// when a run changed.
     #[serde(default)]
     runs: Option<bool>,
+    /// The `epoch` the client's cursor came with (perf N1). When it is not
+    /// this daemon's boot id — or `after_seq` is ahead of anything this
+    /// process handed out — the cursor is stale: answer as a full load with
+    /// `reset: true`.
+    #[serde(default)]
+    epoch: Option<String>,
 }
 
 /// Longest run `summary` the activity feed carries (the run page has it all).
-const ACTIVITY_SUMMARY_CLIP: usize = 280;
+const ACTIVITY_SUMMARY_CLIP: usize = otto_state::personal_agents::FEED_SUMMARY_CHARS;
 
 /// `GET /personal-agents/{id}/activity` — what the agent is doing now (the
 /// running run + its session's live status), its recent tool calls (allowed /
@@ -242,7 +248,10 @@ const ACTIVITY_SUMMARY_CLIP: usize = 280;
 ///
 /// Incremental (perf W4): `?after_seq=N` returns only newer `items`, and
 /// `?runs=false` leaves `runs` out (`null`). `seq` is the cursor for the next
-/// call. Approvals are read in one statement; run summaries are clipped.
+/// call, `epoch` the daemon boot id it belongs to: the ring and its counter
+/// restart with the daemon, so a cursor from a previous process is ignored
+/// (full answer, `reset: true`) instead of freezing the feed (perf N1).
+/// Approvals are read in one statement; run summaries are clipped.
 async fn activity(
     Path(id): Path<String>,
     Query(q): Query<ActivityQuery>,
@@ -251,7 +260,10 @@ async fn activity(
 ) -> ApiResult<Json<Value>> {
     load(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     let (current, runs) = if q.runs.unwrap_or(true) {
-        let mut runs = agents(&ctx).list_runs(&id, 20).await.map_err(ApiError)?;
+        let mut runs = agents(&ctx)
+            .list_runs_for_feed(&id, 20)
+            .await
+            .map_err(ApiError)?;
         for r in &mut runs {
             clip_in_place(&mut r.summary, ACTIVITY_SUMMARY_CLIP);
         }
@@ -274,7 +286,11 @@ async fn activity(
             .map(|s| json!(s.status)),
         None => None,
     };
-    let items = match q.after_seq {
+    let after_seq = q.after_seq.filter(|&after| {
+        crate::personal_agent_activity::cursor_is_current(after, q.epoch.as_deref())
+    });
+    let reset = q.after_seq.is_some() && after_seq.is_none();
+    let items = match after_seq {
         Some(after) => crate::personal_agent_activity::recent_after(&id, after, 100),
         None => crate::personal_agent_activity::recent(&id, 100),
     };
@@ -312,13 +328,15 @@ async fn activity(
     let seq = items
         .first()
         .map(|i| i.seq)
-        .unwrap_or(q.after_seq.unwrap_or(0));
+        .unwrap_or(after_seq.unwrap_or(0));
     Ok(Json(json!({
         "now": { "run": current, "session_status": session_status },
         "items": items,
         "approvals": approvals,
         "runs": runs,
         "seq": seq,
+        "epoch": crate::transport::boot_id(),
+        "reset": reset,
     })))
 }
 
