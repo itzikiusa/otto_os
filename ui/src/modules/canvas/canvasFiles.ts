@@ -10,42 +10,46 @@
 // goes inline exactly once; its sha (sha256 of the data-URL text, the same
 // digest the server uses) is learned after that save lands.
 //
-// The pure helpers here are unit-tested (ui/unit/canvasFiles.test.ts, via canvasFileRefs.ts); the
-// fetch/digest ones are thin wrappers.
+// The pure helpers here are unit-tested (ui/unit/canvasFiles.test.ts, via
+// canvasFileRefs.ts + canvasFileCache.ts); the fetch/digest ones are thin wrappers.
 
 import { baseUrl, getToken } from '../../lib/api/client';
+import { FileCache } from './canvasFileCache';
 import { refSha, type ExFile } from './canvasFileRefs';
 
 export { FILE_REF_PREFIX, refSha, filesForSave, sha256Hex } from './canvasFileRefs';
 
-// One fetch per sha per page load (the HTTP cache covers reloads).
-const fetched = new Map<string, Promise<string>>();
+// One fetch per sha while a board uses it, bounded to 64 MB (LRU) and released
+// when the last board using it unmounts (the HTTP cache covers a reopen).
+const cache = new FileCache(async (sha) => {
+  const token = getToken();
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const resp = await fetch(`${baseUrl()}/api/v1/canvas/files/${sha}`, { headers });
+  if (!resp.ok) throw new Error(`canvas file ${sha.slice(0, 8)}: ${resp.status}`);
+  return resp.text();
+});
 
-/** A file's data URL by sha (authed; cached; a failure is not cached). */
-export function fetchFile(sha: string): Promise<string> {
-  const hit = fetched.get(sha);
-  if (hit) return hit;
-  const p = (async () => {
-    const token = getToken();
-    const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-    const resp = await fetch(`${baseUrl()}/api/v1/canvas/files/${sha}`, { headers });
-    if (!resp.ok) throw new Error(`canvas file ${sha.slice(0, 8)}: ${resp.status}`);
-    return resp.text();
-  })();
-  fetched.set(sha, p);
-  p.catch(() => fetched.delete(sha));
-  return p;
+/** A file's data URL by sha for `owner` (authed; cached; a failure is not cached). */
+export function fetchFile(sha: string, owner: unknown): Promise<string> {
+  return cache.get(sha, owner);
+}
+
+/** A board unmounted: free the files no other open board uses. */
+export function releaseFiles(owner: unknown): void {
+  cache.release(owner);
 }
 
 /**
  * Resolve a scene's `files` map for Excalidraw: ref entries get their data URL
  * fetched (and `known` learns id → sha); inline entries pass through. Files
  * whose fetch fails are left out (Excalidraw shows its placeholder) rather
- * than failing the whole load. `skip` = ids the editor already holds.
+ * than failing the whole load. `owner` = the board (released on unmount via
+ * `releaseFiles`); `skip` = ids the editor already holds.
  */
 export async function resolveFiles(
   files: Record<string, ExFile> | null | undefined,
   known: Map<string, string>,
+  owner: unknown,
   skip: ReadonlySet<string> = new Set(),
 ): Promise<ExFile[]> {
   const entries = Object.entries(files ?? {}).filter(([id, f]) => {
@@ -59,7 +63,7 @@ export async function resolveFiles(
       const sha = refSha(f.dataURL);
       if (!sha) return f;
       try {
-        return { ...f, dataURL: await fetchFile(sha) };
+        return { ...f, dataURL: await fetchFile(sha, owner) };
       } catch {
         return null;
       }
