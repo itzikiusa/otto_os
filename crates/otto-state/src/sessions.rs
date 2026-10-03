@@ -212,6 +212,26 @@ fn list_query(
     q
 }
 
+/// The [`SessionsRepo::visible_ids`] statement, after `prefix` (as for
+/// [`list_query`]). No ORDER BY, so the index pick is the planner's alone —
+/// the plan test pins it to the 0162 source index.
+fn visible_ids_query(
+    prefix: &str,
+    ws: &Id,
+    owner: Option<&Id>,
+) -> sqlx::QueryBuilder<sqlx::Sqlite> {
+    let mut q = sqlx::QueryBuilder::<sqlx::Sqlite>::new(prefix);
+    q.push("SELECT id FROM sessions WHERE workspace_id = ")
+        .push_bind(ws.clone());
+    if let Some(o) = owner {
+        q.push(" AND created_by = ").push_bind(o.clone());
+    }
+    q.push(" AND archived = 0 AND (kind <> 'agent' OR ");
+    push_foreground_agent(&mut q);
+    q.push(" OR source = 'channel')");
+    q
+}
+
 /// Insert payload for a new session row.
 pub struct NewSession {
     pub workspace_id: Id,
@@ -415,17 +435,7 @@ impl SessionsRepo {
     /// Selects only `id`: the rollup used to decode every row (meta included)
     /// of a 2 k-session workspace just to build this set.
     pub async fn visible_ids(&self, ws: &Id, owner: Option<&Id>) -> Result<Vec<Id>> {
-        let mut q = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT id FROM sessions WHERE workspace_id = ",
-        );
-        q.push_bind(ws.clone());
-        if let Some(o) = owner {
-            q.push(" AND created_by = ").push_bind(o.clone());
-        }
-        q.push(" AND archived = 0 AND (kind <> 'agent' OR ");
-        push_foreground_agent(&mut q);
-        q.push(" OR source = 'channel')");
-        let rows = q
+        let rows = visible_ids_query("", ws, owner)
             .build()
             .fetch_all(&self.pool)
             .await
@@ -1842,6 +1852,48 @@ mod tests {
             if f.limit.is_none() {
                 assert!(!plan.contains("TEMP B-TREE"), "{f:?}: {plan}");
             }
+        }
+
+        // The unordered shown-row statements (no ORDER BY to steer the pick):
+        // with 0002's `(workspace_id, archived)` prefix index around the
+        // planner chose it and parsed every row's meta JSON (migration 0170).
+        let (ws, owner): (Id, Id) = ("ws".into(), "u".into());
+        for owner in [None, Some(&owner)] {
+            let plan = visible_ids_query("EXPLAIN QUERY PLAN ", &ws, owner)
+                .build()
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.get::<String, _>("detail"))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert!(
+                plan.contains("USING INDEX idx_sessions_ws_arch_created_src"),
+                "visible_ids owner={owner:?}: {plan}"
+            );
+        }
+        for owner_scoped in [false, true] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN {}",
+                crate::activity::summary_trail_sql(owner_scoped)
+            );
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(&ws);
+            if owner_scoped {
+                q = q.bind(&owner);
+            }
+            let plan = q
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.get::<String, _>("detail"))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert!(
+                plan.contains("SEARCH s USING INDEX idx_sessions_ws_arch_created_src"),
+                "summary trail owner_scoped={owner_scoped}: {plan}"
+            );
         }
     }
 
