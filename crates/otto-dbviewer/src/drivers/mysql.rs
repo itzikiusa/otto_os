@@ -41,6 +41,11 @@ const POOL_MAX_CONNECTIONS: u32 = 6;
 /// Drop idle pooled connections after this long so a long-lived cached pool
 /// doesn't pin server-side connections forever.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a request waits for a pooled session before failing with a clear
+/// "connection busy" error instead of sqlx's silent 30 s default.
+const POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upper bound on the out-of-band `KILL QUERY` (its own short-lived connection).
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// MySQL driver. Holds a per-`cache_key` pool cache so connections are reused
 /// across calls instead of re-handshaking every time. `Mutex<HashMap>` is
@@ -426,8 +431,10 @@ impl Driver for MysqlDriver {
 
         let pool = self.pool(cfg).await?;
 
+        // The four catalog reads are independent: one concurrent wave (pool of
+        // 6) instead of four back-to-back round trips.
         // Columns from information_schema.
-        let col_rows: Vec<ColumnRow> = sqlx::query_as(
+        let cols_q = sqlx::query_as::<_, ColumnRow>(
             // CAST text columns to CHAR (MySQL 8 returns information_schema text
             // as VARBINARY); keep the original names so FromRow still matches.
             "SELECT CAST(column_name AS CHAR) AS column_name, \
@@ -444,9 +451,21 @@ impl Driver for MysqlDriver {
         )
         .bind(&db)
         .bind(&table)
-        .fetch_all(&pool)
-        .await
-        .map_err(types::upstream)?;
+        .fetch_all(&pool);
+
+        let (col_rows, indexes, foreign_keys, ddl) = tokio::join!(
+            cols_q,
+            // Indexes via SHOW INDEX, grouped by Key_name (ordered by Seq_in_index).
+            self.indexes_of(&pool, &db, &table),
+            // Foreign keys (CRITICAL for the JOIN builder).
+            self.foreign_keys_of(&pool, &db, &table),
+            // DDL via SHOW CREATE TABLE / VIEW (2nd column).
+            self.show_create(&pool, &db, &table, is_view),
+        );
+        let col_rows = col_rows.map_err(types::upstream)?;
+        let indexes = indexes?;
+        let foreign_keys = foreign_keys?;
+        let ddl = ddl.ok();
 
         let mut columns = Vec::with_capacity(col_rows.len());
         let mut primary_key = Vec::new();
@@ -470,18 +489,9 @@ impl Driver for MysqlDriver {
             });
         }
 
-        // Indexes via SHOW INDEX, grouped by Key_name (ordered by Seq_in_index).
-        let indexes = self.indexes_of(&pool, &db, &table).await?;
-
-        // Foreign keys (CRITICAL for the JOIN builder).
-        let foreign_keys = self.foreign_keys_of(&pool, &db, &table).await?;
-
         // Row count is intentionally left empty: the only cheap source here is
         // information_schema.tables.table_rows, which is an InnoDB *estimate*
         // (often wildly off) — the user doesn't want estimated counts shown.
-
-        // DDL via SHOW CREATE TABLE / VIEW (2nd column).
-        let ddl = self.show_create(&pool, &db, &table, is_view).await.ok();
 
         let mut detail = ObjectDetail::new(
             table,
@@ -564,6 +574,121 @@ impl Driver for MysqlDriver {
             pool.close().await;
         }
         self.completions.invalidate(cache_key);
+    }
+
+    /// Drop cached pools nobody acquired for `idle`. Only the cache's handle is
+    /// dropped (no explicit `close`): a query running longer than the window
+    /// holds its own clone, so it finishes and the pool goes with the last
+    /// clone; idle sessions are then closed by sqlx.
+    async fn evict_idle(&self, idle: Duration) -> usize {
+        self.pools.take_idle(idle).len()
+    }
+
+    /// The whole database's diagram in three concurrent `information_schema`
+    /// queries (tables, columns with their `PRI` key flag, FK key columns)
+    /// instead of one `object_detail` (4 sequential queries) per table.
+    async fn schema_graph_bulk(
+        &self,
+        cfg: &ResolvedConfig,
+        schema: &str,
+        max_tables: usize,
+    ) -> Result<Option<types::SchemaGraph>> {
+        use crate::drivers::postgres::{assemble_bulk_graph, BulkCol, BulkFk, BulkRel};
+        let pool = self.pool(cfg).await?;
+        // Same objects and order as the lazy tree's Tables then Views folders.
+        let rels_q = sqlx::query_as::<_, (String, String)>(
+            "SELECT CAST(table_name AS CHAR), CAST(table_type AS CHAR) \
+             FROM information_schema.tables \
+             WHERE table_schema = ? AND table_type IN ('BASE TABLE', 'VIEW') \
+             ORDER BY (table_type = 'VIEW'), table_name",
+        )
+        .bind(schema)
+        .fetch_all(&pool);
+        let cols_q = sqlx::query_as::<_, (String, String, String, String, Option<String>)>(
+            "SELECT CAST(table_name AS CHAR), CAST(column_name AS CHAR), \
+                    CAST(COALESCE(NULLIF(column_type, ''), data_type) AS CHAR), \
+                    CAST(is_nullable AS CHAR), CAST(column_key AS CHAR) \
+             FROM information_schema.columns \
+             WHERE table_schema = ? \
+             ORDER BY table_name, ordinal_position",
+        )
+        .bind(schema)
+        .fetch_all(&pool);
+        #[allow(clippy::type_complexity)]
+        let fks_q = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            "SELECT CAST(kcu.table_name AS CHAR), CAST(kcu.constraint_name AS CHAR), \
+                    CAST(kcu.column_name AS CHAR), \
+                    CAST(kcu.referenced_table_schema AS CHAR), \
+                    CAST(kcu.referenced_table_name AS CHAR), \
+                    CAST(kcu.referenced_column_name AS CHAR) \
+             FROM information_schema.key_column_usage kcu \
+             JOIN information_schema.referential_constraints rc \
+               ON rc.constraint_schema = kcu.table_schema \
+              AND rc.constraint_name = kcu.constraint_name \
+             WHERE kcu.table_schema = ? AND kcu.referenced_table_name IS NOT NULL \
+             ORDER BY kcu.table_name, kcu.constraint_name, kcu.ordinal_position",
+        )
+        .bind(schema)
+        .fetch_all(&pool);
+        let (rels, cols, fks) = tokio::try_join!(rels_q, cols_q, fks_q).map_err(types::upstream)?;
+
+        let db = NodePath::parse(&format!("db:{schema}"));
+        let rels = rels
+            .into_iter()
+            .map(|(name, table_type)| {
+                let (seg, kind) = if table_type.eq_ignore_ascii_case("VIEW") {
+                    ("view", NodeKind::View)
+                } else {
+                    ("table", NodeKind::Table)
+                };
+                BulkRel {
+                    id: db.child(seg, &name).to_id(),
+                    name,
+                    kind,
+                }
+            })
+            .collect();
+        let cols = cols
+            .into_iter()
+            .map(|(table, name, data_type, nullable, key)| BulkCol {
+                table,
+                name,
+                data_type,
+                nullable: nullable.eq_ignore_ascii_case("YES"),
+                primary_key: key.as_deref() == Some("PRI"),
+            })
+            .collect();
+        let fks = fks
+            .into_iter()
+            .filter_map(|(table, name, column, ref_schema, ref_table, ref_column)| {
+                Some(BulkFk {
+                    table,
+                    name,
+                    column,
+                    ref_schema,
+                    ref_table: ref_table?,
+                    ref_column: ref_column?,
+                })
+            })
+            .collect();
+        Ok(Some(assemble_bulk_graph(
+            schema,
+            rels,
+            cols,
+            &[],
+            fks,
+            max_tables,
+        )))
     }
 
     async fn run_tracked(
@@ -661,9 +786,25 @@ impl Driver for MysqlDriver {
         let sql = format!("KILL QUERY {conn_id}");
         // Best-effort: an already-finished query yields "Unknown thread id 1234"
         // — that's a successful no-op cancel, not a failure to report.
-        let _ = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-            .execute(&pool)
-            .await;
+        // Never wait in the pool's queue: Stop matters most exactly when every
+        // pooled session is busy. Use an idle one if there is one right now,
+        // else a one-off connection built from the pool's own options.
+        let cancel = async {
+            if let Some(mut conn) = pool.try_acquire() {
+                let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
+                    .execute(&mut *conn)
+                    .await;
+                return;
+            }
+            let opts = pool.connect_options();
+            if let Ok(mut conn) = sqlx::MySqlConnection::connect_with(&opts).await {
+                let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
+                    .execute(&mut conn)
+                    .await;
+                let _ = conn.close().await;
+            }
+        };
+        let _ = tokio::time::timeout(CANCEL_TIMEOUT, cancel).await;
         Ok(())
     }
 
@@ -681,7 +822,7 @@ impl Driver for MysqlDriver {
         }
         let pool = self.pool(cfg).await?;
         let node = node.map(str::trim).filter(|s| !s.is_empty());
-        let mut conn = acquire_scoped(&pool, effective_db(node, cfg)).await?;
+        let mut conn = acquire_scoped(&pool, effective_db(node, cfg), None).await?;
         let mut conn = conn
             .begin_with("START TRANSACTION READ ONLY")
             .await
@@ -775,7 +916,7 @@ impl Driver for MysqlDriver {
 
         let pool = self.pool(cfg).await?;
         let node = node.map(str::trim).filter(|s| !s.is_empty());
-        let mut conn = acquire_scoped(&pool, effective_db(node, cfg)).await?;
+        let mut conn = acquire_scoped(&pool, effective_db(node, cfg), None).await?;
         let mut conn = conn
             .begin_with("START TRANSACTION READ ONLY")
             .await
@@ -1361,7 +1502,7 @@ impl MysqlDriver {
         db: &str,
         name: &str,
     ) -> Result<Option<String>> {
-        let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        let mut conn = acquire(pool).await?;
         (&mut *conn)
             .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(use_db_sql(db))))
             .await
@@ -1632,6 +1773,7 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::MySqlPool> {
     MySqlPoolOptions::new()
         .max_connections(POOL_MAX_CONNECTIONS)
         .idle_timeout(POOL_IDLE_TIMEOUT)
+        .acquire_timeout(POOL_ACQUIRE_TIMEOUT)
         .after_connect(move |conn, _meta| {
             let tz_stmt = format!("SET time_zone = '{}'", tz.replace('\'', "''"));
             Box::pin(async move {
@@ -1704,17 +1846,53 @@ fn first_keyword(statement: &str) -> String {
         .to_ascii_uppercase()
 }
 
-/// Read the backend connection id (`CONNECTION_ID()`) for the acquired session
-/// and record it in `token`, so a concurrent cancel can `KILL QUERY <id>` this
-/// exact connection. Best-effort: a failure leaves the token empty (the query
-/// just can't be server-cancelled), never an error to the caller.
-async fn capture_conn_id(conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>, token: &CancelToken) {
-    if let Ok(id) = sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()")
-        .fetch_one(&mut **conn)
-        .await
-    {
-        token.set(QueryHandle::MysqlConnId(id));
+/// Acquire a pooled session, mapping sqlx's pool timeout to a clear message.
+async fn acquire(pool: &sqlx::MySqlPool) -> Result<sqlx::pool::PoolConnection<sqlx::MySql>> {
+    pool.acquire().await.map_err(acquire_error)
+}
+
+/// `PoolTimedOut` means every pooled session stayed busy for
+/// [`POOL_ACQUIRE_TIMEOUT`]: say so instead of sqlx's generic text.
+fn acquire_error(e: sqlx::Error) -> otto_core::Error {
+    match e {
+        sqlx::Error::PoolTimedOut => types::upstream(format!(
+            "connection busy: all {POOL_MAX_CONNECTIONS} sessions to this server are in use \
+             (waited {}s); stop a running query or retry",
+            POOL_ACQUIRE_TIMEOUT.as_secs()
+        )),
+        other => types::upstream(other),
     }
+}
+
+/// The ONE text-protocol round trip that scopes a pooled session for a
+/// request and reads what cancel / the no-default-db check need:
+///
+/// - `db` → `USE` it and read `CONNECTION_ID()`;
+/// - none → read `CONNECTION_ID()` and `DATABASE()` (the caller retires a
+///   session that still carries a default database).
+///
+/// It used to be two or three trips (`USE` / `SELECT DATABASE()`, then
+/// `SELECT CONNECTION_ID()`). Text protocol is required: MySQL rejects `USE`
+/// as a prepared statement (see [`use_db_sql`]); sqlx enables
+/// `CLIENT_MULTI_STATEMENTS`, so the pair travels as one `COM_QUERY`.
+fn session_setup_sql(db: Option<&str>) -> String {
+    match db {
+        Some(db) => format!("{}; SELECT CONNECTION_ID(), DATABASE()", use_db_sql(db)),
+        None => "SELECT CONNECTION_ID(), DATABASE()".to_string(),
+    }
+}
+
+/// `CONNECTION_ID()` from a text-protocol row (decoded as whichever integer /
+/// string form the server sent).
+fn conn_id_of(row: &MySqlRow) -> Option<u64> {
+    row.try_get::<u64, _>(0)
+        .ok()
+        .or_else(|| row.try_get::<i64, _>(0).ok().map(|n| n as u64))
+        .or_else(|| {
+            row.try_get::<String, _>(0)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+        })
 }
 
 /// The database a request runs in: the selected one, else the profile default
@@ -1736,25 +1914,30 @@ fn effective_db<'a>(active_db: Option<&'a str>, cfg: &'a ResolvedConfig) -> Opti
 async fn acquire_scoped(
     pool: &sqlx::MySqlPool,
     db: Option<&str>,
+    token: Option<&CancelToken>,
 ) -> Result<sqlx::pool::PoolConnection<sqlx::MySql>> {
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
-    if let Some(db) = db {
-        (&mut *conn)
-            .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(use_db_sql(db))))
-            .await
-            .map_err(types::upstream)?;
-        return Ok(conn);
-    }
+    let setup = session_setup_sql(db);
+    let mut conn = acquire(pool).await?;
     for _ in 0..=POOL_MAX_CONNECTIONS {
-        let current: Option<String> = sqlx::query_scalar("SELECT DATABASE()")
-            .fetch_one(&mut *conn)
+        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(setup.as_str()))
+            .fetch_all(&mut *conn)
             .await
             .map_err(types::upstream)?;
-        if current.is_none() {
+        let row = rows.last();
+        // Whether the session still carries a default database: judged on the
+        // raw NULL flag, so a value that won't decode as text can't pass as
+        // "none".
+        let has_default_db = row
+            .and_then(|r| r.try_get_raw(1).ok())
+            .is_some_and(|v| !sqlx::ValueRef::is_null(&v));
+        if db.is_some() || !has_default_db {
+            if let (Some(token), Some(id)) = (token, row.and_then(conn_id_of)) {
+                token.set(QueryHandle::MysqlConnId(id));
+            }
             return Ok(conn);
         }
         let _ = conn.close().await;
-        conn = pool.acquire().await.map_err(types::upstream)?;
+        conn = acquire(pool).await?;
     }
     Err(types::upstream(
         "mysql: could not obtain a session without a default database",
@@ -1770,11 +1953,10 @@ async fn run_read(
 ) -> Result<QueryResult> {
     // Acquire a single connection so the `USE <db>` and the statement share
     // the same session — the default schema must apply to the query.
-    let mut conn = acquire_scoped(pool, active_db).await?;
-    // Capture this connection's backend id so a concurrent cancel can
-    // `KILL QUERY <id>` it. Best-effort — a query with no captured id simply
-    // can't be server-cancelled.
-    capture_conn_id(&mut conn, token).await;
+    // The backend id is captured in the same round trip as the `USE`, so a
+    // concurrent cancel can `KILL QUERY <id>` it. Best-effort — a query with
+    // no captured id simply can't be server-cancelled.
+    let mut conn = acquire_scoped(pool, active_db, Some(token)).await?;
     // Reads leave no session state, except the explicit lock functions.
     if types::sql_leaves_session_state(statement) {
         conn.close_on_drop();
@@ -1801,8 +1983,7 @@ async fn run_write(
     token: &CancelToken,
 ) -> Result<QueryResult> {
     // Same as run_read: `USE <db>` and the statement must share one session.
-    let mut conn = acquire_scoped(pool, active_db).await?;
-    capture_conn_id(&mut conn, token).await;
+    let mut conn = acquire_scoped(pool, active_db, Some(token)).await?;
     // A `SET`/`BEGIN`/`LOCK`/… would outlive this request on a pooled session:
     // close it afterwards instead of returning it to the pool.
     if types::sql_leaves_session_state(statement) {
@@ -1826,8 +2007,7 @@ async fn run_batch(
     active_db: Option<&str>,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    let mut conn = acquire_scoped(pool, active_db).await?;
-    capture_conn_id(&mut conn, token).await;
+    let mut conn = acquire_scoped(pool, active_db, Some(token)).await?;
     if spans
         .iter()
         .any(|span| types::sql_leaves_session_state(&span.text))
@@ -2545,8 +2725,8 @@ async fn governed_read(
     token: &CancelToken,
 ) -> Result<QueryResult> {
     let scope_db = req.scope_database();
-    let mut conn = acquire_scoped(pool, effective_db(scope_db.as_deref(), cfg)).await?;
-    capture_conn_id(&mut conn, token).await;
+    let mut conn =
+        acquire_scoped(pool, effective_db(scope_db.as_deref(), cfg), Some(token)).await?;
     let mut tx = conn
         .begin_with("START TRANSACTION READ ONLY")
         .await
@@ -2795,6 +2975,24 @@ mod cache_isolation_tests {
         assert_eq!(effective_db(None, &cfg), None);
         cfg.database = None;
         assert_eq!(effective_db(None, &cfg), None);
+    }
+
+    /// DB-02 round-trip guard: scoping a pooled session and capturing its
+    /// cancel id is ONE text-protocol `COM_QUERY` (it used to be `USE` or
+    /// `SELECT DATABASE()`, then `SELECT CONNECTION_ID()`).
+    #[test]
+    fn per_run_setup_is_one_round_trip() {
+        assert_eq!(
+            session_setup_sql(Some("sh`op")),
+            "USE `sh``op`; SELECT CONNECTION_ID(), DATABASE()"
+        );
+        assert_eq!(
+            session_setup_sql(None),
+            "SELECT CONNECTION_ID(), DATABASE()"
+        );
+        for sql in [session_setup_sql(Some("x")), session_setup_sql(None)] {
+            assert_eq!(sql.matches("SELECT").count(), 1, "{sql}");
+        }
     }
 
     #[test]

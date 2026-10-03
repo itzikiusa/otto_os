@@ -39,6 +39,15 @@ use crate::types::{
 const DEFAULT_MAX_ROWS: usize = 1000;
 const POOL_MAX_CONNECTIONS: u32 = 4;
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a request waits for a pooled session before failing with a clear
+/// "connection busy" error instead of sqlx's silent 30 s default.
+const POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upper bound on the out-of-band cancel (its own short-lived connection).
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Rows per decode task handed to the blocking pool.
+const DECODE_CHUNK: usize = 1024;
+/// A tail of at most this many cells is decoded inline (a spawn costs more).
+const INLINE_DECODE_CELLS: usize = 16 * 1024;
 
 /// PostgreSQL driver. Holds a per-`cache_key` pool cache + a completion snapshot
 /// cache, exactly like [`crate::drivers::mysql::MysqlDriver`].
@@ -382,8 +391,11 @@ impl Driver for PostgresDriver {
 
         let pool = self.pool(cfg).await?;
 
-        // Columns (name, formatted type, nullability, default) via pg_attribute.
-        let col_rows: Vec<PgColumnRow> = sqlx::query_as(
+        // The independent catalog reads run concurrently (pool of 4): over an
+        // SSH tunnel they used to cost one RTT each, back to back. The PK flag
+        // is folded into the columns after the join; only the synthesized
+        // table DDL depends on the columns, so it runs last.
+        let cols_q = sqlx::query_as::<_, PgColumnRow>(
             "SELECT a.attname AS name, \
                     pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type, \
                     (NOT a.attnotnull) AS nullable, \
@@ -397,12 +409,9 @@ impl Driver for PostgresDriver {
         )
         .bind(&schema)
         .bind(&name)
-        .fetch_all(&pool)
-        .await
-        .map_err(types::upstream)?;
-
+        .fetch_all(&pool);
         // Primary-key columns (in key order).
-        let primary_key: Vec<String> = sqlx::query_scalar(
+        let pk_q = sqlx::query_scalar::<_, String>(
             "SELECT a.attname FROM pg_catalog.pg_constraint con \
              JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -412,9 +421,27 @@ impl Driver for PostgresDriver {
         )
         .bind(&schema)
         .bind(&name)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
+        .fetch_all(&pool);
+        let view_ddl = async {
+            if is_view {
+                self.view_ddl(&pool, &schema, &name, path.get("matview").is_some())
+                    .await
+                    .ok()
+            } else {
+                None
+            }
+        };
+        let (col_rows, primary_key, indexes, foreign_keys, view_ddl) = tokio::join!(
+            cols_q,
+            pk_q,
+            self.indexes_of(&pool, &schema, &name),
+            self.foreign_keys_of(&pool, &schema, &name),
+            view_ddl,
+        );
+        let col_rows = col_rows.map_err(types::upstream)?;
+        let primary_key = primary_key.unwrap_or_default();
+        let indexes = indexes.unwrap_or_default();
+        let foreign_keys = foreign_keys.unwrap_or_default();
 
         let columns: Vec<ColumnDef> = col_rows
             .into_iter()
@@ -431,19 +458,8 @@ impl Driver for PostgresDriver {
                 }
             })
             .collect();
-
-        let indexes = self
-            .indexes_of(&pool, &schema, &name)
-            .await
-            .unwrap_or_default();
-        let foreign_keys = self
-            .foreign_keys_of(&pool, &schema, &name)
-            .await
-            .unwrap_or_default();
         let ddl = if is_view {
-            self.view_ddl(&pool, &schema, &name, path.get("matview").is_some())
-                .await
-                .ok()
+            view_ddl
         } else {
             self.table_ddl(&pool, &schema, &name, &columns).await.ok()
         };
@@ -513,6 +529,126 @@ impl Driver for PostgresDriver {
         self.completions.invalidate(cache_key);
     }
 
+    /// Drop cached pools nobody acquired for `idle`. Only the cache's handle is
+    /// dropped (no explicit `close`): a query running longer than the window
+    /// holds its own clone, so it finishes and the pool goes with the last
+    /// clone; idle sessions are then closed by sqlx.
+    async fn evict_idle(&self, idle: Duration) -> usize {
+        self.pools.take_idle(idle).len()
+    }
+
+    /// The whole schema's diagram in three concurrent catalog queries
+    /// (relations, columns, PK/FK constraints) instead of one `object_detail`
+    /// (2–6 sequential queries) per table.
+    async fn schema_graph_bulk(
+        &self,
+        cfg: &ResolvedConfig,
+        schema: &str,
+        max_tables: usize,
+    ) -> Result<Option<types::SchemaGraph>> {
+        let pool = self.pool(cfg).await?;
+        // Same objects and order as the lazy tree's folders: tables
+        // (incl. partitioned), then views, then materialized views; by name.
+        let rels_q = sqlx::query_as::<_, (String, String)>(
+            "SELECT c.relname, c.relkind::text FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind IN ('r','p','v','m') \
+             ORDER BY CASE WHEN c.relkind IN ('r','p') THEN 0 WHEN c.relkind = 'v' THEN 1 ELSE 2 END, \
+                      c.relname",
+        )
+        .bind(schema)
+        .fetch_all(&pool);
+        let cols_q = sqlx::query_as::<_, (String, String, String, bool)>(
+            "SELECT c.relname, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), \
+                    (NOT a.attnotnull) \
+             FROM pg_catalog.pg_attribute a \
+             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind IN ('r','p','v','m') \
+               AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY c.relname, a.attnum",
+        )
+        .bind(schema)
+        .fetch_all(&pool);
+        #[allow(clippy::type_complexity)]
+        let cons_q = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            "SELECT c.relname, con.conname, con.contype::text, att.attname, \
+                    fn.nspname, fc.relname, fatt.attname \
+             FROM pg_catalog.pg_constraint con \
+             JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+             JOIN pg_catalog.pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = k.attnum \
+             LEFT JOIN pg_catalog.pg_class fc ON fc.oid = con.confrelid \
+             LEFT JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace \
+             LEFT JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord) ON fk.ord = k.ord \
+             LEFT JOIN pg_catalog.pg_attribute fatt ON fatt.attrelid = con.confrelid AND fatt.attnum = fk.attnum \
+             WHERE con.contype IN ('p','f') AND n.nspname = $1 \
+             ORDER BY c.relname, con.conname, k.ord",
+        )
+        .bind(schema)
+        .fetch_all(&pool);
+        let (rels, cols, cons) =
+            tokio::try_join!(rels_q, cols_q, cons_q).map_err(types::upstream)?;
+
+        let db = NodePath::parse(&format!("db:{schema}"));
+        let rels = rels
+            .into_iter()
+            .map(|(name, relkind)| {
+                let (seg, kind) = match relkind.as_str() {
+                    "v" => ("view", NodeKind::View),
+                    "m" => ("matview", NodeKind::View),
+                    _ => ("table", NodeKind::Table),
+                };
+                BulkRel {
+                    id: db.child(seg, &name).to_id(),
+                    name,
+                    kind,
+                }
+            })
+            .collect();
+        let cols = cols
+            .into_iter()
+            .map(|(table, name, data_type, nullable)| BulkCol {
+                table,
+                name,
+                data_type,
+                nullable,
+                primary_key: false,
+            })
+            .collect();
+        let mut pks = Vec::new();
+        let mut fks = Vec::new();
+        for (table, name, contype, column, ref_schema, ref_table, ref_column) in cons {
+            if contype == "p" {
+                pks.push((table, column));
+            } else if let (Some(ref_table), Some(ref_column)) = (ref_table, ref_column) {
+                fks.push(BulkFk {
+                    table,
+                    name,
+                    column,
+                    ref_schema,
+                    ref_table,
+                    ref_column,
+                });
+            }
+        }
+        Ok(Some(assemble_bulk_graph(
+            schema, rels, cols, &pks, fks, max_tables,
+        )))
+    }
+
     async fn run_tracked(
         &self,
         cfg: &ResolvedConfig,
@@ -576,10 +712,28 @@ impl Driver for PostgresDriver {
         let Some(pool) = self.pools.get_ready(&cfg.cache_key()) else {
             return Ok(());
         };
-        let _ = sqlx::query("SELECT pg_cancel_backend($1)")
-            .bind(pid)
-            .execute(&pool)
-            .await;
+        let pid = *pid;
+        // Never wait in the pool's queue: Stop matters most exactly when every
+        // pooled session is busy. Use an idle one if there is one right now,
+        // else a one-off connection built from the pool's own options.
+        let cancel = async {
+            if let Some(mut conn) = pool.try_acquire() {
+                let _ = sqlx::query("SELECT pg_cancel_backend($1)")
+                    .bind(pid)
+                    .execute(&mut *conn)
+                    .await;
+                return;
+            }
+            let opts = pool.connect_options();
+            if let Ok(mut conn) = sqlx::PgConnection::connect_with(&opts).await {
+                let _ = sqlx::query("SELECT pg_cancel_backend($1)")
+                    .bind(pid)
+                    .execute(&mut conn)
+                    .await;
+                let _ = conn.close().await;
+            }
+        };
+        let _ = tokio::time::timeout(CANCEL_TIMEOUT, cancel).await;
         Ok(())
     }
 
@@ -597,7 +751,7 @@ impl Driver for PostgresDriver {
             return Err(types::invalid("empty statement"));
         }
         let pool = self.pool(cfg).await?;
-        let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        let mut conn = acquire(&pool).await?;
         let mut conn = conn
             .begin_with("BEGIN READ ONLY")
             .await
@@ -689,7 +843,7 @@ impl Driver for PostgresDriver {
         }
 
         let pool = self.pool(cfg).await?;
-        let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        let mut conn = acquire(&pool).await?;
         let mut conn = conn
             .begin_with("BEGIN READ ONLY")
             .await
@@ -1210,43 +1364,29 @@ impl PostgresDriver {
             });
         }
 
-        let tables = sqlx::query_as::<_, (String, String)>(
+        // The four catalog reads are independent: one concurrent wave instead
+        // of four back-to-back round trips.
+        let tables_q = sqlx::query_as::<_, (String, String)>(
             "SELECT table_name, table_type FROM information_schema.tables \
              WHERE table_schema = $1 ORDER BY table_name",
         )
         .bind(schema)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
-
-        let cols = sqlx::query_as::<_, (String, String, String)>(
+        .fetch_all(&pool);
+        let cols_q = sqlx::query_as::<_, (String, String, String)>(
             "SELECT table_name, column_name, data_type FROM information_schema.columns \
              WHERE table_schema = $1 ORDER BY table_name, ordinal_position",
         )
         .bind(schema)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
-
-        let routines: Vec<RoutineSnap> = sqlx::query_as::<_, (String, String)>(
+        .fetch_all(&pool);
+        let routines_q = sqlx::query_as::<_, (String, String)>(
             "SELECT p.proname, p.prokind::text FROM pg_catalog.pg_proc p \
              JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname = $1 ORDER BY p.proname",
         )
         .bind(schema)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(name, kind)| RoutineSnap {
-            name,
-            // 'p' = procedure; everything else (f/a/w) is called like a function.
-            is_function: kind != "p",
-        })
-        .collect();
-
+        .fetch_all(&pool);
         // (table, column) → strongest index rank.
-        let stats = sqlx::query_as::<_, (String, String, bool, bool)>(
+        let stats_q = sqlx::query_as::<_, (String, String, bool, bool)>(
             "SELECT tc.relname, a.attname, ix.indisprimary, ix.indisunique \
              FROM pg_catalog.pg_index ix \
              JOIN pg_catalog.pg_class tc ON tc.oid = ix.indrelid \
@@ -1255,9 +1395,20 @@ impl PostgresDriver {
              WHERE n.nspname = $1",
         )
         .bind(schema)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
+        .fetch_all(&pool);
+        let (tables, cols, routines, stats) = tokio::join!(tables_q, cols_q, routines_q, stats_q);
+        let tables = tables.unwrap_or_default();
+        let cols = cols.unwrap_or_default();
+        let stats = stats.unwrap_or_default();
+        let routines: Vec<RoutineSnap> = routines
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, kind)| RoutineSnap {
+                name,
+                // 'p' = procedure; everything else (f/a/w) is called like a function.
+                is_function: kind != "p",
+            })
+            .collect();
 
         let mut rank: HashMap<(String, String), Rank> = HashMap::new();
         for (t, c, is_primary, is_unique) in stats {
@@ -1394,6 +1545,7 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::PgPool> {
     PgPoolOptions::new()
         .max_connections(POOL_MAX_CONNECTIONS)
         .idle_timeout(POOL_IDLE_TIMEOUT)
+        .acquire_timeout(POOL_ACQUIRE_TIMEOUT)
         .after_connect(move |conn, _meta| {
             let tz = tz.clone();
             Box::pin(async move {
@@ -1409,6 +1561,114 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::PgPool> {
         .connect_with(opts)
         .await
         .map_err(types::upstream)
+}
+
+// --- Bulk schema graph (shared by the SQL drivers) ---------------------------
+
+/// One diagrammable relation from a bulk catalog read, in tree order.
+pub(crate) struct BulkRel {
+    /// The lazy tree's node id for this object (`db:<s>/table:<t>` …).
+    pub id: String,
+    pub name: String,
+    pub kind: NodeKind,
+}
+
+/// One column row from a bulk catalog read (`primary_key` may be pre-set by
+/// engines that report it per column, e.g. MySQL's `column_key = 'PRI'`).
+pub(crate) struct BulkCol {
+    pub table: String,
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    pub primary_key: bool,
+}
+
+/// One FK column pair from a bulk catalog read, rows ordered by
+/// (table, constraint, key position).
+pub(crate) struct BulkFk {
+    pub table: String,
+    pub name: String,
+    pub column: String,
+    pub ref_schema: Option<String>,
+    pub ref_table: String,
+    pub ref_column: String,
+}
+
+/// Assemble a [`types::SchemaGraph`] from set-based catalog rows — the same
+/// shape the per-object walk builds: the first `max_tables` relations (in the
+/// given order) with PK/FK column flags, the FK edges out of them (a missing
+/// ref schema defaults to this schema), `truncated` when relations were cut.
+pub(crate) fn assemble_bulk_graph(
+    schema: &str,
+    rels: Vec<BulkRel>,
+    cols: Vec<BulkCol>,
+    pks: &[(String, String)],
+    fks: Vec<BulkFk>,
+    max_tables: usize,
+) -> types::SchemaGraph {
+    use std::collections::HashSet;
+    let truncated = rels.len() > max_tables;
+    let kept: Vec<BulkRel> = rels.into_iter().take(max_tables).collect();
+    let kept_names: HashSet<&str> = kept.iter().map(|r| r.name.as_str()).collect();
+    let pk: HashSet<(&str, &str)> = pks.iter().map(|(t, c)| (t.as_str(), c.as_str())).collect();
+    let fk_cols: HashSet<(&str, &str)> = fks
+        .iter()
+        .map(|f| (f.table.as_str(), f.column.as_str()))
+        .collect();
+    let mut by_table: HashMap<&str, Vec<types::GraphColumn>> = HashMap::new();
+    for c in &cols {
+        if !kept_names.contains(c.table.as_str()) {
+            continue;
+        }
+        by_table
+            .entry(c.table.as_str())
+            .or_default()
+            .push(types::GraphColumn {
+                name: c.name.clone(),
+                data_type: c.data_type.clone(),
+                nullable: c.nullable,
+                primary_key: c.primary_key || pk.contains(&(c.table.as_str(), c.name.as_str())),
+                foreign_key: fk_cols.contains(&(c.table.as_str(), c.name.as_str())),
+            });
+    }
+    // Group FK rows into edges (rows arrive ordered by table, constraint, pos).
+    let mut edges: Vec<types::GraphEdge> = Vec::new();
+    for f in &fks {
+        if !kept_names.contains(f.table.as_str()) {
+            continue;
+        }
+        match edges.last_mut() {
+            Some(e) if e.from_table == f.table && e.name == f.name => {
+                e.from_columns.push(f.column.clone());
+                e.to_columns.push(f.ref_column.clone());
+            }
+            _ => edges.push(types::GraphEdge {
+                name: f.name.clone(),
+                from_table: f.table.clone(),
+                from_columns: vec![f.column.clone()],
+                to_schema: f.ref_schema.clone().unwrap_or_else(|| schema.to_string()),
+                to_table: f.ref_table.clone(),
+                to_columns: vec![f.ref_column.clone()],
+            }),
+        }
+    }
+    let tables = kept
+        .into_iter()
+        .map(|r| types::GraphTable {
+            columns: by_table.remove(r.name.as_str()).unwrap_or_default(),
+            id: r.id,
+            schema: schema.to_string(),
+            name: r.name,
+            kind: r.kind,
+        })
+        .collect();
+    types::SchemaGraph {
+        schema: schema.to_string(),
+        tables,
+        edges,
+        relationships: true,
+        truncated,
+    }
 }
 
 // --- Query execution --------------------------------------------------------
@@ -1459,13 +1719,33 @@ fn set_search_path_sql(schema: &str) -> String {
 }
 
 /// Capture the backend PID (`pg_backend_pid()`) so a concurrent cancel can
-/// `pg_cancel_backend(pid)` this exact connection. Best-effort.
+/// `pg_cancel_backend(pid)` this exact connection. Best-effort. Only the
+/// governed (read-only transaction) path still pays this as its own round
+/// trip; ad-hoc runs fold it into [`session_setup_sql`].
 async fn capture_backend_pid(conn: &mut sqlx::PgConnection, token: &CancelToken) {
     if let Ok(pid) = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
         .fetch_one(&mut *conn)
         .await
     {
         token.set(QueryHandle::PostgresBackendPid(pid));
+    }
+}
+
+/// Acquire a pooled session, mapping sqlx's pool timeout to a clear message.
+async fn acquire(pool: &sqlx::PgPool) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
+    pool.acquire().await.map_err(acquire_error)
+}
+
+/// `PoolTimedOut` means every pooled session stayed busy for
+/// [`POOL_ACQUIRE_TIMEOUT`]: say so instead of sqlx's generic text.
+fn acquire_error(e: sqlx::Error) -> otto_core::Error {
+    match e {
+        sqlx::Error::PoolTimedOut => types::upstream(format!(
+            "connection busy: all {POOL_MAX_CONNECTIONS} sessions to this server are in use \
+             (waited {}s); stop a running query or retry",
+            POOL_ACQUIRE_TIMEOUT.as_secs()
+        )),
+        other => types::upstream(other),
     }
 }
 
@@ -1478,35 +1758,65 @@ fn search_path_sql(schema: Option<&str>) -> String {
         .unwrap_or_else(|| "RESET search_path".to_string())
 }
 
-/// One round trip setting a request's session context: its `search_path`
-/// (see [`search_path_sql`]) and its statement timeout — `RESET` to the
-/// role/database default when the request sets none, so neither `0` (which
-/// would override a DBA's default) nor a timeout left by a cancelled run
-/// that never reached its reset applies.
+/// ONE simple-protocol round trip that sets a request's whole session context
+/// — its `search_path` (see [`search_path_sql`]) and statement timeout (`RESET`
+/// to the role/database default when the request sets none, so neither `0`
+/// nor a timeout left by a cancelled run applies) — AND returns the backend
+/// pid for cancel. It used to be two trips (setup, then `pg_backend_pid()`)
+/// plus a trailing `RESET` the response waited on.
 fn session_setup_sql(schema: Option<&str>, timeout_ms: Option<u64>) -> String {
     let timeout = timeout_ms
         .map(|ms| format!("SET statement_timeout = {ms}"))
         .unwrap_or_else(|| "RESET statement_timeout".to_string());
-    format!("{}; {timeout}", search_path_sql(schema))
+    format!(
+        "{}; {timeout}; SELECT pg_backend_pid()",
+        search_path_sql(schema)
+    )
+}
+
+/// The `BEGIN` of a governed read: opens the read-only transaction and sets
+/// its scope in the same simple-protocol round trip (both revert with the
+/// transaction), instead of three separate trips.
+fn governed_begin_sql(schema: Option<&str>, timeout_ms: Option<u64>) -> String {
+    let mut sql = format!("BEGIN READ ONLY; {}", search_path_sql(schema));
+    if let Some(ms) = timeout_ms.filter(|ms| *ms > 0) {
+        sql.push_str(&format!("; SET LOCAL statement_timeout = {ms}"));
+    }
+    sql
 }
 
 /// Acquire a pooled session with this request's context set EXPLICITLY (see
-/// [`session_setup_sql`]). Pooled sessions keep what an earlier request set,
-/// so a request without a selected schema used to run on whichever
-/// `search_path` its connection had last been given.
+/// [`session_setup_sql`]) and its backend pid recorded in `token`. Pooled
+/// sessions keep what an earlier request set, so a request without a selected
+/// schema used to run on whichever `search_path` its connection had last been
+/// given.
 async fn acquire_session(
     pool: &sqlx::PgPool,
     schema: Option<&str>,
     timeout_ms: Option<u64>,
+    token: &CancelToken,
 ) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
-    (&mut *conn)
-        .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(session_setup_sql(
-            schema, timeout_ms,
-        ))))
+    let mut conn = acquire(pool).await?;
+    let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(session_setup_sql(schema, timeout_ms)))
+        .fetch_all(&mut *conn)
         .await
         .map_err(types::upstream)?;
+    if let Some(pid) = rows.last().and_then(|r| r.try_get::<i32, _>(0).ok()) {
+        token.set(QueryHandle::PostgresBackendPid(pid));
+    }
     Ok(conn)
+}
+
+/// Don't leave a per-statement cap on the pooled session for the tree /
+/// completion queries that share it — but don't make the RESPONSE wait for
+/// that round trip either: the session finishes its reset in the background
+/// and only then returns to the pool.
+fn reset_timeout_in_background(mut conn: sqlx::pool::PoolConnection<sqlx::Postgres>) {
+    tokio::spawn(async move {
+        let _ = sqlx::raw_sql("RESET statement_timeout")
+            .execute(&mut *conn)
+            .await;
+    });
 }
 
 async fn run_read(
@@ -1517,8 +1827,7 @@ async fn run_read(
     timeout_ms: Option<u64>,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    let mut conn = acquire_session(pool, active_schema, timeout_ms).await?;
-    capture_backend_pid(&mut conn, token).await;
+    let mut conn = acquire_session(pool, active_schema, timeout_ms, token).await?;
     // Reads leave no session state, except the explicit lock/config functions.
     if types::sql_leaves_session_state(statement) {
         conn.close_on_drop();
@@ -1536,12 +1845,8 @@ async fn run_read(
         conn.close_on_drop();
         return Ok(out.result);
     }
-    // Best-effort: don't leave the per-statement cap on the pooled session for
-    // the tree/completion queries that share it (the next run sets its own).
     if timeout_ms.is_some() {
-        let _ = (&mut *conn)
-            .execute(sqlx::raw_sql("RESET statement_timeout"))
-            .await;
+        reset_timeout_in_background(conn);
     }
     Ok(out.result)
 }
@@ -1552,8 +1857,7 @@ async fn run_write(
     active_schema: Option<&str>,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    let mut conn = acquire_session(pool, active_schema, None).await?;
-    capture_backend_pid(&mut conn, token).await;
+    let mut conn = acquire_session(pool, active_schema, None, token).await?;
     // A `SET`/`BEGIN`/`SET ROLE`/… would outlive this request on a pooled
     // session: close it afterwards instead of returning it to the pool.
     if types::sql_leaves_session_state(statement) {
@@ -1573,8 +1877,7 @@ async fn run_batch(
     timeout_ms: Option<u64>,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    let mut conn = acquire_session(pool, active_schema, timeout_ms).await?;
-    capture_backend_pid(&mut conn, token).await;
+    let mut conn = acquire_session(pool, active_schema, timeout_ms, token).await?;
     if spans
         .iter()
         .any(|span| types::sql_leaves_session_state(&span.text))
@@ -1619,9 +1922,7 @@ async fn run_batch(
     if unread {
         conn.close_on_drop();
     } else if timeout_ms.is_some() {
-        let _ = (&mut *conn)
-            .execute(sqlx::raw_sql("RESET statement_timeout"))
-            .await;
+        reset_timeout_in_background(conn);
     }
     Ok(types::fold_batch_results(results))
 }
@@ -1635,10 +1936,16 @@ struct ReadOut {
 }
 
 /// Run a row-returning statement and shape it into a `QueryResult`, capped at
-/// `max_rows` rows and at the response `budget`. Stops pulling at the cap
-/// instead of draining the rest of a non-LIMIT-able read (a batch statement,
-/// `TABLE t`, VALUES…), and decodes each column with the decoder picked once
-/// from its type ([`PgCell`]) instead of up to ~20 typed `try_get`s per cell.
+/// `max_rows` rows and at the response `budget`.
+///
+/// - Stops pulling at the cap instead of draining the rest of a non-LIMIT-able
+///   read (a batch statement, `TABLE t`, VALUES…).
+/// - Each column's decoder is picked once from its type ([`PgCell`]).
+/// - The budget is charged per row from the RAW wire sizes
+///   ([`raw_row_json_len`]), before decoding.
+/// - Decoding runs in [`DECODE_CHUNK`]-row chunks on the blocking pool while
+///   the next rows stream in (the MySQL pipeline): a wide JSONB/numeric page
+///   no longer blocks a tokio worker for tens to hundreds of ms.
 async fn exec_read_conn(
     conn: &mut sqlx::PgConnection,
     statement: &str,
@@ -1649,42 +1956,64 @@ async fn exec_read_conn(
 
     let mut stream = sqlx::query(sqlx::AssertSqlSafe(statement)).fetch(&mut *conn);
     let mut columns: Vec<Column> = Vec::new();
-    let mut decoders: Vec<PgCell> = Vec::new();
-    let mut out_rows: Vec<Vec<Value>> = Vec::new();
+    let mut decoders: std::sync::Arc<[PgCell]> = std::sync::Arc::from(Vec::new());
+    let mut chunk: Vec<PgRow> = Vec::new();
+    let mut decoding: Vec<tokio::task::JoinHandle<Vec<Vec<Value>>>> = Vec::new();
+    let mut kept = 0usize;
     let mut truncated = false;
     let mut truncated_reason = None;
     let mut unread = false;
     while let Some(row) = stream.try_next().await.map_err(types::upstream)? {
         if columns.is_empty() {
+            let mut decs = Vec::with_capacity(row.columns().len());
             for col in row.columns() {
                 columns.push(Column::typed(col.name(), col.type_info().name()));
-                decoders.push(pg_cell_decoder(col.type_info().name()));
+                decs.push(pg_cell_decoder(col.type_info().name()));
             }
+            decoders = decs.into();
         }
-        if out_rows.len() >= max_rows {
+        if kept >= max_rows {
             truncated = true;
             unread = true;
             break;
         }
-        // Cap oversized cells (text/bytea/JSON) like ClickHouse does — an
-        // uncapped multi-MB cell freezes the grid and bloats the WS frame.
-        let cells: Vec<Value> = decoders
-            .iter()
-            .enumerate()
-            .map(|(i, dec)| types::cap_cell(pg_cell(&row, i, *dec)))
-            .collect();
-        let bytes = 2 + cells
-            .iter()
-            .map(|c| types::approx_json_len(c) + 1)
-            .sum::<usize>();
         // Always keep at least one row so a single huge row still shows.
-        if !budget.charge(bytes) && !out_rows.is_empty() {
+        if !budget.charge(raw_row_json_len(&row, &decoders)) && kept > 0 {
             truncated = true;
             truncated_reason = Some(types::TruncatedReason::Bytes);
             unread = true;
             break;
         }
-        out_rows.push(cells);
+        kept += 1;
+        chunk.push(row);
+        if chunk.len() >= DECODE_CHUNK {
+            let rows = std::mem::take(&mut chunk);
+            let dec = decoders.clone();
+            decoding.push(tokio::task::spawn_blocking(move || {
+                decode_pg_rows(&rows, &dec)
+            }));
+        }
+    }
+    drop(stream);
+
+    let mut out_rows: Vec<Vec<Value>> = Vec::with_capacity(kept);
+    for task in decoding {
+        out_rows.extend(
+            task.await
+                .map_err(|e| otto_core::Error::Internal(format!("decode task failed: {e}")))?,
+        );
+    }
+    if !chunk.is_empty() {
+        if chunk.len() * decoders.len() <= INLINE_DECODE_CELLS {
+            out_rows.extend(decode_pg_rows(&chunk, &decoders));
+        } else {
+            let dec = decoders.clone();
+            out_rows.extend(
+                tokio::task::spawn_blocking(move || decode_pg_rows(&chunk, &dec))
+                    .await
+                    .map_err(|e| otto_core::Error::Internal(format!("decode task failed: {e}")))?,
+            );
+        }
     }
 
     Ok(ReadOut {
@@ -1697,6 +2026,50 @@ async fn exec_read_conn(
         },
         unread,
     })
+}
+
+/// Decode fetched rows with their per-column decoders, capping oversized
+/// cells (text/bytea/JSON) like ClickHouse does — an uncapped multi-MB cell
+/// freezes the grid and bloats the WS frame.
+fn decode_pg_rows(rows: &[PgRow], decoders: &[PgCell]) -> Vec<Vec<Value>> {
+    rows.iter()
+        .map(|row| {
+            decoders
+                .iter()
+                .enumerate()
+                .map(|(i, dec)| types::cap_cell(pg_cell(row, i, *dec)))
+                .collect()
+        })
+        .collect()
+}
+
+/// Estimated JSON size of a row from its raw wire bytes (no decoding).
+fn raw_row_json_len(row: &PgRow, decoders: &[PgCell]) -> usize {
+    let mut n = 2;
+    for (i, dec) in decoders.iter().enumerate() {
+        let raw = row
+            .try_get_raw(i)
+            .ok()
+            .filter(|v| !sqlx::ValueRef::is_null(v))
+            .and_then(|v| v.as_bytes().ok().map(<[u8]>::len));
+        n += 3 + raw_cell_json_len(raw, *dec);
+    }
+    n
+}
+
+/// Rendered-size estimate of one cell from its raw byte length: text/JSON
+/// are ~1:1 (capped at the cell cap), the base64-rendered fallback grows by
+/// 4/3, and fixed-width binary values (ints, floats, timestamps, uuids,
+/// numerics) are counted at a typical rendered width.
+fn raw_cell_json_len(raw: Option<usize>, dec: PgCell) -> usize {
+    match raw.map(|len| len.min(types::MAX_CELL_CHARS)) {
+        None => 4,
+        Some(len) => match dec {
+            PgCell::Text | PgCell::Json => len,
+            PgCell::Cascade => len.div_ceil(3) * 4,
+            _ => len.max(24),
+        },
+    }
 }
 
 /// How one Postgres result column decodes, chosen ONCE from its type name
@@ -2215,29 +2588,19 @@ async fn governed_read(
     req: &QueryRequest,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
-    capture_backend_pid(&mut conn, token).await;
-    let mut tx = conn
-        .begin_with("BEGIN READ ONLY")
-        .await
-        .map_err(types::upstream)?;
+    let mut conn = acquire(pool).await?;
     // Always explicit (reverted with the transaction): the selected schema,
-    // else the session default rather than a pooled leftover.
+    // else the session default rather than a pooled leftover — set in the
+    // same round trip as the BEGIN.
     let schema = req.scope_database();
-    (&mut *tx)
-        .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(search_path_sql(
+    let mut tx = conn
+        .begin_with(sqlx::AssertSqlSafe(governed_begin_sql(
             schema.as_deref(),
-        ))))
+            req.timeout_ms,
+        )))
         .await
         .map_err(types::upstream)?;
-    if let Some(ms) = req.timeout_ms.filter(|ms| *ms > 0) {
-        (&mut *tx)
-            .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-                "SET LOCAL statement_timeout = {ms}"
-            ))))
-            .await
-            .map_err(types::upstream)?;
-    }
+    capture_backend_pid(&mut tx, token).await;
     let spans = split_statements(req.statement.trim(), SqlDialect::Postgres);
     if spans.is_empty() {
         return Err(types::invalid("empty statement"));
@@ -2396,12 +2759,105 @@ mod tests {
     fn session_setup_is_always_explicit() {
         assert_eq!(
             session_setup_sql(Some("shop"), Some(5000)),
-            "SET search_path TO \"shop\"; SET statement_timeout = 5000"
+            "SET search_path TO \"shop\"; SET statement_timeout = 5000; SELECT pg_backend_pid()"
         );
         assert_eq!(
             session_setup_sql(None, None),
-            "RESET search_path; RESET statement_timeout"
+            "RESET search_path; RESET statement_timeout; SELECT pg_backend_pid()"
         );
+    }
+
+    /// DB-02 round-trip guard: the whole per-run setup (scope, timeout AND
+    /// the cancel pid) is ONE simple-protocol script, so a warm pooled
+    /// session pays exactly one round trip before the statement; the governed
+    /// path folds its scope into the BEGIN.
+    #[test]
+    fn per_run_setup_is_one_round_trip() {
+        for (schema, timeout) in [(Some("s"), Some(10)), (None, None), (Some("a"), None)] {
+            let sql = session_setup_sql(schema, timeout);
+            // One script; the pid is its only row-returning statement, last.
+            assert!(sql.ends_with("; SELECT pg_backend_pid()"), "{sql}");
+            assert_eq!(sql.matches("SELECT").count(), 1, "{sql}");
+        }
+        assert_eq!(
+            governed_begin_sql(Some("shop"), Some(250)),
+            "BEGIN READ ONLY; SET search_path TO \"shop\"; SET LOCAL statement_timeout = 250"
+        );
+        assert_eq!(
+            governed_begin_sql(None, Some(0)),
+            "BEGIN READ ONLY; RESET search_path"
+        );
+    }
+
+    #[test]
+    fn raw_cell_estimates_track_rendered_size() {
+        assert_eq!(raw_cell_json_len(None, PgCell::Text), 4);
+        assert_eq!(raw_cell_json_len(Some(100), PgCell::Text), 100);
+        assert_eq!(raw_cell_json_len(Some(3), PgCell::Cascade), 4);
+        assert_eq!(raw_cell_json_len(Some(8), PgCell::Int8), 24);
+        assert_eq!(
+            raw_cell_json_len(Some(types::MAX_CELL_CHARS * 4), PgCell::Json),
+            types::MAX_CELL_CHARS
+        );
+    }
+
+    /// The bulk diagram matches the per-object walk's shape: tree order,
+    /// PK/FK flags, composite FK edges grouped, `truncated` past the cap,
+    /// FK edges only out of kept tables.
+    #[test]
+    fn bulk_graph_assembles_flags_edges_and_truncation() {
+        let rel = |n: &str, kind| BulkRel {
+            id: format!("db:s/table:{n}"),
+            name: n.into(),
+            kind,
+        };
+        let col = |t: &str, c: &str| BulkCol {
+            table: t.into(),
+            name: c.into(),
+            data_type: "int".into(),
+            nullable: false,
+            primary_key: false,
+        };
+        let fk = |t: &str, name: &str, c: &str, rt: &str, rc: &str| BulkFk {
+            table: t.into(),
+            name: name.into(),
+            column: c.into(),
+            ref_schema: None,
+            ref_table: rt.into(),
+            ref_column: rc.into(),
+        };
+        let g = assemble_bulk_graph(
+            "s",
+            vec![
+                rel("a", NodeKind::Table),
+                rel("b", NodeKind::Table),
+                rel("v", NodeKind::View),
+            ],
+            vec![
+                col("a", "id"),
+                col("b", "id"),
+                col("b", "a1"),
+                col("b", "a2"),
+                col("v", "x"),
+            ],
+            &[("a".into(), "id".into()), ("b".into(), "id".into())],
+            vec![
+                fk("b", "fk_ab", "a1", "a", "id"),
+                fk("b", "fk_ab", "a2", "a", "id2"),
+                fk("v", "fk_v", "x", "a", "id"),
+            ],
+            2,
+        );
+        assert!(g.truncated && g.relationships);
+        assert_eq!(g.tables.len(), 2);
+        assert_eq!(g.tables[1].id, "db:s/table:b");
+        let b = &g.tables[1].columns;
+        assert!(b[0].primary_key && !b[0].foreign_key);
+        assert!(b[1].foreign_key && b[2].foreign_key && !b[1].primary_key);
+        assert_eq!(g.edges.len(), 1, "edges out of the cut table are dropped");
+        assert_eq!(g.edges[0].from_columns, vec!["a1", "a2"]);
+        assert_eq!(g.edges[0].to_columns, vec!["id", "id2"]);
+        assert_eq!(g.edges[0].to_schema, "s");
     }
 
     #[test]
