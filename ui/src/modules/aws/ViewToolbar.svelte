@@ -1,10 +1,11 @@
 <script lang="ts">
   // Shared service-view toolbar: title, client-side filter box, refresh +
-  // auto-refresh (10 s) toggle, plus a slot for view-specific controls (region
+  // auto-refresh (10 s; 30 s across all regions) toggle, plus a slot for view-specific controls (region
   // switcher, state filter…). `/` focuses the filter from anywhere in the view.
   import type { Snippet } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { pollWhileVisible } from '../../lib/poll';
+  import { AUTO_REFRESH_MS, effectiveRefreshMs } from './refresh';
 
   interface Props {
     title: string;
@@ -13,6 +14,8 @@
     filterPlaceholder?: string;
     loading?: boolean;
     auto?: boolean;
+    /** The view's region — `ALL_REGIONS` floors the auto-refresh cadence. */
+    region?: string;
     /** Return the load's promise so auto-refresh chains after it settles. */
     onrefresh?: () => void | Promise<unknown>;
     children?: Snippet;
@@ -25,6 +28,7 @@
     filterPlaceholder = 'Filter…',
     loading = false,
     auto = $bindable(false),
+    region,
     onrefresh,
     children,
     actions,
@@ -32,13 +36,17 @@
 
   let filterEl = $state<HTMLInputElement | null>(null);
 
-  // Auto-refresh: re-armed whenever the toggle flips; stopped on unmount. A
-  // chain (next tick 10 s after the previous refresh SETTLES), paused while
-  // the window is hidden — an interval stacked slow `aws` CLI refreshes.
+  // Auto-refresh: re-armed whenever the toggle flips or the cadence changes;
+  // stopped on unmount. A chain (next tick 10 s after the previous refresh
+  // SETTLES), paused while the window is hidden — an interval stacked slow
+  // `aws` CLI refreshes. All-regions mode spawns ~17 processes per tick, so
+  // its cadence is floored at 30 s.
+  const refreshMs = $derived(effectiveRefreshMs(AUTO_REFRESH_MS, region));
   $effect(() => {
     if (!auto || !onrefresh) return;
     const fn = onrefresh;
-    const poller = pollWhileVisible(async () => { await fn(); }, { ms: 10_000, immediate: false });
+    const ms = refreshMs;
+    const poller = pollWhileVisible(async () => { await fn(); }, { ms, immediate: false });
     return () => poller.stop();
   });
 
@@ -82,7 +90,7 @@
     >
       <Icon name="refresh" size={14} />
     </button>
-    <label class="auto" title="Auto-refresh every 10 s">
+    <label class="auto" title={`Auto-refresh every ${refreshMs / 1000} s${refreshMs > AUTO_REFRESH_MS ? ' (all regions)' : ''}`}>
       <input type="checkbox" bind:checked={auto} />
       <span>Auto</span>
     </label>

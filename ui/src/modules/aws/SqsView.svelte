@@ -285,6 +285,7 @@
   filterPlaceholder="Filter queues…"
   {loading}
   bind:auto
+  {region}
   onrefresh={() => void load()}
 >
   <RegionPicker {account} service="sqs" bind:region />

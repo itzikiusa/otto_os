@@ -6,6 +6,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { pollWhileVisible } from '../../lib/poll';
+  import { adaptiveCadence } from '../../lib/pollBackoff';
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import { copyAsJson, downloadJson, exportCsv } from '../../lib/components/exporters';
   import type {
@@ -159,12 +160,18 @@
   let tailOffsets = $state<Map<number, number>>(new Map());
   // Capped ring buffer so the in-memory list does not grow unbounded.
   const TAIL_CAP = 500;
-  // Auto-refresh on an interval (live-tail). The interval re-uses the offsets
-  // accumulated so far; toggling off clears them.
+  // Auto-refresh (live-tail). Each tick re-uses the offsets accumulated so far;
+  // toggling off clears them. Adaptive cadence: 3 s while ticks keep returning
+  // new messages, doubling to 15 s while the topic is idle (each tick is a
+  // consume through the daemon, possibly over an SSH tunnel).
   let autoPoll = $state(false);
-  const POLL_MS = 60_000;
+  const TAIL_MIN_MS = 3000;
+  const TAIL_MAX_MS = 15_000;
   /** Messages the last tail tick appended (inline badge — no per-tick toast). */
   let tailAdded = $state(0);
+  /** Bumped whenever a tail tick appends messages (drives the adaptive cadence;
+   *  `tailAdded` alone can't tell a failed tick from an empty one). */
+  let tailSeq = 0;
 
   // ---- produce state ----
   let pKey = $state('');
@@ -254,9 +261,20 @@
     if (!autoPoll) return;
     // Seed on enable, then chained ticks (paused while hidden, stopped on leave).
     untrack(() => void consumeWithTail(false));
+    const cadence = adaptiveCadence({ min: TAIL_MIN_MS, max: TAIL_MAX_MS });
     const poller = pollWhileVisible(
-      () => (consuming ? undefined : untrack(() => consumeWithTail(true))),
-      { ms: POLL_MS, immediate: false },
+      async () => {
+        if (consuming) return;
+        const before = tailSeq;
+        await untrack(() => consumeWithTail(true));
+        cadence.record(tailSeq !== before);
+      },
+      {
+        get ms() {
+          return cadence.ms;
+        },
+        immediate: false,
+      },
     );
     return () => poller.stop();
   });
@@ -342,6 +360,7 @@
       }
       tailAdded = r.messages.length;
       if (r.messages.length > 0) {
+        tailSeq += 1;
         updateTailOffsets(r.messages);
         const prev = result;
         result = {
@@ -647,7 +666,7 @@
         {/if}
       </div>
       <input class="grow" bind:value={valueFilter} placeholder="filter value…" aria-label="Filter by value" />
-      <label class="auto" class:on={autoPoll} title="Append new messages every minute (incremental, capped at {TAIL_CAP})">
+      <label class="auto" class:on={autoPoll} title="Append new messages every 3 s, backing off to 15 s while none arrive (incremental, capped at {TAIL_CAP})">
         <input type="checkbox" bind:checked={autoPoll} disabled={!!consumeError && !autoPoll} /> Live · 1m
       </label>
       <label

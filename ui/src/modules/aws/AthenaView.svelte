@@ -21,6 +21,7 @@
   import ResultsGrid from '../database/ResultsGrid.svelte';
   import RegionPicker from './RegionPicker.svelte';
   import { athenaCostUsd, fmtAgo, fmtBytes, fmtMs, awsErrorText, serviceTabKey } from './util';
+  import { statusPollMs } from '../../lib/pollBackoff';
   import type {
     AthenaExecution,
     AthenaQueryState,
@@ -238,12 +239,11 @@
 
   // Status-poll backoff: each poll is an `aws` CLI process (~0.3 s CPU), so a
   // 10-minute scan polled every second burned ~30% of a core. 1,1,2,2,3,5 s…
-  // capped at 5 s (15 s while the window is hidden).
-  const POLL_BACKOFF = [1000, 1000, 2000, 2000, 3000, 5000];
+  // capped at 5 s (15 s while the window is hidden) — lib/pollBackoff, shared
+  // with Logs Insights.
   let pollN = 0;
   function nextPollMs(): number {
-    const ms = POLL_BACKOFF[Math.min(pollN++, POLL_BACKOFF.length - 1)];
-    return typeof document !== 'undefined' && document.visibilityState === 'hidden' ? Math.max(ms, 15_000) : ms;
+    return statusPollMs(pollN++, typeof document !== 'undefined' && document.visibilityState === 'hidden');
   }
 
   function schedulePoll(ms: number): void {
