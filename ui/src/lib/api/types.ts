@@ -1817,6 +1817,9 @@ export interface NotificationSettings {
   expiry_threshold_days: number;
   native_enabled: boolean;
   session_events: boolean;
+  /** Native banner for "Session awaiting input" when you are not watching
+   *  that session (default true; older daemons omit it → treat as true). */
+  native_on_waiting?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -10815,6 +10818,10 @@ export interface UiHelloAckFrame {
   conn_id: string;
   /** This daemon process's boot id (changes on every daemon restart). */
   boot_id?: string;
+  /** What this daemon's boot restore did to sessions (A4): re-adopted from
+   *  their PTY holders (`kept_running`) vs live sessions that lost their
+   *  process with the previous daemon (`suspended`). Null until restored. */
+  boot_restore?: { kept_running: number; suspended: number } | null;
 }
 
 /** Server → this connection: run one UI command. */
@@ -10865,6 +10872,33 @@ export interface UiControlGrant {
   enabled: boolean;
   granted_at?: string;
   granted_by?: Id;
+}
+
+// ---------------------------------------------------------------------------
+// Per-session tokens + cost (review A5) — GET /sessions/{id}/usage and
+// GET /workspaces/{wid}/sessions/usage
+// ---------------------------------------------------------------------------
+
+/** One session's usage sums (otto-usage `SessionTotals`). */
+export interface SessionTotals {
+  session_id: Id;
+  workspace_id: Id;
+  provider: string;
+  events: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+}
+
+/** `GET /workspaces/{wid}/sessions/usage?days=` — sessions without usage are absent. */
+export interface WorkspaceSessionsUsage {
+  /** False when the usage engine is unavailable: hide tokens/cost UI. */
+  available: boolean;
+  days: number;
+  sessions: SessionTotals[];
 }
 
 export type * from './room-types';

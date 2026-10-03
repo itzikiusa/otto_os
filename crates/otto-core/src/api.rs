@@ -1199,6 +1199,11 @@ pub struct NotificationSettings {
     pub native_enabled: bool,
     /// Emit notices for session-progress events (finished / awaiting-input / exited).
     pub session_events: bool,
+    /// Also raise a native banner for "Session awaiting input" (`:waiting`,
+    /// severity info) when the user is not watching that session (review
+    /// A2). The UI decides "watching"; the server severity is unchanged.
+    #[serde(default = "default_true")]
+    pub native_on_waiting: bool,
 }
 
 impl Default for NotificationSettings {
@@ -1207,6 +1212,7 @@ impl Default for NotificationSettings {
             expiry_threshold_days: 3,
             native_enabled: true,
             session_events: true,
+            native_on_waiting: true,
         }
     }
 }

@@ -218,12 +218,40 @@ async fn user_sessions_survive_a_daemon_restart_and_engine_ones_do_not() {
     .await;
 
     // ── daemon run #2 ──────────────────────────────────────────────────────
+    let before = SessionsRepo::new(w.pool.clone())
+        .get(&id)
+        .await
+        .unwrap()
+        .last_active_at;
     let second = daemon(&w, &holders);
-    second
+    let summary = second
         .restore_all(&|_: &String| None::<String>)
         .await
         .expect("restore");
+    assert_eq!(
+        summary,
+        otto_sessions::RestoreSummary {
+            kept_running: 1,
+            suspended: 0
+        }
+    );
     assert!(second.is_live(&id), "re-adopted on boot");
+    // A restart is not activity (A14): the row's idle clock is untouched and
+    // the adopted handle's last-output clock is back-dated to the holder's.
+    assert_eq!(
+        second.get(&id).await.unwrap().last_active_at,
+        before,
+        "re-adoption must not stamp last_active_at"
+    );
+    let quiet = second
+        .live_handle(&id)
+        .expect("live")
+        .last_output_at()
+        .elapsed();
+    assert!(
+        quiet >= Duration::from_millis(400),
+        "idle clock reset by the restart: quiet for only {quiet:?}"
+    );
     assert_eq!(
         second.live_pid(&id),
         Some(pid),

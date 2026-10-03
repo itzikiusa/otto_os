@@ -2346,7 +2346,7 @@ resolution or tunnel failure is reported as a `502` and recorded in history.
 |---|---|---|---|
 | GET /notifications | member | — | `Notice[]` — global/system notices + the caller's own (root sees all) |
 | DELETE /notifications | member | — | clears the caller's own notices (root clears all; global/system notices remain for non-root) |
-| GET /notifications/settings | member | — | notification settings |
+| GET /notifications/settings | member | — | `NotificationSettings {expiry_threshold_days, native_enabled, session_events, native_on_waiting}` — `native_on_waiting` (default `true`; absent in older rows → `true`): the UI also raises a native banner for the info "Session awaiting input" (`…:waiting`) notice when the user is not watching that session |
 | PUT /notifications/settings | member | NotificationSettings | settings |
 | POST /notifications/read-all | member | — | marks the caller's own notices read (root marks all) |
 | POST /notifications/{id}/read | member | — | mark one read (own only for non-root; global notices are read-only to them) |
@@ -2501,6 +2501,8 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | POST /usage/install | root | — | install the embedded ClickHouse binary |
 | GET /usage/budgets | root | — | UsageBudgetStatus (caps + live spend; enforcement opt-in, default off) |
 | PUT /usage/budgets | root | UsageBudgetConfig | UsageBudgetStatus (replace + persist budget config) |
+| GET /sessions/{id}/usage | Usage:View + ws viewer + session owner-or-admin | — | `SessionTotals \| null` — this session's token + cost totals over its whole recorded history (`{session_id, workspace_id, provider, events, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost_usd}`). `null` = nothing recorded, or usage tracking unavailable — never a misleading 0. The Agents pane's details chip shows it as "2.1M tokens · $1.24" (tokens first) |
+| GET /workspaces/{wid}/sessions/usage?days=30 | Usage:View + ws viewer | `days` 1–365 (default 30) | `{available, days, sessions: SessionTotals[]}` — one row per session of the workspace that the caller may see (workspace admin / root: all; otherwise their own) with usage in the window; sessions without usage are absent. `available: false` (and `sessions: []`) when the usage engine is unavailable — the UI then hides the tokens sort. Backed by one daemon-wide `session_totals(days)` rollup cached for 60 s (every rollup is a ClickHouse query) |
 
 ## Insights (scheduled usage reports)
 

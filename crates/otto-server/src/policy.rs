@@ -551,6 +551,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/providers/models/refresh" {
         return Require(Agents, Edit);
     }
+    // Per-session tokens + cost (review A5): a usage read. The handlers add
+    // the session-viewer / workspace-viewer gate.
+    if p == "/sessions/{id}/usage" || p == "/workspaces/{wid}/sessions/usage" {
+        return Require(Usage, View);
+    }
     if p == "/sessions/{id}" {
         // GET inspect = View; PATCH/DELETE = Edit.
         return Require(Agents, if get { View } else { Edit });
@@ -2272,6 +2277,18 @@ mod tests {
         assert_eq!(
             pol(Method::GET, "/api/v1/eval-matrices/{id}"),
             Require(SkillEval, View)
+        );
+    }
+
+    #[test]
+    fn per_session_usage_is_a_usage_read() {
+        assert_eq!(
+            pol(Method::GET, "/api/v1/sessions/{id}/usage"),
+            Require(Usage, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{wid}/sessions/usage"),
+            Require(Usage, View)
         );
     }
 

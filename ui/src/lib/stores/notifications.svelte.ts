@@ -153,6 +153,7 @@ const DEFAULT_SETTINGS: NotificationSettings = {
   expiry_threshold_days: 7,
   native_enabled: true,
   session_events: true,
+  native_on_waiting: true,
 };
 
 /** Client-side ceiling on held notices: the server list is capped at 200, but
@@ -296,12 +297,24 @@ class NotificationStore {
     if (known && known.created_at === notice.created_at) return;
     if (this.isChannelSessionNotice(notice)) return;
     this.notices = capNotices([notice, ...this.notices.filter((n) => n.id !== notice.id)]);
-    if (
-      this.settings.native_enabled &&
-      (notice.severity === 'warn' || notice.severity === 'error')
-    ) {
-      void this.fireNative(notice);
-    }
+    if (this.wantsNative(notice)) void this.fireNative(notice);
+  }
+
+  /** Whether `notice` earns a native banner: any warn/error, plus — behind
+   *  `native_on_waiting` (A2) — an info "Session awaiting input" (`:waiting`)
+   *  for a session the user is NOT watching (window hidden / unfocused, or
+   *  another session active). Codex, agy and custom providers only ever
+   *  produce that info notice, so without this they never banner. */
+  wantsNative(notice: Notice): boolean {
+    if (!this.settings.native_enabled) return false;
+    if (notice.severity === 'warn' || notice.severity === 'error') return true;
+    if (this.settings.native_on_waiting === false) return false;
+    if (!(notice.source_key ?? '').endsWith(':waiting')) return false;
+    const action = notice.action;
+    if (action?.type !== 'open_session') return false;
+    const doc = typeof document !== 'undefined' ? document : null;
+    const away = doc ? doc.hidden || !doc.hasFocus() : false;
+    return away || ws.activeSessionId !== action.session_id;
   }
 
   // ── Native OS notification (Tauri only) ───────────────────────────────────

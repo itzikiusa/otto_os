@@ -14,6 +14,9 @@
 //! * **Boot id.** Minted once per daemon process and sent in `hello_ack` /
 //!   `subscribe_ack`, so a client can tell "reconnected to the same daemon"
 //!   from "the daemon restarted" (every ephemeral id is then gone).
+//! * **Boot restore.** `hello_ack` also carries what the boot restore did
+//!   (`kept_running` / `suspended`), so the UI can say "Otto restarted — N kept
+//!   running, M suspended" once per boot id.
 
 use std::sync::{LazyLock, OnceLock};
 
@@ -34,6 +37,27 @@ static BOOT_ID: LazyLock<String> = LazyLock::new(otto_core::new_id);
 /// This daemon process's boot id (stable for its lifetime).
 pub fn boot_id() -> &'static str {
     BOOT_ID.as_str()
+}
+
+/// What the boot restore did (review A4): sessions re-adopted from their PTY
+/// holders vs sessions that lost their process with the previous daemon.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct BootRestore {
+    pub kept_running: usize,
+    pub suspended: usize,
+}
+
+static BOOT_RESTORE: OnceLock<BootRestore> = OnceLock::new();
+
+/// Record the boot restore summary. Set once by `ottod` after
+/// `restore_all`; first call wins.
+pub fn set_boot_restore(summary: BootRestore) {
+    let _ = BOOT_RESTORE.set(summary);
+}
+
+/// The boot restore summary sent in `hello_ack` (`None` until recorded).
+pub fn boot_restore() -> Option<BootRestore> {
+    BOOT_RESTORE.get().copied()
 }
 
 #[cfg(test)]

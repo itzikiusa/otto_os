@@ -174,7 +174,9 @@ pub use saved_views::{NewSavedView, SavedView, SavedViewsRepo};
 pub use scheduled_tasks::{
     FinishRun, NewRun as NewScheduledRun, NewScheduledTask, ScheduledTaskPatch, ScheduledTasksRepo,
 };
-pub use sessions::{NewSession, SessionListFilter, SessionScope, SessionsRepo, UsageAttrRow};
+pub use sessions::{
+    DormantPass, NewSession, SessionListFilter, SessionScope, SessionsRepo, UsageAttrRow,
+};
 pub use settings::{
     otto_mcp_enabled_for, pr_draft_model_from, SettingsRepo, OTTO_MCP_ENABLED_KEY,
     PR_DRAFT_MODEL_DEFAULT, PR_DRAFT_MODEL_KEY,

@@ -742,3 +742,170 @@ pub fn trail_to_usage_with_work(
         origin: dim_val("origin"),
     })
 }
+
+// ---------------------------------------------------------------------------
+// Per-session tokens + cost (review A5)
+// ---------------------------------------------------------------------------
+
+/// `GET /sessions/{id}/usage` — this session's token + cost totals over its
+/// whole recorded history (`null` when nothing was recorded or usage tracking
+/// is unavailable — never a misleading 0). Session viewer (owner or workspace
+/// admin, the transcript gate) + `Usage:View` (policy).
+pub async fn session_usage(
+    axum::extract::Path(id): axum::extract::Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Option<SessionTotals>>> {
+    crate::routes::transcript::session_gate(
+        &ctx,
+        &user,
+        &id,
+        otto_core::domain::WorkspaceRole::Viewer,
+    )
+    .await?;
+    if !ctx.usage.available() {
+        return Ok(Json(None));
+    }
+    Ok(Json(ctx.usage.session_totals_for(&id, None).await))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionsUsageQuery {
+    /// Days of history to roll up (default 30, 1–365).
+    pub days: Option<u32>,
+}
+
+/// `GET /workspaces/{wid}/sessions/usage` response.
+#[derive(Debug, serde::Serialize)]
+pub struct WorkspaceSessionsUsage {
+    /// False when the usage engine is unavailable / disabled — the UI then
+    /// hides every tokens/cost affordance instead of showing zeros.
+    pub available: bool,
+    pub days: u32,
+    /// One row per session of this workspace the caller may see that has
+    /// recorded usage in the window (sessions without usage are absent).
+    pub sessions: Vec<SessionTotals>,
+}
+
+/// How long the daemon-wide per-session rollup is reused. Every rollup spawns
+/// a ClickHouse query over the whole window, and the sidebar asks per
+/// workspace switch / minute; a minute of staleness is invisible there.
+const SESSIONS_USAGE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+type SessionsUsageCache =
+    std::sync::Mutex<Option<(std::time::Instant, u32, std::sync::Arc<Vec<SessionTotals>>)>>;
+
+static SESSIONS_USAGE_CACHE: SessionsUsageCache = std::sync::Mutex::new(None);
+
+/// The daemon-wide `session_totals(days)` rollup, cached for
+/// [`SESSIONS_USAGE_TTL`] per window. Errors are not cached.
+async fn cached_session_totals(
+    ctx: &ServerCtx,
+    days: u32,
+) -> Result<std::sync::Arc<Vec<SessionTotals>>, ApiError> {
+    if let Some((at, d, rows)) = SESSIONS_USAGE_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+    {
+        if *d == days && at.elapsed() < SESSIONS_USAGE_TTL {
+            return Ok(std::sync::Arc::clone(rows));
+        }
+    }
+    let rows = std::sync::Arc::new(
+        ctx.usage
+            .session_totals(days, false)
+            .await
+            .map_err(ApiError)?,
+    );
+    *SESSIONS_USAGE_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = Some((
+        std::time::Instant::now(),
+        days,
+        std::sync::Arc::clone(&rows),
+    ));
+    Ok(rows)
+}
+
+/// Keep the rollup rows for `visible` sessions only.
+fn filter_session_totals(
+    rows: &[SessionTotals],
+    visible: &std::collections::HashSet<&str>,
+) -> Vec<SessionTotals> {
+    rows.iter()
+        .filter(|r| visible.contains(r.session_id.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// `GET /workspaces/{wid}/sessions/usage?days=30` — tokens + cost per session
+/// of this workspace (the Agents sidebar's tokens sort / row tooltip). Same
+/// visibility as the session list: a workspace admin (or root) sees every
+/// session, anyone else only their own. Backed by one cached daemon-wide
+/// rollup ([`cached_session_totals`]). `Usage:View` (policy) + workspace
+/// viewer (here).
+pub async fn workspace_sessions_usage(
+    axum::extract::Path(wid): axum::extract::Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Query(q): Query<SessionsUsageQuery>,
+) -> ApiResult<Json<WorkspaceSessionsUsage>> {
+    use otto_core::domain::WorkspaceRole;
+    crate::auth::require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    let days = q.days.unwrap_or(30).clamp(1, 365);
+    if !ctx.usage.available() {
+        return Ok(Json(WorkspaceSessionsUsage {
+            available: false,
+            days,
+            sessions: Vec::new(),
+        }));
+    }
+    let repo = otto_state::SessionsRepo::new(ctx.pool.clone());
+    let admin = user.is_root
+        || crate::auth::require_ws_role(&ctx, &user, &wid, WorkspaceRole::Admin)
+            .await
+            .is_ok();
+    let sessions = if admin {
+        repo.list_by_workspace(&wid).await
+    } else {
+        repo.list_by_workspace_for_user(&wid, &user.id).await
+    }
+    .map_err(ApiError)?;
+    let visible: std::collections::HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    let rows = cached_session_totals(&ctx, days).await?;
+    Ok(Json(WorkspaceSessionsUsage {
+        available: true,
+        days,
+        sessions: filter_session_totals(&rows, &visible),
+    }))
+}
+
+#[cfg(test)]
+mod session_usage_tests {
+    use super::*;
+
+    fn row(id: &str, tokens: u64) -> SessionTotals {
+        SessionTotals {
+            session_id: id.into(),
+            workspace_id: "w".into(),
+            provider: "claude".into(),
+            events: 1,
+            input_tokens: tokens,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            total_tokens: tokens,
+            cost_usd: 0.5,
+        }
+    }
+
+    #[test]
+    fn filter_keeps_only_visible_sessions() {
+        let rows = vec![row("a", 10), row("b", 20), row("c", 30)];
+        let visible: std::collections::HashSet<&str> = ["a", "c", "zzz"].into_iter().collect();
+        let got = filter_session_totals(&rows, &visible);
+        let ids: Vec<&str> = got.iter().map(|r| r.session_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "c"]);
+    }
+}

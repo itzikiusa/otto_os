@@ -79,11 +79,13 @@ test('paneDetails keeps only the facts that exist, in a stable order', () => {
     handoverFrom: null,
     handoverPending: true,
     cwd: '/repo',
+    usage: '2.1M tokens · $1.24',
   });
   assert.deepEqual(rows, [
     ['Agent', 'claude'],
     ['Name', 'Cristiano Ronaldo'],
     ['Idle', 'suspends in 12m'],
+    ['Usage', '2.1M tokens · $1.24'],
     ['Tasks', '2/5 done'],
     ['Now', 'Run tests'],
     ['Handover', 'Preparing the brief…'],

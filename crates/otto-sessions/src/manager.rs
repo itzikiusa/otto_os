@@ -1091,6 +1091,35 @@ pub const SESSION_PERSISTENCE_SETTING: &str = "session_persistence";
 /// mid-turn, watched, pinned or busy. `0` in the setting = no cap.
 pub const MAX_LIVE_AGENT_SESSIONS: usize = 12;
 
+/// `meta.suspended.reason` values (review A4): why a session went dormant.
+/// The idle sweep's grace ran out.
+pub const SUSPEND_REASON_IDLE: &str = "idle";
+/// The live-session cap reclaimed the least recently used quiet session.
+pub const SUSPEND_REASON_CAP: &str = "cap";
+/// The daemon restarted and the process did not survive it.
+pub const SUSPEND_REASON_RESTART: &str = "restart";
+/// An explicit [`SessionManager::suspend`] call (engines, API).
+pub const SUSPEND_REASON_RELEASED: &str = "released";
+
+/// The agent-trail lifecycle line for a suspend with `reason`.
+fn suspend_lifecycle_line(reason: &str) -> &'static str {
+    match reason {
+        SUSPEND_REASON_IDLE => "Suspended (idle — freed memory, still resumable)",
+        SUSPEND_REASON_CAP => "Suspended (live-session cap — freed memory, still resumable)",
+        SUSPEND_REASON_RESTART => "Suspended (daemon restart — still resumable)",
+        _ => "Suspended (freed memory, still resumable)",
+    }
+}
+
+/// What [`SessionManager::restore_all`] did at boot: sessions re-adopted from
+/// their PTY holders (still running) and sessions that were live but lost
+/// their process with the previous daemon (now dormant, resumable).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RestoreSummary {
+    pub kept_running: usize,
+    pub suspended: usize,
+}
+
 /// The cap never suspends a session that printed something more recently than
 /// this (or than the idle grace, when that is set lower): a CLI that just
 /// streamed is plausibly still working even when its transcript says nothing.
@@ -4088,7 +4117,9 @@ impl SessionManager {
     /// exited, so the late exit wrote `Exited` over 334 of 337 idle suspends:
     /// channel threads then spawned a fresh, memory-less agent per follow-up.)
     pub async fn suspend(&self, id: &Id) -> Result<()> {
-        self.suspend_inner(id, None).await.map(|_| ())
+        self.suspend_inner(id, None, SUSPEND_REASON_RELEASED)
+            .await
+            .map(|_| ())
     }
 
     /// [`Self::suspend`] for the idle sweep. The sweep evaluates its guards
@@ -4097,11 +4128,23 @@ impl SessionManager {
     /// that window must still win. So the cheap guards are re-checked under the
     /// resume lock, right before the kill. `Ok(false)` = no longer idle (or no
     /// longer live) — nothing was done.
-    async fn suspend_if_idle(&self, id: &Id, grace: Duration) -> Result<bool> {
-        self.suspend_inner(id, Some(grace)).await
+    async fn suspend_if_idle(
+        &self,
+        id: &Id,
+        grace: Duration,
+        reason: &'static str,
+    ) -> Result<bool> {
+        self.suspend_inner(id, Some(grace), reason).await
     }
 
-    async fn suspend_inner(&self, id: &Id, idle_grace: Option<Duration>) -> Result<bool> {
+    /// `reason` is stamped as `meta.suspended = {reason, at}` (review A4) so
+    /// the pane can say why and when it went dormant; a resume clears it.
+    async fn suspend_inner(
+        &self,
+        id: &Id,
+        idle_grace: Option<Duration>,
+        reason: &'static str,
+    ) -> Result<bool> {
         let lock = self.resume_lock(id);
         let _guard = lock.lock().await;
         if let Some(grace) = idle_grace {
@@ -4125,12 +4168,13 @@ impl SessionManager {
         self.repo
             .update_status(id, SessionStatus::Reconnectable)
             .await?;
-        self.record_lifecycle(&session, "Suspended (idle — freed memory, still resumable)");
+        self.record_lifecycle(&session, suspend_lifecycle_line(reason));
         let _ = self.events.send(Event::SessionStatus {
             session_id: id.clone(),
-            workspace_id: session.workspace_id,
+            workspace_id: session.workspace_id.clone(),
             status: SessionStatus::Reconnectable,
         });
+        self.stamp_suspended(&session, Some(reason)).await;
         Ok(true)
     }
 
@@ -4533,7 +4577,7 @@ impl SessionManager {
                 }
                 continue;
             }
-            match self.suspend_if_idle(&id, grace).await {
+            match self.suspend_if_idle(&id, grace, SUSPEND_REASON_IDLE).await {
                 Ok(false) => {
                     tracing::debug!(session = %id, "idle-suspend: session became active or was respawned mid-sweep; skipped");
                 }
@@ -4629,7 +4673,10 @@ impl SessionManager {
                 tracing::debug!(session = %id, guard, "live-session cap: keeping session alive");
                 continue;
             }
-            match self.suspend_if_idle(&id, min_quiet).await {
+            match self
+                .suspend_if_idle(&id, min_quiet, SUSPEND_REASON_CAP)
+                .await
+            {
                 Ok(true) => {
                     excess -= 1;
                     freed += 1;
@@ -5147,6 +5194,10 @@ impl SessionManager {
             workspace_id: session.workspace_id.clone(),
             status: SessionStatus::Running,
         });
+        // Live again: the dormant reason no longer applies (review A4).
+        if session.meta.get("suspended").is_some() {
+            self.stamp_suspended(&session, None).await;
+        }
         self.record_lifecycle(&session, "Session resumed");
         self.start_status_task(id.clone(), session.workspace_id, session.provider, handle);
         self.repo.get(id).await
@@ -5260,7 +5311,12 @@ impl SessionManager {
             let pid = handle.pid();
             let handle = Arc::new(handle);
             self.live.insert(sid.clone(), Arc::clone(&handle));
-            if let Err(e) = self.repo.update_status(&sid, SessionStatus::Running).await {
+            // Not activity: a restart must not reset the idle clock (A14).
+            if let Err(e) = self
+                .repo
+                .update_status_keep_activity(&sid, SessionStatus::Running)
+                .await
+            {
                 tracing::warn!(session = %sid, "re-adopted session: status update failed: {e}");
             }
             let _ = self.events.send(Event::SessionStatus {
@@ -5340,26 +5396,68 @@ impl SessionManager {
     /// ([`SESSION_PERSISTENCE_SETTING`]) are re-adopted FIRST
     /// ([`Self::adopt_holders`]): they come back `running` — same process,
     /// same screen — and keep their credentials. Only the rest go dormant.
+    ///
+    /// The dormant pass is ONE set-based statement pair
+    /// ([`SessionsRepo::mark_dormant_except`]): rows already `reconnectable`
+    /// are untouched and `last_active_at` is never stamped (a restart is not
+    /// activity — review P1). Only the rows that changed are broadcast. The
+    /// returned [`RestoreSummary`] feeds the UI's "Otto restarted" notice.
     pub async fn restore_all(
         &self,
         _fallback_cwd: &(dyn Fn(&Id) -> Option<String> + Send + Sync),
-    ) -> Result<()> {
+    ) -> Result<RestoreSummary> {
         let adopted = self.adopt_holders().await;
         self.expire_orphaned_session_credentials(&adopted).await;
-        for session in self.repo.list_all_restorable().await? {
-            if adopted.contains(&session.id) {
-                continue;
-            }
-            self.repo
-                .update_status(&session.id, SessionStatus::Reconnectable)
-                .await?;
+        let at = chrono::Utc::now().to_rfc3339();
+        let pass = self.repo.mark_dormant_except(&adopted, &at).await?;
+        for (id, workspace_id, meta) in &pass.suspended {
             let _ = self.events.send(Event::SessionStatus {
-                session_id: session.id.clone(),
-                workspace_id: session.workspace_id.clone(),
+                session_id: id.clone(),
+                workspace_id: workspace_id.clone(),
+                status: SessionStatus::Reconnectable,
+            });
+            let _ = self.events.send(Event::SessionMetaUpdated {
+                session_id: id.clone(),
+                workspace_id: workspace_id.clone(),
+                meta: meta.clone(),
+            });
+        }
+        for (id, workspace_id) in &pass.resumable {
+            let _ = self.events.send(Event::SessionStatus {
+                session_id: id.clone(),
+                workspace_id: workspace_id.clone(),
                 status: SessionStatus::Reconnectable,
             });
         }
-        Ok(())
+        Ok(RestoreSummary {
+            kept_running: adopted.len(),
+            suspended: pass.suspended.len(),
+        })
+    }
+
+    /// Merge `meta.suspended = {reason, at: now}` (or remove it with `None`)
+    /// and broadcast the new meta. Best-effort: a failed write only loses the
+    /// pane's explanation, never the suspend itself.
+    async fn stamp_suspended(&self, session: &Session, reason: Option<&'static str>) {
+        let value = match reason {
+            Some(reason) => serde_json::json!({
+                "reason": reason,
+                "at": chrono::Utc::now().to_rfc3339(),
+            }),
+            None => serde_json::Value::Null,
+        };
+        let patch = serde_json::json!({ "suspended": value });
+        if let Err(e) = self.repo.merge_meta(&session.id, &patch).await {
+            tracing::debug!(session = %session.id, "stamp meta.suspended: {e}");
+            return;
+        }
+        if let Ok(updated) = self.repo.get(&session.id).await {
+            let _ = self.events.send(Event::SessionMetaUpdated {
+                session_id: updated.id.clone(),
+                workspace_id: updated.workspace_id.clone(),
+                meta: updated.meta.clone(),
+            });
+        }
     }
 
     /// Boot-time credential sweep (see [`Self::restore_all`]): apart from the

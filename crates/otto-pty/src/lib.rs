@@ -297,6 +297,17 @@ impl Mirror {
         }
     }
 
+    /// Make the last-output clock read `age` ago (an adopted holder's real
+    /// last output). Moves the epoch back — saturating at what `Instant` can
+    /// represent — so [`PtyHandle::uptime`] grows by the same amount, which
+    /// stays truthful: the child has been running at least that long.
+    pub(crate) fn backdate(&mut self, age: Duration) {
+        if let Some(epoch) = Instant::now().checked_sub(age) {
+            self.epoch = epoch;
+            self.last_output_ms.store(0, Ordering::Relaxed);
+        }
+    }
+
     /// One chunk of child output → emulator + ring + broadcast.
     pub(crate) fn feed(&self, data: &[u8]) {
         self.last_output_ms
@@ -1042,6 +1053,18 @@ impl Drop for PtyHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backdate_moves_the_last_output_clock_not_the_feed() {
+        let mut m = Mirror::new(80, 24, RingBuffer::default());
+        m.backdate(Duration::from_secs(3600));
+        let last = m.epoch + Duration::from_millis(m.last_output_ms.load(Ordering::Relaxed));
+        assert!(last.elapsed() >= Duration::from_secs(3599));
+        // Real output afterwards is "now" again.
+        m.feed(b"x");
+        let last = m.epoch + Duration::from_millis(m.last_output_ms.load(Ordering::Relaxed));
+        assert!(last.elapsed() < Duration::from_secs(5));
+    }
 
     /// Same-size resizes must be dropped before the ioctl: a shell trapping
     /// SIGWINCH sees NOTHING for repeats of the current grid and exactly one

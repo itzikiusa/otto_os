@@ -408,7 +408,7 @@ MCP token, a share link — are ignored, so such a socket is never a target):
 Server → that ONE connection:
 
 ```json
-{"type":"hello_ack","conn_id":"01J…","boot_id":"01J…"}
+{"type":"hello_ack","conn_id":"01J…","boot_id":"01J…","boot_restore":{"kept_running":5,"suspended":2}}
 {"type":"ui_command","id":"01J…","session_id":"…","agent":{"session_id":"…","title":"Fix the report","provider":"claude"},"command":"db_run_query","args":{"tab_id":"…"},"deadline_ms":45000}
 {"type":"ui_command_cancel","id":"01J…","reason":"timeout"}
 ```
@@ -417,6 +417,12 @@ Server → that ONE connection:
   back as `X-Otto-Ui-Conn` on `POST /ui/commands/{id}/result|progress`.
   `boot_id` (additive) is minted once per daemon process: a different value than
   the one seen before means the daemon restarted (every ephemeral id is gone).
+  `boot_restore` (additive; `null` until the boot restore ran) says what that
+  restart did to sessions: `kept_running` = re-adopted from their PTY holders
+  (same process), `suspended` = sessions that were live but lost their process
+  with the previous daemon (now `reconnectable`, stamped
+  `meta.suspended = {reason:"restart", at}`). The UI shows "Otto restarted —
+  N kept running · M suspended" once per boot id when either is non-zero.
 - `ui_command` — `command` is the bare catalog name (no `ui_` prefix); `args`
   are validated against the entry's schema, with `connection_id` already
   resolved to the canonical id; `deadline_ms` is the DURATION (ms) the daemon

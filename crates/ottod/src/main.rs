@@ -664,11 +664,22 @@ async fn run(cfg: Config) -> Result<(), String> {
         .into_iter()
         .map(|w| (w.id, w.root_path))
         .collect();
-    if let Err(e) = manager
+    match manager
         .restore_all(&move |ws_id| ws_paths.get(ws_id.as_str()).cloned())
         .await
     {
-        tracing::warn!("session restore: {e}");
+        Ok(summary) => {
+            tracing::info!(
+                kept_running = summary.kept_running,
+                suspended = summary.suspended,
+                "session restore"
+            );
+            otto_server::transport::set_boot_restore(otto_server::transport::BootRestore {
+                kept_running: summary.kept_running,
+                suspended: summary.suspended,
+            });
+        }
+        Err(e) => tracing::warn!("session restore: {e}"),
     }
 
     // Sweep stray `com.otto.deploy.*` launchd jobs. deploy.sh detaches with
