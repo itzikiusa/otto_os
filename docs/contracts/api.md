@@ -2528,13 +2528,46 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 
 - `compact` is the one-time `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;` rewrite
   of `otto.db`. It holds the SQLite write lock for the whole rewrite (tens of
-  seconds on a large DB), so it never runs automatically: the UI sends it only
-  after a confirm dialog that says writes stall meanwhile. Audited as
-  `db.compact` (`detail` = the report). Once `auto_vacuum = 2`, the daemon's
-  hourly maintenance runs `PRAGMA incremental_vacuum(4000)`.
+  seconds on a large DB): the UI sends it only after a confirm dialog that
+  says writes stall meanwhile. Audited as `db.compact` (`detail` = the
+  report). It also runs ONCE on its own when the file is not converted and
+  more than 20 % and 64 MiB of it are free pages: inline at boot (before the
+  listener) when the live data is ≤ 128 MiB, otherwise from the hourly pass
+  while no session is live. Once `auto_vacuum = 2`, the daemon's hourly
+  maintenance runs `PRAGMA incremental_vacuum(4000)` and the trigger never
+  fires again.
+- Boot (no endpoint): `PRAGMA analysis_limit=1000; PRAGMA optimize=0x10002`
+  right after migrations, so `sqlite_stat1` exists from the first query.
 - Hourly maintenance (no endpoint): `PRAGMA optimize`, then
-  `wal_checkpoint(TRUNCATE)` (PASSIVE when a reader pins the WAL). The writer
+  `wal_checkpoint(TRUNCATE)` with a 250 ms busy timeout (PASSIVE when a reader
+  pins the WAL, so the writer is never parked for the full 5 s). The writer
   sets `journal_size_limit = 64 MiB`.
+
+## Secret storage
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /admin/secrets/status | root | — | `SecretsStatus {mode: plaintext\|encrypted\|keychain, plaintext_file, plaintext_entries, key_state: unlocked\|locked\|not_loaded\|error, migration_available, migrating, backup_present}` · 404 when the daemon has no managed store |
+| POST /admin/secrets/secure | root | `{confirm: true}` | `SecretsMigrationReport {migrated, total, duration_ms}` · 400 without `confirm` · 409 when not in plaintext mode / already running / a key differs between the files · 502 when the Keychain is locked or a prompt is waiting (nothing changed) |
+
+- Stores (`otto_keychain`): `encrypted` = `secrets.enc` (AES-256-GCM, 0600,
+  atomic writes) sealed with ONE random master key in a single Keychain item
+  (`com.otto.daemon` / `otto-secrets-master-key-v1`); `plaintext` = legacy
+  `secrets.json`; `keychain` = one Keychain item per secret. Selected by
+  `OTTO_SECRETS` (`encrypted`/`file`/`keychain`) and the files on disk: once
+  `secrets.enc` exists and `secrets.json` is gone the encrypted store wins even
+  under a stale `OTTO_SECRETS=file`. Release macOS builds refuse `file` unless
+  `OTTO_SECRETS_ALLOW_PLAINTEXT=1` or a legacy `secrets.json` already exists.
+- Keychain access is bounded (8 s): a locked keychain / pending prompt yields
+  `key_state: locked` and a 502 "secret store locked" error instead of a
+  blocked request; one Keychain call is in flight at a time.
+- `secure` is NEVER automatic (an unattended deploy must not block on a
+  Keychain prompt). It copies every entry into `secrets.enc`, keeps an
+  encrypted backup, verifies every entry reads back, then zero-overwrites and
+  deletes `secrets.json` and switches the running daemon in-process (no
+  restart). Audited as `secrets.secure` / `secrets.secure_failed` with counts
+  only — no values, no key names. The desktop app's next plist rewrite then
+  sets `OTTO_SECRETS=encrypted`.
 
 ## Usage tracking & system metrics (embedded ClickHouse)
 
