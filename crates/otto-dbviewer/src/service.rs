@@ -935,19 +935,6 @@ impl DbViewerService {
         )))
     }
 
-    async fn check_resolved_scope(
-        &self,
-        conn_id: &Id,
-        user_id: &Id,
-        node: Option<&str>,
-        operation: &str,
-        r: &Resolved,
-    ) -> Result<()> {
-        let snap = self.access_snapshot(conn_id).await?;
-        self.check_resolved_scope_snap(&snap, user_id, node, operation, r)
-            .await
-    }
-
     async fn check_resolved_scope_snap(
         &self,
         snap: &AccessSnapshot,
@@ -1011,19 +998,26 @@ impl DbViewerService {
     ) -> Result<T> {
         let execution = r.with_lifecycle(execution);
         tokio::pin!(execution);
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        // One snapshot per check (was ~8 state reads every 500 ms). The first
+        // tick still fires at t=0: nothing checked the export scope just before.
+        let eligible = || async {
+            let snap = self.access_snapshot(conn_id).await?;
+            self.guard_export_snap(&snap, user_id, statement, node)
+                .await?;
+            self.check_resolved_scope_snap(&snap, user_id, node, "db_export", r)
+                .await
+        };
+        let mut interval = tokio::time::interval(ELIGIBILITY_TICK);
         loop {
             tokio::select! {
                 result = &mut execution => {
-                    self.guard_export(conn_id, user_id, statement, node).await?;
-                    self.check_resolved_scope(conn_id, user_id, node, "db_export", r).await?;
+                    eligible().await?;
                     return result;
                 }
                 _ = interval.tick() => {
                     // Dropping the native stream on revocation stops further
                     // response/file writes; effects already sent are not undone.
-                    self.guard_export(conn_id, user_id, statement, node).await?;
-                    self.check_resolved_scope(conn_id, user_id, node, "db_export", r).await?;
+                    eligible().await?;
                 }
             }
         }
@@ -2628,15 +2622,28 @@ impl DbViewerService {
         statement: &str,
         node: Option<&str>,
     ) -> Result<()> {
+        let snap = self.access_snapshot(conn_id).await?;
+        self.guard_export_snap(&snap, user_id, statement, node)
+            .await
+    }
+
+    /// [`Self::guard_export`] against one loaded [`AccessSnapshot`].
+    async fn guard_export_snap(
+        &self,
+        snap: &AccessSnapshot,
+        user_id: &Id,
+        statement: &str,
+        node: Option<&str>,
+    ) -> Result<()> {
         let guard_req = QueryRequest {
             statement: statement.to_string(),
             node: node.map(str::to_string),
             ..QueryRequest::default()
         };
-        self.authorize(conn_id, user_id, node, "db_export").await?;
-        if self.is_enforced(conn_id).await? {
-            let conn = self.connections.get(conn_id).await?;
-            let engine = Engine::from_kind(conn.kind)
+        self.authorize_snap(snap, user_id, node, "db_export")
+            .await?;
+        if snap.enforced() {
+            let engine = Engine::from_kind(snap.conn.kind)
                 .ok_or_else(|| Error::Invalid("not a database".into()))?;
             if crate::access::operations(engine, statement)? != vec!["db_query"] {
                 return Err(Error::Forbidden(
@@ -2644,8 +2651,9 @@ impl DbViewerService {
                 ));
             }
         }
-        self.execution_access(conn_id, user_id, &guard_req).await?;
-        self.guard_write(conn_id, &guard_req).await
+        self.execution_access_snap(snap, user_id, &guard_req)
+            .await?;
+        Self::guard_write_conn(&snap.conn, &guard_req)
     }
 
     /// Import a local file into an existing table/collection. Parses the file,
