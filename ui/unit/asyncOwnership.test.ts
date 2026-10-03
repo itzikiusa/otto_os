@@ -27,6 +27,66 @@ function workspace() {
   return { ws, requests, restored };
 }
 
+/** The store with a saved workspace id and a transport that logs every GET in
+ *  order; `/workspaces` is held until the test releases it. */
+function bootWorkspace(saved: string, list: { id: string }[]) {
+  const log: string[] = [];
+  const held = deferred<any[]>();
+  const api = { get: (path: string) => {
+    log.push(path);
+    if (path === '/workspaces') return held.promise;
+    if (path === '/workspaces/scratch') return Promise.resolve({ id: 'scratch' });
+    if (/^\/workspaces\/[^/]+\/sessions\?/.test(path) && !path.includes('archived=true')) {
+      const ws = path.split('/')[2];
+      return Promise.resolve(ws === 'scratch' ? [] : [{ id: `${ws}-session`, workspace_id: ws, kind: 'agent', status: 'running', last_active_at: 't' }]);
+    }
+    return Promise.resolve([]);
+  } };
+  const layout = { panes: [], focusedIndex: 0, bindKey() {}, restore() {}, retain() {} };
+  const { ws } = loadSource(new URL('../src/lib/stores/workspace.svelte.ts', import.meta.url), {
+    '../api/client': { api, getToken: () => 'tok' }, '../api/workflows': { listActiveWorkflowRuns: async () => [] }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
+    '../router.svelte': { router: {} }, '../toast.svelte': { toasts: {} }, '../confirm.svelte': { confirmer: {} },
+    './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
+    '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
+    '../storage': { lsGet: (k: string) => (k === 'otto_workspace' ? saved : null), lsSet() {}, lsRemove() {} },
+    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
+  });
+  ws.refreshOtherSessions = async () => {};
+  ws.refreshActiveWorkflowRuns = async () => {};
+  return { ws, log, release: () => held.resolve(list) };
+}
+
+const shown = (log: string[], ws: string) => log.filter((p) => p.startsWith(`/workspaces/${ws}/sessions?`) && !p.includes('archived=true'));
+
+test('boot: the saved workspace\'s session list goes out with /workspaces, and is used once (perf G3)', async () => {
+  const { ws, log, release } = bootWorkspace('A', [{ id: 'A' }, { id: 'B' }]);
+  const loading = ws.load();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(shown(log, 'A').length, 1, `sessions start before /workspaces answers: ${log.join(' ')}`);
+  assert.equal(shown(log, 'scratch').length, 1, 'with the scratch list');
+  release();
+  await loading;
+  assert.equal(ws.currentId, 'A');
+  assert.equal(ws.sessions[0]?.id, 'A-session');
+  assert.equal(shown(log, 'A').length, 1, 'select() reused the boot request instead of asking again');
+  assert.equal(shown(log, 'scratch').length, 1);
+  await ws.refreshSessions();
+  assert.equal(shown(log, 'A').length, 2, 'one-shot: a later refresh asks the daemon');
+});
+
+test('boot: a saved workspace that no longer exists drops its speculative list (perf G3)', async () => {
+  const { ws, log, release } = bootWorkspace('gone', [{ id: 'B' }]);
+  const loading = ws.load();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(shown(log, 'gone').length, 1);
+  release();
+  await loading;
+  assert.equal(ws.currentId, 'B');
+  assert.equal(ws.sessions[0]?.id, 'B-session', 'the fallback workspace\'s own list, not the stale one');
+  assert.equal(shown(log, 'B').length, 1);
+  assert.equal(shown(log, 'scratch').length, 2, 'the scratch list is fetched again with the real selection');
+});
+
 test('late workspace selection cannot publish sessions or restore the old layout', async () => {
   const { ws, requests, restored } = workspace();
   const a = ws.select('A'); const b = ws.select('B');

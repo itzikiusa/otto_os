@@ -36,6 +36,13 @@ const ARCHIVED_PAGE = 100;
 // window's label so two windows never clobber each other's workspace/tabs/view.
 // The main window keeps the legacy unprefixed keys.
 const LS_CURRENT = 'otto_workspace';
+
+/** Boot-time shown-list requests for the saved workspace (perf G3). */
+interface BootSessions {
+  key: string;
+  own: Promise<Session[]>;
+  scratch: Promise<Session[]>;
+}
 const LS_TABS = 'otto_tabs_'; // + workspace id
 // App-wide (deliberately NOT winKey-namespaced): whether the sidebar lists
 // sessions from every workspace, grouped by workspace, instead of only the
@@ -107,6 +114,11 @@ class WorkspaceStore {
   private sessionsTrailing: Promise<void> | null = null;
   /** In-flight fetch-by-id per session id ({@link ensureSession}). */
   private ensuring = new Map<Id, Promise<Session | null>>();
+  /** The saved workspace's shown-list requests, started WITH `/workspaces`
+   *  on boot (perf G3) and taken once by the first {@link loadSessions} whose
+   *  workspace + query + token match; dropped when the saved id isn't the one
+   *  selected. Keyed `${token}|${wsId}|${query}`. */
+  private bootSessions: BootSessions | null = null;
 
   /** In-flight workflow runs (pending|running) in the current workspace, for the
    *  "Running" sidebar list + the Workflows nav count chip. Refreshed on each
@@ -443,16 +455,49 @@ class WorkspaceStore {
     // `scratch` null and the sheet falls back to `~`. Fetched WITH the list
     // (perf F3: one round-trip instead of two before the session list).
     const scratchReq = api.get<Workspace>(`/workspaces/${SCRATCH_WORKSPACE_ID}`).catch(() => null);
-    const workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
+    // The saved workspace's session list goes out WITH the list too (perf
+    // G3): it used to wait for `/workspaces` to answer, then for `select()`,
+    // so the sidebar filled after three round trips instead of two. Only used
+    // if the saved id survives validation below; otherwise dropped unread.
+    const saved = lsGet(winKey(LS_CURRENT));
+    const boot = saved && saved !== SCRATCH_WORKSPACE_ID ? this.startBootSessions(token, saved) : null;
+    this.bootSessions = boot;
+    // Drop ours only — a newer load() may have replaced it meanwhile.
+    const dropBoot = () => {
+      if (this.bootSessions === boot) this.bootSessions = null;
+    };
+    let workspaces: WorkspaceWithRole[];
+    try {
+      workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
+    } catch (e) {
+      dropBoot();
+      throw e;
+    }
     if (!current()) return;
     this.workspaces = workspaces;
     const scratch = await scratchReq;
     if (!current()) return;
     this.scratch = scratch;
-    const saved = lsGet(winKey(LS_CURRENT));
     const target = workspaces.find((w) => w.id === saved) ?? workspaces[0] ?? null;
-    if (target) await this.select(target.id);
-    else await this.selectNone();
+    if (target?.id !== saved) dropBoot();
+    try {
+      if (target) await this.select(target.id);
+      else await this.selectNone();
+    } finally {
+      // One-shot: a later refresh always asks the daemon again.
+      dropBoot();
+    }
+  }
+
+  /** Start the shown-list requests {@link loadSessions} would make for `wsId`
+   *  (its own rows + the scratch workspace's). A rejection is held for the
+   *  consumer, never reported as unhandled when the requests go unused. */
+  private startBootSessions(token: string | null, wsId: Id): BootSessions {
+    const q = shownListQuery(this.extraSources.keys());
+    const own = api.get<Session[]>(`/workspaces/${wsId}/sessions${q}`);
+    own.catch(() => {});
+    const scratch = api.get<Session[]>(`/workspaces/${SCRATCH_WORKSPACE_ID}/sessions${q}`).catch(() => [] as Session[]);
+    return { key: `${token}|${wsId}|${q}`, own, scratch };
   }
 
   async select(id: Id): Promise<void> {
@@ -739,11 +784,15 @@ class WorkspaceStore {
           .get<Session[]>(`/workspaces/${w}/sessions?archived=true&limit=1`)
           .then((r) => r.length > 0)
           .catch(() => false);
+      // The boot's speculative requests for exactly this list, if any (G3).
+      const boot =
+        this.bootSessions && this.bootSessions.key === `${getToken()}|${wsId}|${q}` ? this.bootSessions : null;
+      if (boot) this.bootSessions = null;
       const [own, scratch, pinned, archivedAny] = await Promise.all([
-        wsId ? api.get<Session[]>(`/workspaces/${wsId}/sessions${q}`) : Promise.resolve([]),
-        api
-          .get<Session[]>(`/workspaces/${SCRATCH_WORKSPACE_ID}/sessions${q}`)
-          .catch(() => [] as Session[]),
+        boot ? boot.own : wsId ? api.get<Session[]>(`/workspaces/${wsId}/sessions${q}`) : Promise.resolve([]),
+        boot
+          ? boot.scratch
+          : api.get<Session[]>(`/workspaces/${SCRATCH_WORKSPACE_ID}/sessions${q}`).catch(() => [] as Session[]),
         Promise.all(
           idChunks(this.pinnedIds()).map((chunk) =>
             api
