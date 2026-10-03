@@ -8394,6 +8394,8 @@ export interface AwsCliStats {
   call_ms_p50?: number;
   call_ms_p95?: number;
   samples?: number;
+  /** Calls signed in-process (logs tail, query status, EC2 lists) — no child. */
+  native_total?: number;
 }
 
 /** One profile parsed from `~/.aws/config` / `~/.aws/credentials` — never key values. */

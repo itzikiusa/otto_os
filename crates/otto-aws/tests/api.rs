@@ -241,6 +241,8 @@ struct TestCtx {
     events: tokio::sync::broadcast::Sender<Event>,
     data_dir: PathBuf,
     spawner: Arc<dyn Spawner>,
+    /// Native SigV4 calls: off (CLI only) unless a test points them at a mock.
+    native: otto_aws::native::Mode,
 }
 
 impl TestCtx {
@@ -257,6 +259,7 @@ impl TestCtx {
             events,
             data_dir,
             spawner: Arc::new(NullSpawner),
+            native: otto_aws::native::Mode::Off,
         }
     }
 }
@@ -276,6 +279,9 @@ impl AwsCtx for TestCtx {
     }
     fn spawner(&self) -> &Arc<dyn Spawner> {
         &self.spawner
+    }
+    fn aws_native(&self) -> otto_aws::native::Mode {
+        self.native.clone()
     }
 }
 
@@ -1451,4 +1457,189 @@ async fn s3_upload_streams_and_aborts_an_interrupted_multipart_upload() {
         "interrupted upload was not aborted:\n{}",
         calls_log()
     );
+}
+
+/// One request the mock AWS endpoint saw: (x-amz-target, authorization,
+/// x-amz-security-token, body).
+type Seen = Arc<Mutex<Vec<(String, String, String, String)>>>;
+
+/// A local stand-in for the AWS endpoints: Logs `FilterLogEvents` (two pages)
+/// and EC2 `DescribeInstances` (XML).
+async fn mock_aws() -> (String, Seen) {
+    let seen: Seen = Arc::default();
+    let s2 = seen.clone();
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::post(move |headers: axum::http::HeaderMap, body: String| {
+            let seen = s2.clone();
+            async move {
+                let h = |k: &str| {
+                    headers
+                        .get(k)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                let target = h("x-amz-target");
+                seen.lock().unwrap().push((
+                    target.clone(),
+                    h("authorization"),
+                    h("x-amz-security-token"),
+                    body.clone(),
+                ));
+                match target.as_str() {
+                    "Logs_20140328.FilterLogEvents" if !body.contains("nextToken") => {
+                        r#"{"events":[{"logStreamName":"s1","timestamp":1000,"message":"one","eventId":"e1"}],"nextToken":"p2"}"#.to_string()
+                    }
+                    "Logs_20140328.FilterLogEvents" => {
+                        r#"{"events":[{"logStreamName":"s1","timestamp":2000,"message":"two","eventId":"e2"}],"nextToken":"p3"}"#.to_string()
+                    }
+                    "Logs_20140328.GetQueryResults" => {
+                        r#"{"status":"Complete","results":[[{"field":"@message","value":"hit"}]],"statistics":{"recordsMatched":1.0}}"#.to_string()
+                    }
+                    "AmazonAthena.GetQueryExecution" => {
+                        r#"{"QueryExecution":{"Status":{"State":"SUCCEEDED","SubmissionDateTime":1.7e9},"Statistics":{"DataScannedInBytes":42,"TotalExecutionTimeInMillis":7}}}"#.to_string()
+                    }
+                    "AmazonAthena.GetQueryResults" => {
+                        r#"{"ResultSet":{"ResultSetMetadata":{"ColumnInfo":[{"Name":"n","Type":"integer"}]},"Rows":[{"Data":[{"VarCharValue":"n"}]},{"Data":[{"VarCharValue":"1"}]}]},"NextToken":"a2"}"#.to_string()
+                    }
+                    _ => r#"<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>i-0abc1234</instanceId><instanceType>t3.micro</instanceType><instanceState><code>16</code><name>running</name></instanceState><tagSet><item><key>Name</key><value>web</value></item></tagSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>"#.to_string(),
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), seen)
+}
+
+/// F2d: with static creds, the Logs tail and EC2 lists are signed in-process —
+/// no `aws` child at all — and page through like `--max-items`.
+#[tokio::test]
+async fn logs_tail_and_ec2_list_are_native_with_static_creds() {
+    let (url, seen) = mock_aws().await;
+    let mut ctx = TestCtx::new().await;
+    ctx.native = otto_aws::native::Mode::Endpoint(url);
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let body = serde_json::json!({
+        "name": "native", "auth_mode": "access_keys", "region": "eu-central-1",
+        "access_key_id": "AKIANATIVEEXAMPLE001",
+        "secret_access_key": "nativeSecretExample00000000000000000000",
+        "session_token": "nativeTok"
+    });
+    let (st, a, _) = call(&ctx, &root, "POST", "/aws/accounts", Some(body)).await;
+    assert_eq!(st, StatusCode::CREATED, "{a}");
+    let id = a["id"].as_str().unwrap();
+    let native_before = otto_aws::cli::stats().native_total;
+
+    let (st, ev, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/logs/events?group=app&max=2&start=500"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ev}");
+    let msgs: Vec<&str> = ev["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(msgs, ["one", "two"], "two API pages collected into max=2");
+    assert_eq!(ev["next_token"], "n1:p3", "native tokens are tagged");
+
+    let (st, inst, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/ec2/instances?state=running"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{inst}");
+    assert_eq!(inst["instances"][0]["instance_id"], "i-0abc1234");
+    assert_eq!(inst["instances"][0]["name"], "web");
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    let (target, auth, tok, body) = &seen[0];
+    assert_eq!(target, "Logs_20140328.FilterLogEvents");
+    assert!(
+        auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIANATIVEEXAMPLE001/")
+            && auth.contains("/eu-central-1/logs/aws4_request"),
+        "{auth}"
+    );
+    assert_eq!(tok, "nativeTok");
+    let b: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(b["logGroupName"], "app");
+    assert_eq!(b["startTime"], 500);
+    assert_eq!(b["limit"], 2);
+    let b2: serde_json::Value = serde_json::from_str(&seen[1].3).unwrap();
+    assert_eq!(
+        (b2["nextToken"].as_str(), b2["limit"].as_i64()),
+        (Some("p2"), Some(1))
+    );
+    assert!(seen[2].1.contains("/eu-central-1/ec2/aws4_request"));
+    assert!(
+        seen[2].3.contains("Action=DescribeInstances")
+            && seen[2].3.contains("Filter.1.Value.1=running")
+    );
+    // Not one `aws` child for any of it (other tests spawn concurrently, so
+    // check this account's lines in the fake's log, not the global counter).
+    assert!(
+        !calls_log()
+            .lines()
+            .any(|l| l.contains("AKID=AKIANATIVEEXAMPLE001")
+                && (l.contains("filter-log-events") || l.contains("describe-instances"))),
+        "a CLI child ran for a native call"
+    );
+    assert!(otto_aws::cli::stats().native_total >= native_before + 3);
+
+    // Status polls: Insights and Athena (state + first page) are native too.
+    let (st, ins, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/logs/insights/q-1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ins}");
+    assert_eq!(ins["status"], "Complete");
+    let (st, ath, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/athena/query/qe-1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ath}");
+    assert_eq!(ath["state"], "SUCCEEDED");
+    assert_eq!(ath["next_token"], "n1:a2");
+    assert_eq!(
+        ath["result"]["rows"].as_array().map(Vec::len),
+        Some(1),
+        "{ath}"
+    );
+    assert!(calls_log()
+        .lines()
+        .all(|l| !(l.contains("AKID=AKIANATIVEEXAMPLE001") && (l.contains("get-query")))));
+
+    // A CLI-minted token cannot be resumed natively: it stays on the CLI path.
+    let (st, _, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/logs/events?group=app&token=eyJjbGki"),
+        None,
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "the fake CLI has no filter-log-events");
+    assert!(calls_log().contains("ARGS=logs filter-log-events --log-group-name app"));
 }

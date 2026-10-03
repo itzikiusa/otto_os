@@ -478,6 +478,42 @@ pub async fn filter_events(
             ));
         }
     }
+    let pattern = q.pattern.as_deref().map(str::trim).unwrap_or("");
+    if !pattern.is_empty() {
+        no_control("filter pattern", pattern, 1024)?;
+    }
+    let token = q.token.as_deref().filter(|t| !t.is_empty());
+    // F2d: the tail ticks every 2–10 s — sign the call in-process (one pooled
+    // HTTPS round trip) instead of starting a Python child each tick. A CLI
+    // page token can only be resumed by the CLI, and vice versa.
+    if token.is_none_or(|t| crate::native::native_token(t).is_some()) {
+        if let Some(t) = svc.native_target(a, q.region.as_deref()).await? {
+            let mut input = serde_json::Map::new();
+            input.insert("logGroupName".into(), q.group.clone().into());
+            if !streams.is_empty() {
+                input.insert("logStreamNames".into(), streams.clone().into());
+            }
+            if !pattern.is_empty() {
+                input.insert("filterPattern".into(), pattern.into());
+            }
+            if let Some(s) = q.start {
+                input.insert("startTime".into(), s.into());
+            }
+            if let Some(e) = q.end {
+                input.insert("endTime".into(), e.into());
+            }
+            if let Some(tok) = token.and_then(crate::native::native_token) {
+                input.insert("nextToken".into(), tok.into());
+            }
+            let n = max.parse::<usize>().unwrap_or(1);
+            let v = crate::native::filter_log_events(&t, input, n).await?;
+            svc.touch(a).await;
+            return Ok(normalize_events(&v));
+        }
+    }
+    if token.is_some_and(|t| crate::native::native_token(t).is_some()) {
+        return Err(crate::native::foreign_token_error());
+    }
     let mut args: Vec<&str> = vec![
         "logs",
         "filter-log-events",
@@ -490,9 +526,7 @@ pub async fn filter_events(
         args.push("--log-stream-names");
         args.extend(streams.iter().map(String::as_str));
     }
-    let pattern = q.pattern.as_deref().map(str::trim).unwrap_or("");
     if !pattern.is_empty() {
-        no_control("filter pattern", pattern, 1024)?;
         args.extend(["--filter-pattern", pattern]);
     }
     if let Some(s) = start.as_deref() {
@@ -501,7 +535,7 @@ pub async fn filter_events(
     if let Some(e) = end.as_deref() {
         args.extend(["--end-time", e]);
     }
-    if let Some(t) = q.token.as_deref().filter(|t| !t.is_empty()) {
+    if let Some(t) = token {
         args.extend(["--starting-token", t]);
     }
     let v = svc.run_json(a, q.region.as_deref(), &args).await?;
@@ -548,6 +582,19 @@ pub async fn insights_results(
     region: Option<&str>,
 ) -> Result<InsightsResultsResp> {
     validate_query_id(qid)?;
+    // F2d: the Insights status poll — in-process when static creds exist.
+    if let Some(t) = svc.native_target(a, region).await? {
+        let v = crate::native::json_call(
+            &t,
+            "logs",
+            "Logs_20140328",
+            "GetQueryResults",
+            &serde_json::json!({ "queryId": qid }),
+        )
+        .await?;
+        svc.touch(a).await;
+        return Ok(normalize_insights(&v));
+    }
     let v = svc
         .run_json(a, region, &["logs", "get-query-results", "--query-id", qid])
         .await?;

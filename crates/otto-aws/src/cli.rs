@@ -133,6 +133,9 @@ pub struct CliStats {
     pub call_ms_p95: u64,
     /// Calls in the percentile window.
     pub samples: usize,
+    /// In-process SigV4 calls (F2d: logs tail, query status, EC2 lists) since
+    /// start — work that no longer spawns a child.
+    pub native_total: u64,
 }
 
 static QUEUED: AtomicU64 = AtomicU64::new(0);
@@ -184,6 +187,7 @@ pub fn stats() -> CliStats {
         call_ms_p50: percentile(&calls, 50),
         call_ms_p95: percentile(&calls, 95),
         samples: calls.len(),
+        native_total: crate::native::calls_total(),
     }
 }
 
