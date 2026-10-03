@@ -521,3 +521,126 @@ async fn viewer_can_list_but_not_mutate() {
         "viewer must not be able to detach a scene"
     );
 }
+
+/// R2: a scene's pasted images live in the content-addressed file store; the
+/// editor reads the doc with refs (`?files=ref`), fetches each file once from
+/// the immutable `GET /canvas/files/{sha}`, and autosaves refs — while every
+/// other caller still gets a self-contained (rehydrated) document. A file is
+/// only visible through a workspace the caller can view.
+#[tokio::test]
+async fn canvas_files_are_served_once_and_scoped_to_the_workspace() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_user(&pool, "bob", false).await;
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "editor").await;
+
+    let canvas_repo = CanvasRepo::new(pool.clone());
+    let img = format!("data:image/png;base64,{}", "Q".repeat(3 * 1024 * 1024));
+    let scene_src = serde_json::json!({
+        "type": "excalidraw", "elements": [],
+        "files": { "f1": { "id": "f1", "mimeType": "image/png", "dataURL": img } },
+    });
+    let scene = canvas_repo
+        .create(NewScene {
+            workspace_id: "ws1".into(),
+            story_id: None,
+            title: "Img".into(),
+            doc_json: serde_json::json!({
+                "type": "otto-canvas", "version": 1, "format": "excalidraw",
+                "source": scene_src.to_string(),
+            })
+            .to_string(),
+            provider: "claude".into(),
+            section: None,
+            created_by: "alice".into(),
+        })
+        .await
+        .unwrap();
+    let marker = "otto-canvas-file:";
+    let at = scene.doc_json.find(marker).expect("stored with a ref");
+    let sha = scene.doc_json[at + marker.len()..at + marker.len() + 64].to_string();
+
+    let app: Router = Router::new()
+        .merge(otto_canvas::router::<ServerCtx>())
+        .with_state(test_ctx(&pool).await);
+    let alice = user("alice", false);
+
+    // The editor's read: refs only — small.
+    let (st, body) = get_as(
+        &app,
+        &alice,
+        &format!("/canvas/scenes/{}?files=ref", scene.id),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(body.len() < 10_000, "ref read is {} B", body.len());
+    // Everyone else's read: self-contained.
+    let (st, body) = get_as(&app, &alice, &format!("/canvas/scenes/{}", scene.id)).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(body.len() > 3 * 1024 * 1024);
+
+    // The file itself, immutable + revalidates to 304.
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/canvas/files/{sha}"))
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(AuthUser(alice.clone()));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cc = resp.headers()["cache-control"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(cc.contains("immutable"), "{cc}");
+    let etag = resp.headers()["etag"].to_str().unwrap().to_string();
+    let data = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(data.as_ref(), img.as_bytes());
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/canvas/files/{sha}"))
+        .header("if-none-match", etag)
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(AuthUser(alice.clone()));
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::NOT_MODIFIED
+    );
+
+    // A non-member can't read it (nor learn it exists); a bad id is a 400.
+    let (st, _) = get_as(&app, &user("bob", false), &format!("/canvas/files/{sha}")).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = get_as(&app, &alice, "/canvas/files/not-a-sha").await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // An autosave that sends the ref back is tiny and keeps the image.
+    let ref_doc = serde_json::json!({
+        "type": "otto-canvas", "version": 1, "format": "excalidraw",
+        "source": serde_json::json!({
+            "type": "excalidraw", "elements": [{"id": "e1"}],
+            "files": { "f1": { "id": "f1", "mimeType": "image/png",
+                               "dataURL": format!("{marker}{sha}") } },
+        }).to_string(),
+    });
+    let body = serde_json::to_vec(&serde_json::json!({ "doc": ref_doc })).unwrap();
+    assert!(body.len() < 200 * 1024, "autosave PUT is {} B", body.len());
+    let mut req = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/canvas/scenes/{}?summary=true", scene.id))
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    req.extensions_mut().insert(AuthUser(alice.clone()));
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let (st, body) = get_as(&app, &alice, &format!("/canvas/scenes/{}", scene.id)).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        String::from_utf8_lossy(&body).contains("QQQQQQQQ"),
+        "image still rehydrates"
+    );
+}
