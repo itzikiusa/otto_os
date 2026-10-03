@@ -338,6 +338,9 @@ pub struct CompletionCache {
     /// lands, or the TTL expiring mid-typing) wait for the ONE build instead of
     /// each running the same remote introspection. Removed when the build ends.
     building: Mutex<HashMap<SnapKey, Arc<tokio::sync::Mutex<()>>>>,
+    /// Single-flight gates for Mongo field builds, keyed like `fields` — a cold
+    /// collection typed against from several keystrokes samples ONCE.
+    fields_building: Mutex<HashMap<FieldKey, Arc<tokio::sync::Mutex<()>>>>,
     /// Mongo only: the first user database per connection, used to seed
     /// collection completion before a database is chosen (`None` = the server
     /// was unreachable — negatively cached like a failed snapshot).
@@ -364,6 +367,7 @@ impl CompletionCache {
             snapshots: Mutex::default(),
             fields: Mutex::default(),
             building: Mutex::default(),
+            fields_building: Mutex::default(),
             first_db: Mutex::default(),
         }
     }
@@ -495,6 +499,53 @@ impl CompletionCache {
         value
     }
 
+    /// A collection's cached field paths, else the result of `build` — run by at
+    /// most ONE caller per `(cache_key, db, object)` at a time (the others wait,
+    /// then read what it cached). Mirrors [`Self::snapshot_or_build`]: an empty
+    /// build (unreachable server, no privileges) is remembered for
+    /// [`COMPLETION_NEGATIVE_TTL`] so each keystroke doesn't re-sample.
+    pub async fn fields_or_build<F, Fut>(
+        &self,
+        cache_key: &str,
+        db: &str,
+        object: &str,
+        build: F,
+    ) -> Arc<Vec<FieldSnap>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Vec<FieldSnap>>,
+    {
+        if let Some(f) = self.get_fields(cache_key, db, object) {
+            return f;
+        }
+        let key = (cache_key.to_string(), db.to_string(), object.to_string());
+        let gate = self
+            .fields_building
+            .lock()
+            .unwrap()
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        let guard = gate.lock().await;
+        if let Some(f) = self.get_fields(cache_key, db, object) {
+            return f;
+        }
+        let fields = build().await;
+        let ttl = if fields.is_empty() {
+            COMPLETION_NEGATIVE_TTL
+        } else {
+            COMPLETION_TTL
+        };
+        let value = Arc::new(fields);
+        self.fields
+            .lock()
+            .unwrap()
+            .insert(key.clone(), Cached::new(value.clone(), ttl));
+        drop(guard);
+        self.fields_building.lock().unwrap().remove(&key);
+        value
+    }
+
     /// Drop every cached entry for a connection (its `cache_key`). Called when
     /// the user refreshes the connection so the next completion re-introspects.
     pub fn invalidate(&self, cache_key: &str) {
@@ -512,6 +563,85 @@ impl CompletionCache {
     /// Total cached snapshot entries — for the refresh endpoint's warm summary.
     pub fn snapshot_count(&self) -> usize {
         self.snapshots.lock().unwrap().len()
+    }
+}
+
+/// A small TTL cache whose misses are built by at most ONE caller per key (the
+/// others wait on the key's gate, then read what it stored). Drivers use it for
+/// expensive per-object reads several surfaces share — e.g. Mongo's collection
+/// sample, which the tree, the structure tab and field completion all derive
+/// from. The builder picks each entry's lifetime, so a failure can be cached
+/// briefly (negative TTL) and a success longer.
+pub struct SingleFlight<K, V> {
+    entries: Mutex<HashMap<K, Cached<V>>>,
+    gates: Mutex<HashMap<K, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl<K, V> Default for SingleFlight<K, V> {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            gates: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Clone, V> SingleFlight<K, V> {
+    /// A fresh cached value, or `None`.
+    pub fn get(&self, key: &K) -> Option<Arc<V>> {
+        let map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(key).filter(|c| c.fresh()).map(|c| c.value.clone())
+    }
+
+    /// The cached value for `key`, else `build()`'s — single-flight. `build`
+    /// returns the value and how long to keep it.
+    pub async fn get_or_build<F, Fut>(&self, key: K, build: F) -> Arc<V>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = (V, Duration)>,
+    {
+        if let Some(v) = self.get(&key) {
+            return v;
+        }
+        let gate = self
+            .gates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        let guard = gate.lock().await;
+        if let Some(v) = self.get(&key) {
+            return v;
+        }
+        let (value, ttl) = build().await;
+        let value = Arc::new(value);
+        {
+            let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            // Sweep expired entries on insert so a long session browsing many
+            // collections doesn't keep every stale sample resident.
+            map.retain(|_, c| c.fresh());
+            map.insert(key.clone(), Cached::new(value.clone(), ttl));
+        }
+        drop(guard);
+        self.gates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
+        value
+    }
+
+    /// Drop every entry whose key matches `pred` (connection refresh / close).
+    pub fn invalidate_where(&self, pred: impl Fn(&K) -> bool) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k, _| !pred(k));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.lock().unwrap().len()
     }
 }
 
@@ -768,5 +898,85 @@ mod tests {
         assert!(rank_score(Rank::Pk) > rank_score(Rank::Unique));
         assert!(rank_score(Rank::Unique) > rank_score(Rank::Index));
         assert!(rank_score(Rank::Index) > rank_score(Rank::Plain));
+    }
+
+    /// DB-05 / DB-10 guard: ten concurrent cold field requests for one
+    /// collection run the (expensive, sampling) builder exactly once.
+    #[tokio::test]
+    async fn fields_or_build_is_single_flight() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Arc::new(CompletionCache::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..10 {
+            let cache = cache.clone();
+            let calls = calls.clone();
+            tasks.push(tokio::spawn(async move {
+                cache
+                    .fields_or_build("k", "db", "coll", || async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        vec![FieldSnap::new("a", Some("int32".into()), Rank::Plain)]
+                    })
+                    .await
+                    .len()
+            }));
+        }
+        for t in tasks {
+            assert_eq!(t.await.unwrap(), 1);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // A refresh clears it, so the next request re-builds.
+        cache.invalidate("k");
+        assert!(cache.get_fields("k", "db", "coll").is_none());
+    }
+
+    #[tokio::test]
+    async fn fields_or_build_negatively_caches_an_empty_build() {
+        let cache = CompletionCache::new();
+        let first = cache
+            .fields_or_build("k", "db", "c", || async { Vec::new() })
+            .await;
+        assert!(first.is_empty());
+        // Within the negative TTL the empty result is served, not rebuilt.
+        let again = cache
+            .fields_or_build("k", "db", "c", || async {
+                panic!("must not rebuild inside the negative TTL")
+            })
+            .await;
+        assert!(again.is_empty());
+    }
+
+    #[tokio::test]
+    async fn single_flight_builds_once_and_honours_ttl() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let sf: Arc<SingleFlight<String, u32>> = Arc::new(SingleFlight::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..10 {
+            let sf = sf.clone();
+            let calls = calls.clone();
+            tasks.push(tokio::spawn(async move {
+                *sf.get_or_build("x".to_string(), || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    (7, Duration::from_secs(60))
+                })
+                .await
+            }));
+        }
+        for t in tasks {
+            assert_eq!(t.await.unwrap(), 7);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // A zero TTL entry is never served from cache.
+        let v = sf
+            .get_or_build("y".to_string(), || async { (1, Duration::ZERO) })
+            .await;
+        assert_eq!(*v, 1);
+        assert!(sf.get(&"y".to_string()).is_none());
+        sf.invalidate_where(|k| k == "x");
+        assert!(sf.get(&"x".to_string()).is_none());
+        assert!(sf.len() <= 1);
     }
 }

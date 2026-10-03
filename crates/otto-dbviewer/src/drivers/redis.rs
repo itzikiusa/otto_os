@@ -273,21 +273,10 @@ impl Driver for RedisDriver {
 
         let mut conn = self.connect(cfg, db).await?;
 
-        let ty = type_of(&mut conn, &key).await;
-        let ttl: i64 = redis::cmd("TTL")
-            .arg(&key)
-            .query_async(&mut conn)
-            .await
-            .unwrap_or(-2);
-        let encoding: Option<String> = redis::cmd("OBJECT")
-            .arg("ENCODING")
-            .arg(&key)
-            .query_async(&mut conn)
-            .await
-            .ok();
-
-        let length = length_of(&mut conn, &key, &ty).await;
-        let preview = preview_of(&mut conn, &key, &ty).await;
+        // Trip 1 (DB-08): TYPE + TTL + OBJECT ENCODING pipelined. Trip 2: the
+        // type-dependent length + preview, also pipelined where possible.
+        let (ty, ttl, encoding) = key_header(&mut conn, &key).await;
+        let (length, preview) = length_and_preview(&mut conn, &key, &ty).await;
 
         let mut detail = ObjectDetail::new(key, NodeKind::Key);
         detail.extra = json!({
@@ -349,21 +338,19 @@ impl Driver for RedisDriver {
         }
         let duration_ms = started.elapsed().as_millis() as u64;
 
-        let mut result = reply_to_result(last_reply);
         // Honour the request's row cap (a `KEYS *` / `LRANGE k 0 -1` reply can
-        // hold millions of elements) and run every cell through the shared
-        // per-cell size cap — the other engines already do both; Redis was the
-        // one path that could hand the grid a multi-hundred-MB payload.
+        // hold millions of elements) BEFORE converting: the reply is sliced to
+        // the cap, each cell goes through the shared per-cell cap and is charged
+        // against the response byte budget (DB-07). A big reply converts on the
+        // blocking pool instead of a runtime worker.
         let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
-        if result.rows.len() > max_rows {
-            result.rows.truncate(max_rows);
-            result.truncated = true;
-        }
-        for row in &mut result.rows {
-            for cell in row.iter_mut() {
-                *cell = types::cap_cell(std::mem::take(cell));
-            }
-        }
+        let mut result = if reply_len(&last_reply) > OFF_RUNTIME_ELEMENTS {
+            tokio::task::spawn_blocking(move || bounded_reply_to_result(last_reply, max_rows))
+                .await
+                .map_err(|e| types::upstream(format!("redis: decode task failed: {e}")))?
+        } else {
+            bounded_reply_to_result(last_reply, max_rows)
+        };
         result.stats.duration_ms = duration_ms;
         result.stats.row_count = result.rows.len();
         Ok(result)
@@ -388,6 +375,13 @@ impl Driver for RedisDriver {
     async fn close(&self, cache_key: &str) {
         let prefix = format!("{cache_key}|");
         self.clients.remove_where(|k| k.starts_with(&prefix));
+    }
+
+    /// Drop connection managers unused for `idle` (DB-09). Dropping the
+    /// cache's clone stops the reconnect loop once any in-flight command
+    /// holding its own clone finishes — nothing is closed underneath it.
+    async fn evict_idle(&self, idle: Duration) -> usize {
+        self.clients.take_idle(idle).len()
     }
 
     async fn completion(
@@ -530,12 +524,24 @@ impl RedisDriver {
         self.clients
             .get_or_try_init(cache_key, cfg.lifecycle.as_ref(), |_| true, async {
                 let client = build_client(cfg, db)?;
-                ConnectionManager::new(client)
+                ConnectionManager::new_with_config(client, manager_config())
                     .await
                     .map_err(types::upstream)
             })
             .await
     }
+}
+
+/// Connection-manager bounds (DB-09). The crate default (`ConnectionManager::new`)
+/// is a 1 s connect timeout — too tight through an SSH tunnel — and a 500 ms
+/// RESPONSE timeout that failed any legitimately slow command (a big `SCAN`
+/// page, `KEYS` on a large db). 10 s to connect, 30 s per response, and a
+/// small reconnect budget so a dead server fails fast instead of retrying ~6×.
+fn manager_config() -> redis::aio::ConnectionManagerConfig {
+    redis::aio::ConnectionManagerConfig::new()
+        .set_connection_timeout(Some(Duration::from_secs(10)))
+        .set_response_timeout(Some(Duration::from_secs(30)))
+        .set_number_of_retries(2)
 }
 
 // --- SCAN / type / length / preview ----------------------------------------
@@ -659,6 +665,109 @@ async fn types_of(conn: &mut ConnectionManager, keys: &[String]) -> Vec<String> 
         }
     }
     out
+}
+
+/// `TYPE`, `TTL` and `OBJECT ENCODING` for one key in a single pipelined
+/// round trip. Each reply is decoded independently, so one failing command
+/// (e.g. `OBJECT` disabled by ACL) degrades only its own field.
+async fn key_header(conn: &mut ConnectionManager, key: &str) -> (String, i64, Option<String>) {
+    let mut pipe = redis::pipe();
+    // Per-command errors come back in place (as `ServerError` values).
+    pipe.ignore_errors();
+    pipe.cmd("TYPE")
+        .arg(key)
+        .cmd("TTL")
+        .arg(key)
+        .cmd("OBJECT")
+        .arg("ENCODING")
+        .arg(key);
+    match pipe.query_async::<Vec<RedisValue>>(conn).await {
+        Ok(replies) => decode_key_header(replies),
+        // Transport-level failure of the pipeline: fall back to the
+        // sequential reads (each degrades on its own).
+        Err(_) => {
+            let ty = type_of(conn, key).await;
+            let ttl: i64 = redis::cmd("TTL")
+                .arg(key)
+                .query_async(conn)
+                .await
+                .unwrap_or(-2);
+            let encoding: Option<String> = redis::cmd("OBJECT")
+                .arg("ENCODING")
+                .arg(key)
+                .query_async(conn)
+                .await
+                .ok();
+            (ty, ttl, encoding)
+        }
+    }
+}
+
+/// Decode the `[TYPE, TTL, OBJECT ENCODING]` pipeline replies (pure).
+fn decode_key_header(replies: Vec<RedisValue>) -> (String, i64, Option<String>) {
+    let mut it = replies.into_iter();
+    let ty = it
+        .next()
+        .and_then(|v| redis::from_redis_value::<String>(v).ok())
+        .unwrap_or_else(|| "unknown".into());
+    let ttl = it
+        .next()
+        .and_then(|v| redis::from_redis_value::<i64>(v).ok())
+        .unwrap_or(-2);
+    let encoding = it
+        .next()
+        .and_then(|v| redis::from_redis_value::<String>(v).ok());
+    (ty, ttl, encoding)
+}
+
+/// Length + preview for the structure panel. For the range-previewed types
+/// (string/list/zset) both commands go in ONE pipelined trip; hash/set
+/// previews are cursor scans, so they run after the length.
+async fn length_and_preview(
+    conn: &mut ConnectionManager,
+    key: &str,
+    ty: &str,
+) -> (Option<i64>, JsonValue) {
+    let len_cmd = match ty {
+        "string" => "STRLEN",
+        "list" => "LLEN",
+        "zset" => "ZCARD",
+        _ => {
+            let length = length_of(conn, key, ty).await;
+            return (length, preview_of(conn, key, ty).await);
+        }
+    };
+    let mut pipe = redis::pipe();
+    pipe.ignore_errors();
+    pipe.cmd(len_cmd).arg(key);
+    match ty {
+        "string" => pipe
+            .cmd("GETRANGE")
+            .arg(key)
+            .arg(0)
+            .arg(PREVIEW_STRING_BYTES),
+        "list" => pipe.cmd("LRANGE").arg(key).arg(0).arg(PREVIEW_LIMIT),
+        _ => pipe
+            .cmd("ZRANGE")
+            .arg(key)
+            .arg(0)
+            .arg(PREVIEW_LIMIT)
+            .arg("WITHSCORES"),
+    };
+    match pipe.query_async::<Vec<RedisValue>>(conn).await {
+        Ok(replies) => {
+            let mut it = replies.into_iter();
+            let length = it
+                .next()
+                .and_then(|v| redis::from_redis_value::<i64>(v).ok());
+            let preview = it.next().map(value_to_json).unwrap_or(JsonValue::Null);
+            (length, preview)
+        }
+        Err(_) => {
+            let length = length_of(conn, key, ty).await;
+            (length, preview_of(conn, key, ty).await)
+        }
+    }
 }
 
 /// `TYPE key` → "string"/"hash"/... ("none" when missing).
@@ -821,6 +930,84 @@ fn reply_to_result(reply: RedisValue) -> QueryResult {
         }
         // `redis::Value` is #[non_exhaustive]; render anything new as text.
         other => single_value(JsonValue::String(format!("{other:?}"))),
+    }
+}
+
+/// Replies with more top-level elements than this convert on the blocking pool.
+const OFF_RUNTIME_ELEMENTS: usize = 16 * 1024;
+
+/// Top-level element count of a reply (rows it would produce before capping).
+fn reply_len(reply: &RedisValue) -> usize {
+    match reply {
+        RedisValue::Array(items) | RedisValue::Set(items) => items.len(),
+        RedisValue::Map(pairs) => pairs.len(),
+        _ => 1,
+    }
+}
+
+/// [`reply_to_result`] bounded for the run path: an Array/Set/Map reply is
+/// sliced to `max_rows` BEFORE any JSON conversion (the dropped tail is never
+/// converted), every cell is size-capped, and rows stop once the response byte
+/// budget is spent (at least one row is always kept).
+fn bounded_reply_to_result(reply: RedisValue, max_rows: usize) -> QueryResult {
+    let mut budget = types::ByteBudget::default();
+    let mut truncated = false;
+    let mut truncated_reason = None;
+    let mut push_row = |rows: &mut Vec<Vec<JsonValue>>, row: Vec<JsonValue>| -> bool {
+        let row: Vec<JsonValue> = row.into_iter().map(types::cap_cell).collect();
+        let size: usize = row.iter().map(types::approx_json_len).sum();
+        if !budget.charge(size) && !rows.is_empty() {
+            truncated_reason = Some(types::TruncatedReason::Bytes);
+            return false;
+        }
+        rows.push(row);
+        true
+    };
+    let (columns, rows) = match reply {
+        RedisValue::Array(mut items) | RedisValue::Set(mut items) => {
+            if items.len() > max_rows {
+                items.truncate(max_rows);
+                truncated = true;
+            }
+            let mut rows = Vec::with_capacity(items.len());
+            for item in items {
+                if !push_row(&mut rows, vec![value_to_json(item)]) {
+                    truncated = true;
+                    break;
+                }
+            }
+            (vec![Column::new("value")], rows)
+        }
+        RedisValue::Map(mut pairs) => {
+            if pairs.len() > max_rows {
+                pairs.truncate(max_rows);
+                truncated = true;
+            }
+            let mut rows = Vec::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                if !push_row(&mut rows, vec![value_to_json(k), value_to_json(v)]) {
+                    truncated = true;
+                    break;
+                }
+            }
+            (vec![Column::new("key"), Column::new("value")], rows)
+        }
+        other => {
+            let mut result = reply_to_result(other);
+            for row in &mut result.rows {
+                for cell in row.iter_mut() {
+                    *cell = types::cap_cell(std::mem::take(cell));
+                }
+            }
+            return result;
+        }
+    };
+    QueryResult {
+        columns,
+        rows,
+        truncated,
+        truncated_reason,
+        ..QueryResult::empty()
     }
 }
 
@@ -1277,5 +1464,91 @@ mod tests {
     fn info_field_extracts_version() {
         let info = "# Server\r\nredis_version:7.2.4\r\nredis_mode:standalone\r\n";
         assert_eq!(info_field(info, "redis_version").as_deref(), Some("7.2.4"));
+    }
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+
+    /// DB-07: a huge `KEYS`/`LRANGE 0 -1`-shaped reply is sliced to the row cap
+    /// before conversion and charged against the response byte budget.
+    #[test]
+    fn big_array_reply_is_capped_before_conversion() {
+        let items: Vec<RedisValue> = (0..200_000)
+            .map(|i| RedisValue::BulkString(format!("key:{i}").into_bytes()))
+            .collect();
+        let reply = RedisValue::Array(items);
+        assert_eq!(reply_len(&reply), 200_000);
+        let r = bounded_reply_to_result(reply, 1_000);
+        assert_eq!(r.rows.len(), 1_000);
+        assert!(r.truncated);
+        assert!(r.truncated_reason.is_none());
+        assert_eq!(r.rows[999][0], JsonValue::String("key:999".into()));
+
+        // Under the cap: untouched, not truncated.
+        let r = bounded_reply_to_result(
+            RedisValue::Map(vec![(
+                RedisValue::SimpleString("a".into()),
+                RedisValue::Int(1),
+            )]),
+            10,
+        );
+        assert_eq!(r.columns.len(), 2);
+        assert_eq!(r.rows, vec![vec![json!("a"), json!(1)]]);
+        assert!(!r.truncated);
+    }
+
+    #[test]
+    fn byte_budget_stops_rows_but_keeps_at_least_one() {
+        // ~1 MiB cells (each capped at the per-cell cap) blow the 32 MB budget
+        // long before the 1000-row cap.
+        let cell = vec![b'x'; 1 << 20];
+        let items: Vec<RedisValue> = (0..200)
+            .map(|_| RedisValue::BulkString(cell.clone()))
+            .collect();
+        let r = bounded_reply_to_result(RedisValue::Array(items), 1_000);
+        assert!(r.truncated);
+        assert_eq!(r.truncated_reason, Some(types::TruncatedReason::Bytes));
+        assert!(!r.rows.is_empty() && r.rows.len() < 200);
+    }
+
+    #[test]
+    fn scalar_replies_still_render() {
+        // Non-collection replies go through the unbounded shaping unchanged.
+        let ok = bounded_reply_to_result(RedisValue::Okay, 10);
+        assert_eq!(ok.rows, reply_to_result(RedisValue::Okay).rows);
+        assert!(!ok.truncated);
+        let r = bounded_reply_to_result(RedisValue::Int(7), 10);
+        assert_eq!(r.rows, vec![vec![json!(7)]]);
+    }
+
+    #[test]
+    fn key_header_decodes_each_reply_independently() {
+        let (ty, ttl, enc) = decode_key_header(vec![
+            RedisValue::SimpleString("hash".into()),
+            RedisValue::Int(-1),
+            RedisValue::BulkString(b"listpack".to_vec()),
+        ]);
+        assert_eq!(
+            (ty.as_str(), ttl, enc.as_deref()),
+            ("hash", -1, Some("listpack"))
+        );
+        // OBJECT refused / missing → only the encoding degrades.
+        let (ty, ttl, enc) = decode_key_header(vec![
+            RedisValue::SimpleString("string".into()),
+            RedisValue::Int(30),
+            RedisValue::Nil,
+        ]);
+        assert_eq!((ty.as_str(), ttl, enc), ("string", 30, None));
+        assert_eq!(decode_key_header(Vec::new()).0, "unknown");
+    }
+
+    #[test]
+    fn manager_config_bounds_connect_and_response() {
+        let c = manager_config();
+        assert_eq!(c.connection_timeout(), Some(Duration::from_secs(10)));
+        assert_eq!(c.response_timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(c.number_of_retries(), 2);
     }
 }
