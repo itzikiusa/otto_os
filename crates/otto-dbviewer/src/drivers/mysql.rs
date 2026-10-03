@@ -581,6 +581,8 @@ impl Driver for MysqlDriver {
     /// holds its own clone, so it finishes and the pool goes with the last
     /// clone; idle sessions are then closed by sqlx.
     async fn evict_idle(&self, idle: Duration) -> usize {
+        // Same 5-minute tick: expired completion snapshots go too (DB2-07).
+        self.completions.sweep();
         self.pools.take_idle(idle).len()
     }
 
@@ -752,7 +754,7 @@ impl Driver for MysqlDriver {
                 ri.sql.clone()
             };
             (
-                run_read(&pool, &sql, max_rows, active_db, token).await,
+                run_read(&pool, &sql, max_rows, ri.limited, active_db, token).await,
                 // Report the user-visible page size (max_rows), not the +1 probe.
                 ri.limited.then_some(max_rows as u64),
             )
@@ -1775,19 +1777,25 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::MySqlPool> {
         .idle_timeout(POOL_IDLE_TIMEOUT)
         .acquire_timeout(POOL_ACQUIRE_TIMEOUT)
         .after_connect(move |conn, _meta| {
-            let tz_stmt = format!("SET time_zone = '{}'", tz.replace('\'', "''"));
+            let setup = connect_setup_sql(&tz);
+            let fallback = connect_setup_fallback_sql(&tz);
             Box::pin(async move {
-                // Best-effort: ignore errors (e.g. a named zone when the server's
-                // tz tables aren't loaded) so a bad zone never breaks the session.
-                let _ = sqlx::query(sqlx::AssertSqlSafe(tz_stmt.as_str()))
+                // ONE round trip, unprepared (COM_QUERY): both settings in a
+                // single statement. Best-effort: ignore errors so a bad zone
+                // never breaks the session — on failure retry the variables
+                // one by one (a server lacking the stats var, or one whose tz
+                // tables aren't loaded, must still get the other setting).
+                if sqlx::raw_sql(sqlx::AssertSqlSafe(setup.as_str()))
                     .execute(&mut *conn)
-                    .await;
-                // Use cached information_schema statistics (avoids the expensive
-                // per-table stats recomputation that slows the tree on big
-                // servers). Best-effort: harmless if the server lacks the var.
-                let _ = sqlx::query("SET SESSION information_schema_stats_expiry = 86400")
-                    .execute(&mut *conn)
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    for stmt in fallback {
+                        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(stmt.as_str()))
+                            .execute(&mut *conn)
+                            .await;
+                    }
+                }
                 Ok(())
             })
         })
@@ -1799,6 +1807,25 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::MySqlPool> {
 /// The MySQL `SET time_zone` value for a connection. Defaults to UTC
 /// (`+00:00`); `UTC` is normalized to the offset form, anything else (offset
 /// like `+03:00` or a named zone) is passed through.
+/// The per-connection session setup as ONE statement (one round trip): the
+/// session time zone plus cached `information_schema` statistics (avoids the
+/// expensive per-table stats recomputation that slows the tree on big servers).
+fn connect_setup_sql(tz: &str) -> String {
+    format!(
+        "SET time_zone = '{}', SESSION information_schema_stats_expiry = 86400",
+        tz.replace('\'', "''")
+    )
+}
+
+/// The same settings one per statement — used only when the combined `SET`
+/// failed (MySQL applies a multi-assignment `SET` all-or-nothing).
+fn connect_setup_fallback_sql(tz: &str) -> [String; 2] {
+    [
+        format!("SET time_zone = '{}'", tz.replace('\'', "''")),
+        "SET SESSION information_schema_stats_expiry = 86400".to_string(),
+    ]
+}
+
 fn mysql_session_tz(cfg: &ResolvedConfig) -> String {
     match cfg.param_str("timezone") {
         Some(tz) if !tz.eq_ignore_ascii_case("UTC") => tz,
@@ -1948,6 +1975,7 @@ async fn run_read(
     pool: &sqlx::MySqlPool,
     statement: &str,
     max_rows: usize,
+    server_bounded: bool,
     active_db: Option<&str>,
     token: &CancelToken,
 ) -> Result<QueryResult> {
@@ -1965,12 +1993,14 @@ async fn run_read(
         &mut conn,
         statement,
         max_rows,
+        server_bounded,
         &mut types::ByteBudget::default(),
     )
     .await?;
     if out.unread {
         // Rows left on the wire: discard the session instead of letting its
-        // next use drain them.
+        // next use drain them. (A server-bounded read at the row cap drains
+        // its leftover and keeps the session — DB2-01.)
         conn.close_on_drop();
     }
     Ok(out.result)
@@ -2021,7 +2051,7 @@ async fn run_batch(
         let stmt = span.text.as_str();
         let started = Instant::now();
         let outcome = if is_read_statement(stmt) {
-            exec_read_conn(&mut conn, stmt, max_rows, &mut budget)
+            exec_read_conn(&mut conn, stmt, max_rows, false, &mut budget)
                 .await
                 .map(|out| {
                     // A LATER statement would drain the unread rows anyway (same
@@ -2077,7 +2107,15 @@ struct ReadOut {
 ///   rest: a non-LIMIT-able read (UNION, a batch statement, SHOW…) past the cap
 ///   used to fetch and discard the WHOLE server result (~1.5 µs/row — a 50M-row
 ///   UNION took over a minute to show 1,000 rows). The caller closes the session
-///   when `unread`.
+///   when `unread` — EXCEPT a `server_bounded` read (injected `LIMIT
+///   max_rows+1`) stopped at the row cap: the probe row was the server's last,
+///   so the reader drains the end-of-result packet ([`types::drain_leftover`])
+///   and the session goes back to the pool. Without that, the default "open
+///   table" view and every page closed its session and the next Run paid a
+///   full reconnect (DB2-01).
+/// - Ad-hoc SQL is NOT kept in the statement cache (`persistent(false)`): every
+///   distinct statement/page used to be cached per session, evicting the
+///   tree/completion statements that are actually reused (DB2-02).
 /// - Each column's decoder is chosen ONCE from its type ([`CellDecoder`]), not by
 ///   trying up to 11 typed `try_get`s per cell (2.1–2.5 s → ~0.2 s CPU per
 ///   100k×30 rows) — which also stops text that merely LOOKS like JSON being
@@ -2087,11 +2125,14 @@ async fn exec_read_conn(
     conn: &mut sqlx::MySqlConnection,
     statement: &str,
     max_rows: usize,
+    server_bounded: bool,
     budget: &mut types::ByteBudget,
 ) -> Result<ReadOut> {
     use futures_util::TryStreamExt as _;
 
-    let mut stream = sqlx::query(sqlx::AssertSqlSafe(statement)).fetch(&mut *conn);
+    let mut stream = sqlx::query(sqlx::AssertSqlSafe(statement))
+        .persistent(false)
+        .fetch(&mut *conn);
     let mut columns: Vec<Column> = Vec::new();
     let mut decoders: std::sync::Arc<[CellDecoder]> = std::sync::Arc::from(Vec::new());
     let mut chunk: Vec<MySqlRow> = Vec::new();
@@ -2108,9 +2149,12 @@ async fn exec_read_conn(
             decoders = column_decoders(&row).into();
         }
         if kept >= max_rows {
-            // Row max_rows+1 exists: the result is capped. Stop here.
+            // Row max_rows+1 exists: the result is capped. Stop here — and,
+            // when the server bounded the result, finish it so the session
+            // stays poolable.
             truncated = true;
-            unread = true;
+            unread = !(server_bounded
+                && types::drain_leftover(&mut stream, types::LEFTOVER_DRAIN_ROWS).await);
             break;
         }
         // Budget on the raw wire size, per row, BEFORE decoding. Always keep
@@ -2757,7 +2801,8 @@ async fn governed_read(
                 );
             }
         }
-        let out = match exec_read_conn(&mut tx, &sql, max_rows, &mut budget).await {
+        let bounded = single && limited.limited;
+        let out = match exec_read_conn(&mut tx, &sql, max_rows, bounded, &mut budget).await {
             Ok(out) => out,
             // A batch keeps its completed results and flags the failing
             // statement (same contract as `run_batch`); a single statement's
@@ -2993,6 +3038,26 @@ mod cache_isolation_tests {
         for sql in [session_setup_sql(Some("x")), session_setup_sql(None)] {
             assert_eq!(sql.matches("SELECT").count(), 1, "{sql}");
         }
+    }
+
+    /// DB2-01 round-trip guard: a NEW connection's setup is ONE `SET` (it was
+    /// two sequential prepared statements), escaped, with a per-variable
+    /// fallback for servers that reject one of the settings.
+    #[test]
+    fn connect_setup_is_one_statement() {
+        let sql = connect_setup_sql("Europe/O'X");
+        assert_eq!(
+            sql,
+            "SET time_zone = 'Europe/O''X', SESSION information_schema_stats_expiry = 86400"
+        );
+        assert_eq!(sql.matches("SET ").count(), 1, "{sql}");
+        assert!(
+            !sql.contains(';'),
+            "one statement, no multi-statement batch"
+        );
+        let [tz, stats] = connect_setup_fallback_sql("+00:00");
+        assert_eq!(tz, "SET time_zone = '+00:00'");
+        assert!(stats.contains("information_schema_stats_expiry"));
     }
 
     #[test]

@@ -560,6 +560,34 @@ impl CompletionCache {
         self.first_db.lock().unwrap().remove(cache_key);
     }
 
+    /// Drop every EXPIRED entry (snapshots, Mongo field lists, first-db
+    /// probes) — a `get` only filters them, it never removes them, so a
+    /// connection typed against once kept its snapshot resident until the same
+    /// key was rebuilt. Called from the service's 5-minute reaper (DB2-07).
+    /// Returns how many entries were dropped.
+    pub fn sweep(&self) -> usize {
+        let mut dropped = 0;
+        {
+            let mut m = self.snapshots.lock().unwrap();
+            let before = m.len();
+            m.retain(|_, c| c.fresh());
+            dropped += before - m.len();
+        }
+        {
+            let mut m = self.fields.lock().unwrap();
+            let before = m.len();
+            m.retain(|_, c| c.fresh());
+            dropped += before - m.len();
+        }
+        {
+            let mut m = self.first_db.lock().unwrap();
+            let before = m.len();
+            m.retain(|_, c| c.fresh());
+            dropped += before - m.len();
+        }
+        dropped
+    }
+
     /// Total cached snapshot entries — for the refresh endpoint's warm summary.
     pub fn snapshot_count(&self) -> usize {
         self.snapshots.lock().unwrap().len()
@@ -632,6 +660,14 @@ impl<K: std::hash::Hash + Eq + Clone, V> SingleFlight<K, V> {
     }
 
     /// Drop every entry whose key matches `pred` (connection refresh / close).
+    /// Drop every expired entry (see [`CompletionCache::sweep`]).
+    pub fn sweep(&self) -> usize {
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let before = map.len();
+        map.retain(|_, c| c.fresh());
+        before - map.len()
+    }
+
     pub fn invalidate_where(&self, pred: impl Fn(&K) -> bool) {
         self.entries
             .lock()
@@ -674,6 +710,30 @@ mod tests {
         c.invalidate("ck");
         assert!(c.get_snapshot("ck", "db").is_none());
         assert_eq!(c.snapshot_count(), 0);
+    }
+
+    /// DB2-07: the reaper's sweep drops expired entries of every map (a `get`
+    /// only filters them) and keeps fresh ones.
+    #[test]
+    fn sweep_drops_only_expired_entries() {
+        let expired = CompletionCache::with_ttl(Duration::ZERO);
+        expired.put_snapshot("ck", "db", snap());
+        expired.put_snapshot("ck", "db2", snap());
+        assert_eq!(
+            expired.snapshot_count(),
+            2,
+            "get filters, the map keeps them"
+        );
+        assert_eq!(expired.sweep(), 2);
+        assert_eq!(expired.snapshot_count(), 0);
+
+        let live = CompletionCache::new();
+        live.put_snapshot("ck", "db", snap());
+        live.put_fields("ck", "db", "users", vec![]);
+        live.put_first_db("ck", Some("db".into()));
+        assert_eq!(live.sweep(), 0);
+        assert_eq!(live.snapshot_count(), 1);
+        assert!(live.get_fields("ck", "db", "users").is_some());
     }
 
     #[test]

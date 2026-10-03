@@ -648,3 +648,46 @@ async fn mysql_uncapped_read_stops_at_the_row_cap() {
     let next = d.run(&cfg, &query("SELECT 7")).await.expect("next run");
     assert_eq!(next.rows[0][0], json!(7));
 }
+
+/// DB2-01: an auto-limited read that hits the row cap (the default "open
+/// table" view and every page after it) keeps its pooled session — the next
+/// Run reuses the SAME backend connection instead of reconnecting.
+#[tokio::test]
+#[ignore]
+async fn mysql_truncated_read_keeps_its_session() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+
+    let d = MysqlDriver::default();
+    let cfg = cfg();
+    let conn_id = |r: &otto_dbviewer::types::QueryResult| r.rows[0][0].to_string();
+    let first = d
+        .run(&cfg, &query("SELECT CONNECTION_ID()"))
+        .await
+        .expect("conn id");
+    for _ in 0..5 {
+        let res = d
+            .run(
+                &cfg,
+                &QueryRequest {
+                    statement: "SELECT id FROM customers".into(),
+                    max_rows: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("truncated read");
+        assert!(res.truncated, "max_rows 1 over a multi-row table truncates");
+        assert_eq!(res.auto_limited, Some(1));
+    }
+    let after = d
+        .run(&cfg, &query("SELECT CONNECTION_ID()"))
+        .await
+        .expect("conn id");
+    assert_eq!(
+        conn_id(&first),
+        conn_id(&after),
+        "a truncated, server-bounded read must not close its pooled session"
+    );
+}

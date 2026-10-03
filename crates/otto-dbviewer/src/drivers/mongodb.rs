@@ -486,6 +486,59 @@ impl Driver for MongoDriver {
         Ok(detail)
     }
 
+    /// DB2-03: the ERD / DB Assistant graph in one `listCollections` plus one
+    /// projected sample per collection (≤ [`GRAPH_SAMPLE_CONCURRENCY`] in
+    /// flight). The generic walk ran `object_detail` per collection — listIndexes
+    /// + collStats + validator + a ≤2 MB whole-document `$sample` each, ~600 MB
+    /// for a 300-collection DB Assistant schema — to fill a card that needs only
+    /// field names and types. Here the server folds the sample down to
+    /// `{_id: field, t: [$type…]}` rows, so a few KB cross the wire per
+    /// collection. Mongo has no FK metadata: no edges, `relationships = false`.
+    async fn schema_graph_bulk(
+        &self,
+        cfg: &ResolvedConfig,
+        schema: &str,
+        max_tables: usize,
+    ) -> Result<Option<types::SchemaGraph>> {
+        let client = self.connect(cfg).await?;
+        let db = client.database(schema);
+        // Same listing (and sort) as the tree's db node, so ids match it.
+        let mut names = db.list_collection_names().await.map_err(types::upstream)?;
+        names.sort();
+        let truncated = names.len() > max_tables;
+        names.truncate(max_tables);
+
+        let db_path = NodePath::parse(&format!("db:{schema}"));
+        let mut tables: Vec<types::GraphTable> = futures_util::stream::iter(names)
+            .map(|name| {
+                let coll: Collection<Document> = db.collection(&name);
+                let id = db_path.child("coll", &name).to_id();
+                async move {
+                    // A collection whose sample fails (a broken view, a
+                    // permission hole) still gets its card, just without fields.
+                    let columns = sample_field_types(&coll).await.unwrap_or_default();
+                    types::GraphTable {
+                        id,
+                        schema: schema.to_string(),
+                        name,
+                        kind: NodeKind::Collection,
+                        columns,
+                    }
+                }
+            })
+            .buffer_unordered(GRAPH_SAMPLE_CONCURRENCY)
+            .collect()
+            .await;
+        tables.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(Some(types::SchemaGraph {
+            schema: schema.to_string(),
+            tables,
+            edges: Vec::new(),
+            relationships: false,
+            truncated,
+        }))
+    }
+
     async fn run(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
         // Untracked run (widgets, export fallback, agents): same path with a
         // throwaway token — the MySQL/ClickHouse idiom.
@@ -3066,6 +3119,96 @@ impl SampleAccumulator {
     }
 }
 
+/// Collections sampled at once by [`Driver::schema_graph_bulk`] (the generic
+/// walk's concurrency, well under a server's connection limit).
+const GRAPH_SAMPLE_CONCURRENCY: usize = 8;
+
+/// The schema-graph sample pipeline: `$sample` `size` documents, then fold them
+/// ON THE SERVER to one row per top-level field — `{_id: name, t: [$type…],
+/// p: first position}` — ordered by where the field appears in the documents
+/// and capped at [`MAX_DOC_COLUMNS`]. Only names and type names cross the wire.
+fn graph_sample_pipeline(size: i64) -> Vec<Document> {
+    vec![
+        doc! { "$sample": { "size": size } },
+        doc! { "$project": { "_id": 0, "kv": { "$objectToArray": "$$ROOT" } } },
+        doc! { "$unwind": { "path": "$kv", "includeArrayIndex": "i" } },
+        doc! { "$group": {
+            "_id": "$kv.k",
+            "t": { "$addToSet": { "$type": "$kv.v" } },
+            "p": { "$min": "$i" },
+        } },
+        doc! { "$sort": { "p": 1, "_id": 1 } },
+        doc! { "$limit": MAX_DOC_COLUMNS as i64 },
+    ]
+}
+
+/// Map a server `$type` alias to the label the explorer's own inference
+/// ([`bson_type_name`]) gives the same value, so a graph card reads like the
+/// tree / structure tab (`int32`, not `int`).
+fn mongo_type_alias_label(alias: &str) -> &str {
+    match alias {
+        "int" => "int32",
+        "long" => "int64",
+        "binData" => "binary",
+        "javascriptWithScope" => "javascript",
+        "missing" => "undefined",
+        other => other,
+    }
+}
+
+/// One grouped sample row (`{_id, t, p}`) → a graph column. `null` alongside
+/// real types marks the field nullable rather than widening its type; several
+/// real types join as `int32|string` (sorted, so the label is stable).
+fn graph_column_from_group(row: &Document) -> Option<types::GraphColumn> {
+    let name = row.get_str("_id").ok()?.to_string();
+    let mut labels: BTreeSet<&str> = row
+        .get_array("t")
+        .map(|ts| {
+            ts.iter()
+                .filter_map(Bson::as_str)
+                .map(mongo_type_alias_label)
+                .collect()
+        })
+        .unwrap_or_default();
+    // Non-short-circuit `|`: both have to come out.
+    let nullable = labels.remove("null") | labels.remove("undefined");
+    if labels.is_empty() && nullable {
+        // Only ever null in the sample — that IS its observed type.
+        labels.insert("null");
+    }
+    let data_type = labels.into_iter().collect::<Vec<_>>().join("|");
+    Some(types::GraphColumn {
+        primary_key: name == "_id",
+        nullable: nullable && name != "_id",
+        name,
+        data_type,
+        foreign_key: false,
+    })
+}
+
+/// Turn the grouped rows into graph columns, `_id` first (the server sorts by
+/// first position, which already puts it first for real documents).
+fn graph_columns(rows: &[Document]) -> Vec<types::GraphColumn> {
+    let mut cols: Vec<types::GraphColumn> =
+        rows.iter().filter_map(graph_column_from_group).collect();
+    cols.sort_by_key(|c| c.name != "_id");
+    cols
+}
+
+/// Run [`graph_sample_pipeline`] on one collection.
+async fn sample_field_types(coll: &Collection<Document>) -> Result<Vec<types::GraphColumn>> {
+    let mut cursor = coll
+        .aggregate(graph_sample_pipeline(SAMPLE_SIZE))
+        .batch_size(MAX_DOC_COLUMNS as u32)
+        .await
+        .map_err(types::upstream)?;
+    let mut rows = Vec::new();
+    while let Some(next) = cursor.next().await {
+        rows.push(next.map_err(types::upstream)?);
+    }
+    Ok(graph_columns(&rows))
+}
+
 /// Fill in connect/selection/idle bounds the URI didn't set (DB-09). The
 /// driver defaults are 30 s selection with no connect bound, so an unreachable
 /// host sat silent for half a minute; idle pooled sockets were kept forever. A
@@ -4301,6 +4444,121 @@ mod tests {
             "n"
         );
     }
+
+    // --- DB2-03: bulk schema-graph sample ---------------------------------
+
+    #[test]
+    fn graph_sample_pipeline_ships_only_names_and_types() {
+        let p = graph_sample_pipeline(100);
+        let stages: Vec<&str> = p
+            .iter()
+            .map(|s| s.keys().next().map(String::as_str).unwrap_or(""))
+            .collect();
+        assert_eq!(
+            stages,
+            ["$sample", "$project", "$unwind", "$group", "$sort", "$limit"]
+        );
+        assert_eq!(p[0], doc! { "$sample": { "size": 100_i64 } });
+        // The fold happens server-side: one row per field, never a document.
+        let group = p[3].get_document("$group").unwrap();
+        assert_eq!(group.get_str("_id").unwrap(), "$kv.k");
+        assert_eq!(
+            group.get_document("t").unwrap(),
+            &doc! { "$addToSet": { "$type": "$kv.v" } }
+        );
+        assert_eq!(
+            p[5].get_i64("$limit").unwrap(),
+            MAX_DOC_COLUMNS as i64,
+            "the field list is capped like a read's columns"
+        );
+    }
+
+    #[test]
+    fn type_aliases_match_the_explorer_labels() {
+        // Every `$type` alias the server can emit lands on the label
+        // `bson_type_name` gives the same value.
+        let cases: &[(&str, Bson)] = &[
+            ("double", Bson::Double(1.0)),
+            ("string", Bson::String("s".into())),
+            ("object", Bson::Document(doc! {})),
+            ("array", Bson::Array(vec![])),
+            ("bool", Bson::Boolean(true)),
+            ("null", Bson::Null),
+            ("int", Bson::Int32(1)),
+            ("long", Bson::Int64(1)),
+            ("objectId", Bson::ObjectId(Default::default())),
+            ("date", Bson::DateTime(BsonDateTime::from_millis(0))),
+            ("decimal", Bson::Decimal128(Decimal128::from_bytes([0; 16]))),
+            (
+                "timestamp",
+                Bson::Timestamp(BsonTimestamp {
+                    time: 0,
+                    increment: 0,
+                }),
+            ),
+            (
+                "binData",
+                Bson::Binary(BsonBinary {
+                    subtype: BinarySubtype::Generic,
+                    bytes: vec![],
+                }),
+            ),
+            ("minKey", Bson::MinKey),
+            ("maxKey", Bson::MaxKey),
+        ];
+        for (alias, value) in cases {
+            assert_eq!(
+                mongo_type_alias_label(alias),
+                bson_type_name(value),
+                "{alias}"
+            );
+        }
+    }
+
+    #[test]
+    fn grouped_rows_become_graph_columns() {
+        let rows = vec![
+            doc! { "_id": "_id", "t": ["objectId"], "p": 0_i64 },
+            doc! { "_id": "qty", "t": ["int", "long"], "p": 1_i64 },
+            doc! { "_id": "note", "t": ["string", "null"], "p": 2_i64 },
+            doc! { "_id": "gone", "t": ["null"], "p": 3_i64 },
+            doc! { "_id": "tags", "t": ["array"], "p": 4_i64 },
+            doc! { "t": ["string"] }, // no name → skipped
+        ];
+        let cols = graph_columns(&rows);
+        let shape: Vec<(&str, &str, bool, bool)> = cols
+            .iter()
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    c.data_type.as_str(),
+                    c.nullable,
+                    c.primary_key,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("_id", "objectId", false, true),
+                ("qty", "int32|int64", false, false),
+                ("note", "string", true, false),
+                ("gone", "null", true, false),
+                ("tags", "array", false, false),
+            ]
+        );
+        assert!(cols.iter().all(|c| !c.foreign_key));
+    }
+
+    #[test]
+    fn graph_columns_put_id_first() {
+        let rows = vec![
+            doc! { "_id": "a", "t": ["string"] },
+            doc! { "_id": "_id", "t": ["int"] },
+        ];
+        let names: Vec<String> = graph_columns(&rows).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["_id", "a"]);
+    }
 }
 
 /// End-to-end SQL → Mongo (plus server-side cancel and keyset paging) over a
@@ -4957,5 +5215,63 @@ mod perf_tests {
         );
         let names: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["_id", "a", "b"]);
+    }
+}
+
+/// Shaping timing for materialised Mongo documents (DB2-04).
+#[cfg(test)]
+mod perf_bench {
+    use super::*;
+
+    fn docs(n: usize, fields: usize) -> Vec<Document> {
+        (0..n)
+            .map(|i| {
+                let mut d = Document::new();
+                d.insert("_id", Bson::Int64(i as i64));
+                for f in 1..fields {
+                    let key = format!("f{f}");
+                    match f % 4 {
+                        0 => d.insert(key, Bson::Int32((i + f) as i32)),
+                        1 => d.insert(key, Bson::String(format!("customer-{i}-{f}@example.com"))),
+                        2 => d.insert(key, Bson::Boolean(i % 2 == 0)),
+                        _ => d.insert(
+                            key,
+                            mongodb::bson::doc! { "k": i as i64, "tags": ["a", "b"] },
+                        ),
+                    };
+                }
+                d
+            })
+            .collect()
+    }
+
+    /// CI ceiling: shaping 10k×30 documents into a grid stays under a few
+    /// seconds in a debug build.
+    #[test]
+    fn docs_to_result_10k_x_30_within_ceiling() {
+        let d = docs(10_000, 30);
+        let t = Instant::now();
+        let r = docs_to_result(d, false, Instant::now());
+        let took = t.elapsed();
+        assert_eq!(r.rows.len(), 10_000);
+        assert_eq!(r.columns.len(), 30);
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "10k×30 docs_to_result took {took:?} (ceiling 5 s)"
+        );
+    }
+
+    /// Bench (on demand, `-- --ignored --nocapture bench_`): 100k×30.
+    #[test]
+    #[ignore]
+    fn bench_docs_to_result_100k_x_30() {
+        let d = docs(100_000, 30);
+        let t = Instant::now();
+        let r = docs_to_result(d, false, Instant::now());
+        eprintln!(
+            "bench Mongo docs_to_result 100k×30: {:?}, rows {}",
+            t.elapsed(),
+            r.rows.len()
+        );
     }
 }

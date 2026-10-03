@@ -534,6 +534,8 @@ impl Driver for PostgresDriver {
     /// holds its own clone, so it finishes and the pool goes with the last
     /// clone; idle sessions are then closed by sqlx.
     async fn evict_idle(&self, idle: Duration) -> usize {
+        // Same 5-minute tick: expired completion snapshots go too (DB2-07).
+        self.completions.sweep();
         self.pools.take_idle(idle).len()
     }
 
@@ -684,7 +686,16 @@ impl Driver for PostgresDriver {
         let (result, auto_limited) = if is_read_statement(statement) {
             let ri = types::inject_row_limit(statement, max_rows.saturating_add(1), req.offset);
             (
-                run_read(&pool, &ri.sql, max_rows, active_schema, timeout_ms, token).await,
+                run_read(
+                    &pool,
+                    &ri.sql,
+                    max_rows,
+                    ri.limited,
+                    active_schema,
+                    timeout_ms,
+                    token,
+                )
+                .await,
                 ri.limited.then_some(max_rows as u64),
             )
         } else {
@@ -1365,16 +1376,30 @@ impl PostgresDriver {
         }
 
         // The four catalog reads are independent: one concurrent wave instead
-        // of four back-to-back round trips.
+        // of four back-to-back round trips. Straight off `pg_class` /
+        // `pg_attribute` (like the bulk schema graph), NOT the
+        // `information_schema` views: those evaluate per-row privilege checks
+        // over the whole catalog and cost seconds on 10k+ relations (DB2-07).
+        // Matviews now complete too (the view skipped them); types come from
+        // `format_type` (`character varying(255)`, `text[]`).
         let tables_q = sqlx::query_as::<_, (String, String)>(
-            "SELECT table_name, table_type FROM information_schema.tables \
-             WHERE table_schema = $1 ORDER BY table_name",
+            "SELECT c.relname, \
+                    CASE WHEN c.relkind IN ('v','m') THEN 'VIEW' ELSE 'BASE TABLE' END \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind IN ('r','p','f','v','m') \
+             ORDER BY c.relname",
         )
         .bind(schema)
         .fetch_all(&pool);
         let cols_q = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT table_name, column_name, data_type FROM information_schema.columns \
-             WHERE table_schema = $1 ORDER BY table_name, ordinal_position",
+            "SELECT c.relname, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) \
+             FROM pg_catalog.pg_attribute a \
+             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind IN ('r','p','f','v','m') \
+               AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY c.relname, a.attnum",
         )
         .bind(schema)
         .fetch_all(&pool);
@@ -1823,6 +1848,7 @@ async fn run_read(
     pool: &sqlx::PgPool,
     statement: &str,
     max_rows: usize,
+    server_bounded: bool,
     active_schema: Option<&str>,
     timeout_ms: Option<u64>,
     token: &CancelToken,
@@ -1836,12 +1862,15 @@ async fn run_read(
         &mut conn,
         statement,
         max_rows,
+        server_bounded,
         &mut types::ByteBudget::default(),
     )
     .await?;
     if out.unread {
         // Rows left on the wire: discard the session (no RESET — it would
-        // drain them first; a closed session takes its timeout with it).
+        // drain them first; a closed session takes its timeout with it). A
+        // server-bounded read at the row cap drained its end-of-result and
+        // keeps the session (DB2-01).
         conn.close_on_drop();
         return Ok(out.result);
     }
@@ -1892,7 +1921,7 @@ async fn run_batch(
         let stmt = span.text.as_str();
         let started = Instant::now();
         let outcome = if is_read_statement(stmt) {
-            exec_read_conn(&mut conn, stmt, max_rows, &mut budget)
+            exec_read_conn(&mut conn, stmt, max_rows, false, &mut budget)
                 .await
                 .map(|out| {
                     // A later statement drains them anyway (same session); the
@@ -1939,7 +1968,14 @@ struct ReadOut {
 /// `max_rows` rows and at the response `budget`.
 ///
 /// - Stops pulling at the cap instead of draining the rest of a non-LIMIT-able
-///   read (a batch statement, `TABLE t`, VALUES…).
+///   read (a batch statement, `TABLE t`, VALUES…). A `server_bounded` read
+///   (injected `LIMIT max_rows+1`) at the cap instead finishes the result —
+///   the probe row was the last, only CommandComplete/ReadyForQuery remain — so
+///   the pooled session survives the default "open table" view and every page
+///   (DB2-01; it used to be closed, and the next Run reconnected).
+/// - Ad-hoc SQL runs as an unnamed statement (`persistent(false)`): it no
+///   longer fills the per-session statement cache and evicts the tree /
+///   completion statements that ARE reused (DB2-02).
 /// - Each column's decoder is picked once from its type ([`PgCell`]).
 /// - The budget is charged per row from the RAW wire sizes
 ///   ([`raw_row_json_len`]), before decoding.
@@ -1950,11 +1986,14 @@ async fn exec_read_conn(
     conn: &mut sqlx::PgConnection,
     statement: &str,
     max_rows: usize,
+    server_bounded: bool,
     budget: &mut types::ByteBudget,
 ) -> Result<ReadOut> {
     use futures_util::TryStreamExt as _;
 
-    let mut stream = sqlx::query(sqlx::AssertSqlSafe(statement)).fetch(&mut *conn);
+    let mut stream = sqlx::query(sqlx::AssertSqlSafe(statement))
+        .persistent(false)
+        .fetch(&mut *conn);
     let mut columns: Vec<Column> = Vec::new();
     let mut decoders: std::sync::Arc<[PgCell]> = std::sync::Arc::from(Vec::new());
     let mut chunk: Vec<PgRow> = Vec::new();
@@ -1974,7 +2013,8 @@ async fn exec_read_conn(
         }
         if kept >= max_rows {
             truncated = true;
-            unread = true;
+            unread = !(server_bounded
+                && types::drain_leftover(&mut stream, types::LEFTOVER_DRAIN_ROWS).await);
             break;
         }
         // Always keep at least one row so a single huge row still shows.
@@ -2621,6 +2661,7 @@ async fn governed_read(
             &mut tx,
             if single { &sql.sql } else { &span.text },
             max_rows,
+            single && sql.limited,
             &mut budget,
         )
         .await?;

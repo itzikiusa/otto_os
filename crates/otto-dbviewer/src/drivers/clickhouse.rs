@@ -967,7 +967,7 @@ impl Conn {
     /// once its status is a success (an error status reads the small body
     /// and maps it to the server's message).
     async fn send(&self, body: String, readonly: bool) -> Result<reqwest::Response> {
-        let mut req = self.client.post(&self.base).headers(self.headers.clone());
+        let mut req = compressed(self.client.post(&self.base).headers(self.headers.clone()));
         if readonly {
             req = req.query(&[("readonly", "2")]);
         }
@@ -1029,6 +1029,7 @@ impl Conn {
     async fn read_capped(&self, resp: reqwest::Response) -> Result<String> {
         use futures_util::StreamExt as _;
         let mut buf: Vec<u8> = Vec::new();
+        let mut body = BodyDecoder::for_response(&resp)?;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = match chunk {
@@ -1038,6 +1039,7 @@ impl Conn {
                     return Err(req_err(e));
                 }
             };
+            let chunk = body.decode(&chunk)?;
             if buf.len() + chunk.len() > HTTP_RESPONSE_BYTE_CAP {
                 return Err(response_cap_error());
             }
@@ -1065,6 +1067,7 @@ impl Conn {
         // lines not yet decoded.
         let mut carry: Vec<u8> = Vec::new();
         let mut pending: Vec<u8> = Vec::new();
+        let mut body = BodyDecoder::for_response(&resp)?;
         let mut stream = resp.bytes_stream();
         let mut exhausted = true;
         while let Some(chunk) = stream.next().await {
@@ -1073,6 +1076,13 @@ impl Conn {
                 Err(e) => {
                     self.kill_after_client_timeout(&e).await;
                     return Err(req_err(e));
+                }
+            };
+            let chunk = match body.decode(&chunk) {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    self.spawn_kill();
+                    return Err(e);
                 }
             };
             match chunk.iter().rposition(|&b| b == b'\n') {
@@ -1154,7 +1164,7 @@ impl Conn {
     /// server's message; on success the body is left unread for the caller to
     /// stream chunk-by-chunk to disk.
     async fn post_stream(&self, body: String) -> Result<reqwest::Response> {
-        let mut req = self.client.post(&self.base).headers(self.headers.clone());
+        let mut req = compressed(self.client.post(&self.base).headers(self.headers.clone()));
         if let Some(tz) = &self.timezone {
             req = req.query(&[("session_timezone", tz.as_str())]);
         }
@@ -1170,7 +1180,8 @@ impl Conn {
         req = req.timeout(Duration::from_secs(24 * 60 * 60));
         let resp = req.body(body).send().await.map_err(req_err)?;
         if !resp.status().is_success() {
-            let text = resp.text().await.map_err(types::upstream)?;
+            // Capped AND decoded (the error body may be compressed too).
+            let text = self.read_capped(resp).await?;
             return Err(otto_core::Error::Upstream(crate::errors::clean_ch_message(
                 text.trim(),
             )));
@@ -2304,6 +2315,8 @@ impl Driver for ClickhouseDriver {
     /// close explicitly: a query running longer than the window holds its own
     /// clone, and the handle goes away with the last clone.
     async fn evict_idle(&self, idle: Duration) -> usize {
+        // Same 5-minute tick: expired completion snapshots go too (DB2-07).
+        self.completions.sweep();
         let http = self.clients.take_idle(idle);
         let native = self.native.take_idle(idle);
         let mut memo = self
@@ -2626,14 +2639,103 @@ impl ClickhouseDriver {
         let resp = conn.post_stream(body).await?;
 
         let mut sink = ExportSink::new(w, format);
+        let mut body = BodyDecoder::for_response(&resp)?;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(req_err)?;
+            let chunk = body.decode(&chunk)?;
             sink.write_raw(&chunk)
                 .map_err(|e| otto_core::Error::Internal(format!("write export chunk: {e}")))?;
         }
         sink.finish()
             .map_err(|e| otto_core::Error::Internal(format!("finish export file: {e}")))
+    }
+}
+
+// --- HTTP response compression (DB2-05) -------------------------------------
+
+/// Ask ClickHouse to compress the response body: `enable_http_compression=1`
+/// plus `Accept-Encoding: zstd`. `FORMAT JSONCompact` / TSV / CSV compress
+/// 5–10× and a tunnel/WAN link is bandwidth-bound, so a page or an export
+/// arrives several times faster. Decoded by [`BodyDecoder`] — NOT by
+/// enabling reqwest's `zstd`/`gzip` features, which would switch on silent
+/// auto-decompression for every other reqwest user in the daemon (the API
+/// client must show the wire as-is). A server that ignores the request
+/// answers uncompressed (no `Content-Encoding`) and that passes through.
+fn compressed(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    req.header(reqwest::header::ACCEPT_ENCODING, "zstd")
+        .query(&[("enable_http_compression", "1")])
+}
+
+/// Streaming decoder for a ClickHouse response body (see [`compressed`]):
+/// chunk in, decompressed bytes out, so the line-by-line JSONCompact reader,
+/// the capped reader and the export sink stay streaming.
+enum BodyDecoder {
+    Identity,
+    Zstd {
+        dec: Box<zstd::stream::raw::Decoder<'static>>,
+        /// Reused output window.
+        window: Vec<u8>,
+    },
+}
+
+/// Output window per `Decoder::run` call.
+const ZSTD_WINDOW: usize = 128 * 1024;
+/// Most one network chunk may decode to. Totals stay bounded by each reader's
+/// own cap (the run path's row/byte budget, [`HTTP_RESPONSE_BYTE_CAP`]); this
+/// stops a single decompression bomb chunk before it reaches them.
+const ZSTD_CHUNK_DECODE_CAP: usize = 64 * 1024 * 1024;
+
+impl BodyDecoder {
+    fn for_response(resp: &reqwest::Response) -> Result<Self> {
+        Self::for_encoding(
+            resp.headers()
+                .get(reqwest::header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+        )
+    }
+
+    fn for_encoding(encoding: Option<&str>) -> Result<Self> {
+        match encoding.map(|e| e.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("identity") => Ok(Self::Identity),
+            Some("zstd") => Ok(Self::Zstd {
+                dec: Box::new(zstd::stream::raw::Decoder::new().map_err(|e| {
+                    otto_core::Error::Internal(format!("clickhouse: zstd decoder: {e}"))
+                })?),
+                window: vec![0u8; ZSTD_WINDOW],
+            }),
+            Some(other) => Err(otto_core::Error::Upstream(format!(
+                "clickhouse: unsupported response encoding '{other}'"
+            ))),
+        }
+    }
+
+    /// Decode one body chunk (identity borrows it unchanged).
+    fn decode<'a>(&mut self, chunk: &'a [u8]) -> Result<std::borrow::Cow<'a, [u8]>> {
+        use zstd::stream::raw::{InBuffer, Operation as _, OutBuffer};
+        let (dec, window) = match self {
+            Self::Identity => return Ok(std::borrow::Cow::Borrowed(chunk)),
+            Self::Zstd { dec, window } => (dec, window),
+        };
+        let mut out = Vec::with_capacity(chunk.len().saturating_mul(4));
+        let mut input = InBuffer::around(chunk);
+        loop {
+            let mut output = OutBuffer::around(&mut window[..]);
+            dec.run(&mut input, &mut output).map_err(|e| {
+                otto_core::Error::Upstream(format!("clickhouse: corrupt zstd response: {e}"))
+            })?;
+            let n = output.pos();
+            out.extend_from_slice(&window[..n]);
+            if out.len() > ZSTD_CHUNK_DECODE_CAP {
+                return Err(response_cap_error());
+            }
+            // Input consumed and the window not filled ⇒ everything decodable
+            // so far has been flushed.
+            if input.pos() == chunk.len() && n < window.len() {
+                break;
+            }
+        }
+        Ok(std::borrow::Cow::Owned(out))
     }
 }
 
@@ -3429,6 +3531,66 @@ mod tests {
         );
     }
 
+    /// DB2-05: a zstd body decodes chunk by chunk to exactly the original bytes
+    /// however the network splits it; identity passes through; an encoding we
+    /// never asked for is a clear error, not garbage rows.
+    #[test]
+    fn zstd_body_decodes_across_arbitrary_chunk_splits() {
+        let rows: Vec<String> = (0..5_000).map(|i| format!("[{i}, \"row {i}\"]")).collect();
+        let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let plain = compact_reply(&refs, "");
+        let packed = zstd::stream::encode_all(plain.as_bytes(), 3).unwrap();
+        assert!(packed.len() * 5 < plain.len(), "JSONCompact compresses ≥5×");
+        for split in [1usize, 7, 4096, packed.len()] {
+            let mut dec = BodyDecoder::for_encoding(Some("zstd")).unwrap();
+            let mut out = Vec::new();
+            for chunk in packed.chunks(split) {
+                out.extend_from_slice(&dec.decode(chunk).unwrap());
+            }
+            assert_eq!(out, plain.as_bytes(), "split {split}");
+        }
+        let mut id = BodyDecoder::for_encoding(None).unwrap();
+        assert!(matches!(
+            id.decode(b"abc").unwrap(),
+            std::borrow::Cow::Borrowed(b"abc")
+        ));
+        assert!(BodyDecoder::for_encoding(Some("br")).is_err());
+        let mut dec = BodyDecoder::for_encoding(Some("zstd")).unwrap();
+        assert!(dec.decode(b"definitely not zstd").is_err());
+    }
+
+    /// DB2-05 end to end: every request asks for compression, and a compressed
+    /// JSONCompact reply streams into the same rows as a plain one.
+    #[tokio::test]
+    async fn compressed_reply_streams_into_rows() {
+        let plain = compact_reply(&["[1, \"a\"]", "[2, \"b\"]"], "");
+        let packed = zstd::stream::encode_all(plain.as_bytes(), 3).unwrap();
+        let (addr, seen) = fake_ch(move |_t, _b, mut sock| {
+            let packed = packed.clone();
+            async move {
+                use tokio::io::AsyncWriteExt;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    packed.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&packed).await;
+                let _ = sock.shutdown().await;
+            }
+        })
+        .await;
+        let conn = test_conn(addr);
+        let raw = conn.query_json_capped("SELECT 1", 10).await.unwrap();
+        assert_eq!(raw.data.len(), 2);
+        assert_eq!(raw.data[1][1], json!("b"));
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen[0].0.contains("enable_http_compression=1"),
+            "{}",
+            seen[0].0
+        );
+    }
+
     /// DB-02: the first `readonly` refusal is remembered — later requests skip
     /// the doomed attempt (2 round trips once, then 1 per request).
     #[tokio::test]
@@ -3480,5 +3642,101 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert_eq!(d.evict_idle(Duration::from_millis(1)).await, 1);
         assert!(d.clients.get_ready(&cfg.cache_key()).is_none());
+    }
+}
+
+/// Decode timing for the streamed `JSONCompact` reader (DB2-04).
+#[cfg(test)]
+mod perf_bench {
+    use super::*;
+
+    /// A `FORMAT JSONCompact` reply laid out the way ClickHouse writes it (one
+    /// data row per line) with `rows × cols` mixed cells.
+    fn compact_body(rows: usize, cols: usize) -> String {
+        let mut s = String::from("{\n\t\"meta\":\n\t[\n");
+        let meta: Vec<String> = (0..cols)
+            .map(|c| {
+                format!("\t\t{{\n\t\t\t\"name\": \"c{c}\",\n\t\t\t\"type\": \"String\"\n\t\t}}")
+            })
+            .collect();
+        s.push_str(&meta.join(",\n"));
+        s.push_str("\n\t],\n\n\t\"data\":\n\t[\n");
+        for r in 0..rows {
+            s.push_str("\t\t[");
+            for c in 0..cols {
+                if c > 0 {
+                    s.push_str(", ");
+                }
+                match c % 3 {
+                    0 => s.push_str(&(r * 31 + c).to_string()),
+                    1 => s.push_str(&format!("\"customer-{r}-{c}@example.com\"")),
+                    _ => s.push_str("\"2026-10-03 17:14:25\""),
+                }
+            }
+            s.push(']');
+            if r + 1 < rows {
+                s.push(',');
+            }
+            s.push('\n');
+        }
+        s.push_str(&format!("\t],\n\n\t\"rows\": {rows},\n\n\t\"statistics\":\n\t{{\n\t\t\"elapsed\": 0.001,\n\t\t\"rows_read\": {rows},\n\t\t\"bytes_read\": 16\n\t}}\n}}\n"));
+        s
+    }
+
+    /// Feed in 64 KiB batches of whole lines, as the network loop does.
+    fn decode(body: &str, cap: Option<usize>) -> RawRows {
+        let mut st = CompactStream::new(cap);
+        let bytes = body.as_bytes();
+        let mut start = 0;
+        while start < bytes.len() {
+            let mut end = (start + 64 * 1024).min(bytes.len());
+            while end < bytes.len() && bytes[end - 1] != b'\n' {
+                end += 1;
+            }
+            st.push_lines(&bytes[start..end.saturating_sub(1).max(start)])
+                .unwrap();
+            start = end;
+        }
+        st.finish().unwrap()
+    }
+
+    /// CI ceiling: 10k×30 streamed decode stays well under a few seconds in a
+    /// debug build (catches an accidental quadratic re-scan of the buffer).
+    #[test]
+    fn compact_stream_10k_x_30_within_ceiling() {
+        let body = compact_body(10_000, 30);
+        let t = std::time::Instant::now();
+        let raw = decode(&body, None);
+        let took = t.elapsed();
+        assert_eq!(raw.data.len(), 10_000);
+        assert_eq!(raw.data[0].len(), 30);
+        assert!(
+            took < Duration::from_secs(5),
+            "10k×30 JSONCompact decode took {took:?} (ceiling 5 s)"
+        );
+    }
+
+    /// Bench (on demand, `-- --ignored --nocapture bench_`): 100k×30 decode,
+    /// uncapped and capped at 1,001 rows (the default page + probe row).
+    #[test]
+    #[ignore]
+    fn bench_compact_stream_100k_x_30() {
+        let body = compact_body(100_000, 30);
+        let t = std::time::Instant::now();
+        let raw = decode(&body, None);
+        eprintln!(
+            "bench CH JSONCompact decode 100k×30 ({} MB): {:?}, rows {} (byte budget hit: {})",
+            body.len() / (1024 * 1024),
+            t.elapsed(),
+            raw.data.len(),
+            raw.truncated_bytes
+        );
+        let t = std::time::Instant::now();
+        let raw = decode(&body, Some(1_001));
+        eprintln!(
+            "bench CH JSONCompact decode 100k×30 capped at 1001: {:?}, rows {}",
+            t.elapsed(),
+            raw.data.len()
+        );
     }
 }

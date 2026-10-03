@@ -165,14 +165,15 @@ async fn run_reads(legacy: bool) -> u64 {
     reads
 }
 
-/// A legacy Run: one snapshot for the pre-execution phase, one for the
-/// eligibility check before the driver call and one after — 6 counted state
-/// reads (was ~13: conn + policy re-read by every guard, scope check and
-/// resolution, then again by both eligibility checks).
+/// A legacy Run: one snapshot for the pre-execution phase (which the
+/// eligibility check right before the driver call reuses, DB2-06) and one
+/// after — 4 counted state reads (was ~13: conn + policy re-read by every
+/// guard, scope check and resolution, then again by both eligibility checks;
+/// 6 before the reuse).
 #[tokio::test]
 async fn legacy_run_stays_within_state_read_budget() {
     let reads = run_reads(true).await;
-    assert!(reads <= 6, "legacy Run made {reads} state reads (budget 6)");
+    assert!(reads <= 4, "legacy Run made {reads} state reads (budget 4)");
 }
 
 /// An enforced Run (root caller) re-validates the caller and scope before and
@@ -181,8 +182,8 @@ async fn legacy_run_stays_within_state_read_budget() {
 async fn enforced_run_stays_within_state_read_budget() {
     let reads = run_reads(false).await;
     assert!(
-        reads <= 13,
-        "enforced Run made {reads} state reads (budget 13)"
+        reads <= 11,
+        "enforced Run made {reads} state reads (budget 11)"
     );
 }
 
@@ -238,4 +239,204 @@ async fn schema_graph_is_single_flight_and_cached() {
         .await
         .unwrap();
     assert_eq!(driver.bulk_calls.load(Ordering::SeqCst), 2);
+}
+
+// --- Driver round-trip counter (DB2-04) ---------------------------------------
+
+/// Counts every driver entry point a service call reaches. A Run must be ONE
+/// statement execution and nothing else: no tree walk, object introspection,
+/// completion or graph build sneaking onto the hot path.
+#[derive(Default)]
+struct Counting {
+    runs: AtomicUsize,
+    catalog: AtomicUsize,
+}
+
+impl Counting {
+    fn catalog_call(&self) {
+        self.catalog.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl Driver for Counting {
+    fn engine(&self) -> Engine {
+        Engine::Mysql
+    }
+    fn capabilities(&self) -> Capabilities {
+        crate::drivers::mysql::MysqlDriver::default().capabilities()
+    }
+    async fn test(&self, _: &ResolvedConfig) -> Result<TestResult> {
+        self.catalog_call();
+        Err(otto_core::Error::Invalid("counting stub".into()))
+    }
+    async fn native_grants(
+        &self,
+        _: &ResolvedConfig,
+    ) -> Result<Vec<crate::native_access::NativeGrant>> {
+        self.catalog_call();
+        Ok(Vec::new())
+    }
+    async fn schema_root(&self, _: &ResolvedConfig) -> Result<Vec<SchemaNode>> {
+        self.catalog_call();
+        Ok(Vec::new())
+    }
+    async fn schema_children(
+        &self,
+        _: &ResolvedConfig,
+        _: &NodePath,
+        _: Option<&str>,
+    ) -> Result<Vec<SchemaNode>> {
+        self.catalog_call();
+        Ok(Vec::new())
+    }
+    async fn schema_children_with_counts(
+        &self,
+        _: &ResolvedConfig,
+        _: &NodePath,
+        _: Option<&str>,
+        _: bool,
+    ) -> Result<Vec<SchemaNode>> {
+        self.catalog_call();
+        Ok(Vec::new())
+    }
+    async fn search_objects(
+        &self,
+        _: &ResolvedConfig,
+        _: &crate::types::ObjectSearchReq,
+    ) -> Result<crate::types::ObjectSearchResult> {
+        self.catalog_call();
+        Ok(Default::default())
+    }
+    async fn object_detail(&self, _: &ResolvedConfig, _: &NodePath) -> Result<ObjectDetail> {
+        self.catalog_call();
+        Err(otto_core::Error::Invalid("counting stub".into()))
+    }
+    async fn object_detail_with_opts(
+        &self,
+        _: &ResolvedConfig,
+        _: &NodePath,
+        _: bool,
+    ) -> Result<ObjectDetail> {
+        self.catalog_call();
+        Err(otto_core::Error::Invalid("counting stub".into()))
+    }
+    async fn run(&self, _: &ResolvedConfig, _: &QueryRequest) -> Result<QueryResult> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(QueryResult::message("ok"))
+    }
+    async fn query_plan(
+        &self,
+        _: &ResolvedConfig,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<crate::types::DbQueryPlan> {
+        self.catalog_call();
+        Err(otto_core::Error::Invalid("counting stub".into()))
+    }
+    async fn completion(
+        &self,
+        _: &ResolvedConfig,
+        _: &crate::types::CompletionContext,
+    ) -> Result<CompletionResponse> {
+        self.catalog_call();
+        Err(otto_core::Error::Invalid("counting stub".into()))
+    }
+    async fn schema_graph_bulk(
+        &self,
+        _: &ResolvedConfig,
+        _: &str,
+        _: usize,
+    ) -> Result<Option<SchemaGraph>> {
+        self.catalog_call();
+        Ok(None)
+    }
+}
+
+/// One Run (legacy and enforced) = exactly ONE driver execution and ZERO
+/// catalog calls. `run_tracked` keeps the trait default (delegates to `run`),
+/// so whichever entry point the service uses is counted once.
+#[tokio::test]
+async fn run_issues_one_driver_execution_and_no_catalog_calls() {
+    for legacy in [true, false] {
+        let (mut service, conn, user) = fixture_mode(legacy).await;
+        let driver = Arc::new(Counting::default());
+        service.registry.set_for_test(Engine::Mysql, driver.clone());
+        let req = QueryRequest {
+            statement: "SELECT * FROM t".into(),
+            ..Default::default()
+        };
+        service.run(&conn, &user, &req).await.unwrap();
+        assert_eq!(
+            driver.runs.load(Ordering::SeqCst),
+            1,
+            "legacy={legacy}: a Run must execute the statement exactly once"
+        );
+        assert_eq!(
+            driver.catalog.load(Ordering::SeqCst),
+            0,
+            "legacy={legacy}: a Run must not touch the catalog"
+        );
+    }
+}
+
+// --- Serialisation timing (DB2-04) --------------------------------------------
+
+/// A synthetic `rows × cols` page shaped like a wide real table: ints, short
+/// text, a decimal string, a timestamp string, nulls and a small JSON object.
+pub(crate) fn synthetic_result(rows: usize, cols: usize) -> QueryResult {
+    use serde_json::{json, Value};
+    let columns = (0..cols)
+        .map(|c| crate::types::Column::typed(format!("col_{c}"), "VARCHAR"))
+        .collect();
+    let rows = (0..rows)
+        .map(|r| {
+            (0..cols)
+                .map(|c| match c % 6 {
+                    0 => json!(r as i64 * 31 + c as i64),
+                    1 => Value::String(format!("customer-{r}-{c}@example.com")),
+                    2 => Value::String(format!("{}.{:02}", r * 7, c)),
+                    3 => Value::String("2026-10-03 17:14:25".into()),
+                    4 => Value::Null,
+                    _ => json!({ "k": r, "tags": ["a", "b"] }),
+                })
+                .collect()
+        })
+        .collect();
+    QueryResult {
+        columns,
+        rows,
+        ..QueryResult::empty()
+    }
+}
+
+/// Ceiling that runs in CI: serialising a 10k×30 page (the shape of a "fetch
+/// 10,000 rows" Run) stays well under a second even in a debug build. Loose on
+/// purpose — it catches an accidental quadratic, not a 10% drift.
+#[test]
+fn query_result_serialise_10k_x_30_within_ceiling() {
+    let r = synthetic_result(10_000, 30);
+    let t = std::time::Instant::now();
+    let bytes = serde_json::to_vec(&r).unwrap();
+    let took = t.elapsed();
+    assert!(bytes.len() > 10_000 * 30 * 4);
+    assert!(
+        took < Duration::from_secs(3),
+        "10k×30 QueryResult serialise took {took:?} (ceiling 3 s)"
+    );
+}
+
+/// Bench (run on demand): `cargo test -p otto-dbviewer --lib bench_ -- --ignored
+/// --nocapture`. 100k×30 serialise — the WS/HTTP response cost of a big page.
+#[test]
+#[ignore]
+fn bench_query_result_serialise_100k_x_30() {
+    let r = synthetic_result(100_000, 30);
+    let t = std::time::Instant::now();
+    let bytes = serde_json::to_vec(&r).unwrap();
+    eprintln!(
+        "bench serialise QueryResult 100k×30: {:?} ({} MB)",
+        t.elapsed(),
+        bytes.len() / (1024 * 1024)
+    );
 }

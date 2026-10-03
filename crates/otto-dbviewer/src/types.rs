@@ -1723,6 +1723,34 @@ impl ByteBudget {
     }
 }
 
+/// Leftover rows a capped read may still pull (and discard) so the server can
+/// finish the result and the pooled session stays reusable (DB2-01). Only used
+/// when the SERVER bounded the statement (an injected `LIMIT max_rows+1`): the
+/// probe row is then the last one, so the rest is just the OK/EOF packet that
+/// is already in the socket buffer — no waiting on a slow scan.
+pub const LEFTOVER_DRAIN_ROWS: usize = 4;
+
+/// Finish a capped row stream: pull and discard at most `allowance` more rows.
+/// `true` when the stream ended inside the allowance — nothing is left on the
+/// wire, so the session can go back to the pool instead of being closed (a
+/// closed session costs the next Run a full reconnect: TCP + TLS + auth +
+/// session setup, ~4–6 RTT — 200–300 ms through a tunnel). `false` (more rows,
+/// or an error mid-drain) → the caller keeps its close-on-drop.
+pub async fn drain_leftover<S>(stream: &mut S, allowance: usize) -> bool
+where
+    S: futures_util::TryStream + Unpin,
+{
+    use futures_util::TryStreamExt as _;
+    for _ in 0..=allowance {
+        match stream.try_next().await {
+            Ok(None) => return true,
+            Ok(Some(_)) => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 /// Cheap upper-ish estimate of a value's serialized JSON length (no escaping
 /// accounted for; numbers counted at their typical width). Used for the
 /// response byte budget — never for anything that must be exact.
@@ -1768,6 +1796,47 @@ pub fn cap_cell(v: serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt as _;
+
+    /// A row stream that counts how many items were pulled from it.
+    fn counted(
+        items: Vec<std::result::Result<u32, &'static str>>,
+        pulled: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> impl futures_util::Stream<Item = std::result::Result<u32, &'static str>> + Unpin {
+        futures_util::stream::iter(items).inspect(move |_| {
+            pulled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        })
+    }
+
+    /// DB2-01: a server-bounded truncated read (LIMIT max_rows+1 → the probe
+    /// row was the last one) drains cleanly, so the session is KEPT.
+    #[tokio::test]
+    async fn truncated_bounded_read_keeps_its_session() {
+        let pulled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // The probe row was already consumed by the reader; only EOF remains.
+        let mut s = counted(vec![], pulled.clone());
+        assert!(drain_leftover(&mut s, LEFTOVER_DRAIN_ROWS).await);
+        // A couple of leftovers (e.g. OFFSET quirks) still fit the allowance.
+        let mut s = counted(vec![Ok(1), Ok(2)], pulled.clone());
+        assert!(drain_leftover(&mut s, LEFTOVER_DRAIN_ROWS).await);
+        assert_eq!(pulled.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    /// An unbounded remainder is NOT drained (pulls stop at the allowance), and
+    /// an error mid-drain discards the session rather than failing the read.
+    #[tokio::test]
+    async fn unbounded_remainder_or_error_discards_the_session() {
+        let pulled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut s = counted((0..10_000).map(Ok).collect(), pulled.clone());
+        assert!(!drain_leftover(&mut s, LEFTOVER_DRAIN_ROWS).await);
+        assert_eq!(
+            pulled.load(std::sync::atomic::Ordering::Relaxed),
+            LEFTOVER_DRAIN_ROWS + 1,
+            "the drain must stop at the allowance, not read the whole result"
+        );
+        let mut s = counted(vec![Ok(1), Err("boom")], pulled);
+        assert!(!drain_leftover(&mut s, LEFTOVER_DRAIN_ROWS).await);
+    }
 
     #[test]
     fn big_integers_keep_every_digit() {
