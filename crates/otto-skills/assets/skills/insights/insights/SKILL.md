@@ -1,7 +1,7 @@
 ---
 description: Generate an action-first coding-agent usage report across ALL providers Otto uses (Claude, Codex, agy/Gemini) for a chosen period (day/week/month or explicit range), compare it to the previous comparable period for trends, and emit a self-contained HTML report where every finding — even the good ones — carries Evidence/threshold → Action → Expected effect. Use when the user wants a usage/productivity insights report, a weekly/daily/monthly review, or trend tracking of how they work with AI agents.
 category: insights
-version: 3
+version: 4
 ---
 
 # Insights
