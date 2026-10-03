@@ -1219,6 +1219,11 @@ async fn scale_vault(
 
 async fn assert_scale_budgets(n: usize, read_budget_ms: u128) {
     let (e, _dir, id, cold) = scale_vault(n).await;
+    let commits = e.store.index_commits.load(Relaxed);
+    assert!(
+        commits <= n / 200 + 5,
+        "cold scan batches note publication: {commits} commits for {n} notes"
+    );
     let mut worst = [0u128; 3];
     for i in 0..20 {
         let k = (i * 331) % n;

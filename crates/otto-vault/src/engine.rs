@@ -26,6 +26,10 @@ use crate::types::*;
 /// The Vault page polls status every 5 s: at 5 s here every poll walked the
 /// whole tree (10k files ≈ 27 ms of stat calls) and wrote `scan_state` twice.
 const STALE_AFTER_SECS: i64 = 30;
+/// Scan publication batch bounds (F7): notes per transaction, and prepared
+/// body bytes held at once (a few 4 MiB notes close a batch early).
+const SCAN_BATCH_NOTES: usize = 200;
+const SCAN_BATCH_BYTES: usize = 16 * 1024 * 1024;
 /// `mode=full` graph default edge budget (override via `edge_budget`).
 const DEFAULT_EDGE_BUDGET: usize = 2_000_000;
 
@@ -34,6 +38,8 @@ type VaultWriteLock = Arc<tokio::sync::Mutex<()>>;
 /// (vault, source, target) → (source content hash, context line).
 type BacklinkCtxCache = HashMap<(i64, String, String), (String, String)>;
 /// (graph generation the payloads were built against, [(opts key, payload)]).
+/// ((generation, graph generation), counts) — see `status_counts`.
+type StatusCountsEntry = ((i64, i64), crate::store::StatusCounts);
 type GraphCacheEntry = (i64, Vec<(String, Arc<GraphPayload>)>);
 /// Cached graph payloads kept per vault (full view + a few local views).
 const GRAPH_CACHE_PER_VAULT: usize = 6;
@@ -113,7 +119,7 @@ pub struct VaultEngine {
     pub(crate) watch_kicks: std::sync::atomic::AtomicUsize,
     /// `(generation, graph generation)` → the status COUNTs (F2): the page's
     /// 5 s status poll runs no aggregate SQL while nothing changed.
-    status_counts: Mutex<HashMap<i64, ((i64, i64), crate::store::StatusCounts)>>,
+    status_counts: Mutex<HashMap<i64, StatusCountsEntry>>,
 }
 
 impl VaultEngine {
@@ -271,6 +277,96 @@ impl VaultEngine {
     }
 
     /// Caller owns publication. Ordinary note updates never load global links.
+    /// Publish a batch of scanned notes under ONE publication-lock hold and
+    /// ONE transaction (F7). Same fencing as the per-note path: paths an API
+    /// write touched since `epoch` are skipped. Links resolve against the
+    /// pre-batch resolver; any added path sets `links_dirty`, so the scan's
+    /// closing reconcile pass re-resolves everything. Returns `true` when the
+    /// batch could not be published (index refreshing → scan incomplete).
+    async fn index_scan_batch(
+        &self,
+        id: i64,
+        state: &crate::index::IndexState,
+        epoch: u64,
+        batch: Vec<crate::prepare::PreparedNote>,
+    ) -> Result<bool> {
+        let _publication = state.publication.lock().await;
+        state.check_active()?;
+        let mut notes: Vec<_> = batch
+            .into_iter()
+            .filter(|n| !state.changed_since(&n.row.path, epoch))
+            .collect();
+        if notes.is_empty() {
+            return Ok(false);
+        }
+        if notes.len() == 1 {
+            if state.cache.read().unwrap().is_none() {
+                return Ok(true);
+            }
+            self.index_prepared(id, state, notes.pop().unwrap(), false)
+                .await?;
+            return Ok(false);
+        }
+        let mut records = Vec::with_capacity(notes.len());
+        let (mut added, mut graph_changed) = (false, false);
+        {
+            let cached = state.cache.read().unwrap();
+            let Some(index) = cached.as_ref() else {
+                return Ok(true);
+            };
+            for note in &mut notes {
+                let old = index.records.get(&note.row.path);
+                for link in &mut note.links {
+                    link.dst_path = index.resolver.resolve(&note.row.path, &link.raw_target);
+                }
+                let sig = graph_sig(note);
+                added |= old.is_none();
+                graph_changed |= old.and_then(|r| r.graph_sig) != Some(sig);
+                let mut record = crate::index::IndexRecord::note(&note.row);
+                record.graph_sig = Some(sig);
+                records.push(record);
+            }
+        }
+        if added {
+            state.links_dirty.store(true, Ordering::Relaxed);
+        }
+        // A failed batch transaction rolled back (DB not ahead of the
+        // caches): publish note by note instead, so one bad file costs only
+        // itself — exactly the pre-batch behaviour, error included.
+        if let Err(e) = self
+            .store
+            .index_notes(id, &notes, self.fts_ready().await)
+            .await
+        {
+            tracing::debug!(vault = id, error = %e, "vault scan batch failed; retrying per note");
+            for note in notes {
+                self.index_prepared(id, state, note, false).await?;
+            }
+            return Ok(false);
+        }
+        let mut repair = IndexRepair {
+            state,
+            last_scan: self.last_scan_cell(id),
+            graph: self.graph_generation(id),
+            complete: false,
+        };
+        #[cfg(test)]
+        Self::pause_publication(state).await;
+        {
+            let mut cached = state.cache.write().unwrap();
+            let cache = cached.as_mut().expect("publication owns cache");
+            for record in records {
+                cache.upsert(record);
+            }
+        }
+        self.generation(id).fetch_add(1, Ordering::Relaxed);
+        if graph_changed || added {
+            self.graph_generation(id).fetch_add(1, Ordering::Relaxed);
+        }
+        repair.complete = true;
+        Ok(false)
+    }
+
     async fn index_prepared(
         &self,
         id: i64,
@@ -577,8 +673,12 @@ impl VaultEngine {
             }
         }
         let mut incomplete = !walk.complete;
-        // A sequential stream retains one prepared body, never N tasks/bodies.
-        // Added paths resolve all incoming links once after the entire scan.
+        // A sequential stream retains a bounded batch of prepared bodies
+        // (≤ SCAN_BATCH_NOTES / SCAN_BATCH_BYTES), never N tasks/bodies, and
+        // commits each batch in one transaction (F7). Added paths resolve all
+        // incoming links once after the entire scan.
+        let mut batch: Vec<crate::prepare::PreparedNote> = Vec::new();
+        let mut batch_bytes = 0usize;
         for rel in changed_notes {
             if state.changed_since(&rel, epoch) {
                 continue;
@@ -598,16 +698,17 @@ impl VaultEngine {
                     continue;
                 }
             };
-            let _publication = state.publication.lock().await;
-            state.check_active()?;
-            if state.changed_since(&rel, epoch) {
-                continue;
+            batch_bytes += prepared.body.len();
+            batch.push(prepared);
+            if batch.len() >= SCAN_BATCH_NOTES || batch_bytes >= SCAN_BATCH_BYTES {
+                batch_bytes = 0;
+                incomplete |= self
+                    .index_scan_batch(id, &state, epoch, std::mem::take(&mut batch))
+                    .await?;
             }
-            if state.cache.read().unwrap().is_none() {
-                incomplete = true;
-                continue;
-            }
-            self.index_prepared(id, &state, prepared, false).await?;
+        }
+        if !batch.is_empty() {
+            incomplete |= self.index_scan_batch(id, &state, epoch, batch).await?;
         }
         let file_sizes: HashMap<_, _> = walk
             .files

@@ -48,6 +48,9 @@ pub struct Store {
     /// Status aggregate COUNT round-trips — regression counter (F2).
     #[cfg(test)]
     pub(crate) status_count_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Note-index transactions committed — regression counter (F7).
+    #[cfg(test)]
+    pub(crate) index_commits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// The status aggregates that need a COUNT over links/tags/files.
@@ -69,6 +72,8 @@ impl Store {
             link_reads: Default::default(),
             #[cfg(test)]
             status_count_reads: Default::default(),
+            #[cfg(test)]
+            index_commits: Default::default(),
         }
     }
 
@@ -436,7 +441,45 @@ impl Store {
             .begin()
             .await
             .map_err(dberr("vault.index.begin"))?;
-        Self::upsert_note_conn(&mut tx, vault, &note.row).await?;
+        Self::index_note_conn(&mut tx, vault, note, incoming, fts).await?;
+        tx.commit().await.map_err(dberr("vault.index.commit"))?;
+        #[cfg(test)]
+        self.index_commits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Index many scanned notes in ONE transaction (F7: a cold 10k-note scan
+    /// commits ~50 times, not 10k). Scan-only: no incoming-link rewrites.
+    pub(crate) async fn index_notes(
+        &self,
+        vault: i64,
+        notes: &[crate::prepare::PreparedNote],
+        fts: bool,
+    ) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("vault.index.begin"))?;
+        for note in notes {
+            Self::index_note_conn(&mut tx, vault, note, &[], fts).await?;
+        }
+        tx.commit().await.map_err(dberr("vault.index.commit"))?;
+        #[cfg(test)]
+        self.index_commits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn index_note_conn(
+        tx: &mut sqlx::SqliteConnection,
+        vault: i64,
+        note: &crate::prepare::PreparedNote,
+        incoming: &[(i64, Option<String>)],
+        fts: bool,
+    ) -> Result<()> {
+        Self::upsert_note_conn(tx, vault, &note.row).await?;
         for sql in [
             "DELETE FROM vault_tags WHERE vault_id=? AND path=?",
             "DELETE FROM vault_links WHERE vault_id=? AND src_path=?",
@@ -471,11 +514,10 @@ impl Store {
                 .map_err(dberr("vault.index.incoming"))?;
         }
         if fts {
-            fts_put_conn(&mut tx, vault, &note.row.path, &note.row.title, &note.body)
+            fts_put_conn(tx, vault, &note.row.path, &note.row.title, &note.body)
                 .await
                 .map_err(dberr("vault.index.fts"))?;
         }
-        tx.commit().await.map_err(dberr("vault.index.commit"))?;
         Ok(())
     }
 
