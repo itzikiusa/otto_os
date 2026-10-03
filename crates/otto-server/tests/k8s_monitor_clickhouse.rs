@@ -1405,9 +1405,10 @@ async fn rows_read_per_refresh_before_and_after() {
     // engine's hard 1 GiB `max_server_memory_usage` (MEMORY_LIMIT_EXCEEDED
     // "while pushing to view default.k8s_samples_1m_mv"). A synthetic-load
     // artifact: the collector inserts one cycle per statement (pods × series
-    // rows — 5k pods is ~100k rows), far below it. 500k, not 2M: ClickHouse
-    // 26.8 (CI's pin) holds more per view push and hit the cap at 2M.
-    let chunk = (500_000 / (pods * series.len() as u64)).clamp(1, cycles);
+    // rows — 5k pods is ~100k rows), far below it. So the load mirrors that
+    // size: ClickHouse 26.8 (CI's pin) holds more per view push and hit the
+    // cap at 2M locally and at 500k on CI's Linux runner (RSS accounting).
+    let chunk = (100_000 / (pods * series.len() as u64)).clamp(1, cycles);
     let mut c0 = 0;
     while c0 < cycles {
         let n = chunk.min(cycles - c0);
