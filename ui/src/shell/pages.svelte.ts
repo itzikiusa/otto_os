@@ -43,6 +43,7 @@ const LOADERS: Record<string, Loader> = {
   git: () => import('../modules/git/GitPage.svelte'),
   database: () => import('../modules/database/DatabasePage.svelte'),
   vault: () => import('../modules/vault/VaultPage.svelte'),
+  workbench: () => import('../modules/workbench/WorkbenchPage.svelte'),
   api: () => import('../modules/api/ApiPage.svelte'),
   history: () => import('../modules/agents/history/HistoryPage.svelte'),
   assistant: () => import('../modules/assistant/AssistantPage.svelte'),
