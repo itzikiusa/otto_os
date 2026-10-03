@@ -894,9 +894,14 @@ maps directly onto the `{channel, chat, thread?, mention_only?}` spec.
 - From the inspector of a selected node: **▶ From here**
   (`{ start_node, only_node:false }`) or **Only this**
   (`{ start_node, only_node:true }`).
-- **Stop** → `POST /workflow-runs/{id}/cancel`. Cancellation is checked at each
-  node boundary: the **current node finishes**, then the run halts and remaining
-  nodes are marked `skipped` (status `canceled`).
+- **Stop** → `POST /workflow-runs/{id}/cancel`. The cancel is announced to the
+  engine, which stops the **running node at once** (its sessions are killed), then
+  marks the remaining nodes `skipped` (status `canceled`). A running node reads
+  only the run's status as a backstop (first tick, then every 30 s) — never the
+  run body — so a long agent step costs no DB reads while it works (perf W1).
+  Live step changes reach the open run view as a node summary on
+  `workflow_run_updated` and are applied in place, without a `/progress` GET,
+  when the event is the next revision (perf W5).
 
 A run executes in a background task (`run_workflow`) and persists progress to the
 `workflow_runs` row after **every** node transition.

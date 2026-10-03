@@ -842,7 +842,7 @@ non-terminal so the view converges even with no WS connection.
   "status": "running|success|error|canceled",
   "node_id": "<node_id | null>",
   "rev": 7,
-  "node": { "node_id": "…", "status": "…", "logs": ["…"], "…": "…" },
+  "node": { "node_id": "…", "status": "…", "logs": [], "log_count": 12, "has_output": false, "detail_version": "<sha256>", "…": "…" },
   "nodes_done": 2,
   "nodes_total": 5,
   "waiting_approval": false
@@ -854,12 +854,17 @@ non-terminal so the view converges even with no WS connection.
 - `rev` — the run revision this event reflects (0 = unknown → refetch path).
   Clients drop events/snapshots whose rev is behind what they already show, and
   apply a node payload in place only when `rev` is exactly contiguous.
-- `node` — the changed node's full `NodeRunState`. It may carry `activity`
-  (`NodeActivity`: phase, pending task count, sub-agent rows), present only while
-  a running agent-backed step is working and cleared when it finishes. The 32 KiB
-  size rule above is unchanged: `logs` ≤ 200 lines and `activity.subagents` ≤ 40
-  (descriptions ≤ 80 chars) keep the payload bounded, so the `activity` addition
-  does not push normal steps onto the refetch path.
+- `node` — the changed node's SUMMARY: exactly the node shape
+  `GET /workflows/runs/{id}/progress` serves (`logs: []` + `log_count`,
+  `output: null` + `has_output`, `error` clipped to 1 KiB, `detail_version` =
+  hash of the full node). It may carry a bounded `activity` (`NodeActivity`:
+  phase, pending task count, ≤ 32 sub-agent rows) while a running agent-backed
+  step works. Since perf W5 (was the full `NodeRunState`, ≤ 32 KiB): the run
+  view applies a node summary in place when `rev` is exactly contiguous, the
+  run is `running`, the node is already listed and the run has no checkpointed
+  (loop) pages — skipping the `/progress` GET; anything else refetches. Full
+  logs/output still load lazily from the node-detail endpoint by
+  `detail_version`. Omitted over 32 KiB (backstop; summaries are far smaller).
 - `nodes_done`/`nodes_total` — step progress for the "Running" sidebar, updated
   in place without a second GET (`nodes_total` 0 = unknown, keep last counts).
 - `waiting_approval` — true on the pause event; the approve/reject decision

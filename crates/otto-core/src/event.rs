@@ -215,8 +215,13 @@ pub enum Event {
         node_id: Option<Id>,
         #[serde(default)]
         rev: i64,
+        /// The changed node's SUMMARY — exactly the node shape
+        /// `GET /workflows/runs/{id}/progress` returns (`logs: []` +
+        /// `log_count`, `output: null` + `has_output`, `detail_version`), so
+        /// a client applies it in place without refetching (perf W5). Was the
+        /// full `NodeRunState` (≤ 32 KiB), which clients refetched anyway.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        node: Option<crate::workflows::NodeRunState>,
+        node: Option<serde_json::Value>,
         #[serde(default)]
         nodes_done: u32,
         #[serde(default)]
@@ -862,19 +867,13 @@ mod tests {
             status: "running".into(),
             node_id: Some("step".into()),
             rev: 7,
-            node: Some(crate::workflows::NodeRunState {
-                node_id: "step".into(),
-                status: crate::workflows::NodeStatus::Running,
-                output: None,
-                error: None,
-                logs: vec!["▶ log started".into()],
-                started_at: None,
-                duration_ms: None,
-                attempts: None,
-                sessions: vec![],
-                review_ids: Vec::new(),
-                activity: None,
-            }),
+            node: Some(serde_json::json!({
+                "node_id": "step",
+                "status": "running",
+                "logs": [],
+                "log_count": 1,
+                "detail_version": "abc",
+            })),
             nodes_done: 2,
             nodes_total: 5,
             waiting_approval: false,
@@ -884,8 +883,7 @@ mod tests {
         assert_eq!(v["rev"], 7);
         assert_eq!(v["node"]["node_id"], "step");
         assert_eq!(v["node"]["status"], "running");
-        // `started_at` is skip-if-none — a pending node stays compact.
-        assert!(v["node"].get("started_at").is_none());
+        assert_eq!(v["node"]["log_count"], 1);
         assert_eq!(v["nodes_done"], 2);
         assert_eq!(v["nodes_total"], 5);
 

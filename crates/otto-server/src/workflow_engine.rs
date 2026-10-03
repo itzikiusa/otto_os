@@ -233,13 +233,14 @@ fn emit_run_updated(
     states: &[NodeRunState],
     waiting_approval: bool,
 ) {
+    // The node's SUMMARY (perf W5): what `/progress` serves for it — logs and
+    // output stripped, `detail_version` set — so the run view applies it in
+    // place instead of refetching, and the WS frame carries a few hundred
+    // bytes, not up to 32 KiB of logs. Bounded by construction (error clipped,
+    // activity capped); the size rule stays as a backstop.
     let node = node
-        .filter(|n| {
-            serde_json::to_string(n)
-                .map(|s| s.len() <= NODE_EVENT_MAX_BYTES)
-                .unwrap_or(false)
-        })
-        .cloned();
+        .and_then(|n| otto_state::workflow_progress::node_summary(n).ok())
+        .filter(|v| v.to_string().len() <= NODE_EVENT_MAX_BYTES);
     let ev = Event::WorkflowRunUpdated {
         workspace_id: workspace_id.clone(),
         run_id: run_id.clone(),

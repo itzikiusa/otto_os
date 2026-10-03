@@ -71,3 +71,17 @@ test('a shared read is aborted only when every consumer that joined it aborted',
   c2.abort(); assert.equal(seen.aborted,true,'the last consumer left; the request is aborted');
   release(); await Promise.all([p1,p2]);
 });
+test('a contiguous live node summary applies in place; anything else refetches (perf W5)',()=>{
+  const {applyLiveNode}=helpers();
+  const mk=()=>({id:'run',rev:5,status:'running',summary:true,checkpoint_rev:0,waiting_approval:false,nodes:[{node_id:'a',status:'running',detail_version:'v1',log_count:1,logs:[]}]});
+  const ev=(over:any={})=>({rev:6,status:'running',waitingApproval:false,node:{node_id:'a',status:'running',detail_version:'v2',log_count:4,logs:[]},...over});
+  const run=mk(); const first=run.nodes[0];
+  assert.equal(applyLiveNode(run,ev()),true);
+  assert.equal(run.rev,6); assert.equal(run.nodes[0],first,'node object kept'); assert.equal(first.log_count,4); assert.equal(first.detail_version,'v2');
+  assert.equal(applyLiveNode(mk(),ev({rev:7})),false,'rev gap');
+  assert.equal(applyLiveNode(mk(),ev({node:null})),false,'no node');
+  assert.equal(applyLiveNode(mk(),ev({status:'success'})),false,'status change');
+  assert.equal(applyLiveNode(mk(),ev({node:{node_id:'new',status:'running',logs:[]}})),false,'unknown node');
+  assert.equal(applyLiveNode({...mk(),checkpoint_rev:3},ev()),false,'checkpointed run');
+  assert.equal(applyLiveNode({...mk(),summary:false},ev()),false,'full-body view');
+});
