@@ -33,7 +33,7 @@ use otto_state::{
     PersonalAgentSchedule, PersonalAgentsRepo, SettingsRepo,
 };
 
-use crate::auth::{require_ws_role, CurrentUser};
+use crate::auth::{require_ws_role, CurrentAuthContext, CurrentUser};
 use crate::cadence;
 use crate::error::{ApiError, ApiResult};
 use crate::personal_agents_engine;
@@ -915,13 +915,34 @@ async fn resolve_session_agent(
     agents(ctx).get(agent_id).await.map_err(ApiError)
 }
 
+/// The session a room read/post acts as. An agent-session credential (an
+/// Otto-issued API token or a per-session MCP token) is bound to ITS session:
+/// it cannot omit `session_id` to read without the membership check or post
+/// as the human, and cannot name another session. A person's own credential
+/// keeps the request's `session_id` (none = the user).
+fn bound_room_session(
+    auth: &otto_core::auth::AuthContext,
+    requested: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    let requested = requested.filter(|s| !s.is_empty());
+    match (crate::ui_bridge::calling_session(auth), requested) {
+        (Some(own), Some(other)) if own.as_str() != other => Err(ApiError(Error::Forbidden(
+            "an agent session can only read or post in rooms as itself".into(),
+        ))),
+        (Some(own), _) => Ok(Some(own.clone())),
+        (None, r) => Ok(r.map(str::to_string)),
+    }
+}
+
 /// `GET /agent-rooms/{id}/messages?after=&limit=&session_id=`
 async fn list_messages(
     Path(id): Path<String>,
-    Query(q): Query<MessagesQuery>,
+    Query(mut q): Query<MessagesQuery>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
 ) -> ApiResult<Json<Vec<AgentRoomMessage>>> {
+    q.session_id = bound_room_session(&auth, q.session_id.as_deref())?;
     let repo = rooms(&ctx);
     let room = repo.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &room.workspace_id, WorkspaceRole::Viewer).await?;
@@ -957,8 +978,10 @@ async fn post_message(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-    Json(req): Json<PostMessageReq>,
+    CurrentAuthContext(auth): CurrentAuthContext,
+    Json(mut req): Json<PostMessageReq>,
 ) -> ApiResult<Json<AgentRoomMessage>> {
+    req.session_id = bound_room_session(&auth, req.session_id.as_deref())?;
     let repo = rooms(&ctx);
     let room = repo.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &room.workspace_id, WorkspaceRole::Editor).await?;
@@ -1175,6 +1198,50 @@ mod tests {
                 assert!(crate::cadence::validate(&s.schedule).is_ok());
             }
         }
+    }
+
+    #[test]
+    fn agent_credentials_are_bound_to_their_own_room_session() {
+        let user: User = serde_json::from_value(json!({
+            "id": "u1", "username": "u", "display_name": "U", "is_root": false,
+            "disabled": false, "created_at": "2026-10-03T00:00:00Z"
+        }))
+        .unwrap();
+        let mut auth = otto_core::auth::AuthContext {
+            real_user: user.clone(),
+            effective_user: user,
+            scope: None,
+            mcp_only: false,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
+            managed_session_id: None,
+        };
+        // A person: the request decides (none = post as the user).
+        assert_eq!(bound_room_session(&auth, None).unwrap(), None);
+        assert_eq!(
+            bound_room_session(&auth, Some("s9")).unwrap().as_deref(),
+            Some("s9")
+        );
+        // An Otto-issued session API token (managed only): never the user.
+        auth.managed_session_id = Some("s1".into());
+        assert_eq!(
+            bound_room_session(&auth, None).unwrap().as_deref(),
+            Some("s1")
+        );
+        assert_eq!(
+            bound_room_session(&auth, Some("")).unwrap().as_deref(),
+            Some("s1")
+        );
+        assert!(bound_room_session(&auth, Some("s2")).is_err());
+        // A per-session MCP credential binds the same way.
+        auth.managed_session_id = None;
+        auth.mcp_session_id = Some("s3".into());
+        assert_eq!(
+            bound_room_session(&auth, Some("s3")).unwrap().as_deref(),
+            Some("s3")
+        );
+        assert!(bound_room_session(&auth, Some("s1")).is_err());
     }
 
     #[test]

@@ -488,6 +488,8 @@ export interface McpApproval {
   status: McpApprovalStatus;
   requested_by: string | null;
   requested_by_kind: string | null;
+  /** The agent session that raised the request, when known. */
+  requested_by_session_id?: string | null;
   decided_by: string | null;
   decision_note: string | null;
   created_at: string;
@@ -525,6 +527,8 @@ export interface McpCallLogRow {
   bytes: number | null;
   rows: number | null;
   approval_id: string | null;
+  /** The agent session that made the call (Otto-minted session credentials only). */
+  caller_session_id?: string | null;
   created_at: string;
 }
 

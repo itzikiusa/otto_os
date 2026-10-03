@@ -1495,8 +1495,25 @@ pub(crate) async fn governed_invoke(
         caller_user_id: Some(user.id.clone()),
         caller_kind: Some("mcp_server".into()),
         args_redacted_json: otto_core::redact::redact_json(arguments).value.to_string(),
+        // The agent session behind an Otto-minted credential, so the audit
+        // can be split per agent (and scoped to its workspace below).
+        caller_session_id: crate::ui_bridge::calling_session(auth).cloned(),
         ..Default::default()
     };
+    // The calling session's workspace: the audit row's workspace when the
+    // call itself names none, so the row is scoped to a workspace (and never
+    // falls into the NULL-workspace bucket every MCP viewer could read).
+    let session_ws = if audit.caller_session_id.is_some() {
+        crate::agent_refs::caller_session_ws(ctx, auth).await
+    } else {
+        None
+    };
+    audit.workspace_id = arguments
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .filter(|w| crate::agent_refs::looks_like_id(w))
+        .map(str::to_string)
+        .or_else(|| session_ws.clone());
 
     // PER-TOKEN SCOPE (multi-token access control). A `kind='mcp'` token carries an
     // [`McpScope`]; a NULL column resolved to the unrestricted scope, so legacy
@@ -1603,6 +1620,10 @@ pub(crate) async fn governed_invoke(
         .get("workspace_id")
         .and_then(Value::as_str)
         .map(str::to_string);
+    // The RESOLVED workspace (a named object / repo / artifact's own) wins.
+    if let Some(w) = ws.clone().or_else(|| session_ws.clone()) {
+        audit.workspace_id = Some(w);
+    }
     // The gate applies (before any opt-out rule) to a DANGEROUS tool without a
     // trusted token grant, under the global `mcp_require_approval_dangerous`.
     let gate_applies = approval_gated(dangerous, false, token_write_grant)
@@ -1648,39 +1669,58 @@ pub(crate) async fn governed_invoke(
                 audit.approval_id = Some(appr_id);
             }
             None => {
-                let appr = ctx
+                // A retry of a call that is still waiting reuses its card
+                // (same tool + args + workspace + requester) instead of
+                // stacking a duplicate per poll.
+                let pending = ctx
                     .mcp
                     .approvals()
-                    .create(NewApproval {
-                        workspace_id: ws.clone(),
-                        kind: "tool_call".into(),
-                        server_id: None,
-                        server_name: Some("otto".into()),
-                        tool: Some(tool.to_string()),
-                        title: format!("otto MCP server → {tool}"),
-                        detail: Some(match &repo_label {
-                            // The resolved repo by name, so the approver isn't
-                            // judging an opaque id.
-                            Some(label) => {
-                                format!("{} — repo {label}", dangerous_detail(tool, arguments))
-                            }
-                            None => dangerous_detail(tool, arguments),
-                        }),
-                        args_redacted_json: audit.args_redacted_json.clone(),
-                        args_hash: Some(args_hash.clone()),
-                        risk_label: Some("dangerous".into()),
-                        requested_by: Some(user.id.clone()),
-                        requested_by_kind: Some("mcp_server".into()),
-                        expires_at: Some(
-                            (chrono::Utc::now() + chrono::Duration::minutes(120)).to_rfc3339(),
-                        ),
-                    })
+                    .find_pending(ws.as_deref(), None, tool, &args_hash, &user.id)
                     .await
                     .map_err(ApiError)?;
-                match wait_for_decision(ctx, &appr.id, wait_seconds).await {
+                let appr_id = match pending {
+                    Some(id) => id,
+                    None => {
+                        ctx.mcp
+                            .approvals()
+                            .create(NewApproval {
+                                workspace_id: ws.clone(),
+                                kind: "tool_call".into(),
+                                server_id: None,
+                                server_name: Some("otto".into()),
+                                tool: Some(tool.to_string()),
+                                title: format!("otto MCP server → {tool}"),
+                                detail: Some(match &repo_label {
+                                    // The resolved repo by name, so the approver isn't
+                                    // judging an opaque id.
+                                    Some(label) => {
+                                        format!(
+                                            "{} — repo {label}",
+                                            dangerous_detail(tool, arguments)
+                                        )
+                                    }
+                                    None => dangerous_detail(tool, arguments),
+                                }),
+                                args_redacted_json: audit.args_redacted_json.clone(),
+                                args_hash: Some(args_hash.clone()),
+                                risk_label: Some("dangerous".into()),
+                                requested_by: Some(user.id.clone()),
+                                requested_by_kind: Some("mcp_server".into()),
+                                requested_by_session_id: audit.caller_session_id.clone(),
+                                expires_at: Some(
+                                    (chrono::Utc::now() + chrono::Duration::minutes(120))
+                                        .to_rfc3339(),
+                                ),
+                            })
+                            .await
+                            .map_err(ApiError)?
+                            .id
+                    }
+                };
+                match wait_for_decision(ctx, &appr_id, wait_seconds).await {
                     Some(true) => {
-                        let _ = ctx.mcp.approvals().consume(&appr.id).await;
-                        audit.approval_id = Some(appr.id.clone());
+                        let _ = ctx.mcp.approvals().consume(&appr_id).await;
+                        audit.approval_id = Some(appr_id.clone());
                     }
                     Some(false) => {
                         audit.decision = "denied".into();
@@ -1692,10 +1732,10 @@ pub(crate) async fn governed_invoke(
                     }
                     None => {
                         audit.decision = "pending_approval".into();
-                        audit.approval_id = Some(appr.id.clone());
+                        audit.approval_id = Some(appr_id.clone());
                         let _ = ctx.mcp.call_log().insert(audit).await;
                         return Ok(json!({"decision":"pending_approval","executed":false,
-                            "approval_id":appr.id,"reason":"awaiting human approval — resubmit after it is approved"}));
+                            "approval_id":appr_id,"reason":"awaiting human approval — resubmit after it is approved"}));
                     }
                 }
             }
@@ -1726,20 +1766,22 @@ pub(crate) async fn governed_invoke(
     let started = std::time::Instant::now();
     // An internal per-session MCP credential carries an immutable session
     // binding; for the room tools it OVERRIDES any client-supplied session_id
-    // so a bound token can only ever speak as its own session's agent.
-    let bound_session = auth.mcp_session_id.as_deref();
+    // so a bound token can only ever speak as its own session's agent. The
+    // room tools bind ANY agent-session credential (an Otto-issued API token
+    // carries only `managed_session_id`): without it such a session could
+    // omit `session_id` and post as the human, or read a room it is not a
+    // member of. The route then refuses a session that is not a room-member
+    // personal agent.
+    let bound_session = match short.as_str() {
+        "room_post" | "room_read" => crate::ui_bridge::calling_session(auth).map(String::as_str),
+        "assistant_remember" | "assistant_forget" | "assistant_recall" => {
+            auth.mcp_session_id.as_deref()
+        }
+        _ => None,
+    };
     let rebound;
     let arguments = match bound_session {
-        Some(sid)
-            if matches!(
-                short.as_str(),
-                "room_post"
-                    | "room_read"
-                    | "assistant_remember"
-                    | "assistant_forget"
-                    | "assistant_recall"
-            ) =>
-        {
+        Some(sid) => {
             let mut a = arguments.clone();
             if let Some(o) = a.as_object_mut() {
                 o.insert("session_id".into(), json!(sid));
@@ -1793,8 +1835,8 @@ pub(crate) async fn governed_invoke(
                 .get("workspace_id")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty());
-            let current = crate::agent_refs::caller_session_ws(ctx, auth).await;
-            crate::agent_refs::directory_json(ctx, auth, kind, ws, current.as_deref().or(ws)).await
+            crate::agent_refs::directory_json(ctx, auth, kind, ws, session_ws.as_deref().or(ws))
+                .await
         }
         None => execute_otto_tool(ctx, user, &short, arguments).await,
     };
@@ -4568,6 +4610,7 @@ async fn ask_human_approval(
             risk_label: None,
             requested_by: Some(user.id.clone()),
             requested_by_kind: Some("mcp_server".into()),
+            requested_by_session_id: None,
             expires_at: Some((chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339()),
         })
         .await?;

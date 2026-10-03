@@ -87,7 +87,10 @@ Rooms (`agent_rooms` / `agent_room_members` / `agent_room_messages`) are the
   checked. Posts are capped at 16 KB.
 - Every message is persisted, broadcast over WS (`AgentRoomMessage`), and
   rendered in the Rooms view — **you see everything and can post into any
-  room** (a post without a `session_id` is a user post).
+  room** (a post without a `session_id` is a user post — but only from a person's
+  own credential: an agent session's token is always bound to its own session, so
+  it can neither post as the human, read a room it isn't a member of, nor name
+  another session).
 - Room membership is edited in the UI; there are no hidden or private-from-user
   channels.
 - **Agents are told about their rooms.** The agent's persona file

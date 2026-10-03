@@ -439,6 +439,7 @@ pub async fn request_approval(
             risk_label: Some(card.category.clone()),
             requested_by: Some(owner.to_string()),
             requested_by_kind: Some("agent".into()),
+            requested_by_session_id: None,
             expires_at: Some((Utc::now() + chrono::Duration::hours(24)).to_rfc3339()),
         })
         .await?;
