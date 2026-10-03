@@ -904,6 +904,12 @@ async fn run(cfg: Config) -> Result<(), String> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
+                // Nothing live → no transcript is growing; skip the SQL
+                // candidate scan (the first sweep after a session goes live
+                // catches anything left unnamed).
+                if manager.live_count() == 0 {
+                    continue;
+                }
                 let n = manager.refresh_provider_titles().await;
                 if n > 0 {
                     tracing::info!("auto-named {n} session(s) from provider title");
