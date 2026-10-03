@@ -56,7 +56,15 @@ case "$1 $2" in
     printf 'hello world' > "$out"
     echo '{"ContentType": "text/plain", "ContentLength": 11, "ContentRange": "bytes 0-10/11", "ETag": "\"abc\""}'; exit 0;;
   "s3 cp")
+    if [ "$3" = "-" ]; then
+      # streamed upload (F9): the body arrives on stdin
+      cat > "$dir/upload.$AWS_PROFILE"; exit 0
+    fi
     printf 'hello world'; exit 0;;
+  "s3api list-multipart-uploads")
+    echo "{\"Uploads\": [{\"Key\": \"up/big.bin\", \"UploadId\": \"u-1\", \"Initiated\": \"$(date -u +%Y-%m-%dT%H:%M:%S+00:00)\"}]}"; exit 0;;
+  "s3api abort-multipart-upload")
+    exit 0;;
   "sqs list-queues")
     echo '{"QueueUrls": ["https://sqs.eu-west-1.amazonaws.com/123456789012/orders"]}'; exit 0;;
   "configure export-credentials")
@@ -1329,4 +1337,118 @@ async fn s3_text_preview_is_a_single_spawn() {
     };
     assert_eq!(mine("ARGS=s3api get-object"), 1);
     assert_eq!(mine("ARGS=s3api head-object"), 0, "no head for a texty key");
+}
+
+/// Raw-body PUT for the upload tests (`len` = the Content-Length header).
+async fn put_raw(
+    ctx: &TestCtx,
+    user: &User,
+    uri: &str,
+    body: Body,
+    len: Option<u64>,
+) -> (StatusCode, serde_json::Value) {
+    let app = otto_aws::api_router::<TestCtx>()
+        .layer(Extension(AuthUser(user.clone())))
+        .with_state(ctx.clone());
+    let mut req = Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "text/plain");
+    if let Some(len) = len {
+        req = req.header("content-length", len.to_string());
+    }
+    let resp = app.oneshot(req.body(body).unwrap()).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// F9/N2: a body with a Content-Length streams into `s3 cp -` (no spool file),
+/// and a body cut short kills the child before EOF and aborts the multipart
+/// upload it opened.
+#[tokio::test]
+async fn s3_upload_streams_and_aborts_an_interrupted_multipart_upload() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let mut ids = Vec::new();
+    for profile in ["upload-ok", "upload-cut"] {
+        let (_, a, _) = call(
+            &ctx,
+            &root,
+            "POST",
+            "/aws/accounts",
+            Some(profile_req(profile, profile)),
+        )
+        .await;
+        ids.push(a["id"].as_str().unwrap().to_string());
+    }
+    // Complete body → streamed, nothing spooled under <data_dir>/tmp.
+    let payload = "x".repeat(200_000);
+    let (st, r) = put_raw(
+        &ctx,
+        &root,
+        &format!(
+            "/aws/accounts/{}/s3/buckets/logs-prod/object?key=up/small.txt&overwrite=true",
+            ids[0]
+        ),
+        Body::from(payload.clone()),
+        Some(payload.len() as u64),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+    assert_eq!(r["size"], 200_000);
+    let got = std::fs::read(fake_aws_dir().join("upload.upload-ok")).unwrap();
+    assert_eq!(
+        got.len(),
+        200_000,
+        "the whole body reached the child's stdin"
+    );
+    let tmp = ctx.data_dir.join("tmp");
+    let spooled = std::fs::read_dir(&tmp).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(spooled, 0, "a streamed upload writes no temp copy");
+    assert!(calls_log().lines().any(|l| l.contains("PROFILE=upload-ok ")
+        && l.contains(
+            "ARGS=s3 cp - s3://logs-prod/up/small.txt --no-progress --expected-size 200000"
+        )));
+
+    // Body errors half-way (client disconnect) → 4xx, child killed, abort issued.
+    let chunks: Vec<std::result::Result<bytes::Bytes, std::io::Error>> = vec![
+        Ok(bytes::Bytes::from(vec![b'y'; 64 * 1024])),
+        Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "client went away",
+        )),
+    ];
+    let (st, r) = put_raw(
+        &ctx,
+        &root,
+        &format!(
+            "/aws/accounts/{}/s3/buckets/logs-prod/object?key=up/big.bin&overwrite=true",
+            ids[1]
+        ),
+        Body::from_stream(futures_util::stream::iter(chunks)),
+        Some(10 * 1024 * 1024),
+    )
+    .await;
+    assert!(st.is_client_error(), "{st} {r}");
+    // The abort runs detached after the child is reaped; give it a moment.
+    let mut aborted = false;
+    for _ in 0..100 {
+        if calls_log().lines().any(|l| {
+            l.contains("PROFILE=upload-cut ")
+                && l.contains("ARGS=s3api abort-multipart-upload --bucket logs-prod --key up/big.bin --upload-id u-1")
+        }) {
+            aborted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        aborted,
+        "interrupted upload was not aborted:\n{}",
+        calls_log()
+    );
 }

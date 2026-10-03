@@ -195,8 +195,12 @@ the `prefix` "directory marker" object is hidden) → per-object **head**,
   `Cache-Control: no-store`). The child process is killed the moment the
   client disconnects. Objects over **2 GiB** are refused (413) — use the CLI.
 - **Upload** (toolbar button or drag-and-drop onto the list; `aws_s3:Edit` +
-  `s3_write`): each file goes to `<current folder>/<file name>`, spooled to a
-  temp file (≤ 5 GiB) and sent with `aws s3 cp`. An existing key asks
+  `s3_write`): each file goes to `<current folder>/<file name>` (≤ 5 GiB). A
+  browser upload carries its size, so the body streams straight into
+  `aws s3 cp - s3://…` with no temp copy; if the upload is interrupted (tab
+  closed, network drop) the child is killed before the object completes and
+  the multipart upload it opened is aborted, so no orphaned parts are billed.
+  A body without a `Content-Length` is spooled to a temp file first. An existing key asks
   "Replace existing object?" first (the daemon answers 409 without
   `overwrite=true`); production accounts confirm the destination first.
 - **Presigned link** (⋯ menu, `aws_s3:View`): pick 1 h / 12 h / 24 h / 7 d;
@@ -389,11 +393,14 @@ writes an `audit_log` row: `aws.sqs.send`, `aws.sqs.delete_message`,
   no longer paid per call. A text-looking S3 key previews with one call (the
   ranged `get-object`), not head + get.
 - ⚠️ At most **10 `aws` children run at once** daemon-wide; further calls
-  queue (each child is a ~60–100 MB Python process). S3 download streams and
-  the `sso login` PTY are not counted. `GET /aws/status` → `cli` shows the live
-  `running` / `queued` / `spawned_total` counters, and
-  `RUST_LOG=otto_aws::cli=debug` logs every call's service, operation, wall
-  time and exit status.
+  queue (each child is a ~60–100 MB Python process). Background work
+  (permission probes, all-regions fan-outs) may hold at most **6** of them, so
+  what you just clicked always has a slot and never waits behind probes. A
+  call's timeout includes its queue wait. S3 download/upload streams and the
+  `sso login` PTY are not counted. `GET /aws/status` → `cli` shows the live
+  `running` / `queued` / `spawned_total` counters plus p50/p95 queue wait and
+  call time over the last 256 calls, and `RUST_LOG=otto_aws::cli=debug` logs
+  every call's service, operation, lane, queue wait, wall time and exit status.
 - ⚠️ The permission probe checks *read* actions only; Edit-level denials
   surface when you act.
 - ⚠️ The EKS/Athena list views fan out `describe` calls (first 20 items) —
