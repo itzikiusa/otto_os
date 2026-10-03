@@ -985,7 +985,15 @@ impl DesignService {
                         if !node_cache.contains_key(&vid) {
                             let ids = match self.store.get_version(&vid).await? {
                                 Some(v) => match self.blobs.get(&v.blob_sha256).await {
-                                    Ok(b) => extract::node_ids(&t.format, &b),
+                                    // D5: parsing a multi-MB target doc
+                                    // runs on the blocking pool.
+                                    Ok(b) => {
+                                        let fmt = t.format.clone();
+                                        cpu(b.len() >= OFF_RUNTIME_BYTES, move || {
+                                            extract::node_ids(&fmt, &b)
+                                        })
+                                        .await?
+                                    }
                                     Err(_) => None,
                                 },
                                 None => None,
