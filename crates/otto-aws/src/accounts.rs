@@ -406,6 +406,44 @@ fn assume_cache_evict(id: &Id) {
     map.remove(id);
 }
 
+/// Per-(kind, account) single-flight lock for the credential miss paths
+/// (`configure export-credentials`, `sts assume-role`). An all-regions
+/// fan-out starts up to six calls at once; on a cold or expired account each
+/// would otherwise run its own export (= its own SSO `GetRoleCredentials`).
+/// The first caller fetches, the rest wait and re-read the cache.
+fn cred_lock(kind: &'static str, id: &Id) -> Arc<tokio::sync::Mutex<()>> {
+    type Locks = Mutex<HashMap<(&'static str, Id), Arc<tokio::sync::Mutex<()>>>>;
+    static LOCKS: OnceLock<Locks> = OnceLock::new();
+    let mut map = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    // Bounded: drop locks nobody is holding or waiting on.
+    map.retain(|_, l| Arc::strong_count(l) > 1);
+    map.entry((kind, id.clone())).or_default().clone()
+}
+
+/// How often a successful call may write `last_used_at` per account. The
+/// Logs tail / Insights pollers run a call every 1–2 s; one SQLite write a
+/// minute is plenty for a "last used" column.
+const TOUCH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// `true` when `id`'s `last_used_at` is due for a write (and records it).
+pub(crate) fn touch_due(id: &Id) -> bool {
+    static LAST: OnceLock<Mutex<HashMap<Id, Instant>>> = OnceLock::new();
+    let mut map = LAST
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    match map.get(id) {
+        Some(at) if at.elapsed() < TOUCH_INTERVAL => false,
+        _ => {
+            map.insert(id.clone(), Instant::now());
+            true
+        }
+    }
+}
+
 /// `sts assume-role` JSON → temp creds.
 pub fn parse_assumed(v: &serde_json::Value) -> Option<StaticCreds> {
     let c = v.get("Credentials")?;
@@ -446,10 +484,33 @@ impl AwsService {
 
     /// The `aws` binary, or the contract's `not installed` error.
     pub fn bin(&self) -> Result<PathBuf> {
-        install::locate(&self.data_dir).ok_or_else(|| Error::Invalid(cli::NOT_INSTALLED_MSG.into()))
+        // `locate` stats every `$PATH` entry; every CLI call asks. Reuse the
+        // last answer for a minute (re-checked with one stat), so an install
+        // or uninstall is still picked up quickly. An explicit override is
+        // authoritative and cheap — always honoured as-is.
+        type BinCache = Mutex<Option<(PathBuf, PathBuf, Instant)>>;
+        static CACHE: OnceLock<BinCache> = OnceLock::new();
+        const BIN_TTL: Duration = Duration::from_secs(60);
+        let not_installed = || Error::Invalid(cli::NOT_INSTALLED_MSG.into());
+        if std::env::var_os(install::BIN_ENV).is_some() {
+            return install::locate(&self.data_dir).ok_or_else(not_installed);
+        }
+        let cache = CACHE.get_or_init(|| Mutex::new(None));
+        if let Some((dir, bin, at)) = cache.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            if dir == &self.data_dir && at.elapsed() < BIN_TTL && bin.is_file() {
+                return Ok(bin.clone());
+            }
+        }
+        let bin = install::locate(&self.data_dir).ok_or_else(not_installed)?;
+        *cache.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((self.data_dir.clone(), bin.clone(), Instant::now()));
+        Ok(bin)
     }
 
     fn emit(&self, account_id: &Id, deleted: bool) {
+        // A changed account (profile, region, keys…) must not be answered
+        // from a cached all-regions list built with the old settings.
+        crate::regions::invalidate(account_id);
         let _ = self.events.send(Event::AwsAccountUpdated {
             account_id: account_id.clone(),
             deleted,
@@ -865,7 +926,15 @@ impl AwsService {
         // Profile-mode accounts whose profile already carries `role_arn` let the
         // CLI chain roles itself; an explicit params.role_arn on top is the
         // "assume this from the base creds" case, handled here.
-        let creds = match assume_cache_get(&account.id) {
+        let _assume_guard;
+        let cached = match assume_cache_get(&account.id) {
+            Some(c) => Some(c),
+            None => {
+                _assume_guard = cred_lock("assume", &account.id).lock_owned().await;
+                assume_cache_get(&account.id)
+            }
+        };
+        let creds = match cached {
             Some(c) => c,
             None => {
                 let bin = self.bin()?;
@@ -911,6 +980,14 @@ impl AwsService {
         profile: &str,
         base: &[(String, String)],
     ) -> Result<Option<StaticCreds>> {
+        if let Some(c) = crate::creds::get(&account.id, profile) {
+            return Ok(Some(c));
+        }
+        if crate::creds::recently_failed(&account.id) {
+            return Ok(None);
+        }
+        // Single-flight: whoever got here first exports; the rest re-check.
+        let _guard = cred_lock("export", &account.id).lock_owned().await;
         if let Some(c) = crate::creds::get(&account.id, profile) {
             return Ok(Some(c));
         }
@@ -1002,7 +1079,7 @@ impl AwsService {
         let env = self.env_for(account, region).await?;
         let argv = with_json_output(args);
         let out = cli::run(&bin, &argv, &env, timeout, stdin).await;
-        if out.is_ok() {
+        if out.is_ok() && touch_due(&account.id) {
             self.repo.touch_used(&account.id).await;
         }
         out

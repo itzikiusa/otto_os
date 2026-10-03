@@ -495,6 +495,21 @@ pub async fn preview(
     validate_bucket(bucket)?;
     validate_key(key)?;
     let max = max_bytes.unwrap_or(PREVIEW_DEFAULT).clamp(1, PREVIEW_CAP);
+    // One spawn instead of two when the key already looks like text: the
+    // ranged get-object's own JSON carries ContentType + ContentRange, which
+    // is everything the head call would have told us. Unknown extensions
+    // still head first so a 2 GB binary is never range-read for nothing.
+    if is_texty(None, key) {
+        match ranged_get(svc, a, bucket, key, max, region).await {
+            Ok((bytes, meta)) => {
+                let size = meta.total_size();
+                return Ok(preview_from_bytes(&bytes, meta.content_type, size, key));
+            }
+            // An empty object cannot satisfy `bytes=0-N`: take the head path.
+            Err(Error::Invalid(m)) if is_invalid_range(&m) => {}
+            Err(e) => return Err(e),
+        }
+    }
     let head = head_object(svc, a, bucket, key, region).await?;
     if !is_texty(head.content_type.as_deref(), key) {
         return Ok(PreviewResp {
@@ -506,6 +521,61 @@ pub async fn preview(
             size: Some(head.size),
         });
     }
+    if head.size == 0 {
+        return Ok(preview_from_bytes(&[], head.content_type, Some(0), key));
+    }
+    let (bytes, _) = ranged_get(svc, a, bucket, key, max, region).await?;
+    Ok(preview_from_bytes(
+        &bytes,
+        head.content_type,
+        Some(head.size),
+        key,
+    ))
+}
+
+/// What a ranged `get-object` printed about the object.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RangedMeta {
+    pub content_type: Option<String>,
+    pub content_length: Option<u64>,
+    /// `bytes 0-99/12345`.
+    pub content_range: Option<String>,
+}
+
+impl RangedMeta {
+    pub fn from_json(v: &Value) -> Self {
+        Self {
+            content_type: s(v, "ContentType"),
+            content_length: v.get("ContentLength").and_then(|x| x.as_u64()),
+            content_range: s(v, "ContentRange"),
+        }
+    }
+
+    /// The whole object's size: the `/total` of ContentRange, else (no range
+    /// applied — the object fit) ContentLength.
+    pub fn total_size(&self) -> Option<u64> {
+        self.content_range
+            .as_deref()
+            .and_then(|r| r.rsplit('/').next())
+            .and_then(|t| t.trim().parse().ok())
+            .or(self.content_length)
+    }
+}
+
+fn is_invalid_range(msg: &str) -> bool {
+    msg.contains("InvalidRange") || msg.contains("not satisfiable")
+}
+
+/// Ranged `get-object` into a temp file under `<data_dir>/tmp` (the CLI's
+/// `get-object` insists on an outfile); returns the bytes + the call's JSON.
+async fn ranged_get(
+    svc: &AwsService,
+    a: &AwsAccountRow,
+    bucket: &str,
+    key: &str,
+    max: u64,
+    region: Option<&str>,
+) -> Result<(Vec<u8>, RangedMeta)> {
     // Scratch file at an Otto-owned location: <data_dir>/tmp/<fresh ULID>.
     // `bucket`/`key` only ever travel as argv to the CLI, never into the path.
     let tmp_dir = crate::paths::owned_dir(&svc.data_dir, "tmp")?;
@@ -529,15 +599,14 @@ pub async fn preview(
             ],
         )
         .await;
-    let bytes = std::fs::read(&tmp).unwrap_or_default();
-    let _ = std::fs::remove_file(&tmp);
-    res?;
-    Ok(preview_from_bytes(
-        &bytes,
-        head.content_type,
-        Some(head.size),
-        key,
-    ))
+    // Async fs: up to 1 MB must not be read on a runtime worker thread.
+    let bytes = tokio::fs::read(&tmp).await.unwrap_or_default();
+    let _ = tokio::fs::remove_file(&tmp).await;
+    let out = res?;
+    let meta = crate::cli::parse_stdout(&out.stdout)
+        .map(|v| RangedMeta::from_json(&v))
+        .unwrap_or_default();
+    Ok((bytes, meta))
 }
 
 /// A running `aws s3 cp s3://b/k -` whose stdout is streamed to the client;
@@ -557,6 +626,22 @@ pub async fn download(
 ) -> Result<DownloadStream> {
     validate_bucket(bucket)?;
     validate_key(key)?;
+    // The `cp` starts right away and the head runs alongside it (two Python
+    // start-ups overlap instead of queueing). Until the head clears the caps
+    // the child only fills its pipe buffer; an over-cap object or a failed
+    // head drops `child`, and `kill_on_drop` ends it.
+    let (bin, env) = svc.bin_and_env(a, region).await?;
+    let uri = format!("s3://{bucket}/{key}");
+    let mut child = tokio::process::Command::new(&bin)
+        .args(["s3", "cp", &uri, "-", "--no-progress"])
+        .env_remove("AWS_PROFILE") // same rule as `cli::run_raw`
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| Error::Internal(format!("spawn aws s3 cp: {e}")))?;
     let head = head_object(svc, a, bucket, key, region).await?;
     if inline && head.size > INLINE_PREVIEW_CAP {
         return Err(Error::PayloadTooLarge(format!(
@@ -571,18 +656,6 @@ pub async fn download(
             head.size
         )));
     }
-    let (bin, env) = svc.bin_and_env(a, region).await?;
-    let uri = format!("s3://{bucket}/{key}");
-    let mut child = tokio::process::Command::new(&bin)
-        .args(["s3", "cp", &uri, "-", "--no-progress"])
-        .env_remove("AWS_PROFILE") // same rule as `cli::run_raw`
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| Error::Internal(format!("spawn aws s3 cp: {e}")))?;
     let stdout = child
         .stdout
         .take()
@@ -726,6 +799,20 @@ pub async fn presign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranged_meta_total_size() {
+        let m = RangedMeta::from_json(&serde_json::json!({
+            "ContentType": "text/plain", "ContentLength": 100, "ContentRange": "bytes 0-99/12345"
+        }));
+        assert_eq!(m.total_size(), Some(12345));
+        assert_eq!(m.content_type.as_deref(), Some("text/plain"));
+        let small = RangedMeta::from_json(&serde_json::json!({"ContentLength": 11}));
+        assert_eq!(small.total_size(), Some(11));
+        assert_eq!(RangedMeta::default().total_size(), None);
+        assert!(is_invalid_range("An error occurred (InvalidRange) when calling the GetObject operation: The requested range is not satisfiable"));
+        assert!(!is_invalid_range("NoSuchKey"));
+    }
 
     #[test]
     fn preview_kind_and_inline_types() {

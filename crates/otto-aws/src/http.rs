@@ -235,9 +235,9 @@ fn tag<T>(per_region: Vec<(String, Vec<T>)>) -> Vec<Regional<T>> {
 
 /// Session info is computed for profile accounts only (keys accounts have no
 /// sign-in to expire).
-fn attach_session(account: &mut AwsAccount) {
+fn attach_session(index: &crate::creds::SsoIndex, account: &mut AwsAccount) {
     if account.auth_mode == crate::accounts::AuthMode::Profile {
-        account.session = crate::creds::session_info(&account.id, account.profile.as_deref());
+        account.session = index.session_info(&account.id, account.profile.as_deref());
     }
 }
 
@@ -356,9 +356,11 @@ async fn list_accounts<S: AwsCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<Vec<AwsAccount>>> {
     let mut visible = Vec::new();
+    // One off-worker read of the ini files + SSO cache for the whole list.
+    let index = crate::creds::SsoIndex::load_async().await;
     for mut account in AwsService::from_ctx(&ctx).list().await? {
         if crate::access::allowed(&ctx.pool(), &user, &account.id, "discover", None).await? {
-            attach_session(&mut account);
+            attach_session(&index, &mut account);
             if !crate::access::can_configure(&ctx.pool(), &user, &account.id).await? {
                 account.redact_configuration();
             }
@@ -386,7 +388,7 @@ async fn get_account<S: AwsCtx>(
 ) -> ApiResult<Json<AwsAccount>> {
     crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
     let mut account = AwsService::from_ctx(&ctx).get(&id).await?;
-    attach_session(&mut account);
+    attach_session(&crate::creds::SsoIndex::load_async().await, &mut account);
     if !crate::access::can_configure(&ctx.pool(), &user, &id).await? {
         account.redact_configuration();
     }
@@ -957,20 +959,23 @@ async fn ec2_instances<S: AwsCtx>(
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     if regions::is_all(q.region.as_deref()) {
-        let list = regions::enabled_regions(&svc, &a).await?;
-        let (ok, region_errors) = regions::fan_out(list, |region| {
-            let (svc, a, mut q) = (svc.clone(), a.clone(), q.clone());
-            q.region = Some(region);
-            async move { ec2::list_instances(&svc, &a, &q).await.map(|r| r.instances) }
-        })
-        .await?;
-        return Ok(Json(
+        let key = regions::all_key(&id, "ec2", &q);
+        let v = regions::cached_all(key, || async {
+            let list = regions::enabled_regions(&svc, &a).await?;
+            let (ok, region_errors) = regions::fan_out(list, |region| {
+                let (svc, a, mut q) = (svc.clone(), a.clone(), q.clone());
+                q.region = Some(region);
+                async move { ec2::list_instances(&svc, &a, &q).await.map(|r| r.instances) }
+            })
+            .await?;
             serde_json::to_value(AllRegions {
                 instances: tag(ok),
                 region_errors,
             })
-            .map_err(Error::from)?,
-        ));
+            .map_err(Error::from)
+        })
+        .await?;
+        return Ok(Json(v));
     }
     Ok(Json(
         serde_json::to_value(ec2::list_instances(&svc, &a, &q).await?).map_err(Error::from)?,
@@ -1021,6 +1026,8 @@ async fn ec2_power<S: AwsCtx>(
     let a = svc.get_row(id).await?;
     let confirm = body.and_then(|Json(b)| b.confirm_id);
     let resp = ec2::power(&svc, &a, instance_id, action, confirm.as_deref(), region).await?;
+    // The next all-regions refresh must show the new state, not a cached one.
+    regions::invalidate(id);
     audit(
         ctx,
         user,
@@ -1223,23 +1230,26 @@ async fn eks_clusters<S: AwsCtx>(
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     if regions::is_all(q.region.as_deref()) {
-        let list = regions::enabled_regions(&svc, &a).await?;
-        let (ok, region_errors) = regions::fan_out(list, |region| {
-            let (svc, a) = (svc.clone(), a.clone());
-            async move {
-                eks::list_clusters(&svc, &a, Some(&region))
-                    .await
-                    .map(|r| r.clusters)
-            }
-        })
-        .await?;
-        return Ok(Json(
+        let key = regions::all_key(&id, "eks", &q);
+        let v = regions::cached_all(key, || async {
+            let list = regions::enabled_regions(&svc, &a).await?;
+            let (ok, region_errors) = regions::fan_out(list, |region| {
+                let (svc, a) = (svc.clone(), a.clone());
+                async move {
+                    eks::list_clusters(&svc, &a, Some(&region))
+                        .await
+                        .map(|r| r.clusters)
+                }
+            })
+            .await?;
             serde_json::to_value(AllRegionsClusters {
                 clusters: tag(ok),
                 region_errors,
             })
-            .map_err(Error::from)?,
-        ));
+            .map_err(Error::from)
+        })
+        .await?;
+        return Ok(Json(v));
     }
     Ok(Json(
         serde_json::to_value(eks::list_clusters(&svc, &a, q.region.as_deref()).await?)
@@ -1318,20 +1328,23 @@ async fn rds_instances<S: AwsCtx>(
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     if regions::is_all(q.region.as_deref()) {
-        let list = regions::enabled_regions(&svc, &a).await?;
-        let (ok, region_errors) = regions::fan_out(list, |region| {
-            let (svc, a, mut q) = (svc.clone(), a.clone(), q.clone());
-            q.region = Some(region);
-            async move { rds::list_instances(&svc, &a, &q).await.map(|r| r.instances) }
-        })
-        .await?;
-        return Ok(Json(
+        let key = regions::all_key(&id, "rds", &q);
+        let v = regions::cached_all(key, || async {
+            let list = regions::enabled_regions(&svc, &a).await?;
+            let (ok, region_errors) = regions::fan_out(list, |region| {
+                let (svc, a, mut q) = (svc.clone(), a.clone(), q.clone());
+                q.region = Some(region);
+                async move { rds::list_instances(&svc, &a, &q).await.map(|r| r.instances) }
+            })
+            .await?;
             serde_json::to_value(AllRegions {
                 instances: tag(ok),
                 region_errors,
             })
-            .map_err(Error::from)?,
-        ));
+            .map_err(Error::from)
+        })
+        .await?;
+        return Ok(Json(v));
     }
     Ok(Json(
         serde_json::to_value(rds::list_instances(&svc, &a, &q).await?).map_err(Error::from)?,
