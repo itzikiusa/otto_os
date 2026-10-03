@@ -79,6 +79,37 @@ impl FindingEventsRepo {
         rows.iter().map(Self::row).collect()
     }
 
+    /// Timelines for many findings in one `IN (…)` query per 500 ids (the
+    /// proof-pack assembly used to issue one query per finding), grouped by
+    /// finding id, each oldest first.
+    pub async fn list_for_findings(
+        &self,
+        finding_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<FindingEvent>>> {
+        let mut out: std::collections::HashMap<String, Vec<FindingEvent>> =
+            std::collections::HashMap::new();
+        for chunk in finding_ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT * FROM finding_events WHERE finding_id IN ({marks}) \
+                 ORDER BY finding_id, created_at, id"
+            );
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
+            for id in chunk {
+                q = q.bind(id);
+            }
+            let rows = q
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list finding events (batch)"))?;
+            for r in &rows {
+                let e = Self::row(r)?;
+                out.entry(e.finding_id.clone()).or_default().push(e);
+            }
+        }
+        Ok(out)
+    }
+
     fn row(r: &sqlx::sqlite::SqliteRow) -> Result<FindingEvent> {
         let detail_raw: String = r
             .try_get("detail_json")
@@ -150,5 +181,28 @@ mod tests {
         assert_eq!(events[1].to_status.as_deref(), Some("accepted"));
         // a different finding has no events
         assert!(repo.list_for_finding("other").await.unwrap().is_empty());
+
+        // Batched: same timeline, grouped, one query.
+        repo.append(
+            fid_b(),
+            "ws1",
+            "created",
+            "u1",
+            None,
+            None,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let ids = vec![fid.to_string(), fid_b().to_string(), "none".to_string()];
+        let by = repo.list_for_findings(&ids).await.unwrap();
+        assert_eq!(by[fid].len(), 2);
+        assert_eq!(by[fid][0].kind, "created");
+        assert_eq!(by[fid_b()].len(), 1);
+        assert!(!by.contains_key("none"));
+    }
+
+    fn fid_b() -> &'static str {
+        "f2"
     }
 }
