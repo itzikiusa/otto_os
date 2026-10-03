@@ -222,3 +222,10 @@ pub mod workflow_progress;
 
 pub mod network_profiles;
 pub mod pool;
+
+// --- Workbench (scratch files with full history) ------------------------------
+pub mod workbench;
+pub use workbench::{
+    NewWorkbenchDoc, WorkbenchAsset, WorkbenchDiff, WorkbenchDoc, WorkbenchDocFull, WorkbenchPatch,
+    WorkbenchRepo, WorkbenchRevision, WorkbenchRevisionDetail,
+};
