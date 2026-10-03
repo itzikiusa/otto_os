@@ -13,7 +13,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::classify::{PodSnap, Snapshot};
-use super::queries;
+use super::queries::{self, Level, WSpan};
+use super::schema::sql_str;
 use crate::MonitorSink;
 
 /// Memory ≥ this % of the limit is an outlier.
@@ -177,6 +178,13 @@ fn seed_from_snapshot(snap: &Snapshot, ns: Option<&str>) -> BTreeMap<String, Wor
     }
     for s in m.values_mut() {
         s.pods_detail.sort_by(|a, b| a.pod.cmp(&b.pod));
+        // Versions straight from the snapshot (what the probes reported,
+        // carried across cycles) — no ClickHouse scan of every series.
+        for p in &s.pods_detail {
+            if !p.version.is_empty() && !s.versions.contains(&p.version) {
+                s.versions.push(p.version.clone());
+            }
+        }
     }
     m
 }
@@ -193,47 +201,58 @@ pub async fn workload_stats(
     let secs = window.num_seconds();
     let mut stats = seed_from_snapshot(snap, ns);
 
-    // Every query below is independent — issue them together. Sequential
-    // awaits made the workloads tab wait ~9× one ClickHouse round trip.
+    // Every query below is independent — issue them together. Rates,
+    // latency and the memory baseline come from the wide workload tiers
+    // (one row per workload per bucket); window totals are stitched from
+    // closed coarse buckets + a fine open edge, and closed parts (the 24 h
+    // baseline, the memory slice) are served from the closed-span cache.
+    let now = queries::now_secs();
+    let filter = format!(
+        " AND cluster_id = {}{}",
+        sql_str(cluster_id),
+        ns.filter(|n| !n.is_empty())
+            .map(|n| format!(" AND namespace = {}", sql_str(n)))
+            .unwrap_or_default()
+    );
+    let parts_now = WSpan::plan_total(now, secs, 0);
+    let parts_then = WSpan::plan_total(now, secs + 86_400, secs);
+    let parts_mem = WSpan::plan_total(now, secs + LATEST_SECS, (secs - LATEST_SECS).max(1));
+    let (secs_now, secs_then) = (
+        queries::parts_secs(&parts_now, now),
+        queries::parts_secs(&parts_then, now),
+    );
     let q_mem_now = queries::latest_memory_sql(&cids, ns, LATEST_SECS);
-    let q_mem_then =
-        queries::memory_between_sql(&cids, ns, secs + LATEST_SECS, (secs - LATEST_SECS).max(1));
     let q_restarts = queries::restart_counts_sql(&cids, ns, window);
-    let q_rates_now = queries::request_rates_sql(&cids, ns, secs, 0);
-    let q_rates_then = queries::request_rates_sql(&cids, ns, secs + 86_400, secs);
-    let q_buckets_now = queries::latency_buckets_sql(&cids, ns, secs, 0);
-    let q_buckets_then = queries::latency_buckets_sql(&cids, ns, secs + 86_400, secs);
-    let q_versions = queries::versions_sql(&cids, ns, LATEST_SECS);
-    let (mem_now, mem_then, restarts, rates_now, rates_then, buckets_now, buckets_then, versions) = tokio::join!(
+    let wl = Level::Workload;
+    let (mem_now, restarts, now_t, then_t, mem_then) = tokio::join!(
         sink.query_rows(&q_mem_now),
+        sink.query_rows(&q_restarts),
+        queries::wide_totals(sink, &parts_now, now, wl, wl, &filter),
+        async {
+            queries::wide_totals(sink, &parts_then, now, wl, wl, &filter)
+                .await
+                .unwrap_or_default()
+        },
         async {
             if secs > LATEST_SECS {
-                sink.query_rows(&q_mem_then).await.unwrap_or_default()
+                queries::wide_totals(sink, &parts_mem, now, wl, wl, &filter)
+                    .await
+                    .unwrap_or_default()
             } else {
-                Vec::new()
+                Default::default()
             }
         },
-        sink.query_rows(&q_restarts),
-        sink.query_rows(&q_rates_now),
-        async { sink.query_rows(&q_rates_then).await.unwrap_or_default() },
-        sink.query_rows(&q_buckets_now),
-        async { sink.query_rows(&q_buckets_then).await.unwrap_or_default() },
-        async { sink.query_rows(&q_versions).await.unwrap_or_default() },
     );
-    let (mem_now, restarts, rates_now, buckets_now) =
-        (mem_now?, restarts?, rates_now?, buckets_now?);
+    let (mem_now, restarts, now_t) = (mem_now?, restarts?, now_t?);
+    let wkey = |k: &queries::RowKey| key(&k.1, &k.2);
 
     // Memory now + at the start of the window (trend).
     // Baseline for the trend: AVERAGE per pod at the start of the window (a
     // sum would explode when the first cycle scraped 2 of 15 pods).
-    let mut mem_then_by_wl: BTreeMap<String, (f64, u32)> = BTreeMap::new();
-    for r in mem_then {
-        let e = mem_then_by_wl
-            .entry(key(st(&r, "namespace"), st(&r, "workload")))
-            .or_default();
-        e.0 += f(&r, "mem");
-        e.1 += 1;
-    }
+    let mem_then_by_wl: BTreeMap<String, f64> = mem_then
+        .iter()
+        .map(|(k, t)| (wkey(k), t.mem_avg_per_pod()))
+        .collect();
     for r in mem_now {
         let k = key(st(&r, "namespace"), st(&r, "workload"));
         if let Some(s) = stats.get_mut(&k) {
@@ -269,10 +288,43 @@ pub async fn workload_stats(
                 s.mem_pct = 100.0 * s.mem_bytes / s.mem_limit;
             }
         }
-        if let Some((sum, n)) = mem_then_by_wl.get(k) {
-            let then_avg = if *n > 0 { sum / f64::from(*n) } else { 0.0 };
-            if then_avg > 0.0 && s.mem_avg > 0.0 {
+        if let Some(then_avg) = mem_then_by_wl.get(k) {
+            if *then_avg > 0.0 && s.mem_avg > 0.0 {
                 s.mem_trend_pct = Some(100.0 * (s.mem_avg - then_avg) / then_avg);
+            }
+        }
+    }
+
+    // Request rates + latency now vs the 24 h baseline (the 24 h preceding
+    // the window). Latency: p95 from the histogram, else the sum/count mean;
+    // a baseline only counts when it is the same kind.
+    for (k, t) in &now_t {
+        if let Some(s) = stats.get_mut(&wkey(k)) {
+            s.rps = t.req / secs_now as f64;
+            s.err_pct = if t.req > 0.0 {
+                100.0 * t.err / t.req
+            } else {
+                0.0
+            };
+            let (kind, ms) = t.latency();
+            if !kind.is_empty() {
+                s.latency_kind = kind.into();
+                s.latency_ms = ms;
+            }
+        }
+    }
+    for (k, t) in &then_t {
+        if let Some(s) = stats.get_mut(&wkey(k)) {
+            s.rps_baseline = t.req / secs_then as f64;
+            s.err_pct_baseline = if t.req > 0.0 {
+                100.0 * t.err / t.req
+            } else {
+                0.0
+            };
+            let (kind, ms) = t.latency();
+            if !kind.is_empty() && (s.latency_kind.is_empty() || s.latency_kind == kind) {
+                s.latency_kind = kind.into();
+                s.latency_baseline_ms = ms;
             }
         }
     }
@@ -303,100 +355,6 @@ pub async fn workload_stats(
                     }
                 }
                 _ => {}
-            }
-        }
-    }
-
-    // Request rates now vs 24 h baseline (the 24 h preceding the window).
-    for r in rates_now {
-        if let Some(s) = stats.get_mut(&key(st(&r, "namespace"), st(&r, "workload"))) {
-            s.rps = f(&r, "rps");
-            s.err_pct = if s.rps > 0.0 {
-                100.0 * f(&r, "err_rps") / s.rps
-            } else {
-                0.0
-            };
-        }
-    }
-    for r in rates_then {
-        if let Some(s) = stats.get_mut(&key(st(&r, "namespace"), st(&r, "workload"))) {
-            let rps = f(&r, "rps");
-            s.rps_baseline = rps;
-            s.err_pct_baseline = if rps > 0.0 {
-                100.0 * f(&r, "err_rps") / rps
-            } else {
-                0.0
-            };
-        }
-    }
-
-    // Latency: p95 from buckets, else avg from sum/count.
-    let mut had_p95 = false;
-    for (rows, baseline) in [(buckets_now, false), (buckets_then, true)] {
-        let mut by_wl: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
-        for r in rows {
-            by_wl
-                .entry(key(st(&r, "namespace"), st(&r, "workload")))
-                .or_default()
-                .push((st(&r, "le").to_string(), f(&r, "delta")));
-        }
-        for (k, buckets) in by_wl {
-            if let Some(p95) = queries::p95_from_buckets(&buckets) {
-                if let Some(s) = stats.get_mut(&k) {
-                    s.latency_kind = "p95".into();
-                    if baseline {
-                        s.latency_baseline_ms = p95;
-                    } else {
-                        s.latency_ms = p95;
-                        had_p95 = true;
-                    }
-                }
-            }
-        }
-    }
-    if !had_p95 {
-        for (rows, baseline) in [
-            (
-                sink.query_rows(&queries::latency_avg_sql(&cids, ns, secs, 0))
-                    .await
-                    .unwrap_or_default(),
-                false,
-            ),
-            (
-                sink.query_rows(&queries::latency_avg_sql(&cids, ns, secs + 86_400, secs))
-                    .await
-                    .unwrap_or_default(),
-                true,
-            ),
-        ] {
-            for r in rows {
-                let k = key(st(&r, "namespace"), st(&r, "workload"));
-                let v = f(&r, "avg_ms");
-                if v <= 0.0 {
-                    continue;
-                }
-                if let Some(s) = stats.get_mut(&k) {
-                    s.latency_kind = "avg".into();
-                    if baseline {
-                        s.latency_baseline_ms = v;
-                    } else {
-                        s.latency_ms = v;
-                    }
-                }
-            }
-        }
-    }
-
-    // Versions.
-    for r in versions {
-        let k = key(st(&r, "namespace"), st(&r, "workload"));
-        let v = st(&r, "version").to_string();
-        if v.is_empty() {
-            continue;
-        }
-        if let Some(s) = stats.get_mut(&k) {
-            if !s.versions.contains(&v) {
-                s.versions.push(v.clone());
             }
         }
     }
@@ -730,6 +688,14 @@ mod tests {
         let s = &m["ns/a"];
         assert_eq!((s.pods, s.ready, s.crashloop), (2, 1, 1));
         assert_eq!(s.mem_limit, 200.0);
+        assert!(s.versions.is_empty(), "no version reported");
         assert!(seed_from_snapshot(&snap, Some("other")).is_empty());
+        for (k, v) in [("ns/a-1", "1.0"), ("ns/a-2", "1.1")] {
+            snap.get_mut(k).unwrap().version = v.into();
+        }
+        assert_eq!(
+            seed_from_snapshot(&snap, None)["ns/a"].versions,
+            vec!["1.0", "1.1"]
+        );
     }
 }

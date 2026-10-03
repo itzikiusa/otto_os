@@ -11,6 +11,7 @@
 //! | [`gateway`] | the per-cluster long-lived `kubectl proxy` the proxy transport uses |
 //! | [`classify`] | pod snapshots, diff, restart / churn classification |
 //! | [`collector`] | one cycle + the per-cluster loop |
+//! | [`wide`] | the one-row-per-pod-per-cycle wide row + reset-aware counter increments |
 //! | [`queries`] | ClickHouse SQL builders + the rollup-tier planner ([`queries::Span`]) |
 //! | [`cache`] | dashboard read cache + single-flight |
 //! | [`health`] | the compact `k8s_health` digest |
@@ -28,3 +29,4 @@ pub mod probes;
 pub mod queries;
 pub mod schema;
 pub mod scrape;
+pub mod wide;

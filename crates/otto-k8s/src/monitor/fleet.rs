@@ -33,9 +33,9 @@ use serde_json::{json, Value};
 use super::cache;
 use super::health::RestartCounts;
 use super::queries::{
-    self, bucket, code_of, ident_ok, in_list, is_counter, now_secs, p95_from_buckets,
-    series_deltas, Span, B_UTC, LATENCY_BUCKETS, LATENCY_COUNTS, LATENCY_SUMS, MEMORY_GAUGES,
-    REQUEST_COUNTERS,
+    self, bucket, code_of, ident_ok, in_list, is_counter, now_secs, parts_secs, series_deltas,
+    Level, Span, WSpan, WideMetric, B_UTC, LATENCY_BUCKETS, LATENCY_COUNTS, LATENCY_SUMS,
+    MEMORY_GAUGES, REQUEST_COUNTERS,
 };
 use super::schema::{self, sql_str};
 
@@ -469,6 +469,33 @@ pub fn series_in(
     }
 }
 
+/// The chart the fleet page actually runs: restarts from events, every
+/// other metric from the wide tiers — the workload level unless a line or
+/// the filter is per pod.
+pub fn wide_series_sql(
+    f: &FleetFilter,
+    window: Duration,
+    metric: SeriesMetric,
+    by: SeriesBy,
+    step_secs: u32,
+) -> String {
+    let step = step_secs.max(60);
+    let wm = match metric {
+        SeriesMetric::Restarts => return series_sql(f, window, metric, by, step),
+        SeriesMetric::Mem => WideMetric::Mem,
+        SeriesMetric::Rps => WideMetric::Rps,
+        SeriesMetric::Err => WideMetric::Err,
+        SeriesMetric::Latency => WideMetric::Latency,
+    };
+    let src = if by == SeriesBy::Pod || f.pod.is_some() {
+        Level::Pod
+    } else {
+        Level::Workload
+    };
+    let span = WSpan::plan(now_secs(), window.num_seconds(), 0, Some(step));
+    queries::wide_series_in(&span, src, by.expr(), &f.sql(), wm, step)
+}
+
 /// Allow-listed event sort keys → column.
 fn event_sort_col(key: &str) -> Option<&'static str> {
     Some(match key {
@@ -732,6 +759,8 @@ struct Row {
     workload: String,
     pod: String,
     pods: BTreeSet<String>,
+    /// Pods per the wide tiers (max concurrent for a workload row).
+    pods_n: f64,
     restarts: RestartCounts,
     churn: u32,
     mem_last: f64,
@@ -801,21 +830,29 @@ async fn table_body<S: K8sCtx>(
     let desc = q.dir.as_deref().unwrap_or("desc") != "asc";
     let sink = sink_of(&ctx)?;
 
-    let (q_mem, q_rst, q_rates, q_buckets, q_avgs) = (
-        memory_sql(&f, window, g),
-        restarts_sql(&f, window, g),
-        rates_sql(&f, window, g),
-        latency_buckets_sql(&f, window, g),
-        latency_avg_sql(&f, window, g),
-    );
-    let (mem, rst, rates, buckets, avgs) = tokio::join!(
-        sink.query_rows(&q_mem),
+    // Memory, rates and latency: ONE wide read (workload tier, or the pod
+    // tier for per-pod rows / a pod filter), stitched from closed coarse
+    // buckets + a fine open edge; restarts / churn from events.
+    let now = now_secs();
+    let src = if g == Group::Pod || f.pod.is_some() {
+        Level::Pod
+    } else {
+        Level::Workload
+    };
+    let group = if g == Group::Pod {
+        Level::Pod
+    } else {
+        Level::Workload
+    };
+    let parts = WSpan::plan_total(now, window.num_seconds(), 0);
+    let secs = parts_secs(&parts, now) as f64;
+    let q_rst = restarts_sql(&f, window, g);
+    let fs = f.sql();
+    let (totals, rst) = tokio::join!(
+        queries::wide_totals(sink.as_ref(), &parts, now, src, group, &fs),
         sink.query_rows(&q_rst),
-        sink.query_rows(&q_rates),
-        sink.query_rows(&q_buckets),
-        sink.query_rows(&q_avgs),
     );
-    let (mem, rst, rates, buckets, avgs) = (mem?, rst?, rates?, buckets?, avgs?);
+    let (totals, rst) = (totals?, rst?);
 
     let mut rows: BTreeMap<RowKey, Row> = BTreeMap::new();
     let ensure = |rows: &mut BTreeMap<RowKey, Row>, k: RowKey| {
@@ -828,29 +865,24 @@ async fn table_body<S: K8sCtx>(
         });
     };
 
-    // Memory: best gauge per pod (lowest rank), then summed into the row.
-    let mut best: HashMap<(RowKey, String), (i64, f64, f64, f64)> = HashMap::new();
-    for r in &mem {
-        let k = row_key(r, g);
-        let pod = str_of(r, "pod").to_string();
-        let rank = f64_of(r, "rank") as i64;
-        let e = best.entry((k, pod)).or_insert((i64::MAX, 0.0, 0.0, 0.0));
-        if rank < e.0 {
-            *e = (
-                rank,
-                f64_of(r, "mem_last"),
-                f64_of(r, "mem_avg"),
-                f64_of(r, "mem_max"),
-            );
-        }
-    }
-    for ((k, pod), (_, last, avg, max)) in best {
+    for (k, t) in &totals {
         ensure(&mut rows, k.clone());
-        let row = rows.get_mut(&k).expect("ensured");
-        row.pods.insert(pod);
-        row.mem_last += last;
-        row.mem_avg += avg;
-        row.mem_max = row.mem_max.max(max);
+        let row = rows.get_mut(k).expect("ensured");
+        row.pods_n = t.pods;
+        row.mem_last = t.mem_last;
+        // A workload row's mean is the mean workload TOTAL per cycle (a sum
+        // of per-pod means would double-count pods replaced mid-window).
+        row.mem_avg = match src {
+            Level::Workload if t.n > 0.0 => t.mem_sum / t.n,
+            Level::Workload => 0.0,
+            Level::Pod => t.mem_avg_per_pod(),
+        };
+        row.mem_max = t.mem_max;
+        row.rps = t.req / secs;
+        row.err_rps = t.err / secs;
+        let (kind, ms) = t.latency();
+        row.latency_kind = kind;
+        row.latency_ms = ms;
     }
     for r in &rst {
         let k = row_key(r, g);
@@ -867,39 +899,8 @@ async fn table_body<S: K8sCtx>(
             _ => {}
         }
     }
-    for r in &rates {
-        let k = row_key(r, g);
-        ensure(&mut rows, k.clone());
-        let row = rows.get_mut(&k).expect("ensured");
-        row.rps += f64_of(r, "rps");
-        row.err_rps += f64_of(r, "err_rps");
-    }
-    let mut by_row_buckets: HashMap<RowKey, Vec<(String, f64)>> = HashMap::new();
-    for r in &buckets {
-        by_row_buckets
-            .entry(row_key(r, g))
-            .or_default()
-            .push((str_of(r, "le").to_string(), f64_of(r, "delta")));
-    }
-    for (k, b) in by_row_buckets {
-        if let Some(p95) = p95_from_buckets(&b) {
-            ensure(&mut rows, k.clone());
-            let row = rows.get_mut(&k).expect("ensured");
-            row.latency_kind = "p95";
-            row.latency_ms = p95;
-        }
-    }
-    for r in &avgs {
-        let k = row_key(r, g);
-        ensure(&mut rows, k.clone());
-        let row = rows.get_mut(&k).expect("ensured");
-        if row.latency_kind.is_empty() && f64_of(r, "avg_ms") > 0.0 {
-            row.latency_kind = "avg";
-            row.latency_ms = f64_of(r, "avg_ms");
-        }
-    }
-    // Row 'pods' for the workload grouping counts distinct pods seen in any
-    // source; in pod grouping it is the pod itself.
+    // Row 'pods': in pod grouping the pod itself; for a workload the wide
+    // tier's max concurrent pods, or the distinct pods with events if more.
     for row in rows.values_mut() {
         if g == Group::Pod {
             row.pods.clear();
@@ -907,12 +908,13 @@ async fn table_body<S: K8sCtx>(
         }
         row.pods.remove("");
     }
+    let pods_of = |r: &Row| -> usize { (r.pods_n as usize).max(r.pods.len()) };
 
     let mut list: Vec<Row> = rows.into_values().collect();
     let total = list.len();
     let num = |r: &Row| -> f64 {
         match sort.as_str() {
-            "pods" => r.pods.len() as f64,
+            "pods" => pods_of(r) as f64,
             "restarts" => f64::from(r.restarts.total()),
             "oom" => f64::from(r.restarts.oom),
             "crash" => f64::from(r.restarts.crash),
@@ -981,7 +983,7 @@ async fn table_body<S: K8sCtx>(
             json!({
                 "cluster": cluster_json(&names, &r.cluster_id),
                 "cluster_id": r.cluster_id, "namespace": r.namespace, "workload": r.workload, "pod": r.pod,
-                "pods": r.pods.len(),
+                "pods": if g == Group::Pod { 1 } else { pods_of(r) },
                 "restarts": r.restarts, "churn": r.churn,
                 "mem_last": r.mem_last, "mem_avg": r.mem_avg, "mem_max": r.mem_max,
                 "rps": r.rps, "err_pct": if r.rps > 0.0 { 100.0 * r.err_rps / r.rps } else { 0.0 },
@@ -1017,14 +1019,16 @@ async fn series_body<S: K8sCtx>(
     let by = SeriesBy::parse(q.by.as_deref())?;
     // ~60 buckets by default; never finer than a minute (collector cadence),
     // and aligned to a rollup grain so the chart reads a rollup, not raw.
-    let step = queries::align_step(
+    // Whole hours from a day up, so a 24 h chart reads the hour tier.
+    let step = queries::wide_step(
         q.step
             .unwrap_or_else(|| (window.num_seconds() / 60).clamp(60, 3600) as u32)
             .clamp(60, 86_400),
+        window.num_seconds(),
     );
     let sink = sink_of(&ctx)?;
     let rows = sink
-        .query_rows(&series_sql(&f, window, metric, by, step))
+        .query_rows(&wide_series_sql(&f, window, metric, by, step))
         .await?;
     let mut series: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for r in &rows {

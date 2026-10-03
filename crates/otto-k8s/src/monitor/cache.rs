@@ -10,6 +10,12 @@
 //!   (fleet) reads are valid for [`FLEET_FLOOR`] no matter what, then until
 //!   any collector writes again ([`bump_generation`]).
 //!
+//! - **closed-span** ([`get_closed`] / [`put_closed`]): the answer to a query
+//!   over a time span that ended before the current tier bucket can no
+//!   longer change; it is keyed by its SQL (which carries the snapped
+//!   bounds) and kept until the next bucket boundary — so a 24 h baseline is
+//!   computed once an hour, not on every 60 s cycle.
+//!
 //! [`flight`] serialises identical computations: N viewers (Home box, a
 //! second window, a reconnecting socket) asking the same question at once
 //! cost ONE set of ClickHouse queries — the rest wait and read the cache.
@@ -90,6 +96,44 @@ pub fn put_fleet(key: String, gen: u64, value: &Value) {
     put(key, &gen.to_string(), value);
 }
 
+struct Closed {
+    until: Instant,
+    value: Value,
+}
+
+static CLOSED: OnceLock<Mutex<HashMap<String, Closed>>> = OnceLock::new();
+
+fn closed_map() -> &'static Mutex<HashMap<String, Closed>> {
+    CLOSED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A closed span's cached answer, while still inside its validity.
+pub fn get_closed(sql: &str) -> Option<Value> {
+    let m = closed_map().lock().ok()?;
+    let e = m.get(sql)?;
+    (Instant::now() < e.until).then(|| e.value.clone())
+}
+
+/// Cache a closed span's answer for `ttl` (until the next bucket boundary).
+pub fn put_closed(sql: String, value: &Value, ttl: Duration) {
+    if let Ok(mut m) = closed_map().lock() {
+        if m.len() > CAP {
+            let now = Instant::now();
+            m.retain(|_, e| e.until > now);
+            if m.len() > CAP {
+                m.clear();
+            }
+        }
+        m.insert(
+            sql,
+            Closed {
+                until: Instant::now() + ttl.min(MAX_AGE * 6),
+                value: value.clone(),
+            },
+        );
+    }
+}
+
 /// Wait for (then hold) the single flight for `key`. Re-check the cache
 /// after this returns: the flight you waited on has usually filled it.
 pub async fn flight(key: &str) -> tokio::sync::OwnedMutexGuard<()> {
@@ -141,6 +185,15 @@ mod tests {
             }
         }
         assert_eq!(get_fleet("t:fleet"), Some(Value::from(3)));
+    }
+
+    #[test]
+    fn closed_entries_expire_at_their_boundary() {
+        put_closed("SELECT 1".into(), &Value::from(4), Duration::from_secs(60));
+        assert_eq!(get_closed("SELECT 1"), Some(Value::from(4)));
+        assert_eq!(get_closed("SELECT 2"), None);
+        put_closed("SELECT 3".into(), &Value::from(5), Duration::ZERO);
+        assert_eq!(get_closed("SELECT 3"), None, "past its boundary");
     }
 
     #[tokio::test]
