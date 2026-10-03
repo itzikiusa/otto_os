@@ -90,6 +90,29 @@ jobs:
           "$tool_dir/cargo-nextest" nextest --version
           echo "$tool_dir" >> "$GITHUB_PATH"
 
+      # The k8s-monitor ClickHouse tests (every query builder against a real
+      # engine + the rows-read-per-refresh ratchet) skip without a `clickhouse`
+      # binary, so they passed vacuously here. Install the pinned single binary
+      # (SHA-512 pinned to this exact release asset) and REQUIRE it: the tests
+      # fail instead of skipping when OTTO_REQUIRE_CLICKHOUSE is set.
+      - name: Install ClickHouse (k8s monitor ratchets)
+        env:
+          CLICKHOUSE_VERSION: 26.8.15.10
+          CLICKHOUSE_SHA512: d54f83e187b19399260fa9d7f68403a7c3adf48059f211d0620216e6ea49687490898b5aa32f49d9728db58c5912cfb700148b814b8c3314f88ccfa940ffd85a
+        run: |
+          archive="$RUNNER_TEMP/clickhouse.tgz"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/ClickHouse/ClickHouse/releases/download/v$CLICKHOUSE_VERSION-lts/clickhouse-common-static-$CLICKHOUSE_VERSION-amd64.tgz" \
+            --output "$archive"
+          printf '%s  %s\n' "$CLICKHOUSE_SHA512" "$archive" | sha512sum --check
+          mkdir -p "$RUNNER_TEMP/ch"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/ch"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$(find "$RUNNER_TEMP/ch" -type f -name clickhouse -path '*/bin/*' | head -n 1)" "$HOME/.local/bin/clickhouse"
+          rm -rf "$RUNNER_TEMP/ch" "$archive"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/clickhouse" local --version
+
       # librdkafka (rdkafka-sys, for the Message Brokers viewer) is compiled from
       # source by CMake and links libcurl for OAUTHBEARER/OIDC. Ubuntu runners
       # preinstall cmake and ship the libcurl runtime but NOT its dev headers, so
@@ -115,6 +138,10 @@ jobs:
       # Same full binary/test inventory as cargo test; shared external resources
       # are bounded in .config/nextest.toml. Ignored tests remain ignored.
       - name: cargo nextest
+        env:
+          OTTO_REQUIRE_CLICKHOUSE: "1"
+          # The rows-read ratchet at a scale where full scans would show.
+          OTTO_K8S_MEASURE_PODS: "600"
         run: cargo nextest run --workspace --profile ci --no-fail-fast
 
       # Scale gates kept out of the everyday run (#[ignore], e.g. the 50k-revision
