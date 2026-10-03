@@ -93,6 +93,25 @@ function looksLikeCsv(lines: string[], sep: string): boolean {
 }
 
 /** Detect a language id from a file name (extension wins) and its content. */
+/** Skips a leading `<?xml …?>` and any `<!-- … -->` comments with an
+ *  indexOf scan. A regex with a repeated lazy comment group backtracks
+ *  exponentially on input like `<!--` + `--><!--`×n (CodeQL js/redos). */
+function skipXmlPrologue(t: string): string {
+  let i = 0;
+  if (t.startsWith('<?xml')) {
+    const end = t.indexOf('>', i);
+    if (end < 0) return '';
+    i = end + 1;
+  }
+  for (;;) {
+    while (i < t.length && /\s/.test(t[i])) i++;
+    if (!t.startsWith('<!--', i)) return t.slice(i);
+    const end = t.indexOf('-->', i + 4);
+    if (end < 0) return '';
+    i = end + 3;
+  }
+}
+
 export function detectLanguage(name: string, content: string): string {
   const m = /\.([A-Za-z0-9]+)$/.exec(name.trim());
   if (m) {
@@ -119,7 +138,7 @@ export function detectLanguage(name: string, content: string): string {
     }
   }
   if (t.startsWith('<')) {
-    if (/^(<\?xml[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>]/i.test(t)) return 'svg';
+    if (/^<svg[\s>]/i.test(skipXmlPrologue(t))) return 'svg';
     if (/^<!doctype\s+html/i.test(t) || /<(html|head|body|div|p|span|table|ul|h[1-6]|a|script|style)[\s>]/i.test(t)) {
       return 'html';
     }

@@ -72,3 +72,12 @@ test('every language maps to a CodeEditor key and an extension', () => {
   assert.equal(extensionFor('mermaid'), 'mmd');
   assert.equal(cmExtFor('unknown'), '');
 });
+
+test('svg behind an xml prologue and comments is still svg, in linear time', () => {
+  assert.equal(detectLanguage('untitled', '<?xml version="1.0"?>\n<!-- a -->\n<!-- b --> <svg width="1"></svg>'), 'svg');
+  assert.equal(detectLanguage('untitled', '<!-- c --><div>x</div>'), 'html');
+  // CodeQL js/redos: `<!--` + `--><!--`×n backtracked exponentially before.
+  const started = performance.now();
+  assert.equal(detectLanguage('untitled', '<!--' + '--><!--'.repeat(50_000)), 'xml');
+  assert.ok(performance.now() - started < 500);
+});
