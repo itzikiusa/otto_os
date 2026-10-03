@@ -2165,4 +2165,22 @@ mod tests {
             best.0
         );
     }
+
+    /// Auto-tidy is root-only and opt-in: a non-root caller can neither read
+    /// the gauge nor flip the toggle, and nothing changes.
+    #[tokio::test]
+    async fn auto_tidy_toggle_is_root_only() {
+        let (app, ctx) = app().await;
+        let (st, _, _) = call(
+            &app,
+            Method::PUT,
+            "/design/admin/auto-tidy",
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _, _) = call(&app, Method::GET, "/design/admin/storage", None).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert!(!ctx.design().auto_tidy_setting().await.unwrap());
+    }
 }
