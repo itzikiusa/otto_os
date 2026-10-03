@@ -9,7 +9,7 @@
   // WS `k8s_monitor_cycle` for this cluster. Namespace, filter, sort, the
   // expanded row, the events filter and the scroll offset live in the k8s
   // store per cluster (persisted), so the view survives module switches,
-  // Resources ↔ Monitor and reloads; the namespace is shared with Resources.
+  // Resources ↔ Monitor and reloads; picking a namespace here also sets it in Resources.
   // Cross-links: workload → its pods, a pod row → its drawer (Metrics), an
   // event → the pod drawer's Events tab.
   import { untrack, onDestroy } from 'svelte';
@@ -69,7 +69,9 @@
   // Remembered view (K-1): seeded from the store, written back as it moves.
   const saved = untrack(() => k8s.monitorUi(cluster.id));
   const SORT_KEYS = ['workload', 'pods', 'mem_max', 'mem_pct', 'restarts_total', 'churn_planned', 'rps', 'err_pct', 'latency_ms'];
-  let ns = $state(saved.ns || untrack(() => (k8s.clusterId === cluster.id ? k8s.namespace : '')));
+  // Not seeded from the console namespace: the Monitor lists only its
+  // configured namespaces, and the console's (often `default`) may not be one.
+  let ns = $state(saved.ns);
   let filter = $state(saved.filter);
   let sortKey = $state<keyof K8sMonitorWorkloadRow | 'restarts_total'>(
     (SORT_KEYS.includes(saved.sortKey) ? saved.sortKey : 'mem_max') as keyof K8sMonitorWorkloadRow | 'restarts_total',

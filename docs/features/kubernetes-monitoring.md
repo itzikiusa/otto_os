@@ -174,7 +174,8 @@ first event.
   half of the cluster workspace. A **Resources | Monitor** switch in the
   header moves between the console and the Monitor of the same cluster; the
   cluster stays selected, the console's cached rows stay (switching back
-  paints at once and refreshes quietly) and the namespace is shared. The old
+  paints at once and refreshes quietly), and picking a namespace in the
+  Monitor sets it in Resources too. The old
   `#/kubernetes/monitor/<id>/<tab>` links redirect here.
 - **Remembered view**: namespace, filter, sort, the expanded workload row, the
   Events class filter and the scroll position are kept per cluster in the
