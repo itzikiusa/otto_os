@@ -166,12 +166,29 @@ pub fn kubectl_program(data_dir: &Path) -> String {
 pub async fn kubectl_for<S: K8sCtx>(ctx: &S, cluster: &K8sCluster) -> Result<Kubectl> {
     let program = kubectl_program(ctx.data_dir());
     if let Some(path) = crate::eks_token::cached(cluster) {
-        return Ok(Kubectl::new(
-            program,
-            &with_kubeconfig(cluster, &path),
-            vec![],
-        ));
+        // KS-2: a cached token can outlive the credentials that minted it (SSO
+        // re-login, rotated keys). On "Unauthorized" the runner drops it and
+        // retries once with a handle built from scratch (fresh mint).
+        let (ctx2, cluster2) = (ctx.clone(), cluster.clone());
+        let reauth = crate::cli::Reauth(std::sync::Arc::new(move || {
+            let (ctx, cluster) = (ctx2.clone(), cluster2.clone());
+            let fut: crate::BoxFut<'static, Result<Kubectl>> = Box::pin(async move {
+                crate::eks_token::forget(cluster.id.as_str(), ctx.data_dir());
+                kubectl_fresh(&ctx, &cluster).await
+            });
+            fut
+        }));
+        return Ok(
+            Kubectl::new(program, &with_kubeconfig(cluster, &path), vec![]).with_reauth(reauth),
+        );
     }
+    kubectl_fresh(ctx, cluster).await
+}
+
+/// [`kubectl_for`] without the cached-overlay shortcut: inject the AWS env and
+/// mint (or skip) an overlay now.
+async fn kubectl_fresh<S: K8sCtx>(ctx: &S, cluster: &K8sCluster) -> Result<Kubectl> {
+    let program = kubectl_program(ctx.data_dir());
     let env = aws_env_for(ctx, cluster).await?;
     if let Some(path) = crate::eks_token::overlay_for(&program, cluster, &env, ctx.data_dir()).await
     {

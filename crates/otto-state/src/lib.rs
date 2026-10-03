@@ -30,6 +30,7 @@ pub mod integrations;
 pub mod issues;
 pub mod k8s_clusters;
 pub mod k8s_monitor;
+pub mod k8s_pod_actions;
 pub mod mcp_audit;
 pub mod mcp_auto_approve;
 pub mod mcp_control;
@@ -127,6 +128,7 @@ pub use k8s_clusters::{
     K8sCluster, K8sClusterPatch, K8sClusterSource, K8sClustersRepo, NewK8sCluster,
 };
 pub use k8s_monitor::{K8sMonitorConfigRow, K8sMonitorRepo, K8sMonitorStatusRow};
+pub use k8s_pod_actions::{K8sPodActionsRepo, PodAction, PodActionFilter, UpsertPodAction};
 pub use mcp_audit::{McpAuditRepo, McpToolCallRow, NewMcpToolCall};
 pub use mcp_auto_approve::{
     AutoApproveRulePatch, McpAutoApproveRepo, McpAutoApproveRule, NewAutoApproveRule,

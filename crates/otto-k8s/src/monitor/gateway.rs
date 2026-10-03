@@ -14,8 +14,12 @@
 //! Security: the proxy listens on a **Unix socket** inside a fresh `0700`
 //! directory (never a loopback TCP port another local user could reach), only
 //! accepts pod-proxy paths (`--accept-paths`) and rejects every method but
-//! GET/HEAD (`--reject-methods`). The directory is removed and the child is
-//! killed when the gateway is dropped (loop exit, config change, daemon exit).
+//! GET/HEAD (`--reject-methods`). The pod-HTTP actions pool (K-3,
+//! `crate::pod_http`) starts its own proxies with [`KubeProxy::start_with`]
+//! `allow_mutating = true`, which also admits POST/PUT/PATCH/DELETE — still on
+//! pod-proxy paths only; the monitor's proxies stay GET-only. The directory is
+//! removed and the child is killed when the gateway is dropped (loop exit,
+//! config change, daemon exit).
 //!
 //! Credentials: kubectl resolves them once at start. The gateway remembers a
 //! fingerprint of the argv, env and the kubeconfig files' mtimes (the EKS
@@ -27,7 +31,7 @@ use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-use http_body_util::{BodyExt, Empty};
+use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::client::conn::http1::{self, SendRequest};
 use hyper_util::rt::TokioIo;
@@ -47,14 +51,26 @@ const MAX_IDLE: usize = super::probes::MAX_CONCURRENCY as usize;
 const ACCEPT_PATHS: &str = r"^/api/v1/namespaces/[^/]+/pods/[^/]+/proxy(/.*)?$";
 /// kubectl's `--reject-methods` is a comma list of regexes.
 const REJECT_METHODS: &str = "POST,PUT,PATCH,DELETE,CONNECT,OPTIONS,TRACE";
+/// The pod-HTTP actions pool's proxies (see the module doc).
+const REJECT_METHODS_MUTATING: &str = "CONNECT,OPTIONS,TRACE";
 
 /// A running `kubectl proxy` bound to one cluster's kubectl handle.
 pub struct KubeProxy {
-    child: Child,
+    child: Mutex<Child>,
     dir: PathBuf,
     sock: PathBuf,
     fingerprint: String,
-    idle: Mutex<Vec<SendRequest<Empty<Bytes>>>>,
+    idle: Mutex<Vec<SendRequest<Full<Bytes>>>>,
+}
+
+/// A full request result (status, headers, body bytes) — see [`KubeProxy::request`].
+#[derive(Debug, Clone)]
+pub struct RawResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    /// The body exceeded the cap and was cut.
+    pub truncated: bool,
 }
 
 /// What a request through the gateway returned.
@@ -68,11 +84,24 @@ impl KubeProxy {
     /// Spawn `kubectl proxy --unix-socket <private dir>/s` for `k` and wait
     /// until it serves.
     pub async fn start(k: &Kubectl) -> Result<Self> {
+        Self::start_with(k, false).await
+    }
+
+    /// [`start`](Self::start); `allow_mutating` also admits POST/PUT/PATCH/
+    /// DELETE (pod-HTTP actions only — see the module doc).
+    pub async fn start_with(k: &Kubectl, allow_mutating: bool) -> Result<Self> {
         let dir = private_dir()?;
         let sock = dir.join("s");
         let sock_arg = format!("--unix-socket={}", sock.display());
         let accept = format!("--accept-paths={ACCEPT_PATHS}");
-        let reject = format!("--reject-methods={REJECT_METHODS}");
+        let reject = format!(
+            "--reject-methods={}",
+            if allow_mutating {
+                REJECT_METHODS_MUTATING
+            } else {
+                REJECT_METHODS
+            }
+        );
         let argv = k.argv_stream(["proxy", sock_arg.as_str(), accept.as_str(), reject.as_str()]);
         let mut cmd = Command::new(&k.program);
         cmd.args(&argv)
@@ -94,7 +123,7 @@ impl KubeProxy {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let gw = KubeProxy {
-            child,
+            child: Mutex::new(child),
             dir,
             sock,
             fingerprint,
@@ -149,8 +178,15 @@ impl KubeProxy {
 
     /// Still usable for `k`: the child runs and the credentials it loaded are
     /// the current ones.
-    pub fn usable_for(&mut self, k: &Kubectl) -> bool {
-        matches!(self.child.try_wait(), Ok(None)) && self.fingerprint == fingerprint(k)
+    pub fn usable_for(&self, k: &Kubectl) -> bool {
+        let running = matches!(
+            self.child
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .try_wait(),
+            Ok(None)
+        );
+        running && self.fingerprint == fingerprint(k)
     }
 
     /// `GET path` through the proxy, body capped at `max_body` bytes (the
@@ -161,23 +197,74 @@ impl KubeProxy {
         timeout: Duration,
         max_body: usize,
     ) -> Result<GatewayResponse> {
-        tokio::time::timeout(timeout, self.get_inner(path, max_body))
-            .await
-            .map_err(|_| Error::Upstream("timeout".into()))?
+        let r = self
+            .request(hyper::Method::GET, path, &[], None, timeout, max_body)
+            .await?;
+        Ok(GatewayResponse {
+            status: r.status,
+            body: String::from_utf8_lossy(&r.body).into_owned(),
+        })
     }
 
-    async fn get_inner(&self, path: &str, max_body: usize) -> Result<GatewayResponse> {
+    /// `method path` through the proxy with extra `headers` and an optional
+    /// `body`; the response body is capped at `max_body` bytes (the rest is
+    /// discarded and that connection is not reused). A proxy started without
+    /// `allow_mutating` answers non-GET methods with 405.
+    pub async fn request(
+        &self,
+        method: hyper::Method,
+        path: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+        timeout: Duration,
+        max_body: usize,
+    ) -> Result<RawResponse> {
+        tokio::time::timeout(
+            timeout,
+            self.request_inner(method, path, headers, body, max_body),
+        )
+        .await
+        .map_err(|_| Error::Upstream("timeout".into()))?
+    }
+
+    async fn request_inner(
+        &self,
+        method: hyper::Method,
+        path: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+        max_body: usize,
+    ) -> Result<RawResponse> {
         let mut sender = self.connection().await?;
-        let req = hyper::Request::get(path)
+        let mut req = hyper::Request::builder()
+            .method(method)
+            .uri(path)
             // kubectl proxy's default --accept-hosts only admits localhost.
-            .header(hyper::header::HOST, "localhost")
-            .body(Empty::<Bytes>::new())
+            .header(hyper::header::HOST, "localhost");
+        for (k, v) in headers {
+            if k.eq_ignore_ascii_case("host") {
+                continue;
+            }
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let req = req
+            .body(Full::new(Bytes::from(body.unwrap_or_default())))
             .map_err(|e| Error::Invalid(format!("proxy request: {e}")))?;
         let resp = sender
             .send_request(req)
             .await
             .map_err(|e| Error::Upstream(format!("kubectl proxy: {e}")))?;
         let status = resp.status().as_u16();
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_string(),
+                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
         let mut body = resp.into_body();
         let mut buf: Vec<u8> = Vec::new();
         let mut complete = true;
@@ -196,14 +283,16 @@ impl KubeProxy {
         if complete {
             self.give_back(sender);
         }
-        Ok(GatewayResponse {
+        Ok(RawResponse {
             status,
-            body: String::from_utf8_lossy(&buf).into_owned(),
+            headers,
+            body: buf,
+            truncated: !complete,
         })
     }
 
     /// An idle pooled connection that is still ready, else a new one.
-    async fn connection(&self) -> Result<SendRequest<Empty<Bytes>>> {
+    async fn connection(&self) -> Result<SendRequest<Full<Bytes>>> {
         loop {
             let pooled = self.idle.lock().unwrap_or_else(|p| p.into_inner()).pop();
             let Some(mut s) = pooled else { break };
@@ -223,7 +312,7 @@ impl KubeProxy {
         Ok(sender)
     }
 
-    fn give_back(&self, sender: SendRequest<Empty<Bytes>>) {
+    fn give_back(&self, sender: SendRequest<Full<Bytes>>) {
         let mut idle = self.idle.lock().unwrap_or_else(|p| p.into_inner());
         if idle.len() < MAX_IDLE && !sender.is_closed() {
             idle.push(sender);
@@ -239,7 +328,11 @@ impl KubeProxy {
 impl Drop for KubeProxy {
     fn drop(&mut self) {
         // `kill_on_drop` reaps the child; the socket dir is ours to remove.
-        let _ = self.child.start_kill();
+        let _ = self
+            .child
+            .get_mut()
+            .unwrap_or_else(|p| p.into_inner())
+            .start_kill();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -369,6 +462,7 @@ mod tests {
             base: base_stream.clone(),
             base_stream,
             env: vec![],
+            reauth: None,
         }
     }
 

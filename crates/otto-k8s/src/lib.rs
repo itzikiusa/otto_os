@@ -14,6 +14,7 @@
 //! | [`logs`] | one-shot + `follow` streaming pod logs |
 //! | [`actions`] | every §4.6 verb as a planned kubectl argv list |
 //! | [`sessions`] | `exec` + k9s PTY sessions via `Spawner::spawn_command` |
+//! | [`pod_http`] | HTTP requests to a pod / every pod of a workload (actuator actions) |
 //! | [`http`] | the `/k8s/*` axum router |
 //!
 //! Server-side wiring (ctx trait impl + router merge) lives in
@@ -36,6 +37,7 @@ pub mod http;
 pub mod install;
 pub mod logs;
 pub mod monitor;
+pub mod pod_http;
 pub mod resources;
 pub mod sessions;
 
