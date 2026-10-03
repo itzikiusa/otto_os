@@ -135,8 +135,12 @@ install (one real `otto.db` reached 514 MB). The daemon prunes them **hourly**
 | Run history (`run_history_days`) — **off by default** (`0` = keep forever). Opt in by setting a window; values are floored at 14 days | When enabled: `otto_runs` + `otto_run_events` (Run with Otto): terminal runs (`completed` / `failed` / `rejected` / `cancelled`) last updated before the window, unless a Proof Pack is attached. `swarm_runs`: terminal runs (`done` / `error` / `stopped`) finished before the window — first added to the swarm's `pruned_runs` / `pruned_cost_usd` rollup (migration `0161`), so `max_total_runs` / `max_cost_usd` budgets still count them. `swarm_messages`: older than the window. `goal_loop_iterations`: every iteration but the last of a loop that finished (terminal) before the window. Live runs and loops are never touched |
 
 Rows younger than their window are never touched. The policy lives in the
-`data_retention` setting (a partial object merges over the defaults) and is
-re-read every pass; set it with `POST /settings/import`:
+`data_retention` setting and is re-read every pass. **Run history** has a
+control in the UI: **Settings → Backup & restore → Database storage → Run
+history** (root only) offers *Keep forever* (the default) or a window of 14–365
+days; choosing a window asks first and lists what will be pruned. Everything
+else is set through the API with `PUT /settings` (root), whose body is a map of
+setting keys:
 
 ```json
 {"data_retention": {"enabled": true, "work_events_days": 30, "work_events_keep_per_item": 500,
@@ -145,6 +149,15 @@ re-read every pass; set it with `POST /settings/import`:
                     "notifications_unread_days": 90, "notifications_max_rows": 5000,
                     "room_messages_keep_per_room": 5000, "run_history_days": 0}}
 ```
+
+`POST /settings/import` works too, but its body wraps the map in `settings`:
+`{"settings": {"data_retention": {…}}}` (the bare map above is a 422 there).
+Either way the stored `data_retention` object is **replaced** by the one you
+send, and a field you leave out falls back to its default (not to the value
+stored before), so send every field you have customised. With nothing else
+customised, `{"data_retention": {"run_history_days": 30}}` is enough to opt in.
+The Settings control does this for you: it writes the stored object back with
+only `run_history_days` changed.
 
 `enabled: false` turns the job off. Floors a setting can't go below: 7 days
 (30 for `audit_log`, 3 for `review_retry_days`), 50 events per item, and `work_events_idle_days` never
