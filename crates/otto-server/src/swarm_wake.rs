@@ -50,6 +50,39 @@ pub fn poke(swarm_id: &str) {
     bell(swarm_id).notify_one();
 }
 
+/// Create `swarm_id`'s bell when its coordinator starts, so the bus listener
+/// (which only rings EXISTING bells) never misses an event that lands before
+/// the loop's first park.
+pub fn arm(swarm_id: &str) {
+    let _ = bell(swarm_id);
+}
+
+/// Ring `swarm_id`'s bell only if a coordinator armed one — the bus carries
+/// events of every swarm, and an inactive swarm must not gain a bell (perf
+/// §15 N8). Returns whether a bell rang.
+fn poke_known(swarm_id: &str) -> bool {
+    let b = bells()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(swarm_id)
+        .cloned();
+    match b {
+        Some(b) => {
+            b.notify_one();
+            true
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+fn known(swarm_id: &str) -> bool {
+    bells()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(swarm_id)
+}
+
 /// Forget a swarm's bell (coordinator stopped for good).
 pub fn forget(swarm_id: &str) {
     bells()
@@ -83,7 +116,7 @@ pub fn ensure_listener(ctx: &ServerCtx) {
             match rx.recv().await {
                 Ok(ev) => {
                     if let Some(sid) = swarm_of(&ev) {
-                        poke(sid);
+                        poke_known(sid);
                     }
                 }
                 Err(RecvError::Lagged(_)) => {
@@ -107,6 +140,10 @@ pub fn ensure_listener(ctx: &ServerCtx) {
 /// `last_tick`), [`SAFETY_TICK`] passes, or `cancel` fires. Returns `true`
 /// when cancelled (the caller stops).
 pub async fn wait(cancel: &CancelSignal, swarm_id: &str, last_tick: Instant) -> bool {
+    // A loop stopped mid-tick must not re-create the bell `forget` dropped.
+    if cancel.is_cancelled() {
+        return true;
+    }
     let b = bell(swarm_id);
     tokio::select! {
         stop = cancel.sleep(SAFETY_TICK) => return stop,
@@ -163,6 +200,20 @@ mod tests {
         assert!(stopped);
         assert!(t.elapsed() < Duration::from_secs(1));
         forget("swarm-wake-test-cancel");
+    }
+
+    /// perf §15 N8: the listener path never creates a bell for a swarm with
+    /// no coordinator; an armed bell rings until it is forgotten.
+    #[test]
+    fn listener_pokes_only_armed_swarms_and_forget_drops_the_bell() {
+        let sid = "swarm-wake-test-armed";
+        assert!(!poke_known(sid));
+        assert!(!known(sid), "an inactive swarm gains no bell");
+        arm(sid);
+        assert!(poke_known(sid));
+        forget(sid);
+        assert!(!known(sid));
+        assert!(!poke_known(sid));
     }
 
     #[test]

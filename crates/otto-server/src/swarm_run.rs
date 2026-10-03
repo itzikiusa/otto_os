@@ -353,7 +353,28 @@ async fn run_turn_inner(
         project.as_ref(),
         task.as_ref(),
     );
-    crate::swarm_workspace::provision_agent(ctx, &swarm, project.as_ref(), &agent, identity, &cwd);
+    // Skills/soul/identity materialization + helper installs are a burst of
+    // blocking file writes — run them off the runtime worker (perf §15 N9).
+    {
+        let (ctx2, swarm2, project2, agent2, cwd2) = (
+            ctx.clone(),
+            swarm.clone(),
+            project.clone(),
+            agent.clone(),
+            cwd.clone(),
+        );
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::swarm_workspace::provision_agent(
+                &ctx2,
+                &swarm2,
+                project2.as_ref(),
+                &agent2,
+                identity,
+                &cwd2,
+            )
+        })
+        .await;
+    }
 
     // Board context for the brief (recent messages to/about this agent).
     let board: Vec<String> = repo
@@ -386,7 +407,8 @@ async fn run_turn_inner(
         });
 
     let out = out_path(&run.id);
-    let _ = std::fs::remove_file(&out);
+    // Off the runtime worker (perf §15 N9).
+    let _ = tokio::fs::remove_file(&out).await;
     let prompt = build_prompt(
         &agent,
         task.as_ref(),

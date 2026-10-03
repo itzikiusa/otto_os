@@ -305,6 +305,7 @@ workspace from the row.
 | 74c | GET /api/v1/swarm/swarms/{sid}/utilization | ws viewer | — | `{parallel_cap, active_runs, ready_tasks, tasks_by_status, agents:[{id,name,title,status,active_run}], waiting: {<task_id>: {code, detail, since}}}` — board-utilization snapshot (drives the 5-min manager utilization watchdog + the `swarm_utilization` MCP tool). `waiting` = why each ready task did not start on the last coordinator tick (in memory, rebuilt every tick; empty when the swarm isn't active): `code` ∈ `no_agent_fit` \| `agent_busy` \| `verifying` \| `capacity` \| `run_budget`, `detail` = board text, `since` = when it started waiting for that code. The Kanban board shows it on To-do cards |
 | 74c2 | GET /api/v1/swarm/swarms/{sid}/waiting | ws viewer | — | `{swarm_id, waiting: {<task_id>: {code, detail, since}}}` — only the coordinator's in-memory waiting reasons (same shape as `utilization.waiting`), no DB work beyond the swarm/auth lookup. The Kanban board polls this (15 s while visible + 800 ms after task changes) instead of the full utilization snapshot |
 | 75 | GET /api/v1/swarm/projects/{pid}/tasks | ws viewer | — | `SwarmTask[]` |
+| 75b | GET /api/v1/swarm/swarms/{sid}/tasks | ws viewer | — | `SwarmTask[]` — every project's tasks in ONE read (`ORDER BY order_idx, created_at`, like the per-project list); the board's open path groups them by `project_id` instead of one request per project. The per-project list stays for single-project refreshes |
 | 76 | POST /api/v1/swarm/projects/{pid}/tasks | ws editor | CreateTaskReq | SwarmTask |
 | 77 | PATCH /api/v1/swarm/tasks/{tid} | ws editor | UpdateTaskReq | SwarmTask |
 | 78 | DELETE /api/v1/swarm/tasks/{tid} | ws editor | — | 204 |
@@ -2394,6 +2395,8 @@ way — it never falls back to a direct, unguarded egress.
 | GET /notifications/settings | member | — | `NotificationSettings {expiry_threshold_days, native_enabled, session_events, native_on_waiting}` — `native_on_waiting` (default `true`; absent in older rows → `true`): the UI also raises a native banner for the info "Session awaiting input" (`…:waiting`) notice when the user is not watching that session |
 | PUT /notifications/settings | member | NotificationSettings | settings |
 | POST /notifications/read-all | member | — | marks the caller's own notices read (root marks all) |
+| POST /notifications/read | member | `{ids: Id[]}` (≤ 500) | `{changed: number}` — mark a batch read in ONE statement with ONE `notifications_changed` (only when `changed > 0`); same ownership rule as the single-row call (foreign / global-for-non-root / unknown / already-read ids are skipped); > 500 ids → 400 |
+| POST /notifications/dismiss | member | `{ids: Id[]}` (≤ 500) | `{changed: number}` — dismiss a batch in ONE statement with ONE `notifications_changed`; same ownership rule as `DELETE /notifications/{id}` |
 | POST /notifications/{id}/read | member | — | mark one read (own only for non-root; global notices are read-only to them) |
 | DELETE /notifications/{id} | member | — | dismiss one (own only for non-root) |
 

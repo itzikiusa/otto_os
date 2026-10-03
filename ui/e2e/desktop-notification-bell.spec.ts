@@ -129,6 +129,18 @@ async function mockList(
   await page.route(/\/api\/v1\/notifications\/(?!settings).+$/, async (route) => {
     const url = route.request().url();
     if (url.endsWith('/read-all')) hits.readAll++;
+    // Bulk read (perf §15 N4): one POST /notifications/read {ids}.
+    if (/\/notifications\/read$/.test(url)) {
+      const ids = (route.request().postDataJSON() as { ids: string[] }).ids;
+      hits.readIds.push(...ids);
+      await route.fulfill({ json: { changed: ids.length } });
+      return;
+    }
+    if (/\/notifications\/dismiss$/.test(url)) {
+      const ids = (route.request().postDataJSON() as { ids: string[] }).ids;
+      await route.fulfill({ json: { changed: ids.length } });
+      return;
+    }
     const m = /\/notifications\/([^/]+)\/read$/.exec(url);
     if (m) hits.readIds.push(m[1]);
     await route.fulfill({ status: 204, body: '' });

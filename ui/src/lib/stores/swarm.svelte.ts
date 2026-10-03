@@ -498,9 +498,26 @@ class SwarmStore {
 
   // -- Tasks ----------------------------------------------------------------
 
+  /** Every project's tasks in ONE request (`GET /swarm/swarms/{sid}/tasks`),
+   *  grouped by project — opening a swarm used to send one request per
+   *  project (perf §15 N5). One retry, like `loadTasks`. */
   async loadAllTasks(): Promise<void> {
-    if (!this.detail) return;
-    await Promise.all(this.detail.projects.map((p) => this.loadTasks(p.id)));
+    const detail = this.detail;
+    if (!detail) return;
+    const sid = detail.id;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const all = await api.get<SwarmTask[]>(`/swarm/swarms/${sid}/tasks`);
+        if (this.detail?.id !== sid) return; // switched swarms meanwhile
+        const grouped: Record<string, SwarmTask[]> = {};
+        for (const p of detail.projects) grouped[p.id] = [];
+        for (const t of all) (grouped[t.project_id] ??= []).push(t);
+        this.tasksByProject = { ...this.tasksByProject, ...grouped };
+        return;
+      } catch {
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 800));
+      }
+    }
   }
 
   async loadTasks(pid: string): Promise<void> {

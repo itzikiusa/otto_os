@@ -92,6 +92,7 @@ pub fn start_coordinator(ctx: ServerCtx, swarm_id: Id) {
             crate::swarm_verify::recover(&ctx, &swarm_id).await;
         });
     }
+    crate::swarm_wake::arm(&swarm_id);
     crate::swarm_wake::ensure_listener(&ctx);
     tokio::spawn(coordinator_loop(ctx, swarm_id, handle));
 }
@@ -101,8 +102,10 @@ pub fn stop_coordinator(ctx: &ServerCtx, swarm_id: &str) {
     if let Some(h) = ctx.swarm_coords.lock().unwrap().remove(swarm_id) {
         h.cancel.cancel();
     }
-    // The run is over: drop its shared-file tracking (a restart re-detects).
+    // The run is over: drop its shared-file tracking (a restart re-detects)
+    // and its wake bell (a parked loop keeps its own clone until it exits).
     crate::swarm_run::forget_swarm_files(swarm_id);
+    crate::swarm_wake::forget(swarm_id);
 }
 
 pub fn set_paused(ctx: &ServerCtx, swarm_id: &str, paused: bool) {

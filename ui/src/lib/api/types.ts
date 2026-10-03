@@ -1856,7 +1856,8 @@ export type OttoEvent =
     }
   | {
       /** The caller's notice list changed without a new notice (read,
-       *  read-all, dismiss, clear) — owner-only; refetch `/notifications`. */
+       *  read-all, dismiss, clear; one per bulk read / dismiss batch) —
+       *  owner-only; refetch `/notifications`. */
       type: 'notifications_changed';
       user_id: Id;
     };
@@ -1891,6 +1892,13 @@ export interface Notice {
   body: string;
   source_key: string | null;
   action: NoticeAction | null;
+}
+
+/** Reply of `POST /notifications/read` / `POST /notifications/dismiss`
+ *  (`{ids}` ≤ 500): rows actually changed — foreign, global-for-non-root,
+ *  unknown and already-read ids are skipped. */
+export interface BulkNoticeResult {
+  changed: number;
 }
 
 export interface NotificationSettings {

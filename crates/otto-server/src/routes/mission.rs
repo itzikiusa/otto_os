@@ -106,6 +106,59 @@ fn cache() -> &'static Mutex<HashMap<Id, CacheEntry>> {
 
 const CACHE_TTL: Duration = Duration::from_secs(3);
 
+/// Per-workspace build gates (perf §15 N3): concurrent cache misses — the
+/// sidebar badge, the page and a WS-driven refresh landing together — queue
+/// on one gate and the followers re-read the cache the leader filled instead
+/// of each running `build_view`. Idle gates are pruned on every miss.
+static BUILDING: OnceLock<std::sync::Mutex<HashMap<Id, std::sync::Arc<Mutex<()>>>>> =
+    OnceLock::new();
+
+fn build_gate(ws_id: &Id) -> std::sync::Arc<Mutex<()>> {
+    let mut map = BUILDING
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    // Nobody else holds a pruned gate (strong count 1 = only the map).
+    map.retain(|k, g| k == ws_id || std::sync::Arc::strong_count(g) > 1);
+    map.entry(ws_id.clone()).or_default().clone()
+}
+
+async fn cached(ws_id: &Id) -> Option<MissionView> {
+    let guard = cache().lock().await;
+    guard
+        .get(ws_id)
+        .filter(|e| e.born.elapsed() < CACHE_TTL)
+        .map(|e| e.view.clone())
+}
+
+/// The cached view, or one build shared by every concurrent miss of `ws_id`.
+async fn single_flight<F, Fut>(ws_id: &Id, build: F) -> MissionView
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = MissionView>,
+{
+    if let Some(v) = cached(ws_id).await {
+        return v;
+    }
+    let gate = build_gate(ws_id);
+    let _building = gate.lock().await;
+    // A leader may have filled the cache while we queued.
+    if let Some(v) = cached(ws_id).await {
+        return v;
+    }
+    let view = build().await;
+    let mut guard = cache().lock().await;
+    guard.retain(|_, e| e.born.elapsed() < CACHE_TTL);
+    guard.insert(
+        ws_id.clone(),
+        CacheEntry {
+            view: view.clone(),
+            born: Instant::now(),
+        },
+    );
+    view
+}
+
 // ---------------------------------------------------------------------------
 // Assembly helpers
 // ---------------------------------------------------------------------------
@@ -441,29 +494,7 @@ pub async fn get_mission(
 ) -> ApiResult<Json<MissionView>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
 
-    // Check the short-TTL cache first.
-    let guard = cache().lock().await;
-    if let Some(entry) = guard.get(&ws_id) {
-        if entry.born.elapsed() < CACHE_TTL {
-            return Ok(Json(entry.view.clone()));
-        }
-    }
-    // Drop the lock while we do the (potentially slow) DB reads.
-    drop(guard);
-
-    let view = build_view(&ctx, &ws_id).await;
-
-    // Write back to the cache.
-    let mut guard = cache().lock().await;
-    guard.insert(
-        ws_id,
-        CacheEntry {
-            view: view.clone(),
-            born: Instant::now(),
-        },
-    );
-    drop(guard);
-
+    let view = single_flight(&ws_id, || build_view(&ctx, &ws_id)).await;
     Ok(Json(view))
 }
 
@@ -537,4 +568,48 @@ pub fn mission_routes() -> Router<ServerCtx> {
             get(list_views).post(create_view),
         )
         .route("/mission-views/{id}", delete(delete_view))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// perf §15 N3: eight concurrent misses on one workspace run ONE build;
+    /// another workspace builds on its own; the gate map is pruned.
+    #[tokio::test]
+    async fn concurrent_misses_share_one_build() {
+        let builds = Arc::new(AtomicUsize::new(0));
+        let ws: Id = "mission-single-flight-ws".into();
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let builds = builds.clone();
+            let ws = ws.clone();
+            tasks.push(tokio::spawn(async move {
+                single_flight(&ws, || async move {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    MissionView::default()
+                })
+                .await
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+
+        let other: Id = "mission-single-flight-other".into();
+        let b2 = builds.clone();
+        single_flight(&other, || async move {
+            b2.fetch_add(1, Ordering::SeqCst);
+            MissionView::default()
+        })
+        .await;
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        // Only the last-touched gate may linger; idle ones were pruned.
+        let gates = BUILDING.get().unwrap().lock().unwrap();
+        assert!(!gates.contains_key(&ws), "idle gate pruned");
+    }
 }

@@ -42,6 +42,13 @@ impl WorkGraphService {
     /// ONLY on create or status change (cost/title-only refreshes stay quiet, so
     /// the 2 s session-status churn doesn't spam the UI or bloat the audit trail).
     pub async fn record(&self, up: WorkItemUpsert) -> Result<WorkItem> {
+        self.record_created(up).await.map(|(item, _)| item)
+    }
+
+    /// [`Self::record`], also reporting whether the item was newly CREATED —
+    /// so a projector attaching a one-time artifact can skip the "already
+    /// attached?" probe for an item that existed before.
+    pub async fn record_created(&self, up: WorkItemUpsert) -> Result<(WorkItem, bool)> {
         let UpsertResult {
             item,
             created,
@@ -77,7 +84,7 @@ impl WorkGraphService {
         if created || status_changed {
             self.emit(&item);
         }
-        Ok(item)
+        Ok((item, created))
     }
 
     /// Append an audit event WITHOUT broadcasting (used for high-volume signals

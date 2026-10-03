@@ -523,6 +523,7 @@ authoritative spec is `docs/contracts/api.md` (#59–#86 + "Swarm lifecycle") an
 | 72 | `PATCH /swarm/projects/{pid}` | editor | `UpdateProjectReq` → `SwarmProject` |
 | 73 | `DELETE /swarm/projects/{pid}` | editor | → 204 |
 | 75 | `GET /swarm/projects/{pid}/tasks` | viewer | → `SwarmTask[]` |
+| 75b | `GET /swarm/swarms/{sid}/tasks` | viewer | → `SwarmTask[]` — every project's tasks in one read; opening a swarm uses this instead of one request per project |
 | 76 | `POST /swarm/projects/{pid}/tasks` | editor | `CreateTaskReq` → `SwarmTask` |
 | 77 | `PATCH /swarm/tasks/{tid}` | editor | `UpdateTaskReq` → `SwarmTask` |
 | 78 | `DELETE /swarm/tasks/{tid}` | editor | → 204 |

@@ -1667,7 +1667,9 @@ each says "the list you cached changed — refetch it"; none carries the data.
   named resource (or all) instead of every resource every 15 s.
 - `notifications_changed` — the caller's notice list changed without a new
   notice (`POST /notifications/{id}/read`, `/notifications/read-all`,
-  `DELETE /notifications/{id}`, `DELETE /notifications`). **Owner-scoped**
+  `DELETE /notifications/{id}`, `DELETE /notifications`, and the bulk
+  `POST /notifications/read` / `POST /notifications/dismiss` — ONE event per
+  batch, none when the batch changed nothing). **Owner-scoped**
   (`user_id` only). Consumer: the tray's "needs you" glyph.
 
 Clients keep a slow safety poll (Otto: 5 min, `ui/src/lib/live.ts` `liveQuery`)

@@ -1740,7 +1740,7 @@ async fn login_credential(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::path::PathBuf;
@@ -1782,7 +1782,7 @@ mod tests {
         }
     }
 
-    async fn mem_pool() -> DbPool {
+    pub(crate) async fn mem_pool() -> DbPool {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -1811,7 +1811,7 @@ mod tests {
         }
     }
 
-    async fn test_ctx(pool: &DbPool, data_dir: PathBuf) -> ServerCtx {
+    pub(crate) async fn test_ctx(pool: &DbPool, data_dir: PathBuf) -> ServerCtx {
         let (events, _rx) = broadcast::channel(64);
         // Browser-credentials tests need a real (non-erroring) `SecretStore`
         // to round-trip put/get/delete — `otto_keychain::FileStore` is exactly

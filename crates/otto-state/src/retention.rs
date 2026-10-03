@@ -95,7 +95,10 @@ pub struct RetentionPolicy {
     /// `notifications`: hard row cap — only the newest N survive, whatever
     /// their age.
     pub notifications_max_rows: i64,
-    /// `agent_room_messages`: each room keeps its newest N messages.
+    /// `agent_room_messages`: each room keeps its newest N messages. OPT-IN:
+    /// `0` (the default) keeps every message — room transcripts are user
+    /// records, so only a set cap (floored at [`MIN_ROOM_MESSAGES_KEEP`])
+    /// deletes anything.
     pub room_messages_keep_per_room: i64,
     // --- Run history (perf W6) ---
     /// `otto_runs` (+ events), `swarm_runs` (spend rolled up first),
@@ -120,7 +123,7 @@ impl Default for RetentionPolicy {
             notifications_read_days: 30,
             notifications_unread_days: 90,
             notifications_max_rows: 5_000,
-            room_messages_keep_per_room: 5_000,
+            room_messages_keep_per_room: 0,
             // --- Run history (perf W6) ---
             run_history_days: DEFAULT_RUN_HISTORY_DAYS,
         }
@@ -150,8 +153,12 @@ impl RetentionPolicy {
             .notifications_unread_days
             .max(self.notifications_read_days);
         self.notifications_max_rows = self.notifications_max_rows.max(MIN_NOTIFICATIONS_MAX_ROWS);
-        self.room_messages_keep_per_room =
-            self.room_messages_keep_per_room.max(MIN_ROOM_MESSAGES_KEEP);
+        // Opt-in: 0 (or below) = keep every message; a set cap is floored.
+        self.room_messages_keep_per_room = if self.room_messages_keep_per_room <= 0 {
+            0
+        } else {
+            self.room_messages_keep_per_room.max(MIN_ROOM_MESSAGES_KEEP)
+        };
         // --- Run history (perf W6) ---
         // Opt-in: 0 (or below) = keep forever; a set window is floored.
         self.run_history_days = if self.run_history_days <= 0 {
@@ -246,9 +253,11 @@ impl RetentionRepo {
                 p.notifications_max_rows,
             )
             .await?;
-        report.room_messages = self
-            .prune_room_messages(p.room_messages_keep_per_room)
-            .await?;
+        if p.room_messages_keep_per_room > 0 {
+            report.room_messages = self
+                .prune_room_messages(p.room_messages_keep_per_room)
+                .await?;
+        }
         // --- Run history (perf W6) ---
         if p.run_history_days > 0 {
             report.run_history = self.prune_run_history(&cutoff(p.run_history_days)).await?;
@@ -315,17 +324,18 @@ impl RetentionRepo {
 
     /// `agent_room_messages` (perf §15 R4): each room keeps its newest `keep`
     /// messages (by insertion order, `rowid`). Rooms over the cap are found on
-    /// the `(room_id, …)` index by a read; each trimmed room's denormalized
-    /// `agent_rooms.message_count` is recomputed (`last_message_at` is
+    /// the denormalized `agent_rooms.message_count` (maintained by
+    /// `add_message`'s transaction since `0156`) — a read of the rooms table,
+    /// not a `GROUP BY` count over every message each hour (perf §15 N7).
+    /// Each trimmed room's count is recomputed (`last_message_at` is
     /// unaffected — only the oldest rows go).
     async fn prune_room_messages(&self, keep: i64) -> Result<u64> {
-        let rooms: Vec<String> = sqlx::query_scalar(
-            "SELECT room_id FROM agent_room_messages GROUP BY room_id HAVING COUNT(*) > ?",
-        )
-        .bind(keep)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("retention: room candidates"))?;
+        let rooms: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM agent_rooms WHERE message_count > ?")
+                .bind(keep)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("retention: room candidates"))?;
         let q = format!(
             "DELETE FROM agent_room_messages WHERE rowid IN \
              (SELECT rowid FROM agent_room_messages WHERE room_id = ? \
@@ -860,6 +870,26 @@ mod tests {
             .await
             .unwrap();
         }
+        // `add_message` maintains the denormalized count; mirror it here.
+        sqlx::query(
+            "UPDATE agent_rooms SET message_count = \
+             (SELECT COUNT(*) FROM agent_room_messages m WHERE m.room_id = agent_rooms.id)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Opt-in: the default policy never trims a room.
+        let r = RetentionRepo::new(pool.clone())
+            .prune(&RetentionPolicy::default())
+            .await
+            .unwrap();
+        assert_eq!(r.room_messages, 0);
+        assert_eq!(
+            count(&pool, "SELECT COUNT(*) FROM agent_room_messages").await,
+            1320
+        );
+        let probe = pool.statement_probe();
+        probe.reset();
         let r = RetentionRepo::new(pool.clone())
             .prune(&RetentionPolicy {
                 room_messages_keep_per_room: 1,
@@ -868,6 +898,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.room_messages, 800);
+        // Candidates come from the denormalized count, not a GROUP BY scan.
+        let stmts = probe.take();
+        assert!(
+            stmts.iter().all(|s| !s.contains("GROUP BY room_id")),
+            "{stmts:#?}"
+        );
         assert_eq!(
             count(
                 &pool,

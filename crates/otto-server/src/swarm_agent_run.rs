@@ -143,7 +143,8 @@ pub async fn run_swarm_agent(
     // session in — and poll — the same resolved path, or watch_for_result never
     // finds the completed turn and the run sits "running" until it (wrongly)
     // retries. The headless `claude_pty` path applies the same fix.
-    let cwd_canon = std::fs::canonicalize(cwd)
+    let cwd_canon = tokio::fs::canonicalize(cwd)
+        .await
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| cwd.to_string());
     let cwd: &str = &cwd_canon;
@@ -170,7 +171,7 @@ pub async fn run_swarm_agent(
     let _ = set_run(ctx, &run_id, "running", None, false).await;
 
     let out_path = std::env::temp_dir().join(format!("otto-swarm-{run_id}.out"));
-    let _ = std::fs::remove_file(&out_path);
+    let _ = tokio::fs::remove_file(&out_path).await;
 
     let mut last_reason: Option<FailReason> = None;
     for attempt in 0..SWARM_MAX_ATTEMPTS {
