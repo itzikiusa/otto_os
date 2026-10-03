@@ -274,6 +274,23 @@ fn stale_socket_is_reported_and_removed() {
     // A socket file nobody listens on (its holder was SIGKILLed).
     drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
     assert!(path.exists());
+    // The other tests in this binary spawn PTY children concurrently, and a
+    // fork that lands while the listener above is open hands the child a copy
+    // of its fd until that child execs (CLOEXEC only closes it AT exec). In
+    // that window the socket still listens: adopt connects, then reads EOF
+    // instead of a HELLO_ACK and reports `Failed`, not `Stale`. Once our own
+    // fd is closed no new fork can inherit it, so the first refused connect
+    // means the socket is dead for good — the state a SIGKILLed holder leaves.
+    wait_until(
+        "no forked child still holds the listener",
+        Duration::from_secs(10),
+        || {
+            matches!(
+                std::os::unix::net::UnixStream::connect(&path),
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused
+            )
+        },
+    );
     assert!(matches!(PtyHandle::adopt(&path), Err(AdoptError::Stale)));
     assert!(!path.exists(), "stale socket file removed");
 }
