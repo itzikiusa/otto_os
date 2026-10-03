@@ -321,6 +321,16 @@ between snapshot copies, so a session of short lines at 200 columns holds about
 live terminal **nobody has viewed for 10 minutes** keeps only its newest 1000
 rows of emulator history; the next viewer restores the 4000-row cap and history
 grows again from there (the 10,000-line raw ring used by search is unaffected).
+For a session that survives daemon restarts, the PTY holder's own emulator (the
+copy a restarted daemon re-adopts) follows the same cap, and the holder keeps no
+raw ring of its own (search is daemon-side).
+
+In the app, a primary pane keeps **4000 rows** of xterm scrollback, the same as
+the daemon: a snapshot can never restore more, so deeper local history only cost
+memory until the next rebuild. Grid tiles and embedded previews keep 2000.
+Terminals parked while you are elsewhere in the app (so coming back needs no
+replay) are bounded by count (12) and by an estimated **48 MB** of buffer; the
+least recently parked go first.
 
 **Two searches:**
 - **In-viewport** — the xterm `SearchAddon` over the currently rendered buffer

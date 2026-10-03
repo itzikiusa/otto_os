@@ -67,7 +67,7 @@
   import type { SessionStatus as ParkedStatus } from '../api/types';
   import { base64ToBytes as parkedB64 } from '../b64';
   import { snapshotApplies, withInOrderReset as parkedRis, type TermFlow as FlowT, type WriteQueue as QueueT } from './termFlow';
-  import { PARK_SCROLLBACK, TermPark } from './termPark';
+  import { PARK_CELL_BYTES, PARK_SCROLLBACK, TermPark } from './termPark';
   import { CompactQueue } from './termCompactQueue';
 
   /** Resize compacts for every Terminal in this window: one in flight, the
@@ -116,7 +116,17 @@
     }
   }
 
-  const termPark = new TermPark<ParkedEngine>(disposeParked);
+  /** Estimated heap of a parked xterm (~12 B/cell), for the lot's byte
+   *  budget (perf 01 N2): a full lot of wide 4000-row panes was ~115 MB. */
+  function parkedBytes(e: ParkedEngine): number {
+    try {
+      return e.term.cols * e.term.buffer.active.length * PARK_CELL_BYTES;
+    } catch {
+      return 0;
+    }
+  }
+
+  const termPark = new TermPark<ParkedEngine>(disposeParked, undefined, undefined, undefined, undefined, parkedBytes);
 
   /** While parked the engine keeps up with its session on its own: bytes
    *  parse (the renderer is paused while detached), credit acks flow, snapshots
@@ -282,13 +292,13 @@
      *  this. Default false. */
     claimOnAttach?: boolean;
     /** Local xterm scrollback depth (lines). Each line costs ~12 B/cell, so
-     *  10k lines × 200 cols ≈ 24 MB of JS heap per terminal — fine for the one
-     *  primary pane, 150–360 MB across a 15-tile grid (SA-05). Default
+     *  4000 lines × 200 cols ≈ 9.6 MB of JS heap per terminal — fine for the
+     *  one primary pane, too much across a 15-tile grid (SA-05). Default
      *  EMBED_SCROLLBACK (2k): tiles and embedded previews mount many at once.
      *  PRIMARY hosts (SessionView, the share page, the DB SSH shell) pass
-     *  PRIMARY_SCROLLBACK (10k); the daemon keeps 4000 rows, so maximizing/
-     *  reconnecting still restores depth. Also the `lines` requested in every
-     *  `scrollback` snapshot. */
+     *  PRIMARY_SCROLLBACK (4000 = the daemon's own depth, perf 01 N2), so
+     *  maximizing/reconnecting restores everything the daemon has. Also the
+     *  `lines` requested in every `scrollback` snapshot. */
     scrollback?: number;
     /** Park instead of dispose on unmount / session switch (termPark.ts):
      *  the xterm and its socket stay live off-screen and the next Terminal

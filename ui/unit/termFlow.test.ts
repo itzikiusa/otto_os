@@ -200,9 +200,15 @@ test('input over a big queue sends resync BEFORE the resume its drop triggers, a
   assert.equal(q.queued, 1024);
 });
 
-test('scrollback depths: 2k default for embeds, 10k only where a primary pane asks for it', () => {
+test('scrollback depths: 2k default for embeds, 4000 (the daemon depth) only where a primary pane asks for it', () => {
   assert.equal(EMBED_SCROLLBACK, 2000);
-  assert.equal(PRIMARY_SCROLLBACK, 10_000);
+  // perf 01 N2: never more than the daemon emulator keeps (otto-pty
+  // EMULATOR_SCROLLBACK_LINES) — rows past it cannot survive a snapshot.
+  assert.equal(PRIMARY_SCROLLBACK, 4000);
+  assert.match(
+    readFileSync(new URL('../../crates/otto-pty/src/lib.rs', import.meta.url), 'utf8'),
+    /pub const EMULATOR_SCROLLBACK_LINES: usize = 4000;/,
+  );
   const src = (p: string) => readFileSync(new URL(p, import.meta.url), 'utf8');
   // The default in the props destructure (later props may follow it).
   assert.match(src('../src/lib/components/Terminal.svelte'), /scrollback = EMBED_SCROLLBACK(, \w+ = [^,}]+)* \}: Props = \$props\(\)/);

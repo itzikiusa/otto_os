@@ -19,7 +19,7 @@ import { isWebkitProject, useDefaultTerminalRenderer, watchFatalUiErrors } from 
 //     `scrollback` request (no redundant rebuild requests);
 //   • ^C mid-flood is on screen in < 150 ms (A3: queue dropped + `resync`);
 //   • a 15-tile TiledView keeps ≤ 2k scrollback per tile, the maximized tile
-//     10k (A4).
+//     4000 = the daemon's depth (A4, perf 01 N2).
 // Numbers come from an in-page probe (`window.__ottoTermProbe`, installed
 // before load; Terminal.svelte registers into it only when present). The
 // screen is read through the probe too (the parsed buffer, `onRender` for
@@ -381,7 +381,7 @@ test.describe('tiled scrollback budget', () => {
     await ctx?.dispose();
   });
 
-  test('15 live tiles keep ≤ 2k scrollback each; the maximized tile gets 10k', async ({ page }) => {
+  test('15 live tiles keep ≤ 2k scrollback each; the maximized tile gets 4000', async ({ page }) => {
     const c = await apiCtx();
     ctx = c.ctx;
     base = c.base;
@@ -425,7 +425,7 @@ test.describe('tiled scrollback budget', () => {
       await page.getByRole('menuitem', { name: 'Zoom in on this session' }).click();
     }
     await expect(page.locator('.tiled.single .pane')).toHaveCount(1);
-    await expect.poll(async () => (await live()).includes(10_000), { timeout: 15_000 }).toBe(true);
+    await expect.poll(async () => (await live()).includes(4000), { timeout: 15_000 }).toBe(true);
     expect(fatal, 'no fatal UI error (the WebGL park/adopt effect loop reloaded the page)').toEqual([]);
   });
 });

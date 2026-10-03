@@ -5,9 +5,12 @@ import type { WsTermFlowFrame } from '../api/types';
 
 /** xterm scrollback depth (lines) for a PRIMARY terminal — the one pane the
  *  user works in (SessionView: agents main/split panes, the maximized tile,
- *  swarm/loop session panes; the share page; the DB SSH shell). Each line
- *  costs ~12 B/cell, so 10k × 200 cols ≈ 24 MB of JS heap. */
-export const PRIMARY_SCROLLBACK = 10_000;
+ *  swarm/loop session panes; the share page; the DB SSH shell). Equal to the
+ *  daemon emulator's depth (otto-pty EMULATOR_SCROLLBACK_LINES, perf 01 N2):
+ *  every snapshot, resync or compact replaces the buffer with at most this
+ *  many rows, so rows past it only lived until the next rebuild while costing
+ *  ~12 B/cell (10k × 200 cols was ≈ 24 MB of JS heap; 4000 is ≈ 9.6 MB). */
+export const PRIMARY_SCROLLBACK = 4000;
 /** Default depth for every other Terminal: grid tiles and the embedded
  *  previews that mount several terminals at once (review/docs/analysis/run
  *  agents, assistant panels, docks, exec views). 10k there was 150–360 MB
