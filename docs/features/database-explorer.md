@@ -38,6 +38,23 @@ a MongoDB result **wider than N columns** (a per-engine user setting: MongoDB on
 at 10, the SQL engines and Redis off) switches to Vertical so a document is
 readable without a horizontal scroll (§5). A wide SQL table stays a grid unless
 you opt that engine in.
+**Restore order.** Every restored connection tab appears at once, but only the
+**active** one connects in the foreground. The others show a hollow ring ("Not
+connected yet — opens on click") and connect **in the background, three at a
+time** (the app-wide background request lane), each with its own spinner / red
+dot — focus never moves while they warm, so a click mid-restore sticks.
+Right-click a warming tab for **Stop connecting**, or an idle one for **Connect
+in background**. *Settings → Appearance → Database Explorer → "Connect restored
+tabs on click only"* skips the background warm-up entirely.
+
+**Keep-alive.** While the app is visible, every open connection that is
+connected gets a `db/test` ping every 4 minutes (*"Keep open connections
+alive"*, on by default), so its pool (5-minute idle timeout) and SSH tunnel
+stay warm and a dropped connection turns red *before* your next query. When the
+daemon restarts (new boot id) every open connection is marked stale: the active
+one re-loads its schema in place, the others drop to "Not connected yet" and
+re-warm — their open query tabs and results are kept.
+
 You can also dock a connection's full explorer *beside an agent* in the Agents
 split ("Open beside agents (split)" from a connection's right-click menu), so an
 agent and a live DB sit side by side.
@@ -496,6 +513,25 @@ variables and view picks are all persisted per connection (`otto_db_tabs`), so
 a pinned tab is still there after a reload or an app restart. Closed tabs'
 running queries are cancelled (server-side too) exactly like a single close.
 
+**Undo history per tab.** Each tab has a stable id (`uid`, persisted with the
+tab) and its editor state — undo/redo history, selection, scroll — is kept in a
+shared store (`lib/editor-history.ts`) that outlives the editor: ⌘Z still works
+after Query → Structure/Diagram → Query, a Kafka/SSH pane round trip or leaving
+the page. It is also written to **IndexedDB** (2 s after the last edit, flushed
+on page hide) so undo survives a **reload**, as long as the tab's text is
+unchanged; an entry over 512 KB keeps only the text, the total is capped at
+10 MB, and a closed tab's history is deleted. **Masked tabs never persist their
+history** (it holds every string typed or pasted); theirs lives in memory only.
+
+**Clipboard history (⌥⌘V).** Copies made *inside Otto* — result cells/rows/JSON
+(the grid's Copy actions) and copy/cut in the query editor — go into a 50-entry
+ring (≤ 64 KB each, deduped, IndexedDB). **⌥⌘V** in the Query view (or the copy
+icon in the editor toolbar) opens a filterable list and inserts the pick at the
+cursor as one undoable edit. Copies from a **masked** tab are never recorded.
+The webview cannot read the macOS clipboard history, so other apps' copies are
+not in it. *Settings → Appearance → "Clipboard history"* turns it off (and
+clears it).
+
 ### Running a query
 
 Press **Run** (the toolbar button) or **⌘↵ / Ctrl+Enter** — this runs the
@@ -506,7 +542,11 @@ string/comment-aware splitter and returns **one result set per statement** — t
 grid shows a segmented **Result 1…N** switcher (tooltip = the statement; a red
 dot marks an errored entry). Execution stops at the first failure and the
 completed results are still returned. While a query is in flight the grid dims
-under a **running overlay** (elapsed seconds + Cancel); **Esc** cancels. When a
+under a **running overlay** (elapsed seconds + Cancel); **Esc** cancels. The
+elapsed time counts from the run's stored start (`pending.startedAt`, persisted
+with the tab; for a run this page didn't start, backfilled from
+`query-status`'s `elapsed_ms`), so switching tab, connection or view — or
+reloading — no longer restarts it at 0s. When a
 bare SELECT was auto-limited, the footer grows a **pager**
 (`‹ Prev · rows a–b · Next ›`) that re-runs server-side with `OFFSET`/`skip`
 (with an "unordered" hint when the statement has no `ORDER BY`; an explicit
@@ -868,7 +908,11 @@ Filtering and sorting happen **in the browser** against the loaded rows (no
 re-query). Click a column header to cycle **none → ascending → descending →
 none** (type-aware: numeric vs string; nulls sort last). Header right-click adds
 **Sort ascending/descending**, **Clear sort**, **Filter by {column}…**, and
-**Copy column name**. A cell right-click offers **Filter: col = value** /
+**Copy column name**. Sort, the row search, column filters and **un-applied
+cell edits** are kept **per query tab** (`grid-tab-state.ts`): switching tabs
+no longer carries one tab's sort onto another with the same columns, or
+silently discards pending edits — they are back when you return (edits only
+onto the same result they were made on). A cell right-click offers **Filter: col = value** /
 **Exclude: col ≠ value**, **Expand value**, and **Copy value**. (Column filters
 that *re-shape the query* show as chips with a "press Run to apply" hint —
 distinct from the client-side row search.)
