@@ -173,6 +173,17 @@ pub struct K8sRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restarts: Option<i64>,
     pub age_seconds: i64,
+    /// Unix seconds the age counts from (`creationTimestamp`; an event's
+    /// last-seen time) — the UI renders Age as `now - created_at`, so a 304
+    /// (same rows kept) never freezes the column (perf R1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
+    /// `metadata.uid` / `metadata.resourceVersion`: the list's content
+    /// version is built from these (never sent).
+    #[serde(skip)]
+    pub uid: String,
+    #[serde(skip)]
+    pub resource_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -286,6 +297,12 @@ pub(crate) fn string_map(v: Option<&Value>) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
+fn created_at(v: &Value, ptr: &str) -> Option<i64> {
+    s(v, ptr)
+        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.timestamp())
+}
+
 fn age_seconds(v: &Value, ptr: &str, now: DateTime<Utc>) -> i64 {
     s(v, ptr)
         .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
@@ -313,6 +330,11 @@ fn base_row(kind: Kind, item: &Value, now: DateTime<Utc>) -> K8sRow {
         ready: None,
         restarts: None,
         age_seconds: age_seconds(item, "/metadata/creationTimestamp", now),
+        created_at: created_at(item, "/metadata/creationTimestamp"),
+        uid: s(item, "/metadata/uid").unwrap_or("").to_string(),
+        resource_version: s(item, "/metadata/resourceVersion")
+            .unwrap_or("")
+            .to_string(),
         node: None,
         ip: None,
         cpu: None,
@@ -1104,6 +1126,7 @@ fn event(row: &mut K8sRow, item: &Value, now: DateTime<Utc>) {
         .or_else(|| s(item, "/metadata/creationTimestamp"));
     if let Some(t) = last.and_then(|t| DateTime::parse_from_rfc3339(t).ok()) {
         row.age_seconds = (now - t.with_timezone(&Utc)).num_seconds().max(0);
+        row.created_at = Some(t.timestamp());
     }
     row.status = ty.clone();
     row.health = Some(if ty == "Warning" {
@@ -1419,21 +1442,66 @@ pub async fn list(
     Ok((rows, has_metrics))
 }
 
-/// Raw metrics-server pod list for `ns` (or all).
+/// Raw metrics-server pod list for `ns` (or all). The JSON (an all-namespace
+/// list is MBs on a big cluster) is parsed on the blocking pool, not a
+/// runtime worker (perf R3).
 pub async fn pod_metrics(k: &Kubectl, ns: Option<&str>) -> Result<Vec<PodMetrics>> {
     let path = match ns.map(str::trim).filter(|n| !n.is_empty()) {
         Some(n) => format!("/apis/metrics.k8s.io/v1beta1/namespaces/{n}/pods"),
         None => "/apis/metrics.k8s.io/v1beta1/pods".to_string(),
     };
-    let v = k.json(["get", "--raw", &path]).await?;
-    Ok(parse_pod_metrics(&v))
+    let out = k.run(["get", "--raw", &path]).await?;
+    tokio::task::spawn_blocking(move || {
+        crate::cli::parse_json(&out.stdout).map(|v| parse_pod_metrics(&v))
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("k8s metrics task: {e}")))?
 }
 
-/// `GET /k8s/clusters/{id}/metrics` — pods + `available` flag.
-pub async fn metrics(k: &Kubectl, ns: Option<&str>) -> Result<(Vec<PodMetrics>, bool)> {
-    match pod_metrics(k, ns).await {
+/// ONE pod's metrics (`…/namespaces/{ns}/pods/{pod}`) — the drawer's Metrics
+/// tab, instead of the whole namespace every 10 s (perf R5). `Ok(None)` when
+/// metrics-server has no sample for it yet.
+pub async fn one_pod_metrics(k: &Kubectl, ns: &str, pod: &str) -> Result<Option<PodMetrics>> {
+    let valid = |x: &str| {
+        !x.is_empty()
+            && x.len() <= 253
+            && x.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+            && !x.contains("..")
+    };
+    if !valid(ns) || !valid(pod) {
+        return Err(Error::Invalid("invalid namespace or pod name".into()));
+    }
+    let path = format!("/apis/metrics.k8s.io/v1beta1/namespaces/{ns}/pods/{pod}");
+    match k.json(["get", "--raw", &path]).await {
+        Ok(v) => Ok(parse_pod_metrics(&serde_json::json!({ "items": [v] }))
+            .into_iter()
+            .next()),
+        // The pod has no sample yet (metrics-server itself answered).
+        Err(Error::NotFound(m)) if m.contains("podmetrics") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// `GET /k8s/clusters/{id}/metrics` — pods + `available` flag; with `pod`
+/// (and `ns`) only that pod.
+pub async fn metrics(
+    k: &Kubectl,
+    ns: Option<&str>,
+    pod: Option<&str>,
+) -> Result<(Vec<PodMetrics>, bool)> {
+    let ns_s = ns.map(str::trim).filter(|n| !n.is_empty());
+    let res = match (ns_s, pod.map(str::trim).filter(|p| !p.is_empty())) {
+        (Some(n), Some(p)) => one_pod_metrics(k, n, p)
+            .await
+            .map(|m| m.into_iter().collect()),
+        (None, Some(_)) => return Err(Error::Invalid("pod needs ns".into())),
+        _ => pod_metrics(k, ns).await,
+    };
+    match res {
         Ok(p) => Ok((p, true)),
         Err(Error::Forbidden(m)) => Err(Error::Forbidden(m)),
+        Err(Error::Invalid(m)) => Err(Error::Invalid(m)),
         Err(e) => {
             tracing::debug!("metrics unavailable: {e}");
             Ok((vec![], false))

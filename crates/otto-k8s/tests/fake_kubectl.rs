@@ -754,6 +754,97 @@ async fn resources_pods_are_normalised_and_merged_with_metrics() {
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
+/// perf R1 — a REAL conditional GET (the e2e one is mocked): the second
+/// list is a cache MISS (a fresh kubectl run, rows normalised ≥ 1 s later so
+/// every `age_seconds` differs — the bug that kept the version moving) and
+/// must still answer `304` with no body for the `If-None-Match` echo.
+#[tokio::test]
+async fn resources_list_is_304_for_an_unchanged_list_across_a_cache_miss() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let uri = format!("/k8s/clusters/{id}/resources?kind=pods&ns=shop");
+    let mine = format!(
+        "--kubeconfig {} --context kind-kind --request-timeout 20s get pods -o json -n shop",
+        c["kubeconfig_path"].as_str().unwrap()
+    );
+    let lists = || argv_log().iter().filter(|l| **l == mine).count();
+    let app = || {
+        otto_k8s::api_router::<TestCtx>()
+            .layer(Extension(AuthUser(user.clone())))
+            .with_state(ctx.clone())
+    };
+    let get = |inm: Option<String>| {
+        let mut req = Request::builder().method("GET").uri(uri.clone());
+        if let Some(v) = inm {
+            req = req.header("if-none-match", v);
+        }
+        app().oneshot(req.body(Body::empty()).unwrap())
+    };
+    let first = get(None).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let etag = first.headers()["etag"].to_str().unwrap().to_string();
+    let body: serde_json::Value =
+        serde_json::from_slice(&first.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(format!("\"{}\"", body["version"].as_str().unwrap()), etag);
+    let web = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "web-5d4c-abcde")
+        .unwrap();
+    assert!(web["created_at"].is_i64(), "{web}");
+    assert_eq!(lists(), 1);
+
+    // As a poll after the TTL would: drop the cached answer, let the clock
+    // move past a second, list again.
+    otto_k8s::list_cache::forget_cluster(id);
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let second = get(Some(etag.clone())).await.unwrap();
+    assert_eq!(lists(), 2, "the second request re-listed (no cache hit)");
+    assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(second.headers()["etag"].to_str().unwrap(), etag);
+    let bytes = second.into_body().collect().await.unwrap().to_bytes();
+    assert!(bytes.is_empty(), "304 carries no body");
+
+    // A stale tag still gets the full list.
+    let third = get(Some("\"0000000000000000\"".into())).await.unwrap();
+    assert_eq!(third.status(), StatusCode::OK);
+    assert_eq!(lists(), 2, "served from the cache inside the TTL");
+}
+
+/// `GET …/metrics?ns=&pod=` asks metrics-server for that ONE pod.
+#[tokio::test]
+async fn metrics_for_one_pod_hits_the_single_pod_path() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let (st, body, t) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/metrics?ns=shop&pod=web-5d4c-abcde"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(body["available"], true, "{body}");
+    assert!(argv_log().iter().any(|l| l.contains(&format!(
+        "--kubeconfig {} ",
+        c["kubeconfig_path"].as_str().unwrap()
+    )) && l
+        .ends_with("get --raw /apis/metrics.k8s.io/v1beta1/namespaces/shop/pods/web-5d4c-abcde")));
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/metrics?ns=shop&pod=..%2F..%2Fsecrets"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn forbidden_namespace_maps_to_403() {
     let (ctx, user) = TestCtx::new().await;
