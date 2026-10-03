@@ -778,7 +778,10 @@ switch, client-side filter/sort, selection bar, pending-edits bar, footer pager)
 over three interchangeable views of the same rows:
 
 - **Grid** (`GridView.svelte`) — a **virtualized** columnar table: only the rows
-  in view are in the DOM, so 100k-row results scroll smoothly. The sticky
+  in view are in the DOM, so 100k-row results scroll smoothly. Past 40 columns
+  the **columns** are windowed too: each row mounts only the columns near the
+  viewport (spacer cells stand for the rest; the header keeps every column), so
+  a 300-column ClickHouse result scrolls like a narrow one. The sticky
   header has two lines (name, then type); numbers are right-aligned in tabular
   figures; `NULL` renders as a dim italic **NULL**. Drag a header's edge to
   resize (double-click to fit), drag the header itself to **reorder** columns.
@@ -816,6 +819,16 @@ strip (the checkbox slot is always reserved; the toolbar is one fixed row whose
 rarer verbs live in **Copy ▾ / Export ▾ / ⋯** menus; the edit verdict lands in
 the status bar). `desktop-db-layout-stability.spec.ts` pins the grid frame and
 first row from the loading frame through the probe.
+
+**Memory budget across tabs.** Every query tab keeps its last result, and a
+parked connection keeps its tabs. All resident results — across every tab and
+open connection — share one budget (`lib/stores/db-result-budget.ts`, about
+384 MB estimated; per-device override in `localStorage`
+`otto.db.resultBudgetMB`). Past it, the **least recently viewed** results are
+released: the rows are dropped, columns and stats are kept, and the tab shows
+**"Result released to save memory"** with a **Re-run** button that runs the same
+statement, scope and page again. The tab on screen, running tabs and tabs with
+un-applied edits are never released; results under 1 MB are not worth it.
 
 ### View mode & auto-Vertical
 
@@ -939,7 +952,10 @@ usual review modal. Whole-result import/export (files, streaming) is §10/§10b.
 ### Client-side filter & sort
 
 Filtering and sorting happen **in the browser** against the loaded rows (no
-re-query). Click a column header to cycle **none → ascending → descending →
+re-query). Over 20k rows the row search and the **Filter row** boxes apply when
+typing pauses (120 ms), not on every key; each column's display text is built
+once per result and reused for every key (a JSON column is no longer
+re-serialized per row per keystroke). Click a column header to cycle **none → ascending → descending →
 none** (type-aware: numeric vs string; nulls sort last). Header right-click adds
 **Sort ascending/descending**, **Clear sort**, **Filter by {column}…**, and
 **Copy column name**. Sort, the row search, column filters and **un-applied
@@ -1038,6 +1054,8 @@ streaming, uncapped local-file export — §10; flagged when the result is
 capped) and **Import file…** (§10b). **⋯**: Aggregate pipeline (Mongo),
 Compare two records (Vertical/JSON), Insert from JSON (editable results),
 Expand JSON cells (Grid), *Send to running agent…* and *Examine with AI*.
+Above 20k rows, copies and downloads are built 5k rows at a time behind a
+"Preparing…" toast so the window stays responsive.
 
 ### Foreign-key navigation
 
@@ -1184,7 +1202,11 @@ dependency) — the `DbViz` set is **`table` · `number` · `line` · `bar` · `
 | `pie` | slices with percentages (first numeric column = values) |
 
 A widget's **Refresh** button re-runs its stored statement (uncapped to 5000
-rows for rendering). Although the dashboards are framed around ClickHouse
+rows for rendering). Charts are **sampled to what a tile can show**
+(`chart-sample.ts`): bars average into at most 150 buckets, lines and areas keep
+each bucket's minimum and maximum (spikes survive), and a pie keeps its 11
+largest slices plus **Other**; the legend says how many points were averaged or
+sampled. Although the dashboards are framed around ClickHouse
 analytics, a widget runs against whatever connection it stores, through the same
 guarded execution path as a normal query.
 
