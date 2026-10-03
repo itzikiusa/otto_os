@@ -220,9 +220,11 @@
     return children.filter((k) => nodeMatchesFilter(k, q));
   }
 
-  /** Cap rendered children per node so a 5k-table schema can't flood the DOM;
-   *  a tail row reports how many were held back. */
-  const CHILD_CAP = 1000;
+  /** Cap flattened children per node; a tail row reports how many were held
+   *  back. The tree is windowed (only rows in view mount), so the cap only
+   *  bounds the flat list — it was 1,000, which hid tables 1,001+ of a big
+   *  schema behind "refine filter" for no DOM benefit. */
+  const CHILD_CAP = 20_000;
 
   // ── Flattened, windowed rows ────────────────────────────────────────────
   // The visible tree (roots, then each OPEN node's filtered children, depth

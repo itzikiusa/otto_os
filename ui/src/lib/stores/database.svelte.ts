@@ -2814,29 +2814,42 @@ class DatabaseStore {
       return;
     }
     const seq = ++this.objectSearchSeq;
+    // A newer keystroke ABORTS the superseded catalog search instead of only
+    // ignoring its answer (the daemon stops scanning a big catalog early).
+    this.objectSearchAbort?.abort();
+    const ac = (this.objectSearchAbort = new AbortController());
     this.objectSearching = true;
     try {
-      const r = await api.post<ObjectSearchResult>(`${this.connBase(connId)}/search-objects`, {
-        q: q.trim(),
-        schema: this.objectSearchScope === 'schema' ? schema : undefined,
-        scope: this.objectSearchScope,
-      });
+      const r = await api.post<ObjectSearchResult>(
+        `${this.connBase(connId)}/search-objects`,
+        {
+          q: q.trim(),
+          schema: this.objectSearchScope === 'schema' ? schema : undefined,
+          scope: this.objectSearchScope,
+        },
+        ac.signal,
+      );
       if (seq !== this.objectSearchSeq) return; // a newer keystroke won
       this.objectSearchHits = r.hits;
       this.objectSearchTruncated = r.truncated;
       this.objectSearchScanned = r.scanned;
       this.objectSearchSupported = r.supported;
     } catch (e) {
-      if (seq === this.objectSearchSeq) {
+      if (seq === this.objectSearchSeq && !isAbortError(e)) {
         this.objectSearchHits = [];
         toasts.error('Object search failed', errMsg(e));
       }
     } finally {
-      if (seq === this.objectSearchSeq) this.objectSearching = false;
+      if (seq === this.objectSearchSeq) {
+        this.objectSearching = false;
+        this.objectSearchAbort = null;
+      }
     }
   }
 
   clearObjectSearch(): void {
+    this.objectSearchAbort?.abort();
+    this.objectSearchAbort = null;
     this.objectSearchSeq++;
     this.objectSearchQuery = '';
     this.objectSearchHits = null;
@@ -2846,6 +2859,7 @@ class DatabaseStore {
   }
 
   private objectSearchSeq = 0;
+  private objectSearchAbort: AbortController | null = null;
 
   private async loadChildren(connId: string, nodeId: string): Promise<void> {
     const epoch = this.epochOf(connId);

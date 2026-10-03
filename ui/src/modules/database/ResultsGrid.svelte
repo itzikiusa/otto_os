@@ -209,8 +209,17 @@
     };
     // Immediately: no "0s" flash for a run that has been going for minutes.
     tick();
-    const iv = setInterval(tick, 250);
-    return () => clearInterval(iv);
+    // The label shows whole seconds: tick once per second, aligned to the next
+    // second boundary of the run (not 4×/s).
+    let iv: ReturnType<typeof setInterval> | undefined;
+    const align = setTimeout(() => {
+      tick();
+      iv = setInterval(tick, 1000);
+    }, 1000 - ((Date.now() - start) % 1000) + 5);
+    return () => {
+      clearTimeout(align);
+      if (iv !== undefined) clearInterval(iv);
+    };
   });
 
   // ── Footer pager (single auto-limited result only) ───────────────────────────
