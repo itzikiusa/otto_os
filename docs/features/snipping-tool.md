@@ -48,7 +48,9 @@ window.
    flattened PNG replaces the clipboard (“Copied ✓” in the toolbar). The PNG
    encode runs in a worker (OffscreenCanvas, main-thread fallback), the upload
    is a raw `image/png` body, and nothing is re-encoded or re-sent when the
-   annotations are unchanged since the last save. Undo keeps the last 100 steps. ⌘C or the
+   annotations are unchanged since the last save (`uploadNeeded` in
+   `annotations.ts`, unit-tested in `ui/unit/snipSaveGate.test.ts`; a 15 MB raw
+   upload is budgeted under 300 ms in `crates/otto-server/tests/snips.rs`). Undo keeps the last 100 steps. ⌘C or the
    **Copy** button forces it immediately. Paste into your session whenever
    you're ready — the newest state is always what pastes.
 6. **Done** — Close the window. Snips are pruned after 14 days (Delete removes

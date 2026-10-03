@@ -40,6 +40,10 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/workspaces/{id}/proof-packs", get(list).post(create))
         .route("/workspaces/{id}/proof-summary", get(summary))
         .route(
+            "/workspaces/{id}/proof-packs/archive-sessions",
+            post(archive_sessions),
+        )
+        .route(
             "/proof-packs/{id}",
             get(detail).patch(patch_pack).delete(remove),
         )
@@ -158,6 +162,9 @@ struct ListQuery {
     limit: Option<u32>,
     /// Opaque keyset cursor from a previous page's `x-next-cursor` header.
     cursor: Option<String>,
+    /// Also list packs the opt-in session archive hid (default false).
+    #[serde(default)]
+    include_archived: bool,
 }
 
 /// `<updated_at>|<id>` — both are RFC3339 / ULID-ish text without `|`.
@@ -188,6 +195,7 @@ async fn list(
             q.work_item_id.as_deref(),
             q.limit.map(|l| l.clamp(1, 500)),
             after.as_ref(),
+            q.include_archived,
         )
         .await
         .map_err(ApiError)?;
@@ -222,22 +230,82 @@ async fn list(
         .map_err(|e| ApiError(Error::Internal(format!("packs response: {e}"))))
 }
 
+/// Most `kind:id` entries one scoped summary request may name.
+const SUMMARY_MAX_WORK_ITEMS: usize = 1000;
+
+#[derive(Deserialize, Default)]
+struct SummaryQuery {
+    /// `kind:id,kind:id,…` — only these work items' packs are read (R3). Absent
+    /// = the whole workspace (the legacy full read, kept as a fallback).
+    #[serde(default)]
+    work_items: Option<String>,
+}
+
+/// Parse `kind:id,…` (blank entries skipped). Every kind must be a known
+/// work-item kind; at most [`SUMMARY_MAX_WORK_ITEMS`] entries.
+fn parse_work_items(raw: &str) -> Result<Vec<(String, String)>, Error> {
+    let mut out = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let Some((kind, id)) = entry.split_once(':') else {
+            return Err(Error::Invalid(format!(
+                "work_items entry {entry:?} is not kind:id"
+            )));
+        };
+        let kind = parse_work_kind(kind).map_err(|e| e.0)?;
+        if id.is_empty() {
+            return Err(Error::Invalid(format!(
+                "work_items entry {entry:?} has no id"
+            )));
+        }
+        out.push((kind.as_str().to_string(), id.to_string()));
+    }
+    if out.len() > SUMMARY_MAX_WORK_ITEMS {
+        return Err(Error::Invalid(format!(
+            "at most {SUMMARY_MAX_WORK_ITEMS} work_items per request"
+        )));
+    }
+    Ok(out)
+}
+
 async fn summary(
     State(ctx): State<ServerCtx>,
     Extension(user): Extension<AuthUser>,
     Path(ws): Path<Id>,
+    Query(q): Query<SummaryQuery>,
 ) -> ApiResult<Json<ProofSummaryResp>> {
     check(&ctx, &user, &ws, WorkspaceRole::Viewer).await?;
-    let packs = ctx
-        .proof_repo
-        .list_packs(&ws, None, None, None)
-        .await
-        .map_err(ApiError)?;
-    let mut by_pack = ctx
-        .proof_repo
-        .badge_artifacts(&ws)
-        .await
-        .map_err(ApiError)?;
+    let (packs, mut by_pack) = match q.work_items.as_deref() {
+        // Scoped: only the named work items' packs + their badge artifacts,
+        // both index probes — rows read match the filter, not the workspace.
+        Some(raw) => {
+            let items = parse_work_items(raw).map_err(ApiError)?;
+            let packs = ctx
+                .proof_repo
+                .list_packs_for_work_items(&ws, &items)
+                .await
+                .map_err(ApiError)?;
+            let ids: Vec<String> = packs.iter().map(|p| p.id.clone()).collect();
+            let arts = ctx
+                .proof_repo
+                .artifacts_meta_for_packs(&ids)
+                .await
+                .map_err(ApiError)?;
+            (packs, arts)
+        }
+        None => {
+            let packs = ctx
+                .proof_repo
+                .list_packs(&ws, None, None, None)
+                .await
+                .map_err(ApiError)?;
+            let arts = ctx
+                .proof_repo
+                .badge_artifacts(&ws)
+                .await
+                .map_err(ApiError)?;
+            (packs, arts)
+        }
+    };
     let mut rows = Vec::with_capacity(packs.len());
     for p in packs {
         let arts = by_pack.remove(&p.id).unwrap_or_default();
@@ -252,6 +320,63 @@ async fn summary(
         });
     }
     Ok(Json(ProofSummaryResp { rows }))
+}
+
+/// Default / minimum age (days) for the opt-in session-pack archive.
+const ARCHIVE_DEFAULT_DAYS: u32 = 30;
+const ARCHIVE_MIN_DAYS: u32 = 7;
+
+#[derive(Deserialize, Default)]
+struct ArchiveSessionsReq {
+    /// Only packs last updated more than this many days ago (default 30, min 7).
+    #[serde(default)]
+    older_than_days: Option<u32>,
+    /// Dry run unless true.
+    #[serde(default)]
+    apply: bool,
+}
+
+/// `POST /workspaces/{id}/proof-packs/archive-sessions` — OPT-IN, workspace
+/// admin. Hides stale `session` packs that never got any evidence from the
+/// summary + default list by stamping `archived_at`; nothing is deleted, and a
+/// pack un-archives itself the moment it changes or gains evidence. Dry run
+/// (count only) unless `apply: true`.
+async fn archive_sessions(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(ws): Path<Id>,
+    body: Option<Json<ArchiveSessionsReq>>,
+) -> ApiResult<Json<Value>> {
+    check(&ctx, &user, &ws, WorkspaceRole::Admin).await?;
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let days = req.older_than_days.unwrap_or(ARCHIVE_DEFAULT_DAYS);
+    if days < ARCHIVE_MIN_DAYS {
+        return Err(ApiError(Error::Invalid(format!(
+            "older_than_days must be at least {ARCHIVE_MIN_DAYS}"
+        ))));
+    }
+    // Same RFC3339 shape the repo stamps `updated_at` with (lexical compare).
+    let cutoff = (chrono::Utc::now() - chrono::Duration::days(i64::from(days))).to_rfc3339();
+    let matched = ctx
+        .proof_repo
+        .archive_stale_session_packs(&ws, &cutoff, false)
+        .await
+        .map_err(ApiError)?;
+    let archived = if req.apply && matched > 0 {
+        ctx.proof_repo
+            .archive_stale_session_packs(&ws, &cutoff, true)
+            .await
+            .map_err(ApiError)?
+    } else {
+        0
+    };
+    Ok(Json(json!({
+        "applied": req.apply,
+        "older_than_days": days,
+        "cutoff": cutoff,
+        "matched": matched,
+        "archived": archived,
+    })))
 }
 
 async fn create(
@@ -1007,5 +1132,26 @@ mod proof_route_tests {
         let c = ("2026-10-03T12:00:00Z".to_string(), "01ABC".to_string());
         assert_eq!(decode_cursor(&encode_cursor(&c)).unwrap(), c);
         assert!(decode_cursor("nobar").is_err());
+    }
+
+    #[test]
+    fn summary_work_items_parse_and_validate() {
+        let items = parse_work_items("session:s1, goal_loop:g2,,").unwrap();
+        assert_eq!(
+            items,
+            vec![
+                ("session".to_string(), "s1".to_string()),
+                ("goal_loop".to_string(), "g2".to_string())
+            ]
+        );
+        assert!(parse_work_items("").unwrap().is_empty());
+        assert!(parse_work_items("nokind").is_err());
+        assert!(parse_work_items("bogus:x").is_err());
+        assert!(parse_work_items("session:").is_err());
+        let too_many = (0..=SUMMARY_MAX_WORK_ITEMS)
+            .map(|i| format!("session:s{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_work_items(&too_many).is_err());
     }
 }

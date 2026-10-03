@@ -26,6 +26,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { CanvasDoc } from './types';
   import { buildExcalidrawElements, isSimplified } from './excalidraw-build';
+  import { filesForSave, resolveFiles, sha256Hex } from './canvasFiles';
+  import type { ExFile } from './canvasFileRefs';
 
   interface Props {
     readonly?: boolean;
@@ -52,6 +54,11 @@
   let suppressSave = false;
   let lastApplied = '';
   let pendingDoc: CanvasDoc | null = null;
+  // Images out of the autosave body (canvasFiles.ts): file id → sha of every
+  // image the server already holds (learned from loaded refs, or after a save
+  // that carried it inline lands). Those autosave as refs, not base64.
+  const knownFiles = new Map<string, string>();
+  const inlineOf = new WeakMap<CanvasDoc, ExFile[]>();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function center(e: any): { x: number; y: number } {
@@ -184,9 +191,15 @@
     suppressSave = true;
     try {
       // Re-register the scene's image files (kept across an Ask AI turn) so
-      // image elements never render as broken placeholders.
-      const files = raw?.files && typeof raw.files === 'object' ? Object.values(raw.files) : [];
-      if (files.length) ex.addFiles?.(files);
+      // image elements never render as broken placeholders. Refs resolve via
+      // the immutable file route; files the editor already holds aren't
+      // fetched again.
+      if (raw?.files && typeof raw.files === 'object') {
+        const have = new Set(Object.keys(ex.getFiles?.() ?? {}));
+        void resolveFiles(raw.files, knownFiles, have).then((files) => {
+          if (files.length && liveApi === ex) ex.addFiles?.(files);
+        });
+      }
       ex.updateScene({ elements });
       if (elements.length) ex.scrollToContent(elements, { fitToContent: true, animate: false });
     } finally {
@@ -249,15 +262,33 @@
   function snapshotDoc(): CanvasDoc | null {
     if (!excaliApi) return null;
     const appState = excaliApi.getAppState();
-    return {
+    // Images the server holds go as refs — the stringify (and the PUT) stay
+    // small however big the pasted screenshots are.
+    const { files, inline } = filesForSave(excaliApi.getFiles?.() ?? {}, knownFiles);
+    const doc: CanvasDoc = {
       type: 'otto-canvas', version: 1, format: 'excalidraw',
       source: JSON.stringify({
         type: 'excalidraw', version: 2, source: 'otto',
         elements: excaliApi.getSceneElements(),
         appState: { viewBackgroundColor: appState.viewBackgroundColor, gridSize: appState.gridSize ?? null },
-        files: excaliApi.getFiles?.() ?? {},
+        files,
       }),
     };
+    if (inline.length) inlineOf.set(doc, inline);
+    return doc;
+  }
+
+  /** After `doc` landed: the server now holds its inline images — learn
+   *  their content address so later autosaves send refs. */
+  function learnSaved(doc: CanvasDoc): void {
+    const inline = inlineOf.get(doc);
+    if (!inline) return;
+    inlineOf.delete(doc);
+    for (const f of inline) {
+      void sha256Hex(f.dataURL)
+        .then((sha) => knownFiles.set(f.id, sha))
+        .catch(() => {});
+    }
   }
 
   // Excalidraw fires onChange on every drag frame, scroll, zoom and selection.
@@ -307,7 +338,7 @@
     const doc = pendingDoc;
     if (!doc || !sceneId) return;
     try {
-      await canvas.persistDoc(sceneId, doc, saveContext);
+      if (await canvas.persistDoc(sceneId, doc, saveContext)) learnSaved(doc);
       // Newer local drawing wins over the response to an older snapshot.
       if (!destroyed && canvas.saveContext === saveContext && canvas.currentId === sceneId && pendingDoc === doc) {
         lastApplied = doc.source ?? '';
@@ -318,7 +349,10 @@
     }
   }
 
-  function initialData() {
+  // Excalidraw accepts a Promise here: the elements are ready at once and the
+  // image refs resolve (one immutable fetch each, HTTP-cached on reopen)
+  // before the first paint, so files are part of the baseline, not an edit.
+  async function initialData() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let raw: any = null;
     try {
@@ -328,10 +362,12 @@
     }
     const elements = normalizeScene(raw);
     lastApplied = canvas.source ?? '';
+    const resolved = raw?.files && typeof raw.files === 'object' ? await resolveFiles(raw.files, knownFiles) : [];
     return {
       elements,
       appState: { viewBackgroundColor: raw?.appState?.viewBackgroundColor ?? '#ffffff' },
-      files: raw?.files ?? {},
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      files: Object.fromEntries(resolved.map((f) => [f.id, f])) as any,
       scrollToContent: elements.length > 0,
     };
   }
@@ -340,7 +376,8 @@
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const w = window as any;
     if (!w.EXCALIDRAW_ASSET_PATH) {
-      w.EXCALIDRAW_ASSET_PATH = 'https://unpkg.com/@excalidraw/excalidraw@0.18.1/dist/prod/';
+      // Fonts are served by Otto (vite.config.ts `excalidrawFonts`), not a CDN.
+      w.EXCALIDRAW_ASSET_PATH = `${import.meta.env.BASE_URL}assets/excalidraw/`;
     }
     const React = await import('react');
     const { createRoot } = await import('react-dom/client');

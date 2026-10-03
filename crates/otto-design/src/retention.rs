@@ -1,13 +1,17 @@
 //! Retention planning + the scheduled pass.
 //!
 //! Two ways the policy runs: an admin's `POST /design/admin/prune` (a dry run
-//! unless `apply: true`, any version age), and the daily scheduled pass
-//! ([`spawn_scheduler`], OFF by default — it deletes autosave versions, which
-//! are user data, so it is opt-in via `OTTO_DESIGN_AUTO_PRUNE=1`) which only
-//! squashes autosaves OLDER than a day
-//! (`OTTO_DESIGN_PRUNE_MIN_AGE_SECS`, default 86 400) and then GCs the blobs
+//! unless `apply: true`, any version age), and the scheduled "auto-tidy" pass
+//! ([`spawn_scheduler`]). Auto-tidy deletes autosave versions, which are user
+//! data, so it is OPT-IN: a visible Settings → Design Hall toggle (the
+//! `design.auto_tidy` setting, OFF by default) next to a storage gauge that
+//! shows how much it would reclaim (`GET /design/admin/storage`). The
+//! `OTTO_DESIGN_AUTO_PRUNE` env var is a hard override either way (`0` keeps
+//! it off whatever the toggle says, `1` forces it on). When on, it runs at
+//! most once a day and only squashes autosaves OLDER than a week
+//! (`OTTO_DESIGN_PRUNE_MIN_AGE_SECS`, default 604 800), then GCs the blobs
 //! nothing references. Every content PUT keeps a full content-addressed copy,
-//! so without it the blob store only ever grew.
+//! so without it the blob store only ever grows.
 //!
 //! Policy (proposal §3.1): named / agent / import / sync / restore versions are
 //! always kept; `autosave` versions are squashed to the LAST one per editing
@@ -21,17 +25,23 @@ use std::collections::HashSet;
 use chrono::{DateTime, Utc};
 
 pub const DEFAULT_WINDOW_SECS: i64 = 600;
-/// Scheduled pass: only versions older than this are candidates.
-pub const DEFAULT_MIN_AGE_SECS: i64 = 86_400;
-/// Scheduled pass cadence.
+/// Scheduled pass: only versions older than this (a week) are candidates.
+pub const DEFAULT_MIN_AGE_SECS: i64 = 604_800;
+/// Scheduled pass cadence: at most one pass per this many seconds.
 pub const SCHEDULE_EVERY_SECS: u64 = 86_400;
+/// How often the scheduler re-reads the toggle (a flip takes effect within it).
+pub const CHECK_EVERY_SECS: u64 = 3_600;
 /// First scheduled pass after boot (keeps it off the startup path).
 pub const FIRST_RUN_AFTER_SECS: u64 = 600;
+/// The persisted Settings toggle (`settings` table, JSON bool).
+pub const AUTO_TIDY_SETTING: &str = "design.auto_tidy";
 
 /// Scheduled-pass settings, read from the environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerConfig {
-    pub enabled: bool,
+    /// `OTTO_DESIGN_AUTO_PRUNE` as a hard override: `Some(false)` = never,
+    /// `Some(true)` = always, `None` = follow the Settings toggle.
+    pub forced: Option<bool>,
     pub window_secs: i64,
     pub min_age_secs: i64,
 }
@@ -41,17 +51,20 @@ impl SchedulerConfig {
         Self::from_lookup(|k| std::env::var(k).ok())
     }
 
-    /// Pure parse (unit-tested): opt-in — only `OTTO_DESIGN_AUTO_PRUNE` =
-    /// 1/true/on/yes enables the scheduled pass (unset or anything else keeps
-    /// it off, since it deletes autosave versions); the window and minimum age fall back to the defaults when
-    /// unset or not a positive integer.
+    /// Pure parse (unit-tested): `OTTO_DESIGN_AUTO_PRUNE` = 1/true/on/yes
+    /// forces the pass on, 0/false/off/no forces it off, and unset or
+    /// anything else leaves the decision to the Settings toggle; the window
+    /// and minimum age fall back to the defaults when unset or not a positive
+    /// integer.
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
-        let enabled = matches!(
-            get("OTTO_DESIGN_AUTO_PRUNE")
-                .map(|v| v.trim().to_ascii_lowercase())
-                .as_deref(),
-            Some("1" | "true" | "on" | "yes")
-        );
+        let forced = match get("OTTO_DESIGN_AUTO_PRUNE")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("1" | "true" | "on" | "yes") => Some(true),
+            Some("0" | "false" | "off" | "no") => Some(false),
+            _ => None,
+        };
         let num = |k: &str, d: i64| {
             get(k)
                 .and_then(|v| v.trim().parse::<i64>().ok())
@@ -59,10 +72,15 @@ impl SchedulerConfig {
                 .unwrap_or(d)
         };
         Self {
-            enabled,
+            forced,
             window_secs: num("OTTO_DESIGN_PRUNE_WINDOW_SECS", DEFAULT_WINDOW_SECS),
             min_age_secs: num("OTTO_DESIGN_PRUNE_MIN_AGE_SECS", DEFAULT_MIN_AGE_SECS),
         }
+    }
+
+    /// Whether the pass runs, given the persisted toggle.
+    pub fn effective(&self, setting: bool) -> bool {
+        self.forced.unwrap_or(setting)
     }
 }
 
@@ -92,27 +110,45 @@ pub async fn run_scheduled_once(
     Ok(report)
 }
 
-/// Daily background retention (boot hook). A no-op when disabled.
+/// Is a scheduled pass due? (pure; unit-tested): on, and no pass recorded
+/// within [`SCHEDULE_EVERY_SECS`].
+pub fn due(on: bool, last_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    on && last_at.is_none_or(|t| (now - t).num_seconds() >= SCHEDULE_EVERY_SECS as i64)
+}
+
+/// Background auto-tidy (boot hook). Re-reads the Settings toggle every
+/// [`CHECK_EVERY_SECS`] and runs at most one pass a day while it is on; the
+/// toggle is off by default, so a default install never deletes anything.
+/// `OTTO_DESIGN_AUTO_PRUNE=0` disables the loop entirely.
 pub fn spawn_scheduler(svc: crate::DesignService) {
     let cfg = SchedulerConfig::from_env();
-    if !cfg.enabled {
-        tracing::info!("design: scheduled retention off (opt in with OTTO_DESIGN_AUTO_PRUNE=1)");
+    if cfg.forced == Some(false) {
+        tracing::info!("design: auto-tidy disabled by OTTO_DESIGN_AUTO_PRUNE=0");
         return;
     }
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(FIRST_RUN_AFTER_SECS)).await;
-        let mut every = tokio::time::interval(std::time::Duration::from_secs(SCHEDULE_EVERY_SECS));
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(CHECK_EVERY_SECS));
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             every.tick().await;
+            let setting = svc.auto_tidy_setting().await.unwrap_or(false);
+            let last = last_run().and_then(|r| {
+                DateTime::parse_from_rfc3339(&r.at)
+                    .ok()
+                    .map(|t| t.with_timezone(&Utc))
+            });
+            if !due(cfg.effective(setting), last, Utc::now()) {
+                continue;
+            }
             match run_scheduled_once(&svc, &cfg).await {
                 Ok(r) if !r.versions.is_empty() => tracing::info!(
                     versions = r.versions.len(),
                     blobs = r.blobs.len(),
-                    "design: scheduled retention squashed old autosaves"
+                    "design: auto-tidy squashed old autosaves"
                 ),
                 Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "design: scheduled retention failed"),
+                Err(e) => tracing::warn!(error = %e, "design: auto-tidy failed"),
             }
         }
     });
@@ -206,27 +242,37 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_config_defaults_off_and_opt_in() {
+    fn scheduler_config_follows_the_toggle_unless_env_forces_it() {
         let none = SchedulerConfig::from_lookup(|_| None);
         assert_eq!(
             none,
             SchedulerConfig {
-                enabled: false,
+                forced: None,
                 window_secs: DEFAULT_WINDOW_SECS,
                 min_age_secs: DEFAULT_MIN_AGE_SECS
             }
         );
-        for off in ["0", "false", "OFF", " no ", "", "maybe"] {
+        // Default install: the toggle (off by default) decides.
+        assert!(!none.effective(false));
+        assert!(none.effective(true));
+        for off in ["0", "false", "OFF", " no "] {
             let c = SchedulerConfig::from_lookup(|k| {
                 (k == "OTTO_DESIGN_AUTO_PRUNE").then(|| off.to_string())
             });
-            assert!(!c.enabled, "{off:?} keeps it off");
+            assert_eq!(c.forced, Some(false), "{off:?} forces it off");
+            assert!(!c.effective(true), "{off:?} beats the toggle");
         }
         for on in ["1", "true", "ON", " yes "] {
             let c = SchedulerConfig::from_lookup(|k| {
                 (k == "OTTO_DESIGN_AUTO_PRUNE").then(|| on.to_string())
             });
-            assert!(c.enabled, "{on:?} opts in");
+            assert!(c.effective(false), "{on:?} forces it on");
+        }
+        for unknown in ["", "maybe"] {
+            let c = SchedulerConfig::from_lookup(|k| {
+                (k == "OTTO_DESIGN_AUTO_PRUNE").then(|| unknown.to_string())
+            });
+            assert_eq!(c.forced, None, "{unknown:?} leaves it to the toggle");
         }
         let c = SchedulerConfig::from_lookup(|k| match k {
             "OTTO_DESIGN_PRUNE_WINDOW_SECS" => Some("120".into()),
@@ -234,6 +280,15 @@ mod tests {
             _ => None,
         });
         assert_eq!((c.window_secs, c.min_age_secs), (120, DEFAULT_MIN_AGE_SECS));
+    }
+
+    #[test]
+    fn due_runs_at_most_once_a_day_and_never_when_off() {
+        let now = Utc::now();
+        assert!(!due(false, None, now), "off never runs");
+        assert!(due(true, None, now), "on + never ran → due");
+        assert!(!due(true, Some(now - Duration::hours(3)), now));
+        assert!(due(true, Some(now - Duration::hours(25)), now));
     }
 
     #[test]

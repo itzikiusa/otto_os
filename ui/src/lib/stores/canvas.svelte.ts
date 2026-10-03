@@ -112,10 +112,14 @@ class CanvasStore {
     if (this.currentId === id) this.dirty = true;
   }
 
-  async persistDoc(id: string, doc: CanvasDoc, context = this.#saveContext): Promise<void> {
-    if (context !== this.#saveContext) return;
+  /** Queue a save of `doc`. Resolves `true` only when THIS doc's PUT landed
+   *  (false when it was superseded/skipped) — the Excalidraw board learns
+   *  which inline images the server now holds from it. */
+  async persistDoc(id: string, doc: CanvasDoc, context = this.#saveContext): Promise<boolean> {
+    if (context !== this.#saveContext) return false;
     this.stageDoc(id, doc, context);
     const previous = this.#writes.get(id);
+    let sent = false;
     const write = (async () => {
       await previous?.catch(() => {});
       if (context !== this.#saveContext) return;
@@ -123,6 +127,7 @@ class CanvasStore {
       // write and will carry the latest doc — skip sending a stale multi-MB body.
       if (this.#drafts.get(id) !== doc) return;
       await api.put(`/canvas/scenes/${id}?summary=true`, { doc }); // list row back, not the doc (SD-22)
+      sent = true;
       if (context !== this.#saveContext) return;
       if (this.#drafts.get(id) !== doc) return;
       this.#drafts.delete(id);
@@ -132,10 +137,11 @@ class CanvasStore {
     this.#writes.set(id, write);
     try { await write; }
     catch (e) {
-      if (context !== this.#saveContext) return;
+      if (context !== this.#saveContext) return false;
       this.docSaveErrors[id] = loadErrorText(e); throw e;
     }
     finally { if (this.#writes.get(id) === write) this.#writes.delete(id); }
+    return sent;
   }
 
   #history: string[] = [];
@@ -190,7 +196,9 @@ class CanvasStore {
     this.loadError = null;
     this.loadErrorId = null;
     try {
-      const row = await api.get<CanvasScene>(`/canvas/scenes/${id}`);
+      // `?files=ref`: Excalidraw images stay `otto-canvas-file:<sha>` refs —
+      // the board fetches each once (immutable) instead of a multi-MB doc.
+      const row = await api.get<CanvasScene>(`/canvas/scenes/${id}?files=ref`);
       if (sequence !== this.#openSequence) return;
       this.currentId = row.id;
       this.scene = parseScene(row.doc_json, row.title);
@@ -249,7 +257,7 @@ class CanvasStore {
   async refreshSession(): Promise<void> {
     if (!this.currentId) return;
     try {
-      const row = await api.get<CanvasScene>(`/canvas/scenes/${this.currentId}`);
+      const row = await api.get<CanvasScene>(`/canvas/scenes/${this.currentId}?files=ref`);
       this.sessionId = row.session_id;
     } catch {
       /* best-effort */
@@ -315,7 +323,7 @@ class CanvasStore {
    *  the replaced doc as a `restore` version, so this is undoable. */
   async restoreVersion(id: string, versionId: string): Promise<void> {
     await this.#writes.get(id)?.catch(() => {});
-    const row = await api.post<CanvasScene>(`/canvas/scenes/${id}/versions/${versionId}/restore`, {});
+    const row = await api.post<CanvasScene>(`/canvas/scenes/${id}/versions/${versionId}/restore?files=ref`, {});
     this.#drafts.delete(id);
     delete this.docSaveErrors[id];
     if (this.currentId !== id) return;

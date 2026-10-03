@@ -15,7 +15,7 @@ use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use otto_core::api::Problem;
 use otto_core::auth::{AuthUser, RoleChecker};
@@ -289,6 +289,7 @@ pub fn router<S: DesignCtx>() -> Router<S> {
         .route("/design/admin/import", post(run_import::<S>))
         .route("/design/admin/prune", post(prune::<S>))
         .route("/design/admin/storage", get(storage::<S>))
+        .route("/design/admin/auto-tidy", put(set_auto_tidy::<S>))
         .merge(crate::brand::http::routes::<S>())
         .merge(crate::site::http::routes::<S>())
 }
@@ -741,17 +742,64 @@ async fn get_content<S: DesignCtx>(
     content_response(&a, &v, bytes, CACHE_REVALIDATE)
 }
 
+/// Content bodies above this are JSON-parsed, base64-decoded and validated on
+/// the blocking pool: a 4 MB autosave used to do all three on a runtime
+/// worker (budgeted by `put_content_4mb_never_blocks_a_worker`).
+const CONTENT_OFF_RUNTIME_ABOVE: usize = 256 * 1024;
+
+/// `Json<ContentPutReq>` + `decode_content` + the host validator, off the
+/// runtime for big bodies. Same contract as axum's extractor: 415 without a
+/// JSON content type, 400 on a malformed body.
+async fn content_put_body<S: DesignCtx>(
+    ctx: &S,
+    format: &str,
+    headers: &axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> ApiResult<(ContentPutReq, Vec<u8>)> {
+    let is_json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|m| {
+            let m = m.trim();
+            m.eq_ignore_ascii_case("application/json")
+                || (m.starts_with("application/") && m.ends_with("+json"))
+        });
+    if !is_json {
+        return Err(ApiErr(Error::UnsupportedMedia(
+            "expected application/json".into(),
+        )));
+    }
+    let big = body.len() > CONTENT_OFF_RUNTIME_ABOVE;
+    let (ctx, format) = (ctx.clone(), format.to_string());
+    let work = move || -> otto_core::Result<(ContentPutReq, Vec<u8>)> {
+        let mut req: ContentPutReq = serde_json::from_slice(&body)
+            .map_err(|e| Error::Invalid(format!("invalid JSON body: {e}")))?;
+        let bytes = decode_content(req.content.take(), req.content_b64.take())?
+            .ok_or_else(|| Error::Invalid("send `content` or `content_b64`".into()))?;
+        ctx.validate_content(&format, &bytes)?;
+        Ok((req, bytes))
+    };
+    let out = if big {
+        tokio::task::spawn_blocking(work)
+            .await
+            .map_err(|e| Error::Internal(format!("design body worker: {e}")))?
+    } else {
+        work()
+    };
+    Ok(out?)
+}
+
 async fn put_content<S: DesignCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(IdPath { id }): Path<IdPath>,
-    Json(req): Json<ContentPutReq>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> ApiResult<Response> {
     let svc = ctx.design();
     let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
-    let bytes = decode_content(req.content, req.content_b64)?
-        .ok_or_else(|| Error::Invalid("send `content` or `content_b64`".into()))?;
-    ctx.validate_content(&a.format, &bytes)?;
+    let (req, bytes) = content_put_body(&ctx, &a.format, &headers, body).await?;
     let author = Author::from_request(&user.id, req.author_kind.as_deref(), req.session_id)?;
     let kind = if author.kind == "agent" {
         "agent"
@@ -1243,6 +1291,24 @@ async fn storage<S: DesignCtx>(
         )));
     }
     Ok(Json(ctx.design().storage().await?).into_response())
+}
+
+/// Flip the Settings → Design Hall auto-tidy toggle (root only, like the
+/// gauge). Opt-in: nothing is deleted until a person turns it on. Returns the
+/// refreshed gauge.
+async fn set_auto_tidy<S: DesignCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(req): Json<AutoTidyReq>,
+) -> ApiResult<Response> {
+    if !user.is_root {
+        return Err(ApiErr(Error::Forbidden(
+            "design auto-tidy is a root-only setting".into(),
+        )));
+    }
+    let svc = ctx.design();
+    svc.set_auto_tidy(req.enabled).await?;
+    Ok(Json(svc.storage().await?).into_response())
 }
 
 #[cfg(test)]
@@ -1995,5 +2061,126 @@ mod tests {
             !ctx.design().blobs().exists(&sha1).await,
             "the replaced thumbnail is GC'd at once"
         );
+    }
+
+    /// R4 budget: a 4 MB `PUT …/content` (the biggest realistic autosave)
+    /// never blocks a tokio worker — body parse, base64 decode, validation,
+    /// hashing and the blob write all run off the runtime. One worker + a
+    /// 1 ms ticker; the worst tick gap is the lag (best of three attempts so
+    /// one OS preemption on a loaded box isn't a failure; a real regression
+    /// blocks every attempt). `OTTO_RUNTIME_LAG_BUDGET_MS` (default 20).
+    #[test]
+    fn put_content_4mb_never_blocks_a_worker() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::time::{Duration, Instant};
+        let budget = Duration::from_millis(
+            std::env::var("OTTO_RUNTIME_LAG_BUDGET_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+        );
+        let attempt = || -> (Duration, Duration) {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .max_blocking_threads(4)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let (app, _ctx) = app().await;
+                let (st, b, _) = call(
+                    &app,
+                    Method::POST,
+                    "/design/artifacts",
+                    Some(serde_json::json!({
+                        "workspace_id": "w1", "format": "html", "title": "Big",
+                        "content": "<p>0</p>"
+                    })),
+                )
+                .await;
+                assert_eq!(st, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+                let aid = json_of(&b)["artifact"]["id"].as_str().unwrap().to_string();
+                let html = format!("<div>{}</div>", "x".repeat(4 * 1024 * 1024));
+                let body = serde_json::json!({ "content": html }).to_string();
+
+                let stop = Arc::new(AtomicBool::new(false));
+                let worst = Arc::new(AtomicU64::new(0));
+                let ticker = {
+                    let (stop, worst) = (stop.clone(), worst.clone());
+                    tokio::spawn(async move {
+                        let mut iv = tokio::time::interval(Duration::from_millis(1));
+                        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        iv.tick().await;
+                        let mut last = Instant::now();
+                        while !stop.load(Ordering::Relaxed) {
+                            iv.tick().await;
+                            let now = Instant::now();
+                            let lag = now
+                                .duration_since(last)
+                                .saturating_sub(Duration::from_millis(1));
+                            worst.fetch_max(lag.as_micros() as u64, Ordering::Relaxed);
+                            last = now;
+                        }
+                    })
+                };
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                worst.store(0, Ordering::Relaxed);
+                let t0 = Instant::now();
+                let req = Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/design/artifacts/{aid}/content"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap();
+                let st = tokio::spawn(app.clone().oneshot(req))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status();
+                let took = t0.elapsed();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                stop.store(true, Ordering::Relaxed);
+                let _ = ticker.await;
+                assert_eq!(st, StatusCode::OK);
+                (Duration::from_micros(worst.load(Ordering::Relaxed)), took)
+            })
+        };
+        let mut best = (Duration::MAX, Duration::ZERO);
+        for _ in 0..3 {
+            let r = attempt();
+            if r.0 < best.0 {
+                best = r;
+            }
+            if best.0 < budget {
+                break;
+            }
+        }
+        println!(
+            "design 4 MB PUT content: worst worker lag {:?}, request {:?}",
+            best.0, best.1
+        );
+        assert!(
+            best.0 < budget,
+            "a 4 MB content PUT blocked a worker for {:?} (budget {budget:?})",
+            best.0
+        );
+    }
+
+    /// Auto-tidy is root-only and opt-in: a non-root caller can neither read
+    /// the gauge nor flip the toggle, and nothing changes.
+    #[tokio::test]
+    async fn auto_tidy_toggle_is_root_only() {
+        let (app, ctx) = app().await;
+        let (st, _, _) = call(
+            &app,
+            Method::PUT,
+            "/design/admin/auto-tidy",
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _, _) = call(&app, Method::GET, "/design/admin/storage", None).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert!(!ctx.design().auto_tidy_setting().await.unwrap());
     }
 }

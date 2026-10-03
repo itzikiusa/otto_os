@@ -102,6 +102,9 @@ fn serve_spa(path: &str, load: AssetLoader) -> Response {
 /// pinned for a year.
 fn is_hashed_asset(path: &str) -> bool {
     const HASH_LEN: usize = 8;
+    if let Some(font) = path.strip_prefix("assets/excalidraw/fonts/") {
+        return is_excalidraw_font(font);
+    }
     let Some(file) = path.strip_prefix("assets/") else {
         return false;
     };
@@ -121,6 +124,26 @@ fn is_hashed_asset(path: &str) -> bool {
         && hash
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+}
+
+/// Excalidraw's own font files, copied into `assets/excalidraw/fonts/` by the
+/// UI build (`vite.config.ts` `excalidrawFonts`): `<Family>/<name>-<32 hex>.woff2`
+/// — the package content-hashes every file, so they are immutable too.
+fn is_excalidraw_font(rel: &str) -> bool {
+    let Some((family, file)) = rel.split_once('/') else {
+        return false;
+    };
+    if family.is_empty() || file.contains('/') || !family.bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    let Some(stem) = file.strip_suffix(".woff2") else {
+        return false;
+    };
+    let Some((name, hash)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    !name.is_empty() && hash.len() == 32 && hash.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 const PLACEHOLDER: &str = r#"<!doctype html>
@@ -280,6 +303,7 @@ mod tests {
             "assets/index-DT-3lsGc.css",
             "assets/d2-a_b-c_d-.wasm",
             "assets/mermaid.core-AbCdEfGh.js",
+            "assets/excalidraw/fonts/Excalifont/Excalifont-Regular-349fac6ca4700ffec595a7150a0d1e1d.woff2",
         ] {
             assert!(is_hashed_asset(yes), "{yes}");
         }
@@ -292,6 +316,10 @@ mod tests {
             "assets/app-AbCdEfG!.js",
             "assets/sub/app-AbCdEfGh.js",
             "assets/app-AbCdEfGh",
+            "assets/excalidraw/fonts/Excalifont/Excalifont-Regular.woff2",
+            "assets/excalidraw/fonts/Excalifont/Excalifont-Regular-349fac6c.woff2",
+            "assets/excalidraw/fonts/../x-349fac6ca4700ffec595a7150a0d1e1d.woff2",
+            "assets/excalidraw/fonts/A/b/c-349fac6ca4700ffec595a7150a0d1e1d.woff2",
         ] {
             assert!(!is_hashed_asset(no), "{no}");
         }

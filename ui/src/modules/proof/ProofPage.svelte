@@ -16,6 +16,7 @@
   import { proof } from '../../lib/stores/proof.svelte';
   import {
     addArtifact,
+    archiveStaleSessionPacks,
     artifactBlobUrl,
     artifactContent,
     assembleProof,
@@ -83,7 +84,6 @@
     if (!id) return;
     const f = filter;
     void loadList(id, f);
-    void proof.loadSummary(id);
   });
 
   // Event-driven list/detail refreshes run only while this page is mounted.
@@ -604,6 +604,30 @@
     }
   }
 
+  // ---- opt-in archive of stale session packs (hides, never deletes) --------
+  async function archiveStaleSessions(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId) return;
+    try {
+      const dry = await archiveStaleSessionPacks(wsId, { older_than_days: 30 });
+      if (dry.matched === 0) {
+        toasts.info('Nothing to archive', 'No session proof packs older than 30 days are without evidence.');
+        return;
+      }
+      const n = dry.matched;
+      const ok = await confirmer.ask(
+        `Archive ${n} session proof pack${n === 1 ? '' : 's'} with no evidence, untouched for 30+ days? They're hidden from the Proof list and the sidebar chips, not deleted — a pack comes back by itself as soon as it changes or gets evidence.`,
+        { title: 'Archive stale session packs', confirmLabel: 'Archive' },
+      );
+      if (!ok) return;
+      const r = await archiveStaleSessionPacks(wsId, { older_than_days: 30, apply: true });
+      toasts.success('Session packs archived', `${r.archived} hidden (nothing deleted).`);
+      await loadList(wsId, filter);
+    } catch (e) {
+      toasts.error("Couldn't archive session packs", loadErrorText(e));
+    }
+  }
+
   // ---- create a manual pack ------------------------------------------------
   async function newPack(): Promise<void> {
     if (!ws.currentId) {
@@ -668,6 +692,8 @@
       {/if}
     {/snippet}
     {#snippet actions()}
+      <!-- Opt-in housekeeping: collapses into ⋯ before anything else. -->
+      <button class="icon-btn" data-overflow="-3" data-icon="archive" data-label="Archive stale session packs…" onclick={archiveStaleSessions} aria-label="Archive stale session packs" title="Archive stale session packs (hides, never deletes)"><Icon name="archive" size={14} /></button>
       {#if detail}
         <!-- Destructive first (collapses first, never beside the primary). -->
         <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete pack" onclick={removePack} aria-label="Delete pack" title="Delete pack"><Icon name="trash" size={14} /></button>

@@ -66,7 +66,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'plugins', label: 'Plugins', group: 'system', keywords: 'custom plugin sidecar install git', gate: ADMIN },
   { id: 'trust-safety', label: 'Trust & safety', group: 'system', keywords: 'security posture audit log trust', gate: ADMIN },
   { id: 'logs', label: 'Logs', group: 'system', keywords: 'daemon log files debug errors', gate: ADMIN },
-  { id: 'backup', label: 'Backup & restore', group: 'system', keywords: 'export import archive restore transfer connections git backup', gate: ADMIN },
+  { id: 'backup', label: 'Backup & restore', group: 'system', keywords: 'export import archive restore transfer connections git backup storage design hall auto-tidy autosave prune', gate: ADMIN },
   // ── People ──
   { id: 'users', label: 'Users', group: 'people', keywords: 'accounts members roles workspace permissions', gate: USERS_ADMIN },
   { id: 'access-groups', label: 'Groups & access', group: 'people', keywords: 'groups roles access rules rbac permissions', gate: 'root' },

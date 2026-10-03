@@ -62,6 +62,7 @@ fn row_to_pack(r: &sqlx::sqlite::SqliteRow) -> Result<ProofPack> {
         waived_by: r.get("waived_by"),
         waived_reason: r.get("waived_reason"),
         waived_at: r.get("waived_at"),
+        archived_at: r.try_get("archived_at").ok().flatten(),
         created_by: r.get("created_by"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
@@ -269,7 +270,7 @@ impl ProofRepo {
         work_item_id: Option<&str>,
     ) -> Result<Vec<ProofPack>> {
         Ok(self
-            .list_packs_page(workspace_id, status, kind, work_item_id, None, None)
+            .list_packs_page(workspace_id, status, kind, work_item_id, None, None, false)
             .await?
             .0)
     }
@@ -277,6 +278,7 @@ impl ProofRepo {
     /// One keyset page of [`Self::list_packs`], newest first, walking
     /// `idx_proof_packs_ws_updated`. `limit = None` returns every row. The
     /// returned cursor is `Some` only when more rows may follow.
+    #[allow(clippy::too_many_arguments)] // filter knobs, all optional
     pub async fn list_packs_page(
         &self,
         workspace_id: &str,
@@ -285,8 +287,12 @@ impl ProofRepo {
         work_item_id: Option<&str>,
         limit: Option<u32>,
         after: Option<&PackCursor>,
+        include_archived: bool,
     ) -> Result<(Vec<ProofPack>, Option<PackCursor>)> {
         let mut sql = String::from("SELECT * FROM proof_packs WHERE workspace_id = ?");
+        if !include_archived {
+            sql.push_str(" AND archived_at IS NULL");
+        }
         if status.is_some() {
             sql.push_str(" AND status = ?");
         }
@@ -331,6 +337,85 @@ impl ProofRepo {
             _ => None,
         };
         Ok((packs, next))
+    }
+
+    /// The packs of exactly these work items (`(kind, work_item_id)` pairs) in
+    /// `workspace_id` — the scoped proof summary (R3). One query per distinct
+    /// kind, each driving from `json_each` into the unique
+    /// `idx_proof_packs_workitem` index (`CROSS JOIN` pins the loop order and
+    /// `+workspace_id` keeps the planner off `idx_proof_packs_ws_updated`, which
+    /// it otherwise picks — a scan of the whole workspace), so the rows read
+    /// match the filter however many packs the workspace holds. Order:
+    /// unspecified.
+    pub async fn list_packs_for_work_items(
+        &self,
+        workspace_id: &str,
+        items: &[(String, String)],
+    ) -> Result<Vec<ProofPack>> {
+        // Deduped per kind: a repeated id never yields a repeated row.
+        let mut by_kind: std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> =
+            std::collections::BTreeMap::new();
+        for (k, id) in items {
+            by_kind.entry(k.as_str()).or_default().insert(id.as_str());
+        }
+        let mut out = Vec::new();
+        for (kind, ids) in by_kind {
+            let ids_json = serde_json::to_string(&ids)
+                .map_err(|e| Error::Internal(format!("proof work items: {e}")))?;
+            let rows = sqlx::query(
+                "SELECT p.* FROM json_each(?2) AS j \
+                 CROSS JOIN proof_packs p \
+                   ON p.work_item_kind = ?1 AND p.work_item_id = j.value \
+                 WHERE +p.workspace_id = ?3 AND p.archived_at IS NULL",
+            )
+            .bind(kind)
+            .bind(&ids_json)
+            .bind(workspace_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("list proof packs for work items"))?;
+            for r in &rows {
+                out.push(row_to_pack(r)?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Opt-in archive of stale session packs (R3): `session` packs in
+    /// `workspace_id` with NO evidence artifacts, not waived, not already
+    /// archived, and last updated before `cutoff` (RFC3339). Returns how many
+    /// match; with `apply` they are stamped `archived_at` (never deleted —
+    /// any later change or new artifact clears the stamp, migration 0164
+    /// triggers). `updated_at` is left alone so the list order is unchanged.
+    pub async fn archive_stale_session_packs(
+        &self,
+        workspace_id: &str,
+        cutoff: &str,
+        apply: bool,
+    ) -> Result<u64> {
+        const MATCH: &str = "workspace_id = ? AND work_item_kind = 'session' \
+             AND archived_at IS NULL AND status != 'waived' AND updated_at < ? \
+             AND NOT EXISTS (SELECT 1 FROM proof_artifacts a \
+                             WHERE a.proof_pack_id = proof_packs.id)";
+        if !apply {
+            let sql = format!("SELECT COUNT(*) FROM proof_packs WHERE {MATCH}");
+            let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
+                .bind(workspace_id)
+                .bind(cutoff)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(dberr("count stale session packs"))?;
+            return Ok(n.max(0) as u64);
+        }
+        let sql = format!("UPDATE proof_packs SET archived_at = ? WHERE {MATCH}");
+        let r = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(fmt(Utc::now()))
+            .bind(workspace_id)
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("archive stale session packs"))?;
+        Ok(r.rows_affected())
     }
 
     pub async fn list_children(&self, parent_id: &str) -> Result<Vec<ProofPack>> {
@@ -1138,7 +1223,7 @@ mod proof_perf_tests {
         let mut cur: Option<PackCursor> = None;
         loop {
             let (page, next) = repo
-                .list_packs_page("ws", None, None, None, Some(3), cur.as_ref())
+                .list_packs_page("ws", None, None, None, Some(3), cur.as_ref(), false)
                 .await
                 .unwrap();
             seen.extend(page.into_iter().map(|p| p.id));
@@ -1150,6 +1235,229 @@ mod proof_perf_tests {
         let all = repo.list_packs("ws", None, None, None).await.unwrap();
         assert_eq!(seen.len(), 7);
         assert_eq!(seen, all.into_iter().map(|p| p.id).collect::<Vec<_>>());
+    }
+
+    /// R4 budget: at 5 000 packs (with an artifact each) the first keyset
+    /// page and the work-item-scoped summary read stay well under 50 ms and
+    /// read exactly the rows asked for — not the whole workspace.
+    #[tokio::test]
+    async fn proof_5k_packs_page_and_scoped_summary_within_budget() {
+        let pool = mem_pool().await;
+        sqlx::query(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 4999)
+             INSERT INTO proof_packs (id, workspace_id, work_item_kind, work_item_id, title,
+                                      created_by, created_at, updated_at)
+             SELECT printf('p%05d', i), 'ws', 'session', printf('s%05d', i), 't', 'u',
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 1767225600 + i, 'unixepoch'),
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 1767225600 + i, 'unixepoch')
+             FROM n",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO proof_artifacts (id, proof_pack_id, workspace_id, kind, title,
+                                          content_ref, status, created_by, created_at, updated_at)
+             SELECT 'a' || id, id, 'ws', 'diff', 'diff', 'x', 'info', 'u', created_at, created_at
+             FROM proof_packs",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The scoped read is an index probe on the unique work-item index,
+        // never a scan of the workspace's packs.
+        let detail: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT p.* FROM json_each(?2) AS j \
+             CROSS JOIN proof_packs p ON p.work_item_kind = ?1 AND p.work_item_id = j.value \
+             WHERE +p.workspace_id = ?3",
+        )
+        .bind("session")
+        .bind("[\"s00001\"]")
+        .bind("ws")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            detail
+                .iter()
+                .any(|r| r.3.contains("idx_proof_packs_workitem")),
+            "{detail:?}"
+        );
+        let repo = ProofRepo::new(pool);
+        // Warm the statement cache / page cache once, then measure.
+        repo.list_packs_page("ws", None, None, None, Some(100), None, false)
+            .await
+            .unwrap();
+        let t = std::time::Instant::now();
+        let (page, next) = repo
+            .list_packs_page("ws", None, None, None, Some(100), None, false)
+            .await
+            .unwrap();
+        let page_ms = t.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(page.len(), 100);
+        assert!(next.is_some());
+
+        let items: Vec<(String, String)> = (0..200)
+            .map(|i| ("session".to_string(), format!("s{:05}", i * 25)))
+            .chain(std::iter::once(("session".into(), "not-a-session".into())))
+            .collect();
+        let t = std::time::Instant::now();
+        let packs = repo.list_packs_for_work_items("ws", &items).await.unwrap();
+        let ids: Vec<String> = packs.iter().map(|p| p.id.clone()).collect();
+        let arts = repo.artifacts_meta_for_packs(&ids).await.unwrap();
+        let summary_ms = t.elapsed().as_secs_f64() * 1e3;
+        // Rows read match the filter: 200 known work items, the unknown one
+        // matches nothing, and another workspace's pack never leaks in.
+        assert_eq!(packs.len(), 200);
+        assert_eq!(arts.values().map(Vec::len).sum::<usize>(), 200);
+        assert!(repo
+            .list_packs_for_work_items("other-ws", &items)
+            .await
+            .unwrap()
+            .is_empty());
+        eprintln!("proof 5k: first page {page_ms:.2} ms, scoped summary (200) {summary_ms:.2} ms");
+        assert!(page_ms < 50.0, "first page took {page_ms:.2} ms");
+        assert!(summary_ms < 50.0, "scoped summary took {summary_ms:.2} ms");
+    }
+
+    /// R3 opt-in archive: a dry run changes nothing; apply hides only stale,
+    /// evidence-less, un-waived session packs from the list + summary (never
+    /// deletes); any later update or new artifact un-archives the pack.
+    #[tokio::test]
+    async fn proof_archive_stale_session_packs_is_opt_in_and_self_heals() {
+        let pool = mem_pool().await;
+        let repo = ProofRepo::new(pool.clone());
+        let mk = |wid: &'static str, kind: WorkItemKind| {
+            let repo = repo.clone();
+            async move {
+                repo.create_pack("ws", kind, wid, "t", "u", None)
+                    .await
+                    .unwrap()
+            }
+        };
+        let stale = mk("s-stale", WorkItemKind::Session).await;
+        let with_ev = mk("s-evidence", WorkItemKind::Session).await;
+        let manual = mk("m-stale", WorkItemKind::Manual).await;
+        let fresh = mk("s-fresh", WorkItemKind::Session).await;
+        repo.add_artifact(
+            &with_ev.id,
+            "ws",
+            ProofArtifactKind::Diff,
+            "diff",
+            Some("x"),
+            ProofArtifactStatus::Info,
+            &serde_json::json!({}),
+            "u",
+        )
+        .await
+        .unwrap();
+        // Age everything but `fresh` past the cutoff.
+        sqlx::query("UPDATE proof_packs SET updated_at = '2020-01-01T00:00:00Z' WHERE id != ?")
+            .bind(&fresh.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let cutoff = "2025-01-01T00:00:00Z";
+
+        // Dry run: counts only the stale evidence-less session pack, changes nothing.
+        assert_eq!(
+            repo.archive_stale_session_packs("ws", cutoff, false)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            repo.list_packs("ws", None, None, None).await.unwrap().len(),
+            4
+        );
+
+        // Apply: hidden from the default list + the scoped summary, still stored.
+        assert_eq!(
+            repo.archive_stale_session_packs("ws", cutoff, true)
+                .await
+                .unwrap(),
+            1
+        );
+        let live = repo.list_packs("ws", None, None, None).await.unwrap();
+        assert_eq!(live.len(), 3);
+        assert!(live.iter().all(|p| p.id != stale.id));
+        let (all, _) = repo
+            .list_packs_page("ws", None, None, None, None, None, true)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 4);
+        let items = vec![
+            ("session".to_string(), "s-stale".to_string()),
+            ("session".to_string(), "s-fresh".to_string()),
+        ];
+        let scoped = repo.list_packs_for_work_items("ws", &items).await.unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, fresh.id);
+        assert!(repo
+            .get_pack(&stale.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_some());
+        assert!(repo
+            .get_pack(&manual.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_none());
+        // Idempotent: nothing left to archive.
+        assert_eq!(
+            repo.archive_stale_session_packs("ws", cutoff, true)
+                .await
+                .unwrap(),
+            0
+        );
+
+        // Any later update un-archives it (recompute path) …
+        repo.set_status_risk(&stale.id, ProofStatus::Missing, 0)
+            .await
+            .unwrap();
+        assert!(repo
+            .get_pack(&stale.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_none());
+        assert_eq!(
+            repo.list_packs("ws", None, None, None).await.unwrap().len(),
+            4
+        );
+
+        // … and so does new evidence.
+        sqlx::query("UPDATE proof_packs SET updated_at = '2020-01-01T00:00:00Z' WHERE id = ?")
+            .bind(&stale.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.archive_stale_session_packs("ws", cutoff, true)
+                .await
+                .unwrap(),
+            1
+        );
+        repo.add_artifact(
+            &stale.id,
+            "ws",
+            ProofArtifactKind::Log,
+            "log",
+            Some("y"),
+            ProofArtifactStatus::Info,
+            &serde_json::json!({}),
+            "u",
+        )
+        .await
+        .unwrap();
+        assert!(repo
+            .get_pack(&stale.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_none());
     }
 
     #[tokio::test]

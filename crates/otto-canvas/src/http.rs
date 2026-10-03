@@ -84,6 +84,39 @@ struct VersionPath {
     vid: Id,
 }
 
+#[derive(Deserialize)]
+struct FilePath {
+    sha: String,
+}
+
+/// `?files=ref` on any scene-returning route: answer with the stored doc,
+/// whose Excalidraw images are `otto-canvas-file:<sha>` refs (the Canvas
+/// editor resolves them via `GET /canvas/files/{sha}`). Without it the doc is
+/// rehydrated to inline `dataURL`s, so export / duplicate / agent callers keep
+/// getting a self-contained document.
+#[derive(Deserialize, Default)]
+struct FilesQ {
+    #[serde(default)]
+    files: Option<String>,
+}
+
+impl FilesQ {
+    fn refs(&self) -> bool {
+        self.files.as_deref() == Some("ref")
+    }
+}
+
+async fn scene_out<S: CanvasCtx>(
+    ctx: &S,
+    scene: otto_state::CanvasScene,
+    q: &FilesQ,
+) -> ApiResult<otto_state::CanvasScene> {
+    if q.refs() {
+        return Ok(scene);
+    }
+    Ok(ctx.canvas_repo().rehydrate_live(scene).await?)
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -115,6 +148,9 @@ pub fn router<S: CanvasCtx>() -> Router<S> {
             "/canvas/scenes/{id}/versions/{vid}/restore",
             post(restore_version::<S>),
         )
+        // Content-addressed Excalidraw images (R2): the live doc keeps
+        // `otto-canvas-file:<sha>` refs; the editor fetches each file once.
+        .route("/canvas/files/{sha}", get(get_file::<S>))
 }
 
 /// Body cap for scene create/update (C1). An Excalidraw board inlines its
@@ -233,6 +269,7 @@ async fn create_scene<S: CanvasCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(WsPath { ws }): Path<WsPath>,
+    Query(fq): Query<FilesQ>,
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Response> {
@@ -254,6 +291,7 @@ async fn create_scene<S: CanvasCtx>(
             created_by: user.id,
         })
         .await?;
+    let scene = scene_out(&ctx, scene, &fq).await?;
     Ok((StatusCode::CREATED, Json(scene)).into_response())
 }
 
@@ -265,8 +303,10 @@ async fn get_scene<S: CanvasCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(SceneIdPath { id }): Path<SceneIdPath>,
+    Query(fq): Query<FilesQ>,
 ) -> ApiResult<Response> {
     let scene = ws_from_scene(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    let scene = scene_out(&ctx, scene, &fq).await?;
     Ok(Json(scene).into_response())
 }
 
@@ -275,6 +315,7 @@ async fn update_scene<S: CanvasCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(SceneIdPath { id }): Path<SceneIdPath>,
     Query(q): Query<UpdateSceneQ>,
+    Query(fq): Query<FilesQ>,
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Response> {
@@ -311,6 +352,7 @@ async fn update_scene<S: CanvasCtx>(
         return Ok(Json(row).into_response());
     }
     let updated = ctx.canvas_repo().update(&id, patch).await?;
+    let updated = scene_out(&ctx, updated, &fq).await?;
     Ok(Json(updated).into_response())
 }
 
@@ -344,6 +386,7 @@ async fn restore_version<S: CanvasCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(VersionPath { id, vid }): Path<VersionPath>,
+    Query(fq): Query<FilesQ>,
 ) -> ApiResult<Response> {
     check_scene_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     let doc = ctx
@@ -364,7 +407,75 @@ async fn restore_version<S: CanvasCtx>(
             },
         )
         .await?;
+    let updated = scene_out(&ctx, updated, &fq).await?;
     Ok(Json(updated).into_response())
+}
+
+/// One content-addressed Excalidraw file as its `data:` URL (`text/plain`),
+/// which is exactly what Excalidraw's `addFiles` takes. Immutable by
+/// construction (the path IS the content hash), so the webview caches it
+/// forever and a reopened board fetches nothing. Visible to anyone who can
+/// view a workspace holding a scene (live or in history) that references it.
+async fn get_file<S: CanvasCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(FilePath { sha }): Path<FilePath>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Error::Invalid("file id must be a sha256 hex digest".into()).into());
+    }
+    let not_found = || ApiErr(Error::NotFound(format!("canvas file {sha}")));
+    let (_mime, data_url, workspaces) = ctx
+        .canvas_repo()
+        .file_with_workspaces(&sha)
+        .await?
+        .ok_or_else(not_found)?;
+    let mut allowed = false;
+    for ws in &workspaces {
+        if ctx
+            .roles()
+            .check(&user, ws, WorkspaceRole::Viewer)
+            .await
+            .is_ok()
+        {
+            allowed = true;
+            break;
+        }
+    }
+    if !allowed {
+        // Same answer as a missing file: a hash alone must not reveal that
+        // some other workspace holds this image.
+        return Err(not_found());
+    }
+    let etag = format!("\"{sha}\"");
+    let cache = (
+        header::CACHE_CONTROL,
+        "private, max-age=31536000, immutable",
+    );
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag))
+    {
+        return Ok((
+            StatusCode::NOT_MODIFIED,
+            [(header::ETAG, etag.clone()), (cache.0, cache.1.to_string())],
+        )
+            .into_response());
+    }
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                "text/plain; charset=utf-8".to_string(),
+            ),
+            (header::ETAG, etag),
+            (cache.0, cache.1.to_string()),
+        ],
+        data_url,
+    )
+        .into_response())
 }
 
 #[cfg(test)]

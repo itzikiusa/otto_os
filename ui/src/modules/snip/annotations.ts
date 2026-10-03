@@ -351,6 +351,15 @@ export function annosHash(annos: Anno[]): string {
   return `${s.length.toString(36)}-${(h >>> 0).toString(36)}`;
 }
 
+/** The save gate the editor runs before every flatten + upload: the new
+ *  fingerprint when `annos` differ from what was last saved, else `null`
+ *  (nothing to encode, nothing to send). Pure so the "unchanged → zero
+ *  uploads" rule is unit-tested (unit/snipSaveGate.test.ts). */
+export function uploadNeeded(annos: Anno[], savedHash: string): string | null {
+  const hash = annosHash(annos);
+  return hash === savedHash ? null : hash;
+}
+
 let encoder: Worker | null = null;
 let encoderBroken = false;
 let encodeSeq = 0;

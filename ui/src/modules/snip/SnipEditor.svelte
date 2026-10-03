@@ -30,6 +30,7 @@
     bounds,
     flatten,
     annosHash,
+    uploadNeeded,
   } from './annotations';
 
   // The shell keys this editor by id; cleanup saves belong to that mounted image.
@@ -273,8 +274,8 @@
       copyAgain = true;
       return;
     }
-    const hash = annosHash(annos);
-    if (hash === savedHash) {
+    const hash = uploadNeeded(annos, savedHash);
+    if (hash === null) {
       copyState = 'copied'; // already saved + on the clipboard
       return;
     }

@@ -12,6 +12,7 @@
   import GitBackup from './GitBackup.svelte';
   import FullBackup from './FullBackup.svelte';
   import DatabaseCompact from './DatabaseCompact.svelte';
+  import DesignStorage from './DesignStorage.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
@@ -175,7 +176,7 @@
   <FullBackup />
   <GitBackup />
   <ConnectionsExport />
-  {#if auth.isRoot}<DatabaseCompact />{/if}
+  {#if auth.isRoot}<DatabaseCompact /><DesignStorage />{/if}
 
   <!-- Settings only: export/import + backup/restore with a manifest -->
   <section class="card pad" aria-label="Settings file">

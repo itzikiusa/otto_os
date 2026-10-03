@@ -639,3 +639,35 @@ async fn raw_png_upload_and_annotated_save_with_cache_validators() {
     assert_eq!(status, StatusCode::NOT_MODIFIED);
     assert!(got.is_empty());
 }
+
+/// R4 budget: a 15 MB raw `image/png` upload and a 15 MB raw annotated save
+/// each finish well under 300 ms (header sniff only — no base64, no JSON, no
+/// decode), and the bytes land intact.
+#[tokio::test]
+async fn raw_15mb_upload_and_annotated_save_within_budget() {
+    let (_tmp, data_dir, app) = test_app().await;
+    // A valid PNG header (the real fixture) padded to 15 MB — the server only
+    // sniffs the IHDR, so this is what a large screen capture costs it.
+    let mut big = fixture_png();
+    big.resize(15 * 1024 * 1024, 0x5A);
+
+    let t = std::time::Instant::now();
+    let (status, _, body) =
+        send_raw(&app, Method::POST, "/snips", "image/png", big.clone(), None).await;
+    let upload_ms = t.elapsed().as_secs_f64() * 1e3;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let id = json(&body)["id"].as_str().unwrap().to_string();
+
+    let uri = format!("/snips/{id}/annotated");
+    let t = std::time::Instant::now();
+    let (status, _, body) =
+        send_raw(&app, Method::POST, &uri, "image/png", big.clone(), None).await;
+    let save_ms = t.elapsed().as_secs_f64() * 1e3;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let sink = std::fs::read(data_dir.join("snips/clipboard-last.png")).expect("sink");
+    assert_eq!(sink.len(), big.len());
+
+    eprintln!("snips 15 MB raw: upload {upload_ms:.1} ms, annotated save {save_ms:.1} ms");
+    assert!(upload_ms < 300.0, "15 MB upload took {upload_ms:.1} ms");
+    assert!(save_ms < 300.0, "15 MB annotated save took {save_ms:.1} ms");
+}

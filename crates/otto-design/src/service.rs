@@ -1554,12 +1554,31 @@ impl DesignService {
         window_secs: i64,
         min_age_secs: i64,
     ) -> Result<PruneReport> {
+        self.scheduled_pass(window_secs, min_age_secs, true).await
+    }
+
+    /// What the scheduled pass WOULD remove right now (dry run) — the
+    /// "auto-tidy would reclaim" figure on the storage gauge.
+    pub async fn prune_scheduled_preview(
+        &self,
+        window_secs: i64,
+        min_age_secs: i64,
+    ) -> Result<PruneReport> {
+        self.scheduled_pass(window_secs, min_age_secs, false).await
+    }
+
+    async fn scheduled_pass(
+        &self,
+        window_secs: i64,
+        min_age_secs: i64,
+        apply: bool,
+    ) -> Result<PruneReport> {
         let cutoff = Utc::now() - chrono::Duration::seconds(min_age_secs.max(0));
         let ids = self
             .store
             .prune_candidates(&crate::store::stamp(cutoff))
             .await?;
-        self.prune_ids(ids, true, window_secs, Some(cutoff)).await
+        self.prune_ids(ids, apply, window_secs, Some(cutoff)).await
     }
 
     async fn prune_ids(
@@ -1598,6 +1617,9 @@ impl DesignService {
                 continue;
             }
             if apply {
+                // Measured BEFORE the delete: what this artifact's squash frees.
+                let (_, bytes) = self.store.reclaimable(&doomed).await?;
+                report.reclaimable_bytes += bytes.max(0) as u64;
                 let candidate_blobs = self.store.delete_versions(&doomed).await?;
                 for sha in candidate_blobs {
                     if !self.store.blob_in_use(&sha).await? {
@@ -1608,19 +1630,54 @@ impl DesignService {
             }
             report.versions.extend(doomed);
         }
+        if !apply {
+            // Dry run: measured once over the whole doomed set, so a blob two
+            // artifacts' doomed versions share is counted (once).
+            let (n, bytes) = self.store.reclaimable(&report.versions).await?;
+            report.reclaimable_bytes = bytes.max(0) as u64;
+            report.reclaimable_blobs = n.max(0) as u64;
+        } else {
+            report.reclaimable_blobs = report.blobs.len() as u64;
+        }
         Ok(report)
     }
 
-    /// Storage gauge for `GET /design/admin/storage`.
+    /// The persisted Settings → Design Hall auto-tidy toggle (default off).
+    pub async fn auto_tidy_setting(&self) -> Result<bool> {
+        self.store.auto_tidy().await
+    }
+
+    /// Flip the auto-tidy toggle (`PUT /design/admin/auto-tidy`).
+    pub async fn set_auto_tidy(&self, on: bool) -> Result<()> {
+        self.store.set_auto_tidy(on).await
+    }
+
+    /// Storage gauge for `GET /design/admin/storage`: what is on disk, the
+    /// auto-tidy toggle (and any env override), and what a pass would
+    /// reclaim right now — so the user decides with the number in front of
+    /// them.
     pub async fn storage(&self) -> Result<StorageReport> {
         let (blob_count, blob_bytes) = self.blobs.usage().await;
         let (version_count, version_bytes) = self.store.version_totals().await?;
+        let cfg = retention::SchedulerConfig::from_env();
+        let setting = self.store.auto_tidy().await?;
+        let preview = self
+            .prune_scheduled_preview(cfg.window_secs, cfg.min_age_secs)
+            .await?;
         Ok(StorageReport {
             blob_count,
             blob_bytes,
             version_count,
             version_bytes,
-            auto_prune: retention::SchedulerConfig::from_env().enabled,
+            auto_prune: cfg.effective(setting),
+            auto_tidy: setting,
+            auto_tidy_forced: cfg.forced,
+            min_age_secs: cfg.min_age_secs,
+            reclaimable: ReclaimEstimate {
+                versions: preview.versions.len() as u64,
+                blobs: preview.reclaimable_blobs,
+                bytes: preview.reclaimable_bytes,
+            },
             last_prune: retention::last_run(),
         })
     }
@@ -2205,7 +2262,20 @@ mod tests {
         assert!(r.versions.is_empty());
         // With no minimum age the window squashes to its last autosave.
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // The gauge's dry run says what a pass would free — and deletes nothing.
+        let preview = s.prune_scheduled_preview(600, 0).await.unwrap();
+        assert!(!preview.applied);
+        assert!(!preview.versions.is_empty());
+        assert!(preview.reclaimable_bytes > 0 && preview.reclaimable_blobs > 0);
+        assert_eq!(
+            s.blobs().usage().await.0,
+            blobs_before,
+            "a preview never deletes"
+        );
         let r = s.prune_scheduled(600, 0).await.unwrap();
+        assert_eq!(r.versions, preview.versions, "the preview matches the pass");
+        assert_eq!(r.reclaimable_blobs, preview.reclaimable_blobs);
+        assert_eq!(r.reclaimable_bytes, preview.reclaimable_bytes);
         assert_eq!(r.artifacts_scanned, 1);
         assert!(r.applied);
         assert!(!r.versions.is_empty());
@@ -2220,7 +2290,7 @@ mod tests {
         let report = retention::run_scheduled_once(
             &s,
             &retention::SchedulerConfig {
-                enabled: true,
+                forced: Some(true),
                 window_secs: 600,
                 min_age_secs: 0,
             },
@@ -2232,5 +2302,12 @@ mod tests {
         let st = s.storage().await.unwrap();
         assert_eq!(st.blob_count, s.blobs().usage().await.0);
         assert!(st.version_count >= 1);
+        // Auto-tidy is opt-in: off until a person flips the Settings toggle.
+        assert!(!st.auto_tidy);
+        assert!(!s.auto_tidy_setting().await.unwrap());
+        s.set_auto_tidy(true).await.unwrap();
+        assert!(s.storage().await.unwrap().auto_tidy);
+        s.set_auto_tidy(false).await.unwrap();
+        assert!(!s.auto_tidy_setting().await.unwrap());
     }
 }

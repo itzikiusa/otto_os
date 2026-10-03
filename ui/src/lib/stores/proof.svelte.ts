@@ -7,7 +7,7 @@
 // from a $derived), so its writes + refetches are safe — keep it that way to
 // avoid the state_unsafe_mutation footgun.
 
-import { listProofPacksPage, proofSummary, getProofPack, type ProofPackFilter } from '../api/proof';
+import { listProofPacksPage, proofSummary, getProofPack, PROOF_SUMMARY_CHUNK, type ProofPackFilter } from '../api/proof';
 import { loadErrorText } from '../loadError';
 import type { OttoEvent, ProofPackDetail, ProofPackResp, ProofSummaryRow } from '../api/types';
 
@@ -85,20 +85,68 @@ class ProofStore {
     }
   }
 
-  /** Load the cheap per-work-item summary roll-up for `wsId` (sidebar chips). */
-  async loadSummary(wsId: string): Promise<void> {
-    if (this.wsId !== wsId) this.summaryLoaded = false;
+  /** Work items (`"<kind>:<id>"`) already asked for in `wsId` — the scoped
+   *  summary only ever fetches keys it has not asked for yet. */
+  private askedKeys = new Set<string>();
+
+  /** Load the cheap per-work-item summary roll-up for `wsId` (sidebar chips).
+   *  With `workItems` (the rows the caller shows, `"<kind>:<id>"`) only those
+   *  packs are read, and only the keys not asked for before — a sidebar that
+   *  gains one session costs one tiny request, an unchanged one costs none.
+   *  Without, the whole workspace (legacy full read). */
+  async loadSummary(wsId: string, workItems?: string[]): Promise<void> {
+    if (this.wsId !== wsId) {
+      this.summaryLoaded = false;
+      this.askedKeys = new Set();
+      this.summaryByWorkItem = {};
+    }
     this.wsId = wsId;
     try {
-      const resp = await proofSummary(wsId);
-      if (this.wsId !== wsId) return;
-      const next: Record<string, ProofSummaryRow> = {};
-      for (const r of resp.rows) next[`${r.work_item_kind}:${r.work_item_id}`] = r;
+      if (!workItems) {
+        const resp = await proofSummary(wsId);
+        if (this.wsId !== wsId) return;
+        const next: Record<string, ProofSummaryRow> = {};
+        for (const r of resp.rows) next[`${r.work_item_kind}:${r.work_item_id}`] = r;
+        this.summaryByWorkItem = next;
+        this.summaryLoaded = true;
+        return;
+      }
+      const fresh = workItems.filter((k) => !this.askedKeys.has(k));
+      if (fresh.length === 0) {
+        this.summaryLoaded = true;
+        return;
+      }
+      for (const k of fresh) this.askedKeys.add(k);
+      const rows: ProofSummaryRow[] = [];
+      try {
+        for (let i = 0; i < fresh.length; i += PROOF_SUMMARY_CHUNK) {
+          const resp = await proofSummary(wsId, fresh.slice(i, i + PROOF_SUMMARY_CHUNK));
+          if (this.wsId !== wsId) return;
+          rows.push(...resp.rows);
+        }
+      } catch (e) {
+        // Not answered: ask again next time.
+        for (const k of fresh) this.askedKeys.delete(k);
+        throw e;
+      }
+      const next = { ...this.summaryByWorkItem };
+      for (const r of rows) next[`${r.work_item_kind}:${r.work_item_id}`] = r;
       this.summaryByWorkItem = next;
       this.summaryLoaded = true;
     } catch {
       /* best-effort */
     }
+  }
+
+  /** Re-pull the summary for the current scope (an unpatchable event). */
+  private reloadSummary(wsId: string): void {
+    if (this.askedKeys.size === 0) {
+      void this.loadSummary(wsId);
+      return;
+    }
+    const keys = [...this.askedKeys];
+    this.askedKeys = new Set();
+    void this.loadSummary(wsId, keys);
   }
 
   /** Patch the summary row (and a loaded list entry) straight from a
@@ -193,7 +241,7 @@ class ProofStore {
       this.refreshTimer = null;
       const wsId = this.wsId;
       if (wsId) {
-        if (this.needSummary) void this.loadSummary(wsId);
+        if (this.needSummary) this.reloadSummary(wsId);
         if (this.needList) {
           if (this.viewers > 0) void this.loadPacks(wsId, this.lastFilter);
           else this.stale = true;

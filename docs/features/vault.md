@@ -191,7 +191,11 @@ chosen mode is remembered per vault.
 - **`#` tag completion** from the vault's existing tags (with counts).
 
 **Reading view** renders GFM through an **allowlist sanitizer** (no scripts,
-iframes, or event handlers survive), with the Obsidian constructs:
+iframes, or event handlers survive), with the Obsidian constructs below. A note
+over **64 KB** is parsed and highlighted in a module worker
+(`noteRender.worker.ts`; only the sanitize pass, which needs `DOMParser`, runs on
+the main thread): the pane shows the note's plain text at once and swaps in the
+rendered view when it lands, and the result joins the same 8-entry render cache.
 
 - **Wikilinks** in all forms: `[[note]]`, `[[note|alias]]`,
   `[[note#heading]]` (opens and scrolls to the heading), `[[#heading]]`
@@ -398,7 +402,10 @@ limit (design budget: **100k nodes / 1–2M edges on an M-series laptop**):
   (render-only).
 - **Full-graph edge budget** — `mode=full` enforces a server-side,
   degree-prioritized edge budget (default 2M, `?edge_budget=` override); the
-  status strip shows a **truncated** chip when it was hit.
+  status strip shows a **truncated** chip when it was hit. The SQL reads are
+  async; the O(N+E) assembly (node table, ghost/tag nodes, BFS, degree sort)
+  runs on the blocking pool (`spawn_blocking`), so building a 10k-note graph
+  never stalls a daemon worker thread.
 - **Local graph** — the server does BFS neighborhoods (`mode=local`, `path=`,
   `depth ≤ 3`) so the common case never ships the whole graph; the GraphView
   component supports a local mode with a depth slider, and local is the
