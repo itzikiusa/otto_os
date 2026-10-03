@@ -1650,4 +1650,21 @@ Close cleanup owns the retired pools and tunnel leases independently of the HTTP
 - **Shared Mongo sample.** Tree expand, the Structure tab and field
   completion share one sample per collection (120 s), built once even when many
   requests arrive together.
+- **Pooled sessions survive paging.** A MySQL/Postgres read that hits the row
+  limit (the default "open table" view and every page after it) returns its
+  session to the pool when the daemon added the `LIMIT` itself, so the next Run
+  doesn't reconnect. A statement without an injected limit (a batch, a
+  `UNION`, `SHOW`, …) that is cut at the limit still closes its session, since
+  draining the rest could take minutes. A new MySQL session is set up in one
+  round trip. Ad-hoc SQL is not kept in the per-session statement cache.
+- **ClickHouse compression.** HTTP requests ask for `zstd`-compressed replies
+  (`enable_http_compression=1`). Results and exports still stream, and arrive
+  several times faster over a tunnel. A server that doesn't compress answers
+  plainly.
+- **Schema diagram for MongoDB.** The diagram and the DB Assistant's schema
+  context sample only field names and types per collection, 8 collections at a
+  time. They no longer read indexes, stats or whole documents.
+- **Cache sweeps.** The five-minute reaper also drops expired schema diagrams
+  and completion snapshots. Postgres completion reads `pg_catalog` directly,
+  so it stays fast on catalogs with thousands of tables.
 

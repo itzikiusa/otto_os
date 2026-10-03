@@ -531,6 +531,12 @@ impl GraphCache {
     }
 }
 
+/// How long a Run's pre-execution [`AccessSnapshot`] may stand in for the
+/// eligibility check right before the driver call (DB2-06). Short on purpose:
+/// it only dedupes the back-to-back read; the in-flight tick and the
+/// post-execution check still read fresh.
+const PRE_SNAPSHOT_REUSE: Duration = Duration::from_millis(50);
+
 /// `secret_ref` → (secret, read time); see [`DbViewerService::completion_secrets`].
 type CompletionSecrets = HashMap<String, (Option<String>, Instant)>;
 
@@ -981,6 +987,17 @@ impl DbViewerService {
         r: &Resolved,
     ) -> Result<()> {
         let snap = self.access_snapshot(conn_id).await?;
+        self.query_eligible_snap(&snap, user_id, req, r).await
+    }
+
+    /// [`Self::query_eligible`] against an already-loaded snapshot.
+    async fn query_eligible_snap(
+        &self,
+        snap: &AccessSnapshot,
+        user_id: &Id,
+        req: &QueryRequest,
+        r: &Resolved,
+    ) -> Result<()> {
         if !snap.enforced() {
             if r.config.params.get("__access_scope").is_some() {
                 return Err(Error::Forbidden(
@@ -989,8 +1006,8 @@ impl DbViewerService {
             }
             return Ok(());
         }
-        self.execution_access_snap(&snap, user_id, req).await?;
-        self.check_resolved_scope_snap(&snap, user_id, req.node.as_deref(), "db_query", r)
+        self.execution_access_snap(snap, user_id, req).await?;
+        self.check_resolved_scope_snap(snap, user_id, req.node.as_deref(), "db_query", r)
             .await
     }
 
@@ -2081,8 +2098,10 @@ impl DbViewerService {
             ..req.clone()
         };
         // One access snapshot for the whole pre-execution phase (access gate,
-        // write guard, resolution, native verification) — see DB-06.
+        // write guard, resolution, native verification) — see DB-06 — and,
+        // while still fresh, the pre-execution eligibility check (DB2-06).
         let snap = self.access_snapshot(conn_id).await?;
+        let snap_at = Instant::now();
         self.execution_access_snap(&snap, user_id, req).await?;
         Self::guard_write_conn(&snap.conn, req)?;
         let child = crate::access::child(req.node.as_deref());
@@ -2123,12 +2142,13 @@ impl DbViewerService {
         }
         self.verify_native_snap(&snap, conn_id, user_id, &r).await?;
         let token = CancelToken::new();
+        let pre = Some((snap, snap_at));
 
         // Without a `query_id` there is nothing to cancel or re-attach to —
         // request-scoped execution (agents over MCP, widgets) stays inline.
         let Some(qid) = req.query_id.clone().filter(|s| !s.is_empty()) else {
             return self
-                .execute_recorded(r, conn_id, user_id, req, &token, record)
+                .execute_recorded(r, conn_id, user_id, req, &token, record, pre)
                 .await;
         };
 
@@ -2165,7 +2185,7 @@ impl DbViewerService {
         if governed {
             let _guard = guard;
             return self
-                .execute_recorded(r, conn_id, user_id, req, &token, record)
+                .execute_recorded(r, conn_id, user_id, req, &token, record, pre)
                 .await;
         }
         // Detached execution: the query runs in its own task, so a dropped HTTP
@@ -2183,7 +2203,7 @@ impl DbViewerService {
         let task = tokio::spawn(async move {
             let _guard = guard;
             let result = svc
-                .execute_recorded(r, &cid, &uid, &req_owned, &token, record)
+                .execute_recorded(r, &cid, &uid, &req_owned, &token, record, pre)
                 .await;
             if let Err(result) = out_tx.send(result) {
                 let outcome = result.map_err(|e| e.to_string());
@@ -2210,6 +2230,13 @@ impl DbViewerService {
 
     /// Drive the resolved driver, apply opt-in masking, and record history —
     /// the shared tail of [`Self::run`] for both inline and detached execution.
+    ///
+    /// `pre` is the caller's pre-execution [`AccessSnapshot`] and when it was
+    /// loaded: the eligibility check right before execution reuses it while it
+    /// is younger than [`PRE_SNAPSHOT_REUSE`] instead of re-reading the same
+    /// two rows back to back (DB2-06). Older (a slow keychain read or native
+    /// verification in between) → a fresh read, as before.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_recorded(
         &self,
         r: Resolved,
@@ -2218,9 +2245,13 @@ impl DbViewerService {
         req: &QueryRequest,
         token: &CancelToken,
         record: bool,
+        pre: Option<(AccessSnapshot, Instant)>,
     ) -> Result<QueryResult> {
         let started = Instant::now();
-        self.query_eligible(conn_id, user_id, req, &r).await?;
+        match pre.filter(|(_, at)| at.elapsed() < PRE_SNAPSHOT_REUSE) {
+            Some((snap, _)) => self.query_eligible_snap(&snap, user_id, req, &r).await?,
+            None => self.query_eligible(conn_id, user_id, req, &r).await?,
+        }
         let execution = r.with_lifecycle(r.driver.run_tracked(&r.config, req, token));
         tokio::pin!(execution);
         // The check above just ran: the first re-check is one tick away (a
