@@ -2234,7 +2234,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | DELETE /workspaces/{wid}/api-client/collections/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/collections/{id}/openapi | ws viewer | — | export the collection as OpenAPI |
 | GET /workspaces/{wid}/api-client/requests | ws viewer | — | `Request[]` |
-| GET /workspaces/{wid}/api-client/requests/summaries?collection_id= | ws viewer | — | `ApiOverviewRequest[]` (`{id, name, method, url, collection_id, auth_type, has_ssh, agent_authored, updated_at}`), same order as `/requests` — a scalar projection: never the body, headers, query, auth values, scripts, docs or multipart files. `/overview` reads it too |
+| GET /workspaces/{wid}/api-client/requests/summaries?collection_id= | ws viewer | — | `ApiOverviewRequest[]` (`{id, name, method, url, collection_id, auth_type, has_ssh, agent_authored, updated_at, position}`), same order as `/requests`; `position` is the row's sort position in its collection, so the UI tree builds from this projection alone and fetches `GET …/requests/{id}` only when a request is opened — a scalar projection: never the body, headers, query, auth values, scripts, docs or multipart files. `/overview` reads it too |
 | POST /workspaces/{wid}/api-client/requests | ws editor | CreateRequestReq | Request |
 | GET /workspaces/{wid}/api-client/requests/{id}?shape=full\|agent | ws viewer | — | Request. `full` is the unchanged default; `agent` masks auth/header/query secrets and caps the body at 64 KiB |
 | PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | UpdateRequestReq | Request. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, tls_verify?}`), `docs?`, `graphql_variables?` |
@@ -5647,6 +5647,8 @@ Transcript session/history GETs reuse bounded immutable folds (32 retained entri
 
 
 ### API client history summaries
+
+`GET /workspaces/{wid}/api-client/storage` (perf N2; workspace Viewer) returns `ApiClientStorage` `{history_rows, history_bytes, run_rows, step_rows, run_bytes, max_runs_per_automation}`: the workspace's `api_history` row count and stored request+response snapshot bytes, its automation-run report count, recorded step count and stored bytes (headers + step rows), and the most runs any one automation holds. Sizes are `octet_length` sums answered from the record headers; the result is cached 60 s per workspace and dropped after any prune or clear. Read-only — nothing is deleted. `POST /workspaces/{wid}/api-client/storage/prune` (Editor) applies the workspace's **configured** retention immediately (`settings.api_client.history_max_rows` / `history_max_days` / `automation_runs_keep`; `0`/absent = no limit, the default) instead of on the next Send or run, and returns the fresh `ApiClientStorage`; with no limit configured it deletes nothing. Retention stays opt-in.
 
 `GET /workspaces/{wid}/api-client/history/summaries` returns `ApiHistorySummary[]` with the same workspace Viewer and API Client View permissions as full history. Optional `limit` defaults to 100 and clamps to 1–500; `q`, `status`, `request_id`, and `source` preserve full-history filtering. Results sort by `executed_at DESC, id DESC`. `q` matches literal text in method/URL (SQL wildcard characters are escaped).
 

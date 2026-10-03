@@ -111,6 +111,17 @@ pub enum Event {
         status: String,
         steps_done: usize,
     },
+    /// A saved API-client object changed (perf N4): a request, collection,
+    /// environment or automation was created, updated, deleted or imported —
+    /// by a person or an agent tool. The UI drops its 60 s list cache for the
+    /// workspace on this. `kind` is `request` | `collection` | `environment` |
+    /// `automation`; `id` is `None` for bulk changes (imports). Ids only.
+    ApiClientChanged {
+        workspace_id: Id,
+        kind: String,
+        id: Option<Id>,
+        deleted: bool,
+    },
     /// A swarm run was created or changed. `run` is the serialized SwarmRun row
     /// (otto-core can't depend on otto-state, so it travels as JSON).
     SwarmRunUpdated {
@@ -755,6 +766,7 @@ impl Event {
             Event::TasksUpdated { .. } => "tasks_updated",
             Event::ApiHistoryAppended { .. } => "api_history_appended",
             Event::ApiRunProgress { .. } => "api_run_progress",
+            Event::ApiClientChanged { .. } => "api_client_changed",
             Event::SwarmRunUpdated { .. } => "swarm_run_updated",
             Event::SwarmTaskUpdated { .. } => "swarm_task_updated",
             Event::SwarmProjectCleared { .. } => "swarm_project_cleared",

@@ -4194,6 +4194,7 @@ dependencies = [
  "chrono-tz",
  "dirs 7.0.0",
  "futures-util",
+ "h2",
  "hex",
  "hmac",
  "http-body-util",

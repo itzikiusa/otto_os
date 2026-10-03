@@ -478,6 +478,16 @@ recorded per-workspace.
   with nothing on screen shows the error inline with **Retry** (a failed
   refresh over existing rows is a toast and keeps the rows).
 - History is bounded server-side: default **100**, max **500** entries returned.
+- **Storage gauge.** `GET …/storage` reports how much history and automation
+  run reports hold (rows and stored bytes, cached 60 s). Retention is still
+  opt-in: picking a preset writes the same settings as the Retention sheet
+  (`history_max_rows` / `history_max_days`, and `automation_runs_keep` for
+  run reports) and `POST …/storage/prune` applies it at once rather than on
+  the next Send or run.
+- Saved requests, collections, environments and automations changed anywhere
+  (another window, an agent's `otto.api_upsert_request`) push an
+  `api_client_changed` WebSocket event, so the page's 60 s list cache is
+  dropped instead of showing a stale tree.
 - Agent executions carry `request.source = {kind:"agent", session_id}` and show an
   *Agent* chip. Use the **Agent runs only** filter to show only those rows.
 - New rows refresh live through the workspace-scoped `api_history_appended`
@@ -591,6 +601,8 @@ mutations and execution require Editor.** Cross-workspace IDs 404
 | `GET /history` (`?limit&q&status&request_id&source=agent\|human`) | Viewer | → filtered `ApiHistoryEntry[]` |
 | `GET /history/{id}` | Viewer | → `ApiHistoryEntry` |
 | `DELETE /history` | Editor | → 204 |
+| `GET /storage` | Viewer | → `ApiClientStorage {history_rows, history_bytes, run_rows, step_rows, run_bytes, max_runs_per_automation}` (cached 60 s) |
+| `POST /storage/prune` | Editor | → `ApiClientStorage`; applies the configured (opt-in) retention now |
 | `POST /execute` | Editor | `ExecuteApiReq` → `ApiResponse` |
 | `POST /requests/{id}/execute` | Editor | `{environment_id?, vars?, timeout_ms?, confirm?, confirm_new_host?, shape?, decode_jwt?}` → `{history_id, request_id, name, response, resolved, jwt_claims?, warnings, script_tests}`; nested `{{` vars → 400, unsafe method/new host without its confirm flag → 409, send failure → 502 |
 | `POST /grpc/describe` | Editor | `{proto}` → service/method descriptors |

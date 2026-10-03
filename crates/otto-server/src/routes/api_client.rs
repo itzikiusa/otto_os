@@ -15,10 +15,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use otto_core::api::{
-    ApiOverview, ApiOverviewAutomation, ApiOverviewCollection, ApiOverviewEnvironment,
-    ApiOverviewRequest, ApiResolvedRequest, ApiResponse, ApiRunResult, ApiRunStepResult,
-    ExecuteApiReq, ImportCurlReq, ParsedCurl, RunSavedRequestReq, RunSavedRequestResp,
-    UpsertApiAutomationReq, UpsertApiCollectionReq, UpsertApiEnvironmentReq, UpsertApiRequestReq,
+    ApiClientStorage, ApiOverview, ApiOverviewAutomation, ApiOverviewCollection,
+    ApiOverviewEnvironment, ApiOverviewRequest, ApiResolvedRequest, ApiResponse, ApiRunResult,
+    ApiRunStepResult, ExecuteApiReq, ImportCurlReq, ParsedCurl, RunSavedRequestReq,
+    RunSavedRequestResp, UpsertApiAutomationReq, UpsertApiCollectionReq, UpsertApiEnvironmentReq,
+    UpsertApiRequestReq,
 };
 use otto_core::auth::AuthContext;
 use otto_core::domain::{
@@ -521,6 +522,24 @@ pub async fn list_collections(
     Ok(Json(repo(&ctx).list_collections(&wid).await?))
 }
 
+/// Tell the workspace's open API clients a saved object changed (perf N4) —
+/// a person's edit, an agent's `api_upsert_request` (it goes through these
+/// same routes) or an import. Ids only; the UI drops its 60 s list cache.
+pub(crate) fn notify_changed(
+    ctx: &ServerCtx,
+    wid: &Id,
+    kind: &str,
+    id: Option<&Id>,
+    deleted: bool,
+) {
+    let _ = ctx.events.send(Event::ApiClientChanged {
+        workspace_id: wid.clone(),
+        kind: kind.to_string(),
+        id: id.cloned(),
+        deleted,
+    });
+}
+
 /// `POST /workspaces/{wid}/api-client/collections`
 pub async fn create_collection(
     Path(wid): Path<Id>,
@@ -541,6 +560,7 @@ pub async fn create_collection(
             position,
         })
         .await?;
+    notify_changed(&ctx, &col.workspace_id, "collection", Some(&col.id), false);
     Ok(Json(col))
 }
 
@@ -557,6 +577,7 @@ pub async fn update_collection(
     let col = repo
         .update_collection(&id, Some(req.name.trim()), Some(req.parent_id.as_deref()))
         .await?;
+    notify_changed(&ctx, &wid, "collection", Some(&id), false);
     Ok(Json(col))
 }
 
@@ -570,6 +591,7 @@ pub async fn delete_collection(
     let repo = repo(&ctx);
     ensure_in_workspace(&repo.get_collection(&id).await?.workspace_id, &wid)?;
     repo.delete_collection(&id).await?;
+    notify_changed(&ctx, &wid, "collection", Some(&id), true);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -691,6 +713,7 @@ pub async fn create_request(
     new.id = Some(id);
     new.auth = auth_row;
     let created = repo(&ctx).create_request(new).await?;
+    notify_changed(&ctx, &wid, "request", Some(&created.id), false);
     Ok(Json(created))
 }
 
@@ -752,6 +775,7 @@ pub async fn update_request(
             return Err(error.into());
         }
     };
+    notify_changed(&ctx, &wid, "request", Some(&id), false);
     Ok(Json(updated))
 }
 
@@ -773,6 +797,7 @@ pub async fn delete_request(
     repo.delete_request(&id).await?;
     // Best-effort: drop the request's Keychain blob with it.
     let _ = otto_core::secrets::delete_async(&ctx.secrets, &api_secrets::request_ref(&id)).await;
+    notify_changed(&ctx, &wid, "request", Some(&id), true);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -864,6 +889,7 @@ pub async fn create_environment(
         .filter(|(k, _)| secret_keys.contains(k))
         .collect();
     api_secrets::store_blob_async(&ctx.secrets, &api_secrets::env_ref(&env.id), &blob).await?;
+    notify_changed(&ctx, &env.workspace_id, "environment", Some(&env.id), false);
     Ok(Json(env))
 }
 
@@ -898,6 +924,7 @@ pub async fn update_environment(
     let env = repo
         .update_environment(&id, Some(req.name.trim()), Some(&vars), Some(&secret_keys))
         .await?;
+    notify_changed(&ctx, &wid, "environment", Some(&id), false);
     Ok(Json(env))
 }
 
@@ -939,6 +966,7 @@ pub async fn delete_environment(
     repo.delete_environment(&id).await?;
     // Best-effort: drop the environment's Keychain blob with it.
     let _ = otto_core::secrets::delete_async(&ctx.secrets, &api_secrets::env_ref(&id)).await;
+    notify_changed(&ctx, &wid, "environment", Some(&id), true);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -951,7 +979,9 @@ pub async fn activate_environment(
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let repo = repo(&ctx);
     ensure_in_workspace(&repo.get_environment(&id).await?.workspace_id, &wid)?;
-    Ok(Json(repo.set_active(&wid, &id).await?))
+    let env = repo.set_active(&wid, &id).await?;
+    notify_changed(&ctx, &wid, "environment", Some(&id), false);
+    Ok(Json(env))
 }
 
 // ===========================================================================
@@ -1030,7 +1060,88 @@ pub async fn clear_history(
 ) -> ApiResult<StatusCode> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     repo(&ctx).clear_history(&wid).await?;
+    invalidate_storage_gauge(&wid);
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ===========================================================================
+// Storage gauge + on-demand retention (perf N2)
+// ===========================================================================
+
+/// How long one workspace's storage gauge is reused (the counts are an
+/// indexed scan, but the History list mounts often).
+const STORAGE_GAUGE_TTL: Duration = Duration::from_secs(60);
+
+fn storage_gauge_cache() -> &'static StdMutex<HashMap<Id, (Instant, ApiClientStorage)>> {
+    static CACHE: OnceLock<StdMutex<HashMap<Id, (Instant, ApiClientStorage)>>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Drop `wid`'s cached gauge — after a prune, a clear or a retention pass.
+pub(crate) fn invalidate_storage_gauge(wid: &Id) {
+    storage_gauge_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(wid);
+}
+
+async fn storage_gauge(ctx: &ServerCtx, wid: &Id) -> Result<ApiClientStorage, ApiError> {
+    if let Some((at, stats)) = storage_gauge_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(wid)
+    {
+        if at.elapsed() < STORAGE_GAUGE_TTL {
+            return Ok(stats.clone());
+        }
+    }
+    let stats = repo(ctx).storage_stats(wid).await?;
+    let mut cache = storage_gauge_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    cache.retain(|_, (at, _)| at.elapsed() < STORAGE_GAUGE_TTL);
+    cache.insert(wid.clone(), (Instant::now(), stats.clone()));
+    Ok(stats)
+}
+
+/// `GET /workspaces/{wid}/api-client/storage` — history / run-report sizes
+/// (cached 60 s per workspace). Read-only; nothing is ever deleted here.
+pub async fn storage(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<ApiClientStorage>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    Ok(Json(storage_gauge(&ctx, &wid).await?))
+}
+
+/// `POST /workspaces/{wid}/api-client/storage/prune` — apply the workspace's
+/// CONFIGURED retention now (`settings.api_client.history_max_rows` /
+/// `history_max_days` / `automation_runs_keep`), instead of waiting for the
+/// next Send or run. With no limit configured it deletes nothing — retention
+/// stays opt-in. Returns the fresh gauge.
+pub async fn prune_storage(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<ApiClientStorage>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    let repo = repo(&ctx);
+    let (max_rows, max_days) = history_retention(&ctx, &wid).await;
+    if max_rows > 0 || max_days > 0 {
+        repo.prune_history(&wid, max_rows, max_days).await?;
+    }
+    let keep = super::api_automation_runs::runs_keep(&ctx, &wid).await;
+    if keep > 0 {
+        let runs = otto_state::api_runs::ApiRunsRepo(ctx.pool.clone());
+        for automation in repo.run_automation_ids(&wid).await? {
+            runs.prune_runs(&wid, &automation, keep)
+                .await
+                .map_err(|e| ApiError(Error::Internal(format!("prune api runs: {e}"))))?;
+        }
+    }
+    invalidate_storage_gauge(&wid);
+    Ok(Json(storage_gauge(&ctx, &wid).await?))
 }
 
 // ===========================================================================
@@ -1602,8 +1713,13 @@ fn schedule_history_prune(ctx: &ServerCtx, repo: &ApiClientRepo, wid: &Id) {
     let (ctx, repo, wid) = (ctx.clone(), repo.clone(), wid.clone());
     tokio::spawn(async move {
         let (max_rows, max_days) = history_retention(&ctx, &wid).await;
-        if max_rows > 0 || max_days > 0 {
-            let _ = repo.prune_history(&wid, max_rows, max_days).await;
+        if (max_rows > 0 || max_days > 0)
+            && repo
+                .prune_history(&wid, max_rows, max_days)
+                .await
+                .is_ok_and(|n| n > 0)
+        {
+            invalidate_storage_gauge(&wid);
         }
     });
 }
@@ -2259,11 +2375,13 @@ pub async fn execute(
                 &exec_req.auth,
             );
             // The history copy never keeps raw bytes: lift them out first so
-            // the clone doesn't copy them only to clear them.
+            // the copy doesn't carry them only to clear them. One copy only —
+            // straight to the stored JSON, scrubbed in place (perf N7: it was
+            // a typed clone of the ≤512 KB body, then a second copy to JSON).
             let body_base64 = std::mem::take(&mut resp.body_base64);
-            let mut stored_resp = resp.clone();
+            let mut stored_resp = serde_json::to_value(&resp).unwrap_or(Value::Null);
             resp.body_base64 = body_base64;
-            api_secrets::scrub_secrets(&mut stored_resp, &secret_values);
+            api_secrets::scrub_response_json(&mut stored_resp, &secret_values);
             // Record success in history (best-effort; do not fail the request).
             record_history(
                 &ctx,
@@ -2275,7 +2393,7 @@ pub async fn execute(
                     status: Some(resp.status as i64),
                     duration_ms: Some(resp.duration_ms),
                     request: request_snapshot,
-                    response: serde_json::to_value(&stored_resp).unwrap_or(Value::Null),
+                    response: stored_resp,
                 },
                 &source,
                 session_id,
@@ -3288,6 +3406,13 @@ pub async fn create_automation(
             steps: normalize_json_array(req.steps),
         })
         .await?;
+    notify_changed(
+        &ctx,
+        &auto.workspace_id,
+        "automation",
+        Some(&auto.id),
+        false,
+    );
     Ok(Json(auto))
 }
 
@@ -3305,6 +3430,7 @@ pub async fn update_automation(
     let auto = repo
         .update_automation(&id, Some(req.name.trim()), Some(&steps))
         .await?;
+    notify_changed(&ctx, &wid, "automation", Some(&id), false);
     Ok(Json(auto))
 }
 
@@ -3318,6 +3444,7 @@ pub async fn delete_automation(
     let repo = repo(&ctx);
     ensure_in_workspace(&repo.get_automation(&id).await?.workspace_id, &wid)?;
     repo.delete_automation(&id).await?;
+    notify_changed(&ctx, &wid, "automation", Some(&id), true);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3887,6 +4014,12 @@ pub async fn secure_all(
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let (requests_secured, env_keys_secured) =
         secure_all_sweep(&repo(&ctx), &ctx.secrets, &wid).await?;
+    if requests_secured > 0 {
+        notify_changed(&ctx, &wid, "request", None, false);
+    }
+    if env_keys_secured > 0 {
+        notify_changed(&ctx, &wid, "environment", None, false);
+    }
     Ok(Json(json!({
         "requests_secured": requests_secured,
         "env_keys_secured": env_keys_secured,
@@ -4795,6 +4928,7 @@ mod tests {
             has_ssh: request.ssh_connection_id.is_some(),
             agent_authored: is_agent_authored(request),
             updated_at: request.updated_at,
+            position: request.position,
         }
     }
 
@@ -5335,5 +5469,157 @@ mod tests {
         vars.insert("token".into(), json!("t"));
         vars.insert("user".into(), json!("u"));
         assert!(unresolved_placeholders(&exec, &vars).is_empty());
+    }
+
+    // ── perf N4 / N5 route-level guards ──────────────────────────────────────
+
+    fn auth_for(user: &otto_core::domain::User) -> AuthContext {
+        AuthContext {
+            real_user: user.clone(),
+            effective_user: user.clone(),
+            scope: None,
+            mcp_only: false,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
+            managed_session_id: None,
+        }
+    }
+
+    fn upsert_req(name: &str, url: &str) -> UpsertApiRequestReq {
+        serde_json::from_value(json!({ "name": name, "method": "GET", "url": url }))
+            .expect("upsert dto")
+    }
+
+    /// perf N4: every saved-request write (the agent's `api_upsert_request`
+    /// goes through these same routes) tells the workspace's clients, so the
+    /// UI's 60 s list cache can't serve a stale tree.
+    #[tokio::test]
+    async fn request_writes_emit_api_client_changed() {
+        use crate::routes::browser::tests::{mem_pool, root_user, seed_workspace, test_ctx};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "ws-n4").await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let mut rx = ctx.events.subscribe();
+        let wid: Id = "ws-n4".into();
+        let user = root_user();
+
+        let Json(created) = create_request(
+            Path(wid.clone()),
+            State(ctx.clone()),
+            CurrentUser(user.clone()),
+            HeaderMap::new(),
+            Json(upsert_req("one", "https://a.example/x")),
+        )
+        .await
+        .unwrap();
+        let _ = update_request(
+            Path((wid.clone(), created.id.clone())),
+            State(ctx.clone()),
+            CurrentUser(user.clone()),
+            HeaderMap::new(),
+            Json(upsert_req("one renamed", "https://a.example/x")),
+        )
+        .await
+        .unwrap();
+        delete_request(
+            Path((wid.clone(), created.id.clone())),
+            State(ctx.clone()),
+            CurrentUser(user.clone()),
+        )
+        .await
+        .unwrap();
+
+        let mut seen = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::ApiClientChanged {
+                workspace_id,
+                kind,
+                id,
+                deleted,
+            } = ev
+            {
+                assert_eq!(workspace_id, wid);
+                seen.push((kind, id, deleted));
+            }
+        }
+        let some = Some(created.id.clone());
+        assert_eq!(
+            seen,
+            vec![
+                ("request".to_string(), some.clone(), false),
+                ("request".to_string(), some.clone(), false),
+                ("request".to_string(), some, true),
+            ]
+        );
+    }
+
+    /// perf N5: `/execute` with a Keychain-backed env secret over a workspace
+    /// of many saved requests checks the secret's host binding from the URL
+    /// projection — it never reads full request rows (`SELECT *`).
+    #[tokio::test]
+    async fn execute_with_env_secret_never_reads_full_request_rows() {
+        use crate::routes::browser::tests::{mem_pool, root_user, seed_workspace, test_ctx};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "ws-n5").await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let wid: Id = "ws-n5".into();
+        let user = root_user();
+        for i in 0..200 {
+            let _ = create_request(
+                Path(wid.clone()),
+                State(ctx.clone()),
+                CurrentUser(user.clone()),
+                HeaderMap::new(),
+                Json(upsert_req(
+                    &format!("r{i}"),
+                    &format!("https://h{i}.example/v1"),
+                )),
+            )
+            .await
+            .unwrap();
+        }
+        let env_req: UpsertApiEnvironmentReq = serde_json::from_value(json!({
+            "name": "prod",
+            "variables": { "base": "https://unbound.invalid" },
+            "secret_keys": ["token"],
+            "secret_values": { "token": "s3cr3t" },
+        }))
+        .unwrap();
+        let Json(env) = create_environment(
+            Path(wid.clone()),
+            State(ctx.clone()),
+            CurrentUser(user.clone()),
+            Json(env_req),
+        )
+        .await
+        .unwrap();
+
+        let before = otto_state::api_client::list_requests_calls_on_this_thread();
+        let exec: ExecuteApiReq = serde_json::from_value(json!({
+            "method": "GET",
+            "url": "{{base}}/me",
+            "headers": [{ "key": "Authorization", "value": "Bearer {{token}}", "enabled": true }],
+            "environment_id": env.id,
+        }))
+        .unwrap();
+        // The outcome (an unbound-secret refusal, or a send error) doesn't
+        // matter here — only what the path read to get there.
+        let _ = execute(
+            Path(wid.clone()),
+            State(ctx.clone()),
+            CurrentUser(user.clone()),
+            CurrentAuthContext(auth_for(&user)),
+            HeaderMap::new(),
+            Json(exec),
+        )
+        .await;
+        assert_eq!(
+            otto_state::api_client::list_requests_calls_on_this_thread() - before,
+            0,
+            "/execute must not read every saved request in full"
+        );
     }
 }

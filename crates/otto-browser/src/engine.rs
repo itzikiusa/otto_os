@@ -81,4 +81,9 @@ pub trait BrowserEngine: Send + Sync {
     fn is_usable(&self) -> bool {
         true
     }
+    /// `true` when the engine owns an external process (the Lightpanda
+    /// sidecar) that is worth stopping while idle (perf N6). Default: `false`.
+    fn owns_process(&self) -> bool {
+        false
+    }
 }

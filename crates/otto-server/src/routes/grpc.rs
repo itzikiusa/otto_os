@@ -121,6 +121,10 @@ fn sha_key(parts: &[&str]) -> String {
 /// measurability hook for the cache tests.
 static PROTO_COMPILES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// How many channels were actually dialled (channel-cache misses) — the
+/// measurability hook for the channel-reuse test (perf N5).
+static CHANNEL_CONNECTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// [`pool_from_proto`] through the pool cache, compiling on the blocking pool
 /// (protox + a tempdir write are synchronous file I/O and CPU).
 async fn pool_from_proto_cached(proto: &str) -> Result<DescriptorPool, ApiError> {
@@ -761,6 +765,7 @@ async fn connect_channel(url: &str, allow_local: bool) -> Result<Channel, ApiErr
     // SSRF guard (pinned, see `grpc_endpoint`) for the reflection target —
     // honouring the workspace allow-local opt-in exactly like invoke does.
     let endpoint = grpc_endpoint(url, allow_local).await?;
+    CHANNEL_CONNECTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     match tokio::time::timeout(Duration::from_secs(20), endpoint.connect()).await {
         Ok(Ok(c)) => Ok(c),
         Ok(Err(e)) => Err(upstream(format!("connect failed: {e}"))),
@@ -1094,5 +1099,64 @@ mod tests {
         let v: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["name"], json!("otto"));
         assert_eq!(v["count"], json!(3));
+    }
+
+    /// Perf guard (N5): invoke and reflection share one dialled channel per
+    /// `(url, allow_local)` — repeat calls reuse it (one TCP connection at a
+    /// real h2 server), and only a transport failure (`forget_channel`)
+    /// makes the next call redial.
+    #[tokio::test]
+    async fn grpc_channel_is_dialled_once_and_redialled_after_forget() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let counted = accepts.clone();
+        // A minimal HTTP/2 (h2c prior-knowledge) server: completes the
+        // handshake and holds the connection, like any gRPC server would.
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((sock, _)) = listener.accept().await else {
+                    return;
+                };
+                counted.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    if let Ok(mut conn) = h2::server::handshake(sock).await {
+                        while let Some(Ok(_)) = conn.accept().await {}
+                    }
+                });
+            }
+        });
+        let url = format!("http://{addr}");
+        let dials = || CHANNEL_CONNECTS.load(Ordering::Relaxed);
+        let before = dials();
+        let a = cached_channel(&url, true).await.expect("dial");
+        let _b = cached_channel(&url, true).await.expect("reuse");
+        let _c = cached_channel(&url, true).await.expect("reuse");
+        let mut client = tonic::client::Grpc::new(a);
+        client.ready().await.expect("ready");
+        assert_eq!(dials() - before, 1, "three calls, one dial");
+        for _ in 0..100 {
+            if accepts.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(accepts.load(Ordering::SeqCst), 1, "one TCP connection");
+
+        // A transport failure drops the cached channel; the next call redials.
+        forget_channel(&url, true);
+        let _d = cached_channel(&url, true).await.expect("redial");
+        assert_eq!(dials() - before, 2);
+        for _ in 0..100 {
+            if accepts.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(accepts.load(Ordering::SeqCst), 2);
+        forget_channel(&url, true);
+        server.abort();
     }
 }

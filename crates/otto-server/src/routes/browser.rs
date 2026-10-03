@@ -85,7 +85,13 @@ pub fn routes() -> Router<ServerCtx> {
 pub struct BrowserEngineHandle {
     configured_bin: Option<String>,
     data_dir: std::path::PathBuf,
-    cell: tokio::sync::OnceCell<otto_browser::BrowserService>,
+    /// The started engine — `None` until first use, and again after an idle
+    /// Lightpanda sidecar is stopped (perf N6).
+    engine: std::sync::Arc<EngineSlot>,
+    /// Rendered pages outlive an idle stop: each (re)started service shares it.
+    pages: otto_browser::SharedPageCache,
+    /// Test-injected services are never idle-stopped.
+    pinned: bool,
     /// The remote live runtime (daemon Chromium) — created on first use by
     /// `routes::browser_live::runtime`, never at boot.
     live: tokio::sync::OnceCell<std::sync::Arc<otto_browser::live::LiveRuntime>>,
@@ -96,7 +102,9 @@ impl BrowserEngineHandle {
         Self {
             configured_bin,
             data_dir,
-            cell: tokio::sync::OnceCell::new(),
+            engine: std::sync::Arc::new(EngineSlot::default()),
+            pages: otto_browser::SharedPageCache::default(),
+            pinned: false,
             live: tokio::sync::OnceCell::new(),
         }
     }
@@ -134,16 +142,30 @@ impl BrowserEngineHandle {
         }
     }
 
-    async fn service(&self) -> &otto_browser::BrowserService {
-        self.cell
-            .get_or_init(|| async {
-                otto_browser::BrowserService::autodetect(
-                    self.configured_bin.as_deref(),
-                    self.data_dir.clone(),
-                )
-                .await
-            })
-            .await
+    /// The engine, started (Lightpanda sidecar autodetect) on first use or
+    /// after an idle stop. The lease counts the call as in flight, so an idle
+    /// stop never kills a sidecar mid-render.
+    async fn service(&self) -> EngineLease {
+        let mut slot = self.engine.svc.lock().await;
+        let svc = match slot.as_ref() {
+            Some(svc) => svc.clone(),
+            None => {
+                let svc = std::sync::Arc::new(
+                    otto_browser::BrowserService::autodetect(
+                        self.configured_bin.as_deref(),
+                        self.data_dir.clone(),
+                    )
+                    .await
+                    .with_page_cache(&self.pages),
+                );
+                *slot = Some(svc.clone());
+                if svc.has_sidecar() && !self.pinned {
+                    EngineSlot::arm_idle_stop(&self.engine);
+                }
+                svc
+            }
+        };
+        EngineLease::new(svc, self.engine.clone())
     }
 
     /// The rendered page, from the service's short-lived per-workspace cache
@@ -180,10 +202,14 @@ impl BrowserEngineHandle {
     /// on a real `lightpanda` binary or network access.
     #[cfg(test)]
     pub fn with_service(service: otto_browser::BrowserService) -> Self {
+        let engine = EngineSlot::default();
+        *engine.svc.try_lock().expect("fresh slot") = Some(std::sync::Arc::new(service));
         Self {
             configured_bin: None,
             data_dir: std::path::PathBuf::new(),
-            cell: tokio::sync::OnceCell::new_with(Some(service)),
+            engine: std::sync::Arc::new(engine),
+            pages: otto_browser::SharedPageCache::default(),
+            pinned: true,
             live: tokio::sync::OnceCell::new(),
         }
     }
@@ -200,6 +226,124 @@ impl BrowserEngineHandle {
         let svc = self.service().await;
         let logged_in = svc.login(url, username, password).await?;
         Ok((logged_in, svc.engine_name()))
+    }
+}
+
+/// A Lightpanda sidecar idle this long is stopped (perf N6); the next reader
+/// fetch starts a new one (rendered pages are kept — see `pages`).
+const ENGINE_IDLE_STOP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// How often the idle check runs — only while a sidecar is alive.
+const ENGINE_IDLE_CHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The started browser engine plus its use tracking.
+struct EngineSlot {
+    svc: tokio::sync::Mutex<Option<std::sync::Arc<otto_browser::BrowserService>>>,
+    last_used: std::sync::Mutex<std::time::Instant>,
+    in_flight: std::sync::atomic::AtomicUsize,
+    /// An idle-check task is running (at most one, and only while a sidecar
+    /// exists — no timer runs for a daemon that never used the reader).
+    checking: std::sync::atomic::AtomicBool,
+}
+
+impl Default for EngineSlot {
+    fn default() -> Self {
+        Self {
+            svc: tokio::sync::Mutex::new(None),
+            last_used: std::sync::Mutex::new(std::time::Instant::now()),
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            checking: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+/// Whether an engine last used at `last_used` with `in_flight` calls running
+/// should be stopped at `now`.
+fn engine_idle_expired(
+    last_used: std::time::Instant,
+    now: std::time::Instant,
+    in_flight: usize,
+    idle: std::time::Duration,
+) -> bool {
+    in_flight == 0 && now.saturating_duration_since(last_used) >= idle
+}
+
+impl EngineSlot {
+    fn touch(&self) {
+        *self.last_used.lock().unwrap_or_else(|p| p.into_inner()) = std::time::Instant::now();
+    }
+
+    /// Drop the engine (stopping its sidecar) if it has been idle for `idle`
+    /// at `now` with nothing in flight. Returns whether the slot is now empty.
+    async fn stop_if_idle(&self, now: std::time::Instant, idle: std::time::Duration) -> bool {
+        use std::sync::atomic::Ordering;
+        let mut slot = self.svc.lock().await;
+        if slot.is_none() {
+            return true;
+        }
+        let last = *self.last_used.lock().unwrap_or_else(|p| p.into_inner());
+        if engine_idle_expired(last, now, self.in_flight.load(Ordering::SeqCst), idle) {
+            tracing::info!("browser: stopping the idle lightpanda sidecar");
+            *slot = None;
+            return true;
+        }
+        false
+    }
+
+    /// Start the idle check for a freshly started sidecar (no-op when one is
+    /// already running). It ends once the engine is stopped.
+    fn arm_idle_stop(this: &std::sync::Arc<Self>) {
+        use std::sync::atomic::Ordering;
+        if this.checking.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let slot = this.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(ENGINE_IDLE_CHECK).await;
+                if slot
+                    .stop_if_idle(std::time::Instant::now(), ENGINE_IDLE_STOP)
+                    .await
+                {
+                    break;
+                }
+            }
+            slot.checking.store(false, Ordering::SeqCst);
+        });
+    }
+}
+
+/// One call's hold on the engine: counted in flight, and the use time is
+/// refreshed when it starts and ends.
+struct EngineLease {
+    svc: std::sync::Arc<otto_browser::BrowserService>,
+    slot: std::sync::Arc<EngineSlot>,
+}
+
+impl EngineLease {
+    fn new(
+        svc: std::sync::Arc<otto_browser::BrowserService>,
+        slot: std::sync::Arc<EngineSlot>,
+    ) -> Self {
+        slot.in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        slot.touch();
+        Self { svc, slot }
+    }
+}
+
+impl std::ops::Deref for EngineLease {
+    type Target = otto_browser::BrowserService;
+    fn deref(&self) -> &Self::Target {
+        &self.svc
+    }
+}
+
+impl Drop for EngineLease {
+    fn drop(&mut self) {
+        self.slot.touch();
+        self.slot
+            .in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -1740,7 +1884,7 @@ async fn login_credential(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::path::PathBuf;
@@ -1782,7 +1926,7 @@ mod tests {
         }
     }
 
-    async fn mem_pool() -> DbPool {
+    pub(crate) async fn mem_pool() -> DbPool {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -1800,7 +1944,7 @@ mod tests {
 
     /// Root so `require_ws_role` passes without seeding `workspace_members`
     /// rows (`WorkspacesRepo::role_of` returns `Admin` for root unconditionally).
-    fn root_user() -> User {
+    pub(crate) fn root_user() -> User {
         User {
             id: "root".into(),
             username: "root".into(),
@@ -1811,7 +1955,7 @@ mod tests {
         }
     }
 
-    async fn test_ctx(pool: &DbPool, data_dir: PathBuf) -> ServerCtx {
+    pub(crate) async fn test_ctx(pool: &DbPool, data_dir: PathBuf) -> ServerCtx {
         let (events, _rx) = broadcast::channel(64);
         // Browser-credentials tests need a real (non-erroring) `SecretStore`
         // to round-trip put/get/delete — `otto_keychain::FileStore` is exactly
@@ -2016,7 +2160,7 @@ mod tests {
         .expect("seed user");
     }
 
-    async fn seed_workspace(pool: &DbPool, ws_id: &str) {
+    pub(crate) async fn seed_workspace(pool: &DbPool, ws_id: &str) {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
@@ -4308,5 +4452,56 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&body)
         );
+    }
+
+    /// perf N6: the idle decision — stop only when idle long enough AND no
+    /// call is in flight.
+    #[test]
+    fn engine_idle_stop_needs_quiet_and_no_calls_in_flight() {
+        let t0 = std::time::Instant::now();
+        let idle = ENGINE_IDLE_STOP;
+        assert!(!engine_idle_expired(t0, t0 + idle / 2, 0, idle));
+        assert!(engine_idle_expired(t0, t0 + idle, 0, idle));
+        assert!(
+            !engine_idle_expired(t0, t0 + idle * 2, 1, idle),
+            "never mid-render"
+        );
+        // A clock that reads earlier than the last use is not idle.
+        assert!(!engine_idle_expired(t0 + idle, t0, 0, idle));
+    }
+
+    /// perf N6: an idle engine is dropped from the slot (killing a sidecar)
+    /// but a leased one is kept; the next call starts a fresh engine.
+    #[tokio::test]
+    async fn idle_engine_is_stopped_and_restarted_on_next_use() {
+        let slot = std::sync::Arc::new(EngineSlot::default());
+        let svc = std::sync::Arc::new(otto_browser::BrowserService::with_engines(
+            std::sync::Arc::new(otto_browser::FallbackEngine::from_static("<p>a</p>")),
+            otto_browser::FallbackEngine::from_static("<p>a</p>"),
+        ));
+        *slot.svc.lock().await = Some(svc.clone());
+        let later = std::time::Instant::now() + ENGINE_IDLE_STOP * 2;
+
+        let lease = EngineLease::new(svc.clone(), slot.clone());
+        assert!(
+            !slot.stop_if_idle(later, ENGINE_IDLE_STOP).await,
+            "in flight"
+        );
+        assert!(slot.svc.lock().await.is_some());
+        drop(lease);
+        assert_eq!(slot.in_flight.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(slot.stop_if_idle(later, ENGINE_IDLE_STOP).await);
+        assert!(slot.svc.lock().await.is_none(), "engine dropped");
+
+        // The handle restarts an engine on demand (plain fetch here: no
+        // lightpanda binary is configured in tests).
+        let handle = BrowserEngineHandle::new(
+            Some("/nonexistent/lightpanda".into()),
+            std::path::PathBuf::from("/tmp"),
+        );
+        *handle.engine.svc.lock().await = None;
+        let lease = handle.service().await;
+        assert!(handle.engine.svc.lock().await.is_some());
+        drop(lease);
     }
 }
