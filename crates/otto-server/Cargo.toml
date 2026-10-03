@@ -3,6 +3,21 @@ name = "otto-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Integration tests link as ONE binary (tests/it.rs `#[path]`-includes each
+# tests/<suite>.rs): every test binary links the whole workspace, so 19 of them
+# cost 19 links + 19 copies on disk per change. A guard test in it.rs fails if
+# a tests/*.rs file is neither included there nor a [[test]] below.
+autotests = false
+
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+# Sets process env vars (OTTO_E2E, OTTO_SNIP_CAPTURE_CMD): kept out of `it` so
+# they can't leak into other suites under `cargo test`'s one-process runner.
+[[test]]
+name = "snips"
+path = "tests/snips.rs"
 
 [features]
 default = []
