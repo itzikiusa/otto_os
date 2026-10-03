@@ -755,7 +755,7 @@ pub struct AuthScanner {
     flagged: Mutex<std::collections::HashSet<Id>>,
     /// Per-session rolling tail of recent output (needles can straddle chunk
     /// boundaries). Bounded to the last few hundred bytes.
-    tails: Mutex<HashMap<Id, String>>,
+    tails: Mutex<HashMap<Id, Vec<u8>>>,
 }
 
 impl AuthScanner {
@@ -775,25 +775,14 @@ impl AuthScanner {
 /// Max retained tail bytes per session (covers the longest needle + slack).
 const TAIL_CAP: usize = 256;
 
-/// Trim `buf` in place to at most `cap` bytes, keeping the most-recent content and
-/// NEVER splitting a UTF-8 code point. Terminal output routinely contains
-/// multi-byte glyphs (e.g. the Powerline prompt separator U+E0B0 ``), so a naive
-/// `buf[buf.len() - cap..]` byte slice can land mid-char and panic the worker
-/// thread. We advance the cut forward to the next char boundary instead — keeping
-/// ≤ `cap` bytes, which still comfortably covers the longest needle.
-fn trim_tail(buf: &mut String, cap: usize) {
-    if buf.len() <= cap {
-        return;
-    }
-    let mut cut = buf.len() - cap;
-    while cut < buf.len() && !buf.is_char_boundary(cut) {
-        cut += 1;
-    }
-    buf.replace_range(..cut, "");
-}
-
 impl OutputScanner for AuthScanner {
     fn on_output(&self, session_id: &Id, provider: &str, chunk: &[u8]) {
+        // A plain shell is not an agent CLI with a login to renew, and its
+        // arbitrary output (curl/git/ssh "not authenticated", …) only ever
+        // produced false re-auth alerts — skip the scan (perf 01 F6).
+        if provider == "shell" {
+            return;
+        }
         // Already flagged this session → nothing to do.
         {
             let flagged = match self.flagged.lock() {
@@ -805,20 +794,18 @@ impl OutputScanner for AuthScanner {
             }
         }
 
-        // Append to the rolling tail and search the combined window.
-        let text = String::from_utf8_lossy(chunk).to_lowercase();
-        let combined = {
+        // Search the rolling tail + the WHOLE chunk, then keep a short tail
+        // (perf 01 F6: the old append-trim-search order cut a phrase early in
+        // a large chunk off before looking, and lowercased bytes it dropped).
+        let hit = {
             let mut tails = match self.tails.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
             let buf = tails.entry(session_id.clone()).or_default();
-            buf.push_str(&text);
-            trim_tail(buf, TAIL_CAP);
-            buf.clone()
+            otto_sessions::tail_scan::scan_chunk(buf, chunk, REAUTH_NEEDLES, TAIL_CAP)
         };
-
-        if !REAUTH_NEEDLES.iter().any(|n| combined.contains(n)) {
+        if hit.is_none() {
             return;
         }
 
@@ -944,48 +931,54 @@ async fn check_budgets(ctx: &ServerCtx, dedup: &mut otto_usage::BudgetDedup) {
 
 #[cfg(test)]
 mod tests {
-    use super::trim_tail;
+    use super::{REAUTH_NEEDLES, TAIL_CAP};
+    use otto_sessions::tail_scan::scan_chunk;
 
     /// Regression: the rolling tail must never panic when the cut point lands
-    /// inside a multi-byte glyph. The Powerline separator U+E0B0 (`\u{e0b0}`) is
-    /// 3 bytes, so a buffer of them has cut points that are NOT char boundaries.
+    /// inside a multi-byte glyph (the Powerline separator U+E0B0 is 3 bytes);
+    /// the byte tail stays bounded and a later needle is still found.
     #[test]
-    fn trim_tail_handles_multibyte_glyphs() {
-        let glyph = '\u{e0b0}';
-        let mut s = String::new();
-        for _ in 0..200 {
-            s.push(glyph); // 600 bytes — well over the cap
-        }
-        trim_tail(&mut s, 256); // must not panic on a mid-char byte index
-        assert!(s.len() <= 256, "tail trimmed to within the cap");
-        assert!(
-            s.chars().all(|c| c == glyph),
-            "no split/garbled code points"
+    fn tail_survives_multibyte_glyphs() {
+        let mut tail = Vec::new();
+        let glyphs = "\u{e0b0}".repeat(200);
+        assert_eq!(
+            scan_chunk(&mut tail, glyphs.as_bytes(), REAUTH_NEEDLES, TAIL_CAP),
+            None
         );
+        assert!(tail.len() <= TAIL_CAP);
+        assert!(scan_chunk(
+            &mut tail,
+            b"Please Sign In to continue",
+            REAUTH_NEEDLES,
+            TAIL_CAP
+        )
+        .is_some());
     }
 
+    /// Perf 01 F6: a re-auth line at the START of a large chunk was trimmed
+    /// away before the search (append → trim to 256 → search).
     #[test]
-    fn trim_tail_is_a_noop_below_cap() {
-        let mut s = "needs reauthentication".to_string();
-        trim_tail(&mut s, 256);
-        assert_eq!(s, "needs reauthentication");
+    fn reauth_line_early_in_a_large_chunk_is_detected() {
+        let mut chunk = b"Session expired. Run `claude login`\n".to_vec();
+        chunk.extend(std::iter::repeat_n(b'.', 8000));
+        let mut tail = Vec::new();
+        assert!(scan_chunk(&mut tail, &chunk, REAUTH_NEEDLES, TAIL_CAP).is_some());
+        assert!(tail.len() <= TAIL_CAP, "only a short tail is kept");
     }
 
+    /// A needle split across two chunks is still found from the kept tail.
     #[test]
-    fn trim_tail_keeps_the_most_recent_bytes() {
-        // 1000 ASCII bytes; trimming must retain the *newest* tail (a needle that
-        // just arrived must survive), not the oldest.
-        let mut s: String = (0..1000).map(|i| (b'a' + (i % 26) as u8) as char).collect();
-        let want_tail: String = s
-            .chars()
-            .rev()
-            .take(50)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        trim_tail(&mut s, 256);
-        assert!(s.len() <= 256);
-        assert!(s.ends_with(&want_tail), "kept the most recent content");
+    fn reauth_line_split_across_chunks_is_detected() {
+        let mut tail = Vec::new();
+        let mut first = vec![b'x'; 5000];
+        first.extend_from_slice(b"you are not log");
+        assert_eq!(
+            scan_chunk(&mut tail, &first, REAUTH_NEEDLES, TAIL_CAP),
+            None
+        );
+        assert_eq!(
+            scan_chunk(&mut tail, b"ged in\n", REAUTH_NEEDLES, TAIL_CAP),
+            Some("you are not logged in")
+        );
     }
 }
