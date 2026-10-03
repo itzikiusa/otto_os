@@ -556,6 +556,9 @@ impl UiBridge {
                         "conn_id": conn_id,
                         // A changed boot id = the daemon restarted (ws.md).
                         "boot_id": crate::transport::boot_id(),
+                        // What that restart did to sessions (A4; null
+                        // before the restore ran).
+                        "boot_restore": crate::transport::boot_restore(),
                     })
                     .to_string(),
                 );
@@ -1779,7 +1782,12 @@ mod tests {
         let ack: Value = serde_json::from_str(&rx.try_recv().expect("hello_ack")).unwrap();
         assert_eq!(
             ack,
-            json!({"type":"hello_ack","conn_id":conn,"boot_id":crate::transport::boot_id()})
+            json!({
+                "type": "hello_ack",
+                "conn_id": conn,
+                "boot_id": crate::transport::boot_id(),
+                "boot_restore": crate::transport::boot_restore(),
+            })
         );
     }
 

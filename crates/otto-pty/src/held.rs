@@ -248,8 +248,12 @@ pub(crate) fn adopt(path: &Path) -> Result<PtyHandle, AdoptError> {
     // The holder's emulator is authoritative; only guard against nonsense.
     let cols = cols.clamp(2, crate::MAX_COLS);
     let rows = rows.clamp(2, crate::MAX_ROWS);
-    let mirror = Mirror::new(cols, rows, RingBuffer::default());
+    let mut mirror = Mirror::new(cols, rows, RingBuffer::default());
     mirror.reset_to(cols, rows, &snapshot);
+    // Carry the holder's last-output clock over: the snapshot replay is not
+    // new output, and a daemon restart must not make every re-adopted session
+    // look freshly active to the idle sweep (review A14).
+    mirror.backdate(last_output_age(info.last_output_unix_ms));
 
     let child_state = Arc::new(ChildState::default());
     let (exit_tx, exit_rx) = watch::channel::<Option<i32>>(None);
@@ -287,6 +291,19 @@ pub(crate) fn adopt(path: &Path) -> Result<PtyHandle, AdoptError> {
         exit_rx,
         done_rx,
     ))
+}
+
+/// How long ago `last_output_unix_ms` was (zero when unknown or in the
+/// future — a clock step never makes a session look idle for longer).
+fn last_output_age(last_output_unix_ms: u64) -> Duration {
+    if last_output_unix_ms == 0 {
+        return Duration::ZERO;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Duration::from_millis(now.saturating_sub(last_output_unix_ms))
 }
 
 struct ExitSignal {

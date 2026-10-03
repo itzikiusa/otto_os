@@ -13,6 +13,18 @@ pub struct SessionsRepo {
     pool: DbPool,
 }
 
+/// What [`SessionsRepo::mark_dormant_except`] changed at boot.
+#[derive(Debug, Clone, Default)]
+pub struct DormantPass {
+    /// `(id, workspace_id, meta)` of the rows that were live and lost their
+    /// process with the previous daemon (now `reconnectable`, stamped
+    /// `meta.suspended.reason = "restart"`; `meta` is the updated object).
+    pub suspended: Vec<(Id, Id, serde_json::Value)>,
+    /// `(id, workspace_id)` of exited, resumable agent rows flipped to
+    /// `reconnectable`.
+    pub resumable: Vec<(Id, Id)>,
+}
+
 /// Minimal read-only projection used by the usage tailer to attribute on-disk
 /// transcript turns back to Otto sessions. Deliberately *not* filtered by
 /// status or `archived`: analysis/agent sessions finish quickly (status
@@ -366,6 +378,85 @@ impl SessionsRepo {
             .await
             .map_err(dberr("update session status"))?;
         Ok(())
+    }
+
+    /// [`Self::update_status`] WITHOUT stamping `last_active_at`: for status
+    /// corrections that are not activity — re-adopting a held PTY after a
+    /// daemon restart must not reset the session's idle clock (review A14).
+    pub async fn update_status_keep_activity(&self, id: &Id, status: SessionStatus) -> Result<()> {
+        sqlx::query("UPDATE sessions SET status = ? WHERE id = ?")
+            .bind(status.as_str())
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("update session status"))?;
+        Ok(())
+    }
+
+    /// Daemon-boot dormant pass (review P1), set-based: every restorable,
+    /// non-archived session NOT in `keep` (the ones just re-adopted from their
+    /// PTY holders) becomes `reconnectable` in two statements instead of one
+    /// UPDATE per row. `last_active_at` is left alone — a restart is not
+    /// activity (stamping it broke auto-archive and recency ordering).
+    ///
+    /// - Rows that were live (`status` not `reconnectable`/`exited`) lost their
+    ///   process with the old daemon: they also get
+    ///   `meta.suspended = {reason: "restart", at}`.
+    /// - Exited agent rows with a `provider_session_id` are resumable with
+    ///   `--resume`, so they flip to `reconnectable` too (no stamp: their
+    ///   process ended on its own).
+    ///
+    /// Rows already `reconnectable` are not touched at all. Returns the rows
+    /// that changed, so the caller broadcasts only those.
+    pub async fn mark_dormant_except(&self, keep: &[Id], at: &str) -> Result<DormantPass> {
+        let keep_json = serde_json::to_string(keep).unwrap_or_else(|_| "[]".into());
+        let stamp = serde_json::json!({ "suspended": { "reason": "restart", "at": at } });
+        let live = sqlx::query(
+            "UPDATE sessions SET status = 'reconnectable',
+                 meta_json = json_patch(
+                     CASE WHEN meta_json IS NOT NULL AND json_valid(meta_json)
+                               AND json_type(meta_json) = 'object'
+                          THEN meta_json ELSE '{}' END,
+                     ?)
+             WHERE archived = 0
+               AND status NOT IN ('reconnectable', 'exited')
+               AND id NOT IN (SELECT value FROM json_each(?))
+             RETURNING id, workspace_id, meta_json",
+        )
+        .bind(stamp.to_string())
+        .bind(&keep_json)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("mark sessions dormant"))?;
+        let resumable = sqlx::query(
+            "UPDATE sessions SET status = 'reconnectable'
+             WHERE archived = 0 AND status = 'exited'
+               AND kind = 'agent' AND provider_session_id IS NOT NULL
+               AND id NOT IN (SELECT value FROM json_each(?))
+             RETURNING id, workspace_id",
+        )
+        .bind(&keep_json)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("mark exited sessions resumable"))?;
+        Ok(DormantPass {
+            suspended: live
+                .iter()
+                .map(|r| {
+                    let meta: Option<String> = r.get("meta_json");
+                    (
+                        r.get::<String, _>("id"),
+                        r.get::<String, _>("workspace_id"),
+                        meta.and_then(|m| serde_json::from_str(&m).ok())
+                            .unwrap_or(serde_json::Value::Null),
+                    )
+                })
+                .collect(),
+            resumable: resumable
+                .iter()
+                .map(|r| (r.get::<String, _>("id"), r.get::<String, _>("workspace_id")))
+                .collect(),
+        })
     }
 
     pub async fn set_provider_session(&self, id: &Id, provider_session_id: &str) -> Result<()> {
@@ -1341,5 +1432,118 @@ mod tests {
         let mut want = vec![ok, codex, other];
         want.sort();
         assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn mark_dormant_except_keeps_last_active_and_skips_dormant_rows() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let old = "2026-07-22T10:00:00+00:00";
+        let set = |id: String, status: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query("UPDATE sessions SET status = ?, last_active_at = ? WHERE id = ?")
+                    .bind(status)
+                    .bind(old)
+                    .bind(&id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                id
+            }
+        };
+        let dormant = set(
+            insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p1"), 0).await,
+            "reconnectable",
+        )
+        .await;
+        let live = set(
+            insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p2"), 0).await,
+            "running",
+        )
+        .await;
+        let kept = set(
+            insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p3"), 0).await,
+            "running",
+        )
+        .await;
+        let exited = set(
+            insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p4"), 0).await,
+            "exited",
+        )
+        .await;
+        let exited_shell = set(
+            insert_session_full(&pool, &ws, &user, "claude", "idle", None, 0).await,
+            "exited",
+        )
+        .await;
+        let archived = set(
+            insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p5"), 1).await,
+            "running",
+        )
+        .await;
+
+        let at = "2026-10-03T09:00:00+00:00";
+        let pass = repo
+            .mark_dormant_except(std::slice::from_ref(&kept), at)
+            .await
+            .unwrap();
+        assert_eq!(pass.suspended.len(), 1);
+        assert_eq!(pass.suspended[0].0, live);
+        assert_eq!(pass.suspended[0].2["suspended"]["reason"], "restart");
+        assert_eq!(pass.suspended[0].2["suspended"]["at"], at);
+        assert_eq!(
+            pass.resumable
+                .iter()
+                .map(|r| r.0.clone())
+                .collect::<Vec<_>>(),
+            vec![exited.clone()]
+        );
+
+        for (id, status) in [
+            (&dormant, SessionStatus::Reconnectable),
+            (&live, SessionStatus::Reconnectable),
+            (&kept, SessionStatus::Running),
+            (&exited, SessionStatus::Reconnectable),
+            (&exited_shell, SessionStatus::Exited),
+            (&archived, SessionStatus::Running),
+        ] {
+            let s = repo.get(id).await.unwrap();
+            assert_eq!(s.status, status, "status of {id}");
+            // A restart is not activity: the idle clock is untouched.
+            assert_eq!(
+                fmt(s.last_active_at),
+                fmt(ts(old).unwrap()),
+                "last_active_at of {id}"
+            );
+        }
+        // The already-dormant row got no restart stamp.
+        assert!(repo
+            .get(&dormant)
+            .await
+            .unwrap()
+            .meta
+            .get("suspended")
+            .is_none());
+        // A second boot changes nothing.
+        let again = repo.mark_dormant_except(&[], at).await.unwrap();
+        assert!(again.suspended.len() == 1 && again.suspended[0].0 == kept);
+        assert!(again.resumable.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_status_keep_activity_leaves_last_active() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let old = "2026-07-22T10:00:00+00:00";
+        let id = insert_session(&pool, &ws, &user, old, "{}", 0).await;
+        repo.update_status_keep_activity(&id, SessionStatus::Running)
+            .await
+            .unwrap();
+        let s = repo.get(&id).await.unwrap();
+        assert_eq!(s.status, SessionStatus::Running);
+        assert_eq!(fmt(s.last_active_at), fmt(ts(old).unwrap()));
     }
 }

@@ -72,7 +72,8 @@ use crate::{CommandSpec, PtyHandle, EMULATOR_SCROLLBACK_LINES};
 /// Incompatible-layout version of the wire protocol (see the module docs).
 pub const PROTO_MAJOR: u32 = 1;
 /// Additive revision of the wire protocol.
-pub const PROTO_MINOR: u32 = 0;
+pub const PROTO_MINOR: u32 = 1;
+// 1.1: `HolderInfo::last_output_unix_ms` (additive; older holders send none).
 
 /// Environment marker the launcher sets on the holder process. A holder entry
 /// point refuses to run without it; it never reaches the session's child.
@@ -235,6 +236,12 @@ pub struct HolderInfo {
     /// Opaque caller metadata given at spawn ([`crate::PtyHandle::spawn_held`]).
     #[serde(default)]
     pub meta: serde_json::Value,
+    /// Unix epoch milliseconds of the child's most recent output (its spawn
+    /// time when it has printed nothing). An adopting daemon back-dates its
+    /// last-output clock from this, so a restart does not reset the session's
+    /// idle clock. `0` = unknown (a protocol 1.0 holder).
+    #[serde(default)]
+    pub last_output_unix_ms: u64,
 }
 
 /// [`frame::INPUT_ACK`] payload.
@@ -779,6 +786,8 @@ impl Shared {
             rows,
             exited: self.exit_code(),
             meta: self.meta.clone(),
+            last_output_unix_ms: unix_ms()
+                .saturating_sub(self.handle.last_output_at().elapsed().as_millis() as u64),
         }
     }
 
