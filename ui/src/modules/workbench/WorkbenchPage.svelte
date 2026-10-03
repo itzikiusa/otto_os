@@ -175,10 +175,8 @@
   function saveNow(): void {
     const id = workbench.active;
     if (!id) return;
-    if (!workbench.isDirty(id)) {
-      toasts.info('Already saved', 'Every save is kept in History.');
-      return;
-    }
+    // Always checkpoint: unchanged content seals the open autosave burst so
+    // History keeps this exact state as its own version.
     void workbench.save(id, true);
   }
 

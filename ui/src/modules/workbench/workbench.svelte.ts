@@ -465,10 +465,9 @@ class WorkbenchStore {
     }
     const content = o.buffer;
     if (content === o.saved && !checkpoint) return;
-    if (content === o.saved && checkpoint && o.doc.rev > 0) {
-      // Nothing new to checkpoint: the latest content already has a revision.
-      return;
-    }
+    // A checkpoint of unchanged content still goes out: the daemon SEALS the
+    // open autosave burst (its revision becomes a checkpoint), so the next
+    // edit starts a new revision instead of folding into this one.
     this.inflight.add(id);
     o.saving = true;
     try {
