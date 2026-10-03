@@ -850,6 +850,8 @@ class ApiClientStore {
   // ── Changes made elsewhere (perf2 N4) ─────────────────────────────────────
   private changeQueue: { kinds: Set<string>; requests: Map<Id, boolean>; wid: Id } | null = null;
   private changeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Imports in flight in this window — their echoes are skipped. */
+  private bulkWrites = 0;
 
   /** `api_client_changed`: a request / collection / environment / automation
    *  changed (an agent's MCP tool, another user, or our own save echoing).
@@ -862,6 +864,8 @@ class ApiClientStore {
       if (ev.kind === 'automation') this.automationsLoadedAt = null;
       return;
     }
+    // A request/collection echo of our own import: its final reload covers it.
+    if (this.bulkWrites > 0 && (ev.kind === 'request' || ev.kind === 'collection')) return;
     const q = this.changeQueue?.wid === ev.workspace_id
       ? this.changeQueue
       : (this.changeQueue = { kinds: new Set(), requests: new Map(), wid: ev.workspace_id });
@@ -998,6 +1002,9 @@ class ApiClientStore {
     let failed = 0;
     let firstError = '';
     const note = (e: unknown): void => { failed++; firstError ||= errMsg(e); };
+    // Our own N creates echo back as N `api_client_changed` events: the one
+    // reload below covers them (see noteClientChanged).
+    this.bulkWrites++;
     try {
       for (const req of parsed.requests) {
         if (this.base() !== base) break; // workspace switched mid-import
@@ -1022,6 +1029,7 @@ class ApiClientStore {
       }
     } finally {
       await Promise.all([this.loadCollections(), this.loadRequests()]);
+      this.bulkWrites--;
     }
     if (failed > 0) {
       toasts.error(`${failed} item(s) of “${parsed.name}” weren’t imported`, firstError);

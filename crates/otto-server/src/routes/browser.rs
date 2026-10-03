@@ -277,16 +277,18 @@ impl EngineSlot {
     async fn stop_if_idle(&self, now: std::time::Instant, idle: std::time::Duration) -> bool {
         use std::sync::atomic::Ordering;
         let mut slot = self.svc.lock().await;
-        if slot.is_none() {
-            return true;
-        }
         let last = *self.last_used.lock().unwrap_or_else(|p| p.into_inner());
-        if engine_idle_expired(last, now, self.in_flight.load(Ordering::SeqCst), idle) {
-            tracing::info!("browser: stopping the idle lightpanda sidecar");
-            *slot = None;
-            return true;
+        let stop = slot.is_none()
+            || engine_idle_expired(last, now, self.in_flight.load(Ordering::SeqCst), idle);
+        if stop {
+            if slot.take().is_some() {
+                tracing::info!("browser: stopping the idle lightpanda sidecar");
+            }
+            // Disarm while still holding the slot: a start racing this stop
+            // takes the lock after us and re-arms a fresh check.
+            self.checking.store(false, Ordering::SeqCst);
         }
-        false
+        stop
     }
 
     /// Start the idle check for a freshly started sidecar (no-op when one is
@@ -307,7 +309,6 @@ impl EngineSlot {
                     break;
                 }
             }
-            slot.checking.store(false, Ordering::SeqCst);
         });
     }
 }
