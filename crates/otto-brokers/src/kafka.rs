@@ -934,16 +934,17 @@ impl KafkaClient {
         starts: Option<&HashMap<i32, i64>>,
         byte_budget: Option<usize>,
     ) -> Result<RawConsume> {
-        let md = self
-            .consumer
-            .fetch_metadata(Some(topic), META_TIMEOUT)
-            .map_err(kerr)?;
-        let mt = md
-            .topics()
-            .iter()
-            .find(|t| t.name() == topic)
-            .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
-        let all: Vec<i32> = mt.partitions().iter().map(|p| p.id()).collect();
+        // Partition ids from the per-cluster cache (60 s TTL, invalidated on
+        // create/delete): a live-tail tick every 3 s no longer pays a metadata
+        // round trip before its ListOffsets batch.
+        let all: Vec<i32> =
+            partition_targets_with(&self.consumer, &self.partition_cache, &[topic.to_string()])?
+                .into_iter()
+                .map(|(_, p)| p)
+                .collect();
+        if all.is_empty() {
+            return Err(Error::NotFound(format!("topic {topic}")));
+        }
         let parts: Vec<i32> = match (starts, req.partition) {
             (Some(st), _) => {
                 let mut v: Vec<i32> = all.iter().copied().filter(|p| st.contains_key(p)).collect();
@@ -2194,5 +2195,11 @@ mod tests {
             "a tail tick is one batched watermark pass, saw {list_offsets} ListOffsets"
         );
         assert!(took < Duration::from_secs(2), "tail tick took {took:?}");
+        // The partition list comes from the warm cache, not a metadata request.
+        assert_eq!(
+            mock.requests(API_METADATA),
+            0,
+            "a warm tail tick must not fetch topic metadata"
+        );
     }
 }
