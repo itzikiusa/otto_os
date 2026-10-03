@@ -163,7 +163,7 @@ impl DbViewerService {
         }
 
         // Resolve every target's connection; one engine for the whole run.
-        let mut conns: Vec<Connection> = Vec::with_capacity(spec.targets.len().min(MAX_TARGETS));
+        let mut conns: Vec<Connection> = Vec::new();
         let mut engine: Option<Engine> = None;
         let mut seen: Vec<(Id, Option<String>)> = Vec::new();
         for t in &spec.targets {
@@ -272,8 +272,7 @@ impl DbViewerService {
             engine == Engine::Clickhouse && rendered.iter().any(|s| cluster::has_injectable_ddl(s));
         // Bounded fan-out without a borrowing closure (keeps the handler
         // future `Send` for every lifetime).
-        let mut probes: Vec<Option<TargetCluster>> =
-            Vec::with_capacity(spec.targets.len().min(MAX_TARGETS));
+        let mut probes: Vec<Option<TargetCluster>> = Vec::new();
         for chunk in spec.targets.chunks(PROBE_PARALLELISM) {
             let mut futs = Vec::with_capacity(chunk.len());
             for t in chunk {
