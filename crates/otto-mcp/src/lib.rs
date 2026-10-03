@@ -20,4 +20,4 @@ pub mod service;
 pub mod types;
 
 pub use http::{api_router, outcome_to_resp, McpCtx};
-pub use service::{canonical_hash, InvokeCtx, InvokeOutcome, McpService};
+pub use service::{canonical_hash, CallerAccess, InvokeCtx, InvokeOutcome, McpService};

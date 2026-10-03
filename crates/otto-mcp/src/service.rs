@@ -55,12 +55,25 @@ pub enum InvokeOutcome {
 /// stdio child — on the next checkout or health sweep.
 const CLIENT_IDLE_TTL: Duration = Duration::from_secs(5 * 60);
 const CLIENT_POOL_CAP: usize = 32;
-/// The background sweep re-probes a STDIO server only if something used it
-/// this recently (r3-08-05: probing = spawning the server, e.g. an `npx`
+/// The background sweep re-probes a server only if something used it this
+/// recently. Stdio (r3-08-05): probing = spawning the server, e.g. an `npx`
 /// package, for every enabled server every 5 min whether or not anything uses
-/// MCP). HTTP servers are always probed (a request, no process). Unused stdio
-/// servers keep their last health until used or probed from the UI.
-const STDIO_SWEEP_RECENT: Duration = Duration::from_secs(6 * 3600);
+/// MCP. HTTP (perf2/10-mcp R5): a probe built a fresh client — DNS, TCP, TLS
+/// and an `initialize` — per server per sweep. Unused servers keep their last
+/// health until used or probed from the UI; a used one with a parked session
+/// is pinged over it (no spawn, no new connection).
+const SWEEP_RECENT: Duration = Duration::from_secs(6 * 3600);
+
+/// The caller-level inputs of an Enforced resource check, loaded lazily and
+/// at most once per request: the MCP feature capability, the access-group
+/// membership, and workspace membership per workspace. Holds no policy —
+/// policies are always read live per server.
+#[derive(Debug, Default)]
+pub struct CallerAccess {
+    capability: Option<otto_core::domain::Capability>,
+    groups: Option<Vec<otto_core::Id>>,
+    member_of: HashMap<String, bool>,
+}
 
 struct PooledClient {
     config_hash: String,
@@ -75,32 +88,25 @@ pub struct McpService {
     clients: Arc<Mutex<HashMap<String, PooledClient>>>,
     /// server id → last time a governed op checked out its client. Outlives
     /// the pool entry (reaped after 5 min idle); decides which stdio servers
-    /// the sweep still probes.
+    /// the sweep still probes (stdio and HTTP alike).
     last_use: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 /// What the background sweep does for one enabled server.
 #[derive(Debug, PartialEq, Eq)]
 enum SweepAction {
-    /// A request (HTTP) or a server in recent use with no live session.
+    /// A server in recent use with no live session.
     Probe,
-    /// A stdio server with a parked, initialized session: a `tools/list` on it
-    /// (no spawn) — the live connection is reused.
+    /// A recently used server with a parked, initialized session: a
+    /// `tools/list` on it (no spawn, no new connection).
     PingLive,
-    /// A stdio server nothing used recently: no process is started.
+    /// A server nothing used recently: no process, no request.
     Skip,
 }
 
-fn sweep_action(
-    transport: &str,
-    has_live_session: bool,
-    used_ago: Option<Duration>,
-) -> SweepAction {
-    if transport == "http" {
-        return SweepAction::Probe;
-    }
+fn sweep_action(has_live_session: bool, used_ago: Option<Duration>) -> SweepAction {
     match used_ago {
-        Some(ago) if ago < STDIO_SWEEP_RECENT => {
+        Some(ago) if ago < SWEEP_RECENT => {
             if has_live_session {
                 SweepAction::PingLive
             } else {
@@ -176,29 +182,67 @@ impl McpService {
         user: &otto_core::domain::User,
         checks: &[(&str, Option<&str>)],
     ) -> Result<Vec<bool>> {
+        let mut access = CallerAccess::default();
+        self.resource_allowed_with(&mut access, policy, server, user, checks)
+            .await
+    }
+
+    /// [`Self::resource_allowed_under`] reusing the caller-level inputs in
+    /// `access` (MCP capability, group membership, the role per workspace)
+    /// across MANY servers / (server, tool) pairs of one request — a 200-row
+    /// Enforced audit page or the stats table no longer re-reads them per
+    /// distinct pair (perf2/10-mcp R1). `access` must belong to `user` and
+    /// live no longer than one request.
+    pub async fn resource_allowed_with(
+        &self,
+        access: &mut CallerAccess,
+        policy: &otto_core::access::AccessPolicy,
+        server: &otto_state::McpServerDetail,
+        user: &otto_core::domain::User,
+        checks: &[(&str, Option<&str>)],
+    ) -> Result<Vec<bool>> {
         use otto_core::access::{AccessMode, ResourceKind, ResourceRef};
         if policy.mode == AccessMode::Legacy {
             return Ok(vec![!user.disabled; checks.len()]);
         }
-        let feature = otto_state::GrantsRepo::new(self.pool.clone())
-            .capability_of(user, otto_core::domain::Feature::Mcp)
-            .await?;
+        let feature = match access.capability {
+            Some(c) => c,
+            None => {
+                let c = otto_state::GrantsRepo::new(self.pool.clone())
+                    .capability_of(user, otto_core::domain::Feature::Mcp)
+                    .await?;
+                access.capability = Some(c);
+                c
+            }
+        };
         if feature < otto_core::domain::Capability::View {
             return Ok(vec![false; checks.len()]);
         }
-        if otto_state::WorkspacesRepo::new(self.pool.clone())
-            .role_of(user, &server.workspace_id)
-            .await?
-            .is_none()
-        {
+        let member = match access.member_of.get(&server.workspace_id) {
+            Some(m) => *m,
+            None => {
+                let m = otto_state::WorkspacesRepo::new(self.pool.clone())
+                    .role_of(user, &server.workspace_id)
+                    .await?
+                    .is_some();
+                access.member_of.insert(server.workspace_id.clone(), m);
+                m
+            }
+        };
+        if !member {
             return Ok(vec![false; checks.len()]);
         }
-        // Group membership read once for the whole batch; each check then runs
-        // the pure deny-wins evaluator over the live policy loaded above —
-        // the same inputs `ResourceAccess::evaluate` reads per call.
-        let groups = otto_state::ResourceAccessRepo::new(self.pool.clone())
-            .groups_for_user(&user.id)
-            .await?;
+        if access.groups.is_none() {
+            access.groups = Some(
+                otto_state::ResourceAccessRepo::new(self.pool.clone())
+                    .groups_for_user(&user.id)
+                    .await?,
+            );
+        }
+        let groups = access.groups.as_deref().unwrap_or_default();
+        // Each check runs the pure deny-wins evaluator over the live policy
+        // loaded above — the same inputs `ResourceAccess::evaluate` reads per
+        // call.
         let mut memo: std::collections::HashMap<(String, Option<String>), bool> =
             std::collections::HashMap::new();
         let mut out = Vec::with_capacity(checks.len());
@@ -224,7 +268,7 @@ impl McpService {
                             &user.id,
                             user.is_root,
                             user.disabled,
-                            &groups,
+                            groups,
                             policy,
                             &resource,
                             op,
@@ -264,6 +308,20 @@ impl McpService {
         server: &otto_state::McpServerDetail,
         user: &otto_core::domain::User,
     ) -> Result<Vec<otto_state::McpTool>> {
+        let mut access = CallerAccess::default();
+        self.visible_tools_with(&mut access, policy, server, user)
+            .await
+    }
+
+    /// [`Self::visible_tools_under`] sharing the caller-level inputs across
+    /// the servers of one request (see [`Self::resource_allowed_with`]).
+    pub async fn visible_tools_with(
+        &self,
+        access: &mut CallerAccess,
+        policy: &otto_core::access::AccessPolicy,
+        server: &otto_state::McpServerDetail,
+        user: &otto_core::domain::User,
+    ) -> Result<Vec<otto_state::McpTool>> {
         let tools = self.tools().list_for_server(&server.id).await?;
         let mut checks: Vec<(&str, Option<&str>)> = Vec::with_capacity(tools.len() * 3);
         for tool in &tools {
@@ -272,7 +330,7 @@ impl McpService {
             checks.push(("configure", Some(&tool.name)));
         }
         let verdicts = self
-            .resource_allowed_under(policy, server, user, &checks)
+            .resource_allowed_with(access, policy, server, user, &checks)
             .await?;
         Ok(tools
             .into_iter()
@@ -489,9 +547,9 @@ impl McpService {
 
     /// Best-effort health sweep across all managed servers (background tick).
     ///
-    /// Lazy for stdio servers (r3-08-05): only servers used in the last
-    /// [`STDIO_SWEEP_RECENT`] are checked, over their parked session when one is
-    /// live. HTTP servers are probed every sweep. An explicit
+    /// Lazy (r3-08-05 for stdio, perf2/10-mcp R5 for HTTP): only servers
+    /// used in the last [`SWEEP_RECENT`] are checked, over their parked
+    /// session when one is live. An explicit
     /// [`health_check`](Self::health_check) (the UI's Health button) always
     /// probes. Governed calls also record health as they succeed or fail.
     pub async fn health_sweep(&self) {
@@ -511,7 +569,6 @@ impl McpService {
                 .and_then(|m| m.get(&s.id).map(|t| t.elapsed()));
             let live = self.live_client(&s.id);
             let action = sweep_action(
-                &s.transport,
                 live.as_ref().is_some_and(|c| c.has_live_session()),
                 used_ago,
             );
@@ -1188,19 +1245,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sweep_probes_http_and_only_recently_used_stdio() {
+    fn sweep_probes_only_recently_used_servers() {
+        // Transport-independent since R5: HTTP servers are lazy like stdio.
         let min = Duration::from_secs(60);
-        assert_eq!(sweep_action("http", false, None), SweepAction::Probe);
-        assert_eq!(sweep_action("stdio", false, None), SweepAction::Skip);
+        assert_eq!(sweep_action(false, None), SweepAction::Skip);
+        assert_eq!(sweep_action(true, None), SweepAction::Skip);
         assert_eq!(
-            sweep_action("stdio", false, Some(STDIO_SWEEP_RECENT + min)),
+            sweep_action(false, Some(SWEEP_RECENT + min)),
             SweepAction::Skip
         );
-        assert_eq!(sweep_action("stdio", false, Some(min)), SweepAction::Probe);
-        assert_eq!(
-            sweep_action("stdio", true, Some(min)),
-            SweepAction::PingLive
-        );
+        assert_eq!(sweep_action(false, Some(min)), SweepAction::Probe);
+        assert_eq!(sweep_action(true, Some(min)), SweepAction::PingLive);
     }
 
     #[test]
@@ -1460,4 +1515,136 @@ mod batch_tests {
             .collect();
         assert!(!bob.is_empty() && bob.len() < 6, "{bob:?}");
     }
+
+    /// A stdio MCP server (shell) answering `initialize`, `tools/list` and
+    /// `tools/call` — enough for the full governed pipeline to EXECUTE.
+    async fn stdio_server(svc: &McpService) -> McpServerDetail {
+        let script = r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | grep -o '"id":[0-9]*' | head -n 1 | cut -d: -f2)
+  case "$line" in
+    *'"initialize"'*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"mock","version":"1"}}}\n' ;;
+    *'"tools/call"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}\n' "$id" ;;
+    *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id" ;;
+  esac
+done
+"#;
+        let mut env = BTreeMap::new();
+        env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+        );
+        let server = svc
+            .registry()
+            .create(otto_state::NewServerRow {
+                workspace_id: "w".into(),
+                name: "live".into(),
+                transport: "stdio".into(),
+                command: "sh".into(),
+                args: vec!["-c".into(), script.into()],
+                env,
+                url: None,
+                description: None,
+                headers: Default::default(),
+                secret_ref: None,
+                secret_env_keys: vec![],
+                secret_header_keys: vec![],
+                injection_risk: "low".into(),
+                default_tool_access: "allow".into(),
+                enabled: true,
+                created_by: "root".into(),
+            })
+            .await
+            .unwrap();
+        svc.tools()
+            .upsert_discovered(
+                &server.id,
+                &[otto_state::DiscoveredTool {
+                    name: "echo".into(),
+                    title: None,
+                    description: None,
+                    input_schema: json!({"type": "object"}),
+                    annotations: json!({}),
+                    risk_label: "read".into(),
+                    injection_risk: "low".into(),
+                    mutating: false,
+                    supports_dry_run: false,
+                }],
+            )
+            .await
+            .unwrap();
+        server
+    }
+
+    /// Statements for one EXECUTED outbound call (perf2/10-mcp R6), measured
+    /// on a warm client (the parked session is reused — no spawn).
+    async fn executed_call_cost(svc: &McpService, server: &McpServerDetail) -> u64 {
+        let ctx = InvokeCtx {
+            workspace_id: Some("w".into()),
+            dry_run: false,
+            caller_user_id: Some("bob".into()),
+            caller_kind: "ui".into(),
+            direction: "outbound".into(),
+        };
+        let args = json!({"q": 1});
+        let run = || svc.invoke(&server.id, "echo", &args, &ctx);
+        let warm = run().await.unwrap();
+        assert!(
+            matches!(
+                warm,
+                InvokeOutcome::Executed {
+                    is_error: false,
+                    ..
+                }
+            ),
+            "{warm:?}"
+        );
+        let before = svc.pool.op_count();
+        let out = run().await.unwrap();
+        let used = svc.pool.op_count() - before;
+        assert!(matches!(out, InvokeOutcome::Executed { .. }), "{out:?}");
+        used
+    }
+
+    #[tokio::test]
+    async fn an_executed_outbound_call_stays_within_its_statement_budget() {
+        let (svc, _, _) = setup(0).await;
+        let server = stdio_server(&svc).await;
+        set_policy(&svc, &server, AccessMode::Legacy, vec![]).await;
+        let legacy = executed_call_cost(&svc, &server).await;
+        // Enforced: bob may invoke `echo`. Each of the two authorization
+        // points (entry + the pre-execution re-check, a security property)
+        // reads the user, capability, membership and groups LIVE.
+        set_policy(
+            &svc,
+            &server,
+            AccessMode::Enforced,
+            vec![AccessRule {
+                id: otto_core::new_id(),
+                subject_kind: SubjectKind::User,
+                subject_id: "bob".into(),
+                effect: RuleEffect::Allow,
+                operations: vec!["discover".into(), "invoke".into()],
+                children: None,
+                grantable_operations: vec![],
+                credential_connection_id: None,
+            }],
+        )
+        .await;
+        let enforced = executed_call_cost(&svc, &server).await;
+        eprintln!("executed outbound call: legacy={legacy} enforced={enforced} statements");
+        assert!(legacy <= LEGACY_INVOKE_BUDGET, "legacy invoke: {legacy}");
+        assert!(
+            enforced <= ENFORCED_INVOKE_BUDGET,
+            "enforced invoke: {enforced}"
+        );
+        svc.evict_client(&server.id);
+    }
+    /// Measured 8: server row, tool row, live policy, allowlist, policy
+    /// rules, the fail-closed audit insert, the pre-execution live re-check
+    /// and the audit finalize (settings + secrets cached, session reused).
+    const LEGACY_INVOKE_BUDGET: u64 = 9;
+    /// Measured 16: Legacy + user / capability / membership / groups at BOTH
+    /// authorization points (deliberately live at the re-check).
+    const ENFORCED_INVOKE_BUDGET: u64 = 18;
 }
