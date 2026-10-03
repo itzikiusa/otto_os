@@ -1028,9 +1028,290 @@ async fn the_audit_list_does_not_query_per_row() {
     let many = d.pool.op_count() - before;
     eprintln!("audit list: 1 row = {one} statements, 200 rows = {many}");
     // A fixed cost per distinct server (row + live policy), nothing per row:
-    // measured 5 (1 row) vs 12 (200 rows); per-row checks cost ~600.
+    // measured 5 (1 row) vs 7 (200 rows); per-row checks cost ~600.
     assert!(
-        many <= 15,
+        many <= 9,
         "200 rows cost {many} statements vs {one} for 1 — visibility is per row again"
     );
+}
+
+/// The Enforced variant of [`the_audit_list_does_not_query_per_row`]
+/// (perf2/10-mcp R1): under an Enforced policy every distinct (server, tool)
+/// pair used to re-read the caller's MCP capability, workspace role and
+/// access groups — 3 statements × 80 pairs here. A NON-root caller (root
+/// short-circuits those reads) now pays them once per request, so a 200-row
+/// page over 2 servers × 40 tools and the stats table both stay fixed-cost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_enforced_audit_page_and_stats_read_the_caller_once() {
+    use otto_core::access::{AccessActor, AccessMode, AccessPolicy, AccessRule};
+    use otto_core::access::{ResourceKind, RuleEffect, SubjectKind};
+    let d = boot().await;
+    // bob: a plain ws1 editor with MCP View — the reads root skips.
+    seed_user(&d.pool, "bob", false).await;
+    sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws1', 'bob', 'editor')")
+        .execute(&d.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO user_feature_grants (user_id, feature, capability) VALUES ('bob', 'mcp', 'view')")
+        .execute(&d.pool)
+        .await
+        .unwrap();
+    let (bob, _) = AuthRepo::new(d.pool.clone())
+        .issue_api_token(&"bob".to_string(), Some("ui"))
+        .await
+        .unwrap();
+    let reg = otto_state::McpRegistryRepo::new(d.pool.clone());
+    let access = otto_state::ResourceAccessRepo::new(d.pool.clone());
+    let mut servers = Vec::new();
+    for name in ["alpha", "beta"] {
+        let s = reg
+            .create(otto_state::NewServerRow {
+                workspace_id: "ws1".into(),
+                name: name.into(),
+                transport: "stdio".into(),
+                command: "true".into(),
+                args: vec![],
+                env: Default::default(),
+                url: None,
+                description: None,
+                headers: Default::default(),
+                secret_ref: None,
+                secret_env_keys: vec![],
+                secret_header_keys: vec![],
+                injection_risk: "low".into(),
+                default_tool_access: "allow".into(),
+                enabled: true,
+                created_by: "alice".into(),
+            })
+            .await
+            .unwrap();
+        // Enforced: bob may discover every tool except tool_39.
+        let current = access
+            .get_policy(ResourceKind::McpServer, &s.id)
+            .await
+            .unwrap();
+        let rule = |effect, children: Option<Vec<String>>| AccessRule {
+            id: otto_core::new_id(),
+            subject_kind: SubjectKind::User,
+            subject_id: "bob".into(),
+            effect,
+            operations: vec!["discover".into()],
+            children,
+            grantable_operations: vec![],
+            credential_connection_id: None,
+        };
+        access
+            .put_policy(
+                &AccessPolicy {
+                    kind: ResourceKind::McpServer,
+                    resource_id: s.id.clone(),
+                    mode: AccessMode::Enforced,
+                    revision: current.revision,
+                    rules: vec![
+                        rule(RuleEffect::Allow, None),
+                        rule(RuleEffect::Deny, Some(vec!["tool_39".into()])),
+                    ],
+                },
+                current.revision,
+                &AccessActor {
+                    real_user_id: "alice".into(),
+                    effective_user_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        servers.push(s);
+    }
+    let log = otto_state::McpCallLogRepo::new(d.pool.clone());
+    for i in 0..200 {
+        let s = &servers[i % 2];
+        log.insert(otto_state::NewCallLog {
+            workspace_id: Some("ws1".into()),
+            server_id: Some(s.id.clone()),
+            server_name: Some(s.name.clone()),
+            // 2 servers × 40 tools = 80 distinct (server, tool) pairs.
+            tool: format!("tool_{}", (i / 2) % 40),
+            direction: "outbound".into(),
+            caller_user_id: Some("bob".into()),
+            decision: "allowed".into(),
+            args_redacted_json: "{}".into(),
+            ok: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    let _ = d.send("GET", &bob, "/mcp/audit?limit=1", None).await; // warm auth
+    let before = d.pool.op_count();
+    let (st, rows) = d.send("GET", &bob, "/mcp/audit?limit=200", None).await;
+    let page = d.pool.op_count() - before;
+    assert_eq!(st, 200, "{rows}");
+    let rows = rows.as_array().unwrap();
+    // The policy really filters (tool_39 is denied on both servers: 2 × 2
+    // rows of it in the 200), so the budget is not measured on a no-op.
+    assert_eq!(rows.len(), 196, "tool_39 rows hidden");
+    assert!(rows.iter().all(|r| r["tool"] != "tool_39"));
+    let before = d.pool.op_count();
+    let (st, stats) = d.send("GET", &bob, "/mcp/stats", None).await;
+    let stats_cost = d.pool.op_count() - before;
+    assert_eq!(st, 200, "{stats}");
+    assert_eq!(stats.as_array().unwrap().len(), 78, "{stats}");
+    eprintln!("enforced: audit 200 rows = {page} statements, stats 80 pairs = {stats_cost}");
+    // Fixed cost: auth + ws list + the page + 2 × (server row + live policy)
+    // + the caller's capability / role / groups ONCE. It was ~3 per pair (≈ 240).
+    assert!(
+        page <= ENFORCED_LIST_BUDGET,
+        "audit page: {page} statements"
+    );
+    assert!(
+        stats_cost <= ENFORCED_LIST_BUDGET,
+        "stats: {stats_cost} statements"
+    );
+}
+/// Measured 10 for both (was ≈ 3 per distinct pair before R1: ~250).
+const ENFORCED_LIST_BUDGET: u64 = 12;
+
+/// R6: statement budgets on the MUTATING paths, the whole request measured
+/// (token auth, guard, pipeline, auto-approve resolution / approval
+/// creation, audit, and — when executed — the self-call to the git route,
+/// which fails early here: the fixture repo has no provider).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutating_calls_stay_within_their_statement_budgets() {
+    let d = boot().await;
+    // Warm the token/settings caches with a read.
+    let _ = d.agent_invoke("list_repos", json!({})).await;
+    // 1. No rule: the call files a pending approval (and returns at once).
+    let call = |args: Value| {
+        d.send(
+            "POST",
+            &d.agent,
+            "/mcp/otto-tools/invoke",
+            Some(json!({"tool": "otto.create_pr", "arguments": args, "wait_seconds": 0})),
+        )
+    };
+    let before = d.pool.op_count();
+    let (st, env) = call(pr_args()).await;
+    let pending = d.pool.op_count() - before;
+    assert_eq!(st, 200, "{env}");
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    // 2. An auto-approve rule covers it: resolved, executed, audited.
+    let (st, rule) = d
+        .rule(
+            json!({"scope": "global", "target_kind": "tool", "target": "otto.create_pr",
+                     "name": "Agents open PRs"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{rule}");
+    let mut args = pr_args();
+    args["title"] = json!("Another fix");
+    let _ = call(args.clone()).await; // warm the rules read path
+    args["title"] = json!("A third fix");
+    let before = d.pool.op_count();
+    let (st, env) = call(args).await;
+    let auto = d.pool.op_count() - before;
+    assert_eq!(st, 200, "{env}");
+    assert_eq!(env["executed"], true, "{env}");
+    assert_eq!(env["auto_approved_by"]["name"], "Agents open PRs", "{env}");
+    eprintln!("mutating create_pr: pending={pending} auto_approved+executed={auto} statements");
+    assert!(pending <= PENDING_CALL_BUDGET, "pending call: {pending}");
+    assert!(
+        auto <= AUTO_APPROVED_CALL_BUDGET,
+        "auto-approved call: {auto}"
+    );
+}
+/// Measured 17: auth, session row, repo resolution, the auto-approve rules
+/// read, the usable / still-pending approval lookups, the approval insert +
+/// its re-read, the decision read and the audit insert — fixed per call.
+const PENDING_CALL_BUDGET: u64 = 19;
+/// Measured 14, INCLUDING the self-call's own route.
+const AUTO_APPROVED_CALL_BUDGET: u64 = 16;
+
+/// R7: the badge count equals the list's length (same visibility) and costs
+/// a fixed handful of statements.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pending_count_matches_the_list() {
+    let d = boot().await;
+    for title in ["One", "Two", "Three"] {
+        let mut args = pr_args();
+        args["title"] = json!(title);
+        let env = d.agent_invoke("create_pr", args).await;
+        assert_eq!(env["decision"], "pending_approval", "{env}");
+    }
+    let listed = d.pending_approvals().await.len();
+    let (st, body) = d
+        .send("GET", &d.human, "/mcp/approvals/count?status=pending", None)
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["count"], json!(listed), "{body}");
+    assert_eq!(listed, 3);
+    let before = d.pool.op_count();
+    let _ = d
+        .send("GET", &d.human, "/mcp/approvals/count?status=pending", None)
+        .await;
+    let used = d.pool.op_count() - before;
+    assert!(used <= 5, "count: {used} statements");
+}
+
+/// R7: the stdio bridge's audit append goes through the daemon — accepted
+/// only from a session credential, stamped with THAT session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_bridge_audit_append_is_session_bound() {
+    let d = boot().await;
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.agent,
+            "/mcp/tool-calls",
+            Some(json!({"tool": "otto_list_repos", "arguments": {"token": "s3cret-value"}, "ok": true, "rows": 2})),
+        )
+        .await;
+    assert_eq!(st, 204, "{body}");
+    let row: (Option<String>, Option<String>, String, String, i64) = sqlx::query_as(
+        "SELECT session_id, workspace_id, tool, args_json, rows FROM mcp_tool_calls",
+    )
+    .fetch_one(&d.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0.as_deref(), Some(d.sid.as_str()));
+    assert_eq!(row.1.as_deref(), Some("ws1"), "the session's workspace");
+    assert_eq!(row.2, "otto_list_repos");
+    assert!(!row.3.contains("s3cret-value"), "redacted: {}", row.3);
+    assert_eq!(row.4, 2);
+    // A person's own credential has no session to stamp: refused.
+    let (st, _) = d
+        .send(
+            "POST",
+            &d.human,
+            "/mcp/tool-calls",
+            Some(json!({"tool": "x", "ok": true})),
+        )
+        .await;
+    assert_eq!(st, 403);
+}
+
+/// R4: a UI tool's governed reply carries the calling session's grant, so
+/// the bridge needs no follow-up enabled read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_ui_tool_reply_carries_the_session_grant() {
+    let d = boot().await;
+    let (st, env) = d
+        .send(
+            "POST",
+            &d.agent,
+            "/mcp/otto-tools/invoke",
+            Some(json!({"tool": "otto.ui_state", "arguments": {}, "dry_run": true})),
+        )
+        .await;
+    assert_eq!(st, 200, "{env}");
+    assert_eq!(env["ui_granted"], json!(false), "{env}");
+    // A non-UI tool's envelope is unchanged.
+    let (_, env) = d
+        .send(
+            "POST",
+            &d.agent,
+            "/mcp/otto-tools/invoke",
+            Some(json!({"tool": "otto.list_repos", "arguments": {}, "dry_run": true})),
+        )
+        .await;
+    assert!(env.get("ui_granted").is_none(), "{env}");
 }

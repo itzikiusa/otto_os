@@ -1384,6 +1384,50 @@ impl McpApprovalRepo {
         Ok(rows.iter().map(row_to_approval).collect())
     }
 
+    /// Approval counts grouped by `(server_id, tool)` — what
+    /// `GET /mcp/approvals/count` needs to apply the per-(server, tool)
+    /// visibility check without loading (up to 200) whole rows just to count
+    /// them (perf2/10-mcp R7). Same workspace scoping as [`Self::list`]; no
+    /// row cap (one group per distinct pair).
+    pub async fn count_by_server_tool(
+        &self,
+        workspace_ids: Option<&[String]>,
+        status: Option<&str>,
+    ) -> Result<Vec<(Option<String>, Option<String>, i64)>> {
+        let mut sql =
+            String::from("SELECT server_id, tool, COUNT(*) AS n FROM mcp_approvals WHERE 1=1");
+        if let Some(ids) = workspace_ids {
+            if ids.is_empty() {
+                return Ok(vec![]);
+            }
+            let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            sql.push_str(&format!(
+                " AND (workspace_id IN ({ph}) OR workspace_id IS NULL)"
+            ));
+        }
+        if status.is_some() {
+            sql.push_str(" AND status = ?");
+        }
+        sql.push_str(" GROUP BY server_id, tool");
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
+        if let Some(ids) = workspace_ids {
+            for id in ids {
+                query = query.bind(id);
+            }
+        }
+        if let Some(s) = status {
+            query = query.bind(s);
+        }
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("approval counts"))?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("server_id"), r.get("tool"), r.get("n")))
+            .collect())
+    }
+
     /// Decide an approval. Enforces: still pending, and approver != requester
     /// (separation of duties) unless the request was raised by an agent acting
     /// on that user's behalf — see [`McpApproval::requester_may_decide`].

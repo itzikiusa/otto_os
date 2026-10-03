@@ -417,6 +417,17 @@ export interface McpInvokeResp {
   is_error?: boolean | null;
   /** The dry-run preview when `dry_run`. */
   preview?: unknown;
+  /** `POST /mcp/otto-tools/invoke` of an `otto.ui_*` tool from a session
+   *  credential only: that session's UI-control grant after the call. */
+  ui_granted?: boolean;
+}
+
+/** `POST /mcp/tool-calls` — the stdio bridge's own audit append (204). */
+export interface McpToolCallAuditReq {
+  tool: string;
+  arguments?: unknown;
+  ok: boolean;
+  rows?: number | null;
 }
 
 export interface McpAllowlistEntry {
@@ -570,6 +581,12 @@ export interface McpCallLogRow {
   /** The agent session that made the call (Otto-minted session credentials only). */
   caller_session_id?: string | null;
   created_at: string;
+}
+
+/** `GET /mcp/approvals/count?status=` — the badge number, with the same
+ *  visibility as `GET /mcp/approvals` but uncapped and without the rows. */
+export interface McpApprovalCount {
+  count: number;
 }
 
 /** Filters for `GET /mcp/audit`. */

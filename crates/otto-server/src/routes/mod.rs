@@ -349,6 +349,12 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/mcp/otto-server/enabled",
             get(crate::mcp_outward::otto_server_enabled),
         )
+        // perf2/10-mcp R7: the stdio bridge's tool-call audit rows go through
+        // the daemon (no per-session writer connection to the live DB).
+        .route(
+            "/mcp/tool-calls",
+            axum::routing::post(crate::mcp_outward::record_tool_call),
+        )
         // MCP auto-approve rules: the explicit opt-in under which a mutating
         // otto.* tool skips the per-call approval (View reads, Admin writes).
         .route(

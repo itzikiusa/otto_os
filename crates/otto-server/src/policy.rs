@@ -80,6 +80,13 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/room-join" {
         return Exempt;
     }
+    // perf2/10-mcp R7: an agent session's stdio bridge appends its OWN tool-call
+    // audit rows here (it used to hold a writer connection to the live DB).
+    // Not feature-gated — any agent session's tool calls are audited — but the
+    // handler accepts only a session credential and stamps that session.
+    if p == "/mcp/tool-calls" {
+        return Exempt;
+    }
     if p == "/room-recap-settings" {
         return Require(Settings, Admin);
     }
@@ -2156,6 +2163,12 @@ mod tests {
         );
         assert_eq!(
             pol(Method::GET, "/api/v1/mcp/otto-server/enabled"),
+            Require(Mcp, View)
+        );
+        // The bridge's own audit append: session-credential-only in the handler.
+        assert_eq!(pol(Method::POST, "/api/v1/mcp/tool-calls"), Exempt);
+        assert_eq!(
+            pol(Method::GET, "/api/v1/mcp/approvals/count"),
             Require(Mcp, View)
         );
         assert_eq!(
