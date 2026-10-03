@@ -16,7 +16,7 @@
 
   const doc = $derived(
     svg
-      ? `<!doctype html><html><head>${CSP}<style>html,body{margin:0;height:100%;background:#fff}body{display:flex;align-items:center;justify-content:center}svg{max-width:100%;max-height:100%}</style></head><body>${content}</body></html>`
+      ? `<!doctype html><html><head>${CSP}<meta name="color-scheme" content="light"><style>html,body{margin:0;height:100%;background:Canvas}body{display:flex;align-items:center;justify-content:center}svg{max-width:100%;max-height:100%}</style></head><body>${content}</body></html>`
       : `${CSP}${content}`,
   );
 </script>
