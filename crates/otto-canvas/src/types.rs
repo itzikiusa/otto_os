@@ -2,14 +2,18 @@
 //! `CanvasSceneSummary`, `NewScene`, `SceneUpdate`) live in `otto_state::canvas`.
 
 use serde::Deserialize;
+use serde_json::value::RawValue;
 
 /// Create a scene. `doc` is the full Scene JSON (opaque to Rust); when omitted
-/// an empty scene document is stored.
+/// an empty scene document is stored. It is kept as the raw JSON text
+/// (`RawValue`): validated once while scanning, never built into a
+/// `serde_json::Value` tree nor re-serialised (F5 — a 25 MB board used to be
+/// parsed + re-stringified on every 700 ms autosave).
 #[derive(Debug, Deserialize)]
 pub struct CreateSceneReq {
     pub title: String,
     #[serde(default)]
-    pub doc: Option<serde_json::Value>,
+    pub doc: Option<Box<RawValue>>,
     #[serde(default)]
     pub story_id: Option<String>,
     /// Which agent drives "Ask AI" for this scene (defaults to `"claude"`).
@@ -26,7 +30,7 @@ pub struct UpdateSceneReq {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
-    pub doc: Option<serde_json::Value>,
+    pub doc: Option<Box<RawValue>>,
     #[serde(default)]
     pub thumbnail: Option<String>,
     #[serde(default)]
@@ -50,4 +54,9 @@ pub fn empty_doc(title: &str) -> serde_json::Value {
         "title": title,
         "source": "",
     })
+}
+
+/// Raw JSON text of a request `doc` (no re-serialisation; one move).
+pub fn raw_doc(doc: Box<RawValue>) -> String {
+    Box::<str>::from(doc).into_string()
 }

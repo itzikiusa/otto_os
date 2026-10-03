@@ -217,6 +217,17 @@ restore is itself undoable.
 `note` is the agent's one-line description (or an error explanation when nothing
 was drawn).
 
+**Storage (migration 0170).** Each version records its `format` and byte `size`
+as columns at snapshot time, so opening the history never parses up to 30 stored
+documents. An Excalidraw board's pasted images (`files[*].dataURL`, base64) are
+moved into a content-addressed `canvas_files` table (one row per sha256) when a
+version is taken — 30 versions of a board with one 3 MB screenshot store the
+screenshot once, not 30 times. Restore puts the image back inline; pruning past
+30 versions or deleting the scene garbage-collects files nothing references.
+Saves store the `doc` JSON text exactly as sent (no server-side re-parse into a
+tree and re-serialise; bodies over 1 MB are validated on the blocking pool), and
+the editor drops a queued autosave whose document a newer one superseded.
+
 ### The prompts (mode hint)
 
 `build_assist_prompt` emits an `OTTO_TASK: canvas_assist` sentinel (which routes
