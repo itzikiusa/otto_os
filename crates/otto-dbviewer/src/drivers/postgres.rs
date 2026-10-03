@@ -648,6 +648,14 @@ impl Driver for PostgresDriver {
         self.completions.invalidate(&cfg.cache_key());
     }
 
+    fn cached_completion_snapshot(
+        &self,
+        cfg: &ResolvedConfig,
+        scope: &str,
+    ) -> Option<std::sync::Arc<crate::complete::SchemaSnapshot>> {
+        self.completions.get_snapshot(&cfg.cache_key(), scope)
+    }
+
     fn assemble_completion(
         &self,
         snap: &crate::complete::SchemaSnapshot,

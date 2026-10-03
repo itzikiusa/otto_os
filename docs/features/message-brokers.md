@@ -622,6 +622,12 @@ MSK/private clusters over an SSH bastion; multi-tab + sectioned sidebar.
 - For TLS against a self-signed broker, tick **Skip TLS verify**.
 - Remember **Test never returns 5xx** — read the `message` in the toast; it is
   the underlying librdkafka error.
+- Admin/topic errors read as sentences, not Rust debug output: an unreachable
+  cluster is `kafka: can't reach the brokers — check the bootstrap servers, and
+  that the SSH tunnel for this profile is open`; ACL denials, SASL sign-in
+  failures, timeouts and rejected topic changes (policy, partitions,
+  replication factor, config) have their own short line. Other codes show
+  librdkafka's own description.
 
 **Connects, but topics/metadata hang or partial (private cluster).**
 This is the classic **advertised-listener** problem. Confirm the cluster has an

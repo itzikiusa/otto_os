@@ -55,6 +55,7 @@ import {
   type VarSpec,
 } from '../../modules/database/sql-util';
 import { bsonScalar } from '../../modules/database/bson';
+import { normalizeDbError } from '../../modules/database/error-normalize';
 import { copyTextOrThrow } from '../clipboard';
 import { mapLimit, pollWhileVisible, type Poller } from '../poll';
 import { forgetEditorState, forgetEditorStates, hydrateEditorHistory } from '../editor-history';
@@ -3064,6 +3065,9 @@ class DatabaseStore {
     // the query-status endpoint re-attach to a run whose HTTP wait was lost.
     const queryId = newQueryId();
     const accessEpoch=this.accessEpoch;
+    // The engine this run belongs to — a failure may land after the person has
+    // switched connection, and its background toast must read it as THIS engine.
+    const runEngine = this.capabilities?.engine ?? null;
     this.runControllers.set(t.id, { controller, queryId, connId: id });
     // Scope to the active database (so unqualified tables resolve) unless a
     // node was passed — `null` included, which means "no scope".
@@ -3181,7 +3185,11 @@ class DatabaseStore {
         t.err_statement = sql;
         // The tab's inline ErrorPanel already says this when it's on screen —
         // only toast when the failing tab is NOT the one the person is looking at.
-        if (!this.isVisibleTab(id, t)) toasts.error('Query failed', errMsg(e));
+        // Headline only (the normalised title) — the full error, cause and
+        // hint wait in the tab's ErrorPanel.
+        if (!this.isVisibleTab(id, t)) {
+          toasts.error('Query failed', normalizeDbError(runEngine, errMsg(e), sql).title);
+        }
         return null;
       }
       // The HTTP wait was lost (page teardown / network blip) but the server

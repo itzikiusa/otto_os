@@ -1920,12 +1920,14 @@ impl DbViewerService {
         // Multi-statement batches carry later result sets in `more_results`, so
         // mask those too (never leak an unmasked cell just because it was the 2nd
         // statement).
-        let result = result.map(|mut res| {
-            if req.mask == Some(true) {
-                mask_result(&mut res);
-            }
-            res
-        });
+        let result = result
+            .map(|mut res| {
+                if req.mask == Some(true) {
+                    mask_result(&mut res);
+                }
+                res
+            })
+            .map_err(|e| self.with_name_suggestions(&r, conn_id, user_id, req, e));
 
         match &result {
             _ if !record => {}
@@ -1959,6 +1961,59 @@ impl DbViewerService {
             }
         }
         result
+    }
+
+    /// On an unknown column/table error, append `SUGGEST: a, b` — the nearest
+    /// names from the completion snapshot ALREADY cached for this connection
+    /// (the driver's own, or the enforced path's access-scoped one). No network
+    /// and no build: a cold cache just means no suggestions.
+    fn with_name_suggestions(
+        &self,
+        r: &Resolved,
+        conn_id: &Id,
+        user_id: &Id,
+        req: &QueryRequest,
+        e: Error,
+    ) -> Error {
+        let Error::Upstream(msg) = &e else {
+            return e;
+        };
+        let Some(unknown) = crate::errors::unknown_name(r.config.engine, msg) else {
+            return e;
+        };
+        // The scope a completion snapshot is keyed on: the editor's active
+        // db/schema, else the profile default; Postgres defaults to `public`.
+        let mut scopes: Vec<String> = Vec::new();
+        for s in [
+            req.node.clone(),
+            r.config.database.clone(),
+            Some("public".to_string()),
+            Some(String::new()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !scopes.contains(&s) {
+                scopes.push(s);
+            }
+        }
+        let snap = scopes.iter().find_map(|scope| {
+            r.driver
+                .cached_completion_snapshot(&r.config, scope)
+                .or_else(|| {
+                    self.enforced_completions
+                        .get_snapshot(conn_id.as_str(), &format!("{user_id}\u{0}{scope}"))
+                })
+                .filter(|snap| !snap.objects.is_empty())
+        });
+        let Some(snap) = snap else {
+            return e;
+        };
+        let names = crate::errors::suggest_from_snapshot(&unknown, &snap, &req.statement);
+        if names.is_empty() {
+            return e;
+        }
+        Error::Upstream(crate::errors::with_suggestions(msg.clone(), &names))
     }
 
     /// Re-attach probe for a query previously submitted with `query_id`:
