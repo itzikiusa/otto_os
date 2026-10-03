@@ -31,6 +31,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { clipHistory } from '../../lib/stores/clipHistory.svelte';
+  import { unpersistEditorState } from '../../lib/editor-history';
   import type { DbCompletionKind } from '../../lib/api/types';
   import {
     statementAtCursor,
@@ -1225,7 +1226,12 @@
         type="checkbox"
         class="sr-only"
         checked={tab.mask}
-        onchange={(e) => { database.tab.mask = (e.currentTarget as HTMLInputElement).checked; }}
+        onchange={(e) => {
+          const on = (e.currentTarget as HTMLInputElement).checked;
+          database.tab.mask = on;
+          // A masked tab's undo history (every pasted string) must not stay on disk.
+          if (on) unpersistEditorState(TAB_HISTORY_PREFIX + database.tab.uid);
+        }}
       />
       <Icon name="lock" size={12} />
       {#if tab.mask}<span class="qe-masked-badge">Masked</span>{:else}<span>Mask</span>{/if}

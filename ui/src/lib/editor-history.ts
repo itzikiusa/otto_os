@@ -74,6 +74,14 @@ export function saveEditorState(
   }
 }
 
+/** Stop persisting `key` (its tab was just masked): the disk copy goes now;
+ *  the in-memory history stays for this session. */
+export function unpersistEditorState(key: string): void {
+  if (!persistable.delete(key)) return;
+  dirty.add(key);
+  void flushEditorHistory();
+}
+
 /** The parked state for `key` (memory, incl. what hydration loaded), or null. */
 export function loadEditorState(key: string): SavedEditorState | null {
   return mem.get(key) ?? null;

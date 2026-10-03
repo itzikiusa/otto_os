@@ -46,3 +46,16 @@ test('grid state: parked per tab, taken once, dropped on close', () => {
   dropGridState('t2');
   assert.equal(takeGridState('t2'), null);
 });
+
+test('editor history: memory tier outlives the editor, bounded, forgettable', async () => {
+  const h = await import('../src/lib/editor-history.ts');
+  h.saveEditorState('dbtab:a', { doc: 'SELECT 1', history: { done: [] } }, 40, true);
+  assert.equal(h.loadEditorState('dbtab:a')?.json.doc, 'SELECT 1');
+  assert.equal(h.loadEditorState('dbtab:a')?.scrollTop, 40);
+  for (let i = 0; i < 60; i++) h.saveEditorState(`dbtab:x${i}`, { doc: String(i) }, 0, false);
+  assert.equal(h.loadEditorState('dbtab:a'), null, 'least-recently used entries are evicted');
+  assert.equal(h.loadEditorState('dbtab:x59')?.json.doc, '59');
+  h.forgetEditorStates('dbtab:x');
+  assert.equal(h.loadEditorState('dbtab:x59'), null);
+  await h.flushEditorHistory(); // no IndexedDB in node: a no-op, never a throw
+});
