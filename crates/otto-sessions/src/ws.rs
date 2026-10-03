@@ -489,13 +489,14 @@ impl CreditGate {
     }
 
     /// New live output for this viewer (one coalesced chunk).
-    pub fn push(&mut self, chunk: Vec<u8>, now: tokio::time::Instant) -> CreditStep {
+    pub fn push(&mut self, chunk: impl Into<Bytes>, now: tokio::time::Instant) -> CreditStep {
+        let chunk: Bytes = chunk.into();
         let step = if self.skipped {
             CreditStep::Idle
         } else if self.held.is_empty() && chunk.len() <= self.available() {
             // Fast path (all normal output): straight through, no copy.
             self.sent += chunk.len() as u64;
-            CreditStep::Send(Bytes::from(chunk))
+            CreditStep::Send(chunk)
         } else {
             self.held.extend_from_slice(&chunk);
             if self.held.len() as u64 > self.window {
@@ -1219,6 +1220,52 @@ async fn next_evict(rx: &mut Option<broadcast::Receiver<()>>) {
     }
 }
 
+/// Keystroke frames one connection may have queued for delivery.
+const INPUT_BACKLOG: usize = 256;
+
+/// Per-connection input task (perf 01 F10): delivers `input` frames to the
+/// PTY in order, off the socket's `select!` loop, and reports each outcome
+/// back (`Err` = the message for the one-per-stretch `input_failed` notice).
+/// Successful explicit typing claims size authority, as before. Ends when
+/// the connection drops its sender.
+#[allow(clippy::type_complexity)]
+fn spawn_input_writer<S: SessionsCtx>(
+    ctx: S,
+    session_id: Id,
+    user: Id,
+    scoped: bool,
+    conn_id: u64,
+) -> (
+    tokio::sync::mpsc::Sender<(Vec<u8>, bool)>,
+    tokio::sync::mpsc::Receiver<std::result::Result<(), String>>,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, bool)>(INPUT_BACKLOG);
+    let (res_tx, res_rx) = tokio::sync::mpsc::channel(INPUT_BACKLOG);
+    tokio::spawn(async move {
+        while let Some((bytes, user_input)) = rx.recv().await {
+            let started = std::time::Instant::now();
+            let res = ctx
+                .manager()
+                .human_input(&session_id, &user, scoped, user_input, &bytes)
+                .await;
+            let elapsed = started.elapsed();
+            if elapsed > INPUT_SLOW {
+                tracing::debug!(
+                    session = %session_id,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "terminal ws: slow PTY write (child not draining its tty?)"
+                );
+            }
+            if res.is_ok() && user_input {
+                ctx.manager().note_input_authority(&session_id, conn_id);
+            }
+            // Outcomes only drive a notice: never block on a busy loop.
+            let _ = res_tx.try_send(res.map_err(|e| e.to_string()));
+        }
+    });
+    (tx, res_rx)
+}
+
 async fn serve_terminal<S: SessionsCtx>(
     mut socket: WebSocket,
     ctx: S,
@@ -1319,6 +1366,13 @@ async fn serve_terminal<S: SessionsCtx>(
     };
     let input_user = live_auth.user.id.clone();
     let input_scoped = live_auth.scoped;
+    let (input_tx, mut input_res_rx) = spawn_input_writer(
+        ctx.clone(),
+        session_id.clone(),
+        input_user.clone(),
+        input_scoped,
+        conn_id,
+    );
     let mut can_rx = shared_reauth(&ctx, &session_id, live_auth, reauth_period);
     // Joining a pass that already narrowed: apply its latest verdict now.
     can_input &= *can_rx.borrow_and_update();
@@ -1335,6 +1389,27 @@ async fn serve_terminal<S: SessionsCtx>(
                         let _ = socket.send(Message::Close(None)).await;
                         return;
                     }
+                }
+            }
+
+            // Outcome of a keystroke delivered by the input task: one visible
+            // notice per stretch of failing input (reset on success).
+            Some(res) = input_res_rx.recv() => {
+                match res {
+                    Ok(()) => warned_input = false,
+                    Err(message) if !warned_input => {
+                        warned_input = true;
+                        let frame = serde_json::json!({
+                            "type": "error",
+                            "code": "input_failed",
+                            "message": message,
+                        })
+                        .to_string();
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => {}
                 }
             }
 
@@ -1376,21 +1451,27 @@ async fn serve_terminal<S: SessionsCtx>(
                         // Attempt a non-blocking drain to merge back-to-back
                         // chunks into one WS frame. Lagged errors are harmless
                         // (data is still in the ring buffer).
-                        let mut buf = first.to_vec();
+                        // A lone chunk (the common case) is forwarded as is —
+                        // no copy (perf 01 F11); only a burst is coalesced.
+                        let mut out = first;
                         if let Some(rx) = out_rx.as_mut() {
-                            while let Ok(more) = rx.try_recv() {
+                            if let Ok(more) = rx.try_recv() {
+                                let mut buf = bytes::BytesMut::with_capacity(out.len() + more.len());
+                                buf.extend_from_slice(&out);
                                 buf.extend_from_slice(&more);
                                 // Cap at ~64 KiB to bound latency.
-                                if buf.len() >= 64 * 1024 {
-                                    break;
+                                while buf.len() < 64 * 1024 {
+                                    let Ok(more) = rx.try_recv() else { break };
+                                    buf.extend_from_slice(&more);
                                 }
+                                out = buf.freeze();
                             }
                         }
                         // Credit mode: send only what the window allows (the
                         // rest is held, or skipped → one snapshot later).
                         let step = match credit.as_mut() {
-                            Some(c) => c.push(buf, tokio::time::Instant::now()),
-                            None => CreditStep::Send(Bytes::from(buf)),
+                            Some(c) => c.push(out, tokio::time::Instant::now()),
+                            None => CreditStep::Send(out),
                         };
                         if apply_credit_step(step, &mut socket, &mut out_rx, handle.as_ref(), history).await.is_err() {
                             return;
@@ -1530,35 +1611,22 @@ async fn serve_terminal<S: SessionsCtx>(
                             if let Some(c) = credit.as_mut() {
                                 c.skip_on_input(user, tokio::time::Instant::now());
                             }
-                            // Successful explicit typing claims size authority.
-                            let started = std::time::Instant::now();
-                            let res = ctx.manager().human_input(&session_id, &input_user, input_scoped, user, &bytes).await;
-                            let elapsed = started.elapsed();
-                            if elapsed > INPUT_SLOW {
-                                tracing::debug!(
-                                    session = %session_id,
-                                    elapsed_ms = elapsed.as_millis() as u64,
-                                    "terminal ws: slow PTY write (child not draining its tty?)"
-                                );
-                            }
-                            match res {
-                                Ok(()) => {
-                                    warned_input = false;
-                                    if user { ctx.manager().note_input_authority(&session_id, conn_id); }
-                                },
-                                Err(e) if !warned_input => {
-                                    warned_input = true;
-                                    let frame = serde_json::json!({
-                                        "type": "error",
-                                        "code": "input_failed",
-                                        "message": e.to_string(),
-                                    })
-                                    .to_string();
-                                    if socket.send(Message::Text(frame.into())).await.is_err() {
-                                        return;
-                                    }
+                            // Delivery runs on this connection's input task
+                            // (perf 01 F10): a large paste into a TUI that is
+                            // slow to read its tty no longer freezes this
+                            // loop's output, acks and resizes. Order is kept
+                            // (one queue); results come back on `input_res_rx`.
+                            if input_tx.try_send((bytes, user)).is_err() && !warned_input {
+                                warned_input = true;
+                                let frame = serde_json::json!({
+                                    "type": "error",
+                                    "code": "input_failed",
+                                    "message": "session is not accepting input (input backlog full — the process is not reading its terminal)",
+                                })
+                                .to_string();
+                                if socket.send(Message::Text(frame.into())).await.is_err() {
+                                    return;
                                 }
-                                Err(_) => {}
                             }
                         }
                     }
