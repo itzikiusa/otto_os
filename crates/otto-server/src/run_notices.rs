@@ -157,6 +157,21 @@ fn run_verdict(status: &str, waiting_approval: bool) -> RunVerdict {
     }
 }
 
+/// Prefix of a run's approval-gate dedupe keys (`…:{run}:{node}`).
+fn approval_gate_prefix(run_id: &str) -> String {
+    format!("automation:workflow_approval:{run_id}:")
+}
+
+/// Drop a settled run's approval-gate keys (perf W11): they were inserted per
+/// (run, node) and never removed, so the streak set grew for the daemon's
+/// whole life.
+fn clear_approval_gates(run_id: &str) {
+    let prefix = approval_gate_prefix(run_id);
+    if let Ok(mut s) = streaks().lock() {
+        s.retain(|k| !k.starts_with(&prefix));
+    }
+}
+
 async fn on_workflow_run(
     ctx: &ServerCtx,
     run_id: &str,
@@ -164,12 +179,26 @@ async fn on_workflow_run(
     node_id: Option<&str>,
     waiting_approval: bool,
 ) {
+    if matches!(status, "success" | "error" | "canceled") {
+        clear_approval_gates(run_id);
+    }
     let verdict = run_verdict(status, waiting_approval);
     if verdict == RunVerdict::Nothing {
         return;
     }
+    // Once per approval gate, not per event the parked run emits — and
+    // decided BEFORE any DB read (perf W11: every event a parked run emitted
+    // used to pay a full run-row read first).
+    let gate = (verdict == RunVerdict::NeedsApproval)
+        .then(|| format!("{}{}", approval_gate_prefix(run_id), node_id.unwrap_or("")));
+    if let Some(g) = &gate {
+        if !begin_streak(g) {
+            return;
+        }
+    }
     let repo = WorkflowsRepo::new(ctx.pool.clone());
-    let Ok(run) = repo.get_run(&run_id.to_string()).await else {
+    // Status/ids/error only — never the 50–200 KB `nodes_json` (perf W11).
+    let Ok(Some(run)) = repo.run_head(&run_id.to_string(), false).await else {
         return;
     };
     let key = streak_key("workflow", &run.workflow_id);
@@ -190,16 +219,7 @@ async fn on_workflow_run(
         workspace_id: Some(run.workspace_id.clone()),
         user_id: Some(wf.created_by.clone()),
     };
-    if verdict == RunVerdict::NeedsApproval {
-        // Once per approval gate, not per event the parked run emits.
-        let gate = format!(
-            "automation:workflow_approval:{}:{}",
-            run.id,
-            node_id.unwrap_or("")
-        );
-        if !begin_streak(&gate) {
-            return;
-        }
+    if let Some(gate) = gate {
         post(
             ctx,
             RunNotice {
@@ -312,6 +332,20 @@ mod tests {
         assert_eq!(run_verdict("running", false), RunVerdict::Nothing);
         // A user's cancel is not a failure to tell them about.
         assert_eq!(run_verdict("canceled", false), RunVerdict::Nothing);
+    }
+
+    #[test]
+    fn a_settled_run_drops_its_approval_gate_keys() {
+        let g1 = format!("{}n1", approval_gate_prefix("run-gate-test"));
+        let g2 = format!("{}n2", approval_gate_prefix("run-gate-test"));
+        let other = format!("{}n1", approval_gate_prefix("run-gate-other"));
+        assert!(begin_streak(&g1) && begin_streak(&g2) && begin_streak(&other));
+        clear_approval_gates("run-gate-test");
+        assert!(begin_streak(&g1), "gate key removed");
+        assert!(begin_streak(&g2), "gate key removed");
+        assert!(!begin_streak(&other), "other runs' gates untouched");
+        clear_approval_gates("run-gate-test");
+        clear_approval_gates("run-gate-other");
     }
 
     #[test]

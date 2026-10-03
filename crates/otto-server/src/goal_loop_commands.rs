@@ -46,12 +46,9 @@ pub async fn run(cwd: &str, command: &str, timeout_secs: u64, cancelled: &Atomic
         .map(ProcessGroup);
     let output = tokio::select! {
         biased;
-        _ = async {
-            loop {
-                if cancelled.load(Ordering::Relaxed) { break; }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        } => return failure("verification cancelled".into()),
+        // Parks on the loop flag bell (perf W8) instead of a 25 ms poll.
+        _ = crate::goal_loop::until_flag(|| cancelled.load(Ordering::Relaxed))
+            => return failure("verification cancelled".into()),
         result = tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()) => result,
     };
     match output {
@@ -103,6 +100,7 @@ mod tests {
         let stop = async {
             tokio::time::sleep(Duration::from_millis(50)).await;
             cancelled.store(true, Ordering::Relaxed);
+            crate::goal_loop::ring_flags();
         };
         let start = Instant::now();
         let (result, ()) = tokio::join!(work, stop);

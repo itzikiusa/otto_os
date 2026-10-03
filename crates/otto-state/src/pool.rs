@@ -43,6 +43,52 @@ pub struct DbPool {
     split: bool,
     /// Process-unique identity shared by every clone (see [`DbPool::id`]).
     id: u64,
+    /// Opt-in statement recorder shared by every clone (perf W12): unset in
+    /// the daemon (one atomic load per statement), armed by tests through
+    /// [`DbPool::statement_probe`] to assert query budgets.
+    probe: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<StatementProbe>>>,
+}
+
+/// Records the SQL of every statement routed through a [`DbPool`] once armed
+/// ([`DbPool::statement_probe`]). Statements on an explicit transaction or a
+/// raw `writer()`/`reader()` connection bypass the router and are not seen.
+#[derive(Debug, Default)]
+pub struct StatementProbe {
+    stmts: std::sync::Mutex<Vec<String>>,
+}
+
+impl StatementProbe {
+    fn record(&self, sql: &str) {
+        if let Ok(mut v) = self.stmts.lock() {
+            v.push(sql.to_string());
+        }
+    }
+
+    /// Everything recorded since the last take, oldest first.
+    pub fn take(&self) -> Vec<String> {
+        self.stmts
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+    }
+
+    /// Forget what was recorded so far.
+    pub fn reset(&self) {
+        let _ = self.take();
+    }
+
+    /// Number of statements recorded so far (not consumed).
+    pub fn count(&self) -> usize {
+        self.stmts.lock().map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Recorded statements containing `needle` (case-sensitive), not consumed.
+    pub fn matching(&self, needle: &str) -> Vec<String> {
+        self.stmts
+            .lock()
+            .map(|v| v.iter().filter(|s| s.contains(needle)).cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 fn next_id() -> u64 {
@@ -68,6 +114,7 @@ impl From<SqlitePool> for DbPool {
             write: pool,
             split: false,
             id: next_id(),
+            probe: Default::default(),
         }
     }
 }
@@ -81,6 +128,7 @@ impl DbPool {
             write,
             split: true,
             id: next_id(),
+            probe: Default::default(),
         }
     }
 
@@ -144,7 +192,18 @@ impl DbPool {
         self.write.is_closed()
     }
 
+    /// Arm (once) and return this pool's statement recorder; every clone —
+    /// including ones made before arming — records into it from now on.
+    pub fn statement_probe(&self) -> std::sync::Arc<StatementProbe> {
+        self.probe
+            .get_or_init(|| std::sync::Arc::new(StatementProbe::default()))
+            .clone()
+    }
+
     fn route(&self, sql: &str) -> &SqlitePool {
+        if let Some(p) = self.probe.get() {
+            p.record(sql);
+        }
         if is_read_only_sql(sql) {
             &self.read
         } else {

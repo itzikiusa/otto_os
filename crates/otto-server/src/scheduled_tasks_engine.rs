@@ -1049,7 +1049,23 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask, sched_run_id: &
     let deadline = std::time::Instant::now() + WORKFLOW_WAIT;
     loop {
         tokio::time::sleep(WORKFLOW_POLL).await;
-        if let Ok(r) = repo.get_run(&run_id).await {
+        // Perf W2: poll the status only; the full row (50–200 KB of
+        // `nodes_json`) is read ONCE, when the run has settled.
+        let settled = matches!(
+            repo.run_status(&run_id).await,
+            Ok(Some((
+                otto_core::workflows::RunStatus::Success
+                    | otto_core::workflows::RunStatus::Error
+                    | otto_core::workflows::RunStatus::Canceled,
+                _
+            )))
+        );
+        let full = if settled {
+            repo.get_run(&run_id).await.ok()
+        } else {
+            None
+        };
+        if let Some(r) = full {
             let status = format!("{:?}", r.status).to_lowercase();
             if matches!(status.as_str(), "success" | "error" | "canceled") {
                 let report = workflow_report(&workflow.name, &r);

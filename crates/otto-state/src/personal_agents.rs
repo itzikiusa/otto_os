@@ -623,21 +623,37 @@ impl PersonalAgentsRepo {
     pub async fn list_enabled_schedules(
         &self,
     ) -> Result<Vec<(PersonalAgentSchedule, PersonalAgent)>> {
-        let rows = sqlx::query(
-            "SELECT s.id AS s_id, a.id AS a_id FROM personal_agent_schedules s \
+        // Perf W3: TWO set queries whatever N is (it was 1 + 2N per minute),
+        // reusing the row parsers. A row that fails to parse — or an agent
+        // deleted between the reads — is skipped, never failing the tick.
+        let sched_rows = sqlx::query(
+            "SELECT s.* FROM personal_agent_schedules s \
              JOIN personal_agents a ON a.id = s.agent_id \
              WHERE s.enabled = 1 AND a.enabled = 1",
         )
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list enabled personal agent schedules"))?;
-        let mut out = Vec::with_capacity(rows.len());
-        for r in &rows {
-            let sid: String = r.get("s_id");
-            let aid: String = r.get("a_id");
-            out.push((self.get_schedule(&sid).await?, self.get(&aid).await?));
+        if sched_rows.is_empty() {
+            return Ok(vec![]);
         }
-        Ok(out)
+        let agent_rows = sqlx::query(
+            "SELECT a.* FROM personal_agents a WHERE a.enabled = 1 AND EXISTS \
+             (SELECT 1 FROM personal_agent_schedules s WHERE s.agent_id = a.id AND s.enabled = 1)",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list enabled personal agents"))?;
+        let agents: std::collections::HashMap<String, PersonalAgent> = agent_rows
+            .iter()
+            .filter_map(|r| row_to_agent(r).ok())
+            .map(|a| (a.id.clone(), a))
+            .collect();
+        Ok(sched_rows
+            .iter()
+            .filter_map(|r| row_to_schedule(r).ok())
+            .filter_map(|s| agents.get(&s.agent_id).cloned().map(|a| (s, a)))
+            .collect())
     }
 
     pub async fn update_schedule(
@@ -1426,6 +1442,48 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(repo.list_enabled_schedules().await.unwrap().len(), 0);
+    }
+
+    /// Perf W3/W12 budget: the scheduler's per-minute scan is a constant
+    /// TWO statements whatever the number of schedules (it was 1 + 2N), and
+    /// returns each schedule paired with its own agent.
+    #[tokio::test]
+    async fn schedule_scan_is_two_queries_for_any_n() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = PersonalAgentsRepo::new(p.clone());
+        for i in 0..6 {
+            let a = repo
+                .create(new_agent("ws1", &format!("Agent {i}")))
+                .await
+                .unwrap();
+            for j in 0..2 {
+                repo.create_schedule(NewAgentSchedule {
+                    agent_id: a.id.clone(),
+                    schedule: json!({"cadence":"interval","every_min": 15 + j}),
+                    timezone: "UTC".into(),
+                    directive: format!("d{i}-{j}"),
+                    enabled: true,
+                })
+                .await
+                .unwrap();
+            }
+        }
+        let probe = p.statement_probe();
+        probe.reset();
+        let pairs = repo.list_enabled_schedules().await.unwrap();
+        assert_eq!(pairs.len(), 12);
+        assert!(pairs.iter().all(|(s, a)| s.agent_id == a.id));
+        let stmts = probe.take();
+        assert_eq!(stmts.len(), 2, "tick scan budget: {stmts:?}");
+        // Nothing enabled → a single statement.
+        sqlx::query("UPDATE personal_agents SET enabled = 0")
+            .execute(&p)
+            .await
+            .unwrap();
+        probe.reset();
+        assert!(repo.list_enabled_schedules().await.unwrap().is_empty());
+        assert_eq!(probe.take().len(), 1);
     }
 
     #[tokio::test]

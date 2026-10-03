@@ -956,8 +956,16 @@ impl WorkflowsRepo {
         error: Option<&str>,
         finished: bool,
     ) -> Result<Option<i64>> {
-        let nodes_json =
-            serde_json::to_string(nodes).map_err(|e| Error::Internal(e.to_string()))?;
+        // Serialize + project off the runtime through the SAME memoized path
+        // as `update_run_progress` (perf W10): every node start/finish and
+        // status transition lands here, and re-projecting a big run inline
+        // was tens of ms on a tokio worker.
+        let (run, owned) = (id.to_string(), nodes.to_vec());
+        let (nodes_json, projection) = tokio::task::spawn_blocking(move || {
+            crate::workflow_progress::progress_write(&run, &owned)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("workflow run write: {e}")))??;
         let finished_at = if finished {
             Some(fmt(Utc::now()))
         } else {
@@ -1000,7 +1008,6 @@ impl WorkflowsRepo {
              WHERE id = ?{guard}
              RETURNING rev"
         );
-        let projection = crate::workflow_progress::nodes_projection(nodes)?;
         let rev: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(status.as_str())
             .bind(&nodes_json)
@@ -1042,6 +1049,34 @@ impl WorkflowsRepo {
         .fetch_optional(&self.pool)
         .await
         .map_err(dberr("cancel run"))
+        .inspect(|rev| {
+            if rev.is_some() {
+                announce_cancel(id);
+            }
+        })
+    }
+
+    /// Lifecycle-only read of a run (perf W1): `(status, waiting_approval)`
+    /// without loading or parsing `nodes_json` (live runs carry 50–200 KB).
+    /// `None` when the run is gone.
+    pub async fn run_status(&self, id: &Id) -> Result<Option<(RunStatus, bool)>> {
+        let row: Option<(String, i64)> = sqlx::query_as(
+            "SELECT status, COALESCE(waiting_approval, 0) FROM workflow_runs WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("run status"))?;
+        Ok(row.and_then(|(s, w)| RunStatus::parse(&s).map(|st| (st, w != 0))))
+    }
+
+    /// True when the run's status is `canceled` (status-only read; a DB error
+    /// or a missing row reads as not canceled, like the old `get_run` checks).
+    pub async fn is_canceled(&self, id: &Id) -> bool {
+        matches!(
+            self.run_status(id).await,
+            Ok(Some((RunStatus::Canceled, _)))
+        )
     }
 
     /// Re-open a FINISHED run for a retry-a-step re-entry: back to `pending`
@@ -1100,6 +1135,28 @@ impl WorkflowsRepo {
         .map_err(dberr("update run progress"))?;
         Ok(rev)
     }
+}
+
+/// Process-wide cancel announcements (perf W1): [`WorkflowsRepo::request_cancel`]
+/// publishes the run id here when it flipped a run to `canceled`, so the
+/// engine's running node wakes AT ONCE instead of re-reading the run row on a
+/// timer. Every cancel path (API, chat, scheduled task) goes through
+/// `request_cancel`, so none needs wiring. Receivers see every run's cancels
+/// (they are rare) and filter by id; a lagged receiver must re-check status.
+fn cancel_bus() -> &'static tokio::sync::broadcast::Sender<Id> {
+    static BUS: std::sync::OnceLock<tokio::sync::broadcast::Sender<Id>> =
+        std::sync::OnceLock::new();
+    BUS.get_or_init(|| tokio::sync::broadcast::channel(64).0)
+}
+
+fn announce_cancel(id: &Id) {
+    // No receiver (nothing running) is fine.
+    let _ = cancel_bus().send(id.clone());
+}
+
+/// Subscribe to cancel announcements (see [`cancel_bus`]).
+pub fn subscribe_cancels() -> tokio::sync::broadcast::Receiver<Id> {
+    cancel_bus().subscribe()
 }
 
 /// Run-history retention defaults (08-workflows R1): per workflow, keep the
@@ -1749,6 +1806,104 @@ mod tests {
 
     fn node(id: &str, status: &str) -> NodeRunState {
         serde_json::from_value(serde_json::json!({ "node_id": id, "status": status })).unwrap()
+    }
+
+    /// Perf W1/W12: the engine's cancel checks read the lifecycle only — no
+    /// `SELECT *` / `nodes_json` on `workflow_runs` — and a cancel is
+    /// announced on the bus so a running node wakes without polling.
+    #[tokio::test]
+    async fn status_reads_never_load_the_run_body_and_cancel_is_announced() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}), None)
+            .await
+            .unwrap();
+        let mut bus = subscribe_cancels();
+        let probe = pool.statement_probe();
+        probe.reset();
+        // A simulated 10 s of a running node: 5 cancel-poll safety reads.
+        for _ in 0..5 {
+            assert_eq!(
+                repo.run_status(&run.id).await.unwrap(),
+                Some((RunStatus::Pending, false))
+            );
+            assert!(!repo.is_canceled(&run.id).await);
+        }
+        let stmts = probe.take();
+        assert_eq!(stmts.len(), 10, "one statement per check: {stmts:?}");
+        assert!(
+            stmts
+                .iter()
+                .all(|q| !q.contains("SELECT *") && !q.contains("nodes_json")),
+            "status checks must not read the run body: {stmts:?}"
+        );
+        // The bus is process-wide: other tests' cancels may be on it too.
+        let ours = |bus: &mut tokio::sync::broadcast::Receiver<Id>| {
+            std::iter::from_fn(|| bus.try_recv().ok()).any(|id| id == run.id)
+        };
+        assert!(repo.request_cancel(&run.id).await.unwrap().is_some());
+        assert!(ours(&mut bus), "cancel announced");
+        assert!(repo.is_canceled(&run.id).await);
+        // A no-op cancel (already settled) announces nothing.
+        assert!(repo.request_cancel(&run.id).await.unwrap().is_none());
+        assert!(!ours(&mut bus));
+        assert_eq!(repo.run_status(&"gone".into()).await.unwrap(), None);
+    }
+
+    /// Perf W12 budget: serializing + projecting a big run (500 nodes,
+    /// ~200 KB) — what every `update_run` / `update_run_progress` does off the
+    /// runtime. `progress_write` is memoized per node, so a steady-state write
+    /// (one node changed) must stay well under the cold full projection.
+    /// Timing-sensitive, so `#[ignore]`d in CI; run with
+    /// `cargo test -p otto-state --lib big_run_write_budget -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn big_run_write_budget() {
+        let mut nodes: Vec<NodeRunState> = (0..500)
+            .map(|i| {
+                serde_json::from_value(serde_json::json!({
+                    "node_id": format!("n{i}"),
+                    "status": "success",
+                    "logs": (0..4).map(|l| format!("{i}:{l} {}", "x".repeat(80))).collect::<Vec<_>>(),
+                    "output": { "text": "y".repeat(40) },
+                }))
+                .unwrap()
+            })
+            .collect();
+        let size = serde_json::to_string(&nodes).unwrap().len();
+        assert!(size > 150_000, "fixture is a big run: {size} B");
+        let run = "big-run-write-budget";
+        let t = std::time::Instant::now();
+        crate::workflow_progress::progress_write(run, &nodes).unwrap();
+        let cold = t.elapsed();
+        let mut warm = std::time::Duration::ZERO;
+        for tick in 0..20 {
+            nodes[tick].logs.push(format!("tick {tick}"));
+            let t = std::time::Instant::now();
+            crate::workflow_progress::progress_write(run, &nodes).unwrap();
+            warm = warm.max(t.elapsed());
+        }
+        let t = std::time::Instant::now();
+        crate::workflow_progress::nodes_projection(&nodes).unwrap();
+        let full = t.elapsed();
+        eprintln!("big run {size} B: cold {cold:?}, warm max {warm:?}, unmemoized {full:?}");
+        let budget = if cfg!(debug_assertions) { 150 } else { 15 };
+        assert!(
+            warm < std::time::Duration::from_millis(budget),
+            "steady-state progress write {warm:?} over {budget} ms"
+        );
     }
 
     #[tokio::test]

@@ -75,6 +75,87 @@ const NODE_LIVE_LOG_CAP: usize = 5 * NODE_LOG_CAP;
 /// O(lines × run size). The run view refetches on the persisted rev, so a line
 /// shows up at most this late.
 const LOG_PERSIST_EVERY: Duration = Duration::from_millis(250);
+/// A running node's backstop status read, in 2 s cancel-poll ticks (perf W1):
+/// the first tick, then every 30 s. Cancels normally arrive as an
+/// announcement (`otto_state::workflows::subscribe_cancels`) and wake the node
+/// at once; this only covers a status flip that bypassed `request_cancel`.
+const CANCEL_SAFETY_TICKS: u32 = 15;
+/// A running node's cancel-poll tick (see [`CancelWatch`]).
+const CANCEL_POLL: Duration = Duration::from_secs(2);
+
+/// What a running node's [`CancelWatch`] woke for.
+#[derive(Debug, PartialEq, Eq)]
+enum CancelWake {
+    /// The run's status is `canceled`: stop the node.
+    Canceled,
+    /// A chat `skip` marker for this step was consumed; whether the run is
+    /// parked at an approval (a gate is never skippable).
+    Skip { parked_at_approval: bool },
+}
+
+/// A running node's cancel watch (perf W1). It used to `get_run` — `SELECT *`
+/// plus a parse of 50–200 KB of `nodes_json` — every 2 s for the life of every
+/// running node. Now a cancel is ANNOUNCED by `request_cancel`
+/// (`otto_state::workflows::subscribe_cancels`) and wakes the node at once;
+/// the periodic tick only consumes the in-memory chat `skip` marker, and reads
+/// the run's STATUS (never its body) on the first tick, every
+/// [`CANCEL_SAFETY_TICKS`] after, and when a skip needs the approval flag.
+struct CancelWatch {
+    run_id: Id,
+    rx: tokio::sync::broadcast::Receiver<Id>,
+    poll: tokio::time::Interval,
+    ticks: u32,
+}
+
+impl CancelWatch {
+    fn new(run_id: &Id, period: Duration) -> Self {
+        Self {
+            run_id: run_id.clone(),
+            rx: otto_state::workflows::subscribe_cancels(),
+            poll: tokio::time::interval(period),
+            ticks: 0,
+        }
+    }
+
+    /// Resolve on the next cancel or consumed skip marker. Cancel-safe for a
+    /// `select!` arm: dropping it mid-way loses nothing but a status read.
+    async fn next(&mut self, repo: &WorkflowsRepo, take_skip: impl Fn() -> bool) -> CancelWake {
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            tokio::select! {
+                ev = self.rx.recv() => {
+                    // Ours, or a lag (re-check). Closed can't happen: the bus
+                    // is a static.
+                    let ours = match ev {
+                        Ok(id) => id == self.run_id,
+                        Err(RecvError::Lagged(_)) => true,
+                        Err(RecvError::Closed) => false,
+                    };
+                    if ours && repo.is_canceled(&self.run_id).await {
+                        return CancelWake::Canceled;
+                    }
+                }
+                _ = self.poll.tick() => {
+                    let safety = self.ticks.is_multiple_of(CANCEL_SAFETY_TICKS);
+                    self.ticks = self.ticks.wrapping_add(1);
+                    let skip = take_skip();
+                    let mut parked_at_approval = false;
+                    if safety || skip {
+                        if let Ok(Some((status, waiting))) = repo.run_status(&self.run_id).await {
+                            if status == RunStatus::Canceled {
+                                return CancelWake::Canceled;
+                            }
+                            parked_at_approval = waiting;
+                        }
+                    }
+                    if skip {
+                        return CancelWake::Skip { parked_at_approval };
+                    }
+                }
+            }
+        }
+    }
+}
 const LOG_PERSIST_LINES: usize = 20;
 
 /// Live-log persist coalescing for one running node (see
@@ -2200,11 +2281,9 @@ pub async fn run_workflow(
             break;
         }
         // Honor a cancel request (the API flips the run status to Canceled).
-        if let Ok(r) = repo.get_run(&run_id).await {
-            if r.status == RunStatus::Canceled {
-                canceled = true;
-                break;
-            }
+        if repo.is_canceled(&run_id).await {
+            canceled = true;
+            break;
         }
 
         // Stop once the run has exceeded its global time budget.
@@ -2388,10 +2467,14 @@ pub async fn run_workflow(
         // attempt's handoff (persist_step compares mtimes against this).
         // Assigned at the top of every attempt; the loop runs at least once.
         let mut attempt_started;
-        // Poll for a cancel WHILE this node runs — the node-boundary check only
+        // Catch a cancel WHILE this node runs — the node-boundary check only
         // fires between nodes, so without this a long agent turn would ignore a
-        // cancel for up to TURN_TIMEOUT. First tick is immediate, then every 2s.
-        let mut cancel_poll = tokio::time::interval(Duration::from_secs(2));
+        // cancel for up to TURN_TIMEOUT. Perf W1: a cancel is ANNOUNCED
+        // (`request_cancel` → `subscribe_cancels`) and wakes the select at
+        // once; the 2 s tick only consumes the in-memory chat `skip` marker,
+        // and reads the run's status (status-only, never the 50–200 KB body)
+        // on its first tick and then every CANCEL_SAFETY_TICKS as a backstop.
+        let mut cancel_watch = CancelWatch::new(&run_id, CANCEL_POLL);
         // A chat `skip` command marks this run in `wf_skip_current`; unlike a
         // cancel it aborts only the CURRENT node, which is then marked Skipped and
         // the run continues to the next node.
@@ -2500,19 +2583,18 @@ pub async fn run_workflow(
                             emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
                         }
                     }
-                    _ = cancel_poll.tick() => {
+                    wake = cancel_watch.next(&repo, || take_skip_marker(&ctx, &run_id, &node_id)) => {
                         // A cancel flips the run's DB status to Canceled. Catch it
                         // mid-node so a long agent turn stops promptly; dropping
                         // `fut` ends our wait, and the finalize block kills the
                         // sessions this run spawned.
-                        let mut parked_at_approval = false;
-                        if let Ok(r) = repo.get_run(&run_id).await {
-                            if r.status == RunStatus::Canceled {
+                        let parked_at_approval = match wake {
+                            CancelWake::Canceled => {
                                 canceled = true;
                                 break Err(otto_core::Error::Internal("run canceled".into()));
                             }
-                            parked_at_approval = r.waiting_approval;
-                        }
+                            CancelWake::Skip { parked_at_approval } => parked_at_approval,
+                        };
                         // A chat `skip` command (consume-once) for THIS step → abort
                         // it and skip it; the run continues to the next node. The
                         // marker is keyed by (run, step), so one set for an earlier
@@ -2522,15 +2604,13 @@ pub async fn run_workflow(
                         // That includes a LOOP parked at an approval inside it:
                         // skipping the loop dropped the gate and let the steps
                         // after it (a PR, say) run with nobody's sign-off.
-                        if take_skip_marker(&ctx, &run_id, &node_id) {
-                            if node.kind == "human_approval" || parked_at_approval {
-                                states[idx].logs.push(
-                                    "⚠ skip ignored — an approval step must be approved or rejected".into(),
-                                );
-                            } else {
-                                skip_current = true;
-                                break Err(otto_core::Error::Internal("step skipped".into()));
-                            }
+                        if node.kind == "human_approval" || parked_at_approval {
+                            states[idx].logs.push(
+                                "⚠ skip ignored — an approval step must be approved or rejected".into(),
+                            );
+                        } else {
+                            skip_current = true;
+                            break Err(otto_core::Error::Internal("step skipped".into()));
                         }
                     }
                     r = &mut fut => break r,
@@ -2968,7 +3048,7 @@ pub async fn run_workflow(
 async fn backoff_canceled(repo: &WorkflowsRepo, run_id: &Id, total: Duration) -> bool {
     let deadline = Instant::now() + total;
     loop {
-        if matches!(repo.get_run(run_id).await, Ok(r) if r.status == RunStatus::Canceled) {
+        if repo.is_canceled(run_id).await {
             return true;
         }
         let left = deadline.saturating_duration_since(Instant::now());
@@ -4608,11 +4688,12 @@ async fn execute_node(
             let mut refs_by_repo: serde_json::Map<String, Value> = serde_json::Map::new();
             for i in 1..=max_iter {
                 iterations = i;
-                if let Ok(rr) = WorkflowsRepo::new(ctx.pool.clone()).get_run(run_id).await {
-                    if rr.status == RunStatus::Canceled {
-                        logs.push("loop: canceled".into());
-                        break;
-                    }
+                if WorkflowsRepo::new(ctx.pool.clone())
+                    .is_canceled(run_id)
+                    .await
+                {
+                    logs.push("loop: canceled".into());
+                    break;
                 }
                 if progress.enabled() {
                     progress.post(format!("🔁 *Iteration {i}/{max_iter}*"));
@@ -5353,14 +5434,15 @@ async fn execute_node(
                                 RS::Running => {}
                             }
                         }
-                        if let Ok(rr) = WorkflowsRepo::new(ctx.pool.clone()).get_run(run_id).await {
-                            if rr.status == RunStatus::Canceled {
-                                // Stop HERE: breaking out went on to the goals
-                                // agent / the next target's review before the
-                                // engine's cancel poll dropped this future, and a
-                                // review started in that gap was never cancelled.
-                                return Err(otto_core::Error::Internal("run canceled".into()));
-                            }
+                        if WorkflowsRepo::new(ctx.pool.clone())
+                            .is_canceled(run_id)
+                            .await
+                        {
+                            // Stop HERE: breaking out went on to the goals
+                            // agent / the next target's review before the
+                            // engine's cancel poll dropped this future, and a
+                            // review started in that gap was never cancelled.
+                            return Err(otto_core::Error::Internal("run canceled".into()));
                         }
                         if Instant::now() >= deadline {
                             status = "timeout".into();
@@ -8176,6 +8258,109 @@ mod tests {
             .await
             .expect("migrations");
         WorkflowsRepo::new(pool)
+    }
+
+    /// Perf W1/W12 budget: a running node with no cancel issues ZERO full
+    /// run reads (`SELECT *` / `nodes_json`) — only the first-tick and
+    /// every-CANCEL_SAFETY_TICKS status reads — and a cancel wakes it at once
+    /// via the announcement, not after a poll period.
+    #[tokio::test]
+    async fn cancel_watch_reads_status_only_and_wakes_on_announce() {
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(false);
+        let raw = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&raw)
+            .await
+            .unwrap();
+        let pool = otto_state::DbPool::from(raw);
+        let repo = WorkflowsRepo::new(pool.clone());
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &wf.workspace_id, &Value::Null, None)
+            .await
+            .unwrap();
+        let probe = pool.statement_probe();
+        probe.reset();
+        // 25 ticks of "running" (a scaled-down ~50 s of 2 s ticks), no cancel.
+        let mut watch = CancelWatch::new(&run.id, Duration::from_millis(10));
+        let idle =
+            tokio::time::timeout(Duration::from_millis(255), watch.next(&repo, || false)).await;
+        assert!(idle.is_err(), "nothing to wake for");
+        let stmts = probe.take();
+        assert!(
+            stmts
+                .iter()
+                .all(|q| !q.contains("SELECT *") && !q.contains("nodes_json")),
+            "no full-row reads while running: {stmts:?}"
+        );
+        assert!(
+            (1..=2).contains(&stmts.len()),
+            "status reads only on the safety ticks (1st + every {CANCEL_SAFETY_TICKS}): {stmts:?}"
+        );
+        // A cancel wakes a watch whose tick is far away, at once.
+        let mut watch = CancelWatch::new(&run.id, Duration::from_secs(3600));
+        let first =
+            tokio::time::timeout(Duration::from_millis(100), watch.next(&repo, || false)).await;
+        assert!(first.is_err(), "first tick read the status, not canceled");
+        let t = Instant::now();
+        let (wake, _) = tokio::join!(watch.next(&repo, || false), async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            repo.request_cancel(&run.id).await.unwrap();
+        });
+        assert_eq!(wake, CancelWake::Canceled);
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "woken by the announcement"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_watch_skip_reports_the_approval_park() {
+        let repo = mem_repo().await;
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &wf.workspace_id, &Value::Null, None)
+            .await
+            .unwrap();
+        let mut watch = CancelWatch::new(&run.id, Duration::from_millis(5));
+        let once = std::sync::atomic::AtomicBool::new(true);
+        let wake = watch
+            .next(&repo, || {
+                once.swap(false, std::sync::atomic::Ordering::SeqCst)
+            })
+            .await;
+        assert_eq!(
+            wake,
+            CancelWake::Skip {
+                parked_at_approval: false
+            }
+        );
     }
 
     #[tokio::test]
