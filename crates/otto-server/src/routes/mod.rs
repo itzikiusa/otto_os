@@ -392,6 +392,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route("/usage/status", get(usage::status))
         .route("/usage/summary", get(usage::summary))
         .route("/usage/by-kind", get(usage::by_kind))
+        .route("/usage/report", get(usage::report))
+        .route("/usage/ccusage-check", post(usage::ccusage_check))
         .route("/usage/metrics", get(usage::metrics))
         .route("/usage/config", put(usage::put_config))
         .route("/usage/install", post(usage::install))
