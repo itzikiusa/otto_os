@@ -268,11 +268,10 @@ impl ClickHouse {
         Ok(rows)
     }
 
-    /// Run several queries and return their row sets in order. With the warm
-    /// persistent server, per-query cost is gone, so this is just sequential
-    /// `query_rows` — ALL-OR-NOTHING: any failure errors the whole batch (same
-    /// contract as the old single-process path, so `summary`'s empty-fallback
-    /// still applies).
+    /// Run several queries and return their row sets in order — sequential
+    /// `query_rows` against the persistent server. ALL-OR-NOTHING: any failure
+    /// errors the whole batch, and callers propagate it (a failed read must
+    /// surface as an error, never as an all-zero dashboard).
     pub async fn query_batch(&self, queries: &[String]) -> Result<Vec<Vec<serde_json::Value>>> {
         let mut out = Vec::with_capacity(queries.len());
         for q in queries {
@@ -285,13 +284,18 @@ impl ClickHouse {
     /// A blank payload is a no-op. `date_time_input_format=best_effort` lets
     /// rows carry RFC3339 timestamps (e.g. `UsageEvent.ts`) in `DateTime64`
     /// columns; rows that omit them still get the column DEFAULTs.
+    ///
+    /// `async_insert=1&wait_for_async_insert=1` lets the server coalesce
+    /// inserts from several writers (the usage flusher, the metrics sampler,
+    /// the rebuild) into fewer parts, while the call still returns only once
+    /// the rows are durable — so failure handling is unchanged.
     pub async fn insert_ndjson(&self, table: &str, ndjson: &str) -> Result<()> {
         if ndjson.trim().is_empty() {
             return Ok(());
         }
         let q = urlencode(&format!("INSERT INTO {table} FORMAT JSONEachRow"));
         let url = format!(
-            "{}/?query={q}&date_time_input_format=best_effort",
+            "{}/?query={q}&date_time_input_format=best_effort{INSERT_SETTINGS}",
             self.base_url
         );
         let resp = self
@@ -356,6 +360,10 @@ impl Drop for ClickHouse {
 /// `--` line comments FIRST so a `;` inside a comment (our schema has one) doesn't
 /// split a statement mid-way. Safe for our controlled DDL (no `--` or `;` inside
 /// string literals).
+/// URL settings appended to every insert (see [`ClickHouse::insert_ndjson`]).
+const INSERT_SETTINGS: &str =
+    "&async_insert=1&wait_for_async_insert=1&async_insert_busy_timeout_ms=10000";
+
 fn split_statements(sql: &str) -> Vec<String> {
     let no_comments: String = sql
         .lines()
