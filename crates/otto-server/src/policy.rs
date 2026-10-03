@@ -508,6 +508,15 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Agents, if get { View } else { Edit });
     }
 
+    // ---- Workbench (per-user scratch files with full history) ----------------
+    // Rides the Agents feature like Snips (scratch scripts feed sessions, DB
+    // runs and API requests): every GET (list, doc, revisions, diff, asset) =
+    // View; create/autosave/trash/restore/purge/upload = Edit. Handlers add the
+    // per-owner scoping. Root bypasses.
+    if p.starts_with("/workspaces/{ws}/workbench/") {
+        return Require(Agents, if get { View } else { Edit });
+    }
+
     if p == "/workspaces/{id}/network-profiles"
         || p.starts_with("/network-profiles/")
         || p == "/sessions/{id}/network"

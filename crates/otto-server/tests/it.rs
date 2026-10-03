@@ -54,6 +54,8 @@ mod share_otp;
 mod share_scope_guard;
 #[path = "ui_control.rs"]
 mod ui_control;
+#[path = "workbench_api.rs"]
+mod workbench_api;
 
 /// Guard: every `tests/*.rs` file is either a module above or a standalone
 /// `[[test]]` target (`snips.rs`), so no suite silently stops running.

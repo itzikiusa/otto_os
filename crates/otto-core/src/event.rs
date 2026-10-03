@@ -759,6 +759,21 @@ pub enum Event {
     /// read-all, dismiss, clear). Owner-only; clients refetch
     /// `GET /notifications` (the tray's "needs you" glyph).
     NotificationsChanged { user_id: Id },
+    /// A Workbench doc of `user_id` changed (create / content or metadata
+    /// update / trash / restore / permanent delete). Owner-only; an
+    /// invalidation cue — clients refetch the list and, unless `client_id` is
+    /// their own (self-echo), the open doc.
+    WorkbenchDocChanged {
+        workspace_id: Id,
+        user_id: Id,
+        doc_id: Id,
+        /// `created` | `updated` | `trashed` | `restored` | `deleted`.
+        action: String,
+        rev: i64,
+        updated_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
 }
 
 impl Event {
@@ -854,6 +869,7 @@ impl Event {
             Event::McpApprovalChanged { .. } => "mcp_approval_changed",
             Event::ResourceAccessChanged { .. } => "resource_access_changed",
             Event::NotificationsChanged { .. } => "notifications_changed",
+            Event::WorkbenchDocChanged { .. } => "workbench_doc_changed",
         }
     }
 }
@@ -963,6 +979,15 @@ mod tests {
             },
             Event::NotificationsChanged {
                 user_id: "u".into(),
+            },
+            Event::WorkbenchDocChanged {
+                workspace_id: "w".into(),
+                user_id: "u".into(),
+                doc_id: "d".into(),
+                action: "updated".into(),
+                rev: 2,
+                updated_at: "2026-10-03T00:00:00Z".into(),
+                client_id: None,
             },
         ];
         for e in events {

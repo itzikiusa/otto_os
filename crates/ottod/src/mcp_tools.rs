@@ -4,7 +4,8 @@
 //! doc writers `otto_vault_write` / `otto_vault_rename` / `otto_vault_delete`,
 //! the swarm board tools `swarm_create_task` / `swarm_update_task` /
 //! `swarm_run_task` / `swarm_stop_run` (the manager's utilization levers),
-//! `browser_navigate` (Task 6, opens a reader-mode browser tab), and the three
+//! `browser_navigate` (Task 6, opens a reader-mode browser tab), `workbench_write`
+//! (writes the owner's Workbench scratch file as a new history revision), and the three
 //! cloud-console writers `aws_athena_query` (starts an Athena query execution),
 //! `aws_sqs_send` (produces one SQS message) and `k8s_action` (a kubectl
 //! rollout/scale/delete/Argo verb, see `docs/design/aws-k8s-consoles.md` §4.6),
@@ -1061,6 +1062,44 @@ fn base_tool_catalog() -> Value {
                 }
             },
             {
+                "name": "workbench_list",
+                "description": "Read-only: list the session owner's Workbench scratch files in this workspace (id, name, language, pinned, folder, tags, size, rev, updated_at) — pinned first, newest first. `query` filters by a case-insensitive name substring; `trash: true` lists the trash instead. Read one with workbench_get.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Optional case-insensitive name substring." },
+                        "trash": { "type": "boolean", "description": "List trashed files instead of live ones." }
+                    }
+                }
+            },
+            {
+                "name": "workbench_get",
+                "description": "Read-only: one Workbench scratch file by `doc_id` or exact `name` — metadata + current `content`. Pass `revision` (a seq from the file's history) to read an older version instead; `history: true` adds the revision timeline.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "doc_id": { "type": "string" },
+                        "name": { "type": "string", "description": "Exact file name (used when doc_id is omitted)." },
+                        "revision": { "type": "integer", "description": "Optional revision seq to read." },
+                        "history": { "type": "boolean", "description": "Include the revision list (newest first)." }
+                    }
+                }
+            },
+            {
+                "name": "workbench_write",
+                "description": "MUTATING (Agents Edit): write a Workbench scratch file's content — update by `doc_id`, else the live file with exact `name`, else create a new file named `name`. Every write is recorded as its own revision in the file's full history (nothing is overwritten or lost; the user can diff and restore). `language` optionally sets json | md | sql | html | mermaid | d2 | csv | yaml | … (default: auto-detect). Only write when the user asked for it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "doc_id": { "type": "string" },
+                        "name": { "type": "string", "description": "File name; required when doc_id is omitted." },
+                        "content": { "type": "string" },
+                        "language": { "type": "string" }
+                    },
+                    "required": ["content"]
+                }
+            },
+            {
                 "name": "design_list",
                 "description": "Read-only: list Design Hall artifacts (frames, graphics, sites, 3D scenes, whiteboards, brand kits) — id, title, studio, format, status, head version, who created / last edited it (created_by_name, last_editor_name) and the product stories it implements (story_ids). The library is global; filter by project_id / studio / format / status / story_id. Newest first; for the next page pass cursor = the last row's `updated_at|id`. Use design_search to find references by content.",
                 "inputSchema": {
@@ -1651,6 +1690,7 @@ const NARROW_SOURCES: &[&str] = &[
 /// Tool-name prefixes a [`NARROW_SOURCES`] session is not shown.
 const NARROW_HIDDEN_PREFIXES: &[&str] = &[
     "aws_",
+    "workbench_",
     "k8s_",
     "canvas_",
     "browser_",
@@ -3607,6 +3647,112 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
 
             Ok(finalize(json!({ "ok": true, "format": format })))
         }
+        // Workbench: the session owner's scratch files (owner-scoped routes).
+        // `workbench_write` is Editor-gated by the daemon route and always
+        // lands as a checkpoint revision, so an agent write never folds into
+        // (or hides) the user's own autosave burst.
+        "workbench_list" | "workbench_get" | "workbench_write" => {
+            let ws = ctx
+                .workspace_id
+                .clone()
+                .filter(|s| !s.is_empty())
+                .ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
+            let base = format!("/workspaces/{}/workbench/docs", seg(&ws));
+            let find_by_name = |docs: &Value, want: &str| -> Option<String> {
+                docs.as_array()?
+                    .iter()
+                    .find(|d| d["name"].as_str() == Some(want))
+                    .and_then(|d| d["id"].as_str().map(str::to_string))
+            };
+            match name {
+                "workbench_list" => {
+                    let trash = args.get("trash").and_then(Value::as_bool).unwrap_or(false);
+                    let mut docs = ctx
+                        .get_json(&if trash {
+                            format!("{base}?trash=true")
+                        } else {
+                            base.clone()
+                        })
+                        .await?;
+                    if let (Some(q), Some(arr)) = (
+                        arg_optional_string(args, "query")?.filter(|q| !q.is_empty()),
+                        docs.as_array_mut(),
+                    ) {
+                        let q = q.to_lowercase();
+                        arr.retain(|d| {
+                            d["name"]
+                                .as_str()
+                                .is_some_and(|n| n.to_lowercase().contains(&q))
+                        });
+                    }
+                    Ok(finalize(json!({ "workspace_id": ws, "docs": docs })))
+                }
+                "workbench_get" => {
+                    let id = match arg_optional_string(args, "doc_id")?.filter(|s| !s.is_empty()) {
+                        Some(id) => id,
+                        None => {
+                            let want = arg_str(args, "name")?;
+                            let docs = ctx.get_json(&base).await?;
+                            find_by_name(&docs, &want)
+                                .ok_or_else(|| format!("no workbench file named `{want}`"))?
+                        }
+                    };
+                    let doc_path = format!("{base}/{}", seg(&id));
+                    let mut out = match args.get("revision").and_then(Value::as_i64) {
+                        Some(seq) => ctx.get_json(&format!("{doc_path}/revisions/{seq}")).await?,
+                        None => ctx.get_json(&doc_path).await?,
+                    };
+                    if args
+                        .get("history")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        out["revisions"] = ctx.get_json(&format!("{doc_path}/revisions")).await?;
+                    }
+                    Ok(finalize(out))
+                }
+                _ => {
+                    let content = arg_string_allow_empty(args, "content")?;
+                    let language = arg_optional_string(args, "language")?.filter(|s| !s.is_empty());
+                    let mut id = arg_optional_string(args, "doc_id")?.filter(|s| !s.is_empty());
+                    let doc_name = arg_optional_string(args, "name")?.filter(|s| !s.is_empty());
+                    if id.is_none() {
+                        let want = doc_name.clone().ok_or("pass `doc_id` or `name`")?;
+                        let docs = ctx.get_json(&base).await?;
+                        id = find_by_name(&docs, &want);
+                    }
+                    match id {
+                        Some(id) => {
+                            let mut body = json!({ "content": content, "checkpoint": true });
+                            if let Some(l) = language {
+                                body["language"] = json!(l);
+                            }
+                            let doc = ctx
+                                .patch_json(&format!("{base}/{}", seg(&id)), &body)
+                                .await?;
+                            Ok(finalize(
+                                json!({ "ok": true, "created": false, "doc": doc }),
+                            ))
+                        }
+                        None => {
+                            let mut body = json!({
+                                "name": doc_name.unwrap_or_default(),
+                                "content": content,
+                            });
+                            if let Some(l) = language {
+                                body["language"] = json!(l);
+                            }
+                            let mut doc = ctx.post_json(&base, &body).await?;
+                            // Don't echo the content back into the transcript.
+                            if let Some(o) = doc.as_object_mut() {
+                                o.remove("content");
+                            }
+                            Ok(finalize(json!({ "ok": true, "created": true, "doc": doc })))
+                        }
+                    }
+                }
+            }
+        }
         // Vault v3 doc writers — Editor-gated by the daemon route; the delete is
         // a soft move into `.trash/`.
         "swarm_create_task" => {
@@ -5491,6 +5637,24 @@ mod tests {
             names.contains(&"canvas_update_scene"),
             "catalog missing canvas_update_scene"
         );
+    }
+
+    #[test]
+    fn catalog_lists_the_workbench_tools() {
+        let cat = tool_catalog();
+        let tools = cat["tools"].as_array().unwrap();
+        for t in ["workbench_list", "workbench_get", "workbench_write"] {
+            let spec = tools
+                .iter()
+                .find(|x| x["name"] == t)
+                .unwrap_or_else(|| panic!("catalog missing {t}"));
+            let d = spec["description"].as_str().unwrap();
+            if t == "workbench_write" {
+                assert!(d.starts_with("MUTATING"), "{t} must flag MUTATING");
+            } else {
+                assert!(d.starts_with("Read-only"), "{t} must be read-only");
+            }
+        }
     }
 
     #[test]

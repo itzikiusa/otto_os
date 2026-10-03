@@ -534,9 +534,9 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
 **owner-scoped events** (`assistant_turn`, `assistant_task_update`,
 `assistant_needs_you`, `assistant_limit`, `ui_control_requested`,
-`notifications_changed`) reach only the user named by their `user_id` (not root);
+`notifications_changed`, `workbench_doc_changed`) reach only the user named by their `user_id` (not root);
 **broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
-`mcp_approval_changed`) reach every authenticated client. There are 73
+`mcp_approval_changed`) reach every authenticated client. There are 74
 variants (the sections below cover them; each `## …`/`### …` heading is one
 feature family).
 
@@ -1709,6 +1709,22 @@ each says "the list you cached changed — refetch it"; none carries the data.
   `POST /notifications/read` / `POST /notifications/dismiss` — ONE event per
   batch, none when the batch changed nothing). **Owner-scoped**
   (`user_id` only). Consumer: the tray's "needs you" glyph.
+
+### `workbench_doc_changed`
+
+A Workbench scratch file changed. **Owner-scoped** (`user_id` only — docs are
+per-user). Invalidation cue: refetch `GET /workspaces/{ws}/workbench/docs`
+and, if the doc is open in this window and `client_id` is not this window's
+own (the `client_id` the PATCH sent), refetch the doc.
+
+```json
+{"type":"workbench_doc_changed","workspace_id":"01J…","user_id":"01J…","doc_id":"01J…","action":"updated","rev":7,"updated_at":"2026-10-03T17:02:11Z","client_id":"w-3f2a"}
+```
+
+`action` ∈ `created` | `updated` (content, metadata or a revision restore) |
+`trashed` | `restored` | `deleted` (permanent). `client_id` is omitted unless
+the mutating request carried one. Emitted by
+`crates/otto-server/src/routes/workbench.rs`.
 
 Clients keep a slow safety poll (Otto: 5 min, `ui/src/lib/live.ts` `liveQuery`)
 and refetch after a reconnect / `resync`; while the socket is down they fall

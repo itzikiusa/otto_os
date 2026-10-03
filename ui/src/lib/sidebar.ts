@@ -115,6 +115,9 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   // 3D, Whiteboard, Brand Kit, Spatial). It replaces the Canvas entry: Canvas
   // lives on as the Whiteboard studio (`#/canvas` still routes; see navIdForModule).
   { id: 'design', icon: 'designHall', label: 'Design Hall', group: 'build', feature: 'design', keywords: 'design studio frames graphics site 3d whiteboard canvas brand kit mockup diagram sketch excalidraw mermaid d2 spatial' },
+  // Workbench — per-user scratch files (scripts, JSON, Markdown, diagrams) with
+  // formatting, previews, placeholders, Send to… and full edit history.
+  { id: 'workbench', icon: 'workbench', label: 'Workbench', group: 'build', feature: 'agents', keywords: 'scratch scripts editor format json markdown html mermaid d2 sql snippets notes vscode history placeholders' },
   { id: 'skills-eval', icon: 'zap', label: 'Skills Lab', group: 'build', feature: 'skill_eval', keywords: 'skill lab evaluate validate review edit improve' },
   // ── Infrastructure ──
   // The unified hub: SSH/custom terminals + databases + Kafka clusters live in
