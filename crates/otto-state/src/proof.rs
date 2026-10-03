@@ -246,7 +246,7 @@ impl ProofRepo {
             sql.push_str(" AND work_item_id = ?");
         }
         sql.push_str(" ORDER BY updated_at DESC");
-        let mut q = sqlx::query(&sql).bind(workspace_id);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(workspace_id);
         if let Some(s) = status {
             q = q.bind(s);
         }

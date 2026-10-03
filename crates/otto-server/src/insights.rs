@@ -466,7 +466,10 @@ fn materialize_collector(dir: &Path) -> std::io::Result<PathBuf> {
         })?;
     let collectors = dir.join("collectors");
     std::fs::create_dir_all(&collectors)?;
-    let path = collectors.join(format!("{:x}.py", Sha256::digest(source.as_bytes())));
+    let path = collectors.join(format!(
+        "{}.py",
+        hex::encode(Sha256::digest(source.as_bytes()))
+    ));
     let mut pending = tempfile::NamedTempFile::new_in(&collectors)?;
     pending.write_all(source.as_bytes())?;
     match pending.persist_noclobber(&path) {

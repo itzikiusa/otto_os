@@ -26,7 +26,7 @@ async fn mem_pool() -> DbPool {
 async fn proof_tables_exist() {
     let pool = mem_pool().await;
     for t in ["proof_packs", "proof_artifacts"] {
-        let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {t}"))
+        let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {t}")))
             .fetch_one(&pool)
             .await
             .unwrap_or(-1);

@@ -99,11 +99,13 @@ async fn cross_profile_rows_restore_with_real_constraints_and_inert_runtime() {
         ("goal_loop_iterations", "iteration", "error"),
     ] {
         assert_eq!(
-            sqlx::query_scalar::<_, String>(&format!("SELECT status FROM {table} WHERE id=?"))
-                .bind(id)
-                .fetch_one(&target)
-                .await
-                .unwrap(),
+            sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+                "SELECT status FROM {table} WHERE id=?"
+            )))
+            .bind(id)
+            .fetch_one(&target)
+            .await
+            .unwrap(),
             status
         );
     }

@@ -131,12 +131,9 @@ pub fn artifact_hash(
     executor: &str,
     snapshots: &[TargetSnapshot],
 ) -> Result<String> {
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(encode(
-            &json!({"revision":change.revision,"script":change.script,"targets":snapshots,"executor":executor,"approval_policy":"independent-review-v1"})
-        )?)
-    ))
+    Ok(hex::encode(Sha256::digest(encode(
+        &json!({"revision":change.revision,"script":change.script,"targets":snapshots,"executor":executor,"approval_policy":"independent-review-v1"}),
+    )?)))
 }
 impl DatabaseChangesRepo {
     pub fn new(pool: impl Into<DbPool>) -> Self {

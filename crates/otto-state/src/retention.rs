@@ -171,7 +171,7 @@ impl RetentionRepo {
         );
         let mut total = 0u64;
         loop {
-            let n = sqlx::query(&q)
+            let n = sqlx::query(sqlx::AssertSqlSafe(q.as_str()))
                 .bind(cutoff)
                 .execute(&self.pool)
                 .await
@@ -237,11 +237,11 @@ impl RetentionRepo {
                 }
             };
             loop {
-                let n = sqlx::query(&format!(
+                let n = sqlx::query(sqlx::AssertSqlSafe(format!(
                     "DELETE FROM work_events WHERE rowid IN \
                      (SELECT rowid FROM work_events WHERE work_item_id = ? AND ts < ? \
                       LIMIT {BATCH})"
-                ))
+                )))
                 .bind(&item)
                 .bind(&bound)
                 .execute(&self.pool)
@@ -296,7 +296,10 @@ mod tests {
     }
 
     async fn count(pool: &DbPool, sql: &str) -> i64 {
-        sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .fetch_one(pool)
+            .await
+            .unwrap()
     }
 
     #[test]
@@ -443,10 +446,11 @@ mod tests {
         let r = repo.prune(&RetentionPolicy::default()).await.unwrap();
         assert_eq!((r.mcp_tool_calls, r.mcp_call_log, r.audit_log), (1, 1, 1));
         for t in ["mcp_tool_calls", "mcp_call_log", "audit_log"] {
-            let ids: Vec<String> = sqlx::query_scalar(&format!("SELECT id FROM {t}"))
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+            let ids: Vec<String> =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT id FROM {t}")))
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
             assert_eq!(ids, vec!["young".to_string()], "{t}");
         }
     }

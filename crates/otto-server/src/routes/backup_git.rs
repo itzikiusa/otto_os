@@ -32,7 +32,7 @@ fn internal(error: impl std::fmt::Display) -> ApiError {
     otto_core::Error::Internal(error.to_string()).into()
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 fn json_bytes(value: &impl Serialize) -> ApiResult<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(value).map_err(internal)?;

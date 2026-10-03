@@ -430,7 +430,7 @@ impl ResourceAccessRepo {
             ResourceKind::K8sCluster => "k8s_clusters",
         };
         let exists_sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?)");
-        let exists: bool = sqlx::query_scalar(&exists_sql)
+        let exists: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(exists_sql.as_str()))
             .bind(resource_id)
             .fetch_one(&mut *tx)
             .await
@@ -767,7 +767,7 @@ async fn ensure_exists(
     context: &str,
 ) -> Result<()> {
     let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?)");
-    let exists: bool = sqlx::query_scalar(&sql)
+    let exists: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(id)
         .fetch_one(&mut **tx)
         .await
@@ -781,7 +781,7 @@ async fn ensure_exists(
 
 async fn ensure_exists_pool(pool: &DbPool, table: &str, id: &Id, context: &str) -> Result<()> {
     let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?)");
-    let exists: bool = sqlx::query_scalar(&sql)
+    let exists: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(id)
         .fetch_one(pool)
         .await

@@ -633,14 +633,14 @@ pub fn preview(content: &str) -> (String, bool) {
 pub fn content_sha256(content: &str) -> String {
     let mut h = Sha256::new();
     h.update(content.as_bytes());
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 /// SHA-256 (lowercase hex) of raw bytes (media blobs).
 pub fn bytes_sha256(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 /// Recursively sort object keys so a `Value` serializes deterministically

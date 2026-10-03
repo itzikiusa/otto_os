@@ -403,7 +403,7 @@ async fn parent_swap_after_validation_cannot_redirect_text_write_outside_vault()
     assert!(status.success(), "mkfifo failed: {status}");
 
     let seed = b"existing";
-    let expected_hash = format!("{:x}", Sha256::digest(seed));
+    let expected_hash = hex::encode(Sha256::digest(seed));
     let writer_engine = eng.clone();
     let write = tokio::spawn(async move {
         writer_engine

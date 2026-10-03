@@ -82,60 +82,60 @@ otto-transcript = { path = "crates/otto-transcript" }
 
 # Tree-sitter repo map (otto-context). A coherent grammar set pinned to one
 # tree-sitter ABI; `ignore` walks the repo honoring .gitignore.
-tree-sitter = "0.25"
-tree-sitter-rust = "0.24"
-tree-sitter-typescript = "0.23"
-tree-sitter-javascript = "0.23"
-tree-sitter-python = "0.23"
-tree-sitter-go = "0.23"
-ignore = "0.4"
+tree-sitter = "0.27.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-go = "0.25.0"
+ignore = "0.4.33"
 
-tokio = { version = "1", features = ["full"] }
-axum = { version = "0.8", features = ["ws", "macros"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono", "json"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-chrono = { version = "0.4", features = ["serde"] }
-thiserror = "2"
-anyhow = "1"
-ulid = "1"
-uuid = { version = "1", features = ["v4"] }
-argon2 = "0.5"
-sha2 = "0.10"
+tokio = { version = "1.53.1", features = ["full"] }
+axum = { version = "0.8.9", features = ["ws", "macros"] }
+tower-http = { version = "0.7.1", features = ["cors", "trace"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono", "json"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+chrono = { version = "0.4.45", features = ["serde"] }
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+ulid = "3.0.0"
+uuid = { version = "1.27.0", features = ["v4"] }
+argon2 = "0.6.0"
+sha2 = "0.11.0"
 # YAML frontmatter (Vault v3 / OKF). Already in the lockfile via otto-swarm.
-serde_yaml = "0.9"
-rand = "0.8"
-hex = "0.4"
-base64 = "0.22"
-keyring = { version = "3", features = ["apple-native"] }
-portable-pty = "0.9"
-bytes = "1"
-dashmap = "6"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream", "cookies", "socks"] }
-async-trait = "0.1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
-rust-embed = { version = "8", features = ["interpolate-folder-path"] }
-mime_guess = "2"
-rustix = { version = "1", features = ["fs"] }
-futures-util = "0.3"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-tempfile = "3"
-shell-words = "1"
-vt100 = "0.16"
-dirs = "6"
-protox = "0.7"
-prost = "0.13"
-prost-reflect = { version = "0.14", features = ["serde"] }
-prost-types = "0.13"
-tonic = { version = "0.12", features = ["tls", "tls-webpki-roots"] }
-reqwest_cookie_store = "0.8"
+serde_yaml = "0.9.34"
+rand = "0.10.3"
+hex = "0.4.3"
+base64 = "0.23.1"
+keyring = "4.2.0"
+portable-pty = "0.9.0"
+bytes = "1.12.1"
+dashmap = "6.2.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "multipart", "stream", "cookies", "socks", "query", "form"] }
+async-trait = "0.1.92"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-appender = "0.2.5"
+rust-embed = { version = "8.12.0", features = ["interpolate-folder-path"] }
+mime_guess = "2.0.5"
+rustix = { version = "1.1.5", features = ["fs"] }
+futures-util = "0.3.34"
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+tempfile = "3.27.0"
+shell-words = "1.1.1"
+vt100 = "0.16.2"
+dirs = "7.0.0"
+protox = "0.9.1"
+prost = "0.14.4"
+prost-reflect = { version = "0.16.5", features = ["serde"] }
+prost-types = "0.14.4"
+tonic = { version = "0.14.6", features = ["tls-ring", "tls-webpki-roots"] }
+reqwest_cookie_store = "0.10.0"
 # Message Brokers (Kafka) — librdkafka statically built (cmake) with vendored
 # OpenSSL so SASL_SSL works on machines without a system librdkafka/OpenSSL.
-rdkafka = { version = "0.39", default-features = false, features = ["cmake-build", "ssl-vendored", "libz", "zstd", "tokio"] }
-apache-avro = "0.21"
+rdkafka = { version = "0.39.0", default-features = false, features = ["cmake-build", "ssl-vendored", "libz", "zstd", "tokio"] }
+apache-avro = "0.22.0"
 
 # Build speed over the last few % of runtime/binary size: this app is built +
 # deployed locally many times a day, and thin-LTO's cross-module phase capped

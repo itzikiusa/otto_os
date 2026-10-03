@@ -435,7 +435,7 @@ fn version_of(content: Option<&[u8]>) -> String {
     if let Some(b) = content {
         h.update(b);
     }
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 fn read_profile_sync(dir: &Path) -> Result<ProfileDoc> {

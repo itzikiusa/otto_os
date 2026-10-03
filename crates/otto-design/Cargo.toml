@@ -23,5 +23,5 @@ base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
+tower = { version = "0.5.3", features = ["util"] }
+http-body-util = "0.1.5"

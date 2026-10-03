@@ -34,7 +34,7 @@ impl ImageStore {
     pub fn id_for(data_b64: &str) -> String {
         let mut h = Sha1::new();
         h.update(data_b64.as_bytes());
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     }
 
     /// File extension for a media type (unknown types are stored as `.png` —

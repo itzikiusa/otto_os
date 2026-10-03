@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use crate::{types::*, VaultEngine};
 
 fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 fn valid_id(id: &str) -> Result<()> {
     if id.is_empty()

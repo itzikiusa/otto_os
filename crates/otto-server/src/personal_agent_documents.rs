@@ -49,7 +49,7 @@ fn memory_version(path: &Path, content: Option<&[u8]>) -> String {
     if let Some(bytes) = content {
         hash.update(bytes);
     }
-    format!("{:x}", hash.finalize())
+    hex::encode(hash.finalize())
 }
 
 fn read_sync(root: &Path) -> Result<AgentDocument> {

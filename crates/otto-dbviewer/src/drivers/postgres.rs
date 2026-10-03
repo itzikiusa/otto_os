@@ -231,7 +231,7 @@ impl Driver for PostgresDriver {
         }
         sql.push_str(" ORDER BY n.nspname, c.relname LIMIT $2");
         let pattern = format!("%{}%", req.q);
-        let q = sqlx::query_as::<_, (String, String, String)>(&sql)
+        let q = sqlx::query_as::<_, (String, String, String)>(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(&pattern)
             .bind((limit + 1) as i64);
         let q = if req.all_schemas() {
@@ -606,10 +606,10 @@ impl Driver for PostgresDriver {
         // without a schema, the session default — not a pooled leftover.
         let schema = node.map(str::trim).filter(|s| !s.is_empty());
         (&mut *conn)
-            .execute(sqlx::raw_sql(&search_path_sql(schema)))
+            .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(search_path_sql(schema))))
             .await
             .map_err(types::upstream)?;
-        let row = sqlx::query(&format!("EXPLAIN (FORMAT JSON) {stmt}"))
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!("EXPLAIN (FORMAT JSON) {stmt}")))
             .fetch_one(&mut *conn)
             .await
             .map_err(types::upstream)?;
@@ -690,11 +690,11 @@ impl Driver for PostgresDriver {
         // without a schema, the session default — not a pooled leftover.
         let schema = node.map(str::trim).filter(|s| !s.is_empty());
         (&mut *conn)
-            .execute(sqlx::raw_sql(&search_path_sql(schema)))
+            .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(search_path_sql(schema))))
             .await
             .map_err(types::upstream)?;
 
-        let mut rows = sqlx::query(statement).fetch(&mut *conn);
+        let mut rows = sqlx::query(sqlx::AssertSqlSafe(statement)).fetch(&mut *conn);
         let mut sink = ExportSink::new(w, format);
         let mut header_written = false;
         let mut decoders: Vec<PgCell> = Vec::new();
@@ -861,14 +861,16 @@ impl PostgresDriver {
         );
         let rows: Vec<(String,)> = match &pat {
             Some(p) => {
-                sqlx::query_as(&format!("{base} AND c.relname ILIKE $2 ORDER BY c.relname"))
-                    .bind(schema)
-                    .bind(p)
-                    .fetch_all(&pool)
-                    .await
+                sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                    "{base} AND c.relname ILIKE $2 ORDER BY c.relname"
+                )))
+                .bind(schema)
+                .bind(p)
+                .fetch_all(&pool)
+                .await
             }
             None => {
-                sqlx::query_as(&format!("{base} ORDER BY c.relname"))
+                sqlx::query_as(sqlx::AssertSqlSafe(format!("{base} ORDER BY c.relname")))
                     .bind(schema)
                     .fetch_all(&pool)
                     .await
@@ -1389,7 +1391,9 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::PgPool> {
             Box::pin(async move {
                 if let Some(tz) = tz {
                     let stmt = format!("SET TIME ZONE '{}'", tz.replace('\'', "''"));
-                    let _ = (&mut *conn).execute(sqlx::raw_sql(&stmt)).await;
+                    let _ = (&mut *conn)
+                        .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(stmt.as_str())))
+                        .await;
                 }
                 Ok(())
             })
@@ -1489,7 +1493,9 @@ async fn acquire_session(
 ) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
     let mut conn = pool.acquire().await.map_err(types::upstream)?;
     (&mut *conn)
-        .execute(sqlx::raw_sql(&session_setup_sql(schema, timeout_ms)))
+        .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(session_setup_sql(
+            schema, timeout_ms,
+        ))))
         .await
         .map_err(types::upstream)?;
     Ok(conn)
@@ -1633,7 +1639,7 @@ async fn exec_read_conn(
 ) -> Result<ReadOut> {
     use futures_util::TryStreamExt as _;
 
-    let mut stream = sqlx::query(statement).fetch(&mut *conn);
+    let mut stream = sqlx::query(sqlx::AssertSqlSafe(statement)).fetch(&mut *conn);
     let mut columns: Vec<Column> = Vec::new();
     let mut decoders: Vec<PgCell> = Vec::new();
     let mut out_rows: Vec<Vec<Value>> = Vec::new();
@@ -1784,7 +1790,7 @@ fn pg_cell(row: &PgRow, idx: usize, dec: PgCell) -> Value {
 }
 
 async fn exec_write_conn(conn: &mut sqlx::PgConnection, statement: &str) -> Result<QueryResult> {
-    let res = sqlx::query(statement)
+    let res = sqlx::query(sqlx::AssertSqlSafe(statement))
         .execute(&mut *conn)
         .await
         .map_err(types::upstream)?;
@@ -2211,14 +2217,16 @@ async fn governed_read(
     // else the session default rather than a pooled leftover.
     let schema = req.scope_database();
     (&mut *tx)
-        .execute(sqlx::raw_sql(&search_path_sql(schema.as_deref())))
+        .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(search_path_sql(
+            schema.as_deref(),
+        ))))
         .await
         .map_err(types::upstream)?;
     if let Some(ms) = req.timeout_ms.filter(|ms| *ms > 0) {
         (&mut *tx)
-            .execute(sqlx::raw_sql(&format!(
+            .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
                 "SET LOCAL statement_timeout = {ms}"
-            )))
+            ))))
             .await
             .map_err(types::upstream)?;
     }

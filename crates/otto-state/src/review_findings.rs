@@ -495,7 +495,7 @@ impl ReviewFindingsRepo {
             sql.push_str(&format!(" AND path IN ({})", marks(p.len())));
         }
         let now = fmt(Utc::now());
-        let mut q = sqlx::query(&sql)
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(run_id)
             .bind(&now)
             .bind(workspace_id)

@@ -1,7 +1,7 @@
 //! argon2id password hashing + the shared minimum-password policy.
 
-use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::phc::PasswordHash;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
 use otto_core::{Error, Result};
 
@@ -21,11 +21,11 @@ pub fn validate_password(password: &str) -> Result<()> {
     Ok(())
 }
 
-/// Hash a password with argon2id (default params) and a fresh random salt.
+/// Hash a password with argon2id (default params) and a fresh random salt
+/// (drawn from the OS RNG by `password-hash`).
 pub fn hash_password(password: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map(|h| h.to_string())
         .map_err(|e| Error::Internal(format!("hash password: {e}")))
 }
@@ -46,7 +46,7 @@ mod tests {
     /// Random test password (never a hard-coded literal, so nothing in this
     /// file can be mistaken for a real credential by scanners or readers).
     fn random_pw() -> String {
-        SaltString::generate(&mut OsRng).to_string()
+        hex::encode(rand::random::<[u8; 16]>())
     }
 
     #[test]

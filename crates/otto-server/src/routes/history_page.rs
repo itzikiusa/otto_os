@@ -56,7 +56,7 @@ impl HistoryPageQuery {
             clean(self.cwd.as_deref()),
         ))
         .unwrap_or_default();
-        format!("{:x}", Sha256::digest(encoded))
+        hex::encode(Sha256::digest(encoded))
     }
     fn cursor(&self, scope: &str) -> ApiResult<Option<Cursor>> {
         let Some(encoded) = self.cursor.as_deref() else {

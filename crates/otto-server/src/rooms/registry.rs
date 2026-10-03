@@ -3,7 +3,9 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Utc};
 use otto_core::{api::*, Error, Result};
-use rand::{rngs::OsRng, RngCore};
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
@@ -144,7 +146,7 @@ pub(super) fn forbidden(s: &str) -> Error {
 }
 pub(super) fn secret() -> (String, [u8; 32]) {
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    UnwrapErr(SysRng).fill_bytes(&mut bytes);
     let token = URL_SAFE_NO_PAD.encode(bytes);
     let digest = hash(&token);
     (token, digest)

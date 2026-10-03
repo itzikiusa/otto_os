@@ -435,7 +435,8 @@ async fn hello(ws: &mut Ws, window: &str, pane: &str, module: &str, caps: &[&str
         json!({"type":"hello","client_id":"dev1","window_id":window,"pane":pane,
                "host_window_id":host,"route":module,"module":module,
                "focused":true,"visible":true,"capabilities":caps})
-        .to_string(),
+        .to_string()
+        .into(),
     ))
     .await
     .unwrap();
@@ -477,7 +478,8 @@ async fn agent_drives_the_window_end_to_end() {
         .send(Message::Text(
             json!({"type":"hello","client_id":"dev1","window_id":"evil","pane":"main","route":"database",
                    "module":"connections","focused":true,"visible":true,"capabilities":["db_run_query","open"]})
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .unwrap();

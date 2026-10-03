@@ -348,11 +348,9 @@ async fn serve_websocket(
             let value = HeaderValue::from_bytes(value.as_bytes()).map_err(|e| e.to_string())?;
             request.headers_mut().insert(name, value);
         }
-        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
-            max_message_size: Some(1024 * 1024),
-            max_frame_size: Some(1024 * 1024),
-            ..Default::default()
-        };
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(1024 * 1024))
+            .max_frame_size(Some(1024 * 1024));
         // SSRF guard, DNS-rebinding safe: resolve + vet the host ONCE and dial
         // exactly the vetted address (tungstenite's own connect would resolve
         // the name again, after `prepare_stream`'s pre-flight check). The
@@ -424,7 +422,7 @@ async fn serve_websocket(
                     match v.get("action").and_then(|a| a.as_str()) {
                         Some("send") => {
                             let data = v.get("data").and_then(|d| d.as_str()).unwrap_or("").to_string();
-                            if up_tx.send(TMsg::Text(data.clone())).await.is_err() {
+                            if up_tx.send(TMsg::Text(data.clone().into())).await.is_err() {
                                 let _ = send_json(&mut socket, json!({"type":"error","message":"upstream send failed"})).await;
                                 break;
                             }

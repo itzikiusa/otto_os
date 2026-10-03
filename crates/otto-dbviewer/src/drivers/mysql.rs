@@ -248,7 +248,8 @@ impl Driver for MysqlDriver {
         }
         sql.push_str(" ORDER BY table_schema, table_name LIMIT ?");
         let pattern = format!("%{}%", req.q);
-        let q = sqlx::query_as::<_, (String, String, String)>(&sql).bind(&pattern);
+        let q = sqlx::query_as::<_, (String, String, String)>(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(&pattern);
         let q = if req.all_schemas() {
             q
         } else {
@@ -660,7 +661,9 @@ impl Driver for MysqlDriver {
         let sql = format!("KILL QUERY {conn_id}");
         // Best-effort: an already-finished query yields "Unknown thread id 1234"
         // — that's a successful no-op cancel, not a failure to report.
-        let _ = sqlx::query(&sql).execute(&pool).await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .execute(&pool)
+            .await;
         Ok(())
     }
 
@@ -683,7 +686,7 @@ impl Driver for MysqlDriver {
             .begin_with("START TRANSACTION READ ONLY")
             .await
             .map_err(types::upstream)?;
-        let row = sqlx::query(&format!("EXPLAIN FORMAT=JSON {stmt}"))
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!("EXPLAIN FORMAT=JSON {stmt}")))
             .fetch_one(&mut *conn)
             .await
             .map_err(types::upstream)?;
@@ -772,7 +775,7 @@ impl Driver for MysqlDriver {
 
         // A real cursor over the wire: each `try_next().await` fetches the next
         // row; nothing buffers the whole result.
-        let mut rows = sqlx::query(statement).fetch(&mut *conn);
+        let mut rows = sqlx::query(sqlx::AssertSqlSafe(statement)).fetch(&mut *conn);
         let mut sink = ExportSink::new(w, format);
 
         let mut header_written = false;
@@ -1033,7 +1036,10 @@ impl MysqlDriver {
         table: &str,
     ) -> Result<Vec<IndexDef>> {
         let sql = format!("SHOW INDEX FROM `{}`.`{}`", esc_ident(db), esc_ident(table));
-        let rows = match sqlx::query(&sql).fetch_all(pool).await {
+        let rows = match sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .fetch_all(pool)
+            .await
+        {
             Ok(rows) => rows,
             // Views and permission edge-cases: no indexes rather than a hard error.
             Err(_) => return Ok(Vec::new()),
@@ -1139,7 +1145,7 @@ impl MysqlDriver {
             esc_ident(db),
             esc_ident(table)
         );
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .fetch_one(pool)
             .await
             .map_err(types::upstream)?;
@@ -1237,7 +1243,7 @@ impl MysqlDriver {
     ) -> Result<Option<String>> {
         let kw = if is_function { "FUNCTION" } else { "PROCEDURE" };
         let sql = format!("SHOW CREATE {kw} `{}`.`{}`", esc_ident(db), esc_ident(name));
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .fetch_one(pool)
             .await
             .map_err(types::upstream)?;
@@ -1349,11 +1355,11 @@ impl MysqlDriver {
     ) -> Result<Option<String>> {
         let mut conn = pool.acquire().await.map_err(types::upstream)?;
         (&mut *conn)
-            .execute(sqlx::raw_sql(&use_db_sql(db)))
+            .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(use_db_sql(db))))
             .await
             .map_err(types::upstream)?;
         let sql = format!("SHOW CREATE TRIGGER `{}`", esc_ident(name));
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .fetch_one(&mut *conn)
             .await
             .map_err(types::upstream)?;
@@ -1623,7 +1629,9 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::MySqlPool> {
             Box::pin(async move {
                 // Best-effort: ignore errors (e.g. a named zone when the server's
                 // tz tables aren't loaded) so a bad zone never breaks the session.
-                let _ = sqlx::query(&tz_stmt).execute(&mut *conn).await;
+                let _ = sqlx::query(sqlx::AssertSqlSafe(tz_stmt.as_str()))
+                    .execute(&mut *conn)
+                    .await;
                 // Use cached information_schema statistics (avoids the expensive
                 // per-table stats recomputation that slows the tree on big
                 // servers). Best-effort: harmless if the server lacks the var.
@@ -1724,7 +1732,7 @@ async fn acquire_scoped(
     let mut conn = pool.acquire().await.map_err(types::upstream)?;
     if let Some(db) = db {
         (&mut *conn)
-            .execute(sqlx::raw_sql(&use_db_sql(db)))
+            .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(use_db_sql(db))))
             .await
             .map_err(types::upstream)?;
         return Ok(conn);
@@ -1895,7 +1903,7 @@ async fn exec_read_conn(
 ) -> Result<ReadOut> {
     use futures_util::TryStreamExt as _;
 
-    let mut stream = sqlx::query(statement).fetch(&mut *conn);
+    let mut stream = sqlx::query(sqlx::AssertSqlSafe(statement)).fetch(&mut *conn);
     let mut columns: Vec<Column> = Vec::new();
     let mut decoders: std::sync::Arc<[CellDecoder]> = std::sync::Arc::from(Vec::new());
     let mut chunk: Vec<MySqlRow> = Vec::new();
@@ -2008,7 +2016,7 @@ fn raw_row_json_len(row: &MySqlRow, decoders: &[CellDecoder]) -> usize {
 /// Run a write/DDL statement on an already-prepared connection and return the
 /// affected-row acknowledgement.
 async fn exec_write_conn(conn: &mut sqlx::MySqlConnection, statement: &str) -> Result<QueryResult> {
-    let res = sqlx::query(statement)
+    let res = sqlx::query(sqlx::AssertSqlSafe(statement))
         .execute(&mut *conn)
         .await
         .map_err(types::upstream)?;

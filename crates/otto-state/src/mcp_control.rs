@@ -1102,7 +1102,7 @@ impl McpCallLogRepo {
             sql.push_str(" AND decision = ?");
         }
         sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(ids) = &q.workspace_ids {
             for id in ids {
                 query = query.bind(id);
@@ -1150,7 +1150,7 @@ impl McpCallLogRepo {
             ));
         }
         sql.push_str(" GROUP BY server_id, tool ORDER BY calls DESC");
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(ids) = workspace_ids {
             for id in ids {
                 query = query.bind(id);
@@ -1303,7 +1303,7 @@ impl McpApprovalRepo {
             sql.push_str(" AND status = ?");
         }
         sql.push_str(" ORDER BY created_at DESC LIMIT ?");
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(ids) = workspace_ids {
             for id in ids {
                 query = query.bind(id);

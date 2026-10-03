@@ -175,7 +175,10 @@ async fn migration_preserves_legacy_project_and_backfills_swarm_membership() {
         .iter()
         .filter(|m| m.version < 134)
     {
-        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        sqlx::raw_sql(migration.sql.clone())
+            .execute(&pool)
+            .await
+            .unwrap();
     }
     sqlx::raw_sql("INSERT INTO users(id,username,password_hash,created_at) VALUES ('user','user','x','2026-01-01T00:00:00Z');
         INSERT INTO workspaces(id,name,root_path,created_at) VALUES ('one','one','/tmp','2026-01-01T00:00:00Z');

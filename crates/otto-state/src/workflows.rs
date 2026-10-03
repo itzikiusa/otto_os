@@ -1001,7 +1001,7 @@ impl WorkflowsRepo {
              RETURNING rev"
         );
         let projection = crate::workflow_progress::nodes_projection(nodes)?;
-        let rev: Option<i64> = sqlx::query_scalar(&sql)
+        let rev: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(status.as_str())
             .bind(&nodes_json)
             .bind(&projection)

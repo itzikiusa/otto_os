@@ -118,7 +118,7 @@ fn def_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<(String, Node<'a>)> {
         .or_else(|| node.child_by_field_name("type"))
         .or_else(|| {
             (0..node.named_child_count())
-                .filter_map(|i| node.named_child(i))
+                .filter_map(|i| node.named_child(u32::try_from(i).ok()?))
                 .find(|c| IDENT_KINDS.contains(&c.kind()))
         })?;
     let text = name_node.utf8_text(src).ok()?.to_string();
@@ -170,11 +170,8 @@ fn collect(root: Node, src: &[u8]) -> (Vec<Def>, HashMap<String, usize>) {
                 }
             }
         }
-        for i in 0..node.named_child_count() {
-            if let Some(c) = node.named_child(i) {
-                stack.push(c);
-            }
-        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
     }
     (defs, refs)
 }

@@ -20,9 +20,9 @@ futures-util = { workspace = true }
 reqwest = { workspace = true }
 # The monitor's long-lived `kubectl proxy` gateway (monitor/gateway.rs) speaks
 # HTTP/1.1 over a private Unix socket (reqwest has no Unix-socket connector).
-hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
+hyper = { version = "1.11.1", features = ["client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+http-body-util = "0.1.5"
 # Direct `aws_accounts` lookup for eks-source clusters (env injection) — the
 # full AWS repo lives in otto-aws; see `clusters::aws_env_for`.
 sqlx = { workspace = true }
@@ -30,5 +30,5 @@ dirs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tower = { version = "0.5", features = ["util"] }
+tower = { version = "0.5.3", features = ["util"] }
 sqlx = { workspace = true }

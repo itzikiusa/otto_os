@@ -28,8 +28,11 @@ use std::fmt;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
-use sqlx::sqlite::{Sqlite, SqliteQueryResult, SqliteRow, SqliteStatement, SqliteTypeInfo};
-use sqlx::{Describe, Either, Execute, Executor, SqlitePool, Transaction};
+use sqlx::error::BoxDynError;
+use sqlx::sqlite::{
+    Sqlite, SqliteArguments, SqliteQueryResult, SqliteRow, SqliteStatement, SqliteTypeInfo,
+};
+use sqlx::{Describe, Either, Execute, Executor, SqlStr, SqlitePool, Transaction};
 
 /// The daemon's SQLite pools (see the module docs). Cheap to clone.
 #[derive(Clone)]
@@ -120,7 +123,7 @@ impl DbPool {
     /// `BEGIN IMMEDIATE`).
     pub async fn begin_with(
         &self,
-        statement: impl Into<std::borrow::Cow<'static, str>>,
+        statement: impl sqlx::SqlSafeStr,
     ) -> sqlx::Result<Transaction<'static, Sqlite>> {
         self.write.begin_with(statement).await
     }
@@ -150,6 +153,47 @@ impl DbPool {
     }
 }
 
+/// A statement taken apart for routing. [`Execute::sql`] consumes the query,
+/// so the router reads its arguments and caching flag first, takes the SQL,
+/// and hands the pool this reassembled statement. A query built from a
+/// prepared statement runs by its SQL text instead (SQLite's statement cache
+/// makes that equivalent).
+struct Routed {
+    sql: SqlStr,
+    arguments: Option<SqliteArguments>,
+    persistent: bool,
+}
+
+impl Routed {
+    fn take<'q, E: Execute<'q, Sqlite>>(mut query: E) -> Result<Self, BoxDynError> {
+        let arguments = query.take_arguments()?;
+        let persistent = query.persistent();
+        Ok(Self {
+            sql: query.sql(),
+            arguments,
+            persistent,
+        })
+    }
+}
+
+impl Execute<'_, Sqlite> for Routed {
+    fn sql(self) -> SqlStr {
+        self.sql
+    }
+
+    fn statement(&self) -> Option<&SqliteStatement> {
+        None
+    }
+
+    fn take_arguments(&mut self) -> Result<Option<SqliteArguments>, BoxDynError> {
+        Ok(self.arguments.take())
+    }
+
+    fn persistent(&self) -> bool {
+        self.persistent
+    }
+}
+
 impl<'p> Executor<'p> for &'p DbPool {
     type Database = Sqlite;
 
@@ -161,7 +205,12 @@ impl<'p> Executor<'p> for &'p DbPool {
         'p: 'e,
         E: 'q + Execute<'q, Sqlite>,
     {
-        self.route(query.sql()).fetch_many(query)
+        match Routed::take(query) {
+            Ok(routed) => self.route(routed.sql.as_str()).fetch_many(routed),
+            Err(e) => Box::pin(futures_util::stream::once(async move {
+                Err(sqlx::Error::Encode(e))
+            })),
+        }
     }
 
     fn fetch_optional<'e, 'q: 'e, E>(
@@ -172,28 +221,28 @@ impl<'p> Executor<'p> for &'p DbPool {
         'p: 'e,
         E: 'q + Execute<'q, Sqlite>,
     {
-        self.route(query.sql()).fetch_optional(query)
+        match Routed::take(query) {
+            Ok(routed) => self.route(routed.sql.as_str()).fetch_optional(routed),
+            Err(e) => Box::pin(async move { Err(sqlx::Error::Encode(e)) }),
+        }
     }
 
-    fn prepare_with<'e, 'q: 'e>(
+    fn prepare_with<'e>(
         self,
-        sql: &'q str,
+        sql: SqlStr,
         parameters: &'e [SqliteTypeInfo],
-    ) -> BoxFuture<'e, Result<SqliteStatement<'q>, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<SqliteStatement, sqlx::Error>>
     where
         'p: 'e,
     {
-        self.route(sql).prepare_with(sql, parameters)
+        self.route(sql.as_str()).prepare_with(sql, parameters)
     }
 
-    fn describe<'e, 'q: 'e>(
-        self,
-        sql: &'q str,
-    ) -> BoxFuture<'e, Result<Describe<Sqlite>, sqlx::Error>>
+    fn describe<'e>(self, sql: SqlStr) -> BoxFuture<'e, Result<Describe<Sqlite>, sqlx::Error>>
     where
         'p: 'e,
     {
-        self.route(sql).describe(sql)
+        self.route(sql.as_str()).describe(sql)
     }
 }
 

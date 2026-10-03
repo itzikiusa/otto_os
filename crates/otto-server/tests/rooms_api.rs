@@ -223,7 +223,10 @@ async fn connect(
         .map_err(Box::new)
 }
 async fn send(socket: &mut Socket, value: Value) {
-    socket.send(Message::Text(value.to_string())).await.unwrap();
+    socket
+        .send(Message::Text(value.to_string().into()))
+        .await
+        .unwrap();
 }
 async fn event(socket: &mut Socket) -> Value {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {

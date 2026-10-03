@@ -18,5 +18,5 @@ reqwest.workspace = true
 [dev-dependencies]
 ulid.workspace = true
 chrono.workspace = true
-tower = { version = "0.5", features = ["util"] }
+tower = { version = "0.5.3", features = ["util"] }
 tempfile.workspace = true

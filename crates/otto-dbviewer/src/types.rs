@@ -220,9 +220,9 @@ impl ResolvedConfig {
             params = serde_json::to_string(&cache_params).unwrap_or_default(),
         );
         format!(
-            "{}|{:x}",
+            "{}|{}",
             self.engine.as_str(),
-            Sha256::digest(raw.as_bytes())
+            hex::encode(Sha256::digest(raw.as_bytes()))
         )
     }
 }

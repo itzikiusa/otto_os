@@ -825,11 +825,13 @@ impl SwarmRepo {
             "swarm_projects",
             "swarm_agents",
         ] {
-            sqlx::query(&format!("DELETE FROM {tbl} WHERE swarm_id = ?"))
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("delete swarm children"))?;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {tbl} WHERE swarm_id = ?"
+            )))
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete swarm children"))?;
         }
         sqlx::query("DELETE FROM swarms WHERE id = ?")
             .bind(id)
@@ -1522,7 +1524,7 @@ impl SwarmRepo {
                 result_json = ?, error = ?, tokens_input = ?, tokens_output = ?, cost_usd = ?,
                 started_at = ?, finished_at = ? WHERE id = ? AND status IN ({placeholders})"
         );
-        let mut q = sqlx::query(&sql)
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(&session_id)
             .bind(&status)
             .bind(attempt)
@@ -1657,7 +1659,7 @@ impl SwarmRepo {
             sql.push_str(" AND status = ?");
         }
         sql.push_str(" ORDER BY enqueued_at DESC LIMIT 500");
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(v) = &f.workspace_id {
             q = q.bind(v);
         }
@@ -1869,7 +1871,7 @@ impl SwarmRepo {
             sql.push_str(" AND task_id = ?");
         }
         sql.push_str(" ORDER BY created_at DESC LIMIT ?");
-        let mut q = sqlx::query(&sql).bind(swarm_id);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(swarm_id);
         if let Some(v) = project_id {
             q = q.bind(v);
         }

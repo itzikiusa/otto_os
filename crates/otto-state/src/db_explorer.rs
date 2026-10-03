@@ -285,10 +285,10 @@ impl DbExplorerRepo {
 
     /// Return all history for a connection, unfiltered. For root / workspace-Admin use.
     pub async fn list_history(&self, connection_id: &Id, limit: i64) -> Result<Vec<HistoryEntry>> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {HISTORY_LIST_COLS} FROM db_query_history WHERE connection_id = ?
              ORDER BY created_at DESC LIMIT ?"
-        ))
+        )))
         .bind(connection_id)
         .bind(limit)
         .fetch_all(&self.pool)
@@ -308,10 +308,10 @@ impl DbExplorerRepo {
         user_id: &Id,
         limit: i64,
     ) -> Result<Vec<HistoryEntry>> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {HISTORY_LIST_COLS} FROM db_query_history WHERE connection_id = ? AND user_id = ?
              ORDER BY created_at DESC LIMIT ?"
-        ))
+        )))
         .bind(connection_id)
         .bind(user_id)
         .bind(limit)

@@ -843,7 +843,7 @@ impl ProductRepo {
                     change_notes, created_by, created_at
              FROM product_story_versions WHERE story_id = ? ORDER BY version_no DESC"
         );
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(story)
             .fetch_all(&self.pool)
             .await
@@ -899,7 +899,7 @@ impl ProductRepo {
              WHERE story_id = ? AND kind = 'source'
              ORDER BY version_no DESC LIMIT 1"
         );
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(story)
             .fetch_optional(&self.pool)
             .await

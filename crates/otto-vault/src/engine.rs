@@ -1994,7 +1994,7 @@ fn stat_mtime_ns(stat: &rustix::fs::Stat) -> i64 {
 fn hex_sha256(b: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(b);
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 fn slug(s: &str) -> String {

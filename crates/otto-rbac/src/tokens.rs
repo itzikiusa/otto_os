@@ -29,7 +29,9 @@ use otto_core::auth::{AuthContext, McpScope, SessionScope};
 use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{new_id, Error, Id, Result};
 use otto_state::DbPool;
-use rand::RngCore;
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
@@ -72,11 +74,11 @@ pub fn token_hash(token: &str) -> String {
 }
 
 /// Generate a uniformly-distributed 6-digit numeric OTP (`"000000"`..="999999")
-/// from `OsRng`. Rejection-samples to avoid the modulo bias a bare `% 1_000_000`
+/// from the OS RNG (`SysRng`). Rejection-samples to avoid the modulo bias a bare `% 1_000_000`
 /// would introduce, so every code is equally likely. The plaintext is returned
 /// to the caller exactly once (to email); only its SHA-256 is ever stored.
 pub fn generate_otp() -> String {
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = UnwrapErr(SysRng);
     // Largest multiple of 1_000_000 that fits in u32, used as the rejection
     // bound so the sampled value maps onto [0, 1_000_000) without bias.
     const BOUND: u32 = (u32::MAX / 1_000_000) * 1_000_000;
@@ -143,7 +145,7 @@ impl AuthRepo {
     /// time it exists in plaintext).
     pub async fn issue(&self, user_id: &Id) -> Result<String> {
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let now = Utc::now();
         sqlx::query(
@@ -532,7 +534,7 @@ impl AuthRepo {
         session_id: Option<&Id>,
     ) -> Result<(String, ApiTokenInfo)> {
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let prefix: String = token.chars().take(12).collect();
         let id = new_id();
@@ -729,7 +731,7 @@ impl AuthRepo {
             .ok_or_else(|| Error::Invalid(format!("unknown user '{user_id}'")))?;
 
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let prefix: String = token.chars().take(12).collect();
         let id = new_id();
@@ -804,7 +806,7 @@ impl AuthRepo {
         let scope_json = serde_json::to_string(&scope)
             .map_err(|e| Error::Internal(format!("serialize reviewer scope: {e}")))?;
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let id = new_id();
         let now = Utc::now();
@@ -1010,7 +1012,7 @@ impl AuthRepo {
         ttl: Duration,
     ) -> Result<String> {
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let prefix: String = token.chars().take(12).collect();
         let now = Utc::now();
@@ -1171,7 +1173,7 @@ impl AuthRepo {
         let ttl_secs = ttl_secs.clamp(SHARE_TOKEN_TTL_MIN_SECS, SHARE_TOKEN_TTL_MAX_SECS);
 
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let prefix: String = token.chars().take(12).collect();
         let id = new_id();
@@ -1214,7 +1216,7 @@ impl AuthRepo {
     /// Task 7.2 / design addendum "Email-OTP gate for share links").
     ///
     /// Like [`issue_share_token`] but additionally:
-    /// - generates a **6-digit OTP** from `OsRng` and stores only its SHA-256
+    /// - generates a **6-digit OTP** from the OS RNG and stores only its SHA-256
     ///   (`otp_hash`) — the plaintext is returned exactly once so the caller can
     ///   email it (the DB never holds the raw code);
     /// - locks the share to `recipient_email` (immutable; Task 7.4 extension only
@@ -1250,7 +1252,7 @@ impl AuthRepo {
         let window_secs = duration_secs.clamp(SHARE_TOKEN_TTL_MIN_SECS, SHARE_OTP_WINDOW_MAX_SECS);
 
         let mut buf = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut buf);
+        UnwrapErr(SysRng).fill_bytes(&mut buf);
         let token = hex::encode(buf);
         let prefix: String = token.chars().take(12).collect();
         let otp = generate_otp();

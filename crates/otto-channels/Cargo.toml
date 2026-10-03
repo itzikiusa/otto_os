@@ -26,7 +26,7 @@ anyhow = { workspace = true }
 # tokio1-rustls-tls keeps us on the workspace's rustls stack (no native-tls /
 # OpenSSL); STARTTLS to smtp.gmail.com:587 is the AsyncSmtpTransport default.
 # default-features = false drops lettre's default native-tls feature.
-lettre = { version = "0.11", default-features = false, features = [
+lettre = { version = "0.11.23", default-features = false, features = [
     "tokio1-rustls-tls",
     "smtp-transport",
     "builder",

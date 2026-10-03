@@ -468,7 +468,11 @@ fn order_by_doc(query: &Query, ctx: &Ctx) -> Result<Option<J>> {
     };
     let mut m = Map::new();
     for o in exprs {
-        let dir = if o.options.asc == Some(false) { -1 } else { 1 };
+        let dir = if matches!(o.options.sort, Some(sqlparser::ast::OrderBySort::Desc)) {
+            -1
+        } else {
+            1
+        };
         m.insert(field_path(&o.expr, ctx)?, json!(dir));
     }
     Ok(if m.is_empty() {

@@ -1126,15 +1126,12 @@ impl DbViewerService {
         use sha2::{Digest, Sha256};
         self.reap_idle().await;
         let prefix = format!("{conn_id}\0");
-        let fingerprint = format!(
-            "{:x}",
-            Sha256::digest(format!(
-                "{ssh:?}|{}|{}|{}",
-                engine.as_str(),
-                config.host,
-                config.port
-            ))
-        );
+        let fingerprint = hex::encode(Sha256::digest(format!(
+            "{ssh:?}|{}|{}|{}",
+            engine.as_str(),
+            config.host,
+            config.port
+        )));
         let key = format!("{prefix}{fingerprint}");
         // Fingerprint changes retire pending old setup; held query leases remain alive.
         {

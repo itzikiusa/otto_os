@@ -103,9 +103,9 @@ impl BrowserCredentialsRepo {
     }
 
     pub async fn list(&self, workspace_id: &str) -> Result<Vec<BrowserCredential>> {
-        sqlx::query_as::<_, BrowserCredential>(&format!(
+        sqlx::query_as::<_, BrowserCredential>(sqlx::AssertSqlSafe(format!(
             "SELECT {COLUMNS} FROM browser_credentials WHERE workspace_id = ? ORDER BY domain, username"
-        ))
+        )))
         .bind(workspace_id)
         .fetch_all(&self.pool)
         .await
@@ -113,9 +113,9 @@ impl BrowserCredentialsRepo {
     }
 
     pub async fn get(&self, id: &Id) -> Result<Option<BrowserCredential>> {
-        sqlx::query_as::<_, BrowserCredential>(&format!(
+        sqlx::query_as::<_, BrowserCredential>(sqlx::AssertSqlSafe(format!(
             "SELECT {COLUMNS} FROM browser_credentials WHERE id = ?"
-        ))
+        )))
         .bind(id)
         .fetch_optional(&self.pool)
         .await

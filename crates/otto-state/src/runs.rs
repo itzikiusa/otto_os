@@ -420,7 +420,7 @@ impl RunsRepo {
     async fn list_by_statuses(&self, statuses: &[&str]) -> Result<Vec<OttoRun>> {
         let placeholders = vec!["?"; statuses.len()].join(",");
         let sql = format!("SELECT * FROM otto_runs WHERE status IN ({placeholders})");
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         for s in statuses {
             q = q.bind(*s);
         }

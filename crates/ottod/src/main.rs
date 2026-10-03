@@ -1561,7 +1561,7 @@ async fn load_or_make_tls_config(
         let cert = rcgen::generate_simple_self_signed(sans)
             .map_err(|e| format!("generate self-signed cert: {e}"))?;
         let cert_pem = cert.cert.pem();
-        let key_pem = cert.key_pair.serialize_pem();
+        let key_pem = cert.signing_key.serialize_pem();
         std::fs::write(&cert_path, &cert_pem)
             .map_err(|e| format!("write {}: {e}", cert_path.display()))?;
         std::fs::write(&key_path, &key_pem)

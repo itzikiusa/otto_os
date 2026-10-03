@@ -430,7 +430,7 @@ impl Artifact {
         h.update(kind.as_str().as_bytes());
         h.update(b":");
         h.update(path_or_url.as_bytes());
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     }
 }
 

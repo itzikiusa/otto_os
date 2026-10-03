@@ -122,12 +122,12 @@ impl Store {
         // GLOBAL list — vaults are a cross-workspace library. Dedup by
         // root_path (lowest id wins) in case pre-global rows registered the
         // same folder from two workspaces.
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {} FROM vaults v \
              WHERE v.id IN (SELECT MIN(id) FROM vaults GROUP BY root_path) \
              ORDER BY v.id",
             Self::VAULT_COLS
-        ))
+        )))
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("vault.list"))?;
@@ -135,10 +135,10 @@ impl Store {
     }
 
     pub async fn get_vault(&self, id: i64) -> Result<VaultRec> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {} FROM vaults v WHERE v.id = ?",
             Self::VAULT_COLS
-        ))
+        )))
         .bind(id)
         .fetch_optional(&self.pool)
         .await

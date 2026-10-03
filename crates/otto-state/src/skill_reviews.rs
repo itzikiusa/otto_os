@@ -204,7 +204,7 @@ impl SkillReviewsRepo {
         let now = fmt(Utc::now());
         // `column` is a fixed internal literal, never user input.
         let sql = format!("UPDATE skill_reviews SET {column} = ?, updated_at = ? WHERE id = ?");
-        sqlx::query(&sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(json)
             .bind(&now)
             .bind(id)
