@@ -26,6 +26,13 @@ Two iterations producing identical unmet criteria and evidence block with a requ
 
 ## Preservation and recovery
 
+**Extend budget.** An exhausted loop hit its iteration or time cap (the stat
+that ran out is marked "cap reached"); a plain Resume would re-exhaust at once.
+When no budget is left the primary action is **Extend & resume…**: a dialog
+prefilled with the current caps + 50% (always above what is already used)
+saves the new limits (`PATCH /goal-loops/{id} {limits}`) and resumes. While
+budget remains, **Extend budget…** sits next to Resume.
+
 Pause banks active time. Stop releases execution resources and retains the worktree. Success, failure and exhaustion also retain tracked and untracked work. Restart pauses active loops and preserves blocked decisions, so you can Resume explicitly. Deleting loop history does not delete the working directory or branch; the detail view shows the retained path before deletion.
 
 Build proof includes the actual working contents: committed differences from the launch base, staged changes, unstaged changes and untracked files. Verification command output and evaluator evidence are attached to a proof pack. Research reports are attached as evidence. `OTTO_PROOF_REQUIRE_GOAL_LOOP=1` requires passing machine proof on every completion attempt, including the last permitted iteration. Exhausting the budget never relaxes this requirement.
