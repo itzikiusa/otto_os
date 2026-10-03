@@ -1368,6 +1368,17 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
     // Canned ClickHouse answers, keyed by SQL substrings unique to each builder.
     {
         let mut canned = ctx.sink.canned.lock().unwrap();
+        // The table's memory / rates / latency: ONE wide-tier totals read.
+        canned.push((
+            "AS last_mem, sum(req) AS req".into(),
+            vec![serde_json::json!({
+                "cluster_id": id, "namespace": "shop", "workload": "web",
+                "n": 60, "pods": 2, "mem_n": 120, "mem_sum": 30000.0, "mem_max": 600.0,
+                "last_mem_ts": 1_790_000_000, "last_mem": 600.0,
+                "req": 1000.0, "err": 100.0, "lat_sum": 0.0, "lat_cnt": 0.0,
+                "hist": {"0.1": 90.0, "+Inf": 100.0}
+            })],
+        ));
         canned.push((
             "UNION ALL".into(),
             vec![
@@ -1472,7 +1483,10 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
         "working-set wins over sys for web-1, plus web-2"
     );
     assert_eq!(rows[0]["mem_max"], 600.0);
-    assert_eq!(rows[0]["err_pct"], 10.0);
+    // rps / err_rps are totals over the window's seconds: compare the ratio
+    // with a float tolerance.
+    let err_pct = rows[0]["err_pct"].as_f64().unwrap();
+    assert!((err_pct - 10.0).abs() < 1e-9, "{err_pct}");
     assert_eq!(rows[0]["latency_kind"], "p95");
     assert_eq!(
         rows[0]["latency_ms"], 100.0,
