@@ -276,3 +276,70 @@ export function storyStage(raw: string | null | undefined): StatusInfo {
   if (info) return { key: k, ...info };
   return { key: k || 'unknown', label: k ? sentenceCase(k) : 'Unknown', tone: 'neutral' };
 }
+
+// ---------------------------------------------------------------------------
+// Why / when a session went dormant (review A4)
+// ---------------------------------------------------------------------------
+
+/** `meta.suspended` as the daemon stamps it (manager.rs `stamp_suspended`). */
+export interface SuspendedMeta {
+  reason?: string;
+  at?: string;
+}
+
+const SUSPEND_REASONS: Record<string, string> = {
+  idle: 'idle too long',
+  cap: 'live-session limit',
+  restart: 'Otto restarted',
+  released: 'released to free memory',
+};
+
+function agoLabel(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86_400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86_400)}d ago`;
+}
+
+/**
+ * "Suspended 3h ago · idle too long" from `meta.suspended`, or null when the
+ * session carries no (readable) stamp. Callers show it only while the session
+ * is actually dormant — a resume clears the stamp, but a stale meta copy must
+ * never relabel a live session.
+ */
+export function suspendedNote(meta: Record<string, unknown> | null | undefined, nowMs: number): string | null {
+  const raw = meta?.suspended;
+  if (!raw || typeof raw !== 'object') return null;
+  const s = raw as SuspendedMeta;
+  const at = typeof s.at === 'string' ? Date.parse(s.at) : NaN;
+  const why = typeof s.reason === 'string' ? (SUSPEND_REASONS[s.reason] ?? null) : null;
+  if (Number.isNaN(at) && !why) return null;
+  const when = Number.isNaN(at) ? '' : ` ${agoLabel(nowMs - at)}`;
+  return `Suspended${when}${why ? ` · ${why}` : ''}`;
+}
+
+/** `hello_ack.boot_restore` (ws.md): what the daemon's boot restore did. */
+export interface BootRestoreLike {
+  kept_running?: number;
+  suspended?: number;
+}
+
+/**
+ * The "Otto restarted" toast body, or null when the restart touched no
+ * session (nothing worth interrupting the user for).
+ */
+export function restartSummaryText(r: BootRestoreLike | null | undefined): string | null {
+  const kept = Math.max(0, r?.kept_running ?? 0);
+  const suspended = Math.max(0, r?.suspended ?? 0);
+  if (kept === 0 && suspended === 0) return null;
+  const plural = (n: number) => (n === 1 ? 'session' : 'sessions');
+  const parts: string[] = [];
+  if (kept > 0) parts.push(`${kept} ${plural(kept)} kept running`);
+  if (suspended > 0) {
+    parts.push(
+      `${suspended}${kept > 0 ? '' : ` ${plural(suspended)}`} suspended — ${suspended === 1 ? 'it resumes' : 'they resume'} when you open ${suspended === 1 ? 'it' : 'them'}`,
+    );
+  }
+  return parts.join(' · ');
+}

@@ -1,7 +1,7 @@
 // Shared status vocabulary (lib/status.ts): sessions, runs, environments.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { envTone, isResumable, runStatus, sentenceCase, sessionState, storyStage } from '../src/lib/status.ts';
+import { envTone, isResumable, restartSummaryText, runStatus, sentenceCase, sessionState, storyStage, suspendedNote } from '../src/lib/status.ts';
 
 test('storyStage: product stages map to one label/tone; done is success, not accent', () => {
   assert.deepEqual([storyStage('draft').label, storyStage('draft').tone], ['Draft', 'neutral']);
@@ -106,4 +106,28 @@ test('envTone: prod danger, staging warning, dev neutral', () => {
   assert.deepEqual([envTone('staging').tone, envTone('stg').key], ['warning', 'staging']);
   assert.deepEqual([envTone('dev').tone, envTone(undefined).key], ['neutral', 'dev']);
   assert.deepEqual([envTone('sandbox').label, envTone('sandbox').tone], ['sandbox', 'neutral']);
+});
+
+test('suspendedNote says why and when a session went dormant (A4)', () => {
+  const now = Date.parse('2026-10-03T12:00:00Z');
+  assert.equal(
+    suspendedNote({ suspended: { reason: 'idle', at: '2026-10-03T09:00:00Z' } }, now),
+    'Suspended 3h ago · idle too long',
+  );
+  assert.equal(suspendedNote({ suspended: { reason: 'restart', at: '2026-10-03T11:59:30Z' } }, now), 'Suspended just now · Otto restarted');
+  assert.equal(suspendedNote({ suspended: { reason: 'cap', at: '2026-10-01T12:00:00Z' } }, now), 'Suspended 2d ago · live-session limit');
+  assert.equal(suspendedNote({ suspended: { reason: 'mystery', at: '2026-10-03T11:30:00Z' } }, now), 'Suspended 30m ago');
+  assert.equal(suspendedNote({ suspended: { reason: 'idle' } }, now), 'Suspended · idle too long');
+  assert.equal(suspendedNote({ suspended: {} }, now), null);
+  assert.equal(suspendedNote({ suspended: 'idle' }, now), null);
+  assert.equal(suspendedNote({}, now), null);
+  assert.equal(suspendedNote(null, now), null);
+});
+
+test('restartSummaryText reports kept vs suspended sessions, or nothing', () => {
+  assert.equal(restartSummaryText({ kept_running: 5, suspended: 2 }), '5 sessions kept running · 2 suspended — they resume when you open them');
+  assert.equal(restartSummaryText({ kept_running: 1, suspended: 0 }), '1 session kept running');
+  assert.equal(restartSummaryText({ kept_running: 0, suspended: 1 }), '1 session suspended — it resumes when you open it');
+  assert.equal(restartSummaryText({ kept_running: 0, suspended: 0 }), null);
+  assert.equal(restartSummaryText(null), null);
 });

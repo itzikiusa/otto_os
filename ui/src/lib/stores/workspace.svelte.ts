@@ -9,6 +9,8 @@ import type {
   AttachedIssue,
   CreateSessionReq,
   Id,
+  OpenAgentSessionReq,
+  OpenAgentSessionResp,
   OttoEvent,
   Session,
   SessionStatus,
@@ -819,6 +821,37 @@ class WorkspaceStore {
     };
     const s = await api.post<Session>(`/workspaces/${target}/sessions`, stamped);
     this.addSession(s);
+    return s;
+  }
+
+  /**
+   * Start an agent session WITH an opening prompt (`POST …/sessions/open`): the
+   * daemon waits for the CLI to be ready (trust dialog / cold start), pastes
+   * the prompt, verifies the echo and presses Enter — no client-side timer
+   * racing the spawn (A6). Always stamps `meta.work = {origin: 'manual'}`: the
+   * route otherwise marks the session a delegation, which makes it
+   * engine-owned (5-minute idle grace, hidden from foreground counts). Same
+   * device stamp + list/status bookkeeping as {@link createSessionQuiet};
+   * `opts.route` also navigates to it like {@link createSession}.
+   */
+  async openSessionWithPrompt(
+    req: OpenAgentSessionReq,
+    opts?: { scratch?: boolean; route?: boolean },
+  ): Promise<Session> {
+    const target = this.createTarget(opts);
+    const body: OpenAgentSessionReq = {
+      ...req,
+      meta: { ...(req.meta ?? {}), client_id: clientId(), work: { origin: 'manual' } },
+    };
+    const { session: s } = await api.post<OpenAgentSessionResp>(`/workspaces/${target}/sessions/open`, body);
+    if (opts?.route) {
+      this.addSession(s);
+    } else {
+      if (this.belongsHere(s.workspace_id) && !this.sessions.some((x) => x.id === s.id)) {
+        this.sessions = [...this.sessions, s];
+      }
+      this.statusMap[s.id] = s.status;
+    }
     return s;
   }
 

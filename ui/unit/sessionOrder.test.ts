@@ -35,3 +35,10 @@ test('applyOrder with an empty order equals recency sort', () => {
   assert.deepEqual(applyOrder(sessions, []).map((s) => s.id), ['b', 'c', 'a']);
   assert.deepEqual(applyOrder([], ['a']), []);
 });
+
+test('applyTokenOrder: most tokens first, unused sessions keep recent order after', async () => {
+  const { applyTokenOrder } = await import('../src/lib/stores/sessionOrder.ts');
+  const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
+  const got = applyTokenOrder(rows, { c: 500, a: 10, d: 500 }).map((r) => r.id);
+  assert.deepEqual(got, ['c', 'd', 'a', 'b']);
+});

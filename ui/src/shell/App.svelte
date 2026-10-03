@@ -83,6 +83,7 @@
   import type { Connection, Session } from '../lib/api/types';
   import { toasts } from '../lib/toast.svelte';
   import { now } from '../lib/stores/now.svelte';
+  import { badgeWriter, tauriBadgeSink } from '../lib/dockBadge';
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
 
@@ -105,6 +106,13 @@
     if (!untrack(() => loadedPage(pageKey))) void loadPage(pageKey).catch(() => {});
   });
   $effect(() => installNavPrefetch());
+  // Dock badge = sessions waiting on you (A1). Once per window; the shell
+  // command itself only honours the main window. Unmount (sign-out) → 0.
+  if (isTauri && !isEmbedded) {
+    const badge = badgeWriter(tauriBadgeSink);
+    $effect(() => badge.set(ws.needsYouCount));
+    $effect(() => () => badge.flush(0));
+  }
   $effect(() => {
     if (isEmbedded || isPopout) return;
     return prefetchPagesWhenIdle();

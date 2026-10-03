@@ -25,7 +25,11 @@
   import StartRoomModal from '../rooms/StartRoomModal.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { popoutItems } from '../../lib/popoutMenu';
-  import { now } from '../../lib/stores/now.svelte';
+  import { now, nowMinute } from '../../lib/stores/now.svelte';
+  import { sessionUsage } from '../../lib/stores/sessionUsage.svelte';
+  import { pollWhileVisible } from '../../lib/poll';
+  import { sessionUsageLabel } from '../../lib/sessionUsage';
+  import { suspendedNote } from '../../lib/status';
   import { idleSuspend } from '../../lib/stores/idleSuspend.svelte';
   import { suspendHint } from '../../lib/idleSuspend';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -107,8 +111,13 @@
     const origin = (session.meta?.work as { origin?: string } | undefined)?.origin;
     const userStarted = (origin === undefined || origin === 'manual') && isForeground(session);
     idleSuspend.ensure();
-    const _tick = now(); // reactive dependency: re-computes every second
-    return suspendHint(Date.now() - Date.parse(session.last_active_at), userStarted, idleSuspend.policy);
+    const idleMs = Date.now() - Date.parse(session.last_active_at);
+    // Reactive dependency: the 1-second clock only while the label shows
+    // seconds; past a minute the label is minute-grain, so re-run once a
+    // minute (12 tiled panes stop recomputing every second — A3).
+    if (idleMs > 60_000) nowMinute();
+    else now();
+    return suspendHint(idleMs, userStarted, idleSuspend.policy);
   });
   const readOnly = $derived(ws.myRole === 'viewer');
 
@@ -457,6 +466,24 @@
     }
   }
 
+  // Per-session tokens + cost (A5): loaded while the pane is focused (at most
+  // once a minute — the store throttles) and whenever the details open.
+  const canUsage = $derived(auth.can('usage', 'view'));
+  const usageLabel = $derived(canUsage ? sessionUsageLabel(sessionUsage.bySession[sessionId]) : null);
+  $effect(() => {
+    if (!isAgent || !focused || !canUsage) return;
+    const id = sessionId;
+    const p = pollWhileVisible(() => sessionUsage.loadSession(id), { ms: 60_000 });
+    return () => p.stop();
+  });
+
+  /** Why + when a dormant session was suspended (A4) — "Suspended 3h ago ·
+   *  idle too long"; only while it IS suspended (a resume clears the stamp,
+   *  but a stale meta copy must never relabel a live pane). Minute clock. */
+  const suspendNote = $derived(
+    paneState.key === 'suspended' ? suspendedNote(session?.meta, nowMinute()) : null,
+  );
+
   /** What the header no longer shows inline — the details chip's tooltip and
    *  menu, and the ⋯ info rows once the chip itself is folded away. */
   const detailRows = $derived(
@@ -464,7 +491,8 @@
       provider: session?.provider,
       nameFull: nameFull && nameFull !== session?.title ? nameFull : null,
       account: typeof session?.meta?.account_label === 'string' ? session.meta.account_label : null,
-      state: paneState.key === 'needs-you' || paneState.key === 'suspended' || paneState.key === 'stale' ? paneState.label : null,
+      state: suspendNote ?? (paneState.key === 'needs-you' || paneState.key === 'suspended' || paneState.key === 'stale' ? paneState.label : null),
+      usage: usageLabel,
       idle: idleHint?.label,
       tasks: summary && summary.total > 0 ? { done: summary.done, total: summary.total } : null,
       now: summary?.in_progress,
@@ -501,6 +529,7 @@
     return rows;
   }
   function openDetails(e: MouseEvent | KeyboardEvent): void {
+    if (isAgent && canUsage) void sessionUsage.loadSession(sessionId);
     ctxMenu.show(e, detailItems());
   }
 
@@ -723,7 +752,7 @@
         <Icon name="bell" size={11} /><span class="head-lbl">Needs you</span>
       </span>
     {:else if paneState.key === 'suspended' || paneState.key === 'stale'}
-      <span class="state-note" title={paneState.hint}>{paneState.label}</span>
+      <span class="state-note" title={suspendNote ? `${suspendNote} — resumes when you open it` : paneState.hint}>{paneState.label}</span>
     {/if}
     {#if summary && summary.total > 0}
       <span

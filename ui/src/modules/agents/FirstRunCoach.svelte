@@ -159,21 +159,19 @@
     if (launchBusy || !hasWorkspace || !hasAgentCli) return;
     launchBusy = true;
     try {
-      const s = await ws.createSession({
-        kind: 'agent',
-        provider: launchProvider,
-        title: 'First session',
-        cwd: ws.current?.root_path ?? null,
-        meta: { source: 'onboarding' },
-      });
-      // createSession → addSession → navigateToSession handles the route.
-      // Seed the starter prompt once the PTY has had a moment to spawn the CLI.
-      // Best-effort: a failed seed still leaves a usable, opened session.
-      setTimeout(() => {
-        void ws.sendInput(s.id, STARTER_PROMPT).catch(() => {
-          /* agent not ready / no permission — the empty session is still fine */
-        });
-      }, 1500);
+      // The daemon delivers the starter prompt once the CLI is actually ready
+      // (cold start, trust dialog) — a fixed client timer used to race it and
+      // drop the prompt (A6). `route` → addSession → navigateToSession.
+      await ws.openSessionWithPrompt(
+        {
+          provider: launchProvider,
+          title: 'First session',
+          cwd: ws.current?.root_path ?? null,
+          prompt: STARTER_PROMPT,
+          meta: { source: 'onboarding' },
+        },
+        { route: true },
+      );
       remember();
       ondismiss();
     } catch (e) {

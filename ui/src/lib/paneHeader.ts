@@ -85,6 +85,8 @@ export interface PaneDetailsInput {
   handoverFrom?: string | null;
   handoverPending?: boolean;
   cwd?: string | null;
+  /** "2.1M tokens · $1.24" (A5) — tokens first, cost second. */
+  usage?: string | null;
 }
 
 export function paneDetails(d: PaneDetailsInput): [string, string][] {
@@ -98,6 +100,7 @@ export function paneDetails(d: PaneDetailsInput): [string, string][] {
   put('Account', d.account);
   put('State', d.state);
   put('Idle', d.idle);
+  put('Usage', d.usage);
   if (d.tasks && d.tasks.total > 0) put('Tasks', `${d.tasks.done}/${d.tasks.total} done`);
   put('Now', d.now);
   put('Handed over from', d.handoverFrom);

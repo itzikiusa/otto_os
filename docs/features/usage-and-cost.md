@@ -619,3 +619,22 @@ history), so you lose forward attribution for those files, not duplicate it.
 - **Source:** `crates/otto-usage/`, `crates/ottod/src/usage_tailer.rs`,
   `crates/otto-server/src/routes/usage.rs`, `crates/otto-server/src/monitor.rs`,
   `ui/src/modules/usage/`.
+
+## Per-session tokens on the Agents page
+
+Each agent session's usage is visible where you work with it (review A5):
+
+- **Pane details chip** — a *Usage* row, tokens first and cost second:
+  *"2.1M tokens · $1.24"* (`GET /sessions/{id}/usage`, the session's whole
+  recorded history; `null` = nothing recorded, so the row is simply absent).
+  Loaded while the pane is focused, at most once a minute, and when the chip
+  opens.
+- **Sidebar** — *Sort: Tokens (most first, 30 days)* in the Agents sort menu,
+  and a tokens/cost line in each row's tooltip
+  (`GET /workspaces/{wid}/sessions/usage?days=30`; the daemon caches its
+  rollup for 60 s). Sessions without usage keep their recent order after the
+  rest.
+
+Both need `Usage:View`; the per-session route also requires seeing the session
+(owner or workspace admin), the workspace one returns only the sessions you
+may see. With usage tracking unavailable the sort option is hidden.

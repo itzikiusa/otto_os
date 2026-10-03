@@ -53,3 +53,30 @@ test('a new notice is prepended', () => {
   n.ingest(notice({ id: 'n2', created_at: '2026-09-24T12:00:00Z' }));
   assert.equal(n.notices.map((x: { id: string }) => x.id).join(','), 'n2,n1');
 });
+
+// A2: "awaiting input" (info) earns a native banner only when not watched.
+function storeWith(active: string | null) {
+  const { notifications } = loadSource(new URL('../src/lib/stores/notifications.svelte.ts', import.meta.url), {
+    svelte: { untrack: (fn: () => unknown) => fn() },
+    '../api/client': { api: { get: async () => [], post: async () => ({}), del: async () => ({}) } },
+    '../toast.svelte': { toasts: { warn() {}, info() {} } },
+    '../external': { openExternal: async () => {} },
+    './workspace.svelte': { ws: { sessions: [], activeSessionId: active } },
+    '../desktop': { isEmbedded: false },
+  });
+  return notifications;
+}
+
+test('awaiting-input banners only for a session you are not watching (A2)', () => {
+  const waiting = notice({ action: { type: 'open_session', session_id: 's1' } });
+  assert.equal(storeWith('s2').wantsNative(waiting), true, 'another session is active');
+  assert.equal(storeWith('s1').wantsNative(waiting), false, 'watching it right now');
+  const n = storeWith('s2');
+  n.settings = { ...n.settings, native_on_waiting: false };
+  assert.equal(n.wantsNative(waiting), false, 'setting off');
+  n.settings = { ...n.settings, native_on_waiting: true, native_enabled: false };
+  assert.equal(n.wantsNative(waiting), false, 'native notifications off entirely');
+  const other = storeWith('s2');
+  assert.equal(other.wantsNative(notice({ source_key: 'session:s1:finished', action: { type: 'open_session', session_id: 's1' } })), false, 'other info notices stay quiet');
+  assert.equal(other.wantsNative(notice({ severity: 'warn', action: null })), true, 'warn/error always banner');
+});

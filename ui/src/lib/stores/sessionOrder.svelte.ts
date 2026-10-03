@@ -12,7 +12,7 @@ class SessionOrderStore {
   order: Id[] = $state([]);
   private wsKey = 'scratch';
 
-  /** Accepts only `{ mode ∈ {'recent','manual'}, order: string[] }`; anything else → defaults. */
+  /** Accepts only `{ mode ∈ {'recent','manual','tokens'}, order: string[] }`; anything else → defaults. */
   load(wsKey: string): void {
     this.wsKey = wsKey;
     let mode: OrderMode = 'recent';
@@ -20,7 +20,7 @@ class SessionOrderStore {
     try {
       const raw = localStorage.getItem(winKey(LS_SESSION_ORDER + wsKey));
       const o = raw ? (JSON.parse(raw) as { mode?: unknown; order?: unknown } | null) : null;
-      if (o && (o.mode === 'recent' || o.mode === 'manual') && Array.isArray(o.order)) {
+      if (o && (o.mode === 'recent' || o.mode === 'manual' || o.mode === 'tokens') && Array.isArray(o.order)) {
         mode = o.mode;
         order = o.order.filter((x): x is Id => typeof x === 'string');
       }

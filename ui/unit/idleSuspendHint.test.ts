@@ -16,11 +16,15 @@ const MIN = 60_000;
 
 test('user-started sessions count down on the 24-h manual grace, engine ones on 5 min', () => {
   const p = DEFAULT_IDLE_SUSPEND_POLICY;
-  assert.equal(suspendHint(4 * MIN, true, p)?.label, '4m idle · suspends in 24h');
+  // Far from the suspend: just the idle time (the countdown is noise there,
+  // and false for a watched pane); the rule stays in the tooltip.
+  assert.equal(suspendHint(4 * MIN, true, p)?.label, '4m idle');
   assert.equal(suspendHint(4 * MIN, false, p)?.label, '4m idle · suspends in 1m');
   assert.equal(suspendHint(6 * MIN, false, p)?.label, '6m idle · suspending…');
-  assert.equal(suspendHint(30 * 1000, true, p)?.label, '30s idle · suspends in 24h');
-  assert.equal(suspendHint(5 * 60 * MIN, true, p)?.label, '5h idle · suspends in 19h');
+  assert.equal(suspendHint(30 * 1000, true, p)?.label, '30s idle');
+  assert.equal(suspendHint(5 * 60 * MIN, true, p)?.label, '5h idle');
+  // Inside the last two hours the countdown appears.
+  assert.equal(suspendHint(22 * 60 * MIN + 1 * MIN, true, p)?.label, '22h idle · suspends in 2h');
   assert.equal(suspendHint(23 * 60 * MIN + 30 * MIN, true, p)?.label, '23h idle · suspends in 30m');
   assert.match(suspendHint(4 * MIN, true, p)!.title, /after 24 h of quiet/);
   assert.equal(suspendHint(-1, true, p), null);
@@ -38,7 +42,7 @@ test('durations read naturally at every scale', () => {
 
 test('settings override the grace; manual 0 = never suspended, so no hint', () => {
   const p = policyFromSettings({ manual_idle_suspend_secs: 600, idle_suspend_grace_secs: 120, max_live_agent_sessions: 0 });
-  assert.equal(suspendHint(4 * MIN, true, p)?.label, '4m idle · suspends in 6m');
+  assert.equal(suspendHint(4 * MIN, true, p)?.label, '4m idle · suspends in 6m', 'under 2 h away → countdown');
   assert.equal(suspendHint(1 * MIN, false, p)?.label, '1m idle · suspends in 1m');
   assert.doesNotMatch(suspendHint(1 * MIN, false, p)!.title, /live agent sessions/, 'cap off → no cap note');
   const never = policyFromSettings({ manual_idle_suspend_secs: 0 });
