@@ -613,7 +613,9 @@ otto-state, so the row is embedded as `serde_json::Value`):
 ```
 
 - `swarm_status` — a swarm's lifecycle status changed (`active|paused|aborted`).
-- `swarm_run_updated` — a swarm run was created or changed.
+- `swarm_run_updated` — a swarm run was created or changed. `run` is lite like
+  `GET /swarm/runs`: `result` is `null` unless `kind = 'recruit'`; read one run's
+  result with `GET /swarm/runs/{rid}`.
 - `swarm_task_updated` — a swarm task was created or changed.
 - `swarm_project_cleared` — a project's board was cleared (all tasks + project-scoped
   feed deleted, in-flight runs stopped). Clients drop local task/board state for the

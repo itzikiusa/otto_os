@@ -142,9 +142,21 @@ async fn build_view(ctx: &ServerCtx, ws_id: &Id) -> MissionView {
     //    the `waiting` bucket, and surface all non-archived agent sessions
     //    whose status is Working/Running in the `working` bucket.
     // ------------------------------------------------------------------
+    // Active agent sessions only, filtered in SQL (perf §15 F7) — archived
+    // history and connection sessions were decoded and then skipped below.
     let sessions = ctx
         .manager
-        .list_by_workspace(ws_id)
+        .list_filtered(
+            &[otto_state::SessionScope {
+                workspace_id: ws_id.clone(),
+                owner: None,
+            }],
+            &otto_state::SessionListFilter {
+                archived: Some(false),
+                kind: Some("agent".into()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap_or_default();
 

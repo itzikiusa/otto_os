@@ -789,6 +789,40 @@ impl SessionsRepo {
     }
 }
 
+// --- Targeted live-session lookups (perf §15 F7) ---------------------------
+impl SessionsRepo {
+    /// Non-archived, non-exited sessions of `ws` (optionally of one `kind`)
+    /// whose `meta.<meta_key>` equals `value` — filtered in SQL so a lookup
+    /// never decodes the workspace's whole session history (the swarm's
+    /// per-turn agent-session reuse used to load ~2k rows / 345 KB of
+    /// `meta_json`). `meta_key` is a compile-time identifier, never input.
+    pub async fn list_live_by_meta(
+        &self,
+        ws: &Id,
+        kind: Option<&str>,
+        meta_key: &'static str,
+        value: &str,
+    ) -> Result<Vec<Session>> {
+        debug_assert!(meta_key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_'));
+        let q = format!(
+            "SELECT * FROM sessions WHERE workspace_id = ? AND archived = 0 \
+             AND status != 'exited' AND (? IS NULL OR kind = ?) \
+             AND json_extract(meta_json, '$.{meta_key}') = ? ORDER BY created_at"
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(q.as_str()))
+            .bind(ws)
+            .bind(kind)
+            .bind(kind)
+            .bind(value)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("sessions by meta"))?;
+        rows.iter().map(row_to_session).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1545,5 +1579,38 @@ mod tests {
         let s = repo.get(&id).await.unwrap();
         assert_eq!(s.status, SessionStatus::Running);
         assert_eq!(fmt(s.last_active_at), fmt(ts(old).unwrap()));
+    }
+
+    /// Perf §15 F7: the targeted lookup matches on `meta.<key>` in SQL and
+    /// skips archived and exited rows.
+    #[tokio::test]
+    async fn list_live_by_meta_filters_in_sql() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let now = fmt(Utc::now());
+        let live = insert_session(&pool, &ws, &user, &now, r#"{"agent_id":"a1"}"#, 0).await;
+        insert_session(&pool, &ws, &user, &now, r#"{"agent_id":"a1"}"#, 1).await;
+        let exited = insert_session(&pool, &ws, &user, &now, r#"{"agent_id":"a1"}"#, 0).await;
+        sqlx::query("UPDATE sessions SET status = 'exited' WHERE id = ?")
+            .bind(&exited)
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert_session(&pool, &ws, &user, &now, r#"{"agent_id":"a2"}"#, 0).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let ws: Id = ws;
+        let got = repo
+            .list_live_by_meta(&ws, Some("agent"), "agent_id", "a1")
+            .await
+            .unwrap();
+        assert_eq!(
+            got.into_iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![live]
+        );
+        assert!(repo
+            .list_live_by_meta(&ws, Some("connection"), "agent_id", "a1")
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

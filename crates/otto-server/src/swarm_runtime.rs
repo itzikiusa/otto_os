@@ -230,9 +230,18 @@ pub fn waiting_for(swarm_id: &Id) -> HashMap<Id, WaitingReason> {
 }
 
 async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
+    let started = std::time::Instant::now();
     let mut waiting: HashMap<Id, (&'static str, String)> = HashMap::new();
     let r = tick_inner(ctx, swarm_id, &mut waiting).await;
+    let n_waiting = waiting.len();
     set_waiting(swarm_id, waiting);
+    // Perf §15 M1: per-tick cost is observable (`RUST_LOG=otto_server::swarm_runtime=debug`).
+    tracing::debug!(
+        swarm = %swarm_id,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        waiting = n_waiting,
+        "swarm tick"
+    );
     r
 }
 
@@ -250,7 +259,14 @@ async fn tick_inner(
     // Budget guardrails (D3/D8): before doing anything, check whether any
     // per-swarm budget is exhausted. If so, pause the swarm with a clear reason
     // instead of scheduling more work — the user must raise the budget + resume.
-    if let Some(reason) = budget_exceeded(ctx, &swarm).await {
+    // Spend is read once per tick (perf §15 F9) and shared by the budget gate
+    // and the run-count projection below.
+    let spend = if has_budget(&swarm) {
+        Some(repo.swarm_spend(swarm_id).await?)
+    } else {
+        None
+    };
+    if let Some(reason) = spend.as_ref().and_then(|sp| budget_reason(&swarm, sp)) {
         pause_for_budget(ctx, &swarm, &reason).await;
         return Ok(());
     }
@@ -277,11 +293,9 @@ async fn tick_inner(
     // cap. Track the projected total as we schedule and stop when the next run
     // would reach the ceiling. (Cost can't be projected — per-run cost isn't
     // known until the turn completes — so the cost ceiling stays a tick-top gate.)
-    let mut projected_total_runs: Option<i64> = if swarm.max_total_runs.is_some() {
-        Some(repo.swarm_spend(swarm_id).await?.total_runs)
-    } else {
-        None
-    };
+    let mut projected_total_runs: Option<i64> = swarm
+        .max_total_runs
+        .and(spend.as_ref().map(|sp| sp.total_runs));
 
     let ready = repo.ready_tasks(swarm_id).await?;
     if ready.is_empty() {
@@ -290,6 +304,9 @@ async fn tick_inner(
     // The roster once per tick — `pick_agent`/`has_reports` used to re-list
     // every agent per ready task (backlog B6 / SE-10).
     let agents = repo.list_agents(&swarm.id).await.unwrap_or_default();
+    // Busy agents once per tick (perf §15 F3), kept current as this tick
+    // dispatches — not a COUNT query per ready task.
+    let mut busy = repo.busy_agents(&swarm.id).await.unwrap_or_default();
     let mut ready = ready.into_iter();
     while let Some(task) = ready.next() {
         if budget <= 0 {
@@ -318,7 +335,7 @@ async fn tick_inner(
             );
             continue;
         };
-        if repo.agent_has_active_run(&agent.id).await.unwrap_or(false) {
+        if busy.contains(&agent.id) {
             // one turn per agent at a time
             waiting.insert(
                 task.id.clone(),
@@ -399,6 +416,7 @@ async fn tick_inner(
             }
         };
         budget -= 1;
+        busy.insert(agent.id.clone());
         if let Some(projected) = projected_total_runs.as_mut() {
             *projected += 1;
         }
@@ -420,14 +438,22 @@ async fn tick_inner(
 /// enqueued for the swarm; the runtime budget is measured from `run_started_at`
 /// (the last time the swarm went active).
 async fn budget_exceeded(ctx: &ServerCtx, swarm: &Swarm) -> Option<String> {
-    if let (None, None, None) = (
-        swarm.max_total_runs,
-        swarm.max_cost_usd,
-        swarm.max_runtime_secs,
-    ) {
+    if !has_budget(swarm) {
         return None;
     }
     let spend = ctx.swarm_repo.swarm_spend(&swarm.id).await.ok()?;
+    budget_reason(swarm, &spend)
+}
+
+/// Whether any per-swarm budget is set (all nullable = unlimited).
+fn has_budget(swarm: &Swarm) -> bool {
+    swarm.max_total_runs.is_some()
+        || swarm.max_cost_usd.is_some()
+        || swarm.max_runtime_secs.is_some()
+}
+
+/// [`budget_exceeded`] against an already-read spend.
+fn budget_reason(swarm: &Swarm, spend: &otto_state::swarm::SwarmSpend) -> Option<String> {
     if let Some(max_runs) = swarm.max_total_runs {
         if spend.total_runs >= max_runs {
             return Some(format!(
@@ -1458,12 +1484,13 @@ pub(crate) fn clip(s: &str, n: usize) -> String {
 // --- Session teardown for pause/abort --------------------------------------
 
 async fn swarm_session_ids(ctx: &ServerCtx, ws: &Id, swarm_id: &str) -> Vec<Id> {
+    // Only live sessions matter here (callers suspend/stop them); filtered in
+    // SQL rather than decoding the workspace's whole history (perf §15 F7).
     ctx.manager
-        .list_by_workspace(ws)
+        .list_live_by_meta(ws, None, "swarm_id", swarm_id)
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter(|s| s.meta.get("swarm_id").and_then(|v| v.as_str()) == Some(swarm_id))
         .map(|s| s.id)
         .collect()
 }
@@ -1482,6 +1509,7 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/workspaces/{id}/swarm/projects/{pid}/plan", post(plan))
         .route("/swarm/projects/{pid}/clear", post(clear_project_h))
         .route("/swarm/swarms/{sid}/utilization", get(utilization_h))
+        .route("/swarm/swarms/{sid}/waiting", get(waiting_h))
         .route(
             "/workspaces/{id}/swarm/swarms/{sid}/agent-stop",
             post(agent_stop),
@@ -2147,22 +2175,17 @@ async fn utilization_h(
         .await
         .map_err(ApiError)?
         .len();
-    let mut by_status: HashMap<String, i64> = HashMap::new();
-    for t in ctx
+    // Counted in SQL and one busy-agents read (perf §15 F2/F3) — no task row
+    // decoded, no query per agent.
+    let by_status = ctx
         .swarm_repo
-        .list_tasks_for_swarm(&sid)
+        .task_status_counts(&sid)
         .await
-        .map_err(ApiError)?
-    {
-        *by_status.entry(t.status).or_insert(0) += 1;
-    }
+        .map_err(ApiError)?;
+    let busy_set = ctx.swarm_repo.busy_agents(&sid).await.map_err(ApiError)?;
     let mut agents_out = Vec::new();
     for a in ctx.swarm_repo.list_agents(&sid).await.map_err(ApiError)? {
-        let busy = ctx
-            .swarm_repo
-            .agent_has_active_run(&a.id)
-            .await
-            .unwrap_or(false);
+        let busy = busy_set.contains(&a.id);
         agents_out.push(json!({
             "id": a.id, "name": a.name, "title": a.title,
             "status": a.status, "active_run": busy,
@@ -2179,6 +2202,21 @@ async fn utilization_h(
         // 12-mcp W1: why each ready task isn't starting (last coordinator tick).
         "waiting": waiting_for(&sid),
     })))
+}
+
+/// Just the coordinator's in-memory waiting reasons (perf §15 F2) — what the
+/// Kanban's "why isn't this starting" chips read. No DB work beyond the
+/// swarm/auth lookup, unlike the full utilization snapshot.
+async fn waiting_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(sid): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let swarm = ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?;
+    check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Viewer).await?;
+    Ok(Json(
+        json!({ "swarm_id": sid, "waiting": waiting_for(&sid) }),
+    ))
 }
 
 /// Clear a project's board: stop + cancel every in-flight run for the project

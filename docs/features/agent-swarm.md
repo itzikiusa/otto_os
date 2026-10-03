@@ -379,8 +379,9 @@ how long): *No available agent fits this task*, *&lt;agent&gt; is busy with
 another task*, *&lt;agent&gt;'s branch is being verified*, *All n/n parallel
 slots are busy*, or *Run budget reached*. The coordinator rebuilds these
 reasons every tick (in memory) and serves them as `waiting` on
-`GET /swarm/swarms/{sid}/utilization`; the board re-reads them when tasks
-change and every 15 s while the page is visible.
+`GET /swarm/swarms/{sid}/utilization` and, alone, on the cheap
+`GET /swarm/swarms/{sid}/waiting` (no DB work); the board re-reads the latter
+when tasks change and every 15 s while the page is visible.
 
 **Runs (`RunsList.svelte`).** A filterable table of every run: columns Agent,
 Work (kind + summary), Status, Started, Tokens (`in/out`), Actions. Filter by
