@@ -140,3 +140,24 @@ test('save to vault writes a note without re-fetching the page', async ({ page }
 
   await expect(page.locator('.toasts')).toContainText('Saved to vault', { timeout: 10_000 });
 });
+
+// perf F1: switching back to a tab shows its cached reader page — no second
+// `/browser/page` render while the entry is under a minute old.
+test('switching between reader tabs does not refetch the page', async ({ page }) => {
+  let pageFetches = 0;
+  page.on('request', (req) => {
+    if (req.method() === 'GET' && req.url().includes('/browser/page?url=')) pageFetches++;
+  });
+  await openFixture(page);
+  await page.getByRole('button', { name: 'New tab' }).first().click();
+  await page.getByPlaceholder('Enter URL').fill('https://example.invalid/second-page');
+  await page.getByTitle('Go').click();
+  await expect(page.locator('.tab')).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
+  expect(pageFetches).toBe(2);
+  await page.locator('.tab .tab-main').first().click();
+  await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
+  await page.locator('.tab .tab-main').nth(1).click();
+  await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
+  expect(pageFetches).toBe(2);
+});

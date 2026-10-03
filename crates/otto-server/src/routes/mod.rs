@@ -459,6 +459,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(api_client::list_requests).post(api_client::create_request),
         )
         .route(
+            "/workspaces/{wid}/api-client/requests/summaries",
+            get(api_client::list_request_summaries),
+        )
+        .route(
             "/workspaces/{wid}/api-client/requests/{id}",
             get(api_client::get_request)
                 .patch(api_client::update_request)

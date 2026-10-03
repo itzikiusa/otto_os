@@ -237,6 +237,11 @@ function extrasToDraft(d: ApiDraft, extras: ApiRequestExtras | null | undefined)
 function tabsKey(wid: Id): string {
   return `otto_api_tabs_v1:${wid}`;
 }
+/** Fallback delta-poll interval for a running automation; progress normally
+ *  arrives as `api_run_progress` WS events (perf F2). */
+const RUN_POLL_FALLBACK_MS = 2000;
+/** Re-entering the API page within this long of a successful load reuses it. */
+const RELOAD_FRESH_MS = 60_000;
 /** Debounce for tab writes — the draft setter fires on every keystroke. */
 const TABS_WRITE_DELAY_MS = 250;
 /** Body ceiling for the quota-exceeded fallback rewrite (chars). */
@@ -593,14 +598,32 @@ class ApiClientStore {
 
   // ── Loading ───────────────────────────────────────────────────────────────
 
-  /** Load everything for the current workspace (collections + requests + envs + history). */
-  async loadAll(): Promise<void> {
+  /** When this workspace's lists last loaded successfully (stale-while-
+   *  revalidate for page re-entry — perf F4). Cleared on a failed load. */
+  private loadedAt: { wid: Id; at: number } | null = null;
+  private automationsLoadedAt: { base: string; at: number } | null = null;
+
+  /** Load everything for the current workspace (collections + requests + envs + history).
+   *  Re-entering the API page within RELOAD_FRESH_MS of a successful load
+   *  skips the refetch (`force` overrides) — local edits update the store
+   *  directly and history arrives live over `api_history_appended`. */
+  async loadAll(opts: { force?: boolean } = {}): Promise<void> {
     const wid = this.wsId();
     const base = this.base();
     if (!wid || !base) return;
     // Restore this workspace's persisted open tabs up front (works even when
     // the fetches below fail — the drafts are device-local, not server data).
     this.restoreTabs(wid);
+    if (
+      !opts.force &&
+      this.loadedAt?.wid === wid &&
+      Date.now() - this.loadedAt.at < RELOAD_FRESH_MS &&
+      !this.requestsLoadError &&
+      !this.envLoadError
+    ) {
+      return;
+    }
+    this.loadedAt = null;
     this.loading = true;
     this.requestsLoadError = null;
     this.envLoadError = null;
@@ -624,6 +647,7 @@ class ApiClientStore {
         );
         this.persistTabs();
       }
+      this.loadedAt = { wid, at: Date.now() };
     } catch (e) {
       if (this.wsId() === wid) {
         this.requestsLoadError = errMsg(e);
@@ -1412,11 +1436,14 @@ class ApiClientStore {
 
   // ── Automations (collection runner) ───────────────────────────────────────
 
-  async loadAutomations(): Promise<void> {
+  async loadAutomations(opts: { force?: boolean } = {}): Promise<void> {
     const base = this.base();
     if (!base) return;
+    const last = this.automationsLoadedAt;
+    if (!opts.force && last?.base === base && Date.now() - last.at < RELOAD_FRESH_MS) return;
     try {
       this.automations = await api.get<ApiAutomation[]>(`${base}/automations`);
+      this.automationsLoadedAt = { base, at: Date.now() };
     } catch (e) {
       toasts.error('Could not load automations', errMsg(e));
     }
@@ -1454,6 +1481,21 @@ class ApiClientStore {
     }
   }
 
+  /** The in-flight `runAutomation` loop's wake-up, armed while it waits. */
+  private runWake: { runId: Id; wake: () => void } | null = null;
+
+  /** `api_run_progress` for run `runId`: wake the running view's delta fetch. */
+  noteRunProgress(runId: Id): void {
+    if (this.runWake?.runId === runId) this.runWake.wake();
+  }
+
+  /** One whole run (every step + snapshot) — run-list rows carry neither. */
+  async getAutomationRun(id: Id): Promise<ApiAutomationRun | null> {
+    const base = this.base(); if (!base) return null;
+    try {return await api.get<ApiAutomationRun>(`${base}/automation-runs/${id}`);}
+    catch (e) {toasts.error('Could not load run',errMsg(e)); return null;}
+  }
+
   async loadAutomationRuns(automationId?: Id, before?: Id): Promise<void> {
     const base = this.base(); if (!base) return;
     const query = new URLSearchParams();
@@ -1477,7 +1519,14 @@ class ApiClientStore {
       this.currentRun = run; this.lastRun = run.report;
       while (base === this.base()) {
         if (run.status !== 'running') {void this.loadAutomationRuns(id); return run.report;}
-        await new Promise(resolve => setTimeout(resolve,500));
+        // Woken by the run's `api_run_progress` WS event (noteRunProgress);
+        // the timer is only the fallback for a dropped socket.
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(done, RUN_POLL_FALLBACK_MS);
+          function done() { clearTimeout(timer); resolve(); }
+          this.runWake = { runId: run.id, wake: done };
+        });
+        this.runWake = null;
         if (base !== this.base()) break;
         // Delta poll: only the steps after the ones we have (+ status); the
         // snapshot is not re-sent. Nothing new → no reassignment, no re-render.

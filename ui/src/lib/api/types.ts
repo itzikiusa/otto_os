@@ -1247,6 +1247,14 @@ export type OttoEvent =
       session_id: Id | null;
       request_id: Id | null;
     }
+  | {
+      type: 'api_run_progress';
+      workspace_id: Id;
+      automation_id: Id;
+      run_id: Id;
+      status: ApiAutomationRun['status'];
+      steps_done: number;
+    }
   | { type: 'tasks_updated'; workspace_id: Id; session_id: Id; tasks: AgentTask[] }
   | { type: 'swarm_run_updated'; workspace_id: Id; swarm_id: Id; run: Record<string, unknown> }
   | {
@@ -9752,6 +9760,9 @@ export interface ApiAutomationRun {
   created_by: Id; status: 'running' | 'passed' | 'failed' | 'cancelled' | 'interrupted';
   created_at: string; finished_at: string | null; stop_on_failure: boolean;
   dataset_rows: number; snapshot: unknown; report: ApiRunResult; result_rows: number[]; result_ids: Id[]; error: string | null;
+  /** Run-LIST rows only: completed / passed step counts. List rows carry no
+   *  `report.steps` and no `snapshot` — fetch the run by id for those. */
+  steps_total?: number; steps_passed?: number;
 }
 
 /** Portable saved-data archive. Authentication secrets and live processes are excluded. */

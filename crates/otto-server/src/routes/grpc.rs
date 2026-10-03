@@ -36,6 +36,150 @@ fn upstream(msg: impl Into<String>) -> ApiError {
     ApiError(Error::Upstream(msg.into()))
 }
 
+// ── caches (perf F6) ────────────────────────────────────────────────────────
+//
+// Without these every invoke recompiled its .proto (protox, on a tokio
+// worker), or — with no .proto — recompiled the reflection proto, dialled the
+// server for reflection, then dialled it AGAIN for the call: two TCP+TLS
+// handshakes plus 2+ reflection RPCs per click.
+
+/// A small process-wide TTL cache, bounded by entry count (oldest out first).
+struct TtlCache<V> {
+    map: std::collections::HashMap<String, (V, Instant)>,
+    ttl: Duration,
+    cap: usize,
+}
+
+impl<V: Clone> TtlCache<V> {
+    fn new(ttl: Duration, cap: usize) -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            ttl,
+            cap,
+        }
+    }
+
+    /// A live entry, refreshing its timestamp (idle TTL).
+    fn get(&mut self, key: &str) -> Option<V> {
+        let ttl = self.ttl;
+        self.map.retain(|_, (_, at)| at.elapsed() < ttl);
+        let (value, at) = self.map.get_mut(key)?;
+        *at = Instant::now();
+        Some(value.clone())
+    }
+
+    fn put(&mut self, key: String, value: V) {
+        if !self.map.contains_key(&key) && self.map.len() >= self.cap {
+            if let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(k, _)| k.clone())
+            {
+                self.map.remove(&oldest);
+            }
+        }
+        self.map.insert(key, (value, Instant::now()));
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.map.remove(key);
+    }
+}
+
+type Shared<V> = std::sync::Mutex<TtlCache<V>>;
+
+fn lock<V>(m: &Shared<V>) -> std::sync::MutexGuard<'_, TtlCache<V>> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Compiled descriptor pools: keyed by sha256 of the .proto source (an
+/// uploaded proto) or of url + allow-local + metadata (a reflected one).
+fn pool_cache() -> &'static Shared<DescriptorPool> {
+    static C: std::sync::OnceLock<Shared<DescriptorPool>> = std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(TtlCache::new(Duration::from_secs(5 * 60), 32)))
+}
+
+/// Connected channels by `(url, allow_local)`; tonic `Channel`s multiplex and
+/// clone cheaply. 2 min idle TTL.
+fn channel_cache() -> &'static Shared<Channel> {
+    static C: std::sync::OnceLock<Shared<Channel>> = std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(TtlCache::new(Duration::from_secs(2 * 60), 32)))
+}
+
+fn sha_key(parts: &[&str]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for p in parts {
+        h.update((p.len() as u64).to_le_bytes());
+        h.update(p.as_bytes());
+    }
+    hex::encode(h.finalize())
+}
+
+/// How many times a .proto was actually compiled (cache misses) — the
+/// measurability hook for the cache tests.
+static PROTO_COMPILES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// [`pool_from_proto`] through the pool cache, compiling on the blocking pool
+/// (protox + a tempdir write are synchronous file I/O and CPU).
+async fn pool_from_proto_cached(proto: &str) -> Result<DescriptorPool, ApiError> {
+    let key = format!("proto:{}", sha_key(&[proto]));
+    if let Some(pool) = lock(pool_cache()).get(&key) {
+        return Ok(pool);
+    }
+    let src = proto.to_string();
+    let pool = tokio::task::spawn_blocking(move || pool_from_proto(&src))
+        .await
+        .map_err(|e| upstream(format!("proto compile failed: {e}")))??;
+    lock(pool_cache()).put(key, pool.clone());
+    Ok(pool)
+}
+
+/// A channel to `url`, reused from [`channel_cache`] when one is live.
+async fn cached_channel(url: &str, allow_local: bool) -> Result<Channel, ApiError> {
+    let key = format!("{allow_local}\n{url}");
+    if let Some(ch) = lock(channel_cache()).get(&key) {
+        return Ok(ch);
+    }
+    let ch = connect_channel(url, allow_local).await?;
+    lock(channel_cache()).put(key, ch.clone());
+    Ok(ch)
+}
+
+/// Drop a cached channel after a transport failure so the next call redials.
+fn forget_channel(url: &str, allow_local: bool) {
+    lock(channel_cache()).remove(&format!("{allow_local}\n{url}"));
+}
+
+fn reflect_key(url: &str, headers: &[KV], allow_local: bool) -> String {
+    let mut parts: Vec<&str> = vec![url, if allow_local { "1" } else { "0" }];
+    for h in headers {
+        parts.push(&h.key);
+        parts.push(&h.value);
+    }
+    format!("reflect:{}", sha_key(&parts))
+}
+
+/// [`reflect_pool`] through the pool cache. `fresh` (the explicit "list
+/// services" action) re-reflects and refreshes the entry.
+async fn reflect_pool_cached(
+    url: &str,
+    headers: &[KV],
+    allow_local: bool,
+    fresh: bool,
+) -> Result<DescriptorPool, ApiError> {
+    let key = reflect_key(url, headers, allow_local);
+    if !fresh {
+        if let Some(pool) = lock(pool_cache()).get(&key) {
+            return Ok(pool);
+        }
+    }
+    let pool = reflect_pool(url, headers, allow_local).await?;
+    lock(pool_cache()).put(key, pool.clone());
+    Ok(pool)
+}
+
 // ── describe ────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -73,6 +217,7 @@ fn pool_from_proto(proto: &str) -> Result<DescriptorPool, ApiError> {
     if proto.trim().is_empty() {
         return Err(invalid("empty .proto"));
     }
+    PROTO_COMPILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = tempfile::tempdir().map_err(|e| upstream(e.to_string()))?;
     let proto_path = dir.path().join("service.proto");
     std::fs::write(&proto_path, proto).map_err(|e| upstream(e.to_string()))?;
@@ -120,7 +265,7 @@ pub async fn describe(
     Json(req): Json<GrpcDescribeReq>,
 ) -> ApiResult<Json<GrpcDescribeResp>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let pool = pool_from_proto(&req.proto)?;
+    let pool = pool_from_proto_cached(&req.proto).await?;
     let services = services_from_pool(&pool);
     Ok(Json(GrpcDescribeResp { services }))
 }
@@ -303,9 +448,9 @@ pub async fn invoke(
     // Descriptors come from the uploaded .proto, or from server reflection when
     // none was provided.
     let pool = if req.proto.trim().is_empty() {
-        reflect_pool(&req.url, &req.headers, allow_local).await?
+        reflect_pool_cached(&req.url, &req.headers, allow_local, false).await?
     } else {
-        pool_from_proto(&req.proto)?
+        pool_from_proto_cached(&req.proto).await?
     };
     let method = find_method(&pool, &req.method)
         .ok_or_else(|| invalid(format!("method not found: {}", req.method)))?;
@@ -333,14 +478,9 @@ pub async fn invoke(
         level: "info".into(),
     }];
 
-    // SSRF guard (pinned) + channel build (TLS for https/grpcs).
-    let endpoint = grpc_endpoint(&req.url, allow_local).await?;
-    let connect = tokio::time::timeout(Duration::from_secs(20), endpoint.connect()).await;
-    let channel = match connect {
-        Ok(Ok(c)) => c,
-        Ok(Err(e)) => return Err(upstream(format!("connect failed: {e}"))),
-        Err(_) => return Err(upstream("connection timed out")),
-    };
+    // SSRF guard (pinned) + channel build (TLS for https/grpcs) — reused
+    // from the channel cache (the reflection above dialled it already).
+    let channel = cached_channel(&req.url, allow_local).await?;
     trace.push(TraceStep {
         label: "Connected".into(),
         detail: req.url.clone(),
@@ -349,10 +489,10 @@ pub async fn invoke(
     });
 
     let mut client = tonic::client::Grpc::new(channel);
-    client
-        .ready()
-        .await
-        .map_err(|e| upstream(format!("not ready: {e}")))?;
+    if let Err(e) = client.ready().await {
+        forget_channel(&req.url, allow_local);
+        return Err(upstream(format!("not ready: {e}")));
+    }
 
     let path = PathAndQuery::from_str(&req.method)
         .map_err(|e| invalid(format!("bad method path: {e}")))?;
@@ -654,7 +794,7 @@ async fn reflect_pool(
     use prost::Message as _;
     use prost_reflect::Value as PValue;
 
-    let refl = pool_from_proto(REFLECTION_PROTO)?;
+    let refl = pool_from_proto_cached(REFLECTION_PROTO).await?;
     let req_desc = refl
         .get_message_by_name("grpc.reflection.v1alpha.ServerReflectionRequest")
         .ok_or_else(|| upstream("reflection request descriptor missing"))?;
@@ -664,12 +804,12 @@ async fn reflect_pool(
     let path =
         PathAndQuery::from_static("/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo");
 
-    let channel = connect_channel(url, allow_local).await?;
+    let channel = cached_channel(url, allow_local).await?;
     let mut client = tonic::client::Grpc::new(channel);
-    client
-        .ready()
-        .await
-        .map_err(|e| upstream(format!("not ready: {e}")))?;
+    if let Err(e) = client.ready().await {
+        forget_channel(url, allow_local);
+        return Err(upstream(format!("not ready: {e}")));
+    }
     let md = metadata_from(headers);
 
     let make_req = |field: &str, value: &str| -> DynamicMessage {
@@ -783,7 +923,7 @@ pub async fn reflect(
 ) -> ApiResult<Json<GrpcDescribeResp>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let allow_local = crate::routes::api_client::workspace_allows_local(&ctx, &wid).await;
-    let pool = reflect_pool(&req.url, &req.headers, allow_local).await?;
+    let pool = reflect_pool_cached(&req.url, &req.headers, allow_local, true).await?;
     Ok(Json(GrpcDescribeResp {
         services: services_from_pool(&pool),
     }))
@@ -833,6 +973,37 @@ mod tests {
           rpc SayHello (HelloRequest) returns (HelloReply);
         }
     "#;
+
+    /// Perf guard (F6/F11): a .proto is compiled once per content (on the
+    /// blocking pool) and the TTL cache is bounded and expires.
+    #[tokio::test]
+    async fn proto_pool_is_compiled_once_per_content() {
+        let src = format!("{SAMPLE}\n// cache-test {}", otto_core::new_id());
+        let before = PROTO_COMPILES.load(std::sync::atomic::Ordering::Relaxed);
+        let a = pool_from_proto_cached(&src).await.unwrap();
+        let b = pool_from_proto_cached(&src).await.unwrap();
+        assert_eq!(a.services().count(), b.services().count());
+        // Other tests compile concurrently, so count only our own misses:
+        // a third call on the same content must not compile again.
+        let after_two = PROTO_COMPILES.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(after_two > before);
+        assert!(lock(pool_cache())
+            .get(&format!("proto:{}", sha_key(&[&src])))
+            .is_some());
+
+        let mut c: TtlCache<u32> = TtlCache::new(Duration::from_millis(30), 2);
+        c.put("a".into(), 1);
+        c.put("b".into(), 2);
+        c.put("c".into(), 3);
+        assert_eq!(c.map.len(), 2, "bounded");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(c.get("c").is_none(), "expired");
+        assert_ne!(
+            reflect_key("https://a", &[], false),
+            reflect_key("https://a", &[], true),
+            "allow-local is part of the key"
+        );
+    }
 
     #[test]
     fn describes_services_and_methods() {

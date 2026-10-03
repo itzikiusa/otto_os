@@ -3093,6 +3093,13 @@ pub struct ApiAutomationRun {
     #[serde(default)]
     pub result_ids: Vec<Id>,
     pub error: Option<String>,
+    /// Completed step count — set on run-LIST rows, which omit `report.steps`
+    /// (perf F2); absent on a single-run read, where `report.steps` is whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps_total: Option<usize>,
+    /// How many of those steps passed (list rows only, like `steps_total`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps_passed: Option<usize>,
 }
 
 /// `GET /workspaces/{wid}/api-client/overview` — the agent-facing discovery view.
