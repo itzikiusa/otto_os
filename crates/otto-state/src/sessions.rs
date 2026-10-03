@@ -1856,7 +1856,7 @@ mod tests {
 
         // The unordered shown-row statements (no ORDER BY to steer the pick):
         // with 0002's `(workspace_id, archived)` prefix index around the
-        // planner chose it and parsed every row's meta JSON (migration 0170).
+        // planner chose it and parsed every row's meta JSON (migration 0166).
         let (ws, owner): (Id, Id) = ("ws".into(), "u".into());
         for owner in [None, Some(&owner)] {
             let plan = visible_ids_query("EXPLAIN QUERY PLAN ", &ws, owner)

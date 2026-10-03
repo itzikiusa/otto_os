@@ -730,7 +730,7 @@ fn shown_sessions_sql() -> String {
 /// The activity summary's shown-only trail statement: per shown session, its
 /// newest trail `ts`. Binds `workspace_id`, then (`owner_scoped`) the owner.
 /// A `fn` so the sessions plan test can `EXPLAIN QUERY PLAN` it — it must stay
-/// on the 0162 source index (migration 0170 dropped the prefix index the
+/// on the 0162 source index (migration 0166 dropped the prefix index the
 /// planner used to prefer, which re-parsed every row's meta JSON).
 pub(crate) fn summary_trail_sql(owner_scoped: bool) -> String {
     format!(
