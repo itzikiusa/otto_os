@@ -164,6 +164,43 @@ fn io_err(e: std::io::Error) -> Error {
 
 /// The git subcommand in an argv, for error text: `args[0]`, or `args[2]` when
 /// the call is prefixed with `-c <key=value>` (the diff family does that).
+/// Top-level `-c` config Otto adds per subcommand (prepended before `args`):
+///
+/// * `merge.conflictStyle=diff3` for every subcommand that can leave conflict
+///   markers. With git's default `merge` style the markers carry only
+///   ours/theirs, so the resolver had no BASE for rebase, cherry-pick,
+///   revert, pull or stash conflicts (only `merge_branch` set it). `diff3`,
+///   not `zdiff3`, so older gits still work; `parse_conflict_segments` reads
+///   it.
+/// * `fetch.writeCommitGraph=true` on fetch/pull: git keeps an incremental
+///   commit-graph, which makes `log --all` (the graph), `merge-base`,
+///   `branch --merged` and blame scale on big histories. Opt out with
+///   `OTTO_GIT_COMMIT_GRAPH=0`.
+///
+/// Callers that already pass their own `-c …` (args[0] == "-c") get nothing.
+pub(crate) fn implicit_config_args(args: &[&str]) -> &'static [&'static str] {
+    const DIFF3: &[&str] = &["-c", "merge.conflictStyle=diff3"];
+    const CG: &[&str] = &["-c", "fetch.writeCommitGraph=true"];
+    const DIFF3_CG: &[&str] = &[
+        "-c",
+        "merge.conflictStyle=diff3",
+        "-c",
+        "fetch.writeCommitGraph=true",
+    ];
+    let cg = commit_graph_enabled();
+    match args.first() {
+        Some(&"fetch") if cg => CG,
+        Some(&"pull") if cg => DIFF3_CG,
+        Some(&("cherry-pick" | "revert" | "rebase" | "pull" | "stash" | "merge" | "am")) => DIFF3,
+        _ => &[],
+    }
+}
+
+/// `OTTO_GIT_COMMIT_GRAPH=0` turns off Otto's commit-graph upkeep.
+fn commit_graph_enabled() -> bool {
+    std::env::var("OTTO_GIT_COMMIT_GRAPH").map_or(true, |v| v.trim() != "0")
+}
+
 fn verb_of<'a>(args: &'a [&'a str]) -> &'a str {
     match args.first() {
         Some(&"-c") => args.get(2).copied().unwrap_or("command"),
@@ -801,7 +838,7 @@ impl LocalGit {
     ) -> Result<(String, String)> {
         self.check_repo().await?;
         let mut cmd = self.base_cmd();
-        cmd.args(args);
+        cmd.args(implicit_config_args(args)).args(args);
         for (k, v) in envs {
             cmd.env(k, v);
         }
@@ -842,7 +879,7 @@ impl LocalGit {
     ) -> Result<(bool, String, String, Option<i32>)> {
         self.check_repo().await?;
         let mut cmd = self.base_cmd();
-        cmd.args(args);
+        cmd.args(implicit_config_args(args)).args(args);
         for (k, v) in envs {
             cmd.env(k, v);
         }
@@ -861,7 +898,7 @@ impl LocalGit {
     ) -> Result<(bool, String, String, Option<i32>)> {
         self.check_repo().await?;
         let mut cmd = self.base_cmd();
-        cmd.args(args);
+        cmd.args(implicit_config_args(args)).args(args);
         let out = self
             .spawn_output(cmd, SpawnClass::LocalWrite, verb_of(args), Some(stdin))
             .await?;
@@ -1731,7 +1768,10 @@ impl LocalGit {
             args.splice(3..3, ["-n", limit_s.as_str()]);
         }
         if all {
-            args.insert(1, "--all");
+            // `--date-order`: never a parent before ALL of its children, even
+            // with clock skew / rewritten committer dates — the graph's lane
+            // layout assumes children come first.
+            args.splice(1..1, ["--all", "--date-order"]);
         }
         let out = match self.run_read(&args).await {
             Ok(out) => out,
@@ -2839,7 +2879,46 @@ impl LocalGit {
     }
 
     pub async fn fetch(&self, token: Option<String>) -> Result<String> {
-        self.run_remote(&["fetch", "--prune"], token).await
+        let out = self.run_remote(&["fetch", "--prune"], token).await?;
+        self.seed_commit_graph();
+        Ok(out)
+    }
+
+    /// One-shot background `commit-graph write --reachable --changed-paths`
+    /// for a repo that has no commit-graph yet. After that the per-fetch
+    /// `fetch.writeCommitGraph` keeps it current; the changed-path Bloom
+    /// filters make `log -- <path>` / `--follow` (file history) and blame
+    /// several times faster on big repos. Purely a local cache git itself
+    /// maintains — never blocks or fails the caller.
+    pub(crate) fn seed_commit_graph(&self) {
+        if !commit_graph_enabled() {
+            return;
+        }
+        let git_dir = self.repo_path.join(".git");
+        // Linked worktrees have a `.git` FILE; their objects live in the
+        // main repo, which seeds its own graph — skip them.
+        if !git_dir.is_dir() {
+            return;
+        }
+        let info = git_dir.join("objects").join("info");
+        if info.join("commit-graph").exists() || info.join("commit-graphs").exists() {
+            return;
+        }
+        let mut cmd = self.base_cmd();
+        cmd.args(["commit-graph", "write", "--reachable", "--changed-paths"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(false);
+        let repo = self.repo_path.clone();
+        tokio::spawn(async move {
+            match cmd.status().await {
+                Ok(st) if st.success() => {
+                    tracing::info!(repo = %repo.display(), "wrote commit-graph")
+                }
+                Ok(st) => tracing::debug!(repo = %repo.display(), "commit-graph write: {st}"),
+                Err(e) => tracing::debug!(repo = %repo.display(), "commit-graph write: {e}"),
+            }
+        });
     }
 
     async fn run_remote(&self, args: &[&str], token: Option<String>) -> Result<String> {
@@ -4881,6 +4960,13 @@ mod tests {
         assert!(ms.merging);
         assert_eq!(ms.op.as_deref(), Some("cherry_pick"));
         assert!(!ms.conflicted_files.is_empty());
+        // diff3 markers: the resolver gets the BASE side too, not just
+        // ours/theirs (only `merge_branch` used to set the style).
+        let cf = git.conflict_file("a.txt").await.unwrap();
+        let base_seen = cf.segments.iter().any(|seg| {
+            matches!(seg, otto_core::api::ConflictSegment::Conflict { base, .. } if !base.is_empty())
+        });
+        assert!(base_seen, "cherry-pick conflict must carry a base: {cf:?}");
 
         let st = git.merge_abort().await.unwrap();
         assert_eq!(st.op_in_progress, None);

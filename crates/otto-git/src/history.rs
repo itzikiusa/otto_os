@@ -99,7 +99,26 @@ pub struct BlameLine {
     /// Lines in the run (≥ 1).
     pub count: u32,
     pub summary: String,
+    /// The run's source lines (one per blamed line, `count` of them), each
+    /// capped at [`BLAME_LINE_CAP`] chars — the code column of the panel.
+    pub text: Vec<String>,
+    /// Porcelain `previous <sha> <path>`: the commit's parent and the file's
+    /// path there (follows renames). Blaming `previous.sha:previous.path`
+    /// is "blame before this change". None for a root commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous: Option<BlamePrevious>,
 }
+
+/// Where a blamed line lived just before the commit that last touched it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlamePrevious {
+    pub sha: String,
+    pub path: String,
+}
+
+/// Longest source line the blame keeps (chars) — a minified bundle's
+/// 300 KB line would otherwise ride every response.
+pub(crate) const BLAME_LINE_CAP: usize = 1000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BlameResp {
@@ -131,7 +150,11 @@ impl LocalGit {
         // ahead of each record and corrupt the parsed SHAs (see `LocalGit::log`).
         let mut args: Vec<&str> = vec!["log", "--no-show-signature"];
         if o.all {
+            // The graph path: `--date-order` guarantees no parent is printed
+            // before all of its children (clock skew would otherwise open a
+            // phantom tip lane). Filtered/path logs keep git's order.
             args.push("--all");
+            args.push("--date-order");
         }
         if o.limit > 0 && o.until.is_none() {
             args.push("-n");
@@ -213,6 +236,9 @@ struct BlameHeader {
     orig: u32,
     start: u32,
     count: u32,
+    /// The header printed a group size — the FIRST line of a run. A
+    /// continuation header (no size) adds a line to the open run.
+    opens_run: bool,
 }
 
 fn parse_header(line: &str) -> Option<BlameHeader> {
@@ -224,9 +250,9 @@ fn parse_header(line: &str) -> Option<BlameHeader> {
     let orig = it.next()?.parse().ok()?;
     let start = it.next()?.parse().ok()?;
     // The group size is only printed on the FIRST header of a run.
-    let count = match it.next() {
-        Some(c) => c.parse().ok()?,
-        None => 1,
+    let (count, opens_run) = match it.next() {
+        Some(c) => (c.parse().ok()?, true),
+        None => (1, false),
     };
     if it.next().is_some() {
         return None;
@@ -236,6 +262,7 @@ fn parse_header(line: &str) -> Option<BlameHeader> {
         orig,
         start,
         count,
+        opens_run,
     })
 }
 
@@ -247,27 +274,42 @@ fn parse_header(line: &str) -> Option<BlameHeader> {
 /// line closes a group (it is the only line the file's own text can appear on,
 /// and it is never parsed as anything else).
 pub fn parse_blame(porcelain: &str) -> Vec<BlameLine> {
-    let mut seen: HashMap<String, (String, String, String)> = HashMap::new();
+    type Meta = (String, String, String, Option<BlamePrevious>);
+    let mut seen: HashMap<String, Meta> = HashMap::new();
     let mut out: Vec<BlameLine> = Vec::new();
     let mut cur: Option<BlameHeader> = None;
-    let (mut author, mut at, mut summary) = (None, None, None);
+    let (mut author, mut at, mut summary, mut previous) = (None, None, None, None);
 
     for line in porcelain.lines() {
         if let Some(h) = parse_header(line) {
             cur = Some(h);
-            (author, at, summary) = (None, None, None);
+            (author, at, summary, previous) = (None, None, None, None);
             continue;
         }
-        if line.starts_with('\t') {
+        if let Some(content) = line.strip_prefix('\t') {
             // The file's own text: content, never metadata — and the group's end.
             let Some(h) = cur.take() else { continue };
+            let text: String = content.chars().take(BLAME_LINE_CAP).collect();
             let meta = seen.entry(h.sha.clone()).or_insert_with(|| {
                 (
                     author.take().unwrap_or_else(|| "unknown".to_string()),
                     at.take().unwrap_or_default(),
                     summary.take().unwrap_or_default(),
+                    previous.take(),
                 )
             });
+            // A continuation header (no group size) is the next line of the
+            // open run: fold it in so one row = one run, with its code.
+            if !h.opens_run {
+                if let Some(last) = out
+                    .last_mut()
+                    .filter(|l| l.sha == h.sha && l.line_start + l.text.len() as u32 == h.start)
+                {
+                    last.text.push(text);
+                    last.count = last.count.max(last.text.len() as u32);
+                    continue;
+                }
+            }
             out.push(BlameLine {
                 short_sha: h.sha.chars().take(8).collect(),
                 sha: h.sha,
@@ -277,6 +319,8 @@ pub fn parse_blame(porcelain: &str) -> Vec<BlameLine> {
                 line_start: h.start,
                 count: h.count,
                 summary: meta.2.clone(),
+                text: vec![text],
+                previous: meta.3.clone(),
             });
             continue;
         }
@@ -292,6 +336,14 @@ pub fn parse_blame(porcelain: &str) -> Vec<BlameLine> {
                 .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
         } else if let Some(v) = line.strip_prefix("summary ") {
             summary = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("previous ") {
+            // `previous <sha> <path>` — the path may contain spaces.
+            if let Some((sha, path)) = v.split_once(' ') {
+                previous = Some(BlamePrevious {
+                    sha: sha.to_string(),
+                    path: path.to_string(),
+                });
+            }
         }
     }
     out
@@ -689,21 +741,27 @@ mod tests {
              \tline four\n"
         );
         let lines = parse_blame(&porcelain);
-        assert_eq!(lines.len(), 4, "one row per header/content pair");
+        assert_eq!(lines.len(), 3, "one row per run; continuations fold in");
         assert_eq!(lines[0].author, "Ada Lovelace");
         assert_eq!(lines[0].short_sha, "11111111");
         assert_eq!(lines[0].count, 2, "the run size comes from the header");
         assert_eq!(lines[0].at, "2023-11-14T22:13:20Z");
         assert_eq!(lines[0].summary, "first commit");
-        assert_eq!(lines[1].line_start, 2);
-        assert_eq!(lines[1].count, 1, "a continuation header has no count");
-        assert_eq!(lines[2].author, "Grace Hopper");
+        assert_eq!(
+            lines[0].text,
+            vec!["line one", "line two"],
+            "the code rides along"
+        );
+        assert_eq!(lines[1].author, "Grace Hopper");
+        assert_eq!(lines[1].text, vec!["line three"]);
+        assert_eq!(lines[1].previous, None, "no previous header ⇒ root commit");
         // The LAST run repeats sha_a with no fields at all — they must come back
         // from the cache, not be blanked.
-        assert_eq!(lines[3].author, "Ada Lovelace");
-        assert_eq!(lines[3].summary, "first commit");
-        assert_eq!(lines[3].orig_line, 3);
-        assert_eq!(lines[3].line_start, 4);
+        assert_eq!(lines[2].author, "Ada Lovelace");
+        assert_eq!(lines[2].summary, "first commit");
+        assert_eq!(lines[2].orig_line, 3);
+        assert_eq!(lines[2].line_start, 4);
+        assert_eq!(lines[2].text, vec!["line four"]);
     }
 
     /// A filename that begins with `-` is legal on disk; it must blame (it rides
@@ -718,10 +776,29 @@ mod tests {
         let git = LocalGit::new(&dir);
         let blame = git.blame("-notes.md", "HEAD").await.unwrap();
         assert_eq!(blame.path, "-notes.md");
-        assert_eq!(blame.lines.len(), 2);
+        assert_eq!(blame.lines.len(), 1, "one commit ⇒ one run");
         assert_eq!(blame.lines[0].author, "Otto Test");
         assert_eq!(blame.lines[0].summary, "add notes");
-        assert_eq!(blame.lines[1].line_start, 2);
+        assert_eq!(blame.lines[0].count, 2);
+        assert_eq!(blame.lines[0].text, vec!["alpha", "beta"]);
+
+        // A second commit: its run points at the parent as `previous`
+        // ("blame before this change"), with the path there.
+        write(&dir, "-notes.md", "alpha\ngamma\n");
+        sh_git(&dir, &["commit", "-am", "edit notes"]);
+        let parent = git.rev_parse("HEAD~1").await.unwrap();
+        let blame = git.blame("-notes.md", "HEAD").await.unwrap();
+        let edited = blame
+            .lines
+            .iter()
+            .find(|l| l.summary == "edit notes")
+            .unwrap();
+        assert_eq!(edited.text, vec!["gamma"]);
+        let prev = edited.previous.as_ref().expect("previous header parsed");
+        assert_eq!(
+            (prev.sha.as_str(), prev.path.as_str()),
+            (parent.as_str(), "-notes.md")
+        );
 
         let err = git
             .blame("-notes.md", "--output=/tmp/pwn")
