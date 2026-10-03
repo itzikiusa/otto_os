@@ -55,6 +55,7 @@
   import { startMouseDrag } from '../../lib/dragCursor';
   import { ListWindow } from './list-window.svelte';
   import { DeferredHighlighter } from './diff-highlight.svelte';
+  import { SvelteSet } from 'svelte/reactivity';
 
   interface Props {
     diff: DiffResp;
@@ -109,6 +110,14 @@
   let mode = $state<'unified' | 'split'>('unified');
   let hlReady = $state(false);
   const hl = new DeferredHighlighter();
+  // Minified/generated lines: the DOM only ever gets the first LINE_CUT chars
+  // of a line until the user expands it — layout + measurement of a single
+  // 200 KB text node (or 5 MB after "Load anyway") was a multi-hundred-ms task.
+  const LINE_CUT = 10_000;
+  const expandedLines = new SvelteSet<string>();
+  function kb(n: number): string {
+    return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+  }
 
   // ≤1024 (phone + tablet): side-by-side is unusable in the narrow width (two
   // code columns + 140-char lines either clip off-screen or wrap into an
@@ -731,6 +740,7 @@
       for (const c of inflight.values()) c.abort();
       inflight.clear();
       hl.clear();
+      expandedLines.clear();
     };
   });
   // Fetch the pending files that are inside the rendered window.
@@ -1255,6 +1265,17 @@
   {/snippet}
 
   <!-- One row of the flattened diff. Every row root carries `use:measure`. -->
+  {#snippet codeText(content: string, lang: string | null, key: string)}
+    {#if content.length > LINE_CUT && !expandedLines.has(key)}{@html hl.html(content.slice(0, LINE_CUT), lang)}<button
+        type="button"
+        class="line-cut-btn"
+        data-find-skip
+        aria-label={`Expand line (${kb(content.length)})`}
+        title={`Show the full line (${kb(content.length)})`}
+        onclick={() => expandedLines.add(key)}>… expand line ({kb(content.length)})</button
+      >{:else}{@html hl.html(content, lang)}{/if}
+  {/snippet}
+
   {#snippet rowView(r: Row, i: number)}
     {#if r.kind === 'file'}
       {@const stats = fileStat(r.file)}
@@ -1345,7 +1366,7 @@
           onclick={(e) => (wip ? selectLine(e, r.file.path, r.hi, r.li, r.line) : gutterClick(r.file.path, r.line))}
         >{r.line.new_line ?? ''}</span>
         <span class="sign" data-find-skip>{sign(r.line)}</span>
-        <span class="code mono">{@html hl.html(r.line.content, lang)}</span>
+        <span class="code mono">{@render codeText(r.line.content, lang, r.key)}</span>
       </div>
     {:else if r.kind === 'split'}
       {@const lang = langOf(r.file.path)}
@@ -1356,12 +1377,12 @@
         <span class="gut old" data-find-skip class:commentable={prMode} onclick={() => gutterClick(r.file.path, L)}
           >{L?.old_line ?? ''}</span>
         <span class="code mono half {L ? (L.origin === 'del' ? 'del' : '') : 'void'}"
-          >{#if L}{@html hl.html(L.content, lang)}{/if}</span>
+          >{#if L}{@render codeText(L.content, lang, r.key + ':L')}{/if}</span>
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <span class="gut new" data-find-skip class:commentable={prMode} onclick={() => gutterClick(r.file.path, R)}
           >{R?.new_line ?? ''}</span>
         <span class="code mono half {R ? (R.origin === 'add' ? 'add' : '') : 'void'}"
-          >{#if R}{@html hl.html(R.content, lang)}{/if}</span>
+          >{#if R}{@render codeText(R.content, lang, r.key + ':R')}{/if}</span>
       </div>
     {:else if r.kind === 'comment'}
       <div class="comment-row" data-rk={r.key} use:measure={[r.key, i]}>
@@ -2115,7 +2136,22 @@
     /* Sidebar collapse button. */
     .nav-collapse-btn { min-width: 36px; min-height: 36px; justify-content: center; }
     /* "Show N more lines" hunk-cap button. */
-    .hunk-cap-btn { font-size: var(--fs-s); min-height: 32px; padding: 6px 12px; }
+    .line-cut-btn {
+    display: inline;
+    margin-inline-start: 6px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--accent-text);
+    font: inherit;
+    font-size: var(--fs-xs);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .line-cut-btn:hover { background: var(--accent-soft); }
+  .line-cut-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .hunk-cap-btn { font-size: var(--fs-s); min-height: 32px; padding: 6px 12px; }
     /* Comment composer Cancel/Comment buttons. */
     .composer-actions .btn { min-height: 36px; padding: 6px 14px; }
     /* PR inline-comment affordance: widen the gutter tap zone and surface a
