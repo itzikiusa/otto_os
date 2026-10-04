@@ -14,6 +14,20 @@ function functions(path: string, names: string[], state: Record<string, any>) {
   return context as Record<string, any>;
 }
 const snipFile = '../src/modules/snip/SnipEditor.svelte';
+
+test('a draft without a source revision becomes dirty after typing', () => {
+  const text = readFileSync(new URL('../src/modules/product/OverviewTab.svelte', import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];
+  const file = ts.createSourceFile('overview.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const declaration = file.statements.filter(ts.isVariableStatement).flatMap(n => [...n.declarationList.declarations])
+    .find(n => n.name.getText(file) === 'draftDirty');
+  assert.ok(declaration?.initializer);
+  const expression = declaration.initializer.getText(file);
+  const state = {isDraft:true,story:{title:'New draft'},source:null,draftTitle:'New draft',draftBody:'', $derived:(value:unknown)=>value};
+  assert.equal(runInNewContext(expression,state),false);
+  state.draftBody='Unsaved notes';
+  assert.equal(runInNewContext(expression,state),true);
+});
+
 function snip(overrides: Record<string, unknown>) {
   return functions(snipFile, ['copyNow', 'drainPersistence', 'approveLeave'], {
     img: {}, annos: [], savedHash: '[]', copyTimer: null, copyInFlight: null,
