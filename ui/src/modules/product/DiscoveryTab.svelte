@@ -422,7 +422,7 @@
   .run-progress {
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    margin-left: auto;
+    margin-inline-start: auto;
   }
 
   .view-swarm-btn {

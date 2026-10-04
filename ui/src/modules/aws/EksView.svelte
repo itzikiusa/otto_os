@@ -242,7 +242,7 @@
     top: 0;
     z-index: 1;
     background: var(--surface);
-    text-align: left;
+    text-align: start;
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
@@ -261,10 +261,10 @@
     max-width: 320px;
   }
   .tbl .num {
-    text-align: right;
+    text-align: end;
   }
   .tbl .act {
-    text-align: right;
+    text-align: end;
     width: 1%;
   }
   .tbl.inner th {

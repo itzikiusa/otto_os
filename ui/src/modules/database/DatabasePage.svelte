@@ -2598,7 +2598,7 @@
     align-items: center;
     gap: 8px;
     padding: 6px 0;
-    border-right: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border-inline-end: 1px solid var(--border, rgba(255, 255, 255, 0.1));
     background: var(--surface);
   }
   .rail-btn {

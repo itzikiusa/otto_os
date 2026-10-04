@@ -272,7 +272,7 @@
   }
   .ab-n {
     width: 18px;
-    text-align: right;
+    text-align: end;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

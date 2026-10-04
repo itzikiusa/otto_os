@@ -662,7 +662,7 @@
     width: 168px;
     flex-shrink: 0;
     overflow-y: auto;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     padding: 6px;
     display: flex;
     flex-direction: column;
@@ -676,7 +676,7 @@
     gap: 6px;
     border: none;
     background: transparent;
-    text-align: left;
+    text-align: start;
     padding: 5px 8px;
     border-radius: var(--radius-s);
     font-size: var(--fs-m);
@@ -763,14 +763,14 @@
     min-width: 0;
     height: 100%;
     overflow: hidden;
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
   }
   .drawer-host.sheet {
     position: fixed;
     inset: 0;
     z-index: var(--z-modal);
     width: auto;
-    border-left: none;
+    border-inline-start: none;
   }
   .k9s {
     flex: 1;
@@ -799,7 +799,7 @@
     font-size: var(--fs-m);
   }
   .hints dt {
-    text-align: right;
+    text-align: end;
   }
   .hints dd {
     margin: 0;

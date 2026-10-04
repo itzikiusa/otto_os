@@ -227,7 +227,7 @@
     cursor: pointer;
   }
   .ranges button + button {
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
   }
   .ranges button.on {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -298,7 +298,7 @@
     table-layout: fixed;
   }
   .stats th {
-    text-align: right;
+    text-align: end;
     font-weight: 500;
     color: var(--text-dim);
     padding: 2px 4px;
@@ -310,7 +310,7 @@
     width: 34%;
   }
   .stats td {
-    text-align: right;
+    text-align: end;
     padding: 2px 4px;
     white-space: nowrap;
     overflow: hidden;
@@ -318,7 +318,7 @@
     font-variant-numeric: tabular-nums;
   }
   .stats td.lbl {
-    text-align: left;
+    text-align: start;
     color: var(--text-dim);
   }
   @keyframes spin {

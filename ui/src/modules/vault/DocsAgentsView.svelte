@@ -1596,7 +1596,7 @@
     margin-top: 7px;
   }
   .finding {
-    border-left: 2px solid var(--border);
+    border-inline-start: 2px solid var(--border);
     padding: 3px 0 3px 8px;
   }
   .finding-head {

@@ -371,7 +371,7 @@
     width: 8px;
     height: 8px;
     border-radius: 2px;
-    margin-right: 4px;
+    margin-inline-end: 4px;
     vertical-align: middle;
   }
   .drift {

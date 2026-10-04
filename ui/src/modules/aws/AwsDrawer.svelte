@@ -112,7 +112,7 @@
     max-width: 55%;
     flex-shrink: 0;
     background: var(--surface);
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
   }
   .drawer.sheet {
     position: fixed;
@@ -121,7 +121,7 @@
     z-index: var(--z-modal);
     width: auto;
     max-width: none;
-    border-left: none;
+    border-inline-start: none;
   }
   .dr-head {
     display: flex;

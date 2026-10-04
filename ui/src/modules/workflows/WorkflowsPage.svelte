@@ -267,7 +267,7 @@
     a { color: var(--accent-text); } code { background: var(--surface-2); padding: .15em .35em; border-radius: 4px; font-family: var(--font-mono); }
     pre { background: var(--surface-2); padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
     table { border-collapse: collapse; } th,td { border: 1px solid var(--border); padding: 4px 8px; }
-    blockquote { border-left: 3px solid var(--border-strong); margin: 0; padding-left: 12px; color: var(--text-dim); }
+    blockquote { border-inline-start: 3px solid var(--border-strong); margin: 0; padding-inline-start: 12px; color: var(--text-dim); }
     img { max-width: 100%; }
   `;
   const FINAL_OUTPUT_TOKENS = ['--text', '--text-dim', '--border', '--border-strong', '--surface-2', '--accent-text', '--font-ui', '--font-mono'];

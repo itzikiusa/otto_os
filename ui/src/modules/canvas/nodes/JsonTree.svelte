@@ -83,7 +83,7 @@
     cursor: pointer;
     color: var(--text);
     font: inherit;
-    text-align: left;
+    text-align: start;
   }
   .tw {
     display: inline-block;
@@ -95,13 +95,13 @@
     transform: rotate(90deg);
   }
   .children {
-    border-left: 1px solid var(--border);
-    margin-left: 4px;
+    border-inline-start: 1px solid var(--border);
+    margin-inline-start: 4px;
   }
   .leaf {
     display: flex;
     gap: 4px;
-    padding-left: 14px;
+    padding-inline-start: 14px;
   }
   .key {
     color: var(--accent-text);

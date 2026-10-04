@@ -358,7 +358,7 @@
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
   }
   .num {
-    text-align: right;
+    text-align: end;
   }
   /* `.cell` is a flex box — text-align doesn't move its content. */
   .cell.num {

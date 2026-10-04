@@ -496,7 +496,7 @@
     color: var(--text-dim);
   }
   .picker {
-    text-align: left;
+    text-align: start;
     cursor: pointer;
     display: flex;
     justify-content: space-between;
@@ -599,7 +599,7 @@
     word-break: break-all;
   }
   .samples .num {
-    text-align: right;
+    text-align: end;
     white-space: nowrap;
   }
   .preview {

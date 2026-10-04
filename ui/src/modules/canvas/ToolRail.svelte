@@ -113,7 +113,7 @@
     gap: 2px;
     padding: 6px 4px;
     background: var(--surface);
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     width: 42px;
     flex: 0 0 42px;
     z-index: 4;
@@ -161,7 +161,7 @@
     min-width: 130px;
   }
   .shape-menu button {
-    text-align: left;
+    text-align: start;
     padding: 6px 8px;
     border: none;
     background: none;

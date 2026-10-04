@@ -351,7 +351,7 @@
   }
   .num {
     justify-content: flex-end;
-    text-align: right;
+    text-align: end;
   }
   .when {
     font-size: var(--fs-xs);

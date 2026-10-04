@@ -365,7 +365,7 @@
     top: 0;
     z-index: 1;
     background: var(--surface);
-    text-align: left;
+    text-align: start;
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
@@ -385,7 +385,7 @@
   }
   .tbl .act {
     width: 32px;
-    text-align: right;
+    text-align: end;
   }
   .trow {
     cursor: pointer;

@@ -472,12 +472,12 @@
     grid-template-columns: minmax(0, 1fr);
   }
   .list {
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     overflow: auto;
     min-height: 0;
   }
   .split.mobile .list {
-    border-right: 0;
+    border-inline-end: 0;
   }
   .detail {
     min-width: 0;
@@ -499,7 +499,7 @@
     top: 0;
     z-index: 1;
     background: var(--surface);
-    text-align: left;
+    text-align: start;
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
@@ -517,7 +517,7 @@
     max-width: 320px;
   }
   .tbl .num {
-    text-align: right;
+    text-align: end;
     width: 64px;
   }
   .kvt th {
@@ -546,7 +546,7 @@
   }
   .name :global(svg) {
     vertical-align: -2px;
-    margin-right: 6px;
+    margin-inline-end: 6px;
   }
   .qn {
     overflow: hidden;
@@ -633,7 +633,7 @@
     font-size: var(--fs-m);
   }
   .bar select {
-    margin-left: 4px;
+    margin-inline-start: 4px;
   }
   .msgs {
     list-style: none;

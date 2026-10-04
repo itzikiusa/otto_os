@@ -143,7 +143,7 @@
     white-space: nowrap;
   }
   .num {
-    text-align: right;
+    text-align: end;
   }
   .num.ok {
     color: var(--success);

@@ -762,7 +762,7 @@
   }
   .skill-md :global(ul),
   .skill-md :global(ol) {
-    padding-left: 0;
+    padding-inline-start: 0;
     padding-inline-start: 22px;
   }
   .inline-error {

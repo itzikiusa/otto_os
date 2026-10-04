@@ -544,7 +544,7 @@
     background: var(--surface);
   }
   .tree {
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -606,7 +606,7 @@
     border: 0;
     background: transparent;
     color: var(--text);
-    text-align: left;
+    text-align: start;
     cursor: pointer;
     font: inherit;
     font-size: var(--fs-m);
@@ -628,7 +628,7 @@
     font-size: var(--fs-xs);
   }
   .tables .node {
-    padding-left: 22px;
+    padding-inline-start: 22px;
   }
   .cols {
     padding: 0 0 2px 44px;
@@ -769,7 +769,7 @@
     top: 0;
     z-index: 1;
     background: var(--surface);
-    text-align: left;
+    text-align: start;
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
@@ -787,7 +787,7 @@
     max-width: 480px;
   }
   .hist .num {
-    text-align: right;
+    text-align: end;
   }
   .trow {
     cursor: pointer;

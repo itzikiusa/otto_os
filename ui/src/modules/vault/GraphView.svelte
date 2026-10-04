@@ -1595,7 +1595,7 @@
   }
   .empty button {
     pointer-events: auto; /* the overlay is inert; its escape hatch must not be */
-    margin-left: 6px;
+    margin-inline-start: 6px;
   }
 
   .statusbar {
@@ -1776,7 +1776,7 @@
     max-height: 340px;
     overflow-y: auto;
     overscroll-behavior: contain; /* don't chain a list's scroll into the panel */
-    padding-right: 2px;
+    padding-inline-end: 2px;
   }
   .fl {
     flex: 1;
@@ -1843,7 +1843,7 @@
     background: none;
     color: var(--text);
     font-size: var(--fs-xs);
-    text-align: left;
+    text-align: start;
     cursor: pointer;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1885,7 +1885,7 @@
   }
   .val {
     flex: 0 0 30px;
-    text-align: right;
+    text-align: end;
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
@@ -1907,7 +1907,7 @@
     z-index: 2;
   }
   .tmeta {
-    margin-left: 6px;
+    margin-inline-start: 6px;
     color: var(--text-dim);
   }
 </style>

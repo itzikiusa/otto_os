@@ -302,7 +302,7 @@
     background: var(--hover);
   }
   .num {
-    text-align: right;
+    text-align: end;
   }
   .name {
     display: flex;
