@@ -587,6 +587,9 @@
         />
       {/if}
     {:else if wsId}
+      <!-- Phone: the header title ellipsizes and has no hover, so the full
+           conversation title wraps here (hidden from AT: the h1 already names it). -->
+      <p class="dfull" aria-hidden="true">{entryTitle(sel)}</p>
       <div class="dconv" data-testid="history-conversation">
         {#key selKey}
           {#if sel.status === 'on_disk' || !sel.session_id}
@@ -1046,6 +1049,21 @@
     }
     .empty-line.narrow-only {
       display: flex;
+    }
+  }
+  .dfull {
+    display: none;
+  }
+  @media (max-width: 640px) {
+    .dfull {
+      display: block;
+      margin: 0;
+      padding-block: 8px;
+      padding-inline: 14px;
+      font-size: var(--fs-m);
+      font-weight: 600;
+      overflow-wrap: anywhere;
+      border-block-end: 1px solid var(--separator);
     }
   }
 </style>
