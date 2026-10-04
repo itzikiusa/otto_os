@@ -933,6 +933,31 @@ async fn run_shell_with_retry(
     )
 }
 
+/// Keep a bounded preview while continuing to drain each pipe. Discarding the
+/// excess is essential: a full stderr pipe must not stall a stdout-heavy child.
+const SHELL_STREAM_BYTES: usize = 512 * 1024;
+async fn drain_shell_stream(
+    mut stream: impl tokio::io::AsyncRead + Unpin,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut kept = Vec::new();
+    let mut omitted = 0u64;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        let take = n.min(SHELL_STREAM_BYTES - kept.len());
+        kept.extend_from_slice(&chunk[..take]);
+        omitted = omitted.saturating_add((n - take) as u64);
+    }
+    if omitted > 0 {
+        kept.extend_from_slice(format!("\n[{} bytes omitted]\n", omitted).as_bytes());
+    }
+    Ok(kept)
+}
+
 /// Run `/bin/sh -c cmd` once in its OWN process group, bounded by `timeout`.
 /// On timeout the whole group is killed: the old `timeout(…, output())` only
 /// dropped the future, and tokio does not kill a child on drop by default —
@@ -950,14 +975,28 @@ async fn run_shell_once(cmd: &str, cwd: &str, timeout: Duration) -> Result<std::
         .kill_on_drop(true);
     #[cfg(unix)]
     spec.process_group(0);
-    let child = spec
+    let mut child = spec
         .spawn()
         .map_err(|e| Error::Internal(format!("spawn shell: {e}")))?;
     let pid = child.id();
     // Dropped mid-run (a user's Stop drops the whole execution): kill the
     // group, not just the shell (kill_on_drop) — its children would run on.
     let mut group = GroupKill(pid);
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let capture = async {
+        let (status, stdout, stderr) = tokio::try_join!(
+            child.wait(),
+            drain_shell_stream(stdout),
+            drain_shell_stream(stderr)
+        )?;
+        Ok::<_, std::io::Error>(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    };
+    match tokio::time::timeout(timeout, capture).await {
         Ok(Ok(out)) => {
             group.0 = None;
             Ok(out)
@@ -1572,6 +1611,22 @@ mod tests {
         assert_eq!(plan_cwd("none", true), CwdPlan::Dir);
         assert_eq!(plan_cwd("none", false), CwdPlan::Scratch);
         assert_eq!(plan_cwd("", true), CwdPlan::Dir);
+    }
+
+    #[tokio::test]
+    async fn shell_output_is_bounded_and_both_pipes_are_drained() {
+        let out = run_shell_once(
+            "head -c 700000 /dev/zero; head -c 700000 /dev/zero >&2; exit 7",
+            "/tmp",
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status.code(), Some(7));
+        for stream in [&out.stdout, &out.stderr] {
+            assert!(stream.len() <= SHELL_STREAM_BYTES + 100);
+            assert!(String::from_utf8_lossy(stream).contains("bytes omitted"));
+        }
     }
 
     #[tokio::test]
