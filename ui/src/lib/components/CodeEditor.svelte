@@ -1209,7 +1209,7 @@
   /* Make the CM editor fill the container fully */
   .code-editor-wrap :global(.cm-editor) {
     height: 100%;
-    font-family: var(--font-mono, 'SF Mono', SFMono-Regular, Menlo, Monaco, 'Courier New', monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     line-height: 1.55;
   }

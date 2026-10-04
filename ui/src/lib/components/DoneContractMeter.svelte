@@ -105,13 +105,13 @@
     transition: stroke-dasharray 240ms ease-out;
   }
   .ring-wrap.ok {
-    color: var(--status-working);
+    color: var(--success);
   }
   .ring-wrap.warn {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .ring-wrap.bad {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .ring-label {
     position: absolute;
@@ -123,7 +123,7 @@
   }
   .ring-label .num {
     font-size: var(--fs-xl);
-    font-weight: 700;
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
   }
   .ring-label .den {
@@ -178,11 +178,11 @@
     margin-top: 1px;
   }
   .item.ok .mark {
-    color: var(--status-working);
+    color: var(--success);
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
   }
   .item.miss .mark {
-    color: var(--status-exited);
+    color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 16%, transparent);
   }
   .item-body {

@@ -217,9 +217,10 @@ Rules for plain tables and dense lists:
 |---|---|---|
 | `title` | `string` | Required. Header text and `aria-label`. |
 | `width` | `number` | Default 460. Clamped to `calc(100vw - 24px)`. |
-| `onclose` | `() => void` | Required. Esc, backdrop click and ✕ all call it. |
+| `onclose` | `() => void` | Required. Esc, backdrop click and ✕ all call it. A backdrop click only counts when the press **started** on the backdrop (a text-selection drag that ends there does not close it). |
 | `children` | snippet | Body (scrolls; the sheet caps at the window height). |
 | `footer` | snippet | Action row, right-aligned. |
+| `dismissable` | `boolean` | Default `true`. `false` blocks Esc, backdrop click and the ✕ while a form is busy (mid-submit); close it yourself when the work settles. |
 
 ```svelte
 {#if open}
@@ -249,9 +250,9 @@ Rules:
   user will spend minutes in it, it should be a page, a pane or a window.
 - The title names the task ("New scheduled task"), and the primary button
   names the action ("Create task").
-- **Drawers:** there is no shared `Drawer` yet. `modules/mcp/RulesDrawer.svelte`
-  is the one that registers correctly; copy its approach (trap plus
-  `pushModal`). **TBD:** extract `lib/components/Drawer.svelte`.
+- **Drawers:** use `shell/Drawer.svelte` (off-canvas slide-over: focus trap via
+  `dialogFocus`, Esc, backdrop, `ui.pushModal()`, a 24 px ✕). Don't hand-roll
+  one. A bottom sheet (`BottomNav`'s "More") follows the same contract.
 
 ## 8. Confirm, prompt and choose: `confirmer`
 
@@ -263,11 +264,12 @@ rendered once by `ConfirmDialog.svelte`):
 ```ts
 import { confirmer } from '../../lib/confirm.svelte';
 
-// Destructive (the defaults: danger = true, confirmLabel = 'Delete')
+// Destructive (the default label is 'Delete'; `danger` is derived from the
+// confirm verb: Delete / Remove / Discard / Drop … paint red, anything else doesn't)
 if (!(await confirmer.ask(`Delete account "${a.label}"? Its token is removed from the Keychain.`,
                           { title: 'Delete account' }))) return;
 
-// Non-destructive: you MUST pass danger:false and a real label, or it renders a red "Delete" button
+// Non-destructive: pass a real confirmLabel (the default is "Delete"). A non-destructive verb is not painted red; pass danger:false to be explicit
 const ok = await confirmer.ask(`Start ${label}?`, { title: 'Start instance', confirmLabel: 'Start', danger: false });
 
 // One line of text: resolves the trimmed value, or null on cancel/empty
@@ -369,9 +371,11 @@ Rules:
   ([content.md → Errors](./content.md#4-error-messages)).
 - Don't toast things the user can already see change on screen ("Saved" on a
   toggle that visibly flipped).
-- Toasts have no action buttons or undo yet. **TBD:** `reportError()` with a
-  details disclosure, and action/undo support. Until then, don't promise
-  "Undo" in a toast.
+- A toast can carry **one action** (`action: { label, run }`, rendered as a
+  small button; see `lib/toast.svelte.ts`) — use it for "Undo" or "Open" only
+  when the action really works. Each toast has its own `role` (`alert` for
+  errors, `status` otherwise), so the container is not a live region.
+  **TBD:** `reportError()` with a details disclosure.
 
 ## 11. Empty, loading and error states
 
@@ -388,6 +392,7 @@ four.
 | `actionLabel` + `onaction` | The one CTA (a `.btn.primary`). |
 | `actionIcon` | `IconName`. |
 | `variant` | `'page'` (the whole page or main pane; pinned about 15vh from the top, not vertically centred) or `'panel'` (the default, inside a pane or card). |
+| `tone` | `'neutral'` (default) or `'error'`: a `--danger-soft` icon tile and `role="alert"`, for a state that is a failure. A failed *load* should use `LoadState` (below) instead. |
 | `children` | A quiet secondary link or hint only (`.btn.ghost` or dim text). Never a second primary. |
 
 ```svelte
@@ -410,27 +415,47 @@ four.
 
 **Loading**
 
-- Use `Skeleton` (`rows`, `height`) when the layout of the result is known
-  (lists, cards).
+- Use `Skeleton` (`rows`, `height`, optional `label`) when the layout of the
+  result is known (lists, cards). Standalone it is a `role="status"` region
+  with a visually hidden "Loading {label}"; inside `LoadState` the wrapper owns
+  that announcement.
 - Use short, specific text for small regions: "Loading proof packs…", not
   "Loading…".
 - A button's own busy state is its disabled label (see [§1](#1-buttons)).
 - Don't block the whole page for one region. Don't flash a skeleton for fast
   loads: skip it under about 150 ms, or keep showing stale data while you
   refresh.
-- Don't add yet another spinner `@keyframes` (there are 23 already). **TBD:** a
-  shared `Spinner`/`Loading` with `role="status"`.
+- For a small busy indicator use the shared `.spinner` class from `app.css`
+  (`--spinner-size` sets the size; give the wrapper `role="status"` and a
+  text label). Don't add another spinner `@keyframes`: `otto-spin` and
+  `otto-pulse` are global. Under reduced motion `.spinner` becomes a static
+  dotted ring.
 
 **Error**
 
 - Inline in the region that failed. It needs:
-  - the `warning` icon, with the message in `--text` and a `--danger`
-    icon or accent
+  - the `warning` icon on a `--danger` tile or accent, with the headline in
+    `--text` and `role="alert"`
   - what failed, in words
   - **Retry**
-  - raw detail in a collapsible or dim second line
-- A failed page load is an inline error, not a toast. **TBD:** a shared
-  `ErrorState` (`error`, `onretry`).
+  - raw detail in a dim second line
+- A failed page load is an inline error, not a toast.
+
+**The shared state components: use them, don't hand-roll an error block**
+
+| Component | Use |
+|---|---|
+| `LoadState` (`lib/components/LoadState.svelte`) | The one wrapper for a loaded list/page: `what`, `loading`, `error`, `empty`, `onretry`, `variant` (`page` / `panel` / `compact`), an `emptyView` snippet, and children for the loaded state. Precedence: error with nothing to show, then a full inline "Couldn't load {what}" with Retry; error with stale data, then the data under a slim "Showing the last good load" bar; loading with nothing yet, then a skeleton (never the empty state); empty, then `emptyView`; else the children. A failed load can therefore never read as "No X yet". |
+| `LazyMount` (`lib/components/LazyMount.svelte`) | Renders a `lazyComponent` with every state designed: skeleton while the chunk loads, the same inline error with Retry on failure, the component once loaded. `quiet` is for overlays (nothing while loading, a toast on failure). |
+| `loadErrorText(e)` (`lib/loadError.ts`) | Turns a caught error into the human cause shown as the detail line (session expired, no access, daemon unreachable). Pass its result as `error`; never the raw exception text. |
+
+```svelte
+<LoadState what="scheduled tasks" loading={s.loading} error={s.error}
+           empty={s.tasks.length === 0} onretry={() => s.load()}>
+  {#snippet emptyView()}<EmptyState title="No scheduled tasks yet" … />{/snippet}
+  …the list…
+</LoadState>
+```
 
 ## 12. Planned primitives (TBD)
 

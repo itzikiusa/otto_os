@@ -46,12 +46,12 @@
     color: var(--text-dim);
   }
   .proof-badge.ok {
-    color: var(--status-working);
+    color: var(--success);
     background: color-mix(in srgb, var(--status-working) 14%, transparent);
     border-color: color-mix(in srgb, var(--status-working) 35%, transparent);
   }
   .proof-badge.bad {
-    color: var(--status-exited);
+    color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
     border-color: color-mix(in srgb, var(--status-exited) 35%, transparent);
   }
@@ -61,7 +61,7 @@
     border-color: color-mix(in srgb, var(--accent) 35%, transparent);
   }
   .proof-badge.warn {
-    color: var(--status-warn);
+    color: var(--warning);
     background: color-mix(in srgb, var(--status-warn) 14%, transparent);
     border-color: color-mix(in srgb, var(--status-warn) 38%, transparent);
   }

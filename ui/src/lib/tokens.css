@@ -7,7 +7,11 @@
    Canonical set: --bg --bg-sidebar --surface --surface-2 --surface-3 --border
    --border-strong --hover --text --text-dim --accent(-soft/-text/-solid/
    -contrast) --danger/--warning/--success/--info (+ -soft, --danger-solid)
-   --status-* (indicators) --fs-* --radius-* --font-ui --font-mono --shadow. */
+   --status-* (indicators) --fs-* --radius-* --font-ui --font-mono --shadow.
+   Also defined here: --glass-* / --separator / --shadow-card (chrome
+   materials), --scrim / --scrim-soft (overlay backdrops), --cat-1…6 (chart
+   series), --term-bg, --worktree(-text), --studio-*, --z-* (layers).
+   The full catalogue, with usage rules, is docs/design/guidelines/foundations.md §1.2. */
 
 :root {
   --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
@@ -22,6 +26,8 @@
   --fs-l: 15px;
   --fs-xl: 18px;
   --fs-2xl: 22px;
+  /* Wordmark / boot screen only — never body or page titles. */
+  --fs-hero: 28px;
 
   --radius-s: 5px;
   --radius-m: 8px;
@@ -267,6 +273,10 @@ html[data-theme='warm'][data-scheme='dark'] {
   --shadow-card:
     0 1px 2px rgba(0, 0, 0, 0.05),
     0 2px 8px rgba(0, 0, 0, 0.03);
+  /* Dimmed backdrop behind a modal / drawer / bottom sheet; -soft behind the
+     command palette (which stays transparent enough to keep context). */
+  --scrim: rgba(0, 0, 0, 0.4);
+  --scrim-soft: rgba(0, 0, 0, 0.25);
 }
 html[data-scheme='dark'],
 html[data-theme='pro-dark'] {
@@ -276,6 +286,8 @@ html[data-theme='pro-dark'] {
   --shadow-card:
     0 1px 2px rgba(0, 0, 0, 0.28),
     0 2px 10px rgba(0, 0, 0, 0.12);
+  --scrim: rgba(0, 0, 0, 0.55);
+  --scrim-soft: rgba(0, 0, 0, 0.4);
 }
 
 /* Reduced transparency (the system setting, or Settings → Appearance): every

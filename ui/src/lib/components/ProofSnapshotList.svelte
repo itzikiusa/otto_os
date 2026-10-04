@@ -160,7 +160,7 @@
     color: var(--text-dim);
   }
   .sha {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);

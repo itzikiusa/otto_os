@@ -127,6 +127,31 @@ user's terms.
 - Seeded or example content is neutral and generic (no customer-specific
   examples in a fresh install).
 
+### Vocabulary
+
+One word per concept, everywhere (labels, toasts, ⌘K, docs):
+
+| Say | Means | Not |
+|---|---|---|
+| **Workspace** | Otto's container: sessions, repos and context grouped together | "project" |
+| **Folder** | A path on disk | "directory", "workspace" |
+| **Repository** | A git repo | "repo" in titles (fine in dense lists), "project" |
+| **Project** | Only in Jira (a Jira project) and Design Hall (a design project) | a workspace or a repo |
+| **Ask Otto** | The plain-English command box and the assistant | "Ask AI", "AI assistant" |
+| **Delete** | Destroys, can't be undone | "Remove" for a real delete |
+| **Remove** | Detaches or forgets; the thing survives elsewhere | "Delete" for a detach |
+| **Refresh** | Fetch the data again | "Reload" |
+| **Reload** | Reload the UI itself (⌘⇧R, the chunk-failed screen) | "Refresh" for data |
+
+**Spelling is US English** (color, behavior, analyze, canceled, center). That is
+what the UI mostly uses: "color" and "behavior" outnumber their UK forms by a
+wide margin. A few "colour", "cancelled" and "analyse" are left in older copy;
+fix them when you touch the line. API enum values (for example the job status
+`cancelled`) are wire values and stay as they are; map them to words for the
+screen.
+
+---
+
 ## 7. Numbers, dates and units
 
 Use the shared helpers. Don't write another local `timeAgo` (the audit found 21

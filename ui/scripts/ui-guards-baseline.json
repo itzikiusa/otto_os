@@ -1,19 +1,15 @@
 {
   "accent-fill": {},
-  "accent-text": {
-    "src/app.css": 1
-  },
+  "accent-text": {},
   "body-style": {},
   "color-literal": {
     "src/app.css": 11,
-    "src/lib/components/ResourceAccess.svelte": 2,
     "src/lib/components/Terminal.svelte": 5,
     "src/modules/agents/conversation/Composer.svelte": 1,
     "src/modules/agents/conversation/Lightbox.svelte": 2,
     "src/modules/canvas/PresentMode.svelte": 1,
     "src/modules/canvas/nodes/StickyNode.svelte": 1,
     "src/modules/database/DatabasePage.svelte": 2,
-    "src/modules/database/DbAssistantPanel.svelte": 5,
     "src/modules/database/DiagramView.svelte": 3,
     "src/modules/database/ReviewModal.svelte": 1,
     "src/modules/database/SchemaTree.svelte": 2,
@@ -24,7 +20,6 @@
     "src/modules/kubernetes/ClusterWorkspace.svelte": 1,
     "src/modules/kubernetes/ExecView.svelte": 1,
     "src/modules/kubernetes/LogsView.svelte": 4,
-    "src/modules/mcp/ToolsTab.svelte": 1,
     "src/modules/panels/BrowserPanel.svelte": 1,
     "src/modules/panels/OutputsPanel.svelte": 1,
     "src/modules/product/ActionCard.svelte": 1,
@@ -34,7 +29,6 @@
     "src/modules/product/design/DesignArena.svelte": 1,
     "src/modules/product/design/DeviceFrame.svelte": 11,
     "src/modules/product/design/scene3d/Inspector.svelte": 8,
-    "src/modules/vault/DocsAgentsView.svelte": 1,
     "src/modules/vault/FileViewer.svelte": 1,
     "src/modules/vault/NoteView.svelte": 1,
     "src/shell/TabBar.svelte": 2
@@ -147,7 +141,7 @@
     "src/modules/kubernetes/monitor/MonitorInsights.svelte": 1,
     "src/modules/kubernetes/monitor/MonitorOverview.svelte": 1,
     "src/modules/kubernetes/monitor/MonitorSettings.svelte": 5,
-    "src/modules/mcp/ApprovalsTab.svelte": 3,
+    "src/modules/mcp/ApprovalsTab.svelte": 2,
     "src/modules/mcp/ExposePanel.svelte": 1,
     "src/modules/mcp/PoliciesTab.svelte": 1,
     "src/modules/mcp/TokensPanel.svelte": 1,
@@ -224,13 +218,9 @@
     "src/modules/database/GridView.svelte": 1,
     "src/modules/database/QueryBuilder.svelte": 4,
     "src/modules/kubernetes/ClusterWorkspace.svelte": 2,
-    "src/modules/mcp/ServersTab.svelte": 2,
-    "src/modules/mcp/ToolsTab.svelte": 2,
     "src/modules/product/design/DeviceFrame.svelte": 2,
     "src/modules/run-with-otto/RunStageRail.svelte": 2,
     "src/modules/swarm/AgentGraph.svelte": 1,
-    "src/modules/vault/DocsAgentsView.svelte": 1,
-    "src/modules/vault/GraphView.svelte": 2,
     "src/modules/workflows/WorkflowCanvas.svelte": 5,
     "src/modules/workflows/WorkflowsPage.svelte": 1,
     "src/shell/NotificationBell.svelte": 3
@@ -244,12 +234,9 @@
     "src/modules/agents/SplitNode.svelte": 2,
     "src/modules/agents/TiledView.svelte": 2,
     "src/modules/canvas/AiPromptPill.svelte": 1,
-    "src/modules/database/QueryEditor.svelte": 1,
     "src/modules/git/GraphSearchBar.svelte": 1,
     "src/modules/git/GraphView.svelte": 2,
     "src/modules/kubernetes/NamespacePicker.svelte": 1,
-    "src/modules/mcp/RulesDrawer.svelte": 2,
-    "src/modules/panels/BrowserPanel.svelte": 2,
     "src/modules/workflows/WorkflowsPage.svelte": 1
   }
 }

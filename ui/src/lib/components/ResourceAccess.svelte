@@ -558,7 +558,7 @@
     flex-shrink: 0;
   }
   .error {
-    color: var(--status-exited, #ed635c);
+    color: var(--danger);
     overflow-wrap: anywhere;
   }
   .preview {
@@ -583,7 +583,7 @@
     overflow-wrap: anywhere;
   }
   .allowed {
-    color: var(--status-working, #36a66f);
+    color: var(--success);
   }
   details summary {
     cursor: pointer;

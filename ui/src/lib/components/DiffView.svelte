@@ -286,7 +286,7 @@
     line-height: 1.45;
     overflow: auto;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     background: var(--surface);
   }
   .dv-row {
@@ -316,10 +316,10 @@
     color: var(--text-dim);
   }
   .dv-row.del .dv-sign {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .dv-row.add .dv-sign {
-    color: var(--status-working);
+    color: var(--success);
   }
   .dv-txt {
     flex: 1 1 auto;

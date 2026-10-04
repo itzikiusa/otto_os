@@ -13,8 +13,9 @@
   };
 </script>
 
+<!-- No aria-live on the container: each toast carries its own role, so a toast is announced once, not twice. -->
 <!-- The lift is set HERE, not on :root — see FloatingBar's toast-lift effect. -->
-<div class="toasts" aria-live="polite" style:--toast-lift="{barStore.toastLift}px">
+<div class="toasts" style:--toast-lift="{barStore.toastLift}px">
   {#each toasts.toasts as t (t.id)}
     <!-- An error interrupts (assertive); everything else waits its turn. The
          timer holds while the pointer or focus is on the toast. -->
@@ -88,13 +89,13 @@
     background: var(--accent);
   }
   .toast.success .toast-stripe {
-    background: var(--status-working);
+    background: var(--success);
   }
   .toast.warn .toast-stripe {
-    background: var(--status-warn);
+    background: var(--warning);
   }
   .toast.error .toast-stripe {
-    background: var(--status-exited);
+    background: var(--danger);
   }
   .toast-icon {
     display: grid;

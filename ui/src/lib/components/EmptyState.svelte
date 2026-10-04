@@ -24,13 +24,15 @@
      *  beside) the view's one primary action. */
     actionKind?: 'primary' | 'secondary';
     variant?: 'page' | 'panel';
+    /** 'error' marks a failed state: danger icon tile + role="alert". */
+    tone?: 'neutral' | 'error';
     children?: Snippet;
   }
-  let { icon = 'box', title, body, actionLabel, actionIcon, onaction, actionKind = 'primary', variant = 'panel', children }: Props = $props();
+  let { icon = 'box', title, body, actionLabel, actionIcon, onaction, actionKind = 'primary', variant = 'panel', tone = 'neutral', children }: Props = $props();
 </script>
 
-<div class="empty" class:page={variant === 'page'} data-testid={variant === 'page' ? 'page-empty' : undefined}>
-  <div class="empty-icon"><Icon name={icon} size={variant === 'page' ? 26 : 24} /></div>
+<div class="empty" class:page={variant === 'page'} role={tone === 'error' ? 'alert' : undefined} data-testid={variant === 'page' ? 'page-empty' : undefined}>
+  <div class="empty-icon" class:error={tone === 'error'}><Icon name={icon} size={variant === 'page' ? 26 : 24} /></div>
   <h3>{title}</h3>
   {#if body}<p>{body}</p>{/if}
   {#if actionLabel && onaction}
@@ -70,6 +72,10 @@
     place-items: center;
     margin-bottom: 4px;
     color: var(--text-dim);
+  }
+  .empty-icon.error {
+    background: var(--danger-soft);
+    color: var(--danger);
   }
   h3 {
     margin: 0;

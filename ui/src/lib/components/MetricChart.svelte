@@ -14,6 +14,7 @@
     type MetricChartSeries,
     type MetricChartUnit,
   } from '../metric-format';
+  import { chartColor } from './chartPalette';
 
   interface Props {
     series: MetricChartSeries[];
@@ -35,7 +36,6 @@
     emptyText = 'No data',
   }: Props = $props();
 
-  const PALETTE = ['var(--accent)', '#28c840', '#d2691e', '#bf5af2', '#0e8a8a', '#ff5f57', '#febc2e'];
   const W = 600;
   const PAD = { l: 44, r: 10, t: 10, b: 22 };
 
@@ -47,7 +47,7 @@
   }
 
   // ── domain ─────────────────────────────────────────────────────────────────
-  const colorOf = (i: number) => series[i]?.color ?? PALETTE[i % PALETTE.length];
+  const colorOf = (i: number) => series[i]?.color ?? chartColor(i);
 
   const hasData = $derived(series.some((s) => s.points.some((p) => p.v != null)));
 
@@ -322,7 +322,7 @@
   .tick {
     fill: var(--text-dim);
     font-size: var(--fs-xs);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
   .cursor {
     stroke: var(--text-dim);
@@ -336,7 +336,7 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
     border: 1px dashed var(--border);
-    border-radius: var(--radius-m, 6px);
+    border-radius: var(--radius-m);
   }
   .mc-tip {
     position: absolute;
@@ -345,8 +345,8 @@
     pointer-events: none;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 6px);
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+    border-radius: var(--radius-m);
+    box-shadow: var(--shadow);
     padding: 6px 8px;
     font-size: var(--fs-xs);
     min-width: 120px;
@@ -398,6 +398,6 @@
     flex-shrink: 0;
   }
   .mono {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
 </style>
