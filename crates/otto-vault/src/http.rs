@@ -294,14 +294,32 @@ async fn folder<C: VaultCtx>(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(serde::Deserialize)]
+struct BacklinksQ {
+    path: String,
+    #[serde(default)]
+    context_offset: usize,
+    context_limit: Option<usize>,
+}
+
 async fn backlinks<C: VaultCtx>(
     State(c): State<C>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(WsVaultPath { ws, id }): Path<WsVaultPath>,
-    Query(q): Query<PathQ>,
+    Query(q): Query<BacklinksQ>,
 ) -> ApiResult<Json<Vec<Backlink>>> {
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
-    Ok(Json(c.vault().backlinks(&ws, id, &q.path).await?))
+    Ok(Json(
+        c.vault()
+            .backlinks_context_window(
+                &ws,
+                id,
+                &q.path,
+                q.context_offset,
+                q.context_limit.unwrap_or(100),
+            )
+            .await?,
+    ))
 }
 
 async fn search<C: VaultCtx>(

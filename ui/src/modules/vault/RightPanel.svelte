@@ -20,6 +20,13 @@
     shownOutgoing = LIST_PAGE;
   });
 
+  async function showMoreBacklinks(): Promise<void> {
+    const path = vault.notePath, id = vault.current?.id;
+    if (await vault.loadBacklinkContexts(shownBacklinks)) {
+      if (vault.notePath === path && vault.current?.id === id) shownBacklinks += LIST_PAGE;
+    }
+  }
+
   const props = $derived.by(() => {
     const fm = vault.note?.meta.frontmatter;
     if (!fm || typeof fm !== 'object' || Array.isArray(fm)) return [] as [string, string][];
@@ -58,7 +65,7 @@
           </button>
         {/each}
         {#if vault.backlinks.length > shownBacklinks}
-          <button class="more" onclick={() => (shownBacklinks += LIST_PAGE * 5)}>Show more ({vault.backlinks.length - shownBacklinks} hidden)</button>
+          <button class="more" disabled={vault.loadingBacklinkContexts} onclick={() => void showMoreBacklinks()}>Show more ({vault.backlinks.length - shownBacklinks} hidden)</button>
         {/if}
       {/if}
     {/if}

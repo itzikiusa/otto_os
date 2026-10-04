@@ -115,6 +115,8 @@ class VaultStore {
   /** 409 conflict from autosave — the banner offers Reload / Overwrite. */
   conflict = $state(false);
   backlinks = $state<VaultBacklink[]>([]);
+  private backlinksGeneration = 0;
+  loadingBacklinkContexts = $state(false);
 
   // Open tabs — multiple notes/files at once, persisted per vault (survives
   // module switches AND app restarts; restored in select()).
@@ -789,13 +791,34 @@ class VaultStore {
     if (!this.current || !this.notePath) return;
     // Late replies must not show note A's backlinks under note B (or vault B).
     const id = this.current.id, path = this.notePath;
+    const generation = ++this.backlinksGeneration;
+    this.loadingBacklinkContexts = false;
     let next: VaultBacklink[];
     try {
       next = await vaultBacklinks(this.wsId, id, path);
     } catch {
       next = [];
     }
-    if (this.current?.id === id && this.notePath === path) this.backlinks = next;
+    if (this.current?.id === id && this.notePath === path && generation === this.backlinksGeneration) this.backlinks = next;
+  }
+
+  async loadBacklinkContexts(offset: number): Promise<boolean> {
+    if (!this.current || !this.notePath || this.loadingBacklinkContexts) return false;
+    const id = this.current.id, path = this.notePath, generation = this.backlinksGeneration;
+    const current = () => this.current?.id === id && this.notePath === path && generation === this.backlinksGeneration;
+    this.loadingBacklinkContexts = true;
+    try {
+      const rows = await vaultBacklinks(this.wsId, id, path, offset);
+      if (!current()) return false;
+      const snippets = new Map(rows.slice(offset, offset + 100).map(row => [row.path + '\n' + row.kind, row.context]));
+      this.backlinks = this.backlinks.map(row => ({ ...row, context: snippets.get(row.path + '\n' + row.kind) ?? row.context }));
+      return true;
+    } catch (e) {
+      if (current()) toasts.error('Couldn’t load backlink contexts', String(e));
+      return false;
+    } finally {
+      if (current()) this.loadingBacklinkContexts = false;
+    }
   }
 
   setView(edit: boolean): void {
