@@ -1,5 +1,6 @@
 <script lang="ts">
   import { transcript as transcriptStore } from '../lib/stores/transcript.svelte';
+  import { toastError } from '../lib/toastError';
   $effect(() => {
     const onVis = (): void => transcriptStore.setVisible(!document.hidden);
     onVis();
@@ -284,7 +285,7 @@
     try {
       await ws.renameSession(s.id, next);
     } catch (e) {
-      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename the session', e);
     }
   }
 
@@ -558,7 +559,7 @@
       ws.addSession(session);
       toasts.info('Updating CLIs…', 'Watch the Update CLIs session for progress');
     } catch (e) {
-      toasts.error('Update CLIs failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update the CLIs', e);
     }
   }
 
@@ -583,7 +584,7 @@
       { id: 'core.go-forward', title: 'Go forward', group: 'Navigate', shortcut: '⌘⇧→', keywords: 'next page history', run: () => router.forward() },
       { id: 'core.toggle-rail', title: 'Toggle sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: 'Toggle right panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
-      ...(isTauri ? [{ id: 'core.open-in-window', title: 'Open in new window', group: 'View', keywords: 'pop out popout detach separate native window', run: () => void openPopout(currentRoute(), moduleLabel(moduleName)).catch((e: unknown) => toasts.error('Could not open window', e instanceof Error ? e.message : String(e))) }] : []),
+      ...(isTauri ? [{ id: 'core.open-in-window', title: 'Open in new window', group: 'View', keywords: 'pop out popout detach separate native window', run: () => void openPopout(currentRoute(), moduleLabel(moduleName)).catch((e: unknown) => toastError('Couldn’t open window', e)) }] : []),
       { id: 'core.scheme-auto', title: 'Scheme: Auto (follow system)', group: 'Appearance', keywords: 'color scheme light dark system automatic mode', run: () => ui.setScheme('auto') },
       { id: 'core.scheme-light', title: 'Scheme: Light', group: 'Appearance', keywords: 'color scheme mode day', run: () => ui.setScheme('light') },
       { id: 'core.scheme-dark', title: 'Scheme: Dark', group: 'Appearance', keywords: 'color scheme mode night', run: () => ui.setScheme('dark') },
@@ -1051,7 +1052,7 @@
         class="pb-dismiss"
         onclick={() => {
           void auth.stopImpersonating().catch((e: unknown) => {
-            toasts.error('Could not exit impersonation', e instanceof Error ? e.message : String(e));
+            toastError('Couldn’t exit impersonation', e);
           });
         }}
       >Stop impersonating</button>

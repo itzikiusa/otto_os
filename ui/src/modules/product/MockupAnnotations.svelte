@@ -9,8 +9,8 @@
   // Coordinates are relative, so pins survive resize. Pins render at
   //   left:{x_pct*100}% top:{y_pct*100}%.
   import { tick } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import { product } from '../../lib/stores/product.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import type { MockupAnnotation } from './types';
@@ -73,7 +73,7 @@
     try {
       notes = await product.listAnnotations(attachmentId);
     } catch (e) {
-      toasts.error('Could not load annotations', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t load annotations', e);
     } finally {
       loading = false;
     }
@@ -123,7 +123,7 @@
         void tick().then(() => addBtn?.focus());
       }
     } catch (e) {
-      toasts.error('Could not add note', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t add note', e);
     } finally {
       saving = false;
     }
@@ -266,7 +266,7 @@
       const updated = await product.patchAnnotation(n.id, { resolved: !n.resolved });
       notes = notes.map((x) => (x.id === n.id ? updated : x));
     } catch (e) {
-      toasts.error('Could not update note', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update note', e);
     }
   }
 
@@ -281,7 +281,7 @@
       await product.deleteAnnotation(n.id);
       notes = notes.filter((x) => x.id !== n.id);
     } catch (e) {
-      toasts.error('Could not delete note', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete note', e);
     }
   }
 

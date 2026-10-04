@@ -1,5 +1,6 @@
 <script lang="ts">
   import PathField from '../../lib/components/PathField.svelte';
+  import { toastError } from '../../lib/toastError';
   // Docs agents — fan 1-4 writer agents out over a prompt to author notes into
   // the vault (a summarizer consolidates drafts when >1 writer), plus the
   // vault's RUN HISTORY (docs runs + per-note refine turns, server-persisted
@@ -34,6 +35,7 @@
   } from '../../lib/api/vault';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { toasts } from '../../lib/toast.svelte';
+  import { kindLabel, runStateLabel, severityLabel } from '../../lib/labels';
   import { DOCS_TEMPLATES } from './docsTemplates';
   import { vault } from './vault.svelte';
   import type { Poller } from '../../lib/poll';
@@ -103,7 +105,7 @@
       const s = await contextApi.getSkill(name);
       skillView = { name, body: s.body };
     } catch (e) {
-      toasts.error('Couldn’t open the skill', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t open the skill', e);
     }
   }
 
@@ -257,7 +259,7 @@
       void vault.refreshDocsRuns();
       startPoll();
     } catch (e) {
-      toasts.error('Couldn’t start the docs agent', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start the docs agent', e);
     } finally {
       starting = false;
     }
@@ -275,7 +277,7 @@
       else await retryDocsAgent(r.id, target);
       startPoll();
     } catch (e) {
-      toasts.error('Couldn’t retry the run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t retry the run', e);
     } finally {
       retrying = { ...retrying, [String(target)]: false };
     }
@@ -290,7 +292,7 @@
       await retryDocsReviewer(r.id, iteration, index);
       startPoll();
     } catch (e) {
-      toasts.error('Couldn’t retry the reviewer', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t retry the reviewer', e);
     } finally {
       retrying = { ...retrying, [key]: false };
     }
@@ -305,7 +307,7 @@
       await retryDocsRevision(r.id, iteration);
       startPoll();
     } catch (e) {
-      toasts.error('Couldn’t retry the revision', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t retry the revision', e);
     } finally {
       retrying = { ...retrying, [key]: false };
     }
@@ -320,7 +322,7 @@
       await cancelDocsRun(r.id);
       await poll();
     } catch (e) {
-      toasts.error('Couldn’t cancel the run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t cancel the run', e);
     } finally {
       cancelling = false;
     }
@@ -349,7 +351,7 @@
         outcome === 'ok' ? 'Findings accepted as-is' : 'Findings marked as fixed',
       );
     } catch (e) {
-      toasts.error('Couldn’t resolve the review', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t resolve the review', e);
     } finally {
       resolving = false;
     }
@@ -366,7 +368,7 @@
       if (vault.docsRun?.id === r.id) vault.docsRun = null;
       vault.docsRuns = vault.docsRuns.filter((x) => x.id !== r.id);
     } catch (e) {
-      toasts.error('Couldn’t delete the run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete the run', e);
     } finally {
       deleting = null;
     }
@@ -653,7 +655,7 @@
           {#if active}<span class="spinner-xs"></span>{/if}
           {displayState(run.state)}
         </span>
-        <span class="kind-chip">{run.kind}</span>
+        <span class="kind-chip">{kindLabel(run.kind)}</span>
         <span class="run-meta" title={run.prompt}>
           {#if run.kind === 'refine'}
             <button class="note-link" onclick={() => void vault.open(run.note_path)}>
@@ -673,7 +675,7 @@
         {#if run.state === 'done_with_findings'}
           <button
             class="ghost"
-            title="Prefill a fix run from this run's outstanding findings"
+            title="Prefill a fix run from this run’s outstanding findings"
             onclick={fixWithAgent}>Send to agent to fix</button
           >
           <button
@@ -717,8 +719,8 @@
                 <button
                   class="ghost small"
                   title={agent.state === 'error'
-                    ? "Re-spawn this writer's turn in a fresh session"
-                    : "Kill this writer's session and restart its turn fresh"}
+                    ? "Re-spawn this writer’s turn in a fresh session"
+                    : "Kill this writer’s session and restart its turn fresh"}
                   disabled={retrying[String(agent.index)]}
                   onclick={() => void retry(agent.index)}
                 >
@@ -727,7 +729,7 @@
               {/if}
               <span class="pill st-{agent.state}">
                 {#if agent.state === 'running'}<span class="spinner-xs"></span>{/if}
-                {agent.state}
+                {runStateLabel(agent.state)}
               </span>
             </div>
             {#if agent.error}
@@ -770,7 +772,7 @@
             {#if run.state === 'summarizing' && (run.summarizer.state === 'running' || run.summarizer.state === 'pending')}
               <button
                 class="ghost small"
-                title="Kill the summarizer's session and restart the consolidation fresh"
+                title="Kill the summarizer’s session and restart the consolidation fresh"
                 disabled={retrying['sum']}
                 onclick={() => void retry('sum')}
               >
@@ -779,7 +781,7 @@
             {/if}
             <span class="pill st-{run.summarizer.state}">
               {#if run.summarizer.state === 'running'}<span class="spinner-xs"></span>{/if}
-              {run.summarizer.state}
+              {runStateLabel(run.summarizer.state)}
             </span>
           </div>
           {#if run.summarizer.error}
@@ -807,7 +809,7 @@
               {#if run.review.state === 'reviewing' || run.review.state === 'revising'}
                 <span class="spinner-xs"></span>
               {/if}
-              {run.review.state}
+              {runStateLabel(run.review.state)}
             </span>
           </div>
 
@@ -837,7 +839,7 @@
                     </span>
                   </div>
                   <span class="grow"></span>
-                  <span class="pill st-{round.state}">{round.state}</span>
+                  <span class="pill st-{round.state}">{runStateLabel(round.state)}</span>
                 </header>
 
                 <div class="reviewer-list">
@@ -873,7 +875,7 @@
                         {/if}
                         <span class="pill st-{reviewer.state}">
                           {#if reviewer.state === 'running'}<span class="spinner-xs"></span>{/if}
-                          {reviewer.state}
+                          {runStateLabel(reviewer.state)}
                         </span>
                       </div>
                       {#if reviewer.focus}
@@ -889,7 +891,7 @@
                           {#each reviewer.findings as finding, findingIndex (`${reviewer.index}-${findingIndex}`)}
                             <div class="finding">
                               <div class="finding-head">
-                                <span class="severity sev-{finding.severity}">{finding.severity}</span>
+                                <span class="severity sev-{finding.severity}">{severityLabel(finding.severity)}</span>
                                 <span class="finding-category">{finding.category}</span>
                               </div>
                               <strong>{finding.summary}</strong>
@@ -945,7 +947,7 @@
                       {/if}
                       <span class="pill st-{round.revision.state}">
                         {#if round.revision.state === 'running'}<span class="spinner-xs"></span>{/if}
-                        {round.revision.state}
+                        {runStateLabel(round.revision.state)}
                       </span>
                     </div>
                     {#if round.revision.error}
@@ -1005,7 +1007,7 @@
                 {#if isActive(r)}<span class="spinner-xs"></span>{/if}
                 {displayState(r.state)}
               </span>
-              <span class="kind-chip">{r.kind}</span>
+              <span class="kind-chip">{kindLabel(r.kind)}</span>
               <span class="run-row-text">
                 {r.kind === 'refine' ? `${r.note_path} — ${r.prompt}` : r.prompt}
               </span>

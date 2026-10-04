@@ -3,6 +3,7 @@
   // triggers (schedule / webhook / event).  Shown in the workflow inspector
   // sidebar when the "Triggers" tab is active.
   import { onDestroy } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -95,7 +96,7 @@
       if (!alive) return;
       previewTimezone = timezone;
       preview = result.next_fire_times;
-    } catch (e) { toasts.error('Couldn’t preview the trigger', e instanceof Error ? e.message : String(e)); }
+    } catch (e) { toastError('Couldn’t preview the trigger', e); }
     finally { previewing = false; }
   }
 
@@ -163,7 +164,7 @@
       triggers = triggers.map((x) => (x.id === t.id ? updated : x));
       ontriggers?.(triggers);
     } catch (e) {
-      toasts.error('Couldn’t update the trigger', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update the trigger', e);
     }
   }
 
@@ -183,7 +184,7 @@
       ontriggers?.(triggers);
       toasts.success('Trigger removed');
     } catch (e) {
-      toasts.error('Couldn’t remove the trigger', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove the trigger', e);
     }
   }
 

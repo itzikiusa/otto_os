@@ -237,7 +237,7 @@
     </aside>
   <div class="browser">
     {#if loading}
-      <div class="dim pad">Loading…</div>
+      <div class="dim pad" role="status">Loading folders…</div>
     {:else if error}
       <div class="err pad" role="alert">
         <div>Could not open <code data-testid="attempted-folder">{lastAttempt.path || '~'}</code></div>

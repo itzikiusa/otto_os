@@ -3,6 +3,7 @@
   // story, render it as a task tree with 3-state checkboxes the PO can toggle,
   // and persist toggles in place. Modeled on RewriteTab's load/poll pattern.
   import { product } from '../../lib/stores/product.svelte';
+  import { plural } from '../../lib/plural';
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -468,7 +469,7 @@
               {:else if pollTimer !== null}
                 Generating…
               {:else if multiAgent}
-                Generate plan · {selectedProviders.length} agents
+                Generate plan · {plural(selectedProviders.length, 'agent')}
               {:else}
                 Generate plan
               {/if}

@@ -19,6 +19,7 @@
   // conflict draft set aside. Accepts, drafts and edit-after-draft are
   // recorded server-side.
   import { untrack } from 'svelte';
+  import { toastError } from '../../../lib/toastError';
   import Icon, { asIcon } from '../../../lib/components/Icon.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import AgentChip from '../../../lib/components/AgentChip.svelte';
@@ -351,7 +352,7 @@
       appliedNote = `Applied Otto’s draft as v${res.version.seq}.`;
       void loadRuns().catch(() => {});
     } catch (e) {
-      toasts.error('Couldn’t apply the draft', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t apply the draft', e);
     }
   }
   function keepCurrent(turn: DesignAssistTurn): void {
@@ -394,7 +395,7 @@
       runs = runs.map((r) => (r.run_id === run.run_id ? { ...r, status: 'accepted' as const, accepted_version_id: res.accepted_version_id } : r));
       void loadRuns().catch(() => {});
     } catch (e) {
-      toasts.error('Couldn’t apply the variant', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t apply the variant', e);
     } finally {
       applying = null;
     }

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import { toastError } from '../../lib/toastError';
   import ResourceAccess from '../../lib/components/ResourceAccess.svelte';
   // Clusters overview: one card per saved cluster (env pill, color dot, server
   // version + capability chips), "Add cluster" wizard (Admin), card context menu
@@ -41,7 +42,7 @@
       else toasts.error(`${c.name}: unreachable`, r.message);
       void k8s.loadCapabilities(c.id, true);
     } catch (e) {
-      toasts.error(`${c.name}: test failed`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t test ${c.name}`, e);
     } finally {
       testing = { ...testing, [c.id]: false };
     }
@@ -57,7 +58,7 @@
       await k8s.deleteCluster(c.id);
       toasts.success('Cluster removed', c.name);
     } catch (e) {
-      toasts.error('Couldn’t remove the cluster', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove the cluster', e);
     }
   }
 

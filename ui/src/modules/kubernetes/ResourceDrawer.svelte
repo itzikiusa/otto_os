@@ -19,6 +19,8 @@
   import { stringify as toYaml } from 'yaml';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import { copyText } from '../../lib/clipboard';
   import { isAbortError } from '../../lib/api/client';
@@ -41,7 +43,7 @@
     kind: K8sResourceKind;
     ns: string;
     name: string;
-    /** The table row when it's loaded (null while the list is still loading
+    /** The table row when it’s loaded (null while the list is still loading
      *  or the object vanished — the drawer then leans on the manifest). */
     row: K8sRow | null;
     tab: K8sDrawerTab;
@@ -51,12 +53,12 @@
     ontab: (t: K8sDrawerTab) => void;
     onclose: () => void;
     onaction: (def: ActionDef, row: K8sRow) => void;
-    /** Workloads: jump to one of this object's pods (its own drawer). */
+    /** Workloads: jump to one of this object’s pods (its own drawer). */
     onopenpod?: (ns: string, pod: string, tab?: K8sDrawerTab) => void;
     /** Bumped by the workspace after an action on this object (KS-4): the
      *  drawer re-reads its detail quietly. */
     reloadNonce?: number;
-    /** Open this workload's row in the Monitor view (K-2). */
+    /** Open this workload’s row in the Monitor view (K-2). */
     onmonitor?: (ns: string, workload: string) => void;
   }
   let { modal = false, clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction, onopenpod, reloadNonce = 0, onmonitor }: Props = $props();
@@ -117,7 +119,7 @@
       : []),
     ...(canHttp ? [{ id: 'http' as const, label: 'HTTP' }] : []),
   ].filter(t => t.id === 'logs' ? canLogs : t.id === 'terminal' ? canExec : t.id === 'metrics' ? canOperation('metrics') : true));
-  /** Container names across the workload's pod template (Logs container filter). */
+  /** Container names across the workload’s pod template (Logs container filter). */
   const templateContainers = $derived.by((): K8sContainer[] => {
     if (isPod || !detail) return [];
     const spec = (detail.manifest as { spec?: { template?: { spec?: { containers?: { name: string }[]; initContainers?: { name: string }[] } } } }).spec?.template?.spec;
@@ -154,7 +156,7 @@
         if (!sig.aborted) detail = d;
       })
       .catch((e) => {
-        if (!sig.aborted && !isAbortError(e)) detailError = e instanceof Error ? e.message : String(e);
+        if (!sig.aborted && !isAbortError(e)) detailError = loadErrorText(e);
       })
       .finally(() => {
         if (!sig.aborted) detailLoading = false;
@@ -303,11 +305,11 @@
           {#if isPod || selector || (canEdit && actions.length)}
             <div class="ov-actions">
               {#if isPod}
-                <button class="btn small" disabled={!canLogs} title={canLogs ? undefined : "You don't have permission to read logs in this namespace"} onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
+                <button class="btn small" disabled={!canLogs} title={canLogs ? undefined : "You don’t have permission to read logs in this namespace"} onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
                 {#if canExec}<button class="btn small" onclick={() => ontab('terminal')}><Icon name="terminal" size={12} /> Shell</button>{/if}
               {:else if selector}
                 <button class="btn small" onclick={() => ontab('pods')}><Icon name="box" size={12} /> Pods</button>
-                <button class="btn small" disabled={!canLogs} title={canLogs ? undefined : "You don't have permission to read logs in this namespace"} onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
+                <button class="btn small" disabled={!canLogs} title={canLogs ? undefined : "You don’t have permission to read logs in this namespace"} onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
               {/if}
               {#if onmonitor && httpWorkload}
                 <button class="btn small" onclick={() => onmonitor(ns, httpWorkload.name)} title="Open {httpWorkload.name} in the Monitor (history, restarts, req/s)" data-testid="k8s-drawer-monitor"><Icon name="gauge" size={12} /> Monitor</button>
@@ -352,14 +354,14 @@
         {:else if detailLoading}
           <Skeleton rows={4} height={22} />
         {:else if detailError}
-          <div class="err">{detailError} <button class="btn small" onclick={retry}>Retry</button></div>
+          <LoadState what="this object" variant="compact" error={detailError} empty={true} onretry={retry} />
         {:else}
-          <div class="dim">This object isn't in the current list any more. The manifest / describe tabs show its last known state, if the API still has it.</div>
+          <div class="dim">This object isn’t in the current list any more. The manifest / describe tabs show its last known state, if the API still has it.</div>
         {/if}
       </div>
     {:else if tab === 'manifest'}
       {#if detailLoading}<div class="pad"><Skeleton rows={8} height={16} /></div>
-      {:else if detailError}<div class="err pad">{detailError} <button class="btn small" onclick={retry}>Retry</button></div>
+      {:else if detailError}<div class="pad"><LoadState what="this object" variant="compact" error={detailError} empty={true} onretry={retry} /></div>
       {:else}
         <div class="code-tools">
           <span class="dim">{kind === 'secrets' ? 'Secret values are redacted by the daemon.' : 'managedFields stripped.'}{clippedManifest.clipped ? ` ${clippedManifest.clipped} long value${clippedManifest.clipped === 1 ? '' : 's'} shortened — Copy has the full manifest.` : ''}</span>
@@ -373,7 +375,7 @@
       {/if}
     {:else if tab === 'describe'}
       {#if detailLoading}<div class="pad"><Skeleton rows={8} height={16} /></div>
-      {:else if detailError}<div class="err pad">{detailError} <button class="btn small" onclick={retry}>Retry</button></div>
+      {:else if detailError}<div class="pad"><LoadState what="this object" variant="compact" error={detailError} empty={true} onretry={retry} /></div>
       {:else}
         <div class="code-tools">
           <span class="dim mono">kubectl describe {def.singular.toLowerCase()} {name}</span>
@@ -383,7 +385,7 @@
       {/if}
     {:else if tab === 'events'}
       {#if detailLoading}<div class="pad"><Skeleton rows={4} height={22} /></div>
-      {:else if detailError}<div class="err pad">{detailError} <button class="btn small" onclick={retry}>Retry</button></div>
+      {:else if detailError}<div class="pad"><LoadState what="this object" variant="compact" error={detailError} empty={true} onretry={retry} /></div>
       {:else if !detail?.events.length}<div class="dim pad">No events for this object.</div>
       {:else}
         <table class="events">
@@ -638,11 +640,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .err {
-    color: var(--danger);
-    font-size: var(--fs-s);
-    white-space: pre-wrap;
   }
   .dim {
     color: var(--text-dim);

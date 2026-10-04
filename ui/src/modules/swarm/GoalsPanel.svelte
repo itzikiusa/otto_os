@@ -98,7 +98,7 @@
   <div class="bar">
     {#if running}
       <span class="running" role="status"><span class="spinner-xs" aria-hidden="true"></span> Verifying…</span>
-      <button class="btn small" onclick={stop}><Icon name="square" size={12} /> Stop</button>
+      <button class="btn small" onclick={stop} title="Stop verifying — goals already checked keep their result"><Icon name="stop" size={12} /> Stop</button>
     {:else}
       <button class="btn small primary" onclick={runVerify} disabled={verifying || !goals.length} title={goals.length ? 'Run every goal check for this task now' : 'Add a goal first'}>
         <Icon name="check" size={12} /> Verify now

@@ -1,6 +1,7 @@
 <script lang="ts">
   // The shared surface: a live feed of agent + user board posts, with a composer.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import AgentChip from '../../lib/components/AgentChip.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -43,7 +44,7 @@
 
   function author(m: { author_agent_id?: string | null; author_user_id?: string | null }): string {
     if (m.author_agent_id) return swarm.agentById(m.author_agent_id)?.name ?? 'agent';
-    if (m.author_user_id) return 'you';
+    if (m.author_user_id) return 'You';
     return 'system';
   }
 
@@ -130,10 +131,10 @@
       {/if}
     {/if}
     {#each filtered as m (m.id)}
-      <div class="msg">
+      <div class="msg" class:agent={!!m.author_agent_id}>
         <div class="msg-head">
           <span class="chip kind-chip tone-{KIND_TONE[m.kind] ?? 'neutral'}">{#if KIND_ICON[m.kind]}<Icon name={KIND_ICON[m.kind]} size={12} />{/if} {sentenceCase(m.kind)}</span>
-          <span class="who">{author(m)}</span>
+          <span class="who">{author(m)}</span>{#if m.author_agent_id}<AgentChip />{/if}
           {#if m.to_agent_id}<span class="dim to">to {swarm.agentById(m.to_agent_id)?.name ?? 'an agent'}</span>{/if}
           <span class="grow"></span>
           {#if m.author_agent_id}
@@ -227,6 +228,10 @@
        the feed at 300 and offscreen posts skip layout/paint (backlog B6). */
     content-visibility: auto;
     contain-intrinsic-size: auto 72px;
+  }
+  /* An agent's post: the shared 2px inline-start rule (patterns §2); a person's has none. */
+  .msg.agent {
+    border-inline-start: 2px solid var(--border-strong);
   }
   .msg-head {
     display: flex;

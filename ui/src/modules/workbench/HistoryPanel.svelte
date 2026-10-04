@@ -230,7 +230,7 @@
       {:else if diffSides}
         <RevisionDiff {ws} {docId} {...diffSides} />
       {:else}
-        <p class="wb-hist-note">Loading…</p>
+        <p class="wb-hist-note">Loading revision…</p>
       {/if}
     </section>
   {/if}

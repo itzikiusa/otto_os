@@ -3,6 +3,7 @@
   // user expand a run to read the report + per-task summaries + board messages,
   // and provides a "Run Discovery" button (with team picker) for repeat runs.
   import { product } from '../../lib/stores/product.svelte';
+  import { toastError } from '../../lib/toastError';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -12,6 +13,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { kindLabel } from '../../lib/labels';
   import { renderMarkdown } from '../../lib/md';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { DiscoveryRunSummary, DiscoveryRunDetail } from './types';
@@ -107,7 +109,7 @@
       toasts.success('Discovery started', 'The swarm is now analysing the story.');
       await loadRuns();
     } catch (e) {
-      toasts.error('Discovery failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t run discovery', e);
     } finally {
       running = false;
     }
@@ -119,7 +121,7 @@
       await swarm.openProject(ws.currentId, summary.run.swarm_id, summary.run.project_id);
       router.go('swarm');
     } catch (e) {
-      toasts.error('Could not open swarm', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t open swarm', e);
     }
   }
 
@@ -264,7 +266,7 @@
                     <div class="message-list">
                       {#each expandedDetail.messages as msg (msg.id)}
                         <div class="message-item">
-                          <span class="message-role">{msg.kind}</span>
+                          <span class="message-role">{kindLabel(msg.kind)}</span>
                           <span class="message-content">{msg.body}</span>
                         </div>
                       {/each}

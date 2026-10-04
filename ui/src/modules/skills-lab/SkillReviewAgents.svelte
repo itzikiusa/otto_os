@@ -5,6 +5,7 @@
   // reviewer, and each agent's own findings expand below its row. The summarizer
   // is the trailing row (not retryable; its aggregate renders in the panel).
   import type { SkillReview } from '../../lib/api/types';
+  import { toastError } from '../../lib/toastError';
   import { skillReviewApi } from '../../lib/api/skillReview';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -47,7 +48,7 @@
       onretried?.(r);
       toasts.info('Retrying agent…');
     } catch (e) {
-      toasts.error("Couldn't re-run the agent", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t re-run the agent', e);
     } finally {
       retrying = { ...retrying, [index]: false };
     }

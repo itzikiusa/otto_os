@@ -8,6 +8,8 @@
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
   import { toasts } from '../../lib/toast.svelte';
+  import { runStateLabel } from '../../lib/labels';
+  import { plural } from '../../lib/plural';
   import type {
     ProductTestcaseRunDetail,
     ProductTestcaseRun,
@@ -596,7 +598,7 @@
         </div>
 
         <!-- Primary only before the first run: once cases exist, reviewing them
-             (Approve run) is the view's one primary. -->
+             (Approve run) is the view’s one primary. -->
         <button
           class="btn"
           class:primary={product.testcaseRuns.length === 0}
@@ -629,7 +631,7 @@
         >
           {#each product.testcaseRuns as rd (rd.run.id)}
             <option value={rd.run.id}>
-              {fmtDate(rd.run.created_at)} · {rd.run.status} · {rd.cases.length} cases
+              {fmtDate(rd.run.created_at)} · {runStateLabel(rd.run.status)} · {plural(rd.cases.length, 'case')}
             </option>
           {/each}
         </select>
@@ -913,7 +915,7 @@
                           onclick={() => submitChanges(tc)}
                           disabled={action.busy}
                         >
-                          {action.busy ? 'Saving…' : 'Submit'}
+                          {action.busy ? 'Saving…' : 'Request changes'}
                         </button>
                         <button
                           class="btn small ghost"

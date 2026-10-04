@@ -17,6 +17,7 @@
   // OS text prediction / autocorrect is off here: the bubble it pops over the
   // box is noise when you are typing paths, flags and slash commands.
   import { untrack } from 'svelte';
+  import { toastError } from '../../../lib/toastError';
   import { toasts } from '../../../lib/toast.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import type { SessionStatus, SlashCommand } from '../../../lib/api/types';
@@ -129,7 +130,7 @@
       await interruptAgent(ownerId);
       toasts.info('Interrupt sent', `${agentName} stops after its current step`);
     } catch (e) {
-      toasts.error('Interrupt failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t interrupt the agent', e);
     } finally {
       stopping = false;
       ta?.focus();
@@ -221,7 +222,7 @@
       transcript.setAttachments(ownerId, transcript.attachments(ownerId).filter((a) => !submittedImages.includes(a)));
       queueMicrotask(autosize);
     } catch (e) {
-      toasts.error('Send failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t send the message', e);
     } finally {
       transcript.finishSend(ownerId);
       ta?.focus();
@@ -282,7 +283,7 @@
         const path = await uploadInboxImage(ownerId, f, name);
         transcript.setAttachments(ownerId, [...transcript.attachments(ownerId), { path, name, url: URL.createObjectURL(f) }]);
       } catch (e) {
-        toasts.error('Image upload failed', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t upload the image', e);
       } finally {
         uploading -= 1;
       }

@@ -5,6 +5,7 @@
   // refetches). The kubectl panel auto-continues: once `status.kubectl.installed`
   // flips, the page's `needsInstall` derived turns false and the module renders.
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import { liveQuery } from '../../lib/live';
   import { k8s } from '../../lib/stores/k8s.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -63,7 +64,7 @@
       await k8s.install(tool);
       logOpen = true;
     } catch (e) {
-      toasts.error('Install failed to start', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start the install', e);
     } finally {
       starting = false;
     }

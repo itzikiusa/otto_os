@@ -75,10 +75,13 @@
     </div>
     <button class="icon-btn dr-close" onclick={onclose} aria-label="Close details" title="Close (Esc)"><Icon name="x" size={14} /></button>
   </header>
-  <div class="dr-tabs" role="tablist" aria-label="Detail tabs">
+  <div class="dr-tabs">
+   <div class="segmented" role="tablist" aria-label="Detail tabs">
     {#each tabs as t (t.id)}
       <button
         role="tab"
+        id="dr-tab-{t.id}"
+        aria-controls="dr-panel"
         aria-selected={tab === t.id}
         tabindex={tab === t.id ? 0 : -1}
         class:active={tab === t.id}
@@ -86,8 +89,9 @@
         onkeydown={onTabKey}
       >{t.label}</button>
     {/each}
+   </div>
   </div>
-  <div class="dr-body" role="tabpanel">
+  <div class="dr-body" id="dr-panel" role="tabpanel" aria-labelledby="dr-tab-{tab}">
     {@render children()}
   </div>
 </aside>
@@ -173,37 +177,11 @@
     color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
   }
-  .icon-btn {
-    display: grid;
-    place-items: center;
-    width: 26px;
-    height: 26px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-  }
+  /* The shared .segmented control, scrollable when the tabs outgrow the drawer. */
   .dr-tabs {
-    display: flex;
-    gap: 2px;
-    padding: 4px 8px 0;
+    padding: 8px 12px;
     border-bottom: 1px solid var(--border);
     overflow-x: auto;
-  }
-  .dr-tabs button {
-    border: none;
-    background: transparent;
-    padding: 6px 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    white-space: nowrap;
-  }
-  .dr-tabs button.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
   }
   .dr-body {
     flex: 1;

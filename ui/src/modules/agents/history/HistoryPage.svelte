@@ -10,6 +10,7 @@
   // reconnectable session and then rides the existing restart/resume path.
   import { untrack } from 'svelte';
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
+  import PageBody from '../../../lib/components/PageBody.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../../lib/paneResizer';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../../lib/stores/workspace.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
@@ -345,46 +346,7 @@
       </span>
     {/if}
   {/snippet}
-  {#snippet tabs()}
-    {#if ws.currentId}
-      <div class="segmented" role="group" aria-label="Which conversations">
-        <button class:active={scope === 'workspace'} aria-pressed={scope === 'workspace'}
-          onclick={() => (scope = 'workspace')} title="Conversations in the current workspace">This workspace</button>
-        <button class:active={scope === 'scratch'} aria-pressed={scope === 'scratch'}
-          onclick={() => (scope = 'scratch')} title="Conversations started outside any workspace">No workspace</button>
-      </div>
-    {/if}
-  {/snippet}
   {#snippet actions()}
-    {#if headSel}
-      {@const cur = headSel}
-      {#if canEdit}
-        {@const resumable = cur.status === 'running' || cur.status === 'idle' || cur.resumable || cur.status === 'on_disk'}
-        <button
-          class="btn small primary"
-          onclick={() => void resume(cur)}
-          disabled={busy || !resumable}
-          title={resumable ? (cur.status === 'on_disk' ? 'Import this transcript as an Otto session and continue it' : 'Continue this conversation in Otto') : 'This conversation can’t be resumed (the CLI left no resumable state)'}
-          data-icon="play"
-          data-label={resumeLabel(cur)}
-          data-testid="history-resume"
-        >
-          <Icon name="play" size={12} /> {resumeLabel(cur)}
-        </button>
-      {/if}
-      <button class="btn small" data-overflow="-1" data-icon="folder" data-label="Open folder" onclick={() => void openFolder(cur)} title="Reveal {cur.cwd}">
-        <Icon name="folder" size={12} /> Open folder
-      </button>
-      <button class="btn small" data-overflow="-2" data-icon="copy" data-label="Copy transcript path" onclick={() => void copyText(cur.transcript_path, 'Transcript path copied')} title={cur.transcript_path}>
-        <Icon name="copy" size={12} /> Copy path
-      </button>
-      {#if canEdit && cur.session_id && cur.status !== 'on_disk'}
-        <button class="icon-btn" data-overflow="-3" data-icon="archive" data-label="Archive session" onclick={() => void archive(cur)} disabled={busy}
-          aria-label="Archive" title="Archive the session — restore it any time from the sidebar's Archived list">
-          <Icon name="archive" size={14} />
-        </button>
-      {/if}
-    {/if}
     <!-- The empty page's own CTA is "Rescan transcripts" — no second copy up here. -->
     {#if !isEmpty}
       <button
@@ -400,12 +362,51 @@
         <Icon name="refresh" size={12} /> {rescanning ? 'Rescanning…' : 'Rescan'}
       </button>
     {/if}
+    {#if headSel}
+      {@const cur = headSel}
+      {#if canEdit && cur.session_id && cur.status !== 'on_disk'}
+        <button class="icon-btn" data-overflow="-3" data-icon="archive" data-label="Archive session" onclick={() => void archive(cur)} disabled={busy}
+          aria-label="Archive" title="Archive the session — restore it any time from the sidebar's Archived list">
+          <Icon name="archive" size={14} />
+        </button>
+      {/if}
+      <button class="btn small" data-overflow="-2" data-icon="copy" data-label="Copy transcript path" onclick={() => void copyText(cur.transcript_path, 'Transcript path copied')} title={cur.transcript_path}>
+        <Icon name="copy" size={12} /> Copy path
+      </button>
+      <button class="btn small" data-overflow="-1" data-icon="folder" data-label="Open folder" onclick={() => void openFolder(cur)} title="Reveal {cur.cwd}">
+        <Icon name="folder" size={12} /> Open folder
+      </button>
+      <!-- The primary is last (the trailing edge is where the eye lands). -->
+      {#if canEdit}
+        {@const resumable = cur.status === 'running' || cur.status === 'idle' || cur.resumable || cur.status === 'on_disk'}
+        <button
+          class="btn small primary"
+          onclick={() => void resume(cur)}
+          disabled={busy || !resumable}
+          title={resumable ? (cur.status === 'on_disk' ? 'Import this transcript as an Otto session and continue it' : 'Continue this conversation in Otto') : 'This conversation can’t be resumed (the CLI left no resumable state)'}
+          data-icon="play"
+          data-label={resumeLabel(cur)}
+          data-testid="history-resume"
+        >
+          <Icon name="play" size={12} /> {resumeLabel(cur)}
+        </button>
+      {/if}
+    {/if}
   {/snippet}
 </PageHeader>
+<PageBody fill padded={false}>
 <div class="history" class:has-sel={!!sel} class:list-hidden={hideList} data-testid="history-page">
   <!-- ── Left: search, filters, grouped list ─────────────────────────────── -->
   {#if !hideList}
   <aside class="hlist" aria-label="Conversations" style="--list-pane-w:{listW}px">
+    {#if ws.currentId}
+      <div class="segmented scope-seg" role="group" aria-label="Which conversations">
+        <button class:active={scope === 'workspace'} aria-pressed={scope === 'workspace'}
+          onclick={() => (scope = 'workspace')} title="Conversations in the current workspace">This workspace</button>
+        <button class:active={scope === 'scratch'} aria-pressed={scope === 'scratch'}
+          onclick={() => (scope = 'scratch')} title="Conversations started outside any workspace">No workspace</button>
+      </div>
+    {/if}
     <div class="toolbar">
       <div class="search-wrap">
         <Icon name="search" size={12} />
@@ -620,6 +621,7 @@
     {/if}
   </section>
 </div>
+</PageBody>
 </div>
 
 <style>
@@ -681,6 +683,13 @@
     flex-direction: column;
     min-height: 0;
     background: var(--bg-sidebar);
+  }
+  .scope-seg {
+    display: flex;
+    margin: 8px 8px 0;
+  }
+  .scope-seg > button {
+    flex: 1;
   }
   .toolbar {
     display: flex;

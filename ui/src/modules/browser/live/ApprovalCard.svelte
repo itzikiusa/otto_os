@@ -6,12 +6,15 @@
   // the live socket announces it with an `approval` frame.
   //
   // The one approval shape (docs/design/guidelines/patterns.md §5): WHO asked,
-  // WHAT (where / what / who sees it), WHY, WHEN — then Approve (primary) ·
-  // Take over · Deny. Every button is an explicit decision recorded in the
-  // MCP approvals queue; nothing is decided silently.
+  // WHAT (where / what / who sees it), WHY, WHEN — then the shared
+  // ApprovalActions: Take over · Deny… (DenySheet, optional reason that goes
+  // back to the agent) · Approve (primary). Every button is an explicit
+  // decision recorded in the MCP approvals queue; nothing is decided silently.
   //
   // Not a Modal: it parks only the agent, not the rest of Otto, so it sits in
   // the live pane and the user can still switch tabs or read the page.
+  import AgentChip from '../../../lib/components/AgentChip.svelte';
+  import ApprovalActions from '../../../lib/components/ApprovalActions.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { rel } from '../../../lib/stores/now.svelte';
   import type { McpApproval } from '../../../lib/api/types';
@@ -25,7 +28,8 @@
     detail: McpApproval | null;
     /** The live session's profile (the "As" line). */
     profile: string | null;
-    ondecide: (choice: ApprovalChoice) => void;
+    /** `reason` is only set for a deny that came through the DenySheet. */
+    ondecide: (choice: ApprovalChoice, reason?: string | null) => void;
     /** A decision is in flight (buttons disabled). */
     busy?: boolean;
     /** Why the last decision failed, inline. */
@@ -43,6 +47,8 @@
     cardEl?.focus({ preventScroll: true });
   });
 
+  // Which decision is in flight, so the busy label names it ("Denying…").
+  let inflight = $state<'approve' | 'deny'>('approve');
   const facts = $derived(approvalFacts(detail, profile));
   const titleId = $derived(`approval-title-${id}`);
 </script>
@@ -87,7 +93,7 @@
   {/if}
 
   <p class="who">
-    <span class="chip">Agent</span>
+    <AgentChip />
     <span title={detail?.requested_by ?? undefined}>{facts.requester}</span>
     {#if detail?.created_at}
       <span aria-hidden="true">·</span>
@@ -100,17 +106,29 @@
   {/if}
 
   <div class="actions">
-    <button class="btn primary" disabled={busy} onclick={() => ondecide('approve')}>Approve</button>
-    <button
-      class="btn"
-      disabled={busy}
-      onclick={() => ondecide('take_over')}
-      title="Deny the agent's request and drive the page yourself"
+    <ApprovalActions
+      size="normal"
+      busy={busy ? inflight : null}
+      onapprove={() => {
+        inflight = 'approve';
+        ondecide('approve');
+      }}
+      ondeny={(reason) => {
+        inflight = 'deny';
+        ondecide('deny', reason);
+      }}
+      denyTarget="the agent's request"
+      denyTitle="Deny the request"
     >
-      Take over
-    </button>
-    <span class="grow"></span>
-    <button class="btn danger" disabled={busy} onclick={() => ondecide('deny')}>Deny…</button>
+      {#snippet extra()}
+        <button
+          class="btn"
+          disabled={busy}
+          onclick={() => ondecide('take_over')}
+          title="Deny the agent's request and drive the page yourself"
+        >Take over</button>
+      {/snippet}
+    </ApprovalActions>
   </div>
 </div>
 
@@ -207,22 +225,12 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .who .chip {
-    color: var(--text-dim);
-  }
   .error {
     margin: 10px 0 0;
     color: var(--danger);
     font-size: var(--fs-s);
   }
   .actions {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px;
     margin-top: 12px;
-  }
-  .grow {
-    flex: 1;
   }
 </style>

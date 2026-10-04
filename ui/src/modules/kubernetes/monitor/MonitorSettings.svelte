@@ -6,6 +6,9 @@
   // Client-side validation mirrors the daemon's limits so most mistakes never
   // round-trip.
   import { loadErrorText } from '../../../lib/loadError';
+  import { toastError } from '../../../lib/toastError';
+  import { kindLabel } from '../../../lib/labels';
+  import { plural } from '../../../lib/plural';
   import { untrack } from 'svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
@@ -128,7 +131,7 @@
       toasts.success('Monitoring saved', r.config.enabled ? 'The collector picks the change up within 15 s.' : 'Monitoring is off for this cluster.');
       onsaved?.(r.config, r.status);
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the monitor settings', e);
     } finally {
       saving = false;
     }
@@ -141,7 +144,7 @@
       toasts.success('Cycle finished', collectorLine(status, true));
       if (cfg) onsaved?.(cfg, status);
     } catch (e) {
-      toasts.error('Cycle failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t run the monitor cycle', e);
     } finally {
       running = false;
     }
@@ -367,7 +370,7 @@
       <p class="dim help">Excluded pods are still counted (phase, restarts) but never scraped. Globs use <code>*</code> and <code>?</code>; workload globs match <code>kind:name</code> (e.g. <code>cronjob:*</code>).</p>
       {#each cfg.exclusions as x, i (i)}
         <div class="ex">
-          <span class="chip">{x.kind}</span>
+          <span class="chip">{kindLabel(x.kind)}</span>
           {#if x.kind === 'label'}
             <input class="input mono" placeholder="app=frb,tier!=web" bind:value={x.selector} disabled={!canEdit} />
           {:else}
@@ -396,7 +399,7 @@
           <div class="tp" class:bad={!pr.ok} data-testid="k8s-monitor-test-probe">
             <div class="row between">
               <span><b>{pr.name}</b> {#if pr.port}<span class="dim">:{pr.port}</span>{/if}</span>
-              <span class="dim small">{pr.ok ? `HTTP ${pr.status} · ${pr.ms} ms · ${pr.sample_count ?? 0} sample(s)` : (pr.error ?? `HTTP ${pr.status}`)}{#if pr.parse_errors}{' '}· {pr.parse_errors} parse error(s){/if}{#if pr.capped}{' '}· capped{/if}</span>
+              <span class="dim small">{pr.ok ? `HTTP ${pr.status} · ${pr.ms} ms · ${plural(pr.sample_count ?? 0, 'sample')}` : (pr.error ?? `HTTP ${pr.status}`)}{#if pr.parse_errors}{' '}· {plural(pr.parse_errors, 'parse error')}{/if}{#if pr.capped}{' '}· capped{/if}</span>
             </div>
             {#if pr.labels && Object.keys(pr.labels).length}
               <div class="row wrap">{#each Object.entries(pr.labels) as [k, v] (k)}<span class="chip accent">{k}={v}</span>{/each}</div>

@@ -12,6 +12,8 @@
   // sheet does not stop it; "Recent" reopens a run. Each run is also recorded
   // in its connection's ordinary History.
   import { onDestroy, untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
+  import { plural } from '../../lib/plural';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
@@ -287,7 +289,7 @@
       job = await api.post<DbMultiRunJob>(`/db/multi-runs/${encodeURIComponent(job.id)}/cancel`);
       poller?.now();
     } catch (e) {
-      toasts.error('Could not stop the multi-run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t stop the multi-run', e);
     }
   }
 
@@ -337,7 +339,7 @@
       stage = 'results';
       if (job.status === 'running') watch(job.id);
     } catch (e) {
-      toasts.error('Could not open the multi-run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t open the multi-run', e);
     }
   }
 
@@ -369,7 +371,7 @@
           <ul class="mr-recent">
             {#each recent.slice(0, 4) as r (r.id)}
               <li>
-                <button class="mr-link" onclick={() => reopen(r.id)} title="Open this multi-run's results">
+                <button class="mr-link" onclick={() => reopen(r.id)} title="Open this multi-run’s results">
                   <StatusBadge status={runStatus(r.status)} variant="text" />
                   <span class="mono mr-clip">{r.statement_preview}</span>
                   <span class="mr-dim">{summaryText(r.summary)}</span>
@@ -406,7 +408,7 @@
                     {#if sc === 'loading'}
                       <span class="mr-dim">Loading databases…</span>
                     {:else if sc && 'error' in sc}
-                      <span class="mr-err">Couldn't list databases: {sc.error}</span>
+                      <span class="mr-err">Couldn’t list databases: {sc.error}</span>
                       <button class="btn small ghost" onclick={() => loadScopes(c.id)}>Retry</button>
                     {:else if sc && sc.length > 0}
                       {#each sc as s (s.value)}
@@ -421,7 +423,7 @@
                       {/each}
                     {/if}
                     {#if (picks[c.id] ?? []).length === 0}
-                      <span class="mr-dim">No database picked — runs on the connection's default database.</span>
+                      <span class="mr-dim">No database picked — runs on the connection’s default database.</span>
                     {/if}
                   </div>
                 {/if}
@@ -670,7 +672,7 @@
               class="mr-res-row"
               onclick={() => showItem(it.index)}
               aria-expanded={openItem === it.index}
-              title="Show this run's statement and result"
+              title="Show this run’s statement and result"
             >
               <span class="mr-idx mono">#{it.index + 1}</span>
               <span class="mr-name">{it.label}</span>
@@ -678,7 +680,7 @@
               <StatusBadge status={runStatus(it.status)} variant="text" />
               <span class="mr-dim mr-meta">
                 {#if it.duration_ms != null}{it.duration_ms} ms{/if}
-                {#if it.rows_affected != null} · {it.rows_affected} affected{:else if it.row_count != null} · {it.row_count} rows{/if}
+                {#if it.rows_affected != null} · {it.rows_affected} affected{:else if it.row_count != null} · {plural(it.row_count, 'row')}{/if}
               </span>
               {#if it.error}<span class="mr-err mr-clip" title={it.error}>{it.error}</span>
               {:else if it.message}<span class="mr-dim mr-clip" title={it.message}>{it.message}</span>{/if}
@@ -688,7 +690,7 @@
                 {#if detailError}
                   <div class="mr-error" role="alert"><Icon name="warning" size={13} /><span>{detailError}</span></div>
                 {:else if !detail}
-                  <span class="mr-dim">Loading…</span>
+                  <span class="mr-dim">Loading result details…</span>
                 {:else}
                   <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
                   <pre class="mr-code mono" tabindex="0">{detail.statement}</pre>

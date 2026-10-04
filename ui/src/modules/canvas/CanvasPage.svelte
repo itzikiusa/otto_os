@@ -5,6 +5,7 @@
   // want in the Assistant and the agent edits the file; the board re-renders live.
   import { untrack } from 'svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -187,6 +188,7 @@
     <button class="btn small" onclick={() => void canvas.retryDoc(id).catch(() => {})}>Retry save</button>
   </div>
 {/each}
+<PageBody fill padded={false}>
 {#if !ws.currentId}
   <div class="canvas-page empty-ws" bind:this={workspaceEmpty}>
     <EmptyState
@@ -301,6 +303,7 @@
     </section>
   </div>
 {/if}
+</PageBody>
 </div>
 
 <style>

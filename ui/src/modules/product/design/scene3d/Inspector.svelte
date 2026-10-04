@@ -257,7 +257,7 @@
             {#if open.text !== false}
               <div class="s3d-panel-body">
                 <input class="s3d-text" value={obj.text ?? obj.name} maxlength="500" disabled={readonly} aria-label="Text" oninput={(e) => emit(setText(doc, obj.id, inputVal(e)))} />
-                <div class="s3d-hint">Drawn on a 2 × 0.5 m quad; scale it like any object. Colour comes from the material.</div>
+                <div class="s3d-hint">Drawn on a 2 × 0.5 m quad; scale it like any object. Color comes from the material.</div>
               </div>
             {/if}
           </section>
@@ -287,7 +287,7 @@
               {#if swatches.length}
                 <div class="s3d-field s3d-swatch-row">
                   <span class="s3d-flabel">Brand</span>
-                  <div class="s3d-swatches" role="radiogroup" aria-label="Brand colours">
+                  <div class="s3d-swatches" role="radiogroup" aria-label="Brand colors">
                     {#each swatches.slice(0, 12) as sw (sw.ref)}
                       <button
                         role="radio"
@@ -307,10 +307,10 @@
               {#if isTokenRef(mat.color)}
                 <div class="s3d-field">
                   <span class="s3d-flabel">Color</span>
-                  <span class="s3d-token" title="Follows the brand kit: changing the kit recolours this object">
+                  <span class="s3d-token" title="Follows the brand kit: changing the kit recolors this object">
                     <span class="s3d-dot" style:--sw={resolved.color}></span>{colorLabel(mat.color)} <code>{resolved.color}</code>
                   </span>
-                  <button class="s3d-reset" title="Detach from the brand kit (keep {resolved.color})" aria-label="Detach colour from the brand kit" disabled={readonly} onclick={() => onMat('color', resolved.color)} ><Icon name="x" size={12} /></button>
+                  <button class="s3d-reset" title="Detach from the brand kit (keep {resolved.color})" aria-label="Detach color from the brand kit" disabled={readonly} onclick={() => onMat('color', resolved.color)} ><Icon name="x" size={12} /></button>
                 </div>
               {:else}
                 {@render colorRow('Color', mat.color, resolved.color, (c) => onMat('color', c))}

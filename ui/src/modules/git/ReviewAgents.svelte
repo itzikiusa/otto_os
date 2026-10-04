@@ -5,6 +5,7 @@
   // and live in one place. The backend is already shared: retry hits
   // POST /reviews/{id}/agents/{index}/retry, keyed by review id.
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import { api } from '../../lib/api/client';
   import type { Review } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
@@ -55,7 +56,7 @@
       onretried?.(r);
       toasts.info('Retrying agent…');
     } catch (e) {
-      toasts.error('Retry failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t retry the agent', e);
     } finally {
       retrying = { ...retrying, [index]: false };
     }
@@ -73,7 +74,7 @@
       onretried?.(r);
       toasts.info('Re-running the summary…');
     } catch (e) {
-      toasts.error('Summary retry failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t retry the summary', e);
     } finally {
       retryingSummary = false;
     }
@@ -90,7 +91,7 @@
       onretried?.(r);
       toasts.info('Agent stopped');
     } catch (e) {
-      toasts.error('Stop failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t stop the agent', e);
     } finally {
       stopping = { ...stopping, [index]: false };
     }

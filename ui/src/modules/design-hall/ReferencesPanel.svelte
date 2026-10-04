@@ -4,6 +4,8 @@
   // Start from this (a new draft forked from that version, `derived_from`),
   // Compare, Open. Below: the provenance of this design as a lineage list.
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -57,7 +59,7 @@
       error = null;
     } catch (e) {
       if (isAbortError(e) || ctl !== mine) return;
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
     } finally {
       if (ctl === mine) loading = false;
     }
@@ -94,7 +96,7 @@
       toasts.success('Added as reference', `${ref.title} is pinned at v${ref.head_seq ?? '?'}.`);
       onreload();
     } catch (e) {
-      toasts.error('Couldn’t add the reference', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t add the reference', e);
     } finally {
       busyId = null;
     }
@@ -121,7 +123,7 @@
       toasts.success('Draft created', `“${res.artifact.title}” keeps a pinned link to ${ref.title}.`);
       openArtifact(res.artifact.id);
     } catch (e) {
-      toasts.error('Couldn’t start from this design', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start from this design', e);
     } finally {
       busyId = null;
     }

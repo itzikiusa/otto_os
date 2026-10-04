@@ -5,9 +5,12 @@
   // Task 7.5: adds recipient email + duration (≤12h) for OTP-gated shares and
   // shows a hint when the owner has no verified email sender.
   import { onMount } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import QRCode from 'qrcode';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { api } from '../../lib/api/client';
   import type { CreateShareReq, CreateShareResp, ShareInfo, EmailSenderResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
@@ -45,6 +48,8 @@
   // ── existing-shares state ────────────────────────────────────────────────────
   let shares = $state<ShareInfo[]>([]);
   let sharesLoading = $state(false);
+  /** Cause of the last failed list load; null = ok. A failed load must never read as "no shares". */
+  let sharesError = $state<string | null>(null);
 
   // ── busy flags ────────────────────────────────────────────────────────────────
   let generating = $state(false);
@@ -77,11 +82,13 @@
 
   async function loadShares(): Promise<void> {
     sharesLoading = true;
+    sharesError = null;
     try {
       const resp = await api.get<{ shares: ShareInfo[] }>(`/sessions/${encodeURIComponent(sessionId)}/shares`);
       shares = resp.shares;
-    } catch {
-      // Not fatal — the list is informational only; the mint flow still works.
+    } catch (e) {
+      // Not fatal for minting a new link, but the list says it couldn't load.
+      sharesError = loadErrorText(e);
     } finally {
       sharesLoading = false;
     }
@@ -148,7 +155,7 @@
           : 'Copy the URL or scan the QR code.',
       );
     } catch (e) {
-      toasts.error('Could not create share link', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create share link', e);
     } finally {
       generating = false;
     }
@@ -181,7 +188,7 @@
       }
       toasts.success('Share revoked');
     } catch (e) {
-      toasts.error('Revoke failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t revoke the share link', e);
     } finally {
       const next = { ...revoking };
       delete next[shareId];
@@ -388,8 +395,8 @@
     </div>
 
     <div class="sm-shares-list">
-      {#if sharesLoading}
-        <div class="sm-empty">Loading share links…</div>
+      {#if (sharesLoading || sharesError) && shares.length === 0}
+        <LoadState what="share links" variant="compact" loading={sharesLoading} error={sharesError} empty={true} onretry={loadShares} />
       {:else if shares.length === 0}
         <div class="sm-empty">No active share links for this session.</div>
       {:else}

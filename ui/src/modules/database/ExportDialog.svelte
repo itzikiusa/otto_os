@@ -218,7 +218,7 @@
       <span class="exp-label">Folder</span>
       <div class="exp-dir">
         <input class="exp-input mono" bind:value={exportDir} spellcheck="false" placeholder="~/Downloads" />
-        <button class="tb-btn" onclick={() => (pickingDir = true)} title="Browse the daemon host">
+        <button class="btn small" onclick={() => (pickingDir = true)} title="Browse the daemon host">
           <Icon name="folder" size={12} />Browse…
         </button>
       </div>
@@ -282,25 +282,6 @@
 {/if}
 
 <style>
-  /* Scoped copy of ResultsGrid's toolbar button (the Browse… button). */
-  .tb-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 22px;
-    padding: 0 9px;
-    border-radius: var(--radius-s);
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    font-size: var(--fs-s);
-    cursor: pointer;
-  }
-  .tb-btn:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent-text);
-  }
-
   /* ── Local-file export dialog ─────────────────────────────────────────────── */
   .exp-form {
     display: flex;

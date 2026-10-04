@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../../lib/api/client';
+  import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -242,7 +243,7 @@
       load();
       selected = req.name;
     } catch (e) {
-      toasts.error("Couldn't create the topic", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the topic', e);
     }
   }
 </script>

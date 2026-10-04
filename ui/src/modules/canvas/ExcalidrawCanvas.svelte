@@ -20,6 +20,7 @@
   //                    edits) — so the user's hand edits update the json too.
   // Agent edits arrive live over `canvas_updated` and reload in place.
   import { onMount, onDestroy, untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -238,7 +239,7 @@
       toasts.success('Drawn on canvas', res.note || 'Diagram updated.');
       void canvas.refreshSession();
     } catch (e) {
-      toasts.error('Ask Otto failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t ask Otto', e);
     } finally {
       generating = false;
     }
@@ -348,7 +349,7 @@
         canvas.source = lastApplied;
       }
     } catch (e) {
-      toasts.error('Canvas save failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the canvas', e);
     }
   }
 

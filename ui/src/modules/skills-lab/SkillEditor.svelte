@@ -5,6 +5,8 @@
   // place (type, then Save / ⌘S; Revert drops the draft); bundled and provider
   // copies are read-only, with the way to make them editable spelled out.
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   import type { SkillFileEntry } from '../../lib/api/types';
   import { confirmer } from '../../lib/confirm.svelte';
   import { skillLabApi } from '../../lib/api/skillLab';
@@ -87,7 +89,7 @@
         docKey++;
       }
     } catch (e) {
-      if (generation === loadGeneration) loadError = e instanceof Error ? e.message : String(e);
+      if (generation === loadGeneration) loadError = loadErrorText(e);
     } finally {
       if (generation === loadGeneration) loading = false;
     }
@@ -128,7 +130,7 @@
       onsaved(next, path === 'SKILL.md' ? submitted : null);
       toasts.success('Saved', path);
     } catch (e) {
-      toasts.error(`Couldn't save ${path}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t save ${path}`, e);
     } finally {
       saving = false;
     }
@@ -146,7 +148,7 @@
       onsaved(next, null);
       await open(path);
     } catch (e) {
-      toasts.error("Couldn't add the file", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t add the file', e);
     }
   }
 
@@ -158,7 +160,7 @@
       onsaved(next, null);
       if (currentFile === path) await open('SKILL.md');
     } catch (e) {
-      toasts.error(`Couldn't delete ${path}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t delete ${path}`, e);
     }
   }
 
@@ -238,7 +240,7 @@
       {:else if loadError}
         <div class="msg load-err" role="alert">
           <Icon name="warning" size={14} />
-          <span class="grow">{source === 'bundled' ? loadError : `Couldn't open ${currentFile}. ${loadError}`}</span>
+          <span class="grow">{source === 'bundled' ? loadError : `Couldn’t open ${currentFile}. ${loadError}`}</span>
           {#if source !== 'bundled'}<button class="btn small" onclick={() => open(currentFile)}>Retry</button>{/if}
         </div>
       {:else if binary}

@@ -39,8 +39,9 @@
       <div class="cv-tools">
         {#if flow.viewer.sql}
           <button
-            class="tb-btn"
+            class="btn small cv-toggle"
             class:active={flow.viewer.formatted}
+            aria-pressed={!!flow.viewer.formatted}
             onclick={() => (flow.viewer && (flow.viewer.formatted = !flow.viewer.formatted))}
             title="Toggle SQL formatting"
           >
@@ -48,11 +49,11 @@
           </button>
         {/if}
         {#if flow.viewer.edit && !flow.viewerEditing}
-          <button class="tb-btn" onclick={() => flow.startViewerEdit()} title="Edit this cell value">
+          <button class="btn small" onclick={() => flow.startViewerEdit()} title="Edit this cell value">
             <Icon name="edit" size={12} />Edit
           </button>
         {/if}
-        <button class="tb-btn" onclick={() => copyText(flow.viewerText, ['Copied', 'Full cell value copied'])} title="Copy full value"><Icon name="file" size={12} />Copy</button>
+        <button class="btn small" onclick={() => copyText(flow.viewerText, ['Copied', 'Full cell value copied'])} title="Copy full value"><Icon name="file" size={12} />Copy</button>
       </div>
       {#if nestedPending}
         <div class="cv-pending">Nested change pending on this field — saving a whole value here replaces it.</div>
@@ -89,29 +90,10 @@
 {/if}
 
 <style>
-  /* Scoped copy of the shared dialog rules — DocEditor and ReviewModal each
-     carry their own (Svelte styles don't cross components, and a global sheet
-     would leak into brokers/ClusterViewer's .cv-head). */
-  .tb-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 22px;
-    padding: 0 9px;
-    border-radius: var(--radius-s);
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    font-size: var(--fs-s);
-    cursor: pointer;
-  }
-  .tb-btn:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent-text);
-  }
-  .tb-btn.active {
+  /* The Raw/Formatted toggle's pressed state (the button itself is the shared .btn.small). */
+  .cv-toggle.active {
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .cell-viewer {

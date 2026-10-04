@@ -3,6 +3,7 @@
   // agent sessions via POST /workspaces/{id}/broadcast — NO AI, no parsing, no
   // fallback. Separate from the ⌘K orchestrator on purpose.
   import { api } from '../api/client';
+  import { toastError } from '../../lib/toastError';
   import type { BroadcastResp, Id, Session } from '../api/types';
   import { ui } from '../stores/ui.svelte';
   import { ws } from '../stores/workspace.svelte';
@@ -76,7 +77,7 @@
       else toasts.success('Broadcast sent', `Delivered to ${n} session${n === 1 ? '' : 's'}`);
       close();
     } catch (e) {
-      toasts.error('Broadcast failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t send the broadcast', e);
     } finally {
       busy = false;
     }

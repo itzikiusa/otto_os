@@ -3,8 +3,8 @@
   // sending new messages to the agent.  Props: { tid } (the thread id).
   // Parent (RefineTab) controls which thread is active.
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import { product } from '../../lib/stores/product.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { renderMarkdown } from '../../lib/md';
@@ -83,7 +83,7 @@
       // Roll back the optimistic bubble, restore the typed text, and show an error.
       messages = messages.filter((m) => m.id !== optimisticMsg.id);
       inputText = body;
-      toasts.error('Send failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t send the message', e);
     } finally {
       sending = false;
     }

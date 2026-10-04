@@ -284,7 +284,7 @@
 <div class="mc-page">
 <PageHeader
   title="Mission Control"
-  subtitle="Every agentic activity as one traceable unit — sessions, swarms, loops, workflows, reviews, stories, PRs & triggers."
+  subtitle="Every agentic activity as one traceable unit"
 >
   {#snippet actions()}
     <button class="btn small" disabled={!ws.currentId || backfilling || loading} onclick={runBackfill} title="Re-derive the graph from every source">

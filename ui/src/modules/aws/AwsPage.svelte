@@ -186,15 +186,18 @@
 </PageHeader>
 
 {#if !aws.statusLoaded}
-  <div class="pad" role="status">
-    <p class="boot-note">Checking for the aws CLI…</p>
-    <Skeleton rows={4} />
-  </div>
+  <PageBody>
+    <div role="status">
+      <p class="boot-note">Checking for the aws CLI…</p>
+      <Skeleton rows={4} />
+    </div>
+  </PageBody>
 {:else if aws.statusError}
   <LoadState variant="page" what="the AWS console" error={aws.statusError} empty onretry={() => void aws.loadStatus()} />
 {:else if !aws.installed}
-  <div class="aws-scroll"><InstallPanel /></div>
+  <PageBody><InstallPanel /></PageBody>
 {:else}
+  <PageBody fill padded={false}>
   <div class="aws" class:mobile={viewport.isMobile} class:solo={!showRail}>
     {#if showRail}
       <aside class="rail-col" style="--list-pane-w:{listW}px">
@@ -269,6 +272,7 @@
       </section>
     {/if}
   </div>
+  </PageBody>
 {/if}
 </div>
 
@@ -303,18 +307,14 @@
     height: 100%;
     min-height: 0;
   }
+  /* In-pane loading placeholder (the page's own padding is PageBody's). */
   .pad {
-    padding: 18px 20px;
+    padding: 16px;
   }
   .boot-note {
     margin: 0 0 12px;
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .aws-scroll {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
   }
   .aws {
     display: flex;

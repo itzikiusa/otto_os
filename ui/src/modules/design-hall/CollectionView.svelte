@@ -1,5 +1,6 @@
 <script module lang="ts">
   import type { DesignStudio as DS } from '../../lib/api/types';
+  import { toastError } from '../../lib/toastError';
   export type Scope = { kind: 'project'; id: string } | { kind: 'studio'; id: DS } | { kind: 'story'; id: string };
 </script>
 
@@ -224,7 +225,7 @@
       await updateProject(project.id, { name });
       void library.load();
     } catch (e) {
-      toasts.error('Couldn’t rename the project', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename the project', e);
     }
   }
 
@@ -240,7 +241,7 @@
       toasts.success('Project archived');
       router.go('design');
     } catch (e) {
-      toasts.error('Couldn’t archive the project', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t archive the project', e);
     }
   }
 

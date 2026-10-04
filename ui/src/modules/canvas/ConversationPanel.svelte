@@ -5,6 +5,7 @@
   // the board re-renders. The Terminal attaches to /ws/term/{id} directly, so it
   // shows live output regardless of whether the session is in the workspace store.
   import { onMount } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
@@ -105,7 +106,7 @@
       await canvas.restoreVersion(id, picked.value);
       toasts.success('Canvas restored');
     } catch (e) {
-      toasts.error('Could not restore the canvas', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t restore the canvas', e);
     } finally {
       restoring = false;
     }
@@ -297,7 +298,8 @@
     outline: none;
   }
   .composer textarea:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .send {
     display: inline-flex;

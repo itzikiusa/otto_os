@@ -3,6 +3,7 @@
   // status and when. Opening a row loads its request into a tab (it is NOT
   // re-sent; masked credentials are never sent back — see loadHistoryIntoDraft).
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import MethodTag, { methodWord } from './MethodTag.svelte';
@@ -130,7 +131,7 @@
       if (p.runsKeep !== null && !ws.apiRunsKeep) await ws.setApiRunsKeep(p.runsKeep);
       if (await apiClient.applyRetention()) toasts.success('Retention applied', p.label);
     } catch (e) {
-      toasts.error('Couldn’t save retention', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save retention', e);
     } finally {
       applying = false;
     }

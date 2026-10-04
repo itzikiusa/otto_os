@@ -11,7 +11,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { k8s } from '../../lib/stores/k8s.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmProd, isProdEnv } from '../../lib/confirmProd';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { clusterLabel } from './k8s-util';
   import type { K8sContainer, SessionStatus } from '../../lib/api/types';
@@ -36,7 +36,7 @@
 
   const running = $derived(containers.filter((c) => !c.init));
   const cluster = $derived(k8s.clusters.find((c) => c.id === clusterId) ?? null);
-  const isProd = $derived(cluster?.environment === 'prod');
+  const isProd = $derived(isProdEnv(cluster?.environment));
 
   async function open(): Promise<void> {
     if (!canExec || opening) return;
@@ -47,10 +47,14 @@
     }
     // A shell in a production pod can change anything in it — ask first.
     if (isProd) {
-      const ok = await confirmer.ask(
-        `Open a shell in pod “${pod}” in ${ns} on ${cluster ? clusterLabel(cluster) : 'this cluster'} (PRODUCTION)? Anything you type runs inside the live container.`,
-        { title: 'Open a production shell', confirmLabel: 'Open shell', danger: true },
-      );
+      const ok = await confirmProd({
+        env: cluster?.environment,
+        where: `pod “${pod}” · namespace ${ns} · ${cluster ? clusterLabel(cluster) : 'this cluster'}`,
+        verb: 'Open shell',
+        what: 'An interactive shell. Anything you type runs inside the live container.',
+        title: 'Open a production shell?',
+        danger: true,
+      });
       if (!ok) return;
     }
     opening = true;

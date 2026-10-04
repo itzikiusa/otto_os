@@ -178,6 +178,15 @@
    *  starts a FRESH session with whatever provider is selected. */
   async function reset(): Promise<void> {
     if (!vault.current) return;
+    // Mid-edit the agent may have half-written the note — say so before
+    // detaching its session (an idle session can be dropped without asking).
+    if (sending) {
+      const ok = await confirmer.ask(
+        'The agent is still editing this note. Stopping detaches its session and the edit may be left half-done; Send starts a fresh agent. Your note stays as it is on disk.',
+        { title: 'Stop and start over?', confirmLabel: 'Stop and start over', danger: true },
+      );
+      if (!ok) return;
+    }
     epoch += 1;
     stopPolling();
     try {
@@ -230,15 +239,15 @@
       }}
     />
     <button class="send" disabled={sending || !prompt.trim()} onclick={() => void send()}>
-      {#if sending}<span class="spinner-xs"></span> Working…{:else}Send{/if}
+      {#if sending}<span class="spinner-xs"></span> Refining…{:else}Send{/if}
     </button>
     {#if sessionId || sending}
       <button
-        class="reset"
+        class="btn small"
         title="Detach this note’s agent session — unblocks a stuck or exited agent; the next Send starts a fresh one"
         onclick={() => void reset()}
       >
-        <Icon name="refresh" size={12} /> Stop and start over
+        <Icon name="refresh" size={12} /> Stop and start over…
       </button>
     {/if}
   </div>
@@ -250,7 +259,7 @@
     <div class="notice result" role="status" data-testid="refine-result">
       <AgentByline provider={result.provider} at={result.at} label="Refined this note" />
       <span class="delta">+{result.added} / −{result.removed} lines{result.summary ? ` · ${result.summary}` : ''}</span>
-      <button class="reset" disabled={undoing} onclick={() => void undoRefine()}>
+      <button class="btn small" disabled={undoing} onclick={() => void undoRefine()}>
         {#if undoing}<span class="spinner-xs"></span> Undoing…{:else}Undo refine{/if}
       </button>
     </div>
@@ -333,23 +342,6 @@
   .send:disabled {
     opacity: 0.5;
     cursor: default;
-  }
-  .reset {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    border-radius: var(--radius-s);
-    padding: 6px 10px;
-    font-size: var(--fs-s);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .reset:hover {
-    color: var(--text);
-    border-color: var(--text-dim);
   }
   .notice {
     display: flex;

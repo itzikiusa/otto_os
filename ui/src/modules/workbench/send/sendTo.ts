@@ -56,7 +56,7 @@ export async function sendToDatabase(ctx: SendCtx): Promise<void> {
   try {
     if (!database.connections.length && !database.connectionsLoading) await database.loadConnections();
   } catch (e) {
-    toasts.error('Could not load connections', errText(e));
+    toasts.error('Couldn’t load connections', errText(e));
     return;
   }
   const conns = database.connections;
@@ -96,7 +96,7 @@ export async function sendToDatabase(ctx: SendCtx): Promise<void> {
     await database.openConnection(connId);
     database.setMainTab('query');
   } catch (e) {
-    toasts.error('Could not open the connection', errText(e));
+    toasts.error('Couldn’t open the connection', errText(e));
   }
 }
 
@@ -127,7 +127,7 @@ export async function sendToApiClient(ctx: SendCtx): Promise<void> {
     await apiClient.ensureLoaded();
     if (looksLikeCurl(text)) {
       if (!(await apiClient.importCurl(text))) {
-        toasts.error('Could not import the curl command', 'Check its syntax, or send it as a request body instead.');
+        toasts.error('Couldn’t import the curl command', 'Check its syntax, or send it as a request body instead.');
         return;
       }
     } else {
@@ -145,7 +145,7 @@ export async function sendToApiClient(ctx: SendCtx): Promise<void> {
     apiClient.showRequestView();
     toasts.success('Opened in the API client', 'An unsaved request — set the URL and press Send when ready.');
   } catch (e) {
-    toasts.error('Could not open the API client', errText(e));
+    toasts.error('Couldn’t open the API client', errText(e));
   }
 }
 
@@ -179,7 +179,7 @@ export async function pasteIntoSession(ctx: SendCtx, session: Session): Promise<
     });
     return true;
   } catch (e) {
-    toasts.error('Could not paste into the session', errText(e));
+    toasts.error('Couldn’t paste into the session', errText(e));
     return false;
   }
 }
@@ -210,7 +210,7 @@ export async function sendToVault(ctx: SendCtx): Promise<void> {
   try {
     vaults = await listVaults(ctx.ws);
   } catch (e) {
-    toasts.error('Could not load vaults', errText(e));
+    toasts.error('Couldn’t load vaults', errText(e));
     return;
   }
   if (vaults.length === 0) {
@@ -248,7 +248,7 @@ export async function sendToVault(ctx: SendCtx): Promise<void> {
     ifHash = existing.meta.hash;
   } catch (e) {
     if (!(e instanceof ApiError && e.status === 404)) {
-      toasts.error('Could not check the note path', errText(e));
+      toasts.error('Couldn’t check the note path', errText(e));
       return;
     }
   }
@@ -271,7 +271,7 @@ export async function sendToVault(ctx: SendCtx): Promise<void> {
       },
     });
   } catch (e) {
-    toasts.error('Could not save the note', errText(e));
+    toasts.error('Couldn’t save the note', errText(e));
   }
 }
 
@@ -279,5 +279,5 @@ export async function sendToVault(ctx: SendCtx): Promise<void> {
 
 export async function copyFilled(ctx: SendCtx): Promise<void> {
   if (await copyText(filled(ctx))) toasts.success('Copied', 'Placeholders with a value were filled in.');
-  else toasts.error('Could not copy', 'The clipboard is not available here.');
+  else toasts.error('Couldn’t copy to the clipboard', 'The clipboard is not available here.');
 }

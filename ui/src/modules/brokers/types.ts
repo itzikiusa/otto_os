@@ -85,10 +85,10 @@ export type ClusterView = 'overview' | 'topics' | 'groups' | 'schema' | 'replay'
 export const CLUSTER_VIEWS: { id: ClusterView; label: string }[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'topics', label: 'Topics' },
-  { id: 'groups', label: 'Consumer Groups' },
+  { id: 'groups', label: 'Consumer groups' },
   { id: 'schema', label: 'Schema Registry' },
   { id: 'replay', label: 'Replay' },
-  { id: 'alerts', label: 'Lag Alerts' },
+  { id: 'alerts', label: 'Lag alerts' },
 ];
 
 /** ←/→/Home/End across a view tablist: returns the next view (and moves focus

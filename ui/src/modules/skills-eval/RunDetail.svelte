@@ -20,6 +20,9 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { toastError } from '../../lib/toastError';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus, sentenceCase, type StatusInfo } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
@@ -104,10 +107,10 @@
       onupdate?.(r);
       if (isActive(r)) schedulePoll();
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = loadErrorText(e);
       // Keep a loaded report on screen and just toast; with nothing to show,
       // put the error (and Retry) in the pane itself.
-      if (run) toasts.error("Couldn't refresh the evaluation", msg);
+      if (run) toasts.error('Couldn’t refresh the evaluation', msg);
       else loadError = msg;
     } finally {
       loading = false;
@@ -218,7 +221,7 @@
       onupdate?.(r);
       toasts.info('Evaluation stopped');
     } catch (e) {
-      toasts.error("Couldn't stop the evaluation", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t stop the evaluation', e);
     } finally {
       cancelling = false;
     }
@@ -238,7 +241,7 @@
       toasts.info('Evaluation deleted');
       ondeleted?.(run.id);
     } catch (e) {
-      toasts.error("Couldn't delete the evaluation", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete the evaluation', e);
     } finally {
       deleting = false;
     }
@@ -258,7 +261,7 @@
       if (isActive(r)) schedulePoll();
       toasts.info('Re-running validation…');
     } catch (e) {
-      toasts.error("Couldn't re-run the validation", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t re-run the validation', e);
     } finally {
       retrying = new Set([...retrying].filter((k) => k !== key));
     }
@@ -273,7 +276,7 @@
       try {
         implDiffs[it.id] = await skillsEvalApi.implDiff(run.id, it.id);
       } catch (e) {
-        toasts.error("Couldn't load the code diff", e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t load the code diff', e);
         // Collapse again so the toggle doesn't read "Hide code diff" over nothing.
         openImplDiffs = toggle(openImplDiffs, it.id);
       } finally {
@@ -355,7 +358,7 @@
       // Reflect promoted state.
       void load(run.id);
     } catch (e) {
-      toasts.error("Couldn't promote the skill", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t promote the skill', e);
     } finally {
       promoting = false;
     }
@@ -379,7 +382,7 @@
       lastPolled = '';
       onupdate?.(r);
     } catch (e) {
-      toasts.error("Couldn't save your rating", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save your rating', e);
     } finally {
       const next = new Set(rating);
       next.delete(it.id);
@@ -394,7 +397,7 @@
       const g = await skillsEvalApi.regression(run.id, it.id, {});
       toasts.success('Saved as regression case', g.name);
     } catch (e) {
-      toasts.error("Couldn't save the regression case", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the regression case', e);
     } finally {
       const next = new Set(savingReg);
       next.delete(it.id);
@@ -403,15 +406,8 @@
   }
 </script>
 
-{#if loading && !run}
-  <div class="rd-loading" role="status"><span class="spinner-xs"></span> Loading evaluation…</div>
-{:else if loadError && !run}
-  <div class="rd-loading rd-load-err" role="alert">
-    <Icon name="warning" size={22} />
-    <strong>Couldn't load this evaluation</strong>
-    <p class="rd-load-detail">{loadError}</p>
-    <button class="btn small" onclick={() => load(evalId)} disabled={loading}><Icon name="refresh" size={12} /> {loading ? 'Retrying…' : 'Retry'}</button>
-  </div>
+{#if (loading || loadError) && !run}
+  <LoadState what="this evaluation" {loading} error={loadError} empty={true} onretry={() => load(evalId)} />
 {:else if run}
   <div class="rd">
     <header class="rd-head">
@@ -428,7 +424,7 @@
           </button>
         {/if}
         {#if run.best_iteration != null}
-          <button class="btn small primary" onclick={promoteWinner} title="Save the best-scoring iteration's skill to the library">
+          <button class="btn small primary" onclick={promoteWinner} title="Save the best-scoring iteration’s skill to the library">
             <Icon name="check" size={12} /> Promote winning skill
           </button>
         {/if}
@@ -601,7 +597,7 @@
           </button>
         </div>
 
-        <!-- Export / promote this iteration's tested skill -->
+        <!-- Export / promote this iteration’s tested skill -->
         <div class="skill-actions">
           <span class="lbl">Skill <span class="mono lbl-name" title={it.skill_name}>{it.skill_name}</span></span>
           <span class="grow"></span>
@@ -669,7 +665,7 @@
         {#if gateLoading}
           <p class="muted"><span class="spinner-xs"></span> Checking the promote gate…</p>
         {:else if gateError}
-          <p class="muted">Couldn't check the promote gate here — Otto checks it again when you promote.</p>
+          <p class="muted">Couldn’t check the promote gate here — Otto checks it again when you promote.</p>
         {:else if promoteGate}
           {#if promoteGate.allowed}
             <p class="gate-ok" data-testid="gate-ok">
@@ -822,22 +818,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     overflow-wrap: anywhere;
-  }
-  .rd-load-err {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    color: var(--text);
-    overflow-wrap: anywhere;
-  }
-  .rd-load-err > :global(svg) {
-    color: var(--danger);
-  }
-  .rd-load-detail {
-    margin: 0 0 6px;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
   }
   .rd-task {
     margin: 0;

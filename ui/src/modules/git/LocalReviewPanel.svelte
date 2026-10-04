@@ -3,6 +3,7 @@
   // the configured review agents, show findings with checkboxes, and hand
   // selected findings off to a new agent session.
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
   import { api, ApiError } from '../../lib/api/client';
@@ -245,7 +246,7 @@
       if (review.status === 'running') schedulePoll();
       if (review.status === 'done') initChecked(review.comments);
     } catch (e) {
-      toasts.error('Could not start review', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start review', e);
     } finally {
       starting = false;
     }
@@ -316,7 +317,7 @@
       ws.addSession(session); // navigates to the new session via addSession → navigateToSession
       toasts.success(`Handed ${checkedIds.length} finding${checkedIds.length === 1 ? '' : 's'} to ${provider}`);
     } catch (e) {
-      toasts.error('Handoff failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t hand off the review', e);
     }
   }
 

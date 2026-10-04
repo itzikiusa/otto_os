@@ -5,6 +5,8 @@
   // by editing the document; explicit links are added and removed here.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
   import { ApiError } from '../../lib/api/client';
   import { createLink, deleteLink, search } from '../../lib/api/design';
@@ -81,7 +83,7 @@
       toasts.success('Link removed');
       onreload();
     } catch (e) {
-      toasts.error('Couldn’t remove the link', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove the link', e);
     }
   }
 
@@ -162,14 +164,16 @@
 </script>
 
 <div class="links" data-testid="design-links-panel">
-  {#if loading && !uses.length && !usedIn.length}
-    <p class="dim pad" role="status">Loading links…</p>
-  {:else if error}
-    <div class="pad err" role="alert">
-      <Icon name="warning" size={14} /> Couldn’t load links.
-      <button class="btn small ghost" onclick={onreload}>Retry</button>
-    </div>
+  {#if (loading || error) && !uses.length && !usedIn.length}
+    <div class="pad"><LoadState what="links" variant="compact" {loading} {error} empty={true} onretry={onreload} /></div>
   {:else}
+    {#if error}
+      <!-- Stale: keep the links already loaded; say the refresh failed. -->
+      <div class="pad err" role="status" title={error}>
+        <Icon name="warning" size={14} /> Refresh failed — showing the last good load.
+        <button class="btn small ghost" onclick={onreload} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>
+      </div>
+    {/if}
     {#snippet row(r: LinkRow, incoming: boolean)}
       {@const newer = incoming ? null : newerThanPinned(r)}
       <li class="row" data-testid={incoming ? 'design-link-in' : 'design-link-out'}>

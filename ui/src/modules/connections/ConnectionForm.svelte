@@ -1,5 +1,6 @@
 <script lang="ts">
   import PathField from '../../lib/components/PathField.svelte';
+  import { toastError } from '../../lib/toastError';
   // New/Edit connection sheet — unified form with optional SSH tunnel toggle.
   // Field layout: name / kind / host / port / user / database / password /
   //   [SSH section: jump host + identity file] / first command.
@@ -170,7 +171,7 @@
       newSectionName = '';
       creatingSection = false;
     } catch (e) {
-      toasts.error('Could not create section', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create section', e);
     }
   }
 
@@ -429,7 +430,7 @@
       toasts.success(existing ? 'Connection updated' : 'Connection created', saved.name);
       onsaved(saved);
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the connection', e);
     } finally {
       busy = false;
     }

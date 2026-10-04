@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpTokensApi } from '../../lib/api/mcp';
@@ -93,7 +94,7 @@
       showCreate = false;
       await loadTokens();
     } catch (e) {
-      toasts.error('Create failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the token', e);
     } finally {
       creating = false;
     }
@@ -112,7 +113,7 @@
       toasts.success('Token rotated', 'Only this token was replaced.');
       await loadTokens();
     } catch (e) {
-      toasts.error('Rotate failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rotate the token', e);
     }
   }
 
@@ -127,7 +128,7 @@
       toasts.success('Token revoked');
       await loadTokens();
     } catch (e) {
-      toasts.error('Revoke failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t revoke the token', e);
     }
   }
 

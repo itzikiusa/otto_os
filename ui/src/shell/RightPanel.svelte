@@ -7,6 +7,7 @@
   // aside and the mobile drawer); `panels` is reactive so a tab renders the
   // moment its chunk lands and a loaded tab switches in synchronously.
   import type { Component } from 'svelte';
+  import { toastError } from '../lib/toastError';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { ui as uiStore } from '../lib/stores/ui.svelte';
   import { RIGHT_MIN, RIGHT_MAX } from '../lib/stores/ui.svelte';
@@ -67,7 +68,6 @@
   import { startMouseDrag } from '../lib/dragCursor';
   import { ws } from '../lib/stores/workspace.svelte';
   import { getToken } from '../lib/api/client';
-  import { toasts } from '../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../lib/contextmenu.svelte';
   import { onDestroy, untrack } from 'svelte';
 
@@ -236,7 +236,7 @@
     } catch (e) {
       if (p.token !== getToken()) return;
       if (p.wsId !== notesLoadedFor) {
-        toasts.error('Notes not saved', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t save the notes', e);
         return;
       }
       if (revision !== notesRevision) return;

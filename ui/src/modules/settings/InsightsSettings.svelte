@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   import SectionIntro from './SectionIntro.svelte';
@@ -10,7 +11,6 @@
   // so a scheduled report is never silently missed.
   import { insightsApi } from '../../lib/api/insights';
   import type { InsightsConfig } from '../../lib/api/types';
-  import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { contextApi } from '../../lib/api/context';
@@ -113,7 +113,7 @@
     } catch (e) {
       cfg = prev;
       modelDraft = prev.model || '';
-      toasts.error('Couldn’t save the report agent', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the report agent', e);
     } finally {
       saving = false;
     }
@@ -135,7 +135,7 @@
       flashSaved('schedule');
     } catch (e) {
       cfg = prev; // revert
-      toasts.error(`Couldn’t turn ${String(key)} reports ${next[key] ? 'on' : 'off'}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t turn ${String(key)} reports ${next[key] ? 'on' : 'off'}`, e);
     } finally {
       saving = false;
     }

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { broadcastScope } from './viewFilters';
+  import { toastError } from '../../lib/toastError';
   // Split layout host: renders the nested split TREE (`layout.tree`) through the
   // recursive SplitNode, and owns the layout-wide keyboard chords + ⌘K commands.
   // Pane membership, fractions and focus live in the layout store — this file
@@ -134,7 +135,7 @@
       const n = resp.session_ids.length;
       toasts.info('Broadcast sent', `Delivered to ${n} session${n === 1 ? '' : 's'}.`);
     } catch (e) {
-      toasts.error('Broadcast failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t send the broadcast', e);
     } finally {
       broadcastBusy = false;
     }

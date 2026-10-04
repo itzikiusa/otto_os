@@ -14,6 +14,7 @@
   // Hosted two ways: as the right-panel **Outputs** tab (no props → the focused
   // agent session) and embedded under the History conversation (`embedded`).
   import { untrack } from 'svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { authedBlobUrl, authedText } from '../../lib/api/client';
@@ -155,7 +156,7 @@
       }
     } catch (e) {
       if (stale()) return;
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
     } finally {
       if (!stale()) loading = false;
     }

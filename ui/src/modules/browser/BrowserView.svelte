@@ -3,6 +3,7 @@
   // shape of VaultPage/LoopsPage (a thin view over a $state store).
 
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import { pollWhileVisible } from '../../lib/poll';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -274,7 +275,7 @@
             comment: '',
           });
         } catch (e) {
-          toasts.error('Failed to save mark', e instanceof Error ? e.message : undefined);
+          toastError('Couldn’t save mark', e);
         }
       }
     } finally {
@@ -444,7 +445,7 @@
         toasts.success('Autofilled', `${cred.username} · ${cred.domain} — review before submitting`);
       }
     } catch (e) {
-      toasts.error('Autofill failed', e instanceof Error ? e.message : undefined);
+      toastError('Couldn’t fill the login', e);
     } finally {
       filling = false;
     }
@@ -553,7 +554,7 @@
       await browser.navigate(url);
       browser.summary = '';
     } catch (e) {
-      toasts.error('Failed to load page', e instanceof Error ? e.message : undefined);
+      toastError('Couldn’t load page', e);
     }
   }
 
@@ -602,7 +603,7 @@
     try {
       await browser.runSummarize(url);
     } catch (e) {
-      toasts.error('Summarize failed', e instanceof Error ? e.message : undefined);
+      toastError('Couldn’t summarize the page', e);
     }
   }
 
@@ -619,7 +620,7 @@
       const resp = await browser.vaultSave(url, vaultId, derived);
       toasts.success('Saved to vault', resp.note_path);
     } catch (e) {
-      toasts.error('Vault save failed', e instanceof Error ? e.message : undefined);
+      toastError('Couldn’t save to the vault', e);
     } finally {
       vaultSaving = false;
     }

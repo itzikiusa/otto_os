@@ -3,6 +3,7 @@
   // completion source (debounced /db/completion). Cmd/Ctrl+Enter runs; toolbar
   // has Run / Save / Explain-with-agent. Results render in the ResultsGrid below.
   import { onDestroy, tick, untrack } from 'svelte';
+  import { plural } from '../../lib/plural';
   import type { Completion, CompletionContext, CompletionResult } from '@codemirror/autocomplete';
   import { syntaxTree } from '@codemirror/language';
   import { isInertAt } from './completion-gate';
@@ -1491,7 +1492,7 @@
     <button class="qe-acc-head" onclick={() => (resultsOpen = !resultsOpen)} aria-expanded={resultsOpen}>
       <Icon name={resultsOpen ? 'chevronDown' : 'chevronRight'} size={14} />
       <span class="qe-acc-title">Results</span>
-      {#if hasResult && tab.result}<span class="qe-acc-count">{tab.result.stats.row_count} rows</span>{/if}
+      {#if hasResult && tab.result}<span class="qe-acc-count">{plural(tab.result.stats.row_count, 'row')}</span>{/if}
       {#if tab.error}<span class="qe-acc-count err">error</span>{/if}
     </button>
   {/if}

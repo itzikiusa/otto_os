@@ -3,6 +3,7 @@
   // tool count, injection-risk badge, and an enabled toggle, with Discover /
   // Health check / Delete actions. "Add server" opens the create form.
   import ResourceAccess from '../../lib/components/ResourceAccess.svelte';
+  import { toastError } from '../../lib/toastError';
   import Modal from '../../lib/components/Modal.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -65,7 +66,7 @@
       toasts.success('Discovered tools', `${tools.length} tool${tools.length === 1 ? '' : 's'} from ${s.name}`);
       await onReload();
     } catch (e) {
-      toasts.error('Discovery failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t discover tools', e);
     } finally {
       setBusy(s.id, null);
     }
@@ -82,7 +83,7 @@
         toasts.warn('Unhealthy', updated.health_error ?? s.name);
       }
     } catch (e) {
-      toasts.error('Health check failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t check the server', e);
     } finally {
       setBusy(s.id, null);
     }
@@ -94,7 +95,7 @@
       const updated = await mcpCpApi.cpUpdate(s.id, { enabled: !s.enabled });
       onPatch(updated);
     } catch (e) {
-      toasts.error('Could not update server', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update server', e);
     } finally {
       setBusy(s.id, null);
     }
@@ -113,7 +114,7 @@
       toasts.success('Server deleted', s.name);
       await onReload();
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete the server', e);
     } finally {
       setBusy(s.id, null);
     }

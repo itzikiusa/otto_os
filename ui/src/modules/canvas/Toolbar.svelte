@@ -90,7 +90,7 @@
       <Icon name="play" /> Present
     </button>
     {#if !readonly}
-      <button class="btn accent" title="Ask Otto (⌘↵)" onclick={onaskai}>
+      <button class="btn primary" title="Ask Otto (⌘↵)" onclick={onaskai}>
         <Icon name="zap" /> Ask Otto
       </button>
     {/if}
@@ -159,47 +159,5 @@
     height: 20px;
     background: var(--border);
     margin: 0 4px;
-  }
-  .icon-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 30px;
-    height: 30px;
-    border: none;
-    background: none;
-    color: var(--text);
-    border-radius: var(--radius-s);
-    cursor: pointer;
-  }
-  .icon-btn:hover:not(:disabled) {
-    background: var(--surface-2);
-  }
-  .icon-btn:disabled {
-    opacity: 0.35;
-    cursor: default;
-  }
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 5px 10px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--text);
-    border-radius: var(--radius-s);
-    font-size: var(--fs-m);
-    cursor: pointer;
-  }
-  .btn:hover {
-    background: var(--surface-2);
-  }
-  .btn.accent {
-    background: var(--accent-solid);
-    border-color: var(--accent-solid);
-    color: var(--accent-contrast);
-  }
-  .btn.accent:hover {
-    filter: brightness(1.08);
   }
 </style>

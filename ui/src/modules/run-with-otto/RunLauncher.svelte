@@ -400,7 +400,7 @@
   .big-input::placeholder { color: var(--text-dim); }
   .big-input:focus-visible {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   /* detect line on the start, the one primary on the end — the button sits

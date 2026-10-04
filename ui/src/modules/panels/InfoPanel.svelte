@@ -1,6 +1,7 @@
 <script lang="ts">
   // Info tab: shows active session metadata + attached Jira issue.
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { toastError } from '../../lib/toastError';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -46,7 +47,7 @@
         value === '' ? 'Workspace uses the global default agent' : `Workspace default agent: ${value}`,
       );
     } catch (err) {
-      toasts.error('Could not save default agent', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t save default agent', err);
     }
   }
 
@@ -77,7 +78,7 @@
       await ws.detachIssue(session.id);
       toasts.info('Issue detached');
     } catch (e) {
-      toasts.error('Detach failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t detach the issue', e);
     }
   }
 

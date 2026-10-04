@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Users admin (root): create/disable users + per-workspace role matrix + feature grants.
@@ -138,7 +139,7 @@
       flashSaved('roles');
       return true;
     } catch (e) {
-      toasts.error('Couldn’t change the workspace role', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t change the workspace role', e);
       return false;
     } finally {
       savingWs = savingWs.filter((id) => id !== wsId);
@@ -337,7 +338,7 @@
       users = users.map((x) => (x.id === u.id ? updated : x));
       toasts.success(updated.disabled ? `Disabled @${u.username}` : `Enabled @${u.username}`, updated.disabled ? 'They can no longer sign in.' : 'They can sign in again.');
     } catch (e) {
-      toasts.error(`Couldn’t ${u.disabled ? 'enable' : 'disable'} @${u.username}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t ${u.disabled ? 'enable' : 'disable'} @${u.username}`, e);
     }
   }
 
@@ -354,7 +355,7 @@
       await auth.impersonate(u.id);
       toasts.success(`Now acting as @${u.username}`);
     } catch (e) {
-      toasts.error(`Couldn’t impersonate @${u.username}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t impersonate @${u.username}`, e);
     } finally {
       impersonatingId = null;
     }
@@ -383,7 +384,7 @@
       if (allMembers[matrixWs]) allMembers = { ...allMembers, [matrixWs]: members };
       flashSaved('roles');
     } catch (e) {
-      toasts.error('Couldn’t change the workspace role', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t change the workspace role', e);
     }
   }
 
@@ -407,7 +408,7 @@
       flashSaved('grants');
     } catch (e) {
       if (grantUserId === userId) grantMap = before;
-      toasts.error(`Couldn’t change access to ${FEATURE_LABELS[feature]}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t change access to ${FEATURE_LABELS[feature]}`, e);
     } finally {
       grantSaving = false;
     }

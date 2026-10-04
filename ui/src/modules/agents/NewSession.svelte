@@ -2,6 +2,7 @@
   // ⌘T sheet: workspace (current / none), provider (from /meta.providers),
   // title, cwd.
   import Modal from '../../lib/components/Modal.svelte';
+  import { toastError } from '../../lib/toastError';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import AccountPicker from '../../lib/components/AccountPicker.svelte';
   import NetworkProfilePicker from '../connections/NetworkProfilePicker.svelte';
@@ -376,7 +377,7 @@
       }
       onclose();
     } catch (e) {
-      toasts.error('Could not create session', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create session', e);
     } finally {
       busy = false;
     }

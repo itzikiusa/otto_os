@@ -26,6 +26,7 @@
   // ≤ 640 px the three columns collapse to a segmented single pane (Assets ·
   // Canvas · Inspector), like the Database Explorer's phone layout.
   import { onTabKey } from '../../../lib/tabKeys';
+  import { toastError } from '../../../lib/toastError';
   import { onDestroy, untrack } from 'svelte';
   import { product, toBase64 } from '../../../lib/stores/product.svelte';
   import { mockupAssist, type LiveUpdate } from '../../../lib/stores/mockup-assist.svelte';
@@ -458,7 +459,7 @@
       }
       scheduleListReload();
     } catch (e) {
-      toasts.error('Could not resolve the conflict', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t resolve the conflict', e);
     }
   }
 
@@ -482,7 +483,7 @@
         if (product.saveState[a.id] === 'conflict') void resolveConflict(a, next);
         return;
       }
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the design', e);
     });
   }
   function onBoardChange(src: string): void {
@@ -517,7 +518,7 @@
       selectedId = created.id;
       mobilePane = 'canvas';
     } catch (e) {
-      toasts.error('Could not create the artifact', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the artifact', e);
     }
   }
   function createBlank(format: DesignFormat): void {
@@ -555,7 +556,7 @@
           });
           firstId ??= a.id;
         } catch (err) {
-          toasts.error(`Import failed: ${f.name}`, err instanceof Error ? err.message : String(err));
+          toastError(`Couldn’t import ${f.name}`, err);
         }
       }
       await loadAll(true);
@@ -586,7 +587,7 @@
       scene3dSel = id;
       await loadAll(true);
     } catch (err) {
-      toasts.error('GLB import failed', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t import the GLB', err);
     }
   }
 
@@ -658,7 +659,7 @@
     ctxMenu.show(e, items);
   }
   function fail(e: unknown): void {
-    toasts.error('Export failed', e instanceof Error ? e.message : String(e));
+    toastError('Couldn’t export the design', e);
   }
   function rowMenu(e: MouseEvent | KeyboardEvent, r: { att: ProductAttachment; owner: ProductStory | null }): void {
     const k = kindOf(r.att);
@@ -703,7 +704,7 @@
       await product.patchAttachment(a.id, { filename: name });
       await loadAll(true);
     } catch (e) {
-      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename the design', e);
     }
   }
   async function remove(a: ProductAttachment): Promise<void> {
@@ -717,7 +718,7 @@
       if (selectedId === a.id) selectedId = null;
       await loadAll(true);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete the design', e);
     }
   }
   /** Refine an existing artifact with the in-place agent (docked panel). */
@@ -777,7 +778,7 @@
         toasts.error('Blender render failed', renderJob.error ?? 'unknown error');
       }
     } catch (e) {
-      toasts.error('Blender render failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t render with Blender', e);
     } finally {
       rendering = false;
     }
@@ -914,28 +915,28 @@
               <button class="seg" class:active={device === d.id} aria-pressed={device === d.id} onclick={() => (device = d.id)}>{d.label}</button>
             {/each}
           </div>
-          <button class="tb-btn" onclick={() => (scheme = scheme === 'dark' ? 'light' : 'dark')} title="Toggle light / dark backdrop" aria-label="Toggle light / dark">
+          <button class="btn small" onclick={() => (scheme = scheme === 'dark' ? 'light' : 'dark')} title="Toggle light / dark backdrop" aria-label="Toggle light / dark">
             <Icon name={scheme === 'dark' ? 'eye' : 'eyeOff'} size={12} /> {scheme === 'dark' ? 'Dark' : 'Light'}
           </button>
         {/if}
         {#if kind === 'excalidraw'}
-          <button class="tb-btn" class:on={annotate} aria-pressed={annotate} onclick={() => (annotate = !annotate)} title="Annotate: pin comments on the board (read-only while on)">
+          <button class="btn small da-toggle" class:on={annotate} aria-pressed={annotate} onclick={() => (annotate = !annotate)} title="Annotate: pin comments on the board (read-only while on)">
             <Icon name="pin" size={12} /> Annotate
           </button>
         {/if}
         {#if kind === 'scene3d'}
-          <button class="tb-btn" class:on={play} aria-pressed={play} onclick={() => (play = !play)} title="Play: presentation view (doc camera, no gizmo/grid)">
+          <button class="btn small da-toggle" class:on={play} aria-pressed={play} onclick={() => (play = !play)} title="Play: presentation view (doc camera, no gizmo/grid)">
             <Icon name="play" size={12} /> Play
           </button>
         {/if}
         {#if isText}
-          <button class="tb-btn" class:on={codeView} aria-pressed={codeView} onclick={() => (codeView = !codeView)} title="Edit the source">
+          <button class="btn small da-toggle" class:on={codeView} aria-pressed={codeView} onclick={() => (codeView = !codeView)} title="Edit the source">
             <Icon name="file" size={12} /> Source
           </button>
         {/if}
         <span class="st-grow"></span>
-        <button class="tb-btn" onclick={exportMenu} title="Export"><Icon name="arrowDown" size={12} /> Export <Icon name="chevronDown" size={10} /></button>
-        <button class="tb-btn icon" onclick={moreMenu} aria-label="More actions" title="More actions"><Icon name="more" size={14} /></button>
+        <button class="btn small" onclick={exportMenu} title="Export"><Icon name="arrowDown" size={12} /> Export <Icon name="chevronDown" size={10} /></button>
+        <button class="icon-btn" onclick={moreMenu} aria-label="More actions" title="More actions"><Icon name="more" size={14} /></button>
       </div>
 
       <div class="stage-body" class:split={codeView && isText}>
@@ -1381,30 +1382,9 @@
     background: var(--surface);
     color: var(--accent-text);
   }
-  .tb-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    height: 24px;
-    padding: 0 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .tb-btn.icon {
-    padding: 0 5px;
-  }
-  .tb-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent-text);
-  }
-  .tb-btn.on {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  /* Pressed state of the stage toggles (Annotate / Play / Code); the buttons are the shared .btn.small. */
+  .da-toggle.on {
+    background: var(--accent-soft);
     color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 36%, transparent);
   }

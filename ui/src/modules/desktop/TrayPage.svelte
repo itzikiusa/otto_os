@@ -275,7 +275,7 @@
       </div>
     {/if}
     {#if auth.phase === 'loading' || (auth.phase === 'ready' && !loaded && !loadError)}
-      <p class="state">Loading…</p>
+      <p class="state">Loading your work…</p>
     {:else if auth.phase === 'offline'}
       <div class="state">
         <p>The Otto daemon isn't running yet.</p>

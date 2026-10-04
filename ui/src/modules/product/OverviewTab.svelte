@@ -5,6 +5,7 @@
   // assignee, details, linked issues, comments, history, and attachments.
   import { tick, untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { kindLabel } from '../../lib/labels';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -1310,7 +1311,7 @@
           <option value="">Current ({source ? `v${source.version_no}` : 'none'})</option>
           {#each product.versions as v (v.id)}
             {#if v.id !== source?.id}
-              <option value={v.id}>v{v.version_no} — {v.kind} ({new Date(v.created_at).toLocaleDateString()})</option>
+              <option value={v.id}>v{v.version_no} — {kindLabel(v.kind)} ({new Date(v.created_at).toLocaleDateString()})</option>
             {/if}
           {/each}
         </select>
@@ -1363,7 +1364,7 @@
         class="btn small"
         onclick={runDiscovery}
         disabled={runningDiscovery}
-        title="Launch a discovery swarm run — agents analyse the story and report findings"
+        title="Launch a discovery swarm run — agents analyze the story and report findings"
         aria-label="Run discovery"
       >
         <Icon name="zap" size={12} /> {runningDiscovery ? 'Starting…' : 'Run discovery'}
@@ -1507,7 +1508,7 @@
           <div class="body-wrap">
             {#if viewingVersion}
               <div class="version-banner">
-                Viewing v{viewingVersion.version_no} ({viewingVersion.kind})
+                Viewing v{viewingVersion.version_no} ({kindLabel(viewingVersion.kind)})
                 — {new Date(viewingVersion.created_at).toLocaleString()}
                 {#if viewingVersion.change_notes}
                   <span class="change-notes">· {viewingVersion.change_notes}</span>
@@ -2058,7 +2059,7 @@
       <div class="body-wrap">
         {#if viewingVersion}
           <div class="version-banner">
-            Viewing v{viewingVersion.version_no} ({viewingVersion.kind})
+            Viewing v{viewingVersion.version_no} ({kindLabel(viewingVersion.kind)})
             — {new Date(viewingVersion.created_at).toLocaleString()}
             {#if viewingVersion.change_notes}
               <span class="change-notes">· {viewingVersion.change_notes}</span>
@@ -2218,7 +2219,8 @@
     transition: border-color 120ms, width 120ms;
   }
   .tag-input:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
     color: var(--text);
     width: 100px;
   }
@@ -2386,7 +2388,8 @@
   }
   .title-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .chip {
     font-size: var(--fs-xs);
@@ -2773,7 +2776,8 @@
   }
   .field-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .field-multiselect {
     display: flex;
@@ -2857,7 +2861,8 @@
   }
   .desc-textarea:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .desc-editor-actions {
     display: flex;
@@ -3200,7 +3205,8 @@
     box-sizing: border-box;
   }
   .input:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .textarea {
     background: var(--surface);
@@ -3217,7 +3223,8 @@
     line-height: 1.55;
   }
   .textarea:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .draft-save-row {
     display: flex;

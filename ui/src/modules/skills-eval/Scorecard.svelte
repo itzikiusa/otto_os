@@ -3,9 +3,10 @@
   // signals that feed it) and, on demand, the assembled proof pack. Read-only —
   // it never mutates the eval; rating happens elsewhere.
   import type { EvalScore } from '../../lib/api/types';
+  import { toastError } from '../../lib/toastError';
+  import { kindLabel } from '../../lib/labels';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import Icon from '../../lib/components/Icon.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import { sentenceCase } from '../../lib/status';
 
   interface Props {
@@ -89,7 +90,7 @@
       artifacts = pack.artifacts ?? [];
       loaded = true;
     } catch (e) {
-      toasts.error("Couldn't load the proof pack", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t load the proof pack', e);
       expanded = false;
     } finally {
       loading = false;
@@ -152,7 +153,7 @@
               <div class="artifact">
                 <div class="ahead">
                   <span class="adot" style="background:{dotTone(a.status)}"></span>
-                  <span class="akind">{a.kind}</span>
+                  <span class="akind">{kindLabel(a.kind)}</span>
                   <span class="sep">·</span>
                   <span class="atitle">{a.title}</span>
                   <span class="sep">·</span>

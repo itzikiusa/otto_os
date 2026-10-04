@@ -5,6 +5,7 @@
   // and what they resolve to · Params / Headers / Body / Auth / Scripts / Docs
   // / Settings, each with a one-line explanation.
   import { openExternal } from '../../lib/external';
+  import { toastError } from '../../lib/toastError';
   import { onTabKey } from '../../lib/tabKeys';
   import { baseUrl } from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
@@ -423,7 +424,7 @@
       setAuth({ access_token: res.access_token, token_type: res.token_type || 'Bearer', refresh_token: res.refresh_token || a.refresh_token });
       toasts.success('Access token received', `${res.token_type || 'Bearer'} · expires in ${res.expires_in ?? '?'} s`);
     } catch (e) {
-      toasts.error('Couldn’t get a token', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t get a token', e);
     } finally {
       fetchingToken = false;
     }
@@ -497,7 +498,7 @@
       if (first && !draft.grpc_method) selectGrpcMethod(first.methods[0]);
       toasts.success('Read the .proto file', `${res.services.length} service(s)`);
     } catch (e) {
-      toasts.error('Couldn’t read the .proto file', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t read the .proto file', e);
     } finally {
       grpcParsing = false;
     }
@@ -519,7 +520,7 @@
       if (first) selectGrpcMethod(first.methods[0]);
       toasts.success('Loaded services from the server', `${res.services.length} service(s)`);
     } catch (e) {
-      toasts.error('Server reflection failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t read server reflection', e);
     } finally {
       grpcReflecting = false;
     }

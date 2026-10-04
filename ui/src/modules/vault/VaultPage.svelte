@@ -10,8 +10,9 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { lsGet, lsSet } from '../../lib/storage';
-  import { startMouseDrag } from '../../lib/dragCursor';
-  import { paneResizer } from '../../lib/paneResizer';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
@@ -35,8 +36,8 @@
   const RIGHT_W_KEY = 'otto_vault_right_w';
   // Storage is a convenience cache: lsGet/lsSet swallow a blocked accessor or
   // a full quota, so a private window never blanks the page.
-  let leftW = $state(Number(lsGet(LEFT_W_KEY)) || 250);
-  let rightW = $state(Number(lsGet(RIGHT_W_KEY)) || 280);
+  let leftW = $state(loadPaneWidth(LEFT_W_KEY, LIST_PANE.default, LIST_PANE.min, 520));
+  let rightW = $state(loadPaneWidth(RIGHT_W_KEY, LIST_PANE.default, LIST_PANE.min, 520));
   let rightOpen = $state(lsGet('otto_vault_right_open') !== '0');
   let leftOpen = $state(lsGet('otto_vault_left_open') !== '0');
 
@@ -48,41 +49,6 @@
     rightOpen = !rightOpen;
     lsSet('otto_vault_right_open', rightOpen ? '1' : '0');
   }
-  let resizing = $state(false);
-
-  // lib/dragCursor (r3-03-08): overlay cursor instead of an inherited
-  // body.style write, one width write per frame, one persist on release
-  // (was a localStorage write on every mousemove).
-  function startResize(e: MouseEvent, side: 'left' | 'right'): void {
-    resizing = true;
-    const startX = e.clientX;
-    const startW = side === 'left' ? leftW : rightW;
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => {
-        const d = ev.clientX - startX;
-        const w = Math.max(180, Math.min(520, Math.round(side === 'left' ? startW + d : startW - d)));
-        if (side === 'left') leftW = w;
-        else rightW = w;
-      },
-      onEnd: () => {
-        resizing = false;
-        if (side === 'left') lsSet(LEFT_W_KEY, String(leftW));
-        else lsSet(RIGHT_W_KEY, String(rightW));
-      },
-    });
-  }
-
-  // Keyboard nudges (paneResizer) go through the same clamp + persist as a drag.
-  function setLeftW(w: number): void {
-    leftW = w;
-    lsSet(LEFT_W_KEY, String(w));
-  }
-  function setRightW(w: number): void {
-    rightW = w;
-    lsSet(RIGHT_W_KEY, String(w));
-  }
-  const pxText = (v: number): string => `${Math.round(v)} pixels wide`;
 
   // -- create-vault dialog -------------------------------------------------------
   let createOpen = $state(false);
@@ -249,7 +215,7 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<div class="vault-page" class:resizing>
+<div class="vault-page">
   <!-- Unified header: vault switcher as the title, status chips as badges,
        tools right-aligned (they collapse into ⋯ when the pane is narrow). -->
   <PageHeader title={vault.current?.name ?? 'Vault'} class="vault-header">
@@ -359,6 +325,7 @@
       onaction={() => (createOpen = true)}
     />
   {:else if vault.current}
+    <PageBody fill padded={false}>
     <div class="panes">
       {#if leftOpen}
       <aside class="left" style="width:{leftW}px">
@@ -408,19 +375,7 @@
           <TagsPanel />
         {/if}
       </aside>
-      <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-      <div
-        class="resizer"
-        role="separator"
-        tabindex="0"
-        aria-orientation="vertical"
-        aria-label="Resize sidebar"
-        title="Drag or use ←/→ to resize · double-click or Enter to reset"
-        onmousedown={(e) => startResize(e, 'left')}
-        ondblclick={() => setLeftW(250)}
-        use:paneResizer={{ value: leftW, min: 180, max: 520, onChange: setLeftW, onReset: () => setLeftW(250), text: pxText }}
-      ></div>
+      <PaneDivider bind:width={leftW} storageKey={LEFT_W_KEY} label="Resize sidebar" min={LIST_PANE.min} max={520} />
       {/if}
 
       <main class="center">
@@ -508,18 +463,7 @@
       </main>
 
       {#if rightOpen && vault.centerMode === 'note'}
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-        <div
-          class="resizer resizer-right"
-          role="separator"
-          tabindex="0"
-          aria-orientation="vertical"
-          aria-label="Resize details panel"
-          title="Drag or use ←/→ to resize · double-click or Enter to reset"
-          onmousedown={(e) => startResize(e, 'right')}
-          ondblclick={() => setRightW(280)}
-          use:paneResizer={{ value: rightW, min: 180, max: 520, invert: true, onChange: setRightW, onReset: () => setRightW(280), text: pxText }}
-        ></div>
+        <div class="resizer-right"><PaneDivider bind:width={rightW} storageKey={RIGHT_W_KEY} label="Resize details panel" min={LIST_PANE.min} max={520} invert /></div>
         <aside class="right-pane" style="width:{rightW}px">
           <RightPanel />
         </aside>
@@ -545,6 +489,7 @@
       <span class="grow"></span>
       <span class="dim vs-path" title={vault.current.root_path}>{vault.current.root_path}</span>
     </footer>
+    </PageBody>
   {/if}
 </div>
 
@@ -605,9 +550,6 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
-  }
-  .vault-page.resizing {
-    cursor: col-resize;
   }
   .vault-pick {
     display: inline-flex;
@@ -716,15 +658,9 @@
     padding: 6px 8px;
     border-bottom: 1px solid var(--border);
   }
-  .resizer {
-    width: 4px;
-    cursor: col-resize;
-    flex-shrink: 0;
-  }
-  .resizer:hover,
-  .resizer:focus-visible {
-    outline: none;
-    background: color-mix(in srgb, var(--accent) 30%, transparent);
+  /* display:contents so the divider stays a flex item of .panes. */
+  .resizer-right {
+    display: contents;
   }
   .center {
     flex: 1;
@@ -896,9 +832,6 @@
       max-height: min(25%, 180px);
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
-    }
-    .resizer {
-      display: none;
     }
     .right-pane {
       display: none;

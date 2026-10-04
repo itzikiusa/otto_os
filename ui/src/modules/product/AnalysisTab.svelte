@@ -17,6 +17,7 @@
     return s === 'partial' ? { key: 'partial', label: 'Partial', tone: 'warning' } : runStatus(s);
   }
   import { toasts } from '../../lib/toast.svelte';
+  import { runStateLabel } from '../../lib/labels';
   import { loadErrorText } from '../../lib/loadError';
   import type { ProductAnalysis, ProductAnalysisDetail, ProductAnalysisAgent } from './types';
   import type { ProductLens } from '../../lib/api/types';
@@ -464,14 +465,14 @@
         <option value="">— select a past run —</option>
         {#each product.analyses as a (a.id)}
           <option value={a.id}>
-            {fmtDate(a.created_at)} · {a.status}
+            {fmtDate(a.created_at)} · {runStateLabel(a.status)}
           </option>
         {/each}
       </select>
       {#if loadingHistory}
         <span class="dim-sm">Loading past runs…</span>
       {:else if historyError}
-        <span class="dim-sm hist-error" role="alert" title={historyError}><Icon name="warning" size={12} /> Couldn't load past runs</span>
+        <span class="dim-sm hist-error" role="alert" title={historyError}><Icon name="warning" size={12} /> Couldn’t load past runs</span>
         <button class="btn small ghost" onclick={() => void loadHistory()}>Retry</button>
       {:else if historyLoaded && product.analyses.length === 0}
         <span class="dim-sm">No runs yet — configure the lenses above and run the first analysis.</span>

@@ -4,6 +4,7 @@
   // crossing. Allows creating and deleting alerts.
 
   import { api } from '../../lib/api/client';
+  import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -66,7 +67,7 @@
       newThreshold = 1000;
       toasts.success('Alert created');
     } catch (e) {
-      toasts.error("Couldn't create the alert", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the alert', e);
     } finally {
       creating = false;
     }
@@ -83,7 +84,7 @@
       alerts = alerts.filter((a) => a.id !== alert.id);
       toasts.success('Alert deleted');
     } catch (e) {
-      toasts.error("Couldn't delete the alert", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete the alert', e);
     }
   }
 </script>

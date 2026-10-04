@@ -4,6 +4,7 @@
   // the source agent's recent work (+ git state), summarizes it, and types a
   // handover brief into the target. Optionally review/edit the brief first.
   import Modal from '../../lib/components/Modal.svelte';
+  import { toastError } from '../../lib/toastError';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
@@ -119,7 +120,7 @@
           : '';
       phase = 'review';
     } catch (e) {
-      toasts.error('Could not generate brief', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t generate brief', e);
     } finally {
       briefLoading = false;
     }
@@ -148,7 +149,7 @@
           : `Preparing the brief for ${where} — it'll arrive shortly.`,
       );
     } catch (e) {
-      toasts.error('Handover failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t hand over the session', e);
     } finally {
       busy = false;
     }

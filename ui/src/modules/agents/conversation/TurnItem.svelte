@@ -12,6 +12,7 @@
   // Thinking is its own violet, italic marker — never mistaken for the answer.
   // Per-turn system notes stay a chip that expands in place.
   import { getContext } from 'svelte';
+  import { toastError } from '../../../lib/toastError';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import AgentChip from '../../../lib/components/AgentChip.svelte';
@@ -76,7 +77,7 @@
       await navigator.clipboard.writeText(path);
       toasts.info('Path copied', path);
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy to the clipboard', e);
     }
   }
   async function copyTurn(): Promise<void> {
@@ -84,7 +85,7 @@
       await navigator.clipboard.writeText(copyText);
       toasts.info('Copied', item.role === 'user' ? 'Your message' : 'The response');
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy to the clipboard', e);
     }
   }
   const ctx = getContext<ConvContext>(CONV_CTX);

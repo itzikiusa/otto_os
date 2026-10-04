@@ -2,6 +2,7 @@
   // Create or edit a single swarm goal. Used for per-task / per-project explicit
   // goals AND (in builder mode) the swarm's standing-goal templates.
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import Modal from '../../lib/components/Modal.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -80,7 +81,7 @@
       }
       onclose();
     } catch (e) {
-      toasts.error("Couldn't save the goal", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the goal', e);
     } finally {
       busy = false;
     }

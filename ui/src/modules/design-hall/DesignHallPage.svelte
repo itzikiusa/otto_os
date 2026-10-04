@@ -8,6 +8,7 @@
   //   #/design/studio/<id>    a studio            #/design/story/<id>  designs for a story
   //   #/design/brand          Brand Kit           #/design/learned[/rules|/memory]
   import { router } from '../../lib/router.svelte';
+  import { toastError } from '../../lib/toastError';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -99,7 +100,7 @@
       toasts.success('Imported', file.name);
       created(id);
     } catch (err) {
-      toasts.error('Couldn’t import the file', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t import the file', err);
     }
   }
 
@@ -120,7 +121,7 @@
       void library.load();
       router.go(`design/p/${encodeURIComponent(p.id)}`);
     } catch (e) {
-      toasts.error('Couldn’t create the project', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the project', e);
     }
   }
 

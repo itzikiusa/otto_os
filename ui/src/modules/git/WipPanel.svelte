@@ -4,6 +4,7 @@
   // stage toggles, discard), a per-file working diff, and the commit composer.
   // Replaces the old separate "Changes" tab — staging now lives on the graph.
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import { api, isAbortError } from '../../lib/api/client';
   import type {
     CommitConfig,
@@ -84,7 +85,7 @@
       onstatus(s);
       toasts.success('Resolved', `${path} — kept ${side}`);
     } catch (e) {
-      toasts.error('Resolve failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t resolve the conflict', e);
     }
   }
 
@@ -295,7 +296,7 @@
       );
       onstatus(s);
     } catch (e) {
-      toasts.error('Operation failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t finish the operation', e);
     }
   }
 
@@ -336,7 +337,7 @@
         toasts.info(`Discarded ${paths.length} file${paths.length === 1 ? '' : 's'}`);
       }
     } catch (e) {
-      toasts.error('Discard failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t discard the changes', e);
     }
   }
 
@@ -491,16 +492,37 @@
     stagedWin.refresh();
   });
 
-  // Repo signing defaults. Best-effort: a daemon without the route (or a repo
-  // with no config) just leaves the toggle off.
-  $effect(() => {
+  // Repo signing defaults. A failed read must not look like "this repo doesn't
+  // sign": the toggle stays usable (per-commit override), but the row says the
+  // default couldn't be read and offers Retry. A response for a repo the panel
+  // has since left is dropped.
+  let signCfgError = $state(false);
+  let signCfgLoading = $state(false);
+  let signCfgSeq = 0;
+  function loadSignCfg(id: string): void {
+    const seq = ++signCfgSeq;
+    signCfgError = false;
+    signCfgLoading = true;
     void api
-      .get<CommitConfig>(`/repos/${repoId}/commit-config`)
+      .get<CommitConfig>(`/repos/${id}/commit-config`)
       .then((c) => {
+        if (seq !== signCfgSeq) return;
         signCfg = c;
         signOn = c.gpgsign;
       })
-      .catch(() => {});
+      .catch(() => {
+        if (seq === signCfgSeq) signCfgError = true;
+      })
+      .finally(() => {
+        if (seq === signCfgSeq) signCfgLoading = false;
+      });
+  }
+  $effect(() => {
+    const id = repoId;
+    untrack(() => loadSignCfg(id));
+    return () => {
+      signCfgSeq++;
+    };
   });
 
   // Amend: HEAD's subject is shown as the PLACEHOLDER, never copied into the
@@ -577,7 +599,7 @@
           : 'From working changes (nothing staged) — review & edit.',
       );
     } catch (e) {
-      toasts.error('Draft failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t draft the message', e);
     } finally {
       clearInterval(tick);
       drafting = false;
@@ -598,7 +620,7 @@
       selectedPath = null;
       oncommitted();
     } catch (e) {
-      toasts.error('Commit failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t commit the changes', e);
     } finally {
       committing = false;
     }
@@ -798,7 +820,7 @@
           <p class="wp-untracked-cap" role="note">
             <Icon name="info" size={12} />
             <span
-              >{hiddenUntracked.toLocaleString()} more untracked file{hiddenUntracked === 1 ? '' : 's'} not shown. If they're
+              >{hiddenUntracked.toLocaleString()} more untracked file{hiddenUntracked === 1 ? '' : 's'} not shown. If they’re
               build output or dependencies, add them to <code>.gitignore</code>.</span
             >
           </p>
@@ -884,7 +906,7 @@
                 }}
           />
         {:else if diffError}
-          <div class="dim wp-empty">Couldn't load the diff: {diffError}</div>
+          <div class="dim wp-empty">Couldn’t load the diff: {diffError}</div>
         {:else}
           <div class="dim wp-empty">No textual diff for this file.</div>
         {/if}
@@ -969,6 +991,12 @@
         <input type="checkbox" bind:checked={signOn} />
         Sign
       </label>
+      {#if signCfgError}
+        <span class="sign-err" role="status">
+          Couldn’t read signing settings ·
+          <button class="btn small ghost" onclick={() => loadSignCfg(repoId)} disabled={signCfgLoading}>{signCfgLoading ? 'Retrying…' : 'Retry'}</button>
+        </span>
+      {/if}
       <span class="grow"></span>
       <button
         class="btn primary"
@@ -1333,6 +1361,13 @@
     margin-inline-end: 4px;
   }
   
+  .sign-err {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
   .row {
     display: flex;
     align-items: center;

@@ -1,6 +1,7 @@
 <script lang="ts">
   // Modal to search and attach a Jira issue to a session.
   import type { IssueSummary } from '../../lib/api/types';
+  import { toastError } from '../../lib/toastError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -28,7 +29,7 @@
       toasts.success('Issue attached', `${issue.key}: ${issue.summary}`);
       onclose();
     } catch (e) {
-      toasts.error('Attach failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t attach the issue', e);
     } finally {
       attaching = false;
     }

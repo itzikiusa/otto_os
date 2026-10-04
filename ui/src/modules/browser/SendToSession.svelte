@@ -7,6 +7,7 @@
   // dead/suspended/connection session can't receive a prompt.
 
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { toastError } from '../../lib/toastError';
   import { browser } from '../../lib/stores/browser.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -29,7 +30,7 @@
       await browser.sendAnnotation(annotationId, sessionId);
       toasts.success('Sent to session');
     } catch (e) {
-      toasts.error('Failed to send', e instanceof Error ? e.message : undefined);
+      toastError('Couldn’t send to the session', e);
     } finally {
       sending = false;
     }

@@ -8,6 +8,7 @@
   // inline diff, a written file's content, a read's text, result images.
   // Elided live-push previews fetch the stored result on first expand.
   import { getContext, tick } from 'svelte';
+  import { toastError } from '../../../lib/toastError';
   import Icon from '../../../lib/components/Icon.svelte';
   import VirtualList from '../../../lib/components/VirtualList.svelte';
   import ImageBlock from './ImageBlock.svelte';
@@ -208,7 +209,7 @@
       await navigator.clipboard.writeText(command);
       toasts.info('Copied', 'The command');
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy to the clipboard', e);
     }
   }
 </script>

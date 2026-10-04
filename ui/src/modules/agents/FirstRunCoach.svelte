@@ -8,6 +8,7 @@
   // no new backend is invented here. Dismissable; the dismissal is remembered
   // per-machine so it doesn't nag after the user has found their footing.
   import { contextApi } from '../../lib/api/context';
+  import { toastError } from '../../lib/toastError';
   import type { BundledSkill } from '../../lib/api/types';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -72,7 +73,7 @@
       const w = await ws.createWorkspace(wsName, wsPath);
       toasts.success('Workspace created', w.name);
     } catch (e) {
-      toasts.error('Could not create workspace', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create workspace', e);
     } finally {
       wsBusy = false;
     }
@@ -128,7 +129,7 @@
       toasts.success('Skill installed', s.name);
       await loadSkills();
     } catch (e) {
-      toasts.error('Install failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t install the CLI', e);
     } finally {
       setSkillBusy(s.name, false);
     }
@@ -175,7 +176,7 @@
       remember();
       ondismiss();
     } catch (e) {
-      toasts.error('Could not start session', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start session', e);
     } finally {
       launchBusy = false;
     }

@@ -20,6 +20,7 @@
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
   import { reviewIds, reviewSessions, reviewAgentStatus } from './reviewAgents';
+  import { plural } from '../../lib/plural';
 
   interface Props {
     run: WorkflowRun;
@@ -248,7 +249,7 @@
           <span class="grp-name" title={nodeName(g.id)}>{nodeName(g.id)}</span>
           <span class="grp-status"><StatusBadge status={runStatus(g.status)} variant="text" /></span>
           <span class="grow"></span>
-          <span class="grp-count" title="{g.sessions.length} session(s)">{g.sessions.length}</span>
+          <span class="grp-count" title={plural(g.sessions.length, 'session')}>{g.sessions.length}</span>
         </div>
         {#each g.sessions as sid (sid)}
           <div class="sess" data-sess={sid}>

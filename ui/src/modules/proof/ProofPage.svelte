@@ -10,6 +10,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import ProofBadges from '../../lib/components/ProofBadges.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
@@ -123,6 +124,15 @@
     const c: Record<string, number> = { all: proof.packs.length };
     for (const p of proof.packs) c[p.status] = (c[p.status] ?? 0) + 1;
     return c;
+  });
+
+  // "12 packs · 7 passed · 3 failed" — what the empty detail pane says instead of
+  // a bare "pick one" (only on the unfiltered list, where the counts are true).
+  const packSummary = $derived.by(() => {
+    const c = filterCounts;
+    if (!c || !c.all) return '';
+    const parts = STATUS_FILTERS.filter((f) => f !== 'all' && (c[f] ?? 0) > 0).map((f) => `${c[f]} ${f}`);
+    return `${c.all} pack${c.all === 1 ? '' : 's'}${parts.length ? ` · ${parts.join(' · ')}` : ''}. `;
   });
 
   // Group the open pack's artifacts by kind for display.
@@ -317,6 +327,20 @@
       { label: 'Add media…', icon: 'file', action: () => { resetMedia(); mediaOpen = true; } },
       { label: 'Add evidence…', icon: 'db', action: () => { resetEvidence(); evidenceOpen = true; } },
       { label: 'PR check…', icon: 'pr', action: () => { resetPr(); prOpen = true; } },
+    ]);
+  }
+
+  function openMoreMenu(e: MouseEvent): void {
+    ctxMenu.showAt(e.currentTarget as HTMLElement, [
+      ...(detail
+        ? [
+            { label: 'Waive…', icon: 'check', title: 'Record an approved exception for this pack', action: () => { waiveReason = ''; waiveOpen = true; } },
+            ...(detail.pack.repo_id ? [{ label: 'Refresh CI', icon: 'fetch', action: () => void refreshCi() }] : []),
+            { separator: true },
+          ]
+        : []),
+      { label: 'Archive stale session packs…', icon: 'archive', title: 'Hides, never deletes', action: () => void archiveStaleSessions() },
+      ...(detail ? [{ separator: true }, { label: 'Delete pack…', icon: 'trash', danger: true, action: () => void removePack() }] : []),
     ]);
   }
 
@@ -696,23 +720,19 @@
       {/if}
     {/snippet}
     {#snippet actions()}
-      <!-- Opt-in housekeeping: collapses into ⋯ before anything else. -->
-      <button class="icon-btn" data-overflow="-3" data-icon="archive" data-label="Archive stale session packs…" onclick={archiveStaleSessions} aria-label="Archive stale session packs" title="Archive stale session packs (hides, never deletes)"><Icon name="archive" size={14} /></button>
       {#if detail}
-        <!-- Destructive first (collapses first, never beside the primary). -->
-        <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete pack" onclick={removePack} aria-label="Delete pack" title="Delete pack"><Icon name="trash" size={14} /></button>
-        <button class="btn small" data-overflow="-1" data-icon="check" onclick={() => { waiveReason = ''; waiveOpen = true; }}><Icon name="check" size={12} /> Waive</button>
-        {#if detail.pack.repo_id}
-          <button class="btn small" data-icon="fetch" onclick={refreshCi}><Icon name="fetch" size={12} /> Refresh CI</button>
-        {/if}
         <!-- The four ways to attach evidence share one menu: four sibling
              "Add …" buttons made this the busiest header in the app. -->
         <button class="btn small" data-icon="plus" data-label="Add evidence…" onclick={openAddMenu} aria-haspopup="menu"><Icon name="plus" size={12} /> Add <Icon name="chevronDown" size={11} /></button>
         <button class="btn small primary" onclick={assemble}><Icon name="refresh" size={12} /> Assemble</button>
       {/if}
+      <!-- Everything occasional (waive, CI refresh, housekeeping, delete) lives
+           in one ⋯ so the header stays at Add + Assemble + ⋯. -->
+      <button class="icon-btn" data-overflow="-1" data-icon="more" data-label="More actions…" aria-haspopup="menu" aria-label="More actions" title="More actions" onclick={openMoreMenu}><Icon name="more" size={14} /></button>
     {/snippet}
   </PageHeader>
 
+  <PageBody fill padded={false}>
   <div class="proof-split">
   <!-- Left: filters + pack list. Hidden on a phone while a pack is open. -->
   {#if showRail}
@@ -795,7 +815,7 @@
           variant="page"
           icon="check"
           title="No proof pack open"
-          body="Verified evidence — tests, diffs, CI, reviews, approvals — assembled for each piece of work. Open a pack from the list to inspect its artifacts and badges."
+          body="{packSummary}Verified evidence — tests, diffs, CI, reviews, approvals — for each piece of work. Open a pack to inspect its artifacts and badges."
         />
       {:else if proof.loading || !listLoaded}
         <LoadState what="proof packs" loading empty variant="page" />
@@ -951,6 +971,7 @@
     {/if}
   </section>
   </div>
+  </PageBody>
 </div>
 
 {#if addOpen && detail}
