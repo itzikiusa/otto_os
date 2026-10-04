@@ -30,6 +30,8 @@ export interface PersonalAgentInput {
 }
 
 export interface AgentScheduleInput {
+  /** Create retries with the same key return the original schedule. */
+  idempotency_key?: string;
   schedule?: Record<string, unknown>;
   timezone?: string;
   directive?: string;

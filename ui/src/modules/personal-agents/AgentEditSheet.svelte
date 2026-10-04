@@ -29,8 +29,11 @@
   // svelte-ignore state_referenced_locally
   let fTemplate = $state<string>(agent ? '' : (template ?? ''));
   let scheduleNote = $state('');
+  let createdAgent = $state<PersonalAgent | null>(null);
+  let pendingSchedule: Parameters<typeof personalAgents.createSchedule>[1] | null = null;
 
   function applyTemplate(id: string): void {
+    if (createdAgent) return;
     fTemplate = id;
     const t = templateById(id);
     if (!t) {
@@ -106,12 +109,13 @@
   }
 
   async function save(): Promise<void> {
+    if (busy) return;
     error = '';
     if (!fName.trim()) {
       error = 'Name is required.';
       return;
     }
-    if (!agent && !ws.currentId) {
+    if (!agent && !createdAgent && !ws.currentId) {
       error = 'Add or select a workspace before saving. Your changes are kept in this form.';
       return;
     }
@@ -131,22 +135,28 @@
       if (agent) {
         await personalAgents.update(agent.id, body);
         toasts.success(`Saved ${body.name}`);
-      } else if (ws.currentId) {
-        const created = await personalAgents.create(ws.currentId, body);
-        const t = templateById(fTemplate);
-        if (t) {
-          await personalAgents.createSchedule(created.id, {
-            schedule: t.schedule,
-            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-            directive: t.directive,
-            enabled: true,
-          });
+      } else if (createdAgent || ws.currentId) {
+        if (!createdAgent) {
+          const t = templateById(fTemplate);
+          pendingSchedule = t ? {
+            schedule: t.schedule, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            directive: t.directive, enabled: true, idempotency_key: crypto.randomUUID(),
+          } : null;
+          createdAgent = await personalAgents.create(ws.currentId!, body);
+        } else {
+          createdAgent = await personalAgents.update(createdAgent.id, body);
+        }
+        if (pendingSchedule) {
+          await personalAgents.createSchedule(createdAgent.id, pendingSchedule);
+          pendingSchedule = null;
         }
         toasts.success(`Created ${body.name}`, body.enabled ? undefined : 'It’s paused — enable it to let its schedules fire.');
       }
       onclose();
     } catch (e) {
-      error = `Couldn’t save the agent. ${loadErrorText(e)}`;
+      error = createdAgent
+        ? `Agent created; its schedule could not be added. Save again to finish setup for ${createdAgent.name}. ${loadErrorText(e)}`
+        : `Couldn’t save the agent. ${loadErrorText(e)}`;
     } finally {
       busy = false;
     }
@@ -163,7 +173,7 @@
     {#if !agent}
       <label class="fld">
         <span>Start from a template (optional)</span>
-        <select value={fTemplate} onchange={(e) => applyTemplate((e.currentTarget as HTMLSelectElement).value)} data-testid="agent-template">
+        <select disabled={busy || !!createdAgent} value={fTemplate} onchange={(e) => applyTemplate((e.currentTarget as HTMLSelectElement).value)} data-testid="agent-template">
           <option value="">Blank agent</option>
           {#each TEMPLATES as t (t.id)}<option value={t.id}>{t.avatar} {t.title} — {t.description}</option>{/each}
         </select>
