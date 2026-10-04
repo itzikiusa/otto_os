@@ -20,8 +20,11 @@ clickhouse = { max-threads = 1 }
 # Keep their system process pressure bounded across all test binaries.
 processes = { max-threads = 2 }
 # Wall-clock gates (otto-server tests/runtime_lag.rs: worst ticker lag under a
-# 20 ms budget). One at a time, so they never compete with each other for a
-# core; each case also takes the best of three attempts against outside noise.
+# 20 ms budget). One at a time, and each runs ALONE (`threads-required` in the
+# override below) — on main's CI (d6207941) they shared the 4 vCPUs with three
+# other test processes plus the ClickHouse servers the k8s ratchets spawn
+# (outside nextest's slot count) and all three attempts landed at 20–21 ms.
+# Each case still takes the best of three attempts against outside noise.
 timing = { max-threads = 1 }
 
 [[profile.default.overrides]]
@@ -35,3 +38,4 @@ test-group = 'processes'
 [[profile.default.overrides]]
 filter = 'package(otto-server) & binary(it) & test(/^runtime_lag::/)'
 test-group = 'timing'
+threads-required = 'num-test-threads'
