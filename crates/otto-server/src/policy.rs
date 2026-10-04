@@ -398,6 +398,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         "/access/{kind}/{id}"
             | "/access/{kind}/{id}/subjects"
             | "/access/{kind}/{id}/capabilities"
+            | "/access/{kind}/{id}/capabilities/batch"
             | "/access/{kind}/{id}/effective"
             | "/access/{kind}/{id}/preview"
     ) {
