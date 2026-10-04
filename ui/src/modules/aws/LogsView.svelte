@@ -977,10 +977,10 @@
     cursor: pointer;
   }
   .chip-l {
-    padding: 2px 4px 2px 9px;
+    padding-block: 2px; padding-inline: 9px 4px;
   }
   .chip-x {
-    padding: 2px 7px 2px 3px;
+    padding-block: 2px; padding-inline: 3px 7px;
     color: var(--text-dim);
   }
   .ins-res {

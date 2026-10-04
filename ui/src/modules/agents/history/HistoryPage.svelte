@@ -661,7 +661,7 @@
     flex-direction: column;
     min-height: 0;
     border-inline-end: 1px solid var(--border);
-    background: var(--bg-sidebar, var(--bg));
+    background: var(--bg-sidebar);
   }
   .toolbar {
     display: flex;
@@ -728,7 +728,7 @@
     color: var(--accent-text);
   }
   .sel:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .clear {
@@ -786,7 +786,7 @@
     color: var(--text);
   }
   .group-head:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .group-label {
@@ -823,7 +823,7 @@
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    padding: 6px 4px 6px 8px;
+    padding-block: 6px; padding-inline: 8px 4px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -833,7 +833,7 @@
     cursor: pointer;
   }
   .row-main:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   /* Provider mark — the shared ProviderIcon (the sidebar/pane header one), not
@@ -1026,7 +1026,7 @@
     background: var(--surface-2);
   }
   .doutputs-head:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
 

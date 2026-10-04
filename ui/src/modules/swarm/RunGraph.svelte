@@ -335,11 +335,11 @@
   }
   .node-badge.run {
     background: color-mix(in srgb, var(--status-working) 24%, transparent);
-    color: var(--status-working);
+    color: var(--success);
   }
   .node-badge.err {
     background: color-mix(in srgb, var(--status-exited) 24%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .node-main {
     display: flex;

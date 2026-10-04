@@ -268,7 +268,7 @@
     padding: 4px 8px;
     min-width: 160px;
     max-width: 280px;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .cwd-input::placeholder {
     color: var(--text-dim);
@@ -369,7 +369,7 @@
   .md-body :global(ol) { padding-inline-start: 1.5em; margin: 0 0 0.7em; }
   .md-body :global(li) { margin-bottom: 0.2em; }
   .md-body :global(code) {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 0.88em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 5px;

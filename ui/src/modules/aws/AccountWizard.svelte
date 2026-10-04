@@ -452,7 +452,7 @@
     line-height: 1.45;
   }
   .hint.danger {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   code {
     font-family: var(--font-mono);
@@ -544,12 +544,12 @@
   .env-chip.selected {
     border-color: var(--status-working);
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
-    color: var(--status-working);
+    color: var(--success);
   }
   .env-chip.prod.selected {
     border-color: var(--status-exited);
     background: color-mix(in srgb, var(--status-exited) 16%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .colors {
     display: flex;
@@ -603,10 +603,10 @@
     font-size: var(--fs-m);
   }
   .ok {
-    color: var(--status-working);
+    color: var(--success);
   }
   .bad {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .idn {
     display: grid;
@@ -638,7 +638,7 @@
   .err {
     margin: 0;
     font-size: var(--fs-s);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   @media (max-width: 640px) {
     .row2,

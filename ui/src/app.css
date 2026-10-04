@@ -368,7 +368,7 @@ textarea.input {
   background: transparent;
   height: 22px;
   padding: 0 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-s);
   font-size: var(--fs-s);
   color: var(--text-dim);
   cursor: pointer;
@@ -594,7 +594,7 @@ html[data-scheme='dark'] .hljs-type {
    `ctx.highlight`) — a focus-style ring that fades out after ~2.4 s. An
    outline, never a border, so layout never shifts under the agent's hand. */
 [data-agent-target] {
-  outline: 2px solid var(--accent) !important;
+  outline: 2px solid var(--accent-text) !important;
   outline-offset: 2px;
   border-radius: var(--radius-s);
   animation: agent-target-fade 2.4s ease-out forwards;
@@ -602,7 +602,7 @@ html[data-scheme='dark'] .hljs-type {
 @keyframes agent-target-fade {
   0%,
   70% {
-    outline-color: var(--accent);
+    outline-color: var(--accent-text);
   }
   100% {
     outline-color: transparent;

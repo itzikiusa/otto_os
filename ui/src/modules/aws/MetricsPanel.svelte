@@ -269,7 +269,7 @@
   .stale {
     margin: 0;
     font-size: var(--fs-s);
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .grid {
     display: grid;

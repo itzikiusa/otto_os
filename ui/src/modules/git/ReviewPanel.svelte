@@ -1963,7 +1963,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     overflow-x: auto;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     line-height: 1.45;
   }
@@ -1986,7 +1986,7 @@
     color: var(--text-dim);
   }
   .rp-diff-target {
-    outline: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+    outline: 1px solid color-mix(in srgb, var(--accent-text) 50%, transparent);
     outline-offset: -1px;
     font-weight: 600;
   }
@@ -2102,7 +2102,7 @@
   }
   .cfg-textarea {
     resize: vertical;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     line-height: 1.5;
   }
@@ -2161,7 +2161,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 20px;
-    padding: 3px 8px 3px 10px;
+    padding-block: 3px; padding-inline: 10px 8px;
     font-size: var(--fs-xs);
   }
   .cfg-preset-name {

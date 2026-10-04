@@ -1190,7 +1190,7 @@
     color: var(--accent-contrast);
     background: var(--accent-solid);
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     cursor: pointer;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
     transition: background 0.15s;

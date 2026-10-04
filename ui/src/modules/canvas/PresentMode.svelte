@@ -404,7 +404,7 @@
   .sticky {
     width: 100%;
     height: 100%;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 10px;
     box-sizing: border-box;
     color: #222;
@@ -480,7 +480,7 @@
     color: var(--text);
     cursor: pointer;
     padding: 4px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
   }
   .ctl:hover,
   .ctl.on {

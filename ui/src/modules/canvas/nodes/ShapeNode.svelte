@@ -179,7 +179,7 @@
     height: 80%;
     resize: none;
     border: none;
-    outline: 1px solid var(--accent);
+    outline: 1px solid var(--accent-text);
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);

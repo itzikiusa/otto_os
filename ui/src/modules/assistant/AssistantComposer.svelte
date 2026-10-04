@@ -270,7 +270,7 @@
     align-items: center;
     gap: 6px;
     min-height: 26px;
-    padding: 3px 4px 3px 8px;
+    padding-block: 3px; padding-inline: 8px 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);

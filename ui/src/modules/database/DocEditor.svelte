@@ -114,7 +114,7 @@
     gap: 8px;
   }
   .cv-err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;

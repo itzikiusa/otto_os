@@ -407,7 +407,7 @@
   .bar {
     flex: 1;
     height: 6px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     overflow: hidden;
   }
@@ -460,7 +460,7 @@
   }
   .step.past .step-dot {
     border-color: var(--status-working);
-    color: var(--status-working);
+    color: var(--success);
   }
   .step.active .step-dot {
     background: var(--status-working);

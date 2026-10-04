@@ -200,7 +200,7 @@
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--text);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     padding: 2px 5px;
     cursor: pointer;
@@ -219,7 +219,7 @@
     color: var(--text-dim);
     cursor: pointer;
     padding: 4px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
   }
   .close:hover {
     background: color-mix(in srgb, var(--text) 8%, transparent);
@@ -231,7 +231,7 @@
     color: var(--text-dim);
     cursor: pointer;
     padding: 4px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
   }
   .hist-btn.history {
     margin-inline-start: auto;
@@ -288,7 +288,7 @@
     min-width: 0;
     resize: none;
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: var(--radius-m);
     background: var(--bg);
     color: var(--text);
     font: inherit;

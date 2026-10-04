@@ -316,7 +316,7 @@
     font-family: var(--font-mono);
     background: var(--surface-2);
     padding: 0 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     font-size: var(--fs-s);
   }
   .field-err {

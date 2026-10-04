@@ -440,7 +440,7 @@
     font-size: var(--fs-m);
     padding: 3px 6px;
     border: 1px solid transparent;
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text);
     width: 100%;
@@ -559,7 +559,7 @@
     height: 24px;
     padding: 0;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     background: transparent;
     cursor: pointer;
   }
@@ -571,7 +571,7 @@
     height: 24px;
     padding: 0 6px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
     font-size: var(--fs-s);
@@ -620,7 +620,7 @@
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     font: var(--fs-xs) var(--font-ui);
     padding: 3px 7px;
     cursor: pointer;
@@ -637,7 +637,7 @@
     resize: vertical;
     padding: 6px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
     font: var(--fs-s)/1.45 var(--font-ui);
@@ -693,7 +693,7 @@
   }
   .s3d-preset:focus-visible,
   .s3d-swatch:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .s3d-ball {

@@ -345,7 +345,7 @@
   }
   .n-body :global(li) { margin-bottom: 0.2em; }
   .n-body :global(code) {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 0.87em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 5px;

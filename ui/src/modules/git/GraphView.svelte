@@ -4267,7 +4267,7 @@
   .ref-row.drag-target {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     color: var(--text);
-    outline: 1.5px solid var(--accent);
+    outline: 1.5px solid var(--accent-text);
     outline-offset: -1.5px;
     border-radius: var(--radius-s);
   }
@@ -4448,7 +4448,7 @@
   .graph-select { flex: 1; height: 100%; }
   .ref-select { flex-shrink: 1; overflow: hidden; }
   .graph-row:has(.graph-select:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .graph-row {

@@ -436,7 +436,7 @@
     text-decoration-color: var(--border-strong);
   }
   .fold-row:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
     border-radius: var(--radius-s);
   }
@@ -523,7 +523,7 @@
     background: var(--hover);
   }
   .act-btn:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .turn.hit .bubble,

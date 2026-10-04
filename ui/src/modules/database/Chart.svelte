@@ -258,7 +258,7 @@
   }
   .num-value {
     font-size: 34px;
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: -0.02em;
     color: var(--text);
     font-variant-numeric: tabular-nums;

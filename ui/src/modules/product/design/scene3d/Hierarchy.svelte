@@ -445,7 +445,7 @@
     min-width: 0;
     padding: 3px 6px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
     font-size: var(--fs-xs);
@@ -475,7 +475,7 @@
     height: 26px;
     padding-inline-end: 4px;
     cursor: default;
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     margin: 0 4px;
     outline: none;
   }
@@ -547,7 +547,7 @@
     color: var(--text-dim);
     width: 22px;
     height: 22px;
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     display: inline-flex;
     align-items: center;
     justify-content: center;

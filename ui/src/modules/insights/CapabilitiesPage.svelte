@@ -214,7 +214,7 @@
     cursor: pointer;
   }
   .cap-toggle :global(svg) { color: var(--text-dim); flex-shrink: 0; }
-  .cap-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-m); }
+  .cap-toggle:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; border-radius: var(--radius-m); }
 
   .feature-label {
     font-weight: 500;

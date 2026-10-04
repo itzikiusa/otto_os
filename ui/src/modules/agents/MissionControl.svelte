@@ -766,7 +766,7 @@
     background: var(--surface-2);
   }
   .item.clickable:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
 
@@ -790,7 +790,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 1px 5px;
   }
   /* A repo is a full path — truncate it inside the card instead of letting

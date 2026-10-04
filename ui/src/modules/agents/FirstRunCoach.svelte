@@ -433,7 +433,7 @@
   .step-mark.ok {
     background: color-mix(in srgb, var(--status-working) 18%, transparent);
     border-color: transparent;
-    color: var(--status-working);
+    color: var(--success);
   }
   .step-mark .num {
     font-weight: 600;
@@ -497,7 +497,7 @@
   }
   .chip.found {
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
-    color: var(--status-working);
+    color: var(--success);
   }
 
   .ws-form {
@@ -557,7 +557,7 @@
   }
 
   .mono {
-    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--font-mono);
   }
   .link {
     background: none;

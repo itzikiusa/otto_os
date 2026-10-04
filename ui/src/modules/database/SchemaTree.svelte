@@ -733,7 +733,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    color: var(--status-exited);
+    color: var(--danger);
     font-weight: 600;
   }
   .tree-error-msg {
@@ -887,7 +887,7 @@
     align-items: center;
     gap: 5px;
     font-size: var(--fs-xs);
-    color: var(--status-exited);
+    color: var(--danger);
     padding-top: 2px;
     padding-bottom: 2px;
   }
@@ -923,8 +923,8 @@
     font-size: var(--fs-xs);
     padding: 1px 4px;
     background: var(--surface-2);
-    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
-    border-radius: var(--radius-s, 5px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
     color: var(--text);
   }
   .counts-toggle {
@@ -943,8 +943,8 @@
     align-items: center;
     gap: 2px;
     padding: 1px 5px;
-    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
-    border-radius: var(--radius-s, 5px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
     font-size: var(--fs-xs);

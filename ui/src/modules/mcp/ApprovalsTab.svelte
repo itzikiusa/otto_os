@@ -305,7 +305,7 @@
     letter-spacing: 0.03em;
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 1px 6px;
   }
   .title {

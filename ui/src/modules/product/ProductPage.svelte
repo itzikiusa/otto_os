@@ -1225,7 +1225,7 @@
     gap: 2px;
     padding: 3px;
     background: color-mix(in srgb, var(--text-dim) 7%, transparent);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     overflow-x: auto;
     white-space: nowrap;
     scrollbar-width: none;
@@ -1270,7 +1270,7 @@
     flex-wrap: wrap;
     gap: 2px 4px;
     margin-inline-start: auto;
-    padding: 0 0 0 10px;
+    padding-block: 0; padding-inline: 10px 0;
     background: none;
     border-radius: 0;
     overflow: visible;
@@ -1302,7 +1302,7 @@
     flex-direction: column;
   }
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
 
   /* ── Collection summary (no story open) ──────────────────────────── */
@@ -1400,7 +1400,7 @@
       padding: 12px 14px;
       border: none;
       border-bottom: 1px solid var(--border);
-      background: var(--bg-sidebar, var(--surface));
+      background: var(--bg-sidebar);
       color: var(--text);
       font-size: var(--fs-l);
       font-weight: 600;

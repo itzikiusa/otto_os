@@ -2179,7 +2179,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    padding: 2px 8px 2px 9px;
+    padding-block: 2px; padding-inline: 9px 8px;
     border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 500;
@@ -2254,7 +2254,7 @@
     gap: 10px;
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     padding: 5px 10px;
     cursor: pointer;
     text-align: start;
@@ -2296,7 +2296,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    padding: 0 4px 0 0;
+    padding-block: 0; padding-inline: 0 4px;
     border: none;
     border-radius: 999px;
     background: transparent;
@@ -2525,7 +2525,7 @@
     margin-bottom: 0.25em;
   }
   .md-body :global(code) {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 0.88em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 5px;
@@ -2559,7 +2559,7 @@
     text-decoration: underline;
   }
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
 
   /* ── Jira section (right column) ──────────────────────────── */
@@ -2914,7 +2914,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-s);
     line-height: 1.55;
   }
@@ -2953,7 +2953,7 @@
   .link-key {
     font-size: var(--fs-xs);
     color: var(--accent-text);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .chip-sm {
     font-size: var(--fs-xs);
@@ -2976,7 +2976,7 @@
     color: var(--accent-text);
   }
   .mono-sm {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
   }
 
@@ -3271,7 +3271,7 @@
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     padding: 8px 10px;
     outline: none;
     width: 100%;
@@ -3380,7 +3380,7 @@
     line-height: 1.55;
     border-top: 1px solid var(--border);
     background: color-mix(in srgb, var(--text-dim) 3%, transparent);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     max-height: 320px;
     overflow-y: auto;
   }

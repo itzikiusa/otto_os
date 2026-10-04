@@ -669,7 +669,7 @@
     line-height: 1.5;
   }
   .field-textarea:focus { outline: none; border-color: var(--accent); }
-  .field-textarea.mono { font-family: var(--font-mono, monospace); font-size: var(--fs-xs); }
+  .field-textarea.mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
   .mini-select {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -913,7 +913,7 @@
   .md-body :global(ol) { padding-inline-start: 1.4em; margin: 0 0 0.5em; }
   .md-body :global(li) { margin-bottom: 0.15em; }
   .md-body :global(code) {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 0.88em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 4px;

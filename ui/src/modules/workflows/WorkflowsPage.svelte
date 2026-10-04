@@ -3459,7 +3459,7 @@
     background: var(--hover);
   }
   .tpl:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .tpl-ic {
@@ -3642,7 +3642,7 @@
   /* Disambiguators for concurrent runs of the same workflow (item 8). */
   .run-ord {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 0 5px;
@@ -3713,7 +3713,7 @@
     /* Cancel the .inspector 10px/12px padding so the header spans edge-to-edge
        and its bottom border reads as a clean divider. */
     margin: -10px -12px 6px;
-    padding: 8px 10px 8px 12px;
+    padding-block: 8px; padding-inline: 12px 10px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     position: sticky;
@@ -3825,7 +3825,7 @@
     place-items: center;
     width: 24px;
     height: 24px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--c) 18%, transparent);
     color: var(--c);
     flex-shrink: 0;
@@ -3878,7 +3878,7 @@
     content: '';
     width: 40px;
     height: 3px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--border);
   }
   .insp-grip:hover::after,
@@ -3935,7 +3935,7 @@
     padding: 8px 10px;
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: var(--fs-xs);
     line-height: 1.5;
@@ -4020,7 +4020,7 @@
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
     background: color-mix(in srgb, var(--status-exited) 10%, transparent);
     padding: 6px 8px;
@@ -4190,7 +4190,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 7px 8px 6px 10px;
+    padding-block: 7px 6px; padding-inline: 10px 8px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     flex-shrink: 0;
@@ -4209,7 +4209,7 @@
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 3px 8px;
@@ -4334,7 +4334,7 @@
     color: var(--text-dim);
   }
   .btn.danger {
-    color: var(--status-exited);
+    color: var(--danger);
     border-color: color-mix(in srgb, var(--status-exited) 45%, var(--border));
   }
   .dot {
@@ -4465,7 +4465,7 @@
     resize: vertical;
     padding: 8px 10px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
     font-size: var(--fs-s);
@@ -4478,7 +4478,7 @@
     align-self: flex-start;
     padding: 6px 10px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
     font-size: var(--fs-s);
@@ -4511,7 +4511,7 @@
     color: var(--text);
   }
   .approval-banner strong {
-    font-weight: 700;
+    font-weight: 600;
   }
   .approval-banner > span {
     flex: 1;
@@ -4602,7 +4602,7 @@
     padding: 2px;
   }
   .rv-del:hover {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .rv-provs {
     display: flex;
@@ -4656,7 +4656,7 @@
   }
   .retry-h {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);

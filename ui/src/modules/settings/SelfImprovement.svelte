@@ -708,7 +708,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 8px 6px 12px;
+    padding-block: 6px; padding-inline: 12px 8px;
     border-radius: var(--radius-m);
     background: var(--success-soft);
     border: 1px solid color-mix(in srgb, var(--success) 35%, transparent);

@@ -217,7 +217,7 @@
     font: inherit;
     font-size: var(--fs-xs);
     padding: 3px 10px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     cursor: pointer;
   }
   .pv-seg button.on {
@@ -228,7 +228,7 @@
   }
   .pv-seg button:focus-visible,
   .pv-tool:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .pv-only {

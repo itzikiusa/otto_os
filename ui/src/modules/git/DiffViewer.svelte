@@ -1954,7 +1954,7 @@
     width: 42px;
     min-width: 42px;
     text-align: end;
-    padding: 0 8px 0 4px;
+    padding-block: 0; padding-inline: 4px 8px;
     color: var(--text-dim);
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
@@ -2011,7 +2011,7 @@
     font-family: var(--font-mono);
   }
   .code {
-    padding: 0 10px 0 4px;
+    padding-block: 0; padding-inline: 4px 10px;
     white-space: pre-wrap;
     word-break: break-all;
     user-select: text;
@@ -2119,7 +2119,7 @@
       font-size: var(--fs-xs);
       width: 30px;
       min-width: 30px;
-      padding: 0 5px 0 3px;
+      padding-block: 0; padding-inline: 3px 5px;
     }
     .sign { width: 13px; }
     /* Wrap code so long lines don't push the page wider than the screen.
@@ -2147,7 +2147,7 @@
     margin-inline-start: 6px;
     padding: 0 6px;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--accent-text);
     font: inherit;
@@ -2156,7 +2156,7 @@
     white-space: nowrap;
   }
   .line-cut-btn:hover { background: var(--accent-soft); }
-  .line-cut-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .line-cut-btn:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 1px; }
   .hunk-cap-btn { font-size: var(--fs-s); min-height: 32px; padding: 6px 12px; }
     /* Comment composer Cancel/Comment buttons. */
     .composer-actions .btn { min-height: 36px; padding: 6px 14px; }

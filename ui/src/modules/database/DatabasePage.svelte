@@ -1982,13 +1982,13 @@
     margin-top: 4px;
   }
   .sec-head.drop-target {
-    outline: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+    outline: 1px dashed color-mix(in srgb, var(--accent-text) 55%, transparent);
     outline-offset: -1px;
     background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
   .sec-name {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -2241,12 +2241,12 @@
     padding: 7px 14px;
     font-size: var(--fs-s);
     line-height: 1.4;
-    color: var(--status-working);
+    color: var(--success);
     background: color-mix(in srgb, var(--status-working) 12%, transparent);
     border-bottom: 1px solid color-mix(in srgb, var(--status-working) 35%, transparent);
   }
   .guard-banner.prod {
-    color: var(--status-exited);
+    color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 13%, transparent);
     border-bottom-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
     font-weight: 600;
@@ -2344,7 +2344,7 @@
     display: flex;
     align-items: center;
     height: 26px;
-    padding: 0 3px 0 9px;
+    padding-block: 0; padding-inline: 9px 3px;
     border-radius: var(--radius-s);
     border: 1px solid transparent;
     color: var(--text-dim);
@@ -2397,7 +2397,7 @@
     height: 17px;
     margin-inline-start: 5px;
     border: none;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
@@ -2441,7 +2441,7 @@
     opacity: 1;
   }
   .view-switch .mt:focus-visible {
-    outline: 1.5px solid var(--accent);
+    outline: 1.5px solid var(--accent-text);
     outline-offset: 1px;
   }
   .conn-status {
@@ -2528,7 +2528,7 @@
     color: var(--text-dim);
   }
   .conn-state.err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-weight: 500;
   }
   .conn-state.ok {
@@ -2620,7 +2620,7 @@
     align-items: center;
     gap: 8px;
     padding: 6px 0;
-    border-inline-end: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border-inline-end: 1px solid var(--border);
     background: var(--surface);
   }
   .rail-btn {
@@ -2629,8 +2629,8 @@
     justify-content: center;
     width: 22px;
     height: 22px;
-    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
-    border-radius: var(--radius-s, 5px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
     cursor: pointer;

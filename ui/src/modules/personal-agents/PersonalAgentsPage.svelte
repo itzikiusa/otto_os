@@ -276,7 +276,7 @@
   /* Stretch the name's hit area over the whole card (the "card link" pattern). */
   .name::after { content: ''; position: absolute; inset: 0; border-radius: var(--radius-m); }
   .name:focus-visible { outline: none; }
-  .name:focus-visible::after { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .name:focus-visible::after { outline: 2px solid var(--accent-text); outline-offset: -1px; }
   .paused .name { color: var(--text-dim); }
   .prov { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: var(--fs-s); color: var(--text-dim); }
   .prov :global(svg) { flex-shrink: 0; }

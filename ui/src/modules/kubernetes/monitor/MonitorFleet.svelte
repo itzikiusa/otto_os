@@ -890,7 +890,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 3px 10px 3px 8px;
+    padding-block: 3px; padding-inline: 8px 10px;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: transparent;
@@ -978,7 +978,7 @@
   }
   .kpi .v {
     font-size: var(--fs-xl);
-    font-weight: 700;
+    font-weight: 600;
     line-height: 1.1;
   }
   .kpi .d {
@@ -1121,10 +1121,10 @@
     color: var(--text-dim);
   }
   .bad {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .warn {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .tclass {
     font-weight: 600;

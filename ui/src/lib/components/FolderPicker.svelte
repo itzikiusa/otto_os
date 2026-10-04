@@ -401,7 +401,7 @@
   .folder-grid :global(.picker-rows) { height: 100%; }
   .entry-cell { flex: 1; min-width: 0; }
   .entry-cell .row { width: 100%; height: 32px; }
-  .folder-grid:focus-within [aria-selected="true"] { background: var(--surface); outline: 1px solid var(--accent); outline-offset: -1px; }
+  .folder-grid:focus-within [aria-selected="true"] { background: var(--surface); outline: 1px solid var(--accent-text); outline-offset: -1px; }
   .browser > .row { flex: none; height: 32px; }
   .row-wrap {
     height: 32px;
@@ -455,7 +455,7 @@
   .chip {
     font-size: var(--fs-xs);
     padding: 1px 5px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 18%, transparent);
     color: var(--accent-text);
     text-transform: uppercase;

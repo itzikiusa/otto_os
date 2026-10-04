@@ -288,7 +288,7 @@
     color: var(--text-dim);
   }
   .health.ok {
-    color: var(--status-working);
+    color: var(--success);
     border-color: color-mix(in srgb, var(--status-working) 40%, transparent);
   }
   .health.warn {
@@ -296,7 +296,7 @@
     border-color: color-mix(in srgb, orange 40%, transparent);
   }
   .health.bad {
-    color: var(--status-exited);
+    color: var(--danger);
     border-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
     background: color-mix(in srgb, var(--status-exited) 10%, transparent);
   }
@@ -338,7 +338,7 @@
     color: var(--text-dim);
   }
   .note.bad {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .bar {
     height: 4px;
@@ -356,7 +356,7 @@
   .stack {
     display: flex;
     height: 6px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     overflow: hidden;
     background: var(--surface-2);
   }
@@ -392,7 +392,7 @@
     gap: 4px;
     font-size: var(--fs-xs);
     padding: 8px;
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, orange 8%, var(--surface));
     border: 1px solid color-mix(in srgb, orange 30%, var(--border));
   }

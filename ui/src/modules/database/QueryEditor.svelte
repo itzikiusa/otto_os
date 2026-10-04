@@ -1581,7 +1581,7 @@
     gap: 6px;
     height: 26px;
     max-width: 220px;
-    padding: 0 4px 0 11px;
+    padding-block: 0; padding-inline: 11px 4px;
     border: 1px solid transparent;
     border-bottom: none;
     border-top-left-radius: var(--radius-s);
@@ -1632,7 +1632,7 @@
     display: inline-flex;
     align-items: center;
     padding: 1px 3px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: var(--accent-soft);
     color: var(--accent-text);
     flex: 0 0 auto;
@@ -1679,7 +1679,7 @@
   }
   .qe-tab-close:hover {
     background: color-mix(in srgb, var(--status-exited) 22%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .qe-tab-new {
     display: inline-flex;
@@ -1772,11 +1772,11 @@
     font-size: var(--fs-xs);
   }
   .qe-script-state.ok {
-    color: var(--status-working);
+    color: var(--success);
     font-weight: 600;
   }
   .qe-script-state.warn {
-    color: var(--status-warn);
+    color: var(--warning);
     font-weight: 600;
   }
   .qe-script-state.dim {
@@ -1873,7 +1873,7 @@
   }
   .qe-kbd-title {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -1902,7 +1902,7 @@
   .btn.stop {
     border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);
     background: color-mix(in srgb, var(--status-exited) 16%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
     font-weight: 600;
   }
   .btn.stop:hover {
@@ -2138,7 +2138,7 @@
       font-variant-numeric: tabular-nums;
     }
     .qe-acc-count.err {
-      color: var(--status-exited);
+      color: var(--danger);
       background: color-mix(in srgb, var(--status-exited) 16%, transparent);
     }
     /* A collapsed block is removed from flow. */

@@ -1928,7 +1928,7 @@
     gap: 4px;
     border: 1px solid color-mix(in srgb, var(--status-exited) 55%, transparent);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
     border-radius: var(--radius-s);
     font-size: var(--fs-s);
     font-weight: 600;
@@ -1973,7 +1973,7 @@
     font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--status-warn);
+    color: var(--warning);
     background: var(--status-warn-soft);
     border-radius: 999px;
     padding: 1px 6px;
@@ -2018,7 +2018,7 @@
     background: var(--surface-2);
   }
   .grid-error {
-    color: var(--status-exited);
+    color: var(--danger);
     justify-content: flex-start;
     align-items: flex-start;
     white-space: pre-wrap;
@@ -2146,7 +2146,7 @@
     align-items: center;
     gap: 4px;
     height: 22px;
-    padding: 0 4px 0 0;
+    padding-block: 0; padding-inline: 0 4px;
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: 999px;
     background: var(--surface);
@@ -2156,7 +2156,7 @@
     border-color: color-mix(in srgb, var(--status-exited) 45%, transparent);
   }
   .chip.raw {
-    padding: 0 4px 0 9px;
+    padding-block: 0; padding-inline: 9px 4px;
     border-style: dashed;
   }
   .chip-op {
@@ -2165,17 +2165,17 @@
     justify-content: center;
     width: 20px;
     height: 20px;
-    margin: 0 0 0 1px;
+    margin-block: 0; margin-inline: 1px 0;
     border: none;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     color: var(--accent-text);
-    font-weight: 700;
+    font-weight: 600;
     cursor: pointer;
   }
   .chip.exclude .chip-op {
     background: color-mix(in srgb, var(--status-exited) 16%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .chip-col {
     font-weight: 600;
@@ -2185,7 +2185,7 @@
     display: inline-flex;
     align-items: center;
     gap: 2px;
-    padding: 0 3px 0 6px;
+    padding-block: 0; padding-inline: 6px 3px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text);
@@ -2205,7 +2205,7 @@
   }
   .val-x:hover {
     background: color-mix(in srgb, var(--status-exited) 20%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .chip-add {
     width: 64px;
@@ -2238,7 +2238,7 @@
   }
   .chip-x:hover {
     background: color-mix(in srgb, var(--status-exited) 20%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .fb-clear {
     height: 20px;
@@ -2251,7 +2251,7 @@
     cursor: pointer;
   }
   .fb-clear:hover {
-    color: var(--status-exited);
+    color: var(--danger);
     border-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
   }
   .fb-hint {
@@ -2341,7 +2341,7 @@
     height: 22px;
     padding: 0 9px;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-s);

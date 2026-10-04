@@ -82,7 +82,7 @@
   }
   .drawer {
     position: fixed;
-    inset: 0 0 0 auto;
+    inset-block: 0; inset-inline: auto 0;
     z-index: calc(var(--z-modal) + 1);
     width: min(720px, 100%);
     overflow-y: auto;

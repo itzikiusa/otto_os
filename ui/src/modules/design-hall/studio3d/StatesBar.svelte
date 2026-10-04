@@ -149,7 +149,7 @@
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 6px 5px 12px;
+    padding-block: 5px; padding-inline: 12px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-l);
     background: color-mix(in srgb, var(--surface) 92%, transparent);
@@ -189,7 +189,7 @@
     box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 18%, transparent);
   }
   .seg button:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .none {

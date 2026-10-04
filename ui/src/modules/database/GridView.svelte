@@ -960,12 +960,12 @@
     outline: none;
   }
   .grid-scroll:focus-visible {
-    outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    outline: 1px solid color-mix(in srgb, var(--accent-text) 55%, transparent);
     outline-offset: -1px;
   }
   /* Roving keyboard cell cursor (see onGridKeydown). */
   .grid tbody :global(td.kbd-focus) {
-    outline: 1.5px solid var(--accent);
+    outline: 1.5px solid var(--accent-text);
     outline-offset: -1.5px;
   }
   .grid {
@@ -1032,7 +1032,7 @@
     width: 100%;
     height: 100%;
     /* leave a sliver on the right for the resize handle */
-    padding: 3px 12px 3px 10px;
+    padding-block: 3px; padding-inline: 10px 12px;
     border: none;
     background: transparent;
     color: inherit;
@@ -1044,7 +1044,7 @@
     background: var(--hover);
   }
   .th-sort:focus-visible {
-    outline: 1.5px solid var(--accent);
+    outline: 1.5px solid var(--accent-text);
     outline-offset: -2px;
   }
   .th-inner {

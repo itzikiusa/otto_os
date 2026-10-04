@@ -68,7 +68,7 @@
   }
   .login-mark {
     font-size: 24px;
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: -0.02em;
     text-align: center;
   }

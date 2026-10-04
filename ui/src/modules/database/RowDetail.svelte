@@ -128,7 +128,7 @@
     gap: 4px;
     height: 40px;
     box-sizing: border-box;
-    padding: 0 6px 0 12px;
+    padding-block: 0; padding-inline: 12px 6px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
   }

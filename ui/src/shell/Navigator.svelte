@@ -1780,7 +1780,7 @@
     gap: 6px;
     width: 100%;
     height: 22px;
-    padding: 0 6px 0 8px;
+    padding-block: 0; padding-inline: 8px 6px;
     border: none;
     background: transparent;
     border-radius: var(--radius-s);
@@ -1912,7 +1912,7 @@
     align-items: center;
     gap: 8px;
     height: 30px;
-    padding: 0 4px 0 6px;
+    padding-block: 0; padding-inline: 6px 4px;
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-m);
@@ -2052,7 +2052,7 @@
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
   }
   .ws-chip:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .agents-sub .nested {
@@ -2139,7 +2139,7 @@
   .nested-item.active .row-secondary {
     display: inline-flex;
   }
-  .arch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; padding: 2px 6px 4px 8px; font-size: var(--fs-xs); color: var(--text-dim); }
+  .arch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; padding-block: 2px 4px; padding-inline: 8px 6px; font-size: var(--fs-xs); color: var(--text-dim); }
   .arch-state { display: flex; align-items: center; gap: 6px; padding: 4px 10px 6px; font-size: var(--fs-xs); color: var(--text-dim); }
   .arch-state .show-more { width: auto; padding: 0; }
   .arch-all { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }

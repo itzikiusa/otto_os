@@ -442,7 +442,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 10px 6px 14px;
+    padding-block: 8px 6px; padding-inline: 14px 10px;
     border-bottom: 1px solid var(--border);
   }
   .dr-title {
@@ -484,13 +484,13 @@
     background: var(--text-dim);
   }
   .health-ok {
-    color: var(--status-working);
+    color: var(--success);
   }
   .health-ok .hdot {
     background: var(--status-working);
   }
   .health-bad {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .health-bad .hdot {
     background: var(--status-exited);
@@ -625,7 +625,7 @@
     vertical-align: top;
   }
   .events tr.warn td:first-child {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .events .msg {
     white-space: pre-wrap;
@@ -649,7 +649,7 @@
     white-space: nowrap;
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
     white-space: pre-wrap;
   }

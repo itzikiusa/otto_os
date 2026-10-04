@@ -339,7 +339,7 @@
     color: var(--text-dim);
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .pill {
     display: inline-block;
@@ -352,21 +352,21 @@
     text-transform: lowercase;
   }
   .pill.ok {
-    color: var(--status-working);
+    color: var(--success);
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
   }
   .pill.warn {
-    color: var(--status-warn);
+    color: var(--warning);
     background: color-mix(in srgb, var(--status-warn) 16%, transparent);
   }
   .pill.bad {
-    color: var(--status-exited);
+    color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
   }
   .tag {
     margin-inline-start: 6px;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     padding: 0 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);

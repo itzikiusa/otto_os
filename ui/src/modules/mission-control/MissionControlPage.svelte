@@ -500,7 +500,7 @@
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     color: var(--danger);
     border-radius: var(--radius-s);
-    padding: 6px 8px 6px 10px;
+    padding-block: 6px; padding-inline: 10px 8px;
     font-size: var(--fs-s);
   }
   .be-text {

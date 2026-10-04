@@ -840,7 +840,7 @@
   }
 
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
   }
 </style>

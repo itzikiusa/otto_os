@@ -318,7 +318,7 @@
     transform: translate(-50%, 14px);
     z-index: 6;
     width: 220px;
-    background: var(--surface, var(--bg));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);

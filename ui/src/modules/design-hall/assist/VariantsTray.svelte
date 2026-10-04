@@ -127,7 +127,7 @@
     place-items: center;
     border-radius: 999px;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     background: var(--surface);
     color: var(--text);
     border: 1px solid var(--border);

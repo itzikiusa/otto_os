@@ -1539,7 +1539,7 @@
     cursor: pointer;
     font-size: var(--fs-s);
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     line-height: 1;
   }
   .provider-banner > :global(svg) {

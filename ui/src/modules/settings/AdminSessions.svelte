@@ -305,7 +305,7 @@
     align-items: center;
     gap: 8px;
     margin: 0 0 10px;
-    padding: 6px 8px 6px 12px;
+    padding-block: 6px; padding-inline: 12px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);

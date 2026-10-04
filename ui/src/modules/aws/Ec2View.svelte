@@ -405,7 +405,7 @@
     color: var(--text-dim);
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .pill {
     display: inline-block;
@@ -418,17 +418,17 @@
     text-transform: lowercase;
   }
   .pill.running {
-    color: var(--status-working);
+    color: var(--success);
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
   }
   .pill.pending,
   .pill.stopping,
   .pill.shutting-down {
-    color: var(--status-warn);
+    color: var(--warning);
     background: color-mix(in srgb, var(--status-warn) 16%, transparent);
   }
   .pill.terminated {
-    color: var(--status-exited);
+    color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
   }
   .icon-btn {

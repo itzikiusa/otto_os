@@ -723,7 +723,7 @@
     width: 34px;
     min-width: 34px;
     text-align: end;
-    padding: 0 5px 0 3px;
+    padding-block: 0; padding-inline: 3px 5px;
     color: var(--text-dim);
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
@@ -742,7 +742,7 @@
     padding: 0 1px;
   }
   .dl-code {
-    padding: 0 8px 0 3px;
+    padding-block: 0; padding-inline: 3px 8px;
     white-space: pre;
     word-break: normal;
     user-select: text;

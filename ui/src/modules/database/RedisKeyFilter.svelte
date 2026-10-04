@@ -76,7 +76,7 @@
     height: 17px;
     flex-shrink: 0;
     border: none;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;

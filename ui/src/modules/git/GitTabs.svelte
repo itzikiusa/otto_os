@@ -394,7 +394,7 @@
   .embedded .git-tab {
     border: 1px solid transparent;
     border-radius: var(--radius-s);
-    padding: 4px 6px 4px 9px;
+    padding-block: 4px; padding-inline: 9px 6px;
   }
   .embedded .git-tab.active {
     background: var(--surface-2);
@@ -420,7 +420,7 @@
     }
     .git-tab {
       max-width: 200px;
-      padding: 8px 6px 8px 12px;
+      padding-block: 8px; padding-inline: 12px 6px;
       font-size: var(--fs-m);
       flex-shrink: 0;
     }

@@ -1143,13 +1143,13 @@
     width: 48px;
     height: 6px;
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     overflow: hidden;
   }
   .pos-bar {
     height: 100%;
     background: var(--accent);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     min-width: 2px;
   }
   /* Offset-position badge in the detail pane */
@@ -1186,7 +1186,7 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 20%, transparent);
     color: var(--accent-text);
   }
@@ -1215,7 +1215,7 @@
   }
   table.headers td {
     border: none;
-    padding: 2px 8px 2px 0;
+    padding-block: 2px; padding-inline: 0 8px;
     font-size: var(--fs-s);
   }
   .cfg-set {

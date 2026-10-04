@@ -159,7 +159,7 @@
     gap: 6px;
     margin: 2px 10px 4px;
     padding: 4px 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--warning-soft);
     font-size: var(--fs-xs);
   }

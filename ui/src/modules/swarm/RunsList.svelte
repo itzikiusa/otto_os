@@ -235,7 +235,7 @@
     outline: none;
   }
   .trow:has(.run-open:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   /* Later in the DOM + positioned → painted above the stretched button. */

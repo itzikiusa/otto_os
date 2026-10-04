@@ -561,7 +561,7 @@
     gap: 6px;
     min-width: 0;
     height: 30px;
-    padding: 0 6px 0 10px;
+    padding-block: 0; padding-inline: 10px 6px;
     border: none;
     background: transparent;
     color: inherit;

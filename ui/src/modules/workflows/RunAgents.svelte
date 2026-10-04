@@ -288,7 +288,7 @@
     gap: 7px;
     padding: 3px 4px;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -375,7 +375,7 @@
     white-space: nowrap;
   }
   .sub[data-status='failed'] {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .term {
     height: 320px;

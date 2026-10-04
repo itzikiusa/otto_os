@@ -960,7 +960,7 @@
     font-weight: 600;
   }
   .tabs button:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .count {

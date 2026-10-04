@@ -174,7 +174,7 @@
   .rd-badge {
     display: inline-block;
     padding: 0 6px;
-    border-radius: 9px;
+    border-radius: var(--radius-m);
     font-size: var(--fs-xs);
     color: var(--accent-contrast);
     background: var(--accent-solid);
@@ -207,11 +207,11 @@
     font-style: italic;
   }
   tr.op-unset .rd-path {
-    color: var(--status-exited);
+    color: var(--danger);
     text-decoration: line-through;
   }
   tr.op-rename .rd-path {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   tr.op-set td.rd-val:last-child,
   tr.op-cell td.rd-val:last-child {

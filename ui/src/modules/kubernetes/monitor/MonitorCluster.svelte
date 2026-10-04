@@ -660,7 +660,7 @@
     gap: 6px;
     background: none;
     border: 1px solid transparent;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     padding: 2px 6px;
     font: inherit;
     color: inherit;
@@ -806,10 +806,10 @@
     color: var(--text-dim);
   }
   .pct.warn {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .bad {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .rc {
     font-weight: 600;
@@ -887,7 +887,7 @@
     gap: 8px;
     align-items: baseline;
     padding: 5px 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     font-size: var(--fs-s);
   }
   .timeline li:hover {

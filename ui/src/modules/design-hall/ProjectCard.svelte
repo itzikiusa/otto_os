@@ -58,7 +58,7 @@
     border-color: var(--border-strong);
   }
   .pcard:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    outline: 2px solid color-mix(in srgb, var(--accent-text) 70%, transparent);
     outline-offset: 1px;
   }
   .mosaic {

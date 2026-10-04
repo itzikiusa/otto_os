@@ -421,7 +421,7 @@
     grid-template-columns: 104px minmax(0, 1fr) auto auto;
     gap: 6px;
     align-items: baseline;
-    padding: 3px 0 3px 12px;
+    padding-block: 3px; padding-inline: 12px 0;
     border-inline-start: 1px solid var(--border-strong);
     font-size: var(--fs-s);
   }

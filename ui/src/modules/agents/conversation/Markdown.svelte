@@ -350,7 +350,7 @@
   .md :global(.code-btn:focus-visible),
   .md :global(.code-more:focus-visible),
   .md :global(.code-file:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   /* ~18 lines + padding; the rest behind "Show all N lines". */
@@ -382,7 +382,7 @@
     background: color-mix(in srgb, var(--text-dim) 13%, transparent);
     border: 1px solid color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 0 5px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
   }
   .md :global(pre code) {
     background: none;
@@ -442,9 +442,9 @@
     background: color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .md :global(a:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .md :global(.tag) {
     color: var(--accent-text);

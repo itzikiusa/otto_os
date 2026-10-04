@@ -1309,7 +1309,7 @@
     display: flex;
     height: 6px;
     margin-top: 8px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     overflow: hidden;
     background: var(--surface-2);
   }
@@ -1320,7 +1320,7 @@
   .seg-bar.big {
     height: 12px;
     margin: 0 0 14px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
   }
   .seg-bar.mini {
     height: 4px;
@@ -1427,12 +1427,12 @@
   .bar-track {
     height: 8px;
     background: var(--surface-2);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     overflow: hidden;
   }
   .bar-fill {
     height: 100%;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: var(--accent-solid);
     transition: width 200ms ease-out;
   }
@@ -1631,7 +1631,7 @@
     text-decoration: underline;
   }
   .sess-open:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .model-cell {
@@ -1780,7 +1780,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 8px 6px 12px;
+    padding-block: 6px; padding-inline: 12px 8px;
     margin: 0 0 14px;
     border-radius: var(--radius-s);
     background: var(--danger-soft);

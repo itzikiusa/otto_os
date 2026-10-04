@@ -127,7 +127,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 10px 6px 14px;
+    padding-block: 8px 6px; padding-inline: 14px 10px;
     border-bottom: 1px solid var(--border);
   }
   .dr-title {
@@ -171,15 +171,15 @@
     text-transform: lowercase;
   }
   .pill.ok {
-    color: var(--status-working);
+    color: var(--success);
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
   }
   .pill.warn {
-    color: var(--status-warn);
+    color: var(--warning);
     background: color-mix(in srgb, var(--status-warn) 16%, transparent);
   }
   .pill.bad {
-    color: var(--status-exited);
+    color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
   }
   .icon-btn {

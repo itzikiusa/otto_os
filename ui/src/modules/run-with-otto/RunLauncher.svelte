@@ -410,7 +410,7 @@
     line-height: 1;
     padding: 3px 5px;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     flex: none;
   }
   .run { flex: none; }

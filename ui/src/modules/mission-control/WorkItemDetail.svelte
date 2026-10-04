@@ -398,7 +398,7 @@
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    padding: 12px 10px 12px 14px;
+    padding-block: 12px; padding-inline: 14px 10px;
     border-bottom: 1px solid var(--border);
   }
   .d-title {

@@ -448,7 +448,7 @@
     width: 180px;
     min-width: 0;
     max-width: 100%;
-    background: var(--surface-2, var(--surface));
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
@@ -477,7 +477,7 @@
     color: var(--text-dim);
     cursor: pointer;
     padding: 1px 3px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     font: inherit;
   }
   .crumb:hover {

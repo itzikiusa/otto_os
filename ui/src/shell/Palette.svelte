@@ -720,7 +720,7 @@
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 1px 5px;
   }
   .pal-ask {
@@ -825,7 +825,7 @@
     margin-top: 4px;
   }
   .pal-hit {
-    padding: 4px 8px 4px 10px;
+    padding-block: 4px; padding-inline: 10px 8px;
     border-radius: var(--radius-s);
     display: flex;
     flex-direction: column;

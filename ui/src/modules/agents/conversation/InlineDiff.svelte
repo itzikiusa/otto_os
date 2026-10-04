@@ -209,7 +209,7 @@
   .idiff-row.add .idiff-sign,
   .pdiff-row.add .pdiff-sign {
     color: var(--success);
-    font-weight: 700;
+    font-weight: 600;
   }
   .idiff-row.del,
   .pdiff-row.del {
@@ -218,7 +218,7 @@
   .idiff-row.del .idiff-sign,
   .pdiff-row.del .pdiff-sign {
     color: var(--danger);
-    font-weight: 700;
+    font-weight: 600;
   }
   /* The changed line's edge, like an editor gutter mark. */
   .pdiff-row.add {
@@ -286,7 +286,7 @@
     background: var(--surface-2);
   }
   .pdiff-head:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .pdiff-file.focus .pdiff-head {

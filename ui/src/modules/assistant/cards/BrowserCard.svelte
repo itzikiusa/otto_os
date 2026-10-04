@@ -171,7 +171,7 @@
   }
   .wire .b {
     position: absolute;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--surface-3);
   }
   .side {

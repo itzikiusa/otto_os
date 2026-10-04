@@ -619,7 +619,7 @@
     align-items: center;
     gap: 6px;
     height: 27px;
-    padding: 0 6px 0 8px;
+    padding-block: 0; padding-inline: 8px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -808,7 +808,7 @@
     display: inline-block;
     min-width: 18px;
     padding: 1px 5px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
     font-family: var(--font-mono);

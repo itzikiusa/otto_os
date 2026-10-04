@@ -71,7 +71,7 @@
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    padding: 10px 10px 10px 0;
+    padding-block: 10px; padding-inline: 0 10px;
     /* Opaque, but the same edge + elevation as every floating layer. */
     background: var(--surface);
     border: 1px solid var(--glass-border);

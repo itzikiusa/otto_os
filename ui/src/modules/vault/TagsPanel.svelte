@@ -57,7 +57,7 @@
     justify-content: space-between;
     background: none;
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     padding: 5px 8px;
     cursor: pointer;
   }

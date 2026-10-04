@@ -241,7 +241,7 @@
     font-size: var(--fs-xs);
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .history {
     border-block-start: 1px solid var(--border);

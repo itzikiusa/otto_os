@@ -1137,7 +1137,7 @@
     line-height: 1;
     color: var(--text-dim);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 3px 5px;
     flex-shrink: 0;
   }
@@ -1306,7 +1306,7 @@
     place-items: center;
     width: 22px;
     height: 22px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--hover);
     color: var(--text-dim);
     flex-shrink: 0;

@@ -330,7 +330,7 @@
     margin: 0;
   }
   .hint.danger {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .ctx-tools {
     display: flex;
@@ -438,10 +438,10 @@
   .env-chip.prod.selected {
     background: color-mix(in srgb, var(--status-exited) 18%, transparent);
     border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
     white-space: pre-wrap;
   }

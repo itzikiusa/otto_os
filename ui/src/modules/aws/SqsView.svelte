@@ -570,7 +570,7 @@
   }
   .tag {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     padding: 0 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -769,7 +769,7 @@
     cursor: pointer;
   }
   .icon-btn.danger {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   @media (max-width: 640px) {
     .hide-sm {

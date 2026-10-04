@@ -148,7 +148,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 6px 6px 12px;
+    padding-block: 6px; padding-inline: 12px 6px;
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
@@ -188,7 +188,7 @@
     border-radius: var(--radius-l);
   }
   .bay:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    outline: 2px solid color-mix(in srgb, var(--accent-text) 70%, transparent);
   }
   .spot {
     position: absolute;

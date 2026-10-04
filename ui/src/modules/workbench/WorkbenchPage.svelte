@@ -663,7 +663,7 @@
     overflow-y: auto;
   }
   .wb-grid.drag {
-    outline: 2px dashed var(--accent);
+    outline: 2px dashed var(--accent-text);
     outline-offset: -4px;
   }
   .wb-col-files {

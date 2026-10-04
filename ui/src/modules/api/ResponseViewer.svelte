@@ -640,7 +640,7 @@
     gap: 6px;
     padding: 6px 10px;
     margin-block-end: 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--info-soft);
     color: var(--text);
     font-size: var(--fs-xs);
@@ -725,7 +725,7 @@
     align-items: center;
     gap: 6px;
     height: 27px;
-    padding: 0 4px 0 8px;
+    padding-block: 0; padding-inline: 8px 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -843,7 +843,7 @@
   .trace {
     list-style: none;
     margin: 0;
-    padding: 4px 0 4px 2px;
+    padding-block: 4px; padding-inline: 2px 0;
     display: flex;
     flex-direction: column;
     gap: 2px;

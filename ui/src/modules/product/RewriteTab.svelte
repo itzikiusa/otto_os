@@ -560,7 +560,7 @@
     margin-bottom: 0.25em;
   }
   .md-body :global(code) {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 0.88em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 5px;

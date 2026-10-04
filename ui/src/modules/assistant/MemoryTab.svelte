@@ -409,7 +409,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 8px 8px 8px 12px;
+    padding-block: 8px; padding-inline: 12px 8px;
   }
   .row + .row {
     border-top: 1px solid var(--border);
@@ -453,7 +453,7 @@
     align-items: center;
     gap: 8px;
     margin-bottom: 8px;
-    padding: 6px 8px 6px 12px;
+    padding-block: 6px; padding-inline: 12px 8px;
     border-radius: var(--radius-m);
     background: var(--surface-2);
     border: 1px solid var(--border);

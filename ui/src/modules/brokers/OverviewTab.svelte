@@ -360,7 +360,7 @@
   .metric .track {
     flex: 1;
     height: 7px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);
     overflow: hidden;
   }

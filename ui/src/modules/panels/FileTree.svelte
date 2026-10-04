@@ -441,7 +441,7 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    padding: 3px 4px 3px 8px;
+    padding-block: 3px; padding-inline: 8px 4px;
     border-bottom: 1px solid var(--border);
     background: var(--surface-2);
     flex-shrink: 0;
@@ -613,7 +613,7 @@
   .truncated-badge {
     font-size: var(--fs-xs);
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     color: var(--accent-text);
     flex-shrink: 0;

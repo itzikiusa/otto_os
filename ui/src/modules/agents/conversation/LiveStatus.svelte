@@ -171,7 +171,7 @@
     font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     padding: 0 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     color: var(--text);
     direction: ltr;
     unicode-bidi: isolate;

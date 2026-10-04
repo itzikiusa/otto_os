@@ -92,7 +92,7 @@
     height: 52px;
     display: grid;
     place-items: center;
-    border-radius: 14px;
+    border-radius: var(--radius-l);
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text-dim);
@@ -138,7 +138,7 @@
     color: var(--text-dim);
   }
   .status.err {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .actions {
     display: flex;

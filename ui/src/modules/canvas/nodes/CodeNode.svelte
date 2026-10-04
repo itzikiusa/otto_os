@@ -93,7 +93,7 @@
     font-family: var(--font-mono);
   }
   .code.selected {
-    outline: 1px solid var(--accent);
+    outline: 1px solid var(--accent-text);
   }
   .bar {
     flex: 0 0 auto;

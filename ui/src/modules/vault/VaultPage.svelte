@@ -778,7 +778,7 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-    padding: 4px 4px 4px 10px;
+    padding-block: 4px; padding-inline: 10px 4px;
     border: none;
     background: none;
     color: inherit;

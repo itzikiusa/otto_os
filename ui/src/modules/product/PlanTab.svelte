@@ -802,7 +802,7 @@
   .md-body :global(ul) { padding-inline-start: 1.4em; margin: 0 0 0.6em; }
   .md-body :global(li) { margin-bottom: 0.2em; }
   .md-body :global(code) {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 0.88em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 5px;

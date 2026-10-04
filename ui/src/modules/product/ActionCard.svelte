@@ -374,7 +374,7 @@
   .action-card {
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    background: var(--surface-2, var(--surface));
+    background: var(--surface-2);
     margin-top: 8px;
     overflow: hidden;
   }

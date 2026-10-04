@@ -327,13 +327,13 @@
   .bar-track {
     height: 6px;
     background: var(--surface-2);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     overflow: hidden;
   }
   .bar-fill {
     height: 100%;
     background: var(--accent-solid);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     transition: width 0.2s;
   }
   @media (prefers-reduced-motion: reduce) {

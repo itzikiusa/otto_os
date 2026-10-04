@@ -276,7 +276,7 @@
     align-items: center;
     gap: 6px;
     min-height: 36px;
-    padding: 6px 6px 2px 12px;
+    padding-block: 6px 2px; padding-inline: 12px 6px;
     color: var(--text-dim);
     flex: none;
     user-select: none;
@@ -378,7 +378,7 @@
     opacity: 0.7;
   }
   .resize:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .ellipsis {

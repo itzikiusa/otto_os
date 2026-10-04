@@ -408,7 +408,7 @@
     margin-inline-end: 8px;
     padding: 0 6px;
     border: none;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: hsl(var(--h) 50% 50% / 0.22);
     color: hsl(var(--h) 70% 72%);
     font: inherit;
@@ -440,7 +440,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    color: var(--status-working);
+    color: var(--success);
   }
   .live-dot {
     width: 6px;
@@ -456,7 +456,7 @@
   }
   .err {
     padding: 8px 10px;
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
     white-space: pre-wrap;
   }

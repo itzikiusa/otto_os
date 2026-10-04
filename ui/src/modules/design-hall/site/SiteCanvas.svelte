@@ -712,7 +712,7 @@
     background: var(--surface-2);
   }
   .toolbar button:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .toolbar button[aria-pressed='true'] {
@@ -772,7 +772,7 @@
     cursor: text;
   }
   .os-edit :global(.os-editing) {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 3px;
     border-radius: 2px;
     cursor: text;

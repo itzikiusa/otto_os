@@ -251,7 +251,7 @@
   }
   .views button {
     border: 0;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     padding: 4px 9px;

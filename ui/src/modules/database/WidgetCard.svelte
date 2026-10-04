@@ -184,7 +184,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 8px 8px 8px 12px;
+    padding-block: 8px; padding-inline: 12px 8px;
     border-bottom: 1px solid var(--border);
   }
   .wc-title {
@@ -216,7 +216,7 @@
     display: grid;
     place-items: center;
     height: 100%;
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
   }
   .wc-stale {
@@ -227,7 +227,7 @@
     margin-bottom: 4px;
     padding: 1px 7px;
     font-size: var(--fs-xs);
-    color: var(--status-warn);
+    color: var(--warning);
     background: var(--status-warn-soft);
     border-radius: 999px;
     overflow: hidden;

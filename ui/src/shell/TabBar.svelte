@@ -462,7 +462,7 @@
     align-items: center;
     gap: 7px;
     height: 28px;
-    padding: 0 6px 0 10px;
+    padding-block: 0; padding-inline: 10px 6px;
     border-radius: var(--radius-s);
     border: 1px solid transparent;
     color: var(--text-dim);
@@ -534,7 +534,7 @@
     width: 16px;
     height: 16px;
     border: none;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
@@ -549,11 +549,11 @@
     opacity: 1;
   }
   .tab:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .tab-close:focus-visible {
-    outline: 1px solid var(--accent);
+    outline: 1px solid var(--accent-text);
   }
   /* Unread activity: a quiet accent dot on background tabs whose session
      finished working (or needs input) since the user last looked. */

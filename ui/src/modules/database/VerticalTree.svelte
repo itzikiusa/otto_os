@@ -269,7 +269,7 @@
     overflow-wrap: anywhere;
   }
   .vk-ren {
-    color: var(--status-warn);
+    color: var(--warning);
     font-weight: 500;
   }
   .vv {
@@ -293,7 +293,7 @@
     font-style: italic;
   }
   .vv.pend em {
-    color: var(--status-warn);
+    color: var(--warning);
     font-style: normal;
     font-size: var(--fs-xs);
     margin-inline-start: 6px;
@@ -302,7 +302,7 @@
     display: inline-flex;
     align-items: baseline;
     gap: 4px;
-    padding: 0 4px 0 0;
+    padding-block: 0; padding-inline: 0 4px;
     margin: 0;
     background: none;
     border: none;
@@ -343,7 +343,7 @@
     color: var(--text);
   }
   .vmore.inline {
-    margin: 0 0 0 4px;
+    margin-block: 0; margin-inline: 4px 0;
   }
 
   /* Vertical / JSON views are the comfiest on a narrow phone — bump them too. */

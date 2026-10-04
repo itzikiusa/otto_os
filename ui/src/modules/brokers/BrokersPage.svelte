@@ -689,7 +689,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 6px 8px 6px 6px;
+    padding-block: 6px; padding-inline: 6px 8px;
     cursor: pointer;
     color: var(--text-dim);
     border-inline-start: 2px solid transparent;
@@ -859,7 +859,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     padding: 2px;
     opacity: 0.6;
   }
@@ -875,7 +875,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 0 5px;
   }
   .tunnel-pill {
@@ -884,7 +884,7 @@
     gap: 3px;
     font-size: var(--fs-xs);
     padding: 1px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     color: var(--text-dim);
   }
@@ -1015,7 +1015,7 @@
       font-size: var(--fs-xs);
       color: var(--text-dim);
       background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-      border-radius: 9px;
+      border-radius: var(--radius-m);
       padding: 1px 8px;
     }
     .head-btns .icon-btn {
@@ -1042,7 +1042,7 @@
       font-size: 14px;
     }
     .sec-head {
-      padding: 8px 10px 8px 8px;
+      padding-block: 8px; padding-inline: 8px 10px;
     }
     .count {
       font-size: var(--fs-xs);

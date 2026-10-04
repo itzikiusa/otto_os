@@ -391,7 +391,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-l);
     background: var(--surface);
-    padding: 8px 6px 4px 12px;
+    padding-block: 8px 4px; padding-inline: 12px 6px;
     overflow: hidden;
     min-width: 0;
     box-shadow: var(--shadow-card);
@@ -412,7 +412,7 @@
     line-height: 1.5;
     min-height: 40px;
     max-height: 40vh;
-    padding: 2px 6px 2px 0;
+    padding-block: 2px; padding-inline: 0 6px;
     overflow-x: hidden;
     overflow-y: auto;
     white-space: pre-wrap;
@@ -461,7 +461,7 @@
     filter: brightness(1.08);
   }
   .send:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 2px;
   }
   .send:disabled {

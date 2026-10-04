@@ -282,7 +282,7 @@
   }
   .ob-mark {
     font-size: 30px;
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: -0.02em;
     text-align: center;
     margin-bottom: 4px;
@@ -389,10 +389,10 @@
     flex-shrink: 0;
     border-radius: 50%;
     background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .tool-status.ok {
     background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
+    color: var(--success);
   }
 </style>

@@ -1418,7 +1418,7 @@
     gap: 6px;
     margin: 4px 10px 6px;
     padding: 6px 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--warning-soft);
     color: var(--text);
     font-size: var(--fs-xs);

@@ -119,7 +119,7 @@
     overflow: hidden;
   }
   .json.selected {
-    outline: 1px solid var(--accent);
+    outline: 1px solid var(--accent-text);
   }
   .bar {
     flex: 0 0 auto;
@@ -138,7 +138,7 @@
   }
   .err {
     font-size: var(--fs-xs);
-    color: var(--status-exited);
+    color: var(--danger);
     margin-inline-end: auto;
   }
   .toggle {
@@ -175,7 +175,7 @@
   .errline {
     padding: 6px 10px;
     font-size: var(--fs-xs);
-    color: var(--status-exited);
+    color: var(--danger);
     border-bottom: 1px solid var(--border);
   }
   .src {

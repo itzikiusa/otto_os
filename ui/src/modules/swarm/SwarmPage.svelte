@@ -924,7 +924,7 @@
   }
   .side-resizer:focus-visible,
   .resizer:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -1px;
   }
   .rail-head {
@@ -996,7 +996,7 @@
     background: var(--status-working);
   }
   .dot.paused {
-    background: var(--status-idle, var(--text-dim));
+    background: var(--status-idle);
   }
   .dot.aborted {
     background: var(--status-exited);

@@ -282,7 +282,7 @@
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: var(--radius-s); padding: 6px 8px; font: inherit; font-size: var(--fs-m);
   }
-  .item input:focus-visible, .fld input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .item input:focus-visible, .fld input:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 1px; }
   .meta { color: var(--text-dim); font-size: var(--fs-s); }
   .pa-enf { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 35%, transparent); display: inline-flex; align-items: center; gap: 4px; }
   .fld-row { display: flex; gap: 10px; flex-wrap: wrap; }

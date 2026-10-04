@@ -574,7 +574,7 @@
     gap: 6px;
   }
   .photo-row label:focus-within {
-    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    outline: 2px solid color-mix(in srgb, var(--accent-text) 70%, transparent);
     outline-offset: 1px;
   }
   .photo-row .busy {
@@ -624,7 +624,7 @@
   .tp-bar {
     width: 34px;
     height: 8px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .tp-line {
     width: 80%;
@@ -738,7 +738,7 @@
     align-items: center;
     gap: 8px;
     height: 32px;
-    padding: 0 4px 0 8px;
+    padding-block: 0; padding-inline: 8px 4px;
     border-radius: var(--radius-s);
     font-size: var(--fs-m);
     color: var(--text);
@@ -751,7 +751,7 @@
     align-items: center;
     gap: 8px;
     min-height: 24px;
-    padding: 8px 4px 2px 8px;
+    padding-block: 8px 2px; padding-inline: 8px 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;

@@ -352,7 +352,7 @@
   }
   .org-row.drag-over {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    outline: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
+    outline: 1px dashed color-mix(in srgb, var(--accent-text) 60%, transparent);
   }
   .org-row.dragging-self {
     opacity: 0.4;
@@ -484,12 +484,12 @@
   }
   .state.idle,
   .state.reconnectable {
-    background: var(--status-idle, var(--text-dim));
+    background: var(--status-idle);
   }
   /* A paused agent is parked, not failed — same idle tone the swarm rail uses
      for a paused swarm (red stays for an exited session). */
   .state.paused {
-    background: var(--status-idle, var(--text-dim));
+    background: var(--status-idle);
   }
   .state.exited {
     background: var(--status-exited);

@@ -252,19 +252,19 @@
     background: var(--status-working);
   }
   .health-ok .status-pill {
-    color: var(--status-working);
+    color: var(--success);
   }
   .health-bad .hdot {
     background: var(--status-exited);
   }
   .health-bad .status-pill {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .health-warn .hdot {
     background: var(--status-warn);
   }
   .health-warn .status-pill {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .health-progressing .hdot {
     background: var(--accent);
@@ -317,7 +317,7 @@
     align-items: center;
     padding: 4px 12px;
     font-size: var(--fs-xs);
-    color: var(--status-exited);
+    color: var(--danger);
     border-top: 1px solid var(--border);
     background: color-mix(in srgb, var(--status-exited) 8%, var(--surface));
   }

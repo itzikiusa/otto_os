@@ -1075,7 +1075,7 @@
     border: 1px solid var(--accent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: var(--accent-text);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     padding: 6px 12px;
     cursor: pointer;
     font-size: var(--fs-s);
@@ -1148,7 +1148,7 @@
   .agent-row input {
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-m);
     padding: 8px 10px;
@@ -1176,7 +1176,7 @@
   }
   .review-config {
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: var(--radius-m);
     background: var(--surface);
     overflow: hidden;
   }
@@ -1242,7 +1242,7 @@
     transition: inset-inline-start 0.15s ease, background 0.15s ease;
   }
   .switch input:focus-visible + span {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 2px;
   }
   .switch input:checked + span {
@@ -1292,7 +1292,7 @@
     border-radius: 50%;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: var(--accent-text);
-    font: 700 var(--fs-xs) var(--font-mono, monospace);
+    font: 700 var(--fs-xs) var(--font-mono);
   }
   .reviewer-fields {
     flex: 1;
@@ -1313,7 +1313,7 @@
     min-width: 0;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     color: var(--text);
     font-family: inherit;
     font-size: var(--fs-s);
@@ -1324,7 +1324,7 @@
     box-sizing: border-box;
   }
   .review-hint {
-    margin: 0 0 0 30px;
+    margin-block: 0; margin-inline: 30px 0;
     color: var(--text-dim);
     font-size: var(--fs-xs);
     line-height: 1.4;
@@ -1333,7 +1333,7 @@
     display: inline-flex;
     background: none;
     border: 1px solid var(--border);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     color: var(--text-dim);
     padding: 7px 8px;
     cursor: pointer;
@@ -1350,7 +1350,7 @@
     align-self: flex-start;
     background: none;
     border: 1px dashed var(--border);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     color: var(--text-dim);
     font-size: var(--fs-s);
     padding: 5px 12px;
@@ -1400,7 +1400,7 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     padding: 5px 12px;
     cursor: pointer;
     font-size: var(--fs-s);
@@ -1460,7 +1460,7 @@
     word-break: break-word;
   }
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .term {
     height: min(360px, 60vh);
@@ -1475,7 +1475,7 @@
      author repair, so the quality loop is readable without opening terminals. */
   .review-ledger {
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: var(--radius-m);
     overflow: hidden;
     background: var(--surface);
   }
@@ -1505,7 +1505,7 @@
   .review-outcome {
     margin: 10px 12px 0;
     border: 1px solid var(--border);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     padding: 7px 9px;
     color: var(--text-dim);
     font-size: var(--fs-xs);
@@ -1563,7 +1563,7 @@
   .reviewer-card,
   .revision-card {
     border: 1px solid var(--border);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     background: var(--surface);
     padding: 8px 9px;
   }
@@ -1601,7 +1601,7 @@
   }
   .finding {
     border-inline-start: 2px solid var(--border);
-    padding: 3px 0 3px 8px;
+    padding-block: 3px; padding-inline: 8px 0;
   }
   .finding-head {
     display: flex;
@@ -1624,7 +1624,7 @@
     font-weight: 600;
   }
   .severity {
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 1px 5px;
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -1641,7 +1641,7 @@
   }
   .finding-category {
     color: var(--text-dim);
-    font: var(--fs-xs) var(--font-mono, monospace);
+    font: var(--fs-xs) var(--font-mono);
   }
   .evidence-list,
   .changed-paths {
@@ -1657,7 +1657,7 @@
     padding: 2px 6px;
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
-    font: var(--fs-xs) var(--font-mono, monospace);
+    font: var(--fs-xs) var(--font-mono);
     overflow-wrap: anywhere;
   }
 
@@ -1728,7 +1728,7 @@
     font-size: var(--fs-s);
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     background: color-mix(in srgb, var(--danger) 8%, transparent);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     padding: 6px 10px;
     word-break: break-word;
   }
@@ -1792,7 +1792,7 @@
     background: none;
     border: none;
     color: var(--text-dim);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     padding: 5px;
     cursor: pointer;
     visibility: hidden;
@@ -1815,7 +1815,7 @@
     gap: 8px;
     background: none;
     border: 1px solid transparent;
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     padding: 5px 8px;
     cursor: pointer;
     text-align: start;

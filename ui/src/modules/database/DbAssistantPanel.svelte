@@ -251,7 +251,7 @@
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--text);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     padding: 2px 5px;
     cursor: pointer;
@@ -305,7 +305,7 @@
     color: var(--text-dim);
     cursor: pointer;
     padding: 4px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
   }
   .da-close:hover {
     background: color-mix(in srgb, var(--text) 8%, transparent);
@@ -387,7 +387,7 @@
     box-sizing: border-box;
     resize: none;
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: var(--radius-m);
     background: var(--surface-2);
     color: var(--text);
     font: inherit;

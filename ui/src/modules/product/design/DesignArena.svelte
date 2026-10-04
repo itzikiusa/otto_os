@@ -1329,7 +1329,7 @@
   }
   .agent-badge {
     background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
+    color: var(--success);
   }
   .owner-badge {
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);
@@ -1452,7 +1452,7 @@
     border-inline-start: 1px solid var(--border);
     background: var(--bg);
     color: var(--text);
-    font: 12px/1.5 var(--font-mono, monospace);
+    font: 12px/1.5 var(--font-mono);
     padding: 10px 12px;
     outline: none;
     tab-size: 2;
@@ -1642,7 +1642,7 @@
     border-top: 1px solid var(--border);
   }
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
 
   /* ── Phone: segmented single pane ─────────────────────────────────────── */

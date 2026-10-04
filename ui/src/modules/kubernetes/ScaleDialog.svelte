@@ -64,7 +64,7 @@
     text-align: center;
   }
   .hint.danger {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .dim {
     color: var(--text-dim);

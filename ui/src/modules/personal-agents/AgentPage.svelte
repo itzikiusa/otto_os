@@ -677,7 +677,7 @@
   }
   .tab:hover { color: var(--text); }
   .tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 500; }
-  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-s); }
+  .tab:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; border-radius: var(--radius-s); }
   .err {
     background: var(--danger-soft); color: var(--danger); padding: 8px 12px;
     border-radius: var(--radius-s); font-size: var(--fs-s);
@@ -734,7 +734,7 @@
     border-radius: var(--radius-s); padding: 6px 8px; font: inherit;
   }
   .fld input:focus-visible, .fld select:focus-visible, .fld textarea:focus-visible {
-    outline: 2px solid var(--accent); outline-offset: 1px;
+    outline: 2px solid var(--accent-text); outline-offset: 1px;
   }
   .chk { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); color: var(--text); }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }

@@ -192,6 +192,12 @@ const RULES = {
   'accent-fill': 'text on background: var(--accent) — fill with var(--accent-solid) and set color: var(--accent-contrast)',
   'outline-removed': 'outline: none with no replacement focus indicator — add a :focus-visible / :focus-within border-color + box-shadow ring (app.css .input / .input-group)',
   'raw-set-interval': 'raw setInterval — use pollWhileVisible / liveQuery (lib/poll.ts, lib/live.ts); clocks go on INTERVAL_ALLOW',
+  'status-as-text': 'color: var(--status-*) — status tokens are for dots/bars; text uses --success/--danger/--warning/--text-dim',
+  'token-fallback': 'var(--token, fallback) on a token defined in lib/tokens.css — drop the fallback',
+  'radius-literal': 'off-scale border-radius literal — use var(--radius-s|m|l) (0, 1-2px hairlines, 50%, 999px allowed)',
+  'heavy-weight': 'font-weight ≥ 700 — chrome uses 400/500/600',
+  'focus-accent': 'outline in var(--accent) — focus rings use var(--accent-text)',
+  'physical-shorthand': '4-value padding/margin/inset with different left/right — use -block / -inline',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
 };
 
@@ -239,6 +245,26 @@ const SCRIM = /^\s*0\s*[,\s]\s*0\s*[,\s]\s*0(?:\s*[,/]|\s*$)/; // rgba(0,0,0,x) 
 const DECL = /(^|[{;])(\s*)((?:--)?[a-zA-Z][\w-]*)\s*:([^;{}]*)/g;
 const PRELUDE = /(^|[{};])([^{};@]*[^{};@\s][^{};@]*)\{/g;
 const GLOBAL_CLASS = /\.(btn|chip|row|card|input|icon-btn)(?![\w-])/g;
+/** Custom properties declared in lib/tokens.css (a fallback on one is dead code). */
+const TOKEN_NAMES = new Set(
+  [...(files.find((f) => f.rel === 'src/lib/tokens.css')?.text ?? '').matchAll(/(?:^|[\s;{])(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]),
+);
+/** Split a CSS value on top-level whitespace (parentheses kept together). */
+function splitTop(v) {
+  const out = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of v) {
+    if (ch === '(') depth++;
+    if (ch === ')') depth--;
+    if (/\s/.test(ch) && depth === 0) {
+      if (cur) out.push(cur);
+      cur = '';
+    } else cur += ch;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
 const PHYSICAL = /^(?:(?:margin|padding)-(?:left|right)|border-(?:left|right)(?:-[a-z]+)?|left|right)$/;
 
 /** @type {Record<string, Record<string, {count: number, hits: string[]}>>} */
@@ -277,6 +303,15 @@ for (const f of files) {
       if (PHYSICAL.test(prop)) hit('physical-prop', f, at, `${prop}:${value.trimEnd()}`);
       if (prop === 'text-align' && /^\s*(left|right)\b/.test(value)) hit('physical-prop', f, at, `text-align:${value.trimEnd()}`);
       if (prop === 'color' && /^\s*var\(\s*--accent\s*\)/.test(value)) hit('accent-text', f, at, 'color: var(--accent)');
+      if (prop === 'color' && /var\(\s*--status-/.test(value)) hit('status-as-text', f, at, `color:${value.trimEnd()}`);
+      for (const m of value.matchAll(/var\(\s*(--[\w-]+)\s*,/g)) if (TOKEN_NAMES.has(m[1])) hit('token-fallback', f, vAt + m.index, m[0]);
+      if (prop === 'border-radius' && /^\s*([3-9]|1[0-9]|2[0-9])px\s*$/.test(value)) hit('radius-literal', f, at, `border-radius:${value.trimEnd()}`);
+      if (prop === 'font-weight' && /^\s*(700|800|900|bold)\b/.test(value)) hit('heavy-weight', f, at, `font-weight:${value.trimEnd()}`);
+      if ((prop === 'outline' || prop === 'outline-color') && /var\(\s*--accent\s*\)/.test(value)) hit('focus-accent', f, at, `${prop}:${value.trimEnd()}`);
+      if (prop === 'padding' || prop === 'margin' || prop === 'inset') {
+        const parts = splitTop(value.replace(/!important/, '').trim());
+        if (parts.length === 4 && parts[1] !== parts[3]) hit('physical-shorthand', f, at, `${prop}:${value.trimEnd()}`);
+      }
     }
     if (f.path.endsWith('.svelte')) {
       for (const p of css.matchAll(PRELUDE)) {

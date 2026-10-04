@@ -1505,7 +1505,7 @@
     margin-bottom: 12px;
   }
   .sha-chip {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);

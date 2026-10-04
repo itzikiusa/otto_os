@@ -210,7 +210,7 @@
     align-items: center;
     gap: 3px;
     font-size: var(--fs-xs);
-    color: var(--status-exited);
+    color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
     border: 1px solid color-mix(in srgb, var(--status-exited) 35%, transparent);
     border-radius: 999px;

@@ -383,7 +383,7 @@
     gap: 6px;
     background: none;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     color: var(--text);
     padding: 4px 9px;
     cursor: pointer;
@@ -406,7 +406,7 @@
     font-size: var(--fs-s);
   }
   .notice.err {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .img-wrap {
     display: flex;
@@ -487,13 +487,13 @@
     color: var(--text-dim);
   }
   .big-bar .err {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .file-view :global(.big-lines) {
     flex: 1;
     min-height: 0;
     padding: 8px 14px 40px;
-    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-s);
   }
   /* Let long rows extend the scroll width instead of being clipped to the pane. */
@@ -510,7 +510,7 @@
     flex: 1;
     min-height: 0;
     padding: 14px 18px 40px;
-    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-s);
   }
   .file-view :global(.code-lines .vlist-win) {

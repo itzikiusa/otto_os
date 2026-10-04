@@ -440,7 +440,7 @@
     padding: 6px 8px;
     background: var(--surface-2);
     border-radius: var(--radius-s);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     line-height: 1.45;
     white-space: pre-wrap;
@@ -453,7 +453,7 @@
 
   .grow { flex: 1; }
   .dim { color: var(--text-dim); }
-  .mono { font-family: var(--font-mono, monospace); }
+  .mono { font-family: var(--font-mono); }
 
   /* Status chips (shared vocabulary; high-contrast light-green + black for verified). */
   .chip.status-open { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }

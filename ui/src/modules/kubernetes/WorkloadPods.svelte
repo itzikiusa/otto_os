@@ -185,7 +185,7 @@
     font-size: var(--fs-s);
   }
   .warn {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .acts {
     display: inline-flex;
@@ -217,7 +217,7 @@
     background: var(--success);
   }
   .health-bad {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .health-bad .hdot {
     background: var(--status-exited);
@@ -229,14 +229,14 @@
     background: var(--accent);
   }
   .health-warn {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .health-warn .hdot {
     background: var(--status-warn);
   }
   .err {
     padding: 8px 12px;
-    color: var(--status-exited);
+    color: var(--danger);
     white-space: pre-wrap;
   }
   .dim {

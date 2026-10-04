@@ -1634,7 +1634,7 @@
     font-size: var(--fs-xs);
   }
   .chip.warn {
-    color: var(--status-warn);
+    color: var(--warning);
     background: var(--status-warn-soft);
   }
   .chip.sim {
@@ -1644,7 +1644,7 @@
     font-size: var(--fs-xs);
     padding: 2px 7px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
     cursor: pointer;
@@ -1735,7 +1735,7 @@
     font-size: var(--fs-xs);
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     color: var(--text);
   }
   .sec {
@@ -1847,7 +1847,7 @@
     max-height: 150px;
     overflow-y: auto;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     background: var(--surface-2);
   }
   .hits button {
@@ -1894,7 +1894,7 @@
     font-size: var(--fs-xs);
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     color: var(--text);
     padding: 2px 4px;
   }
@@ -1913,7 +1913,7 @@
     color: var(--text);
     background: color-mix(in srgb, var(--surface) 94%, transparent);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     box-shadow: var(--shadow);
     pointer-events: none;
     white-space: nowrap;

@@ -461,7 +461,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    box-shadow: var(--shadow, 0 1px 3px rgba(0, 0, 0, 0.18));
+    box-shadow: var(--shadow);
   }
   .node.act-working {
     border-color: color-mix(in srgb, var(--status-working) 55%, var(--border));
@@ -568,7 +568,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow, 0 4px 16px rgba(0, 0, 0, 0.28));
+    box-shadow: var(--shadow);
     padding: 5px;
   }
   /* Invisible bridge over the 6px gap: the tooltip lives inside `.node`, so

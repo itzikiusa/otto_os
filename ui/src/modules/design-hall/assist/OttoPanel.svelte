@@ -759,7 +759,7 @@
     display: grid;
     place-items: center;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     background: var(--surface-3);
     color: var(--text-dim);
   }

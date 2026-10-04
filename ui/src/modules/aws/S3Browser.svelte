@@ -873,7 +873,7 @@
     color: var(--text-dim);
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-m);
   }
   .crumbs {
@@ -889,7 +889,7 @@
     color: var(--accent-text);
     cursor: pointer;
     padding: 2px 4px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     font: inherit;
     font-size: var(--fs-m);
     display: inline-flex;
@@ -944,7 +944,7 @@
     position: relative;
   }
   .split.drag-over .tbl-wrap {
-    outline: 2px dashed var(--accent);
+    outline: 2px dashed var(--accent-text);
     outline-offset: -4px;
   }
   .s3-drop {

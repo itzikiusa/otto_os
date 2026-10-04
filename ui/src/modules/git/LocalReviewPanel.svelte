@@ -808,7 +808,7 @@
 
   .grow { flex: 1; }
   .dim { color: var(--text-dim); }
-  .mono { font-family: var(--font-mono, monospace); }
+  .mono { font-family: var(--font-mono); }
 
   /* History section */
   .lrp-history {
