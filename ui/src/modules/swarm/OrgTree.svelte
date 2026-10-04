@@ -3,7 +3,9 @@
   // agent, a status dot, task/run counts, and its open sessions (click → open).
   // Supports drag-and-drop to reparent agents within the hierarchy.
   import Icon from '../../lib/components/Icon.svelte';
-  import { sentenceCase } from '../../lib/status';
+  import { sessionState } from '../../lib/status';
+  import StatusDot from '../../lib/components/StatusDot.svelte';
+  import { events } from '../../lib/events.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { onMount } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -50,6 +52,14 @@
       return showCompleted || st !== 'exited';
     });
   }
+
+  // One dot vocabulary (lib/status.ts): the events socket being down turns a
+  // "working" claim into the stale ring instead of a lie.
+  const stale = $derived(events.state !== 'connected');
+  const sessionDot = (id: string, raw: string) =>
+    sessionState(null, ws.statusMap[id] ?? raw, ws.needsYou[id] === true, { stale });
+  /** An agent is "working" while it holds a live run, otherwise idle. */
+  const agentDot = (live: number) => sessionState(null, live > 0 ? 'working' : 'idle', false, { stale });
 
   function runCount(agentId: string): number {
     return swarm.agentRunStats(agentId).live;
@@ -244,7 +254,7 @@
       {#if a.status === 'paused'}
         <span class="presence paused" role="img" aria-label="Paused" title="Paused — picks up no new work"><Icon name="pause" size={8} /></span>
       {:else}
-        <span class="presence state {running > 0 ? 'working' : 'idle'}" role="img" aria-label={running > 0 ? 'Working' : 'Idle'} title={running > 0 ? 'Working' : 'Idle — waiting for work'}></span>
+        <span class="presence"><StatusDot state={agentDot(running)} size={8} /></span>
       {/if}
     </span>
     <!-- The name opens the agent's editor (the most common action); the rest
@@ -257,7 +267,7 @@
       <span class="badge" role="img" aria-label="Runs on a schedule" title="Runs on a schedule"><Icon name="clock" size={12} /></span>
     {/if}
     {#if running > 0}
-      <span class="chip runs-chip" title="{running} active run{running === 1 ? '' : 's'}"><span class="run-dot" aria-hidden="true"></span>{running}</span>
+      <span class="chip runs-chip" title="{running} active run{running === 1 ? '' : 's'}"><StatusDot state={agentDot(running)} size={6} />{running}</span>
     {/if}
     <span class="grow"></span>
     <span class="row-tools">
@@ -282,7 +292,7 @@
       >
         <Icon name="terminal" size={12} />
         <span class="grow mono ellipsis">{s.title || s.provider}</span>
-        <span class="state {ws.statusMap[s.id] ?? s.status}" role="img" aria-label={sentenceCase(ws.statusMap[s.id] ?? s.status)} title={sentenceCase(ws.statusMap[s.id] ?? s.status)}></span>
+        <StatusDot state={sessionDot(s.id, s.status)} size={8} />
       </button>
       </div>
     {/each}
@@ -344,15 +354,9 @@
     gap: 4px;
     font-variant-numeric: tabular-nums;
   }
-  .run-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--status-working);
-  }
   .org-row.drag-over {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    outline: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
+    outline: 1px dashed color-mix(in srgb, var(--accent-text) 60%, transparent);
   }
   .org-row.dragging-self {
     opacity: 0.4;
@@ -459,6 +463,8 @@
     position: absolute;
     inset-inline-end: -2px;
     inset-block-end: -2px;
+    display: inline-flex;
+    border-radius: 50%;
     box-shadow: 0 0 0 2px var(--bg);
   }
   .presence.paused {
@@ -469,30 +475,6 @@
     place-items: center;
     background: var(--surface-2);
     color: var(--text-dim);
-  }
-  .state {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex: none;
-    background: var(--text-dim);
-  }
-  .state.active,
-  .state.running,
-  .state.working {
-    background: var(--status-working);
-  }
-  .state.idle,
-  .state.reconnectable {
-    background: var(--status-idle, var(--text-dim));
-  }
-  /* A paused agent is parked, not failed — same idle tone the swarm rail uses
-     for a paused swarm (red stays for an exited session). */
-  .state.paused {
-    background: var(--status-idle, var(--text-dim));
-  }
-  .state.exited {
-    background: var(--status-exited);
   }
   .badge {
     color: var(--text-dim);

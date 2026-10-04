@@ -745,7 +745,7 @@
     height: 24px;
     flex-shrink: 0;
     border: none;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
@@ -764,7 +764,7 @@
     }
   }
   .btab-close:hover {
-    background: color-mix(in srgb, var(--text-dim) 22%, transparent);
+    background: var(--hover);
     color: var(--text);
   }
   .btab-new {
@@ -889,7 +889,7 @@
   }
   .section-title {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.07em;
     color: var(--text-dim);
@@ -923,7 +923,7 @@
   .ql-key {
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     color: var(--accent-text);
   }
   .ql-label {
@@ -949,7 +949,7 @@
     gap: 8px;
   }
   .popover-desc {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     color: var(--accent-text);
     white-space: nowrap;
@@ -957,7 +957,7 @@
     text-overflow: ellipsis;
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     padding: 4px 6px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .popover-textarea {

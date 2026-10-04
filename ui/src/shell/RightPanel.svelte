@@ -9,6 +9,8 @@
   import type { Component } from 'svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { ui as uiStore } from '../lib/stores/ui.svelte';
+  import { RIGHT_MIN, RIGHT_MAX } from '../lib/stores/ui.svelte';
+  import { paneResizer, pxWide, RESIZE_TITLE } from '../lib/paneResizer';
   // Panels take different props (v1 Browser: `active`).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   type PanelComponent = Component<any>;
@@ -318,12 +320,16 @@
     style={forceOpen ? undefined : `width:${ui.rightWidth}px`}
   >
     {#if !forceOpen}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <div
         class="resize-handle"
+        role="separator"
+        tabindex="0"
+        aria-label="Resize the session panel"
         onmousedown={startResize}
         ondblclick={() => ui.setRightWidth(300)}
-        title="Drag to resize · double-click to reset"
+        title={RESIZE_TITLE}
+        use:paneResizer={{ value: ui.rightWidth, min: RIGHT_MIN, max: Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, (typeof window === 'undefined' ? RIGHT_MAX : window.innerWidth) - 360)), invert: true, onChange: (w) => ui.setRightWidth(w), onReset: () => ui.setRightWidth(300), text: pxWide }}
       ></div>
     {/if}
     <header class="rpanel-head">

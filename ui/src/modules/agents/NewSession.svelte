@@ -698,7 +698,7 @@
   .home-notice {
     display: block;
     margin-top: 4px;
-    color: var(--status-idle, var(--text-dim));
+    color: var(--text-dim);
   }
   .provider-grid {
     display: grid;
@@ -759,7 +759,7 @@
     justify-content: center;
     padding: 0;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text-dim);
     font: inherit;
@@ -876,7 +876,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     padding: 2px 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     line-height: 1;
   }
   .dir-remove:hover {

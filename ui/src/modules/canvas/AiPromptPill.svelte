@@ -96,7 +96,7 @@
     top: 12px;
     left: 50%;
     transform: translateX(-50%);
-    z-index: 20;
+    z-index: var(--z-sticky);
     width: min(720px, 92%);
   }
   .pill {
@@ -107,10 +107,10 @@
     background: var(--surface);
     border: 1px solid var(--accent);
     border-radius: 999px;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .pill:focus-within {
-    box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow);
+    box-shadow: 0 0 0 3px var(--accent-soft), var(--glass-shadow);
   }
   .pill.busy {
     opacity: 0.9;

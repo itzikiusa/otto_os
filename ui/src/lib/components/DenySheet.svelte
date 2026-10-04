@@ -2,7 +2,7 @@
   // Deny with an optional reason (patterns §5). The reason goes back to the
   // agent so it can adjust; leaving it empty is fine. A skipped question uses
   // the same sheet with its own title / verb / hint.
-  import Modal from '../../../lib/components/Modal.svelte';
+  import Modal from './Modal.svelte';
 
   interface Props {
     action: string;
@@ -28,7 +28,7 @@
     <label for="deny-reason">Reason (optional)</label>
     <textarea
       id="deny-reason"
-      class="input"
+      class="input deny-reason"
       rows="3"
       bind:value={reason}
       placeholder="Not now — ask me again after lunch"
@@ -48,7 +48,7 @@
 </Modal>
 
 <style>
-  textarea.input {
+  .deny-reason {
     height: auto;
     min-height: 72px;
     resize: vertical;

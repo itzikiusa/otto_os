@@ -251,7 +251,7 @@
   }
   .views button {
     border: 0;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     padding: 4px 9px;
@@ -327,7 +327,7 @@
     font-size: var(--fs-m);
   }
   .arow:hover {
-    background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+    background: var(--hover);
   }
   .cell {
     display: flex;

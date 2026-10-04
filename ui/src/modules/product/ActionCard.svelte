@@ -374,7 +374,7 @@
   .action-card {
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    background: var(--surface-2, var(--surface));
+    background: var(--surface-2);
     margin-top: 8px;
     overflow: hidden;
   }
@@ -462,7 +462,7 @@
     cursor: pointer;
   }
   .item-label:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
     border-radius: var(--radius-s);
   }
   .item-label input {

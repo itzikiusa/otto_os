@@ -313,7 +313,7 @@
     gap: 6px;
     margin: 0;
     padding: 6px 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--accent-soft);
     color: var(--accent-text);
     font-size: var(--fs-s);

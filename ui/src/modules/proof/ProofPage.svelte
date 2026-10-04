@@ -4,6 +4,8 @@
   // + the pack list; right = the open pack's detail (badges, artifacts grouped
   // by kind, and assemble / add-artifact / waive / delete actions).
   import { untrack } from 'svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -110,6 +112,8 @@
   $effect(() => {
     if (detail?.pack.id) rememberSelection('proof', detail.pack.id);
   });
+  // The pack list's width — drag / ←→ on the divider, remembered across visits.
+  let listW = $state(loadPaneWidth('proof.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   // An empty, unfiltered list has nothing to show: the page-level empty state
   // owns the page (a filtered-empty list keeps the rail so the filter can change).
   const showRail = $derived(proof.packs.length > 0 || filter !== 'all');
@@ -712,7 +716,7 @@
   <div class="proof-split">
   <!-- Left: filters + pack list. Hidden on a phone while a pack is open. -->
   {#if showRail}
-  <aside class="rail" class:hide-phone={viewport.isPhone && detail}>
+  <aside class="rail" class:hide-phone={viewport.isPhone && detail} style="--list-pane-w:{listW}px">
     <div class="rail-head">
       <span class="section-title">Proof packs</span>
       <button class="icon-btn" onclick={newPack} aria-label="New proof pack" title="New proof pack">
@@ -762,6 +766,9 @@
       {/if}
     </div>
   </aside>
+  {#if !viewport.isPhone}
+    <PaneDivider bind:width={listW} storageKey="proof.listW" label="Resize the proof packs list" />
+  {/if}
   {/if}
 
   <!-- Right: detail. -->
@@ -1181,9 +1188,8 @@
     min-height: 0;
   }
   .rail {
-    width: 280px;
+    width: var(--list-pane-w, 280px);
     flex: none;
-    border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -1505,7 +1511,7 @@
     margin-bottom: 12px;
   }
   .sha-chip {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);

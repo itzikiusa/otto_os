@@ -291,7 +291,7 @@
   }
   .fld input::placeholder, .fld textarea::placeholder { color: var(--text-dim); }
   .fld input:focus-visible, .fld select:focus-visible, .fld textarea:focus-visible {
-    outline: 2px solid var(--accent); outline-offset: 1px;
+    outline: 2px solid var(--accent-text); outline-offset: 1px;
   }
   .toggles { display: flex; flex-direction: column; gap: 6px; }
   .chk { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); color: var(--text); }

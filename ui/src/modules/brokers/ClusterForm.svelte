@@ -326,7 +326,7 @@
     gap: 12px;
     margin-top: 2px;
     padding: 12px;
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
     background: color-mix(in srgb, var(--accent) 5%, transparent);
   }

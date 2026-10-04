@@ -4,6 +4,7 @@
   // (one agent's page). The first list GET seeds four disabled example agents
   // server-side — they render as normal cards, marked "Example".
   import RelTime from '../../lib/components/RelTime.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -121,15 +122,6 @@
     return a.model ? `${a.provider} · ${a.model}` : a.provider;
   }
 
-  // Tab list keyboard: ←/→ switch between Agents and Rooms.
-  function onTabKey(e: KeyboardEvent): void {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'Home' && e.key !== 'End') return;
-    e.preventDefault();
-    const toRooms = e.key === 'End' || ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && sub !== 'rooms');
-    const tablist = e.currentTarget as HTMLElement;
-    router.go(toRooms ? 'personal-agents/rooms' : 'personal-agents');
-    tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]')[toRooms ? 1 : 0]?.focus();
-  }
 </script>
 
 {#if agentId}
@@ -276,7 +268,7 @@
   /* Stretch the name's hit area over the whole card (the "card link" pattern). */
   .name::after { content: ''; position: absolute; inset: 0; border-radius: var(--radius-m); }
   .name:focus-visible { outline: none; }
-  .name:focus-visible::after { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .name:focus-visible::after { outline: 2px solid var(--accent-text); outline-offset: -1px; }
   .paused .name { color: var(--text-dim); }
   .prov { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: var(--fs-s); color: var(--text-dim); }
   .prov :global(svg) { flex-shrink: 0; }

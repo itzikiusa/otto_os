@@ -9,7 +9,7 @@
   import { aws } from '../../lib/stores/aws.svelte';
   import { awsApi, isLoginRequired } from '../../lib/api/aws';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmProd } from '../../lib/confirmProd';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -93,20 +93,17 @@
   async function act(i: Ec2Instance, action: Ec2Action): Promise<void> {
     if (!resourceAccess.can('aws_account', account.id, `ec2_${action}`, 'aws_ec2', 'edit')) return;
     const label = i.name ? `${i.name} (${i.instance_id})` : i.instance_id;
-    if (action === 'start') {
-      const ok = await confirmer.ask(`Start ${label} in ${account.name} · ${rowRegion(i)}?`, { title: 'Start instance', confirmLabel: 'Start', danger: false });
-      if (!ok) return;
-    } else {
-      const typed = await confirmer.promptText(
-        `${action === 'stop' ? 'Stop' : 'Reboot'} ${label} in ${account.name} · ${rowRegion(i)}${account.environment === 'prod' ? ' — this is PRODUCTION' : ''}? Type the instance id to confirm.`,
-        { title: `${action === 'stop' ? 'Stop' : 'Reboot'} instance`, confirmLabel: action === 'stop' ? 'Stop' : 'Reboot', placeholder: i.instance_id, danger: true },
-      );
-      if (typed === null) return;
-      if (typed !== i.instance_id) {
-        toasts.warn('Instance id did not match — cancelled');
-        return;
-      }
-    }
+    const verb = action === 'start' ? 'Start' : action === 'stop' ? 'Stop' : 'Reboot';
+    const ok = await confirmProd({
+      env: account.environment,
+      verb,
+      title: `${verb} instance`,
+      where: `EC2 ${label} · ${account.name} · ${rowRegion(i)}`,
+      // Start is reversible; stop / reboot interrupt a running host, so type the id.
+      typed: action === 'start' ? undefined : i.instance_id,
+      danger: action !== 'start',
+    });
+    if (!ok) return;
     busy = { ...busy, [i.instance_id]: true };
     try {
       const r = await awsApi.ec2Action(account.id, i.instance_id, action, rowRegion(i));
@@ -405,7 +402,7 @@
     color: var(--text-dim);
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .pill {
     display: inline-block;
@@ -418,17 +415,17 @@
     text-transform: lowercase;
   }
   .pill.running {
-    color: var(--status-working);
+    color: var(--success);
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
   }
   .pill.pending,
   .pill.stopping,
   .pill.shutting-down {
-    color: var(--status-warn);
+    color: var(--warning);
     background: color-mix(in srgb, var(--status-warn) 16%, transparent);
   }
   .pill.terminated {
-    color: var(--status-exited);
+    color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
   }
   .icon-btn {

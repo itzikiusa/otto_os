@@ -196,7 +196,7 @@ test('Athena phone cancel, query failure and subsequent successful results', asy
   await page.getByRole('button', { name: 'Cancel', exact: true }).first().click();
   await expect.poll(() => cancelled).toBe(true);
   await expect(page.getByTestId('athena-run')).toBeEnabled();
-  await page.getByTestId('athena-run').click(); await expect(page.getByText('Synthetic Athena unavailable', { exact: false })).toBeVisible();
+  await page.getByTestId('athena-run').click(); await expect(page.getByRole('alert').getByText('Synthetic Athena unavailable', { exact: false })).toBeVisible();
   state = 'SUCCEEDED'; await page.getByTestId('athena-run').click();
   await expect(page.getByText('42', { exact: true }).first()).toBeVisible();
   await expectNoHorizontalOverflow(page); await page.screenshot({ path: '/tmp/otto-ux-r4-cloud-athena-phone.png' });
@@ -308,7 +308,7 @@ test('SQS redrive and typed purge submit the confirmed synthetic queue', async (
   await openPage(page, 'aws/ux-account/sqs'); await page.getByRole('cell', { name: 'review-orders.fifo FIFO', exact: true }).click();
   await page.getByRole('tab', { name: 'Redrive', exact: true }).click();
   await page.getByRole('button', { name: 'Start redrive', exact: true }).click();
-  await page.getByRole('dialog', { name: 'Start redrive' }).getByRole('button', { name: 'Start', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Start redrive' }).getByRole('button', { name: 'Start redrive', exact: true }).click();
   await expect.poll(() => redrive).toMatchObject({ source_arn: 'arn:aws:sqs:eu-west-1:123:review-orders.fifo' });
   await page.getByRole('button', { name: 'Queue actions' }).click(); await page.getByRole('menuitem', { name: 'Purge queue…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Purge queue', exact: true });
@@ -403,5 +403,5 @@ async function contrastOf(page: Page, sel: string): Promise<number> {
 test('Monitor overview cluster card opens with Space', async ({ page }) => {
   await overview(page); await monitoring(page); await openPage(page, 'kubernetes/monitor');
   await page.getByTestId('k8s-monitor-card').focus(); await page.keyboard.press('Space');
-  await expect(page).toHaveURL(/monitor\/ux-cluster\/workloads$/);
+  await expect(page).toHaveURL(/ux-cluster\/monitor\/workloads$/);
 });

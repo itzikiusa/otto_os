@@ -1179,9 +1179,9 @@
       onclick={() => database.openAssist('ask')}
       disabled={!canQuery || !auth.can('agents','edit')}
       title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Ask the DB Assistant about this connection — it opens beside the editor'}
-      aria-label="Ask AI"
+      aria-label="Ask Otto"
     >
-      <Icon name="sparkle" size={12} /><span class="btn-label">Ask AI</span>
+      <Icon name="sparkle" size={12} /><span class="btn-label">Ask Otto</span>
     </button>
     <button
       class="btn small ghost"
@@ -1581,7 +1581,7 @@
     gap: 6px;
     height: 26px;
     max-width: 220px;
-    padding: 0 4px 0 11px;
+    padding-block: 0; padding-inline: 11px 4px;
     border: 1px solid transparent;
     border-bottom: none;
     border-top-left-radius: var(--radius-s);
@@ -1596,7 +1596,7 @@
     transition: background 0.12s, color 0.12s;
   }
   .qe-tab:hover {
-    background: color-mix(in srgb, var(--text-dim) 7%, transparent);
+    background: var(--hover);
     color: var(--text);
   }
   .qe-tab.active {
@@ -1632,7 +1632,7 @@
     display: inline-flex;
     align-items: center;
     padding: 1px 3px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: var(--accent-soft);
     color: var(--accent-text);
     flex: 0 0 auto;
@@ -1645,20 +1645,12 @@
   }
   .qe-tab-dot.running {
     background: var(--accent);
-    animation: qe-pulse 1s ease-in-out infinite;
+    animation: otto-pulse 1s ease-in-out infinite;
   }
   .qe-tab-dot.error {
     background: var(--status-exited);
   }
-  @keyframes qe-pulse {
-    0%,
-    100% {
-      opacity: 0.35;
-    }
-    50% {
-      opacity: 1;
-    }
-  }
+  
   .qe-tab-close {
     display: inline-flex;
     align-items: center;
@@ -1679,7 +1671,7 @@
   }
   .qe-tab-close:hover {
     background: color-mix(in srgb, var(--status-exited) 22%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .qe-tab-new {
     display: inline-flex;
@@ -1772,11 +1764,11 @@
     font-size: var(--fs-xs);
   }
   .qe-script-state.ok {
-    color: var(--status-working);
+    color: var(--success);
     font-weight: 600;
   }
   .qe-script-state.warn {
-    color: var(--status-warn);
+    color: var(--warning);
     font-weight: 600;
   }
   .qe-script-state.dim {
@@ -1873,7 +1865,7 @@
   }
   .qe-kbd-title {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -1902,7 +1894,7 @@
   .btn.stop {
     border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);
     background: color-mix(in srgb, var(--status-exited) 16%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
     font-weight: 600;
   }
   .btn.stop:hover {
@@ -2138,7 +2130,7 @@
       font-variant-numeric: tabular-nums;
     }
     .qe-acc-count.err {
-      color: var(--status-exited);
+      color: var(--danger);
       background: color-mix(in srgb, var(--status-exited) 16%, transparent);
     }
     /* A collapsed block is removed from flow. */

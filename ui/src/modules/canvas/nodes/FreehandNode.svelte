@@ -67,7 +67,7 @@
     height: 100%;
   }
   .freehand.selected {
-    outline: 1px dashed var(--accent);
+    outline: 1px dashed var(--accent-text);
     border-radius: var(--radius-s);
   }
   svg {

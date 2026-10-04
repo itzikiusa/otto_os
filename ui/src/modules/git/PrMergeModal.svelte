@@ -31,32 +31,47 @@
   let merging = $state(false);
   let error = $state<string | null>(null);
 
-  // Both probes are best-effort: a provider that answers neither still lets the
-  // user merge, the rows just read "unavailable" instead of lying with zeros.
+  // Both probes are best-effort, but a failed probe is NOT "all clear": the
+  // row reads "Unavailable" with a Retry, and Merge needs "Merge anyway" until
+  // CI / readiness could actually be verified.
   let checks = $state<PrChecksResp | null>(null);
   let checksLoading = $state(true);
+  let checksError = $state(false);
   let readiness = $state<PrReadiness | null>(null);
   let readinessLoading = $state(true);
+  let readinessError = $state(false);
+  // Bumped by Retry to re-run the probes.
+  let probeTick = $state(0);
 
   $effect(() => {
     const id = repoId;
     const n = number;
+    void probeTick;
     checksLoading = true;
+    checksError = false;
     void api
       .get<PrChecksResp>(`/repos/${id}/prs/${n}/checks`)
       .then((r) => (checks = r))
-      .catch(() => (checks = null))
+      .catch(() => {
+        checks = null;
+        checksError = true;
+      })
       .finally(() => (checksLoading = false));
   });
 
   $effect(() => {
     const id = repoId;
     const n = number;
+    void probeTick;
     readinessLoading = true;
+    readinessError = false;
     void api
       .get<PrReadiness>(`/repos/${id}/prs/${n}/readiness`)
       .then((r) => (readiness = r))
-      .catch(() => (readiness = null))
+      .catch(() => {
+        readiness = null;
+        readinessError = true;
+      })
       .finally(() => (readinessLoading = false));
   });
 
@@ -69,6 +84,7 @@
       checks?.ci.state === 'failure' ? 'CI failing' : null,
       mergeable === false ? 'Not mergeable' : null,
       blockers > 0 ? `${blockers} blocker finding${blockers === 1 ? '' : 's'}` : null,
+      checksError || readinessError ? 'Unable to verify CI / readiness' : null,
     ].filter((r): r is string => r !== null),
   );
   const loading = $derived(checksLoading || readinessLoading);
@@ -141,8 +157,9 @@
         <span class="rvalue">
           {#if checksLoading}
             <span class="dim">Loading…</span>
-          {:else if checks === null}
-            <span class="dim">Unavailable</span>
+          {:else if checksError || checks === null}
+            <span class="warn">Unavailable</span>
+            <button class="linkbtn" onclick={() => probeTick++}>Retry</button>
           {:else if checks.checks.length === 0}
             <span class="dim">No checks reported</span>
           {:else}
@@ -172,7 +189,9 @@
         <span class="rlabel">Approvals</span>
         <span class="rvalue">
           {#if readinessLoading}<span class="dim">Loading…</span>
-          {:else if readiness === null}<span class="dim">Unavailable</span>
+          {:else if readinessError || readiness === null}
+            <span class="warn">Unavailable</span>
+            <button class="linkbtn" onclick={() => probeTick++}>Retry</button>
           {:else}{readiness.approvals}{/if}
         </span>
       </div>
@@ -194,6 +213,8 @@
             <span class:bad={blockers > 0}>{blockers}</span>
             <span class="dim">of {readiness.review.unresolved_total} unresolved</span>
             <button class="linkbtn" onclick={openReview}>Open review</button>
+          {:else if readinessError}
+            <span class="warn">Unavailable</span>
           {:else}
             <span class="dim">No review run</span>
           {/if}

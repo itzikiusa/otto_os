@@ -12,6 +12,7 @@
   //   Settings  the workspace setting `design_learning` (off / suggest only)
   // The evidence pane shows the signals behind the selected rule.
   import { untrack } from 'svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -285,19 +286,6 @@
   function go(t: LearnedTab): void {
     router.go(`design/learned/${t}`);
   }
-  let tablist = $state<HTMLDivElement | null>(null);
-  function onTabKey(e: KeyboardEvent): void {
-    const i = TABS.findIndex((t) => t.id === tab);
-    let j = -1;
-    if (e.key === 'ArrowRight') j = (i + 1) % TABS.length;
-    else if (e.key === 'ArrowLeft') j = (i + TABS.length - 1) % TABS.length;
-    else if (e.key === 'Home') j = 0;
-    else if (e.key === 'End') j = TABS.length - 1;
-    if (j < 0) return;
-    e.preventDefault();
-    go(TABS[j].id);
-    tablist?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[j]?.focus();
-  }
   const count = (t: LearnedTab): number | null => {
     if (t === 'pending') return learned?.pending.length ?? null;
     if (t === 'rules') return learned?.active.length ?? null;
@@ -325,7 +313,7 @@
 <PageHeader title="What Otto learned"
   crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]}>
   {#snippet tabs()}
-    <div class="segmented" role="tablist" aria-label="Learning" bind:this={tablist}>
+    <div class="segmented" role="tablist" aria-label="Learning">
       {#each TABS as t (t.id)}
         {@const n = count(t.id)}
         <button role="tab" aria-selected={tab === t.id} class:active={tab === t.id} tabindex={tab === t.id ? 0 : -1}

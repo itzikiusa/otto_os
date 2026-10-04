@@ -175,7 +175,7 @@
     font-size: var(--fs-m);
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
   }
   .dim {

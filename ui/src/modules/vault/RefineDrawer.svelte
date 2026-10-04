@@ -222,6 +222,7 @@
     </select>
     <input
       bind:value={prompt}
+      aria-label="Refinement request"
       placeholder="Refine this note… (e.g. tighten the intro, add a troubleshooting section)"
       disabled={sending}
       onkeydown={(e) => {
@@ -294,7 +295,7 @@
   .bar select {
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
     padding: 6px 8px;
@@ -308,7 +309,7 @@
     min-width: 0;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-m);
     padding: 6px 10px;
@@ -323,7 +324,7 @@
     background: var(--accent-solid);
     border: none;
     color: var(--accent-contrast);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     padding: 6px 14px;
     font-size: var(--fs-s);
     cursor: pointer;
@@ -340,7 +341,7 @@
     background: transparent;
     border: 1px solid var(--border);
     color: var(--text-dim);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     padding: 6px 10px;
     font-size: var(--fs-s);
     cursor: pointer;

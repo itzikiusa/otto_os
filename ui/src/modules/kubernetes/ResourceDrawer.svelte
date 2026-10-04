@@ -6,6 +6,7 @@
 
 <script lang="ts">
   import { dialogFocus } from '../../lib/dialogFocus';
+  import { onTabKey } from '../../lib/tabKeys';
   import { ui } from '../../lib/stores/ui.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { actionOperation } from './permissions';
@@ -266,16 +267,6 @@
     };
   });
 
-  function tabKey(e: KeyboardEvent, i: number): void {
-    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
-    e.preventDefault();
-    const button = e.currentTarget as HTMLButtonElement;
-    const rtl = getComputedStyle(button).direction === 'rtl';
-    const step = (e.key === 'ArrowRight' ? 1 : -1) * (rtl ? -1 : 1);
-    const j = e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : (i + step + TABS.length) % TABS.length;
-    ontab(TABS[j].id);
-    button.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[j]?.focus();
-  }
 </script>
 
 <aside bind:this={drawerEl} class="drawer" role={modal ? 'dialog' : undefined} aria-modal={modal ? 'true' : undefined} aria-label="{def.singular} details" data-testid="k8s-drawer">
@@ -291,7 +282,7 @@
   </header>
 
   <div class="dr-tabs" role="tablist" aria-label="Detail tabs">
-    {#each TABS as t, i (t.id)}
+    {#each TABS as t (t.id)}
       <button
         role="tab"
         id="k8s-tab-{t.id}"
@@ -300,7 +291,7 @@
         tabindex={tab === t.id ? 0 : -1}
         class:active={tab === t.id}
         onclick={() => ontab(t.id)}
-        onkeydown={(e) => tabKey(e, i)}
+        onkeydown={onTabKey}
       >{t.label}</button>
     {/each}
   </div>
@@ -442,7 +433,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 10px 6px 14px;
+    padding-block: 8px 6px; padding-inline: 14px 10px;
     border-bottom: 1px solid var(--border);
   }
   .dr-title {
@@ -484,13 +475,13 @@
     background: var(--text-dim);
   }
   .health-ok {
-    color: var(--status-working);
+    color: var(--success);
   }
   .health-ok .hdot {
     background: var(--status-working);
   }
   .health-bad {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .health-bad .hdot {
     background: var(--status-exited);
@@ -625,7 +616,7 @@
     vertical-align: top;
   }
   .events tr.warn td:first-child {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .events .msg {
     white-space: pre-wrap;
@@ -649,7 +640,7 @@
     white-space: nowrap;
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
     white-space: pre-wrap;
   }

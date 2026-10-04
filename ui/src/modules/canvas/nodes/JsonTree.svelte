@@ -110,13 +110,13 @@
     color: var(--text-dim);
   }
   .str {
-    color: var(--status-working);
+    color: var(--success);
   }
   .num {
     color: var(--accent-text);
   }
   .bool {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .null,
   .other {

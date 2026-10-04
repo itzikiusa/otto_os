@@ -84,7 +84,7 @@
 <style>
   .children-board {
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     padding: 10px 12px 12px;
     margin-top: 14px;
     display: flex;
@@ -182,6 +182,6 @@
     color: var(--text-dim);
   }
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
 </style>

@@ -194,7 +194,7 @@
     color: var(--danger);
   }
   .score.winner {
-    outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+    outline: 2px solid color-mix(in srgb, var(--accent-text) 60%, transparent);
   }
   .dash {
     color: var(--text-dim);

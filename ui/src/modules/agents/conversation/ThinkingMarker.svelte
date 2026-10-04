@@ -49,7 +49,7 @@
     align-items: center;
     gap: 6px;
     max-width: 100%;
-    padding: 2px 9px 2px 7px;
+    padding-block: 2px; padding-inline: 7px 9px;
     border: 1px dashed color-mix(in srgb, var(--cat-4) 45%, transparent);
     border-radius: 99px;
     background: color-mix(in srgb, var(--cat-4) 9%, transparent);
@@ -64,7 +64,7 @@
     background: color-mix(in srgb, var(--cat-4) 15%, transparent);
   }
   .think-row:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .think-mark {

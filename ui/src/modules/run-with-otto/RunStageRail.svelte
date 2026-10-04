@@ -107,7 +107,7 @@
   .step.done .bubble {
     border-color: color-mix(in srgb, var(--status-working) 55%, var(--border));
     background: color-mix(in srgb, var(--status-working) 14%, var(--bg));
-    color: var(--status-working);
+    color: var(--success);
   }
   .step.done { color: var(--text); }
   .step.now .bubble {
@@ -120,14 +120,14 @@
   .step.bad .bubble {
     border-color: color-mix(in srgb, var(--status-exited) 60%, var(--border));
     background: color-mix(in srgb, var(--status-exited) 15%, var(--bg));
-    color: var(--status-exited);
+    color: var(--danger);
   }
-  .step.bad { color: var(--status-exited); }
+  .step.bad { color: var(--danger); }
   /* the approval step reads amber in the static explainer — the one human gate */
   .step.gate .bubble {
     border-color: color-mix(in srgb, var(--status-warn) 55%, var(--border));
     background: color-mix(in srgb, var(--status-warn) 12%, var(--bg));
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .rail.dead .step .bubble { opacity: 0.45; }
   .rail.dead .step { opacity: 0.7; }

@@ -139,7 +139,7 @@
   }
   .plan-close:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+    background: var(--hover);
   }
   .plan-tree,
   .plan-raw {
@@ -210,7 +210,7 @@
     align-items: center;
     gap: 3px;
     font-size: var(--fs-xs);
-    color: var(--status-exited);
+    color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
     border: 1px solid color-mix(in srgb, var(--status-exited) 35%, transparent);
     border-radius: 999px;

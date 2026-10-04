@@ -11,6 +11,8 @@
   import type { BundledSkillView, LibrarySkill, ProviderSkillInfo } from '../../lib/api/types';
   import { skillLabApi } from '../../lib/api/skillLab';
   import { toasts } from '../../lib/toast.svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -191,6 +193,8 @@
   }
 
   // ---- Selection -----------------------------------------------------------
+  // The skills list's width — drag / ←→ on the divider, remembered across visits.
+  let listW = $state(loadPaneWidth('skills.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let selName = $state<string | null>(null);
   let selSource = $state<VariantSource>('library');
   let tab = $state<DetailTab>('overview');
@@ -275,9 +279,12 @@
     }
   }
   async function deleted(): Promise<void> {
+    // Reload FIRST, then clear: the open-on-a-skill effect above re-runs on the
+    // cleared selection against the fresh list and lands on a neighbour instead
+    // of re-picking the skill that was just deleted (or leaving a blank pane).
+    await loadAll();
     selName = null;
     phoneDetail = false;
-    await loadAll();
   }
 
   // ---- ⌘K ---------------------------------------------------------------------
@@ -351,7 +358,7 @@
     </EmptyState>
   {:else}
     <div class="split">
-      <aside id="skills-list-pane" class="list-pane" class:collapsed={listCollapsed && !viewport.isPhone} class:hide-phone={viewport.isPhone && phoneDetail} aria-label="Skills">
+      <aside id="skills-list-pane" class="list-pane" class:collapsed={listCollapsed && !viewport.isPhone} class:hide-phone={viewport.isPhone && phoneDetail} aria-label="Skills" style="--list-pane-w:{listW}px">
         <div class="list-tools">
           <label class="search">
             <Icon name="search" size={14} />
@@ -433,6 +440,9 @@
           <span><span class="sdot single"></span>One copy</span>
         </div>
       </aside>
+      {#if !viewport.isMobile && !listCollapsed}
+        <PaneDivider bind:width={listW} storageKey="skills.listW" label="Resize the skills list" />
+      {/if}
 
       <section class="detail-pane" class:hide-phone={viewport.isPhone && !phoneDetail}>
         {#if selected}
@@ -455,7 +465,11 @@
             {onopenreview}
           />
         {:else}
-          <EmptyState title="No skill selected" body="Pick a skill on the left to see its method, files and history." icon="zap" />
+          {#if groups.length === 0}
+            <EmptyState title="No skills yet" body="Create a skill or import a package to see its method, files and history here." icon="zap" actionLabel="New skill…" actionIcon="plus" onaction={openNew} />
+          {:else}
+            <EmptyState title="{groups.length} {groups.length === 1 ? 'skill' : 'skills'}" body="Pick a skill on the left to see its method, files and history." icon="zap" />
+          {/if}
         {/if}
       </section>
     </div>
@@ -489,12 +503,11 @@
     padding: 12px;
   }
   .list-pane {
-    width: 320px;
+    width: var(--list-pane-w, 280px);
     flex: none;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    border-inline-end: 1px solid var(--border);
     background: var(--surface);
   }
   .list-pane.collapsed { display: none; }
@@ -733,15 +746,9 @@
   .small {
     font-size: var(--fs-xs);
   }
-  @media (max-width: 1024px) {
-    .list-pane {
-      width: 280px;
-    }
-  }
   @media (max-width: 640px) {
     .list-pane {
       width: 100%;
-      border-inline-end: none;
     }
     .hide-phone {
       display: none;

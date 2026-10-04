@@ -395,7 +395,7 @@
     align-items: center;
     justify-content: space-between;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.07em;
     color: var(--text-dim);
@@ -421,7 +421,7 @@
     gap: 6px;
   }
   .count.nudge {
-    color: var(--status-warn);
+    color: var(--warning);
     background: color-mix(in srgb, var(--status-warn) 14%, transparent);
   }
   .add-task-btn {
@@ -511,21 +511,13 @@
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .badge.queued {
-    color: var(--status-warn);
+    color: var(--warning);
     background: color-mix(in srgb, var(--status-warn) 14%, transparent);
   }
   .task.nudge-pending .task-glyph {
-    animation: pulse 1.4s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.35;
-    }
-  }
+  
   .hint {
     margin-top: 4px;
   }
@@ -579,14 +571,14 @@
     font-weight: 600;
   }
   .task-completed .task-glyph {
-    color: var(--status-working);
+    color: var(--success);
   }
   .task-completed .task-title {
     color: var(--text-dim);
     text-decoration: line-through;
   }
   .task-blocked .task-glyph {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .task-cancelled .task-title {
     color: var(--text-dim);
@@ -700,7 +692,7 @@
     cursor: pointer;
   }
   .row-main.clickable:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .row-main:hover {
@@ -718,10 +710,10 @@
     color: var(--accent-text);
   }
   .lvl-warn .row-icon {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .lvl-error .row-icon {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .row-body {
     min-width: 0;
@@ -764,7 +756,7 @@
     color: var(--text-dim);
   }
   .row-detail {
-    margin: 2px 0 4px 28px;
+    margin-block: 2px 4px; margin-inline: 28px 0;
     padding: 6px 8px;
     background: var(--surface-2);
     border-radius: var(--radius-s);

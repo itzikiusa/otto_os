@@ -211,5 +211,5 @@
   code { font-size: var(--fs-xs); overflow-wrap: anywhere; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 25vh; overflow: auto; }
   .error { color: var(--danger); }
-  @media (max-width: 600px) { .entry { flex-wrap: wrap; } .entry > div { flex-basis: 55%; } }
+  @media (max-width: 640px) { .entry { flex-wrap: wrap; } .entry > div { flex-basis: 55%; } }
 </style>

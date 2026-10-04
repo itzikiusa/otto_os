@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
   import { untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { api, ApiError } from '../../lib/api/client';
@@ -79,16 +80,6 @@
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-  }
-  function resizeListKey(e: KeyboardEvent): void {
-    const forward = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
-    if (e.key === 'Home') listW = 220;
-    else if (e.key === 'End') listW = 520;
-    else if (e.key === 'Enter') listW = LIST_W_DEFAULT;
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') listW = Math.max(220, Math.min(520, listW + (e.key === forward ? 1 : -1) * (e.shiftKey ? 40 : 10)));
-    else return;
-    e.preventDefault();
-    persistListW();
   }
   function resetListW(): void {
     listW = LIST_W_DEFAULT;
@@ -378,14 +369,11 @@
     role="separator"
     aria-orientation="vertical"
     tabindex="0"
-    aria-valuemin="220"
-    aria-valuemax="520"
-    aria-valuenow={Math.round(listW)}
-    onkeydown={resizeListKey}
-    aria-label="Drag to resize the group list (double-click to reset)"
-    title="Drag to resize · double-click to reset"
+    aria-label="Resize the group list"
+    title={RESIZE_TITLE}
     ondblclick={resetListW}
     onpointerdown={startListResize}
+    use:paneResizer={{ value: listW, min: 220, max: 520, step: 10, bigStep: 40, onChange: (w) => { listW = w; persistListW(); }, onReset: resetListW, text: pxWide }}
   ></div>
 
   <div class="detail">
@@ -676,7 +664,7 @@
     text-transform: uppercase;
     letter-spacing: 0.03em;
     padding: 1px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
   }
   .state.ok {
     background: var(--success-soft);
@@ -737,14 +725,14 @@
   }
   .lag-bar {
     height: 6px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--warning) 15%, transparent);
     overflow: hidden;
   }
   .lag-fill {
     height: 100%;
     background: var(--status-warn);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .reset-bar {
     display: flex;
@@ -810,7 +798,7 @@
     margin: 8px;
     border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
     border-inline-start: 3px solid var(--warning);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--warning) 8%, transparent);
   }
   .acl-title {
@@ -821,13 +809,13 @@
     font-family: var(--font-mono);
     background: var(--surface-2);
     padding: 0 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   /* Dry-run preview */
   .dryrun-preview {
     margin-top: 8px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     overflow: hidden;
   }
   .dryrun-summary {

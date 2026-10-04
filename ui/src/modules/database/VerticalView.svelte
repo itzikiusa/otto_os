@@ -497,7 +497,7 @@
   }
   .jrec-copy:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    background: var(--hover);
   }
   .vrec-more {
     font-size: var(--fs-m);

@@ -540,7 +540,13 @@
     </div>
     {#if environment === 'prod'}
       <span class="hint danger">
-        Production — writes &amp; schema changes are blocked until you type a confirmation.
+        {#if kind === 'ssh'}
+          Production — shown with a prod badge; file uploads, renames and deletes ask you to confirm first.
+        {:else if kind === 'custom'}
+          Production — shown with a prod badge so it can’t be mistaken for a dev target.
+        {:else}
+          Production — writes &amp; schema changes are blocked until you type a confirmation.
+        {/if}
       </span>
     {/if}
   </div>

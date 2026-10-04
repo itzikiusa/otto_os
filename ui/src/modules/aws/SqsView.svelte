@@ -12,7 +12,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmProd } from '../../lib/confirmProd';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -157,13 +157,16 @@
     }
   }
 
-  /** Appended to destructive confirms so a prod queue reads as such (EC2 does the same). */
-  const prodNote = $derived(account.environment === 'prod' ? ' — this is PRODUCTION' : '');
+  /** "SQS queue orders-dlq · prod-account · eu-west-1" — the destination line of every confirm. */
+  const queueWhere = (name: string): string => `SQS queue ${name} · ${account.name} · ${rq || account.region}`;
 
   async function deleteMessage(m: SqsMessage): Promise<void> {
     if (!selected) return;
-    const ok = await confirmer.ask(`Delete message ${m.message_id} from “${selected.name}” in ${account.name}${prodNote}? This cannot be undone.`, {
-      title: 'Delete message',
+    const ok = await confirmProd({
+      env: account.environment,
+      verb: 'Delete message',
+      where: queueWhere(selected.name),
+      what: `Message ${m.message_id} — this cannot be undone.`,
     });
     if (!ok) return;
     try {
@@ -219,17 +222,19 @@
 
   // ── purge / redrive ──
   async function purge(q: SqsQueue): Promise<void> {
-    const typed = await confirmer.promptText(
-      `Purge ALL messages from “${q.name}” in ${account.name}${prodNote}? Type the queue name to confirm.`,
-      { title: 'Purge queue', confirmLabel: 'Purge', placeholder: q.name, danger: true },
-    );
-    if (typed === null) return;
-    if (typed !== q.name) {
-      toasts.warn('Name did not match — purge cancelled');
-      return;
-    }
+    // Always typed (purge empties the whole queue), prod or not.
+    const ok = await confirmProd({
+      env: account.environment,
+      verb: 'Purge',
+      title: 'Purge queue',
+      where: queueWhere(q.name),
+      what: 'Deletes ALL messages in the queue. This cannot be undone.',
+      typed: q.name,
+      danger: true,
+    });
+    if (!ok) return;
     try {
-      await awsApi.sqsPurge(account.id, q.url, typed, rq || undefined);
+      await awsApi.sqsPurge(account.id, q.url, q.name, rq || undefined);
       toasts.success('Purge started', 'SQS empties the queue over the next ~60 s');
       void aws.loadSqsAttrs(account.id, q.url, rq);
     } catch (e) {
@@ -242,10 +247,12 @@
   async function redrive(): Promise<void> {
     const src = attrs?.attributes.QueueArn;
     if (!src || !selected) return;
-    const ok = await confirmer.ask(
-      `Move every message from “${selected.name}” in ${account.name}${prodNote} back to ${redriveDest.trim() || 'its original source queue(s)'}?`,
-      { title: 'Start redrive', confirmLabel: 'Start', danger: false },
-    );
+    const ok = await confirmProd({
+      env: account.environment,
+      verb: 'Start redrive',
+      where: queueWhere(selected.name),
+      what: `Move every message back to ${redriveDest.trim() || 'its original source queue(s)'}.`,
+    });
     if (!ok) return;
     redriving = true;
     try {
@@ -570,7 +577,7 @@
   }
   .tag {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     padding: 0 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -769,7 +776,7 @@
     cursor: pointer;
   }
   .icon-btn.danger {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   @media (max-width: 640px) {
     .hide-sm {

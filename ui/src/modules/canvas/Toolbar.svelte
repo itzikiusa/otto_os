@@ -121,7 +121,7 @@
     background: none;
     border: none;
     padding: 4px 6px;
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     cursor: text;
     max-width: 40vw;
     overflow: hidden;
@@ -136,7 +136,7 @@
     font-weight: 600;
     padding: 4px 6px;
     border: 1px solid var(--accent);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
     min-width: 200px;
@@ -169,7 +169,7 @@
     border: none;
     background: none;
     color: var(--text);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     cursor: pointer;
   }
   .icon-btn:hover:not(:disabled) {
@@ -187,7 +187,7 @@
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     font-size: var(--fs-m);
     cursor: pointer;
   }

@@ -451,7 +451,7 @@
     align-items: center;
     gap: 8px;
     height: 60px;
-    padding: 0 12px 0 14px;
+    padding-block: 0; padding-inline: 14px 12px;
     flex-shrink: 0;
   }
   .node:not(.loop) .head {
@@ -465,7 +465,7 @@
     flex: 1;
     flex-direction: column;
     gap: 2px;
-    padding: 5px 10px 6px 14px;
+    padding-block: 5px 6px; padding-inline: 14px 10px;
     min-height: 0;
   }
   .step {
@@ -481,9 +481,9 @@
     place-items: center;
     width: 15px;
     height: 15px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     background: color-mix(in srgb, var(--accent) 18%, transparent);
     color: var(--accent-text);
     flex-shrink: 0;
@@ -538,7 +538,7 @@
     top: 8px;
     bottom: 8px;
     width: 4px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: var(--accent);
   }
   .ic {
@@ -546,7 +546,7 @@
     place-items: center;
     width: 26px;
     height: 26px;
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     color: var(--accent-text);
     flex-shrink: 0;
@@ -582,7 +582,7 @@
   }
   .dot.running {
     background: var(--info);
-    animation: pulse 1.6s ease-in-out infinite;
+    animation: otto-pulse 1.6s ease-in-out infinite;
   }
   .dot.success {
     background: var(--status-working);
@@ -596,11 +596,7 @@
   .dot.pending {
     background: color-mix(in srgb, var(--text-dim) 50%, transparent);
   }
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
-  }
+  
   @media (prefers-reduced-motion: reduce) {
     .dot.running {
       animation: none;

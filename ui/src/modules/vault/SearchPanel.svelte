@@ -131,7 +131,7 @@
   .s :global(mark) {
     background: color-mix(in srgb, var(--accent) 30%, transparent);
     color: var(--text);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     padding: 0 1px;
   }
 </style>

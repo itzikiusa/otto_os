@@ -228,6 +228,8 @@
               <span class="tok-label" title={t.label ?? undefined}>{rowName(t)}</span>
               <span class="tok-meta">
                 {#if sessionToken(t)}{t.session_id ? 'Managed session' : 'Legacy session label'}{t.session_exists === false ? ' · session deleted' : ''} · {/if}<span class="mono">{t.token_prefix}…</span>
+                <!-- Phone only: the Expires column is hidden there, so say it here (display:none at desktop keeps it out of the a11y tree). -->
+                <span class="chip exp-phone" class:bad={isExpired(t)} title={absDate(t.expires_at)}>{isExpired(t) ? 'Expired' : `Expires ${rel(t.expires_at)}`}</span>
               </span>
             </span>
             <span class="col-seen" role="cell" title={absDate(t.last_seen_at)}>{t.last_seen_at ? rel(t.last_seen_at) : 'Never'}</span>
@@ -454,7 +456,15 @@
     word-break: break-all;
   }
 
+  .exp-phone {
+    display: none;
+  }
+
   @media (max-width: 640px) {
+    .exp-phone {
+      display: inline-flex;
+      margin-inline-start: 6px;
+    }
     .token-head,
     .token-row {
       grid-template-columns: minmax(0, 1fr) 84px;

@@ -46,7 +46,7 @@
   import { router } from '../router.svelte';
   import { keyContext } from '../keys';
   import { agentProviders, defaultAgentProvider } from '../providers';
-  import { SIDEBAR_MODULES, availableModules, groupLabel } from '../sidebar';
+  import { SIDEBAR_MODULES, availableModules, goToEntries } from '../sidebar';
   import { bar, onDesktopEvent, openInOtto } from '../desktop';
 
   interface Props {
@@ -141,13 +141,13 @@
     const mods = availableModules((f) => auth.can(f, 'view'), []);
     const base: Command[] = [
       { id: 'bar.open-otto', title: 'Open Otto', group: 'Otto', keywords: 'main window app show', run: go() },
-      ...mods.map((m) => ({
-        id: `core.go-${m.id}`,
-        title: `Go to ${m.label}`,
+      ...goToEntries(mods).map((e) => ({
+        id: e.id,
+        title: e.title,
         group: 'Navigate',
-        detail: groupLabel(m.group),
-        keywords: `module ${m.id.replace(/[-/]/g, ' ')} ${m.keywords ?? ''}`,
-        run: go(m.id),
+        detail: e.detail,
+        keywords: e.keywords,
+        run: go(e.route),
       })),
       { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', keywords: 'preferences appearance', run: go('settings/appearance') },
     ];
@@ -1137,7 +1137,7 @@
     line-height: 1;
     color: var(--text-dim);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 3px 5px;
     flex-shrink: 0;
   }
@@ -1306,7 +1306,7 @@
     place-items: center;
     width: 22px;
     height: 22px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--hover);
     color: var(--text-dim);
     flex-shrink: 0;
@@ -1514,7 +1514,7 @@
     width: 100%;
     min-width: 0;
   }
-  @media (max-width: 560px) {
+  @media (max-width: 640px) {
     .ed-grid {
       grid-template-columns: minmax(0, 1fr);
     }

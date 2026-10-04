@@ -5,6 +5,7 @@
   // group tabs inline-start, the active group's sub-views as pills inline-end —
   // with the selected sub-view's content below.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -384,23 +385,6 @@
     if (!g.subs.some((s) => s.id === product.tab)) {
       void product.changeTab(g.subs[0].id);
     }
-  }
-
-  /** Tablist keyboard (←/→, Home/End) for the view toggle and both story
-   *  tab strips: activate the neighbour, then move focus onto it. */
-  function onTabKey(e: KeyboardEvent): void {
-    const list = e.currentTarget as HTMLElement;
-    const tabs = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
-    const at = tabs.findIndex((t) => t.getAttribute('aria-selected') === 'true');
-    let next = -1;
-    if (e.key === 'ArrowRight') next = (at + 1) % tabs.length;
-    else if (e.key === 'ArrowLeft') next = (at - 1 + tabs.length) % tabs.length;
-    else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = tabs.length - 1;
-    if (next < 0 || !tabs.length) return;
-    e.preventDefault();
-    tabs[next].click();
-    queueMicrotask(() => list.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus());
   }
 
   function sourceIcon(kind: string): IconName {
@@ -1199,7 +1183,6 @@
     color: var(--text-dim);
   }
 
-
   /* ── Main area ───────────────────────────────────────────────── */
   .product-main {
     flex: 1;
@@ -1229,7 +1212,7 @@
     gap: 2px;
     padding: 3px;
     background: color-mix(in srgb, var(--text-dim) 7%, transparent);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     overflow-x: auto;
     white-space: nowrap;
     scrollbar-width: none;
@@ -1274,7 +1257,7 @@
     flex-wrap: wrap;
     gap: 2px 4px;
     margin-inline-start: auto;
-    padding: 0 0 0 10px;
+    padding-block: 0; padding-inline: 10px 0;
     background: none;
     border-radius: 0;
     overflow: visible;
@@ -1306,7 +1289,7 @@
     flex-direction: column;
   }
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
 
   /* ── Collection summary (no story open) ──────────────────────────── */
@@ -1404,7 +1387,7 @@
       padding: 12px 14px;
       border: none;
       border-bottom: 1px solid var(--border);
-      background: var(--bg-sidebar, var(--surface));
+      background: var(--bg-sidebar);
       color: var(--text);
       font-size: var(--fs-l);
       font-weight: 600;

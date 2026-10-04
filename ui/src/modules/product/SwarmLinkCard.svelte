@@ -195,7 +195,7 @@
   }
   .task-pill.active {
     background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
+    color: var(--success);
   }
   .grow {
     flex: 1;

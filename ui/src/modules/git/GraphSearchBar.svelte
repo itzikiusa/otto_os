@@ -27,6 +27,14 @@
   /** The query `results` belong to ('' = no active search). */
   let ran = $state('');
   let listOpen = $state(false);
+  let rootEl = $state<HTMLDivElement | null>(null);
+  /** Result-list height cap: the room under the bar in the window (not a fixed
+   *  50vh), re-measured each time the list opens. */
+  let listMaxH = $state(320);
+  $effect(() => {
+    if (!listOpen || !rootEl) return;
+    listMaxH = Math.max(160, Math.min(480, window.innerHeight - rootEl.getBoundingClientRect().bottom - 12));
+  });
   let inputEl: HTMLInputElement | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let inflight: AbortController | null = null;
@@ -130,7 +138,7 @@
 
 <svelte:window onkeydown={onWindowKeydown} />
 
-<div class="gsb">
+<div class="gsb" bind:this={rootEl}>
   <div class="gsb-row">
     <div class="gsb-box">
       <Icon name="search" size={12} />
@@ -179,7 +187,7 @@
   {#if listOpen && results.length > 0}
     <!-- Anchored to the input (not free coordinates) and height-capped, so a
          200-row result set stays scrollable inside the viewport. -->
-    <ul class="gsb-results">
+    <ul class="gsb-results" style="max-height:{listMaxH}px">
       {#each results as c (c.sha)}
         <li>
           <button class="gsb-result" onclick={() => pick(c)}>
@@ -197,6 +205,7 @@
 <style>
   .gsb {
     position: relative;
+    z-index: var(--z-sticky); /* the results dropdown stays above the graph pane below */
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
   }
@@ -271,19 +280,17 @@
   }
   .gsb-results {
     position: absolute;
-    z-index: 30;
     top: calc(100% - 4px);
     inset-inline: 10px;
     max-width: 640px;
     margin: 0;
     padding: 4px;
     list-style: none;
-    max-height: 50vh;
     overflow-y: auto;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    box-shadow: var(--shadow);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-l);
+    box-shadow: var(--glass-shadow);
   }
   .gsb-result {
     display: grid;
@@ -318,7 +325,7 @@
     font-size: var(--fs-xs);
     white-space: nowrap;
   }
-  @media (max-width: 720px) {
+  @media (max-width: 640px) {
     .gsb-result {
       grid-template-columns: 60px 1fr;
     }

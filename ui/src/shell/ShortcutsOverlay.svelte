@@ -91,7 +91,7 @@
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 1px 5px;
     white-space: nowrap;
   }

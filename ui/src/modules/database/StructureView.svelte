@@ -1208,7 +1208,7 @@
     align-items: center;
     gap: 6px;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -1256,7 +1256,7 @@
     align-items: center;
     gap: 8px;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -1327,7 +1327,7 @@
     width: 16px;
     text-align: end;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     color: var(--accent-text);
   }
   /* The selected row is a flex CONTAINER now (name + direction + remove), so the
@@ -1349,7 +1349,7 @@
     flex-shrink: 0;
     padding: 1px 6px;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
@@ -1371,7 +1371,7 @@
     cursor: pointer;
   }
   .ib-x:hover {
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+    background: var(--hover);
   }
   .ib-row.custom .ib-ord {
     color: var(--success);
@@ -1439,7 +1439,7 @@
   }
   .ib-cond-hint {
     font-size: var(--fs-xs);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .ib-warn {
     font-size: var(--fs-xs);
@@ -1452,7 +1452,7 @@
     font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     padding: 0 3px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .ib-unique,
   .ib-name {
@@ -1587,11 +1587,11 @@
   .pk {
     margin-inline-start: 6px;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     padding: 0 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     vertical-align: middle;
   }
   .comment-row td {
@@ -1793,7 +1793,7 @@
     font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     padding: 0 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .dim {
     color: var(--text-dim);

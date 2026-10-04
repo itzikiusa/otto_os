@@ -379,7 +379,7 @@
     color: var(--accent-text);
   }
   .imp-prog-text.err {
-    color: var(--status-exited);
+    color: var(--danger);
     white-space: pre-wrap;
     word-break: break-word;
   }

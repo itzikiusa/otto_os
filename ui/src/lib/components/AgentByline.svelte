@@ -8,7 +8,8 @@
   // provider (otherwise a neutral sparkle + `name`, default "Otto"), the model
   // when known, and the time (RelTime — relative, exact on hover). `label` is
   // an optional lead-in such as "Plan v3". Agent identity is never the accent
-  // colour — the chip is a neutral `.chip` (no `--agent` token exists yet).
+  // colour — the chip is the shared AgentChip (a neutral `.chip`).
+  import AgentChip from './AgentChip.svelte';
   import Icon from './Icon.svelte';
   import ProviderIcon from './ProviderIcon.svelte';
   import RelTime from './RelTime.svelte';
@@ -43,7 +44,7 @@
       <span class="ab-name">{name}</span>
     {/if}
   </span>
-  <span class="chip ab-chip" title="Written by an agent — review before you apply it">Agent</span>
+  <AgentChip />
   {#if m}<span class="ab-sep" aria-hidden="true">·</span><span class="ab-model mono">{m}</span>{/if}
   {#if at != null && at !== ''}
     <span class="ab-sep" aria-hidden="true">·</span><RelTime iso={at} class="ab-time" />
@@ -75,13 +76,6 @@
   }
   .ab-name {
     text-transform: capitalize;
-  }
-  .ab-chip {
-    height: 16px;
-    padding: 0 6px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 600;
   }
   .ab-model {
     font-family: var(--font-mono);

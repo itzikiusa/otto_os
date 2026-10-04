@@ -97,7 +97,7 @@
     font-size: var(--fs-s);
     background: var(--surface-2);
     padding: 1px 4px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
   }
   .md :global(pre) {
     background: var(--surface-2);
@@ -123,7 +123,7 @@
   .md :global(img) { max-inline-size: 100%; height: auto; }
   .md :global(div.diagram-block) {
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: var(--radius-m);
     padding: 14px;
     margin: 10px 0;
     background: var(--surface-2);

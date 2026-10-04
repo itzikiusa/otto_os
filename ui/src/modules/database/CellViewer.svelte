@@ -155,7 +155,7 @@
     gap: 8px;
   }
   .cv-err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -171,7 +171,7 @@
   .cv-pending {
     padding: 4px 8px;
     font-size: var(--fs-xs);
-    color: var(--status-warn);
+    color: var(--warning);
     background: color-mix(in srgb, var(--status-warn) 12%, transparent);
     border-radius: var(--radius-s);
   }

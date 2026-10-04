@@ -105,7 +105,7 @@
     transform: translateY(-2px);
   }
   .tpl:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 2px;
   }
   .tpl:disabled {

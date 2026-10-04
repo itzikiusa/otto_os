@@ -725,12 +725,7 @@
   .dim {
     color: var(--text-dim);
   }
-  @media (max-width: 1100px) {
-    .brand-grid {
-      grid-template-columns: minmax(0, 1fr) 280px;
-    }
-  }
-  @media (max-width: 900px) {
+  @media (max-width: 1024px) {
     .brand-grid {
       grid-template-columns: minmax(0, 1fr);
     }

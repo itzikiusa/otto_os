@@ -97,13 +97,13 @@
   subtitle="Pod-level metrics from your services' own endpoints, restart classification and a health digest per cluster."
 >
   {#snippet actions()}
-    <div class="seg" role="radiogroup" aria-label="Window" data-keep>
+    <div class="segmented" role="radiogroup" aria-label="Window" data-keep>
       {#each WINDOWS as w (w)}
-        <button class="seg-btn" class:on={window === w} role="radio" onkeydown={radioKey} aria-checked={window === w} tabindex={window === w ? 0 : -1} onclick={() => (window = w)}>{w}</button>
+        <button role="radio" onkeydown={radioKey} aria-checked={window === w} tabindex={window === w ? 0 : -1} onclick={() => (window = w)}>{w}</button>
       {/each}
     </div>
     <button class="btn small" onclick={() => router.go('kubernetes/monitor/fleet')} title="One dashboard over every cluster — restarts, memory, req/s, latency — read from ClickHouse only" data-testid="k8s-monitor-fleet-link"><Icon name="chart" size={12} /> Fleet dashboard</button>
-    <button class="icon-btn" onclick={() => void load()} title="Refresh" aria-label="Refresh overview"><Icon name="refresh" size={14} /></button>
+    <button class="icon-btn" data-icon="refresh" data-label="Refresh overview" onclick={() => void load()} title="Refresh" aria-label="Refresh overview"><Icon name="refresh" size={14} /></button>
   {/snippet}
 </PageHeader>
 <PageBody>
@@ -217,25 +217,6 @@
     height: 100%;
     min-height: 0;
   }
-  .seg {
-    display: inline-flex;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    overflow: hidden;
-  }
-  .seg-btn {
-    background: none;
-    border: none;
-    padding: 3px 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .seg-btn.on {
-    background: var(--surface-2);
-    color: var(--text);
-    font-weight: 600;
-  }
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -288,7 +269,7 @@
     color: var(--text-dim);
   }
   .health.ok {
-    color: var(--status-working);
+    color: var(--success);
     border-color: color-mix(in srgb, var(--status-working) 40%, transparent);
   }
   .health.warn {
@@ -296,7 +277,7 @@
     border-color: color-mix(in srgb, orange 40%, transparent);
   }
   .health.bad {
-    color: var(--status-exited);
+    color: var(--danger);
     border-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
     background: color-mix(in srgb, var(--status-exited) 10%, transparent);
   }
@@ -338,7 +319,7 @@
     color: var(--text-dim);
   }
   .note.bad {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .bar {
     height: 4px;
@@ -356,7 +337,7 @@
   .stack {
     display: flex;
     height: 6px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     overflow: hidden;
     background: var(--surface-2);
   }
@@ -392,7 +373,7 @@
     gap: 4px;
     font-size: var(--fs-xs);
     padding: 8px;
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, orange 8%, var(--surface));
     border: 1px solid color-mix(in srgb, orange 30%, var(--border));
   }

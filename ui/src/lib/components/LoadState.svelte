@@ -12,7 +12,8 @@
   // Precedence:
   //   • error + nothing to show  → inline "Couldn't load {what}" + detail + Retry
   //   • error + stale data       → the data, with a slim "refresh failed" bar + Retry
-  //   • loading + nothing yet    → Skeleton (never the empty state)
+  //   • loading + nothing yet    → Skeleton after a ~150 ms grace (the height is
+  //                                reserved at once; a fast load never flashes it)
   //   • empty                    → `emptyView` (or nothing)
   //   • else                     → children
   //
@@ -38,6 +39,23 @@
     children?: Snippet;
   }
   let { what, loading = false, error = null, empty = false, onretry, variant = 'panel', rows = 4, emptyView, children }: Props = $props();
+
+  // First-load skeleton waits ~150 ms so a fast response never flashes it; the
+  // block keeps its height meanwhile so nothing below jumps when it appears.
+  let showSkeleton = $state(false);
+  const firstLoad = $derived(loading && empty && !error);
+  $effect(() => {
+    if (!firstLoad) {
+      showSkeleton = false;
+      return;
+    }
+    const t = setTimeout(() => (showSkeleton = true), 150);
+    return () => clearTimeout(t);
+  });
+  const skelRows = $derived(variant === 'compact' ? 2 : rows);
+  const skelHeight = $derived(variant === 'compact' ? 24 : 36);
+  // rows * (row + 8 px gap) + the list's 4 px block padding.
+  const reserve = $derived(skelRows * (skelHeight + 8) + 4);
 </script>
 
 {#if error && empty}
@@ -60,8 +78,8 @@
     </div>
   {/if}
 {:else if loading && empty}
-  <div class="ls-loading" class:page={variant === 'page'} role="status" aria-label="Loading {what}">
-    <Skeleton announce={false} rows={variant === 'compact' ? 2 : rows} height={variant === 'compact' ? 24 : 36} />
+  <div class="ls-loading" class:page={variant === 'page'} role="status" aria-label="Loading {what}" style="min-block-size:{reserve}px">
+    {#if showSkeleton}<Skeleton announce={false} rows={skelRows} height={skelHeight} />{/if}
   </div>
 {:else if empty}
   {#if emptyView}{@render emptyView()}{/if}
@@ -148,6 +166,10 @@
     font-size: var(--fs-xs);
   }
   .ls-stale {
+    /* Stays at the top of its scroller while the stale list scrolls under it. */
+    position: sticky;
+    inset-block-start: 0;
+    z-index: var(--z-sticky);
     display: flex;
     gap: 6px;
     align-items: center;
@@ -155,7 +177,8 @@
     font-size: var(--fs-xs);
     color: var(--warning);
     border-block-end: 1px solid var(--border);
-    background: var(--warning-soft);
+    /* Opaque base so list rows don't show through while it is stuck. */
+    background: linear-gradient(var(--warning-soft), var(--warning-soft)), var(--surface);
   }
   .ls-stale-text {
     flex: 1;

@@ -10,6 +10,7 @@
   // reads it, and opening the PR is the one outward action that must stay an
   // explicit, confirmed click in RunDetail (patterns.md §5).
   import { api } from '../../lib/api/client';
+  import { loadErrorText } from '../../lib/loadError';
   import { auth } from '../../lib/stores/auth.svelte';
   import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
   import { runWithOttoApi } from '../../lib/api/runWithOtto';
@@ -38,6 +39,8 @@
 
   let detected = $state<RunDetectResp['detected'] | null>(null);
   let detecting = $state(false);
+  /** The detect call failed (not "no source found") — say so, offer Retry. */
+  let detectFailed = $state(false);
   let busy = $state(false);
   let error = $state('');
 
@@ -45,15 +48,24 @@
   let repos = $state<Repo[]>([]);
   let picking = $state(false);
   let registering = $state(false);
+  /** Failed repo-list load: the select would otherwise silently offer only "Auto". */
+  let reposError = $state('');
+  let reposLoading = $state(false);
+  async function loadRepos(id: string): Promise<void> {
+    reposLoading = true;
+    try {
+      repos = await api.get<Repo[]>(`/workspaces/${id}/repos`);
+      reposError = '';
+    } catch (e) {
+      reposError = loadErrorText(e);
+    } finally {
+      reposLoading = false;
+    }
+  }
   $effect(() => {
     const id = wsId;
-    void (async () => {
-      try {
-        repos = await api.get<Repo[]>(`/workspaces/${id}/repos`);
-      } catch {
-        repos = [];
-      }
-    })();
+    repos = [];
+    void loadRepos(id);
   });
 
   // Providers from the live registry (built-ins + custom, e.g. grok); `shell`
@@ -69,6 +81,7 @@
 
   function onInput(): void {
     detected = null;
+    detectFailed = false;
     error = '';
     if (debounceTimer) clearTimeout(debounceTimer);
     detectAbort?.abort();
@@ -88,11 +101,22 @@
       // Ignore a stale response (the input moved on).
       if (q !== query.trim()) return;
       detected = resp.detected ?? null;
+      detectFailed = false;
     } catch {
+      if (detectAbort?.signal.aborted) return;
       detected = null;
+      if (q === query.trim()) detectFailed = true;
     } finally {
       if (q === query.trim()) detecting = false;
     }
+  }
+
+  function runDetectNow(): Promise<void> {
+    const q = query.trim();
+    if (q.length < 3) return Promise.resolve();
+    detectFailed = false;
+    detecting = true;
+    return runDetect(q);
   }
 
   /** A source chip inserts its paste template and focuses the input. */
@@ -220,6 +244,9 @@
         {#if detected.url}
           <a class="link" href={detected.url} target="_blank" rel="noreferrer" title={detected.url}>Open source <Icon name="external" size={12} /></a>
         {/if}
+      {:else if detectFailed}
+        <span class="warn-text">Couldn’t detect the source — it will run as plain text.</span>
+        <button type="button" class="btn small ghost" onclick={() => void runDetectNow()}>Retry detect</button>
       {:else if query.trim().length >= 3}
         <span class="muted">No known source found — runs as</span>
         <span class="chip">{sourceLabel('channel')}</span>
@@ -262,6 +289,10 @@
           <option value={r.id} title={r.path}>{r.name}</option>
         {/each}
       </select>
+      {#if reposError}
+        <span class="warn-text" role="alert" title={reposError}>Couldn’t load repos.</span>
+        <button type="button" class="btn small" disabled={reposLoading} onclick={() => void loadRepos(wsId)}>{reposLoading ? 'Retrying…' : 'Retry'}</button>
+      {/if}
       <button type="button" class="btn" disabled={registering} onclick={() => (picking = true)}
         title="Pick any folder inside a git repository to add it">
         {registering ? 'Adding…' : 'Browse…'}
@@ -401,6 +432,7 @@
     flex: none;
   }
   .muted { color: var(--text-dim); white-space: nowrap; }
+  .warn-text { color: var(--warning); font-size: var(--fs-s); }
   /* Same keycap look as the palette / bar hints (the mono face drew ⌘ at
      half size). */
   .kbd-hint {
@@ -410,7 +442,7 @@
     line-height: 1;
     padding: 3px 5px;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     flex: none;
   }
   .run { flex: none; }

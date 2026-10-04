@@ -218,7 +218,7 @@
   .add {
     align-self: flex-start;
   }
-  @media (max-width: 720px) {
+  @media (max-width: 640px) {
     .ddrow {
       grid-template-columns: 1fr;
     }

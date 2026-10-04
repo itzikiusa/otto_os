@@ -327,7 +327,7 @@
     margin: -6px 0 12px;
     font-size: var(--fs-xs);
     line-height: 1.45;
-    color: var(--status-idle, var(--text-dim));
+    color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
     border-radius: var(--radius-s);
     padding: 7px 9px;

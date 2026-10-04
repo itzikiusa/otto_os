@@ -175,7 +175,7 @@
     display: flex;
     gap: 8px;
     align-items: center;
-    color: var(--status-working);
+    color: var(--success);
     font-size: var(--fs-m);
     flex-wrap: wrap;
   }
@@ -204,7 +204,7 @@
     display: flex;
     gap: 8px;
     align-items: center;
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-m);
   }
   .actions {

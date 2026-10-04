@@ -1,6 +1,7 @@
 <script lang="ts">
   // Tags panel (left sidebar mode): every tag with its count; click → search.
   import { vault } from './vault.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
 
   let filter = $state('');
   const shown = $derived(
@@ -10,8 +11,12 @@
 
 <div class="tags">
   <input type="search" bind:value={filter} placeholder="Filter tags…" aria-label="Filter tags" />
-  {#if vault.tags.length === 0}
+  {#if vault.tags.length === 0 && vault.loading}
+    <Skeleton rows={4} height={24} label="tags" />
+  {:else if vault.tags.length === 0}
     <div class="dim">No tags yet. Add #tags in a note, or tags: in its frontmatter.</div>
+  {:else if shown.length === 0}
+    <div class="dim">No tags match “{filter}”.</div>
   {/if}
   <div class="list">
     {#each shown as t (t.tag)}
@@ -57,7 +62,7 @@
     justify-content: space-between;
     background: none;
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     padding: 5px 8px;
     cursor: pointer;
   }

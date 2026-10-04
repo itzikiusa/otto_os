@@ -218,7 +218,7 @@
         {:else if !contexts.length}
           <div class="hint">No contexts found. Paste a kubeconfig instead, or import from EKS.</div>
         {:else}
-          <div class="ctx-list" role="listbox" aria-multiselectable="true" aria-label="Kubeconfig contexts">
+          <div class="ctx-list" role="group" aria-label="Kubeconfig contexts">
             {#each filteredContexts as c (ctxKey(c))}
               {@const on = picked.has(ctxKey(c))}
               <label class="ctx" class:on>
@@ -330,7 +330,7 @@
     margin: 0;
   }
   .hint.danger {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .ctx-tools {
     display: flex;
@@ -438,10 +438,10 @@
   .env-chip.prod.selected {
     background: color-mix(in srgb, var(--status-exited) 18%, transparent);
     border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
     white-space: pre-wrap;
   }

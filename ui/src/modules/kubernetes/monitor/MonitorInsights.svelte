@@ -237,7 +237,7 @@
   }
   .verdict {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.05em;
     padding: 2px 8px;
     border-radius: 999px;
@@ -278,7 +278,7 @@
     text-align: start;
     background: none;
     border: 1px solid transparent;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     padding: 5px 6px;
     font-size: var(--fs-s);
     cursor: pointer;
@@ -336,14 +336,14 @@
     font-size: var(--fs-xs);
     background: var(--surface-2);
     padding: 0 3px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .md :global(pre) {
     direction: ltr;
     text-align: start;
     background: var(--surface-2);
     padding: 8px 10px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     overflow: auto;
   }
   .md :global(table) {

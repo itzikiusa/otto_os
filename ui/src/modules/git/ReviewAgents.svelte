@@ -312,7 +312,7 @@
   }
 
   .grow { flex: 1; }
-  .mono { font-family: var(--font-mono, monospace); }
+  .mono { font-family: var(--font-mono); }
 
   /* A1: finding lifecycle state chips */
   .rp-state-chip {

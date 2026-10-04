@@ -4,6 +4,7 @@
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { api } from '../../lib/api/client';
@@ -124,7 +125,7 @@
   });
   // Nothing to list (no clusters, no sections): hide the list pane — the one
   // page-level empty state owns the page and its "Add a cluster" CTA.
-  const isEmpty = $derived(!brokers.loading && brokers.clusters.length === 0 && brokers.sections.length === 0);
+  const isEmpty = $derived(!brokers.loading && !brokers.loadError && brokers.clusters.length === 0 && brokers.sections.length === 0);
 
 
   async function testConn(c: BrokerCluster) {
@@ -397,9 +398,17 @@
       </div>
     </div>
     <div class="cluster-list">
-      {#if brokers.loading && brokers.clusters.length === 0}
-        <p class="muted pad">Loading clusters…</p>
-      {:else}
+      <!-- A failed load is an error with Retry, never "No clusters yet"; the first
+           load is a skeleton. A failed refresh keeps the list + a stale bar. -->
+      <LoadState
+        what="clusters"
+        variant="compact"
+        loading={brokers.loading}
+        error={brokers.loadError}
+        empty={brokers.clusters.length === 0 && brokers.sections.length === 0}
+        rows={3}
+        onretry={() => ws.currentId && void brokers.load(ws.currentId)}
+      >
         {#each tree as node (node.sec.id)}
           {@render sectionNode(node, 0)}
         {/each}
@@ -430,10 +439,7 @@
           {@render clusterRow(c, brokers.sections.length > 0 ? 1 : 0)}
         {/each}
 
-        {#if brokers.clusters.length === 0 && brokers.sections.length === 0}
-          <p class="muted pad small">No clusters yet. Add one to connect to Kafka.</p>
-        {/if}
-      {/if}
+      </LoadState>
     </div>
   </aside>
 
@@ -522,7 +528,7 @@
           actionIcon="plus"
           onaction={openAdd}
         />
-      {:else if !brokers.loading && !viewport.isPhone}
+      {:else if !brokers.loading && !brokers.loadError && !viewport.isPhone}
         <!-- (Phone: the list above IS the page — no second "pick one" pane.)
              Clusters exist: the list pane (with its own "+") is right there, so
              no duplicate "Add a cluster" CTA. -->
@@ -689,14 +695,14 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 6px 8px 6px 6px;
+    padding-block: 6px; padding-inline: 6px 8px;
     cursor: pointer;
     color: var(--text-dim);
     border-inline-start: 2px solid transparent;
     user-select: none;
   }
   .sec-head:hover {
-    background: color-mix(in srgb, var(--text-dim) 6%, transparent);
+    background: var(--hover);
   }
   .sec-head.drop {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
@@ -780,7 +786,7 @@
     }
   }
   .cluster:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .cluster.sel {
     background: var(--accent-soft);
@@ -827,7 +833,7 @@
     border-top: 2px solid transparent;
   }
   .ctab:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .ctab.on {
     color: var(--text);
@@ -859,13 +865,13 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     padding: 2px;
     opacity: 0.6;
   }
   .ctab-x:hover {
     opacity: 1;
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+    background: var(--hover);
   }
   .name {
     font-weight: 600;
@@ -875,7 +881,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 0 5px;
   }
   .tunnel-pill {
@@ -884,7 +890,7 @@
     gap: 3px;
     font-size: var(--fs-xs);
     padding: 1px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     color: var(--text-dim);
   }
@@ -924,12 +930,6 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
-  }
-  .muted {
-    color: var(--text-dim);
-  }
-  .pad {
-    padding: 12px;
   }
   .small {
     font-size: var(--fs-xs);
@@ -1015,7 +1015,7 @@
       font-size: var(--fs-xs);
       color: var(--text-dim);
       background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-      border-radius: 9px;
+      border-radius: var(--radius-m);
       padding: 1px 8px;
     }
     .head-btns .icon-btn {
@@ -1042,7 +1042,7 @@
       font-size: 14px;
     }
     .sec-head {
-      padding: 8px 10px 8px 8px;
+      padding-block: 8px; padding-inline: 8px 10px;
     }
     .count {
       font-size: var(--fs-xs);

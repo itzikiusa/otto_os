@@ -608,7 +608,7 @@
     justify-content: space-between;
     gap: 8px;
     min-height: 32px;
-    padding: 2px 6px 2px 10px;
+    padding-block: 2px; padding-inline: 10px 6px;
     font-size: var(--fs-s);
   }
   .member + .member {

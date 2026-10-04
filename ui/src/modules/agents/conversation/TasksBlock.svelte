@@ -67,7 +67,7 @@
     background: var(--hover);
   }
   .tasks-head:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .tasks-title {
@@ -93,7 +93,7 @@
   ul {
     list-style: none;
     margin: 0 0 4px;
-    padding: 2px 0 2px 6px;
+    padding-block: 2px; padding-inline: 6px 0;
     margin-inline-start: 14px;
     border-inline-start: 1px solid var(--border);
     display: flex;

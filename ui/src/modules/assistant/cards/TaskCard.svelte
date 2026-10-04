@@ -3,6 +3,7 @@
   // → needs you → done / failed), what it is doing now, and Stop while it runs.
   import ActionCard from './ActionCard.svelte';
   import StatePill from './StatePill.svelte';
+  import Icon from '../../../lib/components/Icon.svelte';
   import { assistant, describeError } from '../../../lib/stores/assistant.svelte';
   import { rel } from '../../../lib/stores/now.svelte';
   import { toasts } from '../../../lib/toast.svelte';
@@ -43,7 +44,7 @@
   </p>
   {#snippet footer()}
     {#if task.state === 'running' || task.state === 'queued'}
-      <button class="btn small ghost" onclick={() => void stop()} disabled={busy}>{busy ? 'Stopping…' : 'Stop'}</button>
+      <button class="btn small ghost" onclick={() => void stop()} disabled={busy}><Icon name="stop" size={12} /> {busy ? 'Stopping…' : 'Stop'}</button>
     {/if}
     {#if onopen}<button class="btn small" onclick={onopen}>Open in Tasks</button>{/if}
   {/snippet}

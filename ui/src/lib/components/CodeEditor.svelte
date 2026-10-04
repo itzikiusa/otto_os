@@ -1182,7 +1182,7 @@
     position: absolute;
     top: 6px;
     inset-inline-end: 10px;
-    z-index: 20;
+    z-index: var(--z-sticky);
     padding: 3px 10px;
     font-size: var(--fs-xs);
     font-family: var(--font-ui);
@@ -1190,10 +1190,10 @@
     color: var(--accent-contrast);
     background: var(--accent-solid);
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     cursor: pointer;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
-    transition: background 0.15s;
+    box-shadow: var(--glass-shadow);
+    transition: background var(--dur-fast) var(--ease-out);
     white-space: nowrap;
     user-select: none;
   }

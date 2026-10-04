@@ -108,18 +108,6 @@ export function awsErrorText(raw: string | null | undefined): string {
   return s;
 }
 
-/** Activate and focus enabled tabs, respecting visual direction. */
-export function serviceTabKey(event: KeyboardEvent): void {
-  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-  const current = event.currentTarget as HTMLButtonElement;
-  const tabs = Array.from(current.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]:not(:disabled)') ?? []);
-  if (!tabs.length) return;
-  event.preventDefault();
-  const step = (event.key === 'ArrowRight' ? 1 : -1) * (getComputedStyle(current).direction === 'rtl' ? -1 : 1);
-  const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (tabs.indexOf(current) + step + tabs.length) % tabs.length;
-  tabs[index].click();
-  tabs[index].focus();
-}
 
 /** Merge a freshly re-read FIRST page of an S3 listing over what is loaded
  *  (first page plus any "Load more" pages), so an auto-refresh updates the
@@ -152,3 +140,6 @@ export function logsRoute(accountId: string, group?: string, region?: string): s
   if (group && region) r += `/${encodeURIComponent(region)}`;
   return r;
 }
+
+/** Activate and focus enabled service tabs (shared roving-tabindex keyboard). */
+export { onTabKey as serviceTabKey } from '../../lib/tabKeys';

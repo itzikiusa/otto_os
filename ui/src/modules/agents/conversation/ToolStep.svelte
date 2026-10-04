@@ -337,7 +337,7 @@
     background: var(--hover);
   }
   .step-row:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .step-icon {
@@ -451,14 +451,10 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .spin {
-      animation: spin 0.9s linear infinite;
+      animation: otto-spin 0.9s linear infinite;
     }
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   .step-caret {
     display: inline-flex;
     align-items: center;
@@ -467,7 +463,7 @@
     flex-shrink: 0;
   }
   .step-body {
-    padding: 2px 8px 10px 29px;
+    padding-block: 2px 10px; padding-inline: 29px 8px;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -480,7 +476,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    padding: 5px 4px 5px 10px;
+    padding-block: 5px; padding-inline: 10px 4px;
     min-width: 0;
     direction: ltr;
   }

@@ -34,7 +34,7 @@
     gap: 6px;
     margin: 8px 12px;
     padding: 8px 10px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--warning-soft);
     color: var(--text);
     font-size: var(--fs-s);

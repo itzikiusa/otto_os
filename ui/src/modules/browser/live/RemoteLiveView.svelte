@@ -1165,7 +1165,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 8px 6px 10px;
+    padding-block: 6px; padding-inline: 10px 8px;
     border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
     border-radius: var(--radius-m);
     background: var(--surface);

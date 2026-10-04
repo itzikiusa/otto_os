@@ -211,7 +211,7 @@
   }
   .env-title {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -242,7 +242,7 @@
     text-align: start;
   }
   .env-pick:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .env-pick.active {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
@@ -275,7 +275,7 @@
     display: flex;
     flex-direction: column;
     gap: 5px;
-    padding: 6px 4px 10px 22px;
+    padding-block: 6px 10px; padding-inline: 22px 4px;
   }
   .var-row {
     display: flex;

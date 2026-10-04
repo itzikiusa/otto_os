@@ -2,6 +2,7 @@
   // MCP Control Plane — three focused sections: Otto's built-in server,
   // governed external servers, and approval/audit activity.
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -115,20 +116,6 @@
     { id: 'servers', label: 'External servers' },
     { id: 'activity', label: 'Activity' },
   ];
-  function onTabKey(e: KeyboardEvent): void {
-    const i = SECTIONS.findIndex((s) => s.id === section);
-    let next = -1;
-    if (e.key === 'ArrowRight') next = (i + 1) % SECTIONS.length;
-    else if (e.key === 'ArrowLeft') next = (i - 1 + SECTIONS.length) % SECTIONS.length;
-    else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = SECTIONS.length - 1;
-    if (next < 0) return;
-    e.preventDefault();
-    go(SECTIONS[next].id);
-    queueMicrotask(() =>
-      (e.currentTarget as HTMLElement | null)?.querySelector<HTMLButtonElement>(`[data-testid="mcp-nav-${SECTIONS[next].id}"]`)?.focus(),
-    );
-  }
 </script>
 
 <div class="mcp-page">

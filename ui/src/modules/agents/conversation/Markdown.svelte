@@ -181,7 +181,7 @@
      handler drives them (keyboard activation bubbles as a click too). File
      references / issue chips are `a[tabindex][role=link]` (⏎ opens them). -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="md" class:small dir="auto" bind:this={rootEl} onclick={onClick} onkeydown={onKey} oncontextmenu={onContext}>{@html html}</div>
+<div class="md md-body" class:small dir="auto" bind:this={rootEl} onclick={onClick} onkeydown={onKey} oncontextmenu={onContext}>{@html html}</div>
 
 <style>
   .md {
@@ -350,7 +350,7 @@
   .md :global(.code-btn:focus-visible),
   .md :global(.code-more:focus-visible),
   .md :global(.code-file:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   /* ~18 lines + padding; the rest behind "Show all N lines". */
@@ -375,28 +375,13 @@
       display: none;
     }
   }
-  /* Inline code: a quiet chip. */
-  .md :global(code) {
-    font-family: var(--font-mono);
-    font-size: 0.9em;
-    background: color-mix(in srgb, var(--text-dim) 13%, transparent);
-    border: 1px solid color-mix(in srgb, var(--text-dim) 12%, transparent);
-    padding: 0 5px;
-    border-radius: 4px;
-  }
-  .md :global(pre code) {
-    background: none;
-    border: 0;
-    padding: 0;
-    font-size: inherit;
-  }
   /* File references: accent, mono, open the side panel. */
   .md :global(a.file-ref) {
     color: var(--accent-text);
     cursor: pointer;
     text-decoration: none;
     font-family: var(--font-mono);
-    font-size: 0.92em;
+    font-size: var(--fs-s);
     border-bottom: 1px dotted color-mix(in srgb, var(--accent) 55%, transparent);
     direction: ltr;
     unicode-bidi: isolate;
@@ -424,7 +409,7 @@
     border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
     background: var(--accent-soft);
     color: var(--accent-text);
-    font-size: 0.9em;
+    font-size: var(--fs-s);
     font-weight: 600;
     line-height: 1.45;
     text-decoration: none;
@@ -442,50 +427,12 @@
     background: color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .md :global(a:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .md :global(.tag) {
     color: var(--accent-text);
-  }
-  .md :global(h1),
-  .md :global(h2),
-  .md :global(h3),
-  .md :global(h4) {
-    margin: 1em 0 0.45em;
-    line-height: 1.3;
-    font-weight: 650;
-  }
-  .md :global(:is(h1, h2, h3, h4):first-child) {
-    margin-top: 0.2em;
-  }
-  .md :global(h1) {
-    font-size: 1.3em;
-  }
-  .md :global(h2) {
-    font-size: 1.17em;
-  }
-  .md :global(h3) {
-    font-size: 1.06em;
-  }
-  .md :global(ul),
-  .md :global(ol) {
-    margin: 0.3em 0 0.65em;
-    padding-inline-start: 1.5em;
-  }
-  .md :global(li) {
-    margin: 0.2em 0;
-  }
-  .md :global(li::marker) {
-    color: var(--text-dim);
-  }
-  .md :global(blockquote) {
-    margin: 0.5em 0;
-    padding-block: 2px;
-    padding-inline: 12px 0;
-    border-inline-start: 3px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-    color: var(--text-dim);
   }
   .md :global(blockquote.callout) {
     padding: 6px 12px;
@@ -534,27 +481,19 @@
     background: var(--surface-2);
     font-weight: 600;
   }
-  .md :global(a) {
-    color: var(--accent-text);
-  }
   .md :global(a[href^='http']:not(.ref-chip)) {
     text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
     text-underline-offset: 2px;
   }
   .md :global(a[href^='http']:not(.ref-chip)::after) {
     content: '↗';
-    font-size: 0.8em;
+    font-size: var(--fs-xs);
     margin-inline-start: 1px;
     opacity: 0.7;
   }
   .md :global(img) {
     max-width: 100%;
     border-radius: var(--radius-s);
-  }
-  .md :global(hr) {
-    border: 0;
-    border-top: 1px solid var(--border);
-    margin: 0.9em 0;
   }
   .md :global(input[type='checkbox']) {
     margin-inline-end: 6px;

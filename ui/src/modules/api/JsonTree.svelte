@@ -154,6 +154,6 @@
     color: var(--accent-text);
     font: inherit;
     cursor: pointer;
-    padding: 0 4px 0 20px;
+    padding-block: 0; padding-inline: 20px 4px;
   }
 </style>

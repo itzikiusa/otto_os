@@ -1058,7 +1058,6 @@
     color: var(--text-dim);
   }
 
-
   .pf {
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -1170,14 +1169,10 @@
     border: 1.5px solid currentColor;
     border-top-color: transparent;
     border-radius: 50%;
-    animation: spin 0.7s linear infinite;
+    animation: otto-spin 0.7s linear infinite;
     vertical-align: middle;
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   .grow {
     flex: 1;
   }

@@ -2867,11 +2867,16 @@
   let refPopEl = $state<HTMLDivElement | null>(null);
   let refPopX = $state(0);
   let refPopY = $state(0);
+  /** Height cap measured against the window (never a fixed 60vh): the room
+   *  left under the anchor, but at least ~a third of the window so a popover
+   *  near the bottom edge flips up into the clamp below instead of shrinking. */
+  let refPopMaxH = $state(320);
   $effect(() => {
     const m = refMenu;
     if (!m) return;
     refPopX = m.x;
     refPopY = m.y;
+    refPopMaxH = Math.max(Math.round(window.innerHeight / 3), Math.min(window.innerHeight - 16, window.innerHeight - m.y - 8 + 160), 160);
     requestAnimationFrame(() => {
       if (!refPopEl || refMenu !== m) return;
       const pad = 8;
@@ -3958,7 +3963,7 @@
      full-screen backdrop closes it on any outside click; Escape also closes. -->
 {#if refMenu}
   <button type="button" class="ref-pop-backdrop" aria-label="Close" onclick={closeRefMenu}></button>
-  <div class="ref-popover" role="dialog" aria-modal="true" aria-label="Commit references" use:dialogFocus={closeRefMenu} bind:this={refPopEl} style="left: {refPopX}px; top: {refPopY}px;">
+  <div class="ref-popover" role="dialog" aria-modal="true" aria-label="Commit references" use:dialogFocus={closeRefMenu} bind:this={refPopEl} style="left: {refPopX}px; top: {refPopY}px; max-height: {refPopMaxH}px;">
     {#if refMenu.branches.length > 0}
       <div class="ref-pop-group">Branches</div>
       {#each refMenu.branches as chip (chip.kind + chip.label)}
@@ -4232,8 +4237,16 @@
     transition: opacity 100ms ease-out, color 100ms ease-out;
   }
   .ref-row:hover .ref-more,
-  .ref-row:focus-within .ref-more {
+  .ref-row:focus-within .ref-more,
+  .ref-more:focus-visible {
     opacity: 1;
+  }
+  /* "Always present for pointers with no right-click" — made true: a pointer
+     that cannot hover keeps the tag actions visible. */
+  @media (hover: none) {
+    .ref-more {
+      opacity: 1;
+    }
   }
   .ref-more:hover {
     color: var(--text);
@@ -4267,7 +4280,7 @@
   .ref-row.drag-target {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     color: var(--text);
-    outline: 1.5px solid var(--accent);
+    outline: 1.5px solid var(--accent-text);
     outline-offset: -1.5px;
     border-radius: var(--radius-s);
   }
@@ -4448,7 +4461,7 @@
   .graph-select { flex: 1; height: 100%; }
   .ref-select { flex-shrink: 1; overflow: hidden; }
   .graph-row:has(.graph-select:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .graph-row {
@@ -4786,7 +4799,7 @@
   .ref-pop-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 60;
+    z-index: var(--z-popover-backdrop);
     background: transparent;
     border: 0;
     padding: 0;
@@ -4794,16 +4807,15 @@
   }
   .ref-popover {
     position: fixed;
-    z-index: 61;
+    z-index: var(--z-popover);
     min-width: 200px;
     max-width: 340px;
-    max-height: 60vh;
     overflow-y: auto;
     padding: 4px;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-l);
+    box-shadow: var(--glass-shadow);
   }
   .ref-pop-group {
     font-size: var(--fs-xs);

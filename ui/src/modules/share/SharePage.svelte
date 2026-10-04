@@ -535,13 +535,10 @@
     border: 3px solid var(--border);
     border-top-color: var(--accent);
     border-radius: 50%;
-    animation: spin 0.8s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
   @media (prefers-reduced-motion: reduce) {
     .sp-spinner { animation-duration: 2.4s; }
-  }
-  @keyframes spin {
-    to { transform: rotate(360deg); }
   }
 
   /* ---- main guest shell ---- */
@@ -640,8 +637,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: color-mix(in srgb, var(--bg) 88%, transparent);
-    backdrop-filter: blur(4px);
+    background: var(--surface);
     z-index: var(--z-sticky);
   }
   .extend-card {

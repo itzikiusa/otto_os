@@ -78,7 +78,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 3px 5px 3px 3px;
+    padding-block: 3px; padding-inline: 3px 5px;
     min-width: 0;
   }
   .cf-toggle {
@@ -102,7 +102,7 @@
   }
   .cf-toggle:focus-visible,
   .cf-file:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .cf-caret {

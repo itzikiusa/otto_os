@@ -564,7 +564,7 @@
     font-size: var(--fs-s);
     cursor: pointer;
     padding: 2px 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .link-btn:hover:not(:disabled) {
     text-decoration: underline;
@@ -592,7 +592,7 @@
     padding: 8px 10px;
   }
   .row:hover:not(.disabled) {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .row.disabled {
     cursor: not-allowed;
@@ -639,11 +639,11 @@
   }
   .kind-badge {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
     flex-shrink: 0;

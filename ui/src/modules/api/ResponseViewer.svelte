@@ -4,6 +4,7 @@
   // Timeline · Tests. A failed send shows inline with the reason and what to
   // do; SSE / WebSocket requests get a live message console instead.
   import Icon from '../../lib/components/Icon.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
@@ -187,13 +188,6 @@
   $effect(() => {
     if (!tabs.some((t) => t.id === tab)) tab = 'body';
   });
-  function onTabKey(e: KeyboardEvent, i: number): void {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
-    e.preventDefault();
-    const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
-    tab = next.id;
-    (e.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLElement>('[role=tab]')[tabs.indexOf(next)]?.focus();
-  }
 
   const previewUrl = $derived(resp && isImage && resp.body_base64 ? `data:${resp.content_type};base64,${resp.body_base64}` : '');
 
@@ -400,9 +394,9 @@
     </div>
 
     <div class="rtabs" role="tablist" aria-label="Response">
-      {#each tabs as t, i (t.id)}
+      {#each tabs as t (t.id)}
         <button class="rtab" class:active={tab === t.id} role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1}
-          onclick={() => (tab = t.id)} onkeydown={(e) => onTabKey(e, i)}>
+          onclick={() => (tab = t.id)} onkeydown={onTabKey}>
           {t.label}{#if t.count}<span class="count" aria-hidden="true">{t.count}</span>{/if}
         </button>
       {/each}
@@ -640,7 +634,7 @@
     gap: 6px;
     padding: 6px 10px;
     margin-block-end: 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--info-soft);
     color: var(--text);
     font-size: var(--fs-xs);
@@ -725,7 +719,7 @@
     align-items: center;
     gap: 6px;
     height: 27px;
-    padding: 0 4px 0 8px;
+    padding-block: 0; padding-inline: 8px 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -843,7 +837,7 @@
   .trace {
     list-style: none;
     margin: 0;
-    padding: 4px 0 4px 2px;
+    padding-block: 4px; padding-inline: 2px 0;
     display: flex;
     flex-direction: column;
     gap: 2px;

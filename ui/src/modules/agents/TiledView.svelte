@@ -731,7 +731,7 @@
     align-items: center;
     gap: 8px;
     height: 30px;
-    padding: 0 8px 0 10px;
+    padding-block: 0; padding-inline: 10px 8px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;

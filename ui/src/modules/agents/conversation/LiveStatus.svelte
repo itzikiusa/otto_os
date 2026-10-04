@@ -125,14 +125,10 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .spin {
-      animation: spin 0.9s linear infinite;
+      animation: otto-spin 0.9s linear infinite;
     }
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   /* "Needs you" is the one amber state (patterns §1). */
   .waiting {
     display: flex;
@@ -171,7 +167,7 @@
     font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     padding: 0 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     color: var(--text);
     direction: ltr;
     unicode-bidi: isolate;

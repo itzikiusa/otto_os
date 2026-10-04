@@ -773,7 +773,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 8px 10px 8px 14px;
+    padding-block: 8px; padding-inline: 14px 10px;
     min-width: 0;
   }
   .user-row + .user-row {

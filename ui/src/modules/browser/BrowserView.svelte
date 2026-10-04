@@ -883,7 +883,7 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 8px;
-    padding: 6px 8px 6px 10px;
+    padding-block: 6px; padding-inline: 10px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--info-soft);

@@ -5,7 +5,7 @@
   // any backdrop pixel — unit/ambient.test.ts); dim text lives on the cards.
   import { untrack } from 'svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
-  import StatusDot from '../../lib/components/StatusDot.svelte';
+  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -123,7 +123,7 @@
                 <button class="gc-row" onclick={r.open} title={r.title}>
                   <span class="gc-mark">
                     {#if r.tone === 'working'}
-                      <StatusDot status="working" size={7} />
+                      <LiveWorkingDot size={7} />
                     {:else}
                       <span class="gc-dot {r.tone}"></span>
                     {/if}

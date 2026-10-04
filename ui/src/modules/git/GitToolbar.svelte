@@ -19,8 +19,11 @@
      *  branch) so the parent can re-mount the graph — otherwise the commit graph
      *  shows stale data until the repo tab is reopened. */
     onrefresh?: () => void;
+    /** Rendered as direct children of the PageHeader's actions row (so they
+     *  overflow into its ⋯ by `data-overflow`) instead of in a `.toolbar` wrapper. */
+    inHeader?: boolean;
   }
-  let { repoId, status, onstatus, onrefresh }: Props = $props();
+  let { repoId, status, onstatus, onrefresh, inHeader = false }: Props = $props();
 
   let busy = $state('');
 
@@ -178,97 +181,118 @@
   }
 </script>
 
-<div class="toolbar">
-  <!-- Branch chip -->
-  <span
-    class="branch-chip"
-    title="{status.branch}{status.upstream ? ` · tracks ${status.upstream}` : ''}{status.ahead > 0 ? ` · ${status.ahead} ahead` : ''}{status.behind > 0 ? ` · ${status.behind} behind` : ''}"
-  >
-    <Icon name="branch" size={12} />
-    <span class="mono branch-name">{status.branch}</span>
-    {#if status.ahead > 0}<span class="ab up" aria-label="{status.ahead} ahead">↑{status.ahead}</span>{/if}
-    {#if status.behind > 0}<span class="ab down" aria-label="{status.behind} behind">↓{status.behind}</span>{/if}
-  </span>
+{#snippet items()}
+<!-- Branch chip -->
+<span
+  class="branch-chip"
+  title="{status.branch}{status.upstream ? ` · tracks ${status.upstream}` : ''}{status.ahead > 0 ? ` · ${status.ahead} ahead` : ''}{status.behind > 0 ? ` · ${status.behind} behind` : ''}"
+>
+  <Icon name="branch" size={12} />
+  <span class="mono branch-name">{status.branch}</span>
+  {#if status.ahead > 0}<span class="ab up" aria-label="{status.ahead} ahead">↑{status.ahead}</span>{/if}
+  {#if status.behind > 0}<span class="ab down" aria-label="{status.behind} behind">↓{status.behind}</span>{/if}
+</span>
 
-  <span class="divider"></span>
+{#if !inHeader}<span class="divider"></span>{/if}
 
-  <!-- Fetch -->
-  <button class="btn ghost tbtn" disabled={busy !== ''} onclick={doFetch} title="Fetch from remote">
-    <Icon name="fetch" size={14} />
-    {busy === 'fetch' ? 'Fetching…' : 'Fetch'}
-  </button>
+<!-- Fetch -->
+<button class="btn ghost tbtn" data-overflow="3" data-icon="fetch" data-label="Fetch" disabled={busy !== ''} onclick={doFetch} title="Fetch from remote">
+  <Icon name="fetch" size={14} />
+  {busy === 'fetch' ? 'Fetching…' : 'Fetch'}
+</button>
 
-  <!-- Pull (split button: the repo's configured mode, ▾ overrides it once) -->
-  <span class="split">
-    <button
-      class="btn ghost tbtn"
-      disabled={busy !== '' || detached}
-      onclick={() => void doPull()}
-      title={detached
-        ? 'HEAD is detached — check out a branch to pull'
-        : "Pull from upstream using the repo's configured mode"}
-    >
-      <Icon name="arrowDown" size={14} />
-      {busy === 'pull' ? 'Pulling…' : `Pull (${MODE_LABEL[pullMode]})`}
-    </button>
-    <button
-      class="btn ghost tbtn caret"
-      disabled={busy !== '' || detached}
-      onclick={pullMenu}
-      title="Pull with a different mode"
-      aria-label="Pull options"
-    ><Icon name="chevronDown" size={12} /></button>
-  </span>
-
-  <!-- Push -->
+<!-- Pull (split button: the repo's configured mode, ▾ overrides it once) -->
+<span class="split">
   <button
     class="btn ghost tbtn"
-    disabled={busy !== '' || nothingToPush || detached}
-    onclick={() => void doPush()}
+    data-icon="arrowDown"
+    data-label="Pull ({MODE_LABEL[pullMode]})"
+    disabled={busy !== '' || detached}
+    onclick={() => void doPull()}
     title={detached
-      ? 'HEAD is detached — check out a branch to push'
-      : status.upstream
-      ? status.ahead > 0
-        ? `Push ${status.ahead} commit${status.ahead === 1 ? '' : 's'} to ${status.upstream}`
-        : `Nothing to push — ${status.branch} has no commits that ${status.upstream} doesn’t`
-      : `Publish ${status.branch} to origin`}
+      ? 'HEAD is detached — check out a branch to pull'
+      : "Pull from upstream using the repo's configured mode"}
   >
-    <Icon name="arrowUp" size={14} />
-    {busy === 'push' ? 'Pushing…' : status.upstream ? 'Push' : 'Publish'}
+    <Icon name="arrowDown" size={14} />
+    {busy === 'pull' ? 'Pulling…' : `Pull (${MODE_LABEL[pullMode]})`}
   </button>
-
-  <span class="divider"></span>
-
-  <!-- Branch (create) -->
-  <button class="btn ghost tbtn" disabled={busy !== ''} onclick={() => void doCreateBranch()} title="Create a new branch from {status.branch} and switch to it">
-    <Icon name="plus" size={14} />
-    {busy === 'branch' ? 'Creating…' : 'Branch'}
-  </button>
-
-  <span class="divider"></span>
-
-  <!-- Stash -->
   <button
-    class="btn ghost tbtn"
-    disabled={busy !== '' || status.changes.length === 0}
-    onclick={doStash}
-    title={status.changes.length === 0 ? 'Nothing to stash — the working tree is clean' : 'Stash working changes (including untracked files)'}
-  >
-    <Icon name="stash" size={14} />
-    {busy === 'stash' ? 'Stashing…' : 'Stash'}
-  </button>
+    class="btn ghost tbtn caret"
+    data-icon="chevronDown"
+    data-label="Pull options…"
+    disabled={busy !== '' || detached}
+    onclick={pullMenu}
+    title="Pull with a different mode"
+    aria-label="Pull options"
+  ><Icon name="chevronDown" size={12} /></button>
+</span>
 
-  <!-- Pop -->
-  <button
-    class="btn ghost tbtn"
-    disabled={busy !== '' || nothingToPop}
-    onclick={doPop}
-    title={nothingToPop ? 'Nothing to pop — there are no stashes' : 'Apply the latest stash and drop it'}
-  >
-    <Icon name="archive" size={14} />
-    {busy === 'pop' ? 'Popping…' : 'Pop'}
-  </button>
-</div>
+<!-- Push -->
+<button
+  class="btn ghost tbtn"
+  data-overflow="4"
+  data-icon="arrowUp"
+  data-label={status.upstream ? 'Push' : 'Publish'}
+  disabled={busy !== '' || nothingToPush || detached}
+  onclick={() => void doPush()}
+  title={detached
+    ? 'HEAD is detached — check out a branch to push'
+    : status.upstream
+    ? status.ahead > 0
+      ? `Push ${status.ahead} commit${status.ahead === 1 ? '' : 's'} to ${status.upstream}`
+      : `Nothing to push — ${status.branch} has no commits that ${status.upstream} doesn’t`
+    : `Publish ${status.branch} to origin`}
+>
+  <Icon name="arrowUp" size={14} />
+  {busy === 'push' ? 'Pushing…' : status.upstream ? 'Push' : 'Publish'}
+</button>
+
+{#if !inHeader}<span class="divider"></span>{/if}
+
+<!-- Branch (create) -->
+<button class="btn ghost tbtn" data-overflow="-2" data-icon="plus" data-label="New branch" disabled={busy !== ''} onclick={() => void doCreateBranch()} title="Create a new branch from {status.branch} and switch to it">
+  <Icon name="plus" size={14} />
+  {busy === 'branch' ? 'Creating…' : 'Branch'}
+</button>
+
+{#if !inHeader}<span class="divider"></span>{/if}
+
+<!-- Stash -->
+<button
+  class="btn ghost tbtn"
+  data-overflow="-3"
+  data-icon="stash"
+  data-label="Stash"
+  disabled={busy !== '' || status.changes.length === 0}
+  onclick={doStash}
+  title={status.changes.length === 0 ? 'Nothing to stash — the working tree is clean' : 'Stash working changes (including untracked files)'}
+>
+  <Icon name="stash" size={14} />
+  {busy === 'stash' ? 'Stashing…' : 'Stash'}
+</button>
+
+<!-- Pop -->
+<button
+  class="btn ghost tbtn"
+  data-overflow="-4"
+  data-icon="archive"
+  data-label="Pop stash"
+  disabled={busy !== '' || nothingToPop}
+  onclick={doPop}
+  title={nothingToPop ? 'Nothing to pop — there are no stashes' : 'Apply the latest stash and drop it'}
+>
+  <Icon name="archive" size={14} />
+  {busy === 'pop' ? 'Popping…' : 'Pop'}
+</button>
+{/snippet}
+
+{#if inHeader}
+  {@render items()}
+{:else}
+  <div class="toolbar">
+    {@render items()}
+  </div>
+{/if}
 
 <style>
   .toolbar {

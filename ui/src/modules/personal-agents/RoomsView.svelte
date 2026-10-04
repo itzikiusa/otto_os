@@ -5,6 +5,7 @@
   // post box on the right.
   import { tick, untrack } from 'svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
+  import AgentChip from '../../lib/components/AgentChip.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -324,7 +325,7 @@
               <div class="msg-body">
                 <div class="msg-head">
                   <strong>{authorName(m)}</strong>
-                  {#if agentMsg}<span class="chip agent-label">Agent</span>{/if}
+                  {#if agentMsg}<AgentChip />{/if}
                   <span class="meta"><RelTime iso={m.created_at} /></span>
                 </div>
                 <p class="msg-text">{m.text}</p>
@@ -378,7 +379,7 @@
   .members { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .member {
     display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-s); color: var(--text);
-    border: 1px solid var(--border); border-radius: 999px; padding: 2px 4px 2px 3px;
+    border: 1px solid var(--border); border-radius: 999px; padding-block: 2px; padding-inline: 3px 4px;
     background: var(--surface); max-width: 220px; min-width: 0;
   }
   .member-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -405,7 +406,6 @@
   }
   .msg-body { min-width: 0; }
   .msg-head { display: flex; gap: 8px; align-items: center; font-size: var(--fs-s); color: var(--text); }
-  .agent-label { height: 18px; padding: 0 6px; }
   .msg-text { margin: 2px 0 0; font-size: var(--fs-m); color: var(--text); white-space: pre-wrap; word-break: break-word; }
   .meta { color: var(--text-dim); font-size: var(--fs-s); }
   .how { margin: 0; }
@@ -416,7 +416,7 @@
     border: 1px solid var(--border); border-radius: var(--radius-s); padding: 6px 8px; font: inherit; font-size: var(--fs-m);
   }
   .composer textarea:focus-visible, .create input:focus-visible {
-    outline: 2px solid var(--accent); outline-offset: 1px;
+    outline: 2px solid var(--accent-text); outline-offset: 1px;
   }
   .err {
     background: var(--danger-soft); color: var(--danger); padding: 8px 12px;

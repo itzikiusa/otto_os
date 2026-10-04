@@ -414,7 +414,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 0 16px 0 20px;
+    padding-block: 0; padding-inline: 20px 16px;
     min-width: 0;
   }
   .tauri-pad .ph-row {
@@ -600,7 +600,7 @@
   }
   @media (max-width: 640px) {
     .ph-row {
-      padding: 0 10px 0 14px;
+      padding-block: 0; padding-inline: 14px 10px;
       gap: 8px;
     }
     .ph-title-block {

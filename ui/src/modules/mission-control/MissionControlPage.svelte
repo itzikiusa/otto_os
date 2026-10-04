@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
+  import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
+  import { dialogFocus } from '../../lib/dialogFocus';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -265,15 +267,20 @@
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
   }
-  function onResizerKey(e: KeyboardEvent): void {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-    e.preventDefault();
-    // Anchored at the inline end: ← widens (→ in RTL).
-    const rtl = document.documentElement.dir === 'rtl';
-    const grow = (e.key === 'ArrowLeft') !== rtl;
-    detailW = Math.max(300, Math.min(720, detailW + (grow ? 24 : -24)));
-    persistDetailW();
-  }
+  // Below the 1024 breakpoint the detail is a full-viewport sheet over the page:
+  // it must behave as a dialog — register as modal, trap Tab, Esc closes, focus
+  // returns to the row that opened it (the same wiring as the k8s ResourceDrawer).
+  const detailSheet = $derived(!viewport.isDesktop && !!selectedId);
+  let detailEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    if (!detailSheet || !detailEl) return;
+    untrack(() => ui.pushModal());
+    const focus = dialogFocus(detailEl, () => select(null));
+    return () => {
+      focus.destroy();
+      untrack(() => ui.popModal());
+    };
+  });
   function resetDetailW(): void {
     detailW = DETAIL_W_DEFAULT;
     persistDetailW();
@@ -392,7 +399,14 @@
     </div>
 
     {#if selectedId}
-      <div class="mc-detail" style={`--mc-detail-w:${detailW}px`}>
+      <div
+        class="mc-detail"
+        bind:this={detailEl}
+        style={`--mc-detail-w:${detailW}px`}
+        role={detailSheet ? 'dialog' : undefined}
+        aria-modal={detailSheet ? 'true' : undefined}
+        aria-label={detailSheet ? 'Work item details' : undefined}
+      >
         <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="detail-resizer"
@@ -400,15 +414,12 @@
           tabindex="0"
           aria-orientation="vertical"
           aria-label="Resize the detail pane"
-          aria-valuenow={Math.round(detailW)}
-          aria-valuemin={300}
-          aria-valuemax={720}
-          title="Drag or use ←/→ to resize · double-click to reset"
+          title={RESIZE_TITLE}
           ondblclick={resetDetailW}
           onpointerdown={startDetailResize}
-          onkeydown={onResizerKey}
+          use:paneResizer={{ value: detailW, min: 300, max: 720, step: 24, invert: true, onChange: (w) => { detailW = w; persistDetailW(); }, onReset: resetDetailW, text: pxWide }}
         ></div>
-        <!-- ↑ a focusable separator: drag, or ←/→ to resize; double-click resets. -->
+        <!-- ↑ a focusable separator: drag, or ←/→ to resize; Enter / double-click resets. -->
         <WorkItemDetail
           bind:this={detailPane}
           wsId={ws.currentId ?? ''}
@@ -507,7 +518,7 @@
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     color: var(--danger);
     border-radius: var(--radius-s);
-    padding: 6px 8px 6px 10px;
+    padding-block: 6px; padding-inline: 10px 8px;
     font-size: var(--fs-s);
   }
   .be-text {

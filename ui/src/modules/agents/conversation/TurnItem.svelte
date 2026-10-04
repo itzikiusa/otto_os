@@ -14,6 +14,7 @@
   import { getContext } from 'svelte';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
+  import AgentChip from '../../../lib/components/AgentChip.svelte';
   import Markdown from './Markdown.svelte';
   import WorkSteps from './WorkSteps.svelte';
   import TasksBlock from './TasksBlock.svelte';
@@ -226,7 +227,7 @@
       <header class="agent-head">
         <span class="avatar" aria-hidden="true"><ProviderIcon provider={ctx.provider} size={13} /></span>
         <span class="agent-name">{agentName}</span>
-        <span class="chip agent-label" title="Written by an agent — review before you apply it">Agent</span>
+        <AgentChip />
         {#if item.model}<span class="agent-model mono" title="Model">{item.model}</span>{/if}
         {#if clock}<time class="ts" datetime={item.ts ?? undefined} title={fullTime}>{clock}</time>{/if}
       </header>
@@ -364,11 +365,6 @@
     border: 1px solid var(--border-strong);
     color: var(--text);
   }
-  .agent-label {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    letter-spacing: 0.04em;
-  }
   .agent-name {
     font-weight: 650;
   }
@@ -436,7 +432,7 @@
     text-decoration-color: var(--border-strong);
   }
   .fold-row:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
     border-radius: var(--radius-s);
   }
@@ -523,7 +519,7 @@
     background: var(--hover);
   }
   .act-btn:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .turn.hit .bubble,

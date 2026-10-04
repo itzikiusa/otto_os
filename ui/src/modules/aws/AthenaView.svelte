@@ -631,14 +631,14 @@
     padding-inline-start: 22px;
   }
   .cols {
-    padding: 0 0 2px 44px;
+    padding-block: 0 2px; padding-inline: 44px 0;
   }
   .col {
     display: flex;
     justify-content: space-between;
     gap: 8px;
     font-size: var(--fs-s);
-    padding: 1px 8px 1px 0;
+    padding-block: 1px; padding-inline: 0 8px;
     overflow: hidden;
   }
   .col span {
@@ -647,7 +647,7 @@
     white-space: nowrap;
   }
   .sub {
-    padding: 2px 8px 2px 24px;
+    padding-block: 2px; padding-inline: 24px 8px;
     font-size: var(--fs-s);
   }
   .dim {
@@ -714,7 +714,7 @@
   }
   .st {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     padding: 1px 7px;
     border-radius: 999px;
     background: var(--surface-2);
@@ -722,17 +722,17 @@
     letter-spacing: 0.04em;
   }
   .st.succeeded {
-    color: var(--status-working);
+    color: var(--success);
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
   }
   .st.running,
   .st.queued {
-    color: var(--status-warn);
+    color: var(--warning);
     background: color-mix(in srgb, var(--status-warn) 16%, transparent);
   }
   .st.failed,
   .st.cancelled {
-    color: var(--status-exited);
+    color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 16%, transparent);
   }
   .tabs {

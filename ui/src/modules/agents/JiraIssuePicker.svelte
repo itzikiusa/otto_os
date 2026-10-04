@@ -255,7 +255,7 @@
     width: 100%;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
     padding: 4px 8px;
@@ -300,7 +300,7 @@
   }
   .issue-key {
     font-size: var(--fs-s);
-    font-weight: 700;
+    font-weight: 600;
     font-family: var(--font-mono);
     color: var(--accent-text);
     flex-shrink: 0;

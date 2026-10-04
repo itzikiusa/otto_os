@@ -208,7 +208,7 @@
     max-width: 130px;
     padding: 4px 6px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
     font-size: var(--fs-s);

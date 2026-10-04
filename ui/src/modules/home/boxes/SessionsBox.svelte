@@ -187,7 +187,7 @@
     font-size: var(--fs-xs);
   }
   .pill.needs {
-    color: var(--status-warn);
+    color: var(--warning);
     background: var(--status-warn-soft);
   }
   .ago {

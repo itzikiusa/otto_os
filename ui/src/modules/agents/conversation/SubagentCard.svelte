@@ -110,7 +110,7 @@
     background: var(--hover);
   }
   .sub-head:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .sub-icon {
@@ -165,14 +165,10 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .spin {
-      animation: spin 0.9s linear infinite;
+      animation: otto-spin 0.9s linear infinite;
     }
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   .sub-caret {
     display: inline-flex;
     color: var(--text-dim);

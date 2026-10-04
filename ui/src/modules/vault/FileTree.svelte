@@ -416,7 +416,7 @@
     font-style: italic;
   }
   .row.drag-over {
-    outline: 1px dashed var(--accent);
+    outline: 1px dashed var(--accent-text);
     outline-offset: -1px;
   }
   .chev {
@@ -516,7 +516,7 @@
     inset-inline-end: 8px;
     background: var(--surface-2);
     border: 1px solid var(--accent);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
     padding: 2px 6px;

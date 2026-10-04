@@ -125,7 +125,7 @@
     overflow: hidden;
   }
   .mermaid.selected {
-    outline: 1px solid var(--accent);
+    outline: 1px solid var(--accent-text);
   }
   .render {
     flex: 1 1 auto;
@@ -150,7 +150,7 @@
     flex: 0 0 auto;
     padding: 4px 8px;
     font-size: var(--fs-xs);
-    color: var(--status-exited);
+    color: var(--danger);
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
     white-space: nowrap;

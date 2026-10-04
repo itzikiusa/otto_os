@@ -18,11 +18,15 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   let { workspaceId }: { workspaceId: string } = $props();
 
   let creds: BrowserCredential[] = $state([]);
   let loading = $state(true);
+  /** Cause of the last failed list load (inline + Retry; a toast is for actions). */
+  let loadError = $state('');
 
   // ── Add/Edit form (shared modal) ────────────────────────────────────────
   let formOpen = $state(false);
@@ -48,8 +52,9 @@
     loading = true;
     try {
       creds = await browserApi.listCredentials(workspaceId);
+      loadError = '';
     } catch (e) {
-      toasts.error('Could not load credentials', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -177,11 +182,8 @@
     <button class="btn primary" onclick={openAdd}>+ Add credential</button>
   </div>
 
-  {#if loading}
-    <p class="empty">Loading credentials…</p>
-  {:else if creds.length === 0}
-    <p class="empty">No saved credentials yet.</p>
-  {:else}
+  <LoadState what="credentials" {loading} error={loadError} empty={creds.length === 0} onretry={() => void load()}>
+    {#snippet emptyView()}<p class="empty">No saved credentials yet.</p>{/snippet}
     <ul class="list">
       {#each creds as c (c.id)}
         <li class="row">
@@ -223,7 +225,7 @@
         </li>
       {/each}
     </ul>
-  {/if}
+  </LoadState>
 </div>
 
 {#if formOpen}

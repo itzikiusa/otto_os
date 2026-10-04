@@ -4,6 +4,7 @@
   // widgets are added from a query result via the "Add widget" sheet.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import WidgetCard from './WidgetCard.svelte';
   import { database } from '../../lib/stores/database.svelte';
@@ -132,9 +133,12 @@
       value={dashboard?.id ?? ''}
       onchange={(e) => (database.selectedDashboardId = (e.currentTarget as HTMLSelectElement).value || null)}
       disabled={database.dashboards.length === 0}
+      aria-label="Dashboard"
     >
       {#if database.dashboards.length === 0}
-        <option value="">No dashboards</option>
+        <option value="">
+          {database.dashboardsLoading ? 'Loading dashboards…' : database.dashboardsError ? 'Couldn’t load dashboards' : 'No dashboards'}
+        </option>
       {/if}
       {#each database.dashboards as d (d.id)}
         <option value={d.id}>{d.name}</option>
@@ -172,29 +176,39 @@
     {/if}
   </div>
 
-  {#if database.dashboards.length === 0}
-    <EmptyState
-      icon="grid"
-      title="No dashboards yet"
-      body="Create a dashboard, then add widgets from your query results to build live charts."
-      actionLabel={canEdit ? 'New dashboard' : undefined}
-      onaction={canEdit ? newDashboard : undefined}
-    />
-  {:else if dashboard && widgets.length === 0}
-    <EmptyState
-      icon="box"
-      title="No widgets"
-      body="Run a query in the Query tab, then click “Add widget” to chart it here."
-      actionLabel={canEdit ? 'Add widget' : undefined}
-      onaction={canEdit ? openAdd : undefined}
-    />
-  {:else if dashboard}
-    <div class="widget-grid">
-      {#each widgets as w (w.id)}
-        <WidgetCard widget={w} refreshSecs={dashboard.refresh_secs} onedit={canEdit ? openEdit : undefined} />
-      {/each}
-    </div>
-  {/if}
+  <LoadState
+    what="dashboards"
+    variant="page"
+    loading={database.dashboardsLoading}
+    error={database.dashboardsError}
+    empty={database.dashboards.length === 0}
+    onretry={() => void database.loadDashboards()}
+  >
+    {#snippet emptyView()}
+      <EmptyState
+        icon="grid"
+        title="No dashboards yet"
+        body="Create a dashboard, then add widgets from your query results to build live charts."
+        actionLabel={canEdit ? 'New dashboard' : undefined}
+        onaction={canEdit ? newDashboard : undefined}
+      />
+    {/snippet}
+    {#if dashboard && widgets.length === 0}
+      <EmptyState
+        icon="box"
+        title="No widgets"
+        body="Run a query in the Query tab, then click “Add widget” to chart it here."
+        actionLabel={canEdit ? 'Add widget' : undefined}
+        onaction={canEdit ? openAdd : undefined}
+      />
+    {:else if dashboard}
+      <div class="widget-grid">
+        {#each widgets as w (w.id)}
+          <WidgetCard widget={w} refreshSecs={dashboard.refresh_secs} onedit={canEdit ? openEdit : undefined} />
+        {/each}
+      </div>
+    {/if}
+  </LoadState>
 </div>
 
 {#if adding}

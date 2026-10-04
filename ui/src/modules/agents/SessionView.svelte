@@ -1139,7 +1139,7 @@
     cursor: grab;
   }
   .pane-title:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   /* The active pane reads at full contrast; the others step back (dim title,
@@ -1314,7 +1314,7 @@
     border-color: var(--border-strong);
   }
   .meta-chip:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .meta-chip > :global(svg),
@@ -1350,7 +1350,7 @@
     font-size: var(--fs-xs);
   }
   .view-seg > button:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -1px;
   }
   .view-flip {
@@ -1415,7 +1415,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     padding: 2px 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     line-height: 1;
   }
   .dir-remove:hover {

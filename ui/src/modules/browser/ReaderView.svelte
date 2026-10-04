@@ -331,7 +331,7 @@
   }
   .page.mark-armed :global(*:hover),
   .page.mark-armed :global([role="button"]:focus-visible) {
-    outline: 1px dashed var(--accent);
+    outline: 1px dashed var(--accent-text);
     outline-offset: 2px;
   }
   .page.long > :global(*) {

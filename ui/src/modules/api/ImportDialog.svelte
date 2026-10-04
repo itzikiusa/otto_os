@@ -3,6 +3,7 @@
   // request tab), a Postman / OpenAPI / HAR file (becomes a collection), or a
   // whole Postman account (every collection + environment via the Postman API).
   import Icon from '../../lib/components/Icon.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import Modal from '../../lib/components/Modal.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -67,21 +68,14 @@
     }
   }
 
-  function onTabKey(e: KeyboardEvent, i: number): void {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
-    e.preventDefault();
-    const next = MODES[(i + (e.key === 'ArrowRight' ? 1 : MODES.length - 1)) % MODES.length];
-    mode = next.id;
-    (e.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLElement>('[role=tab]')[MODES.indexOf(next)]?.focus();
-  }
 </script>
 
 <Modal title="Import" width={520} {onclose}>
   <div class="imp">
     <div class="segmented" role="tablist" aria-label="Import from">
-      {#each MODES as m, i (m.id)}
+      {#each MODES as m (m.id)}
         <button role="tab" aria-selected={mode === m.id} class:active={mode === m.id} tabindex={mode === m.id ? 0 : -1}
-          onclick={() => (mode = m.id)} onkeydown={(e) => onTabKey(e, i)}>{m.label}</button>
+          onclick={() => (mode = m.id)} onkeydown={onTabKey}>{m.label}</button>
       {/each}
     </div>
 

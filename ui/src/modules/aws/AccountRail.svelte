@@ -159,7 +159,7 @@
     gap: 6px;
     margin: 2px 10px 4px;
     padding: 4px 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--warning-soft);
     font-size: var(--fs-xs);
   }
@@ -247,8 +247,15 @@
     opacity: 0;
   }
   .acct-row:hover .more,
-  .acct-row:focus-within .more {
+  .acct-row:focus-within .more,
+  .more:focus-visible {
     opacity: 1;
+  }
+  /* No hover on touch: the account menu trigger stays visible. */
+  @media (hover: none) {
+    .more {
+      opacity: 1;
+    }
   }
   .svcs {
     list-style: none;

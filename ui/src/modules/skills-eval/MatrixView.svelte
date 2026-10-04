@@ -631,7 +631,7 @@
   }
   .mx-dot.st-running {
     background: var(--info);
-    animation: pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.2s ease-in-out infinite;
   }
   .mx-dot.st-done {
     background: var(--status-working);
@@ -662,11 +662,7 @@
       animation: none;
     }
   }
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
-  }
+  
   .mx-main {
     flex: 1;
     min-width: 0;
@@ -763,7 +759,7 @@
     border: 0;
   }
   .chip-toggle:has(input:focus-visible) {
-    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    outline: 2px solid color-mix(in srgb, var(--accent-text) 70%, transparent);
     outline-offset: 1px;
   }
   .block-head {

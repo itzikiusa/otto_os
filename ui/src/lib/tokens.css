@@ -9,8 +9,8 @@
    -contrast) --danger/--warning/--success/--info (+ -soft, --danger-solid)
    --status-* (indicators) --fs-* --radius-* --font-ui --font-mono --shadow.
    Also defined here: --glass-* / --separator / --shadow-card (chrome
-   materials), --scrim / --scrim-soft (overlay backdrops), --cat-1…6 (chart
-   series), --term-bg, --worktree(-text), --studio-*, --z-* (layers).
+   materials), --scrim / --scrim-soft / --scrim-media (overlay backdrops), --cat-1…6 (chart
+   series), --term-bg, --worktree(-text), --studio-*, --z-* (layers), --code-* (syntax + find highlights), --dur-* / --ease-out (motion).
    The full catalogue, with usage rules, is docs/design/guidelines/foundations.md §1.2. */
 
 :root {
@@ -52,6 +52,12 @@
      command bar sets it while its pill floats over the content column. */
   --toast-lift: 0px;
 
+  /* Motion (foundations.md §8): one short duration + one easing for hovers and
+     entrances; app.css has the matching otto-fade-in / otto-pop-in keyframes. */
+  --dur-fast: 130ms;
+  --dur-enter: 160ms;
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+
   --accent: #0a84ff;
   /* Text/icon colour on an --accent-solid fill (see the warm/dark override). */
   --accent-contrast: #ffffff;
@@ -64,7 +70,6 @@
   /* Amber "warning/attention" status (ahead-behind, dirty, pending, warn
      severity). */
   --status-warn: #e0a000;
-  --status-warn-soft: rgba(224, 160, 0, 0.16);
 
   /* Semantic tones (dark-scheme defaults; light values below). The bare name
      is TEXT-SAFE: >= 4.5:1 on --bg, --surface, --surface-2 and on its own
@@ -84,6 +89,7 @@
   --warning-soft: color-mix(in srgb, var(--warning) 14%, transparent);
   --success-soft: color-mix(in srgb, var(--success) 14%, transparent);
   --info-soft: color-mix(in srgb, var(--info) 14%, transparent);
+  --status-warn-soft: color-mix(in srgb, var(--status-warn) 14%, transparent);
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
   /* Accent as TEXT (links, accent labels): pulled toward --text so it clears
      4.5:1 in every theme, a user-picked custom accent included. */
@@ -124,6 +130,17 @@
   --cat-5: #ff8fb1;
   --cat-6: #5ad1d1;
 
+  /* Code (highlight.js tokens + find-in-page highlights). Every --code-* text
+     colour is >= 4.5:1 on --surface, --surface-2 and --surface-3 in its scheme
+     (docs/design/guidelines/foundations.md §1.4). Light values below. */
+  --code-keyword: #d08bf7;
+  --code-string: #5fd97a;
+  --code-number: #f0904a;
+  --code-builtin: #56c8d8;
+  --code-find: #ffd54a;
+  --code-find-current: #ff9800;
+  --code-find-text: #1a1a1a;
+
   /* Native form controls (checkboxes, radios, scrollbars, date pickers,
      select popups) follow the scheme and tint with the theme accent, so a
      dark page never shows a white system checkbox. */
@@ -142,7 +159,6 @@ html[data-scheme='light']:not([data-theme='pro-dark']) {
   --status-idle: #69696e;
   --status-exited: #b3261e;
   --status-warn: #8a5100;
-  --status-warn-soft: rgba(138, 81, 0, 0.12);
   --worktree: #7c3aed;
   --worktree-text: #6d28d9;
   --cat-1: #1f6fd1;
@@ -151,6 +167,10 @@ html[data-scheme='light']:not([data-theme='pro-dark']) {
   --cat-4: #7a4fd6;
   --cat-5: #c2417a;
   --cat-6: #0f8a8a;
+  --code-keyword: #8e24c8;
+  --code-string: #166b2c;
+  --code-number: #a8470c;
+  --code-builtin: #0b6e6e;
 }
 
 /* ---------- Native theme (default) ---------- */
@@ -176,7 +196,7 @@ html[data-theme='native'][data-scheme='dark'] {
   --surface-3: #3a3a41;
   --border: rgba(255, 255, 255, 0.1);
   --text: #f2f2f5;
-  --text-dim: #9f9fa6;
+  --text-dim: #acacb3;
   --term-bg: #131318;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
 }
@@ -208,7 +228,7 @@ html[data-theme='warm'][data-scheme='light'] {
   --surface-3: #e7e3dc;
   --border: rgba(60, 50, 30, 0.12);
   --text: #3d3a35;
-  --text-dim: #6b6760;
+  --text-dim: #605c56;
   --term-bg: #fbfaf7;
   --shadow: 0 8px 30px rgba(60, 50, 30, 0.14);
   --accent: #0f9d58;
@@ -222,7 +242,7 @@ html[data-theme='warm'][data-scheme='dark'] {
   --surface-3: #3b3832;
   --border: rgba(255, 245, 225, 0.1);
   --text: #e8e4da;
-  --text-dim: #a09a8e;
+  --text-dim: #ada79b;
   --term-bg: #1a1916;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
   --accent: #2bb673;
@@ -277,6 +297,9 @@ html[data-theme='warm'][data-scheme='dark'] {
      command palette (which stays transparent enough to keep context). */
   --scrim: rgba(0, 0, 0, 0.4);
   --scrim-soft: rgba(0, 0, 0, 0.25);
+  /* Gradient/caption veil over an image, video or 3D viewport — the media is
+     the backdrop, so the same in both schemes (text on it is white). */
+  --scrim-media: rgba(0, 0, 0, 0.6);
 }
 html[data-scheme='dark'],
 html[data-theme='pro-dark'] {

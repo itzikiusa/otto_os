@@ -119,7 +119,7 @@
     font-size: var(--fs-xs);
     color: var(--text);
     padding: 1px 4px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
   }
   .sb-btn:hover {
     background: var(--surface-2);

@@ -570,7 +570,7 @@
     box-shadow: inset 0 0 0 2px var(--accent-text);
   }
   table.grid tbody tr:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .pager {
     display: flex;

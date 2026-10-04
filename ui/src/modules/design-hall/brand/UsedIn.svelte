@@ -175,7 +175,7 @@
   .err > :global(svg) {
     color: var(--danger);
   }
-  @media (max-width: 720px) {
+  @media (max-width: 640px) {
     .studio,
     .tok {
       display: none;

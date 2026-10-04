@@ -113,8 +113,9 @@
 
 <style>
   .row-detail {
-    flex: 0 0 300px;
-    min-width: 0;
+    /* Shrinks toward 240px when the grid needs the room — no viewport query. */
+    flex: 0 1 300px;
+    min-width: 240px;
     display: flex;
     flex-direction: column;
     border: 1px solid var(--border);
@@ -128,7 +129,7 @@
     gap: 4px;
     height: 40px;
     box-sizing: border-box;
-    padding: 0 6px 0 12px;
+    padding-block: 0; padding-inline: 12px 6px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
   }
@@ -192,7 +193,6 @@
   .rd-type {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    opacity: 0.8;
     white-space: nowrap;
   }
   .rd-act {
@@ -201,8 +201,14 @@
     opacity: 0;
   }
   .rd-field:hover .rd-act,
+  .rd-field:focus-within .rd-act,
   .rd-act:focus-visible {
     opacity: 1;
+  }
+  @media (hover: none) {
+    .rd-act {
+      opacity: 1;
+    }
   }
   .rd-field dd {
     margin: 2px 0 0;
@@ -237,10 +243,5 @@
   }
   .grow {
     flex: 1;
-  }
-  @media (max-width: 900px) {
-    .row-detail {
-      flex-basis: 240px;
-    }
   }
 </style>
