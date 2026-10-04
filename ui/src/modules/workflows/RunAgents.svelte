@@ -218,7 +218,7 @@
       case 'skipped':
         return { ...base, key: 'ended', label: 'Skipped', tone: 'neutral', hint: 'Skipped' };
       case 'cancelled':
-        return { ...base, key: 'ended', label: 'Cancelled', tone: 'neutral', hint: 'The review was cancelled' };
+        return { ...base, key: 'ended', label: 'Canceled', tone: 'neutral', hint: 'The review was cancelled' };
       case 'fallback':
         return { ...base, key: 'failed', label: 'Fallback', tone: 'warning', hint: 'The configured summarizer was unavailable — a deterministic fallback ran' };
       case 'error':

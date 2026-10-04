@@ -305,8 +305,11 @@
   /** Nothing to list at all (first load, a failed load, or truly no history):
    *  the list pane — search, filters and an empty column — is hidden and the
    *  page speaks once, from the right (loading / error + Retry / empty + CTA). */
-  const hideList = $derived(history.entries.length === 0 && !serverFiltered && !history.hasMore);
-  const isEmpty = $derived(hideList && !history.error && !history.loading);
+  // …except when the scope toggle lives there (a workspace is open): an empty
+  // or still-loading scope must not hide the way to the other scope.
+  const nothingToList = $derived(history.entries.length === 0 && !serverFiltered && !history.hasMore);
+  const hideList = $derived(nothingToList && !ws.currentId);
+  const isEmpty = $derived(nothingToList && !history.error && !history.loading);
   /** The conversation the header names (only once it can actually be shown). */
   const headSel = $derived(sel && wsId ? sel : null);
 
@@ -529,7 +532,7 @@
 
   <!-- ── Right: read-only conversation + outputs ─────────────────────────── -->
   <section class="hdetail">
-    {#if hideList || (!sel && history.error)}
+    {#if nothingToList || (!sel && history.error)}
       <LoadState
         variant="page"
         what="history"
