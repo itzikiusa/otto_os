@@ -387,16 +387,21 @@ class Router {
   }
 
   go(path: string): void {
+    void this.goChecked(path);
+  }
+
+  /** Await the leave decision before moving focus to a destination tab. */
+  async goChecked(path: string): Promise<boolean> {
     const hash = this.toHash(path);
-    if (hash === this.currentHash()) return;
-    if (this.divert(hash)) return;
+    if (hash === this.currentHash()) return true;
+    if (this.divert(hash)) return false;
     if (this.guards.size === 0) {
       window.location.hash = hash;
-      return;
+      return true;
     }
-    void this.mayLeave(hash).then((ok) => {
-      if (ok) this.setHash(hash);
-    });
+    const ok = await this.mayLeave(hash);
+    if (ok) this.setHash(hash);
+    return ok;
   }
 
   replace(path: string): void {

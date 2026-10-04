@@ -1,5 +1,7 @@
 <script lang="ts">
   import AgentDocuments from '../../src/modules/personal-agents/AgentDocuments.svelte';
+  import ConfirmDialog from '../../src/lib/components/ConfirmDialog.svelte';
+  import { router } from '../../src/lib/router.svelte';
   import PathField from '../../src/lib/components/PathField.svelte';
   let path = $state('~/original');
   let submitted = $state(false);
@@ -10,3 +12,6 @@
   <PathField bind:value={path}><input aria-label="Working directory" bind:value={path} /></PathField>
   <output>{submitted ? 'submitted' : 'not submitted'}</output>
 </form>
+
+<button onclick={() => router.go("fixture-away")}>Leave document</button>
+<ConfirmDialog />

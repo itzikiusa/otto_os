@@ -95,3 +95,40 @@ test('memory inspector: sources, filter, edit and forget are content-checked', a
   expect(edits).toHaveLength(2);
   expect(edits[1]).toMatchObject({ raw: '- [run] CI flaky on mac', text: null });
 });
+
+test('autonomy draft blocks navigation through pending and failed saves', async ({ page }) => {
+  let release!: () => void;
+  const saved = { proactive: { enabled: false, runs_per_day: 4, max_minutes: 15 }, goals: [], rules: [], primary: false };
+  await page.addInitScript(() => { localStorage.setItem('otto_base', location.origin); localStorage.setItem('otto_token', 'fixture'); });
+  await page.route('**/api/v1/**', async r => {
+    if (!new URL(r.request().url()).pathname.endsWith('/autonomy')) return r.fulfill({ json: [] });
+    if (r.request().method() === 'PUT') {
+      await new Promise<void>(resolve => { release = resolve; });
+      return r.fulfill({ status: 503, json: { code: 'upstream', message: 'Synthetic autonomy save unavailable' } });
+    }
+    return r.fulfill({ json: saved });
+  });
+  await page.goto('/e2e/fixtures/personal-autonomy.html');
+  const budget = page.getByLabel('Runs per day (max)');
+  await budget.fill('9');
+  await page.getByRole('button', { name: 'Add rule' }).click();
+  const rule = page.getByLabel('Rule', { exact: true });
+  await rule.fill('Ask before touching release');
+  await page.getByRole('button', { name: 'Leave autonomy' }).click();
+  await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
+  await expect(budget).toHaveValue('9');
+  await expect(rule).toHaveValue('Ask before touching release');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect.poll(() => !!release).toBe(true);
+  await expect(rule).toBeDisabled();
+  await page.getByRole('button', { name: 'Leave autonomy' }).click();
+  await expect(page).not.toHaveURL(/#\/fixture-away$/);
+  release();
+  await expect(rule).toBeEnabled();
+  await page.getByRole('button', { name: 'Leave autonomy' }).click();
+  await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
+  await expect(rule).toHaveValue('Ask before touching release');
+  await page.getByRole('button', { name: 'Leave autonomy' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(page).toHaveURL(/#\/fixture-away$/);
+});

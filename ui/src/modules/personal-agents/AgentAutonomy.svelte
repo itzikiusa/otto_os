@@ -6,6 +6,7 @@
   import { personalAgentsApi } from '../../lib/api/personalAgents';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { router } from '../../lib/router.svelte';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
@@ -81,8 +82,11 @@
     });
     return cur !== was;
   });
+  $effect(() => router.guard(() => !saving));
+  $effect(() => guardUnsaved(() => dirty, { what: 'this agent’s autonomy settings' }));
 
   async function save(): Promise<void> {
+    if (saving) return;
     saving = true;
     try {
       const next = await personalAgentsApi.saveAutonomy(agentId, {
@@ -141,15 +145,15 @@
             <span class="chip">Read-only</span>
           </div>
           <p class="mode-body">Works its standing goals in the background and reports findings. It can read, search and browse, but can’t send, post, write or change anything.</p>
-          <label class="chk"><input type="checkbox" bind:checked={proactiveOn} disabled={!editable} /> Work on standing goals in the background</label>
+          <label class="chk"><input type="checkbox" bind:checked={proactiveOn} disabled={!editable || saving} /> Work on standing goals in the background</label>
           <div class="fld-row">
             <label class="fld">
               <span>Runs per day (max)</span>
-              <input type="number" min="1" max="24" bind:value={runsPerDay} disabled={!editable} />
+              <input type="number" min="1" max="24" bind:value={runsPerDay} disabled={!editable || saving} />
             </label>
             <label class="fld">
               <span>Minutes per run (max)</span>
-              <input type="number" min="1" max="60" bind:value={maxMinutes} disabled={!editable} />
+              <input type="number" min="1" max="60" bind:value={maxMinutes} disabled={!editable || saving} />
             </label>
           </div>
         </div>
@@ -184,7 +188,7 @@
       <div class="card-head">
         <h2 id="goals-h">Standing goals</h2>
         {#if editable}
-          <button class="btn small" onclick={() => (goals = [...goals, { text: '', enabled: true, last_run_at: null }])}>
+          <button class="btn small" disabled={saving} onclick={() => (goals = [...goals, { text: '', enabled: true, last_run_at: null }])}>
             <Icon name="plus" size={12} /> Add goal
           </button>
         {/if}
@@ -196,14 +200,14 @@
         <ul class="list">
           {#each goals as g, i (g.id ?? `new-${i}`)}
             <li class="item">
-              <input type="checkbox" bind:checked={g.enabled} disabled={!editable} aria-label="Goal enabled" title="Enabled" />
-              <input class="grow" bind:value={g.text} disabled={!editable} placeholder="What should it keep an eye on?" aria-label="Goal" />
+              <input type="checkbox" bind:checked={g.enabled} disabled={!editable || saving} aria-label="Goal enabled" title="Enabled" />
+              <input class="grow" bind:value={g.text} disabled={!editable || saving} placeholder="What should it keep an eye on?" aria-label="Goal" />
               <span class="meta">Worked <RelTime iso={g.last_run_at} fallback="never" /></span>
               {#if editable && g.id}
-                <button class="btn small" disabled={workingGoal !== null || dirty} title={dirty ? 'Save first' : 'Start a read-only run on this goal now'} onclick={() => g.id && workNow(g.id)}>Work on it now</button>
+                <button class="btn small" disabled={workingGoal !== null || dirty || saving} title={dirty ? 'Save first' : 'Start a read-only run on this goal now'} onclick={() => g.id && workNow(g.id)}>Work on it now</button>
               {/if}
               {#if editable}
-                <button class="icon-btn" aria-label="Remove goal" title="Remove goal" onclick={() => (goals = goals.filter((_, j) => j !== i))}>
+                <button class="icon-btn" disabled={saving} aria-label="Remove goal" title="Remove goal" onclick={() => (goals = goals.filter((_, j) => j !== i))}>
                   <Icon name="trash" size={14} />
                 </button>
               {/if}
@@ -217,7 +221,7 @@
       <div class="card-head">
         <h2 id="rules-h">Rules</h2>
         {#if editable}
-          <button class="btn small" onclick={() => (rules = [...rules, { text: '', enforce: null }])}>
+          <button class="btn small" disabled={saving} onclick={() => (rules = [...rules, { text: '', enforce: null }])}>
             <Icon name="plus" size={12} /> Add rule
           </button>
         {/if}
@@ -229,7 +233,7 @@
         <ul class="list">
           {#each rules as r, i (r.id ?? `new-${i}`)}
             <li class="item rule">
-              <input class="grow" bind:value={r.text} disabled={!editable} placeholder="e.g. Never post in #general" aria-label="Rule" />
+              <input class="grow" bind:value={r.text} disabled={!editable || saving} placeholder="e.g. Never post in #general" aria-label="Rule" />
               {#if r.id && saved?.rules.some((x) => x.id === r.id && x.text === r.text.trim())}
                 <span class="chip" class:pa-enf={!!r.enforce} title="Derived by Otto from the rule’s wording">
                   {#if r.enforce}<Icon name="lock" size={11} />{/if}{enforceLabel(r)}
@@ -238,7 +242,7 @@
                 <span class="meta">Save to see what Otto enforces</span>
               {/if}
               {#if editable}
-                <button class="icon-btn" aria-label="Remove rule" title="Remove rule" onclick={() => (rules = rules.filter((_, j) => j !== i))}>
+                <button class="icon-btn" disabled={saving} aria-label="Remove rule" title="Remove rule" onclick={() => (rules = rules.filter((_, j) => j !== i))}>
                   <Icon name="trash" size={14} />
                 </button>
               {/if}
@@ -251,7 +255,7 @@
     <section class="pa-panel" aria-labelledby="primary-h">
       <h2 id="primary-h">Your agent</h2>
       <p class="hint">Your primary assistant: it handles general requests and routes specialist work to your other agents through a shared room. One per workspace.</p>
-      <label class="chk"><input type="checkbox" bind:checked={primary} disabled={!editable} /> Make this my primary agent</label>
+      <label class="chk"><input type="checkbox" bind:checked={primary} disabled={!editable || saving} /> Make this my primary agent</label>
     </section>
 
     {#if editable}

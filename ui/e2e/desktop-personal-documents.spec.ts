@@ -92,3 +92,44 @@ test('context stays separate, cancels edits, and inserts file and Vault referenc
   await page.reload();
   await expect(page.getByTestId('agent-document')).toContainText('Reference: /vault/notes.md');
 });
+
+for (const kind of ['memory', 'context']) {
+  test(`${kind} draft survives rejected navigation and failed or pending saves`, async ({ page }) => {
+    let release!: () => void;
+    let fail = true;
+    await page.addInitScript(() => { localStorage.setItem('otto_base', location.origin); localStorage.setItem('otto_token', 'fixture'); });
+    await page.route('**/api/v1/**', async r => {
+      if (!new URL(r.request().url()).pathname.endsWith(`/${kind}`)) return r.fulfill({ json: [] });
+      if (r.request().method() === 'PUT') {
+        await new Promise<void>(resolve => { release = resolve; });
+        if (fail) return r.fulfill({ status: 503, json: { code: 'upstream', message: 'Synthetic save unavailable' } });
+        return r.fulfill({ json: { content: r.request().postDataJSON().content, version: 'v2', exists: true, path: null } });
+      }
+      return r.fulfill({ json: { content: 'Saved original', version: 'v1', exists: true, path: null } });
+    });
+    await page.goto(`/e2e/fixtures/personal-documents.html?kind=${kind}`);
+    await page.getByRole('button', { name: `Edit ${kind}` }).click();
+    const draft = page.getByLabel(kind === 'memory' ? 'Memory Markdown' : 'Context Markdown');
+    await draft.fill('Preserve exact draft [[vault/notes.md]]');
+    await page.getByRole('button', { name: 'Leave document' }).click();
+    await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
+    await expect(draft).toHaveValue('Preserve exact draft [[vault/notes.md]]');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect.poll(() => !!release).toBe(true);
+    await page.getByRole('button', { name: 'Leave document' }).click();
+    await expect(page).not.toHaveURL(/#\/fixture-away$/);
+    release();
+    await expect(page.getByRole('alert')).toContainText('Synthetic save unavailable');
+    await page.getByRole('button', { name: 'Leave document' }).click();
+    await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
+    await expect(draft).toHaveValue('Preserve exact draft [[vault/notes.md]]');
+    fail = false;
+    const prior = release;
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect.poll(() => release !== prior).toBe(true);
+    release();
+    await expect(page.getByTestId('agent-document')).toContainText('Preserve exact draft');
+    await page.getByRole('button', { name: 'Leave document' }).click();
+    await expect(page).toHaveURL(/#\/fixture-away$/);
+  });
+}

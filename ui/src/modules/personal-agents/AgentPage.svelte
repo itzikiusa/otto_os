@@ -2,7 +2,8 @@
   // One personal agent: Overview / Activity / Autonomy / Schedules / Runs /
   // Chat / Memory / Context tabs.
   import RelTime from '../../lib/components/RelTime.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
+  import { nextTabIndex } from '../../lib/tabKeys';
+  import { tick } from 'svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
@@ -64,8 +65,25 @@
   // The tab is part of the URL (`#/personal-agents/<id>/<tab>`), so Run now can
   // land on Runs and a reload / back keeps the section.
   const tab = $derived<Tab>(TABS.some((t) => t.id === router.parts[2]) ? (router.parts[2] as Tab) : 'overview');
-  function goTab(t: Tab): void {
-    router.go(t === 'overview' ? `personal-agents/${agentId}` : `personal-agents/${agentId}/${t}`);
+  let tabTransition = 0;
+  async function goTab(t: Tab, event?: MouseEvent): Promise<void> {
+    const list = (event?.currentTarget as HTMLElement | undefined)?.closest('[role="tablist"]');
+    const seq = ++tabTransition;
+    const accepted = await router.goChecked(t === 'overview' ? `personal-agents/${agentId}` : `personal-agents/${agentId}/${t}`);
+    await tick();
+    await Promise.resolve();
+    if (seq !== tabTransition || !list?.isConnected || list.closest('[inert]')) return;
+    // hashchange may follow this microtask; focus the accepted target only.
+    list.querySelector<HTMLButtonElement>(`[role="tab"][data-tab="${accepted ? t : tab}"]`)?.focus();
+  }
+  function onTabKey(event: KeyboardEvent): void {
+    const list = event.currentTarget as HTMLElement;
+    const tabs = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]:not(:disabled)')];
+    const current = tabs.findIndex((el) => el.getAttribute('aria-selected') === 'true');
+    const next = nextTabIndex(event.key, current, tabs.length, { rtl: getComputedStyle(list).direction === 'rtl' });
+    if (current < 0 || next < 0) return;
+    event.preventDefault();
+    tabs[next].click();
   }
   let editing = $state(false);
   let busy = $state(false);
@@ -370,9 +388,10 @@
           class="tab"
           class:active={tab === t.id}
           role="tab"
+          data-tab={t.id}
           aria-selected={tab === t.id}
           tabindex={tab === t.id ? 0 : -1}
-          onclick={() => goTab(t.id)}
+          onclick={(event) => void goTab(t.id, event)}
         >{t.label}</button>
       {/each}
     </div>
