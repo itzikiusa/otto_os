@@ -69,7 +69,7 @@ test('Health support bundle failure leaves download available for retry', async 
   await page.goto('/#/insights/health');
   const download = page.getByRole('button', { name: 'Download support bundle', exact: true });
   await download.click();
-  await expect(page.getByText("Couldn't download the support bundle", { exact: true })).toBeVisible();
+  await expect(page.getByText('Couldn’t download the support bundle', { exact: true })).toBeVisible();
   await expect(download).toBeEnabled(); fail = false;
   const pending = page.waitForEvent('download'); await download.click();
   expect((await pending).suggestedFilename()).toMatch(/^otto-support-bundle-/);

@@ -201,7 +201,7 @@ test('SFTP long transfer can be cancelled on phone without losing file navigatio
   await openPage(page,'connections');await page.locator('.conn-row',{hasText:conn.name}).click({button:'right'});await page.getByRole('menuitem',{name:'Browse files (SFTP)',exact:true}).click();
   const transfers=page.getByLabel('File transfers',{exact:true});await expect(transfers).toContainText('Running');
   await expectFullyInViewport(page,transfers.getByRole('button',{name:'Cancel',exact:true}));await transfers.getByRole('button',{name:'Cancel',exact:true}).click();
-  await expect(transfers).toContainText('Cancelled');await expect(page.locator('.sftp .crumbs')).toContainText('customer-reporting');
+  await expect(transfers).toContainText('Canceled');await expect(page.locator('.sftp .crumbs')).toContainText('customer-reporting');
   await expect(transfers.locator('.ellipsis')).toHaveCSS('white-space','normal');
   await expectNoHorizontalOverflow(page);await page.screenshot({animations:'disabled',path:`${shots}/sftp-transfer-phone.png`});
 });
