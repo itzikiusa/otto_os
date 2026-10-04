@@ -36,9 +36,11 @@
   let { thread, onopentasks, onopenmemory }: Props = $props();
 
   // ── data ───────────────────────────────────────────────────────────────────
+  // Metadata updates keep the same acquisition; only a new thread releases it.
+  const threadId = $derived(thread.id);
   $effect(() => {
-    const id = thread.id;
-    untrack(() => void assistant.loadTurns(id));
+    const id = threadId;
+    return untrack(() => assistant.acquireTurns(id));
   });
   $effect(() => {
     if (untrack(() => assistant.tasks.state) === 'idle') void assistant.loadTasks();

@@ -56,6 +56,8 @@ pub struct Store {
 /// The status aggregates that need a COUNT over links/tags/files.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StatusCounts {
+    pub notes: i64,
+    pub links: i64,
     pub unresolved: i64,
     pub tags: i64,
     pub attachments: i64,
@@ -152,7 +154,17 @@ impl Store {
         Ok(rows.iter().map(Self::vault_from_row).collect())
     }
 
+    pub async fn get_vault_metadata(&self, id: i64) -> Result<VaultRec> {
+        let row = sqlx::query("SELECT id, ws_id, name, root_path, okf, created_at, last_scan_at, scan_state FROM vaults WHERE id = ?")
+            .bind(id).fetch_optional(&self.pool).await.map_err(dberr("vault.metadata"))?
+            .ok_or_else(|| Error::NotFound("vault".into()))?;
+        Ok(Self::vault_from_row(&row))
+    }
+
     pub async fn get_vault(&self, id: i64) -> Result<VaultRec> {
+        #[cfg(test)]
+        self.status_count_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let row = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {} FROM vaults v WHERE v.id = ?",
             Self::VAULT_COLS
@@ -254,7 +266,16 @@ impl Store {
         id: i64,
         cached: Option<StatusCounts>,
     ) -> Result<(VaultStatus, StatusCounts)> {
-        let v = self.get_vault(id).await?;
+        let v = self.get_vault_metadata(id).await?;
+        self.status_with_metadata(v, cached).await
+    }
+
+    pub async fn status_with_metadata(
+        &self,
+        v: VaultRec,
+        cached: Option<StatusCounts>,
+    ) -> Result<(VaultStatus, StatusCounts)> {
+        let id = v.id;
         let counts = match cached {
             Some(c) => c,
             None => self.status_counts(id).await?,
@@ -265,6 +286,8 @@ impl Store {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let StatusCounts {
+            notes,
+            links,
             unresolved,
             tags,
             attachments,
@@ -276,8 +299,8 @@ impl Store {
                 id,
                 scan_state: v.scan_state,
                 last_scan_at: v.last_scan_at,
-                notes: v.notes,
-                links: v.links,
+                notes,
+                links,
                 unresolved,
                 tags,
                 attachments,
@@ -287,6 +310,16 @@ impl Store {
     }
 
     async fn status_counts(&self, id: i64) -> Result<StatusCounts> {
+        let notes = sqlx::query_scalar("SELECT COUNT(*) FROM vault_notes WHERE vault_id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("vault.status.notes"))?;
+        let links = sqlx::query_scalar("SELECT COUNT(*) FROM vault_links WHERE vault_id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("vault.status.links"))?;
         let unresolved: i64 = sqlx::query(
             "SELECT COUNT(*) AS c FROM vault_links WHERE vault_id = ? AND dst_path IS NULL",
         )
@@ -310,6 +343,8 @@ impl Store {
                 .map_err(dberr("vault.status"))?
                 .get("c");
         Ok(StatusCounts {
+            notes,
+            links,
             unresolved,
             tags,
             attachments,
@@ -753,7 +788,7 @@ impl Store {
         let rows = sqlx::query(
             "SELECT DISTINCT l.src_path, n.title, l.kind, n.hash FROM vault_links l \
              JOIN vault_notes n ON n.vault_id = l.vault_id AND n.path = l.src_path \
-             WHERE l.vault_id = ? AND l.dst_path = ? ORDER BY l.src_path",
+             WHERE l.vault_id = ? AND l.dst_path = ? ORDER BY l.src_path, l.kind",
         )
         .bind(vault)
         .bind(path)

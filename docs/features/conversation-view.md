@@ -291,9 +291,28 @@ corpus numbers and any route-level deviations are recorded in
   block (`truncated:true`); images are served by id, never inlined; the History
   index reads only the head 64 KB + tail 16 KB of each file; artifact bytes cap
   at 25 MB; the Outputs text preview caps at 200 KB.
-- **Live tails** run for at most 32 sessions at once (700 ms poll); beyond that
-  reads still work, only the push stops. A tail stops 60 s after exit or after
-  5 min without a subscriber.
+- **Live tails** run for at most 64 sessions at once (700 ms poll). Retained
+  live folds use a 32 MiB per-session / 128 MiB aggregate accounting budget,
+  with hard source limits of 8 MiB and 16,384 records. These are conservative
+  payload charges, not measured process RSS. Larger transcripts retain only
+  a file-change watcher and request a page refresh at most once per 15 seconds.
+  A tail stops 60 s after exit or after 2 min without a subscriber.
+- **Large transcript reads** stream records instead of retaining a second
+  whole JSON file; Codex scans the same fixed prefix twice to preserve its era
+  rules. Live startup and offline folds share two workers. Interactive reads
+  reject input over 128 MiB, a single record over 16 MiB, or estimated retained
+  charge over 256 MiB with an explicit resource-limit error (HTTP 413).
+  Subagent metadata has a separate 8 MiB charge cap and 1 MiB per-sidecar cap;
+  live-tail admission includes its charge in the aggregate budget.
+  Source files remain untouched. Open the provider's transcript directly or
+  select a smaller subagent transcript when a file exceeds those limits.
+- **Conversation memory** returns to a bounded live window after “Jump to latest”
+  or scrolling back to the live tail: at most 600 turns and an 8 MiB estimated
+  text budget, trimmed only at a recoverable history cursor. Pages deliberately
+  opened for historical reading remain until the reader returns to live.
+  Reconnection across a gap longer than one page replaces the displayed window
+  with the newest page and its earlier-history cursor, so missed turns remain
+  reachable through “Load earlier”.
 - **Idle ≠ finished.** Otto's `idle` means "no PTY output for 5 s", so a board
   task may be handed over while the agent is mid-turn after the 120 s max defer
   — the CLI queues typed input, so nothing is lost, but the task shows up as a

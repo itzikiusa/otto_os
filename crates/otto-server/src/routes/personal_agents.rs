@@ -159,6 +159,8 @@ struct UpdateAgentReq {
 
 #[derive(Deserialize)]
 struct CreateScheduleReq {
+    #[serde(default)]
+    idempotency_key: Option<String>,
     schedule: Value,
     #[serde(default)]
     timezone: Option<String>,
@@ -432,22 +434,20 @@ async fn create_schedule(
     let timezone = req.timezone.unwrap_or_else(|| "UTC".into());
     check_timezone(&timezone)?;
     check_permission(req.permission.as_deref())?;
-    let permission = req.permission.clone();
     let schedule = repo
-        .create_schedule(NewAgentSchedule {
-            agent_id: id,
-            schedule: req.schedule,
-            timezone,
-            directive: req.directive,
-            enabled: req.enabled,
-        })
+        .create_schedule_once(
+            NewAgentSchedule {
+                agent_id: id,
+                schedule: req.schedule,
+                timezone,
+                directive: req.directive,
+                enabled: req.enabled,
+            },
+            req.idempotency_key.as_deref(),
+            req.permission.as_deref().unwrap_or("directed"),
+        )
         .await
         .map_err(ApiError)?;
-    if let Some(p) = permission.as_deref() {
-        repo.set_schedule_permission(&schedule.id, p)
-            .await
-            .map_err(ApiError)?;
-    }
     refresh_next_run(&repo, &schedule).await;
     repo.get_schedule(&schedule.id)
         .await

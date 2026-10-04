@@ -1430,6 +1430,36 @@ impl SwarmRepo {
 
     // -- Runs ---------------------------------------------------------------
 
+    /// Reserve one agent and one capacity slot atomically against the current
+    /// lifecycle state. Manual actions retain the existing ordinary-paused
+    /// behavior; budget-paused and aborted swarms cannot admit new work.
+    pub async fn reserve_run(&self, r: NewRun, allow_paused: bool) -> Result<SwarmRun> {
+        let id = new_id();
+        let inserted = sqlx::query(
+            "INSERT INTO swarm_runs (id, swarm_id, workspace_id, project_id, task_id, agent_id,
+                kind, trigger, status, attempt, enqueued_at)
+             SELECT ?, s.id, ?, ?, ?, ?, ?, ?, 'queued',
+                (SELECT COUNT(*) FROM swarm_runs WHERE task_id = ?), ?
+             FROM swarms s WHERE s.id = ? AND s.workspace_id = ?
+               AND (s.status = 'active' OR (? AND s.status = 'paused' AND COALESCE(s.pause_reason, '') = ''))
+               AND NOT EXISTS (SELECT 1 FROM swarm_runs WHERE agent_id = ? AND status IN ('queued','running','waiting'))
+               AND (SELECT COUNT(*) FROM swarm_runs WHERE swarm_id = s.id AND status IN ('queued','running','waiting'))
+                   < MAX(1, COALESCE(json_extract(s.config_json, '$.max_parallel_sessions'), 4))
+               AND (s.max_total_runs IS NULL OR (SELECT COUNT(*) FROM swarm_runs WHERE swarm_id = s.id) < s.max_total_runs)",
+        )
+        .bind(&id).bind(&r.workspace_id).bind(&r.project_id).bind(&r.task_id)
+        .bind(&r.agent_id).bind(&r.kind).bind(&r.trigger).bind(&r.task_id)
+        .bind(fmt(Utc::now())).bind(&r.swarm_id).bind(&r.workspace_id)
+        .bind(allow_paused).bind(&r.agent_id)
+        .execute(&self.pool).await.map_err(dberr("reserve run"))?;
+        if inserted.rows_affected() == 0 {
+            return Err(otto_core::Error::Conflict(
+                "swarm stopped, agent busy, or run capacity exhausted".into(),
+            ));
+        }
+        self.get_run(&id).await
+    }
+
     pub async fn create_run(&self, r: NewRun) -> Result<SwarmRun> {
         let id = new_id();
         let now = fmt(Utc::now());
@@ -2327,6 +2357,38 @@ mod tests {
         let sessions = repo.latest_task_sessions(&swarm.id).await.unwrap();
         assert_eq!(sessions.get(&task.id).map(String::as_str), Some("sess-new"));
         assert_eq!(sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reservation_serializes_competing_producers_and_stop() {
+        let repo = SwarmRepo::new(mem_pool().await);
+        let ws = new_id();
+        let mut input = new_swarm(&ws);
+        input.config = json!({"max_parallel_sessions": 1});
+        let swarm = repo.create_swarm(input).await.unwrap();
+        repo.set_swarm_status(&swarm.id, "active").await.unwrap();
+        let make = || {
+            let mut r = new_run(&swarm.id);
+            r.workspace_id = ws.clone();
+            r.agent_id = "same-agent".into();
+            r
+        };
+        let (first, second) = tokio::join!(
+            repo.reserve_run(make(), false),
+            repo.reserve_run(make(), false)
+        );
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        assert_eq!(repo.active_run_count(&swarm.id).await.unwrap(), 1);
+        repo.set_swarm_status(&swarm.id, "paused").await.unwrap();
+        repo.stop_active_runs(&swarm.id).await.unwrap();
+        assert!(repo.reserve_run(make(), false).await.is_err());
+        assert!(
+            repo.reserve_run(make(), true).await.is_ok(),
+            "explicit manual run on ordinarily paused swarm"
+        );
+        repo.set_swarm_status(&swarm.id, "aborted").await.unwrap();
+        repo.stop_active_runs(&swarm.id).await.unwrap();
+        assert!(repo.reserve_run(make(), true).await.is_err());
     }
 
     /// D3: a fresh swarm defaults to `max_attempts = 3` and unlimited budgets,

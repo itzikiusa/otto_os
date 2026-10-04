@@ -50,7 +50,7 @@ use crate::report_delivery::{
     augment_report_prompt, deliver_destination, extract_summary, report_hash, write_report,
 };
 use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
-use crate::scheduled_tasks_engine::{until_cancelled, InFlightSet, RunCancels};
+use crate::scheduled_tasks_engine::{until_cancelled, InFlightSet, RunCancelGuard, RunCancels};
 use crate::state::ServerCtx;
 
 /// Marker the prompt-wrap embeds so the offline E2E stub returns a
@@ -500,8 +500,8 @@ pub async fn run_agent(
     trigger: &str,
 ) -> Result<String> {
     let plan = schedule.map_or_else(RunPlan::directed, RunPlan::for_schedule);
-    let run = open_agent_run(ctx, agent, schedule, trigger, &plan).await?;
-    complete_agent_run(ctx, agent, schedule, &run.id, trigger, None, plan).await
+    let (run, cancel) = open_agent_run(ctx, agent, schedule, trigger, &plan).await?;
+    complete_agent_run(ctx, agent, schedule, &run.id, trigger, None, plan, cancel).await
 }
 
 /// Agent ids with a run in flight — ONE set shared by the scheduler tick and
@@ -563,7 +563,7 @@ pub async fn spawn_agent_run(
         ));
     }
     let plan = schedule.map_or_else(RunPlan::directed, RunPlan::for_schedule);
-    let run = open_agent_run(ctx, agent, schedule, trigger, &plan).await?;
+    let (run, cancel) = open_agent_run(ctx, agent, schedule, trigger, &plan).await?;
     let (ctx2, agent2, schedule2, run_id, trigger2) = (
         ctx.clone(),
         agent.clone(),
@@ -581,6 +581,7 @@ pub async fn spawn_agent_run(
             &trigger2,
             None,
             plan,
+            cancel,
         )
         .await;
     });
@@ -614,7 +615,7 @@ pub async fn spawn_directive_run(
             "a run of this agent is already in progress".into(),
         ));
     }
-    let run = open_agent_run(ctx, agent, None, "manual", &RunPlan::directed()).await?;
+    let (run, cancel) = open_agent_run(ctx, agent, None, "manual", &RunPlan::directed()).await?;
     let (ctx2, agent2, run_id, directive2) = (
         ctx.clone(),
         agent.clone(),
@@ -631,6 +632,7 @@ pub async fn spawn_directive_run(
             "manual",
             Some(&directive2),
             RunPlan::directed(),
+            cancel,
         )
         .await;
     });
@@ -657,7 +659,7 @@ pub async fn spawn_proactive_run(
         ));
     };
     let plan = RunPlan::proactive(goal.clone(), cfg.proactive.max_minutes);
-    let run = open_agent_run(ctx, agent, None, "proactive", &plan).await?;
+    let (run, cancel) = open_agent_run(ctx, agent, None, "proactive", &plan).await?;
     if let Some(g) = cfg.goals.iter_mut().find(|g| g.id == goal_id) {
         g.last_run_at = Some(Utc::now().to_rfc3339());
     }
@@ -674,6 +676,7 @@ pub async fn spawn_proactive_run(
             "proactive",
             Some(&directive),
             plan,
+            cancel,
         )
         .await;
     });
@@ -687,35 +690,30 @@ async fn open_agent_run(
     schedule: Option<&PersonalAgentSchedule>,
     trigger: &str,
     plan: &RunPlan,
-) -> Result<PersonalAgentRun> {
+) -> Result<(PersonalAgentRun, RunCancelGuard)> {
+    let id = otto_core::new_id();
+    let cancel = run_cancels().register(&id);
     let run = repo(ctx)
-        .create_run(NewAgentRun {
-            agent_id: agent.id.clone(),
-            schedule_id: schedule.map(|s| s.id.clone()),
-            workspace_id: agent.workspace_id.clone(),
-            trigger: trigger.to_string(),
-        })
-        .await?;
-    repo(ctx)
-        .set_run_mode(
-            &run.id,
+        .create_run_configured(
+            &id,
+            NewAgentRun {
+                agent_id: agent.id.clone(),
+                schedule_id: schedule.map(|s| s.id.clone()),
+                workspace_id: agent.workspace_id.clone(),
+                trigger: trigger.to_string(),
+            },
             plan.mode,
             plan.read_only,
             plan.goal.as_ref().map(|g| g.id.as_str()),
         )
         .await?;
-    let run = PersonalAgentRun {
-        mode: plan.mode.to_string(),
-        goal_id: plan.goal.as_ref().map(|g| g.id.clone()),
-        read_only: plan.read_only,
-        ..run
-    };
     emit(ctx, agent, &run.id, "running");
-    Ok(run)
+    Ok((run, cancel))
 }
 
 /// Execute an opened run to completion and settle it (+ the schedule cursor
 /// for a scheduled run). Returns the run id.
+#[allow(clippy::too_many_arguments)] // cancellation registration precedes publishing the running row
 async fn complete_agent_run(
     ctx: &ServerCtx,
     agent: &PersonalAgent,
@@ -724,6 +722,7 @@ async fn complete_agent_run(
     trigger: &str,
     directive_override: Option<&str>,
     plan: RunPlan,
+    cancel: RunCancelGuard,
 ) -> Result<String> {
     let repo = repo(ctx);
     let run_id = run_id.to_string();
@@ -735,7 +734,6 @@ async fn complete_agent_run(
         .unwrap_or_else(|| "Check in: review your standing instructions and report status.".into());
 
     // A user's Stop drops the execution (no retry) and kills its session.
-    let cancel = run_cancels().register(&run_id);
     // The proactive budget caps a run's wall clock; the normal watchdogs
     // (no-progress / stuck) still apply underneath.
     let cap = plan.max_duration;
@@ -747,10 +745,14 @@ async fn complete_agent_run(
     };
     let mut timed_out = false;
     let result = tokio::select! {
-        r = execute_agent(ctx, agent, &run_id, &directive, &plan) => Some(r),
+        biased;
         _ = until_cancelled(&cancel.signal) => None,
         _ = over_budget => { timed_out = true; None }
+        r = execute_agent(ctx, agent, &run_id, &directive, &plan, &cancel.signal) => Some(r),
     };
+    if result.is_none() {
+        cancel.signal.cancel();
+    }
     drop(cancel);
     let Some(result) = result else {
         if let Ok(run) = repo.get_run(&run_id).await {
@@ -963,6 +965,7 @@ async fn execute_agent(
     run_id: &str,
     directive: &str,
     plan: &RunPlan,
+    cancel: &crate::cancel_signal::CancelSignal,
 ) -> Result<ExecOutcome> {
     let cwd = ensure_agent_workspace(ctx, agent).await?;
     let (user_context, _) = repo(ctx).context(&agent.id).await?;
@@ -1053,6 +1056,7 @@ async fn execute_agent(
                 attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 run_one_session(
                     ctx, &ws, &owner, agent, run_id, &cwd, &augmented, &out_path, &captured, plan,
+                    cancel,
                 )
                 .await
             }
@@ -1102,6 +1106,7 @@ async fn run_one_session(
     out_path: &std::path::Path,
     captured_sid: &Arc<Mutex<Option<String>>>,
     plan: &RunPlan,
+    cancel: &crate::cancel_signal::CancelSignal,
 ) -> crate::agent_run::RunOutcome {
     use crate::agent_run::{FailReason, RunOutcome};
 
@@ -1138,7 +1143,34 @@ async fn run_one_session(
         model: None,
         meta: Some(meta),
     };
-    let session = match ctx.manager.create(ws, &owner.to_string(), req, None).await {
+    // Session creation must finish even if the run future is canceled. Its
+    // completion publishes the exact session ID, then kills it when Stop won
+    // before publication. No prompt can be submitted by this detached setup.
+    let (ctx2, ws2, owner2, run2, stopped) = (
+        ctx.clone(),
+        ws.clone(),
+        owner.to_string(),
+        run_id.to_string(),
+        cancel.clone(),
+    );
+    let creation = tokio::spawn(async move {
+        let session = ctx2.manager.create(&ws2, &owner2, req, None).await?;
+        if let Err(e) = repo(&ctx2).set_run_session(&run2, &session.id).await {
+            let _ = ctx2.manager.kill_session(&session.id).await;
+            return Err(e);
+        }
+        if stopped.is_cancelled() {
+            ctx2.manager.kill_session(&session.id).await?;
+            return Err(Error::Conflict(
+                "run stopped during session creation".into(),
+            ));
+        }
+        Ok(session)
+    });
+    let session = match creation
+        .await
+        .unwrap_or_else(|e| Err(Error::Internal(e.to_string())))
+    {
         Ok(s) => s,
         Err(e) => {
             warn!(agent = %agent.id, "personal agent: create session ({}): {e}", agent.provider);
@@ -1147,8 +1179,6 @@ async fn run_one_session(
     };
     let sid = session.id.clone();
     *captured_sid.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid.clone());
-    // Persist the session id immediately so the UI can Open the run live.
-    let _ = repo(ctx).set_run_session(run_id, &sid).await;
 
     if wait_for_tui(&ctx.manager, &sid).await {
         let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;

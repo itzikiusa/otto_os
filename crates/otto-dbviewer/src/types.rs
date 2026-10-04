@@ -1203,8 +1203,8 @@ pub struct RowLimit {
 /// fully scanned/streamed before we clip it. Conservative: returns the statement
 /// UNCHANGED (with `limited: false`) when it already has a `LIMIT`, spans
 /// multiple statements, or uses a clause where a trailing LIMIT would be
-/// invalid/ambiguous (FORMAT/SETTINGS/INTO OUTFILE/INTO DUMPFILE/FOR UPDATE/
-/// FOR SHARE/UNION/LIMIT BY). Callers should pass this only for statements
+/// invalid/ambiguous (explicit LIMIT/FETCH/OFFSET, FORMAT/SETTINGS, INTO,
+/// locking clauses, or set operations). Callers should pass this only for statements
 /// they've already classified as row-returning reads. `offset` is honoured only
 /// alongside an injected `LIMIT` — never on a statement that bails (the pager is
 /// disabled for those anyway), so `OFFSET` can't land on an explicit user LIMIT.
@@ -1232,33 +1232,50 @@ pub fn inject_row_limit(statement: &str, limit: usize, offset: Option<u64>) -> R
     if trimmed.contains(';') {
         return unchanged();
     }
-    // Already constrained: `limit <digit>` somewhere (honors offset,count and
-    // `LIMIT n OFFSET m`). A column literally named `limit` won't match because
-    // it isn't followed by a digit.
-    if has_word_then_digit(&lower, "limit") {
+    // Look at real SQL tokens, not a digit after an ASCII space: LIMIT ALL,
+    // LIMIT (expr), placeholders, comments and newlines are all explicit
+    // limits. Quoted identifiers/literals and comments are not clauses.
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
+    let Ok(tokens) = Tokenizer::new(&GenericDialect {}, trimmed).tokenize() else {
+        return unchanged(); // Unknown quoting cannot prove a safe rewrite.
+    };
+    const SKIP: &[&str] = &[
+        "LIMIT",
+        "FETCH",
+        "OFFSET",
+        "FORMAT",
+        "SETTINGS",
+        "INTO",
+        "FOR",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "LOCK",
+    ];
+    if tokens.iter().any(|token| match token {
+        Token::Word(word) if word.quote_style.is_none() => {
+            // Generic treats # as an identifier; in MySQL it can start a
+            // trailing comment which would swallow an appended clause.
+            word.value.contains('#') || SKIP.iter().any(|kw| word.value.eq_ignore_ascii_case(kw))
+        }
+        _ => false,
+    }) {
         return unchanged();
     }
-    // Clauses after which a trailing LIMIT is invalid or changes meaning.
-    const SKIP: &[&str] = &[
-        "format ",
-        "settings ",
-        "into outfile",
-        "into dumpfile",
-        "for update",
-        "for share",
-        " union ",
-        "limit by",
-    ];
-    for kw in SKIP {
-        if lower.contains(kw) {
-            return unchanged();
-        }
-    }
+    let separator = if matches!(
+        tokens.last(),
+        Some(Token::Whitespace(Whitespace::SingleLineComment { .. }))
+    ) {
+        "\n" // A trailing line comment must not swallow the injected LIMIT.
+    } else {
+        " "
+    };
     // `LIMIT n [OFFSET m]` — the standard form ClickHouse, MySQL and Postgres all
     // accept. Offset 0 (the first page) is elided so a non-paged run is unchanged.
     let sql = match offset.filter(|&m| m > 0) {
-        Some(m) => format!("{trimmed} LIMIT {limit} OFFSET {m}"),
-        None => format!("{trimmed} LIMIT {limit}"),
+        Some(m) => format!("{trimmed}{separator}LIMIT {limit} OFFSET {m}"),
+        None => format!("{trimmed}{separator}LIMIT {limit}"),
     };
     RowLimit { sql, limited: true }
 }
@@ -1285,30 +1302,6 @@ fn strip_leading_comments(sql: &str) -> &str {
         }
     }
     s
-}
-
-/// True if `word` appears as a whole word (surrounded by non-alphanumeric/non-`_`
-/// boundaries) immediately followed (after spaces) by a digit. Used to detect an
-/// existing `LIMIT 123` while ignoring identifiers like `rate_limit`.
-fn has_word_then_digit(haystack: &str, word: &str) -> bool {
-    let bytes = haystack.as_bytes();
-    let mut from = 0;
-    while let Some(pos) = haystack[from..].find(word) {
-        let start = from + pos;
-        let end = start + word.len();
-        let before_ok = start == 0 || !matches!(bytes[start - 1], b'a'..=b'z' | b'0'..=b'9' | b'_');
-        // after the word, skip spaces, then require a digit
-        let mut i = end;
-        while i < bytes.len() && bytes[i] == b' ' {
-            i += 1;
-        }
-        let after_ok = i < bytes.len() && bytes[i].is_ascii_digit();
-        if before_ok && after_ok {
-            return true;
-        }
-        from = end;
-    }
-    false
 }
 
 // --- Write-gate classification ----------------------------------------------
@@ -2331,6 +2324,44 @@ mod tests {
             inject_row_limit("SELECT * FROM t;", 1000, None).sql,
             "SELECT * FROM t LIMIT 1000"
         );
+    }
+
+    #[test]
+    fn existing_limit_forms_and_fetch_locking_are_never_rewritten() {
+        for sql in [
+            "SELECT id FROM t LIMIT ALL",
+            "SELECT id FROM t LIMIT (2)",
+            "SELECT id FROM t LIMIT\n2",
+            "SELECT id FROM t LIMIT /* rows */ 2",
+            "SELECT id FROM t FETCH FIRST 2 ROWS ONLY",
+            "SELECT id FROM t FOR NO KEY UPDATE",
+            "SELECT id FROM t FOR KEY SHARE",
+            "SELECT id FROM t FOR\nUPDATE",
+        ] {
+            let out = inject_row_limit(sql, 3, None);
+            assert_eq!(out.sql, sql, "{sql}");
+            assert!(!out.limited, "{sql}");
+        }
+    }
+
+    #[test]
+    fn injected_limit_is_not_swallowed_by_trailing_comment() {
+        let out = inject_row_limit("SELECT id FROM t -- comment", 3, None);
+        assert_eq!(out.sql, "SELECT id FROM t -- comment\nLIMIT 3");
+        assert!(out.limited);
+    }
+
+    #[test]
+    fn quoted_or_commented_limit_tokens_do_not_disable_plain_preview() {
+        for sql in [
+            "SELECT 'LIMIT ALL' AS note FROM t",
+            "SELECT `limit` FROM t",
+            "SELECT id /* LIMIT (2) */ FROM t",
+        ] {
+            let out = inject_row_limit(sql, 3, None);
+            assert!(out.limited, "{sql}");
+            assert_eq!(out.sql, format!("{sql} LIMIT 3"));
+        }
     }
 
     #[test]

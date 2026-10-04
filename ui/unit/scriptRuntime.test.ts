@@ -37,3 +37,11 @@ test('post-script keeps passed and failed pm tests plus chaining', () => {
   assert.equal(result.error, undefined); assert.equal(result.tests[0].passed, true);
   assert.equal(result.tests[1].passed, false); assert.equal(vars.next, 'yes');
 });
+
+test('write set records explicit same-value writes and unsets but not reads', () => {
+  const vars = {token:'old',remove:'yes'};
+  const result = runPostResponse("pm.variables.get('token'); pm.globals.set('token','old'); pm.environment.unset('remove')", response, vars);
+  assert.deepEqual({...result.writes}, {token:'old',remove:null});
+  const read = runPostResponse("console.log(pm.variables.get('token'))", response, vars);
+  assert.deepEqual({...read.writes}, {});
+});

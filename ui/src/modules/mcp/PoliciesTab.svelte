@@ -106,21 +106,23 @@
       toasts.error('Expected a policies array or an exported {version, policies} document');
       return;
     }
-    // Replace wipes every existing rule — name the loss before doing it.
-    if (
-      importReplace &&
-      policies.length > 0 &&
-      !(await confirmer.ask(
-        `Replace all ${policies.length} existing rule${policies.length === 1 ? '' : 's'} with the ${list.length} imported? The current rules are deleted.`,
-        { title: 'Replace policy rules', danger: true, confirmLabel: 'Replace' },
-      ))
-    )
-      return;
+    if (importing) return;
+    const replace = importReplace;
     importing = true;
     try {
+      if (replace) {
+        // Replacement is instance-wide, even if this workspace's list is empty.
+        const affected = await mcpCpApi.cpPolicies();
+        const workspaces = new Set(affected.flatMap((rule) => rule.workspace_id ? [rule.workspace_id] : []));
+        const globals = affected.filter((rule) => !rule.workspace_id).length;
+        if (!(await confirmer.ask(
+          `Replace all ${affected.length} existing rules across every workspace with ${list.length} imported rules? This deletes ${globals} global rules and the rules in ${workspaces.size} workspaces.`,
+          { title: 'Replace policy rules everywhere', danger: true, confirmLabel: 'Replace all rules' },
+        ))) return;
+      }
       const res = await mcpCpApi.cpImportPolicies({
         policies: list as CreateMcpPolicyReq[],
-        replace: importReplace,
+        replace,
       });
       toasts.success(
         'Policies imported',

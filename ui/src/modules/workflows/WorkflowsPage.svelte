@@ -385,6 +385,8 @@
   async function backToList(): Promise<void> {
     if (!(await discardEditsOk())) return;
     current = null;
+      ++viewGeneration;
+      ++versionsGeneration;
     graph = { nodes: [], edges: [] };
     selectedId = null;
     run = null;
@@ -505,6 +507,8 @@
       wfFor = wsId;
       if (current && current.workspace_id !== wsId) {
         current = null;
+      ++viewGeneration;
+      ++versionsGeneration;
         graph = { nodes: [], edges: [] };
       }
     }
@@ -536,7 +540,11 @@
     }
   }
 
+  let viewGeneration = 0;
   function open(wf: Workflow): void {
+    ++viewGeneration;
+    ++versionsGeneration;
+    versionsLoading = false;
     requestedRunId = null;
     validationIssues = [];
     current = wf;
@@ -687,6 +695,8 @@
         if (next) open(next);
         else {
           current = null;
+      ++viewGeneration;
+      ++versionsGeneration;
           graph = { nodes: [], edges: [] };
         }
       }
@@ -832,17 +842,18 @@
    *  `running` covers only the POST; {@link followRun} just reports the end. */
   async function startRun(body: RunWorkflowReq): Promise<WorkflowRun | null> {
     if (!current || running) return null;
-    if (!await validateGraph()) return null;
-    if (dirty) await save();
-    if (dirty) return null; // failed save: never execute an older persisted graph
-    running = true;
     const workflowId = current.id;
+    const workspaceId = ws.currentId;
+    const generation = viewGeneration;
+    const ownsView = () => !destroyed && current?.id === workflowId && ws.currentId === workspaceId && viewGeneration === generation;
+    // Reserve before preflight, so two clicks cannot both pass validation.
+    running = true;
     try {
+      if (!await validateGraph() || !ownsView()) return null;
+      if (dirty) await save();
+      if (!ownsView() || dirty) return null;
       const r = await api.post<WorkflowRun>(`/workflows/${workflowId}/run`, body);
-      // Show the new run (a user-initiated view switch); from here the shared
-      // live-run sync streams its progress in.
-      requestedRunId = r.id;
-      run = r;
+      if (ownsView()) { requestedRunId = r.id; run = r; }
       return r;
     } catch (e) {
       toasts.error('Couldn’t start the run', e instanceof Error ? e.message : String(e));
@@ -1500,6 +1511,7 @@
   }
 
   // --- Version history ------------------------------------------------------
+  let versionsGeneration = 0;
   let versionsOpen = $state(false);
   let versions = $state<WorkflowVersion[]>([]);
   let versionsLoading = $state(false);
@@ -1507,32 +1519,39 @@
 
   async function loadVersions(): Promise<void> {
     if (!current) return;
+    const workflowId = current.id;
+    const generation = ++versionsGeneration;
+    const view = viewGeneration;
+    const ownsView = () => !destroyed && current?.id === workflowId && generation === versionsGeneration && view === viewGeneration;
     versionsLoading = true;
     try {
-      versions = await listWorkflowVersions(current.id);
+      const rows = await listWorkflowVersions(workflowId);
+      if (!ownsView()) return;
+      versions = rows;
       versionsError = null;
     } catch (e) {
-      // A failed load is shown inline in the panel, with Retry.
-      versionsError = loadErrorText(e);
+      if (ownsView()) versionsError = loadErrorText(e);
     } finally {
-      versionsLoading = false;
+      if (ownsView()) versionsLoading = false;
     }
   }
 
   async function restoreVersion(v: WorkflowVersion): Promise<void> {
-    if (!current) return;
-    if (!(await discardEditsOk())) return;
+    if (!current || v.workflow_id !== current.id) return;
+    const workflowId = v.workflow_id;
+    const generation = viewGeneration;
+    const ownsView = () => !destroyed && current?.id === workflowId && viewGeneration === generation;
+    if (!(await discardEditsOk()) || !ownsView()) return;
     try {
-      const wf = await restoreWorkflowVersion(current.id, v.version);
-      current = wf;
+      const wf = await restoreWorkflowVersion(workflowId, v.version);
       workflows = workflows.map((w) => (w.id === wf.id ? wf : w));
-      open(wf);
-      await loadVersions();
+      if (ownsView()) { open(wf); await loadVersions(); }
       toasts.success(`Restored v${v.version}`);
     } catch (e) {
       toasts.error('Couldn’t restore the version', e instanceof Error ? e.message : String(e));
     }
   }
+
 </script>
 
 <!-- Label + zoom button for a cramped node-form JSON field (R10). -->

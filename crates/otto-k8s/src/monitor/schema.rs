@@ -36,8 +36,9 @@
 //!
 //! Existing installs migrate in [`ensure`]: the rollup tables are created,
 //! back-filled from whatever raw rows exist (one `(cluster, day)` partition
-//! per statement, two threads), and only THEN are the materialized views
-//! created — while every collector loop waits on the same lock — so a row is
+//! per statement, one thread with bounded aggregation spilling), and only
+//! THEN are the materialized views created — while every collector loop
+//! waits on the same lock — so a row is
 //! never counted twice and a crash mid-backfill simply redoes it (the
 //! rollups are truncated first; nothing but the backfill writes them until
 //! the views exist). Raw partitions older than the raw keep are then dropped.
@@ -558,8 +559,10 @@ pub fn truncate_rollups_sql() -> String {
 }
 
 /// `INSERT … SELECT` statements that back-fill one raw partition into the
-/// tiers that still keep that day. `age_days` = today − `date`. Capped at two
-/// threads so a large backfill never pins the CPU.
+/// tiers that still keep that day. `age_days` = today − `date`. A raw day
+/// can hold millions of distinct label maps: limiting threads alone does
+/// not bound the aggregation hash table. Spill well below the query budget,
+/// leaving room for the merge phase and the embedded server's other work.
 pub fn backfill_sql(
     cluster_id: &str,
     date: &str,
@@ -571,7 +574,10 @@ pub fn backfill_sql(
         sql_str(cluster_id),
         sql_str(date)
     );
-    const LIMITS: &str = "\nSETTINGS max_threads = 2";
+    const LIMITS: &str = "\nSETTINGS max_threads = 1, max_memory_usage = 402653184, \
+        max_bytes_before_external_group_by = 67108864, max_bytes_before_external_sort = 67108864, \
+        max_block_size = 8192, max_insert_block_size = 8192, \
+        min_insert_block_size_rows = 0, min_insert_block_size_bytes = 0";
     let mut out = Vec::new();
     for r in ROLLUPS {
         if age_days <= i64::from(keep_days(r.keep_days, retention_days)) {
@@ -863,7 +869,7 @@ mod tests {
         assert!(fresh[0].contains("cluster_id = 'c\\'1' AND sample_date = '2026-10-01'"));
         assert!(fresh
             .iter()
-            .all(|q| q.ends_with("SETTINGS max_threads = 2")));
+            .all(|q| q.contains("SETTINGS max_threads = 1, max_memory_usage = 402653184")));
         let old = backfill_sql("c1", "2026-09-20", 12, 14);
         let tables: Vec<&str> = old
             .iter()

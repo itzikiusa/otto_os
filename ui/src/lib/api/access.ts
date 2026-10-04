@@ -1,5 +1,5 @@
 import { api } from './client';
-import type { AccessPolicy, AccessPreview, AccessGroup, AccessRole, AccessSubjects, EffectiveAccess, Id, ResourceKind } from './types';
+import type { AccessPolicy, AccessPreview, AccessGroup, AccessRole, AccessSubjects, EffectiveAccess, EffectiveAccessBatchRequest, Id, ResourceKind } from './types';
 const resourcePath = (kind: ResourceKind, id: Id) => `/access/${kind}/${encodeURIComponent(id)}`;
 const childQuery = (child?: string) => child === undefined ? '' : `?child=${encodeURIComponent(child)}`;
 export const accessApi = {
@@ -8,6 +8,7 @@ export const accessApi = {
   preview: (policy: AccessPolicy) => api.post<AccessPreview>(`${resourcePath(policy.kind, policy.resource_id)}/preview`, {policy}),
   /** `background`: a re-check (refresh / safety net), on the bg lane. */
   capabilities: (kind: ResourceKind, id: Id, child?: string, background = false) => (background ? api.bg.get : api.get)<EffectiveAccess>(`${resourcePath(kind, id)}/capabilities${childQuery(child)}`),
+  capabilitiesBatch: (kind: ResourceKind, id: Id, children: string[], background = false) => (background ? api.bg.post : api.post)<EffectiveAccess[]>(`${resourcePath(kind, id)}/capabilities/batch`, { children } satisfies EffectiveAccessBatchRequest),
   effective: (kind: ResourceKind, id: Id, userId: Id, child?: string) => api.get<EffectiveAccess>(`${resourcePath(kind, id)}/effective?user_id=${encodeURIComponent(userId)}${child === undefined ? '' : `&child=${encodeURIComponent(child)}`}`),
   subjects: (kind: ResourceKind, id: Id) => api.get<AccessSubjects>(`${resourcePath(kind, id)}/subjects`),
   groups: () => api.get<AccessGroup[]>('/access/groups'),

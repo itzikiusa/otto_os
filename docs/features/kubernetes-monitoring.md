@@ -146,10 +146,15 @@ never rewrites existing parts.
 **Upgrading a raw-only install** (before the per-series rollups) is
 automatic: on the first collector start the rollup tables are created and
 back-filled from the raw rows already there (one `(cluster, day)` partition
-per statement, two ClickHouse threads), the views are created only after
+per statement, one ClickHouse thread), the views are created only after
 that — every collector loop waits on the same lock, so nothing is counted
 twice and an interrupted backfill simply reruns — and raw days older than 2
-days are dropped.
+days are dropped. Backfill queries spill aggregation to disk at 64 MiB,
+use a 384 MiB query budget, and keep read/insert blocks small so a large
+day fits alongside other work within the embedded server's 1 GiB limit.
+If initialization fails, its error appears in monitor status; retries back
+off up to 15 minutes (or the configured interval if longer). No raw history
+is discarded because initialization failed.
 
 Status series written from the sweep alone: `restarts_total`, `ready`,
 `phase_running`, `mem_limit_bytes`, `cpu_request_millis` (and

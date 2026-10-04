@@ -19,7 +19,11 @@ It is the round-3 driver (perf review r3-11) turned into a repo script.
   that streams ANSI output (2–20 KB/s plus occasional 200 KB bursts), appends
   real-shaped transcript JSONL under the temp `HOME` and posts hooks to the
   test daemon only. No model, no network. `codex`/`agy`/… are inert stubs.
-- It drives the daemon's embedded UI in headless Chromium (CDP metrics).
+- It drives the daemon's embedded UI in Chromium (CDP metrics), headless by
+  default. `--headed true` opens an isolated browser window with normal graphics
+  initialization; headless Chromium may force SwiftShader software rendering.
+  Record the actual GPU process arguments and keep browser modes consistent
+  between comparisons. Neither mode measures native Tauri/WebKit directly.
 - On exit — normal, error, safety abort or Ctrl-C — it kills only the
   processes it started (by pid, by its temp root, by the emulator path) and
   removes the temp root. `cleanup.sh` does the same for a run that was killed
@@ -53,7 +57,7 @@ or `--out <dir>`): `driver.log`, `samples.jsonl` (one sample per
 
 | Mode | What it does |
 |---|---|
-| `scale` | baseline with no agents, then for each N in `--steps`: N emulated agents, `--hold` seconds per UI state, then close all and watch recovery. |
+| `scale` | baseline with no agents, then for each N in `--steps`: N emulated agents, `--hold` seconds divided across four UI states, then close all and watch recovery. |
 | `leak` | `--n` agents for `--leak-min` minutes, cycling UI states every `--state-s` seconds, sampling heap/RSS growth. |
 | `churn` | `--n` agents, then a pop-out window and view switches: what extra windows and remounts cost. |
 | `suspend` | manual vs delegated sessions killed and reopened from the UI, then `--watch-s` seconds of idle-suspend observation. |

@@ -681,13 +681,13 @@ async fn namespace_metrics(
         {
             match r.status {
                 200 => {
-                    return parse_off_runtime(r.body, |v| resources::parse_pod_metrics(&v)).await
+                    return parse_off_runtime(r.body, |v| resources::parse_pod_metrics(&v)).await;
                 }
                 401 | 403 => {
                     return Err(Error::Forbidden(format!(
                         "cluster RBAC: metrics-server answered HTTP {}",
                         r.status
-                    )))
+                    )));
                 }
                 _ => {}
             }
@@ -1124,6 +1124,7 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
         return;
     };
     let mut schema_ready = false;
+    let mut schema_failures: u32 = 0;
     let mut failures: u32 = 0;
     // The cluster's long-lived `kubectl proxy`, transport decision and
     // port-forwards, reused across cycles; dropped (children killed, socket
@@ -1175,8 +1176,18 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
                     schema_ready = true;
                 }
                 Err(e) => {
-                    tracing::warn!(cluster = %cluster_id, "k8s monitor: schema init failed: {e}");
-                    sleep_or_cancel(interval, &cancel).await;
+                    schema_failures = schema_failures.saturating_add(1);
+                    let wait = failure_backoff(interval, schema_failures);
+                    let mut st = repo
+                        .get_status(cluster_id.as_str())
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| K8sMonitorStatusRow::empty(cluster_id.as_str()));
+                    st.last_error = format!("monitor storage initialization failed: {e}");
+                    let _ = repo.upsert_status(&st).await;
+                    tracing::warn!(cluster = %cluster_id, retry_secs = wait.as_secs(), "k8s monitor: schema init failed: {e}");
+                    sleep_or_cancel(wait, &cancel).await;
                     continue;
                 }
             }
@@ -1260,8 +1271,7 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
 
         let wait = if out.unreachable {
             failures = failures.saturating_add(1);
-            let mult = 2u32.saturating_pow(failures.min(10));
-            interval.saturating_mul(mult).min(MAX_BACKOFF).max(interval)
+            failure_backoff(interval, failures)
         } else {
             failures = 0;
             let elapsed = Duration::from_millis(out.status.cycle_ms.max(0) as u64);
@@ -1269,6 +1279,11 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
         };
         sleep_or_cancel(wait, &cancel).await;
     }
+}
+
+fn failure_backoff(interval: Duration, failures: u32) -> Duration {
+    let mult = 2u32.saturating_pow(failures.min(10));
+    interval.saturating_mul(mult).min(MAX_BACKOFF).max(interval)
 }
 
 /// A per-cluster purge is only needed when the cluster keeps fewer days than
@@ -1302,6 +1317,16 @@ async fn sleep_or_cancel(total: Duration, cancel: &AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_failures_back_off_without_shortening_configured_interval() {
+        let interval = Duration::from_secs(60);
+        assert_eq!(failure_backoff(interval, 1), Duration::from_secs(120));
+        assert_eq!(failure_backoff(interval, 2), Duration::from_secs(240));
+        assert_eq!(failure_backoff(interval, u32::MAX), MAX_BACKOFF);
+        let slow = Duration::from_secs(1800);
+        assert_eq!(failure_backoff(slow, 10), slow);
+    }
 
     #[tokio::test]
     async fn status_rewrites_the_snapshot_only_when_it_changed() {

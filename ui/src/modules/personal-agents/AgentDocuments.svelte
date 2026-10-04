@@ -5,6 +5,8 @@
   import Markdown from '../agents/conversation/Markdown.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { guardUnsaved } from '../../lib/leaveGuard';
+  import { router } from '../../lib/router.svelte';
 
   interface Props {
     agentId: string;
@@ -25,6 +27,8 @@
   let vaultId = $state('');
   let generation = 0;
   const label = $derived(kind === 'memory' ? 'Memory' : 'Context');
+  $effect(() => router.guard(() => !saving));
+  $effect(() => guardUnsaved(() => editing && draft !== (document?.content ?? ''), { what: 'this agent’s document' }));
 
   async function load() {
     const seq = ++generation;

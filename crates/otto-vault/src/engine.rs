@@ -3,6 +3,7 @@
 //! and the graph payload. Files on disk are the source of truth throughout.
 
 use std::collections::{HashMap, HashSet};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,7 +37,7 @@ const DEFAULT_EDGE_BUDGET: usize = 2_000_000;
 type VaultWriteKey = (i64, String);
 type VaultWriteLock = Arc<tokio::sync::Mutex<()>>;
 /// (vault, source, target) → (source content hash, context line).
-type BacklinkCtxCache = HashMap<(i64, String, String), (String, String)>;
+type BacklinkCtxCache = HashMap<(i64, String, String), (String, String, std::time::Instant)>;
 /// (graph generation the payloads were built against, [(opts key, payload)]).
 /// ((generation, graph generation), counts) — see `status_counts`.
 type StatusCountsEntry = ((i64, i64), crate::store::StatusCounts);
@@ -238,7 +239,7 @@ impl VaultEngine {
     /// may address — `ws_id` on the row is provenance, not a boundary.
     pub async fn get_scoped(&self, ws: &str, id: i64) -> Result<VaultRec> {
         let _ = ws;
-        self.store.get_vault(id).await
+        self.store.get_vault_metadata(id).await
     }
 
     pub async fn patch(
@@ -834,7 +835,7 @@ impl VaultEngine {
     }
 
     pub async fn status(self: &Arc<Self>, ws: &str, id: i64) -> Result<VaultStatus> {
-        self.get_scoped(ws, id).await?;
+        let v = self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
         let key = (
             self.generation(id).load(Ordering::Relaxed),
@@ -847,7 +848,7 @@ impl VaultEngine {
             .get(&id)
             .filter(|(k, _)| *k == key)
             .map(|(_, c)| *c);
-        let (mut status, counts) = self.store.status_with(id, cached).await?;
+        let (mut status, counts) = self.store.status_with_metadata(v, cached).await?;
         if cached.is_none() {
             self.status_counts.lock().unwrap().insert(id, (key, counts));
         }
@@ -1389,8 +1390,19 @@ impl VaultEngine {
         }
         let is_dir = from_abs.is_dir();
         let case_only = from_rel.to_lowercase() == to_rel.to_lowercase();
-        if to_abs.exists() && !case_only {
-            return Err(Error::Conflict(format!("target exists: {to_rel}")));
+        if to_abs.exists() {
+            let source = std::fs::metadata(&from_abs)
+                .map_err(|e| Error::Internal(format!("rename source identity: {e}")))?;
+            let target = std::fs::metadata(&to_abs)
+                .map_err(|e| Error::Internal(format!("rename target identity: {e}")))?;
+            // Equal spelling after lowercasing does not imply one entry on a
+            // case-sensitive volume. Canonical paths also distinguish hardlinks.
+            let same_entry = source.dev() == target.dev()
+                && source.ino() == target.ino()
+                && std::fs::canonicalize(&from_abs).ok() == std::fs::canonicalize(&to_abs).ok();
+            if !case_only || !same_entry {
+                return Err(Error::Conflict(format!("target exists: {to_rel}")));
+            }
         }
         // Everything fallible that only READS the index runs before the move:
         // once the file has moved, nothing below may return early (the
@@ -1452,22 +1464,37 @@ impl VaultEngine {
                 .await
                 .map_err(|e| Error::Internal(format!("mkdir: {e}")))?;
         }
+        // NOREPLACE closes the existence-check race with external editors too.
+        let move_exclusive = |from: &Path, to: &Path| {
+            rustix::fs::renameat_with(
+                rustix::fs::CWD,
+                from,
+                rustix::fs::CWD,
+                to,
+                rustix::fs::RenameFlags::NOREPLACE,
+            )
+            .map_err(|e| {
+                if e == Errno::EXIST {
+                    Error::Conflict(format!("target exists: {}", to.display()))
+                } else {
+                    Error::Internal(format!("rename: {e}"))
+                }
+            })
+        };
         if case_only {
-            // Case-insensitive APFS: two-step move via a temp name.
-            let tmp = to_abs.with_file_name(format!(
-                ".otto-rename-{}",
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-            ));
-            tokio::fs::rename(&from_abs, &tmp)
-                .await
-                .map_err(|e| Error::Internal(format!("rename: {e}")))?;
-            tokio::fs::rename(&tmp, &to_abs)
-                .await
-                .map_err(|e| Error::Internal(format!("rename: {e}")))?;
+            let tmp = from_abs.with_file_name(format!(".otto-rename-{}", otto_core::new_id()));
+            move_exclusive(&from_abs, &tmp)?;
+            if let Err(error) = move_exclusive(&tmp, &to_abs) {
+                if let Err(rollback) = move_exclusive(&tmp, &from_abs) {
+                    return Err(Error::Internal(format!(
+                        "{error}; rollback failed: {rollback}; source retained at {}",
+                        tmp.display()
+                    )));
+                }
+                return Err(error);
+            }
         } else {
-            tokio::fs::rename(&from_abs, &to_abs)
-                .await
-                .map_err(|e| Error::Internal(format!("rename: {e}")))?;
+            move_exclusive(&from_abs, &to_abs)?;
         }
 
         let mut links_updated = 0i64;
@@ -1730,6 +1757,19 @@ impl VaultEngine {
         id: i64,
         path: &str,
     ) -> Result<Vec<Backlink>> {
+        self.backlinks_context_window(ws, id, path, 0, 100).await
+    }
+
+    /// Keep lightweight identities/counts compatible; hydrate at most 100
+    /// source contexts per request, independent of the note's total fan-in.
+    pub async fn backlinks_context_window(
+        self: &Arc<Self>,
+        ws: &str,
+        id: i64,
+        path: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Backlink>> {
         let v = self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
         let rel = Self::check_rel(path)?;
@@ -1737,15 +1777,33 @@ impl VaultEngine {
         let stem_noext = stem.strip_suffix(".md").unwrap_or(stem).to_lowercase();
         let rel_lower = rel.to_lowercase();
         let mut out = Vec::new();
-        for (src, title, kind, hash) in self.store.backlinks_hashed(id, &rel).await? {
+        for (index, (src, title, kind, hash)) in self
+            .store
+            .backlinks_hashed(id, &rel)
+            .await?
+            .into_iter()
+            .enumerate()
+        {
+            if index < offset || index >= offset.saturating_add(limit.min(100)) {
+                out.push(Backlink {
+                    path: src,
+                    title,
+                    context: String::new(),
+                    kind,
+                });
+                continue;
+            }
             let key = (id, src.clone(), rel.clone());
             let cached = self
                 .backlink_ctx
                 .lock()
                 .unwrap()
-                .get(&key)
-                .filter(|(h, _)| !hash.is_empty() && *h == hash)
-                .map(|(_, c)| c.clone());
+                .get_mut(&key)
+                .filter(|(h, _, _)| !hash.is_empty() && *h == hash)
+                .map(|(_, c, touched)| {
+                    *touched = std::time::Instant::now();
+                    c.clone()
+                });
             let context = match cached {
                 Some(c) => c,
                 None => {
@@ -1754,16 +1812,34 @@ impl VaultEngine {
                     // contributes no context.
                     let abs = Self::abs_confined(&v.root_path, &src).ok();
                     let c = match abs {
-                        Some(abs) => tokio::fs::read_to_string(&abs).await.ok(),
+                        Some(abs) => match tokio::fs::File::open(abs).await {
+                            Ok(file) => {
+                                let mut bytes = Vec::new();
+                                match file.take(MAX_FTS_BYTES).read_to_end(&mut bytes).await {
+                                    Ok(_) => String::from_utf8(bytes).ok(),
+                                    Err(_) => None,
+                                }
+                            }
+                            Err(_) => None,
+                        },
                         None => None,
                     }
                     .and_then(|c| backlink_context(&c, &stem_noext, &rel_lower))
                     .unwrap_or_default();
                     let mut cache = self.backlink_ctx.lock().unwrap();
                     if cache.len() >= 20_000 {
-                        cache.clear();
+                        // Evict a small oldest batch rather than invalidating
+                        // every warm context when the bound is reached.
+                        let mut oldest: Vec<_> = cache
+                            .iter()
+                            .map(|(key, (_, _, touched))| (key.clone(), *touched))
+                            .collect();
+                        oldest.sort_unstable_by_key(|(_, touched)| *touched);
+                        for (key, _) in oldest.into_iter().take(1_000) {
+                            cache.remove(&key);
+                        }
                     }
-                    cache.insert(key, (hash, c.clone()));
+                    cache.insert(key, (hash, c.clone(), std::time::Instant::now()));
                     c
                 }
             };

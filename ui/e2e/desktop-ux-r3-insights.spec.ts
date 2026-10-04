@@ -9,8 +9,9 @@ const report = { kind: 'daily', period_start: '2026-09-24', period_end: '2026-09
 test('Insights waits for the requested period when another scheduled report arrives', async ({ page }) => {
   let phase = 0, polls = 0;
   const unrelated = { ...report, kind: 'weekly', period_start: '2026-09-14', period_end: '2026-09-20', summary: '# Scheduled weekly review' };
-  await page.route('**/api/v1/insights/reports', r => { polls++; return r.fulfill({ json: phase === 0 ? [report] : [unrelated, { ...report, ...(phase === 2 ? { summary: '# Requested daily result', created_at: '2026-09-25T09:00:00Z' } : {}) }] }); });
-  await page.route('**/api/v1/insights/run', r => { phase = 1; return r.fulfill({ json: { started: true, run_id: 'requested-run', report_key: 'daily:20260924_20260924' } }); });
+  await page.route('**/api/v1/insights/reports', r => { return r.fulfill({ json: phase === 0 ? [report] : [unrelated, { ...report, ...(phase === 2 ? { summary: '# Requested daily result', created_at: '2026-09-25T09:00:00Z' } : {}) }] }); });
+  await page.route('**/api/v1/insights/report-status?*', r => { polls++; return r.fulfill({ json: { report: { ...report, summary: new URL(r.request().url()).searchParams.get('summary') === 'true' ? (phase === 2 ? '# Requested daily result' : report.summary) : '', html_path: phase === 2 ? '/tmp/synthetic-report.html' : null }, html_revision: phase === 2 ? 'new' : 'old' } }); });
+  await page.route('**/api/v1/insights/run', r => { phase = 1; return r.fulfill({ json: { started: true, run_id: 'requested-run', report_revision: 'old', report_key: 'daily:20260924_20260924' } }); });
   await page.goto('/#/insights');
   await expect(page.getByTestId('insight-report')).toContainText('Original headline');
   const before = polls;
@@ -83,7 +84,8 @@ test('Insights regeneration cannot be overwritten by an earlier summary response
     if (++reads === 1) { await new Promise<void>(resolve => { release = resolve; }); return r.fulfill({ body: '# Stale summary\n\nOld generation body.' }); }
     return r.fulfill({ body: '# Fresh summary\n\nCurrent result.' });
   });
-  await page.route('**/api/v1/insights/run', r => { replaced = true; return r.fulfill({ json: { started: true, run_id: 'requested-run', report_key: 'daily:20260924_20260924' } }); });
+  await page.route('**/api/v1/insights/report-status?*', r => r.fulfill({ json: { report: { ...report, html_path }, html_revision: replaced ? 'new' : 'old' } }));
+  await page.route('**/api/v1/insights/run', r => { replaced = true; return r.fulfill({ json: { started: true, run_id: 'requested-run', report_revision: 'old', report_key: 'daily:20260924_20260924' } }); });
   await page.goto('/#/insights');
   await expect.poll(() => !!release).toBe(true);
   await page.getByRole('button', { name: 'Run now', exact: true }).click();
@@ -161,8 +163,9 @@ test('History provider change ignores older pagination and exposes the full sele
   release();
   await expect(page.getByText('Old paginated Claude result', { exact: true })).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.locator('.dtitle')).toHaveText(title);
-  await expect.poll(() => page.locator('.dtitle').evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
+  const selectedTitle = page.locator('.hdetail .dfull');
+  await expect(selectedTitle).toHaveText(title);
+  await expect.poll(() => selectedTitle.evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
   await page.screenshot({ path: '/tmp/otto-ux-screenshots/insights-r3-history-phone.png' });
 });
 
@@ -177,7 +180,8 @@ test('Insights regeneration retains current metrics when an old index arrives la
     if (first) await new Promise<void>(resolve => { release = resolve; });
     return r.fulfill({ json: { series: [{ period_key: 'daily:20260924_20260924', kind: 'daily', start: '2026-09-24', end: '2026-09-24', headline: { total_sessions: first ? 12 : 88 } }] } });
   });
-  await page.route('**/api/v1/insights/run', r => { replaced = true; return r.fulfill({ json: { started: true, run_id: 'requested-run', report_key: 'daily:20260924_20260924' } }); });
+  await page.route('**/api/v1/insights/report-status?*', r => r.fulfill({ json: { report: { ...report, html_path }, html_revision: replaced ? 'new' : 'old' } }));
+  await page.route('**/api/v1/insights/run', r => { replaced = true; return r.fulfill({ json: { started: true, run_id: 'requested-run', report_revision: 'old', report_key: 'daily:20260924_20260924' } }); });
   await page.goto('/#/insights');
   await expect.poll(() => !!release).toBe(true);
   await page.getByRole('button', { name: 'Run now', exact: true }).click();

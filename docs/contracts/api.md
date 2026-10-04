@@ -614,6 +614,16 @@ current assistant turn, or on the next one when none is open yet.
 `stats.output_tokens`; a resumed Codex rollout's stats include the earlier
 thread's tokens, its turns only this file's calls.
 
+Interactive transcript reads (session and history routes) return **413
+`payload_too_large`** with an explicit `transcript resource limit` message when
+source input exceeds 128 MiB, one JSONL record exceeds 16 MiB, estimated fold
+charge exceeds 256 MiB, or subagent metadata exceeds its separate 8 MiB charge
+budget (one sidecar may be at most 1 MiB). Parsing is streamed; limits are
+checked before accepting additional records. No transcript is deleted or
+silently truncated. The user can open the provider file directly or select a
+smaller subagent transcript. Live folds have stricter admission bounds and use
+coalesced file-change invalidations plus this read path when not admitted.
+
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /sessions/{id}/transcript?before=&limit=&sub= | ws viewer + owner-or-admin | `before` = opaque cursor from a prior page (exclusive), `limit` turns (default 60, max 500), `sub` = subagent id (Claude `subagents/agent-<id>.jsonl`) | `Transcript` — the last `limit` turns (or the page before `before`); `cursor` = record index of the oldest returned turn, `has_earlier` drives "Load earlier". No resolvable transcript → **200** with `turns: []` and `unavailable_reason` ∈ `no_provider_session_id \| transcript_missing \| provider_unsupported \| codex_rollout_unresolved` (agy is always `provider_unsupported`). A `sub` view carries only turns + `stats.turns/tool_calls`. `subagents` (the full tree) rides on the newest page only — a `before` page returns `subagents: []` (the client keeps the first page's). For a live session the call first (re)arms the live tail (`transcript_appended` events; ≤ 64 concurrent, stops 60 s after exit / 2 min without a touch — see `POST …/transcript/touch`) and pages the TAIL's fold, waiting up to 15 s for its initial fold when it is just starting: one fold of the file per open, the page is the state the deltas continue from, and an agent appending to the file never makes the read 409. Without a tail (not live, cap reached) the fold cache below serves it |
@@ -985,12 +995,19 @@ the wire when absent (back-compat); every other engine ignores `cursor`.
 `QueryResult.truncated_reason?: "bytes"` — **response byte budget (MySQL,
 Postgres, ClickHouse, MongoDB `find`/`aggregate`).** Besides the row cap (`max_rows`, up to "All" = 1,000,000), a read
 stops once the response's estimated JSON size passes **32 MiB** (summed over
-every result set of a batch; at least one row is always kept). It is then
+every result set of a batch; SQL readers keep at least one row). It is then
 `truncated: true` with `truncated_reason: "bytes"`; a row-cap clip leaves
 `truncated_reason` absent (omitted from the wire — back-compat). "Export all
 rows…" still streams the full result to a file. Past either cap the driver stops
-pulling rows and discards the session instead of draining the rest of a
-non-LIMIT-able read (UNION, batch statements, SHOW…). MySQL cells decode by
+pulling rows and discards an unread standalone session instead of draining the rest.
+MySQL/Postgres batches apply the conservative SELECT limiter to each eligible
+statement, including governed reads, while preserving one connection and execution
+order. Non-rewritable statements (for example UNION, explicit LIMIT, locking reads
+or SHOW) keep their SQL unchanged; a later statement on that same connection may
+still drain the unread result. No connection switch or skipped later write is hidden.
+Mongo shaping additionally accounts for escaped cell bytes, null padding and column
+metadata, with a 1,000,000-cell resident cap; either expansion budget truncates with
+reason `bytes`, and an oversized first row can yield zero retained rows. MySQL cells decode by
 column type: only a native `JSON` column is parsed as JSON — text that looks
 like JSON (`'null'`, `'123'`, a 30-digit id) is returned as the string it is.
 
@@ -1389,7 +1406,7 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 |---|---|---|---|
 | GET /workspaces/{ws}/product/stories | ws viewer | — | `Story[]` (flat; the UI derives the tree from `parent_id` → `folder`) |
 | POST /workspaces/{ws}/product/stories | ws editor | ImportStoryReq | Story |
-| GET /product/stories/{sid} | ws viewer | — | Story |
+| GET /product/stories/{sid} | ws viewer | — | `ProductStoryDetail`: `source` contains the latest `draft` revision for local draft stories, or the latest imported `source` revision otherwise, including its full editable `body_md`. It is null only when that revision does not exist; an unapplied suggested rewrite does not replace it. |
 | PATCH /product/stories/{sid} | ws editor | PatchStoryReq (`+ parent_id?, tree_kind?, folder?`) | Story |
 | DELETE /product/stories/{sid} | ws editor | — | 204 (re-parents children; removes attachment/annotation rows + `product/attachments/<sid>/` + each artifact's `product/mockup_assist/<aid>/` scratch dir, best effort) |
 | POST /product/stories/{sid}/children | ws editor | CreateChildReq `{ title?, tree_kind?: 'story'\|'doc' (default doc), folder? }` | ProductStoryDetail — a draft child filed under the epic `sid` (400 if `sid` is itself a child or `tree_kind` is `epic`) |
@@ -2436,7 +2453,7 @@ Plugins are external sidecar processes installed at runtime under `~/otto-plugin
 | ANY `/plugins/{slug}` · ANY `/plugins/{slug}/{*rest}` | plugin `<slug>` grant (GET=view, else=edit); root bypass | Reverse-proxied to the sidecar. Gated by the dedicated plugin branch in the feature guard. |
 | GET `/plugins/{slug}/ui` · GET `/plugins/{slug}/ui/{*path}` | public static | Iframe assets served from the plugin's `ui` dir (root-mounted). |
 | GET `/plugin-admin` | root | Installed-plugin list (full records, no token). |
-| POST `/plugin-admin/install` | root | `{source}` = local path or git URL → installs into the plugins home (disabled). |
+| POST `/plugin-admin/install` | root | `{source}` = local path or git URL → installs into the plugins home (disabled). Reinstall is serialized with enable/disable/remove: disables old credentials and stops the sidecar before replacing local files, then installs the new executable metadata/token disabled. A failed replacement remains disabled. Explicitly enable to start the replacement. |
 | POST `/plugin-admin/{slug}/enable` · POST `/plugin-admin/{slug}/disable` | root | Spawn / stop the sidecar. |
 | DELETE `/plugin-admin/{slug}` | root | Stop + unregister (plugin files are kept). |
 
@@ -2624,11 +2641,12 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /insights/config | root | — | insights scheduler config (daily/weekly/monthly) |
+| GET /insights/config | Insights:View | — | insights scheduler config (daily/weekly/monthly) |
 | PUT /insights/config | root | InsightsConfig | config |
-| GET /insights/reports | root | — | generated report list |
-| GET /insights/report | root | — | one report's HTML |
-| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, reason? }` — `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed) |
+| GET /insights/reports | Insights:View | `?offset=0&limit=200&summaries=false&latest=false` | Newest-first `ReportView[]`; limit 1–200, default 200. Metadata-only by default (`summary:""`); `summaries=true` includes a preview capped at 80 lines / 64 KiB. `latest=true` returns at most one newest report per cadence (three total), ignoring offset. Only selected-page artifacts are hydrated; archive filenames are still enumerated. |
+| GET /insights/report | Insights:View | — | one report's HTML |
+| GET /insights/report-status | Insights:View | `?key=daily:YYYYMMDD_YYYYMMDD&summary=false` (also weekly/monthly) | `{report:ReportView|null, html_revision:string|null}`. Exactly three artifact metadata checks, independent of archive size; optional bounded summary preview. Missing report is null. Bad key is 400. HTML revision changes when HTML length/mtime changes; a new summary alone does not mean completion. |
+| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, report_revision, reason? }` — `report_revision` is the HTML revision captured before starting (null if absent), for bounded completion polling; `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed) |
 
 ## LSP (language server bridge)
 
@@ -2874,7 +2892,7 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | DELETE /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `?path=` | 204 — soft delete → `<vault>/.trash/` (never destroys files) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rename | ws editor | `{from, to}` | `VaultRenameResult{from, to, links_updated, links_failed}` — file OR folder move; rewrites every referencing wikilink/markdown link across the vault on disk (style-preserving); case-only renames use a two-step move. All index reads run before the move; once the move succeeds the call never fails halfway — a source whose links could not be rewritten is listed in `links_failed` (left untouched), and the index is always refreshed to the new path |
 | POST /workspaces/{ws}/vault/vaults/{id}/folder | ws editor | `{path}` | 204 |
-| GET /workspaces/{ws}/vault/vaults/{id}/backlinks | ws viewer | `?path=` | `VaultBacklink[]` (linked mentions with a context snippet; the snippet is cached per source note's indexed hash, so only changed sources are re-read) |
+| GET /workspaces/{ws}/vault/vaults/{id}/backlinks | ws viewer | `?path=&context_offset=0&context_limit=100` | `VaultBacklink[]` (all lightweight linked-mention identities ordered by path/kind; at most 100 context snippets are hydrated in the requested window, other contexts are empty. Snippets are cached per indexed source hash with bounded eviction; identity metadata remains O(total backlinks)) |
 | POST /workspaces/{ws}/vault/vaults/{id}/search | ws viewer | `{query, tag?, path_prefix?, okf_type?, limit?}` | `VaultSearchHit[]` — FTS5 bm25 + snippets; `tag:`/`path:`/`type:` operators inside `query`. Filters are applied in SQL before the limit (`tag:x` also matches nested `x/…`; `path:` is a case-sensitive prefix; `type:` is case-insensitive), so a filtered match ranked below the first page is still returned |
 | GET /workspaces/{ws}/vault/vaults/{id}/switcher | ws viewer | `?q=` | `VaultSwitchHit[]` — server-side fuzzy over title/aliases/path (quick switcher + `[[` completion) |
 | GET /workspaces/{ws}/vault/vaults/{id}/tags | ws viewer | — | `VaultTagCount[]` |
@@ -3127,12 +3145,14 @@ policy prefixes (`/usage/`→Usage, `/brokers/cluster`→Database, `/product/`�
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /brokers/clusters/{id}/replay | ws editor | `ReplayReq {source_topic, target_topic, selector, transform?}` | `ReplayResp {produced, evidence_id}` |
-| GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions | ws viewer | — | `SchemaVersion[]` |
+| GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions | ws viewer | — | `SchemaVersion[]` (`{version:number}` only; oldest first) |
 | GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions/{version} | ws viewer | — | `SchemaVersionDetail` |
 | POST /brokers/clusters/{id}/schema-registry/subjects/{subject}/compatibility | ws editor | `{schema}` | `CompatibilityResult {compatible, messages}` |
 | GET /brokers/clusters/{id}/lag-alerts | ws viewer | — | `LagAlert[]` |
 | POST /brokers/clusters/{id}/lag-alerts | ws editor | `UpsertLagAlertReq` | `LagAlert` |
 | DELETE /brokers/clusters/{id}/lag-alerts/{alert_id} | ws editor | — | 204 |
+
+Schema history lists identifiers only; opening it does not fetch every schema body. `GET .../versions/{version}` returns `{subject,version,id,schema_type,schema}` for a numeric version or `latest`. The comparison fetches its two selected bodies lazily, cancels superseded loads and retains immutable numeric versions in an 8 MiB / 64-entry UI cache. History entries no longer contain `id`, `schema_type` or `schema`; use the detail endpoint for these fields.
 
 `POST /brokers/clusters/{id}/groups/{group}/reset` now also accepts `?dry_run=true` — returns the computed target vs current offsets + lag delta **without writing**.
 
@@ -4119,7 +4139,7 @@ writes) + the workspace-role axis on the agent's workspace.
 | PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | any subset of the create body | PersonalAgent |
 | DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | GET /api/v1/personal-agents/{id}/schedules | scheduled_tasks view + ws viewer | — | `PersonalAgentSchedule[]` |
-| POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?, permission?}` — `permission` = `read_only` \| `directed` (default): the schedule's own permission set (see "Personal agent autonomy") (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
+| POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?, permission?, idempotency_key?}` — optional 1–128 ASCII `idempotency_key` deduplicates create retries within an agent, including a lost response after commit; the same key with different schedule/timezone/directive/permission returns 409. Permission is persisted atomically at creation. `permission` = `read_only` \| `directed` (default): the schedule's own permission set (see "Personal agent autonomy") (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
 | PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?, permission?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent — manual, delegated or scheduled — is already in progress (one run per agent at a time: its runs share a folder and memory; a due schedule waits, cursor untouched) |
@@ -4340,7 +4360,7 @@ purchase, delete, submit, prod) open an `approval` item in the guideline shape �
 | GET /api/v1/assistant/tasks | agents view | query `state?`, `thread_id?`, `limit?` (default 100, max 500) | `AssistantTask[]`, newest first |
 | POST /api/v1/assistant/tasks | agents edit | `AssistantCreateTaskReq {kind: "task" \| "reminder", title, detail?, thread_id?, run_at?, timezone?, origin?}` — a reminder needs `run_at` | `AssistantTask` (reminder: `queued` until `run_at`) |
 | GET /api/v1/assistant/tasks/{id} | agents view | — | `AssistantTask` |
-| POST /api/v1/assistant/tasks/{id}/{action} | agents edit | `action` ∈ `approve \| deny \| takeover \| handback \| cancel`; body (optional) `AssistantDecisionReq {reason?, answer?, always_allow?, provider?}` | `AssistantTask`. `approve`/`deny` resolve a `needs_you` item: an **approval** settles `done` either way (`result.decision`; `always_allow` records a tool+destination grant — 400 for `purchase`/`prod` or without a tool+destination; the linked MCP approvals row is decided too); a **question** on an agent task resumes it (`running`, the `answer` is sent into the thread as the next turn) or cancels it on deny; a **limit** item's approve (`provider`, default the suggestion) re-sends the thread's last message there and remembers "switch" for the thread, deny remembers "stay"; a **memory** item accepts or forgets the memory. `takeover` interrupts the agent (Esc) and parks the task as a `takeover` item until `handback` (which sends "continue" into the thread); `cancel` ends a queued/running/needs-you task. Unknown action → 404; an action that does not fit the task's state → 409 |
+| POST /api/v1/assistant/tasks/{id}/{action} | agents edit | `action` ∈ `approve \| deny \| takeover \| handback \| cancel`; body (optional) `AssistantDecisionReq {reason?, answer?, always_allow?, provider?}` | `AssistantTask`. `approve`/`deny` resolve a `needs_you` item: an **approval** settles `done` either way (`result.decision`; `always_allow` records a tool+destination grant — 400 for `purchase`/`prod` or without a tool+destination; the linked MCP approvals row is decided too); a **question** on an agent task resumes it (`running`, the `answer` is sent into the thread as the next turn) or cancels it on deny; a **limit** item's approve (`provider`, default the suggestion) re-sends the thread's last message there and remembers "switch" for the thread, deny remembers "stay"; a **memory** item accepts or forgets the memory. `takeover` suspends the owned thread session and parks the task as a `takeover` item until `handback` (which sends "continue" into the thread); `cancel` ends a queued/running/needs-you task. Unknown action → 404; an action that does not fit the task's state → 409 |
 | GET /api/v1/assistant/memory | agents view | query `q?` (FTS recall), `limit?` (default 200) | `AssistantMemoryView {profile, memories, pending, memory_approval}` |
 | PUT /api/v1/assistant/memory | agents edit | `{profile: {content, version}}` — `profile.md`, ≤ 256 KiB | `AssistantProfileDoc`; 409 on a stale `version` |
 | POST /api/v1/assistant/memory | agents edit | `{text, kind?, tags?}` — the user adds a memory by hand (accepted at once) | `AssistantMemory` |
@@ -4354,6 +4374,8 @@ purchase, delete, submit, prod) open an `approval` item in the guideline shape �
 | PUT /api/v1/assistant/routing | agents edit | any subset of `AssistantRoutingSettings` (minus `updated_at`) | `AssistantRoutingSettings` |
 | GET /api/v1/assistant/limits | agents view | — | `AssistantLimitState[]` — the last detected limit per provider/account (empty = none seen) |
 | POST /api/v1/assistant/agent/{tool} | agents edit (the calling session's per-session token ⇒ its owner) | `{session_id, …tool args}` — see below | per tool |
+
+Assistant task decisions settle the linked canonical MCP approval first: the first pending decision wins across both surfaces, and a late contradictory card reconciles to that outcome without creating an always-allow grant. Grants are installed only after this request wins approval. Cancel stops the owned delegated run or thread turn before settling the card; a stale card never interrupts a replacement turn. Task-to-turn ownership is internal and omitted from responses. Thread takeover suspends its owned CLI turn and waits for that driver to exit; handback submits an explicit continuation and leaves the card open if submission fails. Delegated runs do not support resumable takeover/handback (409); use Stop or open the delegated session. Legacy unbound running thread tasks reject unsafe control (409). Terminal task outcomes cannot be overwritten by late completion.
 
 **Agent tools** (`POST /assistant/agent/{tool}`) are the back-ends of the
 assistant's MCP tools: the native stdio tools of `ottod mcp-tools` (advertised
@@ -4375,7 +4397,7 @@ thread refuses `remember` / `recall` / `forget` (400). Unknown `{tool}` → 404.
 | `recall` | `assistant_recall` | `{query?, k?}` (k ≤ 20) | `{profile: string, memories: AssistantMemory[]}` — accepted only |
 | `reminder` | `assistant_create_reminder` | `{text, run_at, timezone?}` — `run_at` RFC3339, or local `YYYY-MM-DDTHH:MM` in `timezone` (default the user's) | `AssistantTask` (`kind:"reminder"`, delivered to the thread + a notification at `run_at`) |
 | `task` | `assistant_create_task` | `{title, detail?}` | `AssistantTask` (`state:"running"`) |
-| `task_update` | `assistant_update_task` | `{task_id, state, result?, question?, options?}` — `state` ∈ `running \| needs_you \| done \| failed`; `needs_you` needs `question` | `AssistantTask` |
+| `task_update` | `assistant_update_task` | `{task_id, state, result?, question?, options?}` — `state` ∈ `running \| needs_you \| done \| failed`; `needs_you` needs `question`. The resolved calling thread must own the task (403 otherwise); an explicit `running` update binds Stop to that thread’s current execution atomically with the state change (409 if no active execution). User-scoped tasks without a thread remain user-scoped | `AssistantTask` |
 | `delegate` | `assistant_delegate` | `{agent, directive}` — `agent` = Personal Agent id or exact name the owner can edit | `AssistantTask` (`kind:"delegation"`) |
 | `approval` | `assistant_request_approval` | `{where, what, who_sees, reason, tool?, destination?, category?, wait_seconds?}` — `category` ∈ `send \| post \| publish \| purchase \| delete \| submit \| prod \| other`; `wait_seconds` ≤ 30 | `{task: AssistantTask, decision: "approved" \| "denied" \| "pending", reason?}` — an existing always-allow grant for `tool`+`destination` answers `approved` at once (never for `purchase`/`prod`) |
 
@@ -5348,6 +5370,7 @@ An absent rule is inherited/no grant. Matching group and user allows combine; an
 | GET / PUT | `/access/{kind}/{id}` | Read / replace policy; `manage_access` |
 | GET | `/access/{kind}/{id}/subjects` | Available users, groups, roles; `manage_access` |
 | GET | `/access/{kind}/{id}/capabilities?child=` | Current caller's effective decisions; visible resource |
+| POST | `/access/{kind}/{id}/capabilities/batch` | Self-scoped; same visibility/page/workspace gates as capabilities. Body `EffectiveAccessBatchRequest {children: string[]}` (at most 1,000 children, 4,096 bytes each); returns `EffectiveAccess[]` in input order, including child-specific denials. Administrative rule IDs are omitted. Invalid bounds return 400; invisible resource returns 404. No side effects. |
 | GET | `/access/{kind}/{id}/effective?user_id=&child=` | Target user's effective decisions; `manage_access` |
 | POST | `/access/{kind}/{id}/preview` | Candidate access impact; `manage_access` |
 

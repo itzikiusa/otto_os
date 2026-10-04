@@ -122,6 +122,7 @@
   let extIters = $state(0);
   let extMinutes = $state(0);
   let extError = $state('');
+  let savedExtension = $state('');
   const cap = $derived(loop ? budgetCap(loop, elapsedSecs(loop)) : null);
   const budgetLeft = $derived(!!loop && hasBudgetLeft(loop, elapsedSecs(loop)));
   function openExtend(): void {
@@ -130,10 +131,12 @@
     extIters = d.max_iterations;
     extMinutes = d.runtime_minutes;
     extError = '';
+    savedExtension = '';
     extendOpen = true;
   }
   async function extendAndResume(): Promise<void> {
-    if (!loop) return;
+    if (!loop || acting) return;
+    const loopId = id;
     const iters = Math.floor(Number(extIters));
     const mins = Math.floor(Number(extMinutes));
     if (!(iters > 0) || !(mins > 0)) {
@@ -147,11 +150,19 @@
     extError = '';
     acting = true;
     try {
-      await loops.updateLimits(id, { ...loop.limits, max_iterations: iters, max_runtime_secs: mins * 60 });
-      extendOpen = false;
-      await loops.resume(id);
+      const signature = `${loopId}:${iters}:${mins}`;
+      if (savedExtension !== signature) {
+        await loops.updateLimits(loopId, { ...loop.limits, max_iterations: iters, max_runtime_secs: mins * 60 });
+        savedExtension = signature;
+      }
+      await loops.resume(loopId);
+      if (id === loopId) extendOpen = false;
     } catch (e) {
-      extError = errText(e);
+      const message = savedExtension === `${loopId}:${iters}:${mins}`
+        ? `Budget saved, but the loop did not resume. Retry to resume with the saved budget. ${errText(e)}`
+        : errText(e);
+      if (id === loopId && extendOpen) extError = message;
+      else toasts.error('Couldn’t resume the goal loop', message);
     } finally {
       acting = false;
     }
@@ -355,7 +366,7 @@
 </div>
 
 {#if extendOpen && loop}
-  <Modal title="Extend budget" onclose={() => (extendOpen = false)}>
+  <Modal title="Extend budget" onclose={() => { if (!acting) extendOpen = false; }}>
     <form class="extend" id="gl-extend-form" onsubmit={(e) => { e.preventDefault(); void extendAndResume(); }}>
       <p class="extend-lede">
         {#if cap === 'iterations'}The iteration cap was reached.{:else if cap === 'runtime'}The time cap was reached.{:else}Raise the caps to give the loop more room.{/if}
@@ -368,7 +379,7 @@
       {#if extError}<p class="errline" role="alert"><Icon name="warning" size={13} /> <span>{extError}</span></p>{/if}
     </form>
     {#snippet footer()}
-      <button class="btn" onclick={() => (extendOpen = false)}>Cancel</button>
+      <button class="btn" disabled={acting} onclick={() => (extendOpen = false)}>Cancel</button>
       <button class="btn primary" type="submit" form="gl-extend-form" disabled={acting || unanswered}
         title={unanswered ? 'Answer the open decision first' : undefined}>{acting ? 'Resuming…' : 'Extend & resume'}</button>
     {/snippet}

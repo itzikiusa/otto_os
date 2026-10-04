@@ -205,7 +205,13 @@ impl ProductService {
     /// Build and return a full `ProductStoryDetail` for a given story ID.
     pub(crate) async fn story_detail(&self, story_id: &Id) -> Result<ProductStoryDetail> {
         let story = self.repo.get_story(story_id).await?;
-        let source = self.repo.latest_source_version(story_id).await?;
+        // A local draft is edited in its `draft` revision; it has no imported
+        // `source` row. Returning null hid both its saved body and dirty state.
+        let source = if story.source_kind == "draft" {
+            self.repo.latest_version_of_kind(story_id, "draft").await?
+        } else {
+            self.repo.latest_source_version(story_id).await?
+        };
         let version_count = self.repo.count_versions(story_id).await?;
         let analyses = self.repo.list_analyses(story_id).await?;
         let questions = self.repo.list_questions(story_id).await?;
@@ -2849,6 +2855,13 @@ mod tests {
         assert_eq!(detail.story.title, "My Draft RFC");
         assert_eq!(detail.story.source_key, "");
         assert_eq!(detail.counts.versions, 1);
+        let source = detail
+            .source
+            .as_ref()
+            .expect("new draft exposes its editable revision");
+        assert_eq!(source.kind, "draft");
+        assert_eq!(source.title, "My Draft RFC");
+        assert!(source.body_md.is_empty());
 
         let events = repo
             .list_events(&detail.story.id, Some("source"))
@@ -2892,9 +2905,39 @@ mod tests {
 
         assert_eq!(detail2.counts.versions, 1);
         assert_eq!(detail2.story.title, "Updated Title");
+        let saved = detail2
+            .source
+            .as_ref()
+            .expect("saved draft detail includes its body");
+        assert_eq!(saved.kind, "draft");
+        assert_eq!(saved.body_md, "# New body\n\nSome content.");
+
+        // Reopening must recover saved editable content, even after a separate
+        // suggested rewrite becomes the newest version in history.
+        repo.add_version(otto_state::NewVersion {
+            story_id: story_id.clone(),
+            kind: "suggested".into(),
+            title: "Suggested".into(),
+            body_md: "Unapplied suggestion".into(),
+            raw_json: None,
+            change_notes: None,
+            created_by: user_id.clone(),
+        })
+        .await
+        .unwrap();
+        let reopened = svc.story_detail(&story_id).await.unwrap();
+        let restored = reopened
+            .source
+            .expect("reopened draft includes its saved body");
+        assert_eq!(restored.id, saved.id);
+        assert_eq!(restored.body_md, saved.body_md);
 
         let versions = repo.list_versions(&story_id).await.unwrap();
-        let full_ver = repo.get_version(&versions[0].id).await.unwrap();
+        let draft = versions
+            .iter()
+            .find(|version| version.kind == "draft")
+            .unwrap();
+        let full_ver = repo.get_version(&draft.id).await.unwrap();
         assert!(
             full_ver.body_md.contains("Some content."),
             "body not updated; got: {:?}",

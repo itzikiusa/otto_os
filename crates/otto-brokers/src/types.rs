@@ -669,13 +669,10 @@ pub struct SchemaSubject {
     pub schema: String,
 }
 
-/// One entry in a subject's version history.
+/// One identifier in a subject's version history; bodies are loaded on demand.
 #[derive(Debug, Clone, Serialize)]
 pub struct SchemaVersion {
     pub version: i32,
-    pub id: i32,
-    pub schema_type: String,
-    pub schema: String,
 }
 
 /// Full detail for a specific schema version, including the raw schema text.

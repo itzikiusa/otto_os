@@ -58,6 +58,7 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         if !is_due(&sched, now) {
             continue;
         }
+        let _operation = crate::swarm_runtime::operation_guard(&agent.swarm_id).await;
         // Swarm must be active and under its parallel cap; one turn per agent.
         let swarm = match ctx.swarm_repo.get_swarm(&agent.swarm_id).await {
             Ok(s) if s.status == "active" => s,
@@ -87,36 +88,39 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
             continue;
         }
 
-        // Advance the cursor first (so a slow run can't double-fire next tick).
-        let mut sched2 = sched.clone();
-        if let Some(obj) = sched2.as_object_mut() {
-            obj.insert("last_run".into(), json!(now.to_rfc3339()));
-        }
-        let _ = ctx
-            .swarm_repo
-            .update_agent(
-                &agent.id,
-                AgentPatch {
-                    schedule: Some(Some(sched2)),
-                    ..Default::default()
-                },
-            )
-            .await;
-
         match ctx
             .swarm_repo
-            .create_run(NewRun {
-                swarm_id: swarm.id.clone(),
-                workspace_id: swarm.workspace_id.clone(),
-                project_id: None,
-                task_id: None,
-                agent_id: agent.id.clone(),
-                kind: "scheduled".into(),
-                trigger: "scheduled".into(),
-            })
+            .reserve_run(
+                NewRun {
+                    swarm_id: swarm.id.clone(),
+                    workspace_id: swarm.workspace_id.clone(),
+                    project_id: None,
+                    task_id: None,
+                    agent_id: agent.id.clone(),
+                    kind: "scheduled".into(),
+                    trigger: "scheduled".into(),
+                },
+                false,
+            )
             .await
         {
             Ok(run) => {
+                // Advance only after reservation succeeds. A losing schedule stays due.
+                let mut sched2 = sched.clone();
+                if let Some(obj) = sched2.as_object_mut() {
+                    obj.insert("last_run".into(), json!(now.to_rfc3339()));
+                }
+                let _ = ctx
+                    .swarm_repo
+                    .update_agent(
+                        &agent.id,
+                        AgentPatch {
+                            schedule: Some(Some(sched2)),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+
                 swarm_run::emit_run(ctx, &run.id).await;
                 let ctx2 = ctx.clone();
                 tokio::spawn(async move {
@@ -172,6 +176,7 @@ async fn utilization_pass(ctx: &ServerCtx) {
 }
 
 async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> {
+    let _operation = crate::swarm_runtime::operation_guard(sid).await;
     let repo = &ctx.swarm_repo;
     let swarm = repo.get_swarm(&sid.to_string()).await?;
     if swarm.status != "active" {
@@ -301,15 +306,18 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
         return Ok(());
     };
     let mut run = repo
-        .create_run(NewRun {
-            swarm_id: swarm.id.clone(),
-            workspace_id: swarm.workspace_id.clone(),
-            project_id: None,
-            task_id: None,
-            agent_id: leader.id.clone(),
-            kind: "scheduled".into(),
-            trigger: "utilization".into(),
-        })
+        .reserve_run(
+            NewRun {
+                swarm_id: swarm.id.clone(),
+                workspace_id: swarm.workspace_id.clone(),
+                project_id: None,
+                task_id: None,
+                agent_id: leader.id.clone(),
+                kind: "scheduled".into(),
+                trigger: "utilization".into(),
+            },
+            false,
+        )
         .await?;
     let directive = format!(
         "UTILIZATION CHECK — the board is under-utilized: {active}/{cap} sessions busy, 0 ready \

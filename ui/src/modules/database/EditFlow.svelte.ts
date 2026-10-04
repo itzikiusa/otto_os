@@ -125,7 +125,7 @@ export class EditFlow {
       return coll ? { db: this.ranDb(), table: coll } : null;
     }
     if (database.capabilities?.sql !== true) return null; // Redis etc.
-    const parsed = parseSimpleSelect(sql);
+    const parsed = parseSimpleSelect(sql, this.engine);
     if (!parsed) return null;
     // The database the rows CAME from — never "the first database in the
     // tree". Unknown → unqualified INSERTs, which run wherever the user runs them.
@@ -208,6 +208,11 @@ export class EditFlow {
       this.editPkCols = r.target.pkCols;
       this.editDb = r.target.db;
       this.editReason = null;
+      return;
+    }
+
+    if (this.engine === 'clickhouse') {
+      this.editReason = 'ClickHouse sorting keys do not uniquely identify rows. Copy as INSERT is available; row edits and deletes are disabled.';
       return;
     }
 

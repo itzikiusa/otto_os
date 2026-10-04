@@ -157,7 +157,14 @@ async fn request<S: AccessCtx>(
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+    // A batch contains up to 1000 complete decision records; the single-item
+    // harness's 1 MiB cap is not the route's response contract.
+    let cap = if path.ends_with("/capabilities/batch") {
+        8 * 1024 * 1024
+    } else {
+        1024 * 1024
+    };
+    let bytes = axum::body::to_bytes(response.into_body(), cap)
         .await
         .unwrap();
     (
@@ -341,4 +348,92 @@ async fn failed_direct_launcher_retirement_does_not_activate_policy() {
         .await
         .unwrap();
     assert_eq!(actual, old, "failed cleanup must not publish enforcement");
+}
+
+#[tokio::test]
+async fn capabilities_batch_preserves_child_denials_and_bounds() {
+    let (ctx, root, viewer, id) = setup().await;
+    let repo = ResourceAccessRepo::new(ctx.0.clone());
+    let mut policy = repo
+        .get_policy(ResourceKind::Connection, &id)
+        .await
+        .unwrap();
+    let mut grant = rule("reader", &viewer.id, &["discover", "db_query"]);
+    grant.children = Some(vec!["finance".into()]);
+    policy.rules.push(grant);
+    repo.put_policy(&policy, policy.revision, &actor(&auth(&root)))
+        .await
+        .unwrap();
+    let url = format!("/access/connection/{id}/capabilities/batch");
+    let (status, rows) = request(
+        &ctx,
+        &viewer,
+        "POST",
+        &url,
+        json!({"children":["finance", "payroll"]}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(rows[0]["operations"]["db_query"]["allowed"], true);
+    assert_eq!(rows[1]["operations"]["db_query"]["allowed"], false);
+    assert_eq!(
+        rows[0]["operations"]["db_query"]["matched_rule_ids"],
+        json!([])
+    );
+    let (status, boundary) = request(
+        &ctx,
+        &root,
+        "POST",
+        &url,
+        json!({"children": vec!["finance"; 1000]}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(boundary.as_array().unwrap().len(), 1000);
+    let bytes = serde_json::to_vec(&boundary).unwrap().len();
+    assert!(
+        bytes <= 8 * 1024 * 1024,
+        "bounded catalogue response: {bytes} bytes"
+    );
+    eprintln!("1000 connection capability entries: {bytes} response bytes");
+    let (_, single) = request(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/access/connection/{id}/capabilities?child=finance"),
+        Value::Null,
+    )
+    .await;
+    assert!(boundary
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry == &single));
+    assert_eq!(
+        request(
+            &ctx,
+            &root,
+            "POST",
+            &url,
+            json!({"children": vec!["finance"; 1001]})
+        )
+        .await
+        .0,
+        400
+    );
+    // A newly disabled account cannot use the batch endpoint as an access bypass.
+    let mut disabled = viewer.clone();
+    disabled.disabled = true;
+    assert_eq!(
+        request(
+            &ctx,
+            &disabled,
+            "POST",
+            &url,
+            json!({"children":["finance"]})
+        )
+        .await
+        .0,
+        403
+    );
 }

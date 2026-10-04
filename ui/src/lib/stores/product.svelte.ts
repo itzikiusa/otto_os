@@ -209,71 +209,133 @@ class ProductStore {
     return id;
   }
 
+  private selectionGeneration = 0;
+  private requests = new Map<string, number>();
+  private draftLeave: (() => Promise<boolean>) | null = null;
+  private transition = 0;
+
+  registerDraftLeave(check: () => Promise<boolean>): () => void {
+    this.draftLeave = check;
+    return () => { if (this.draftLeave === check) this.draftLeave = null; };
+  }
+
+  async mayLeaveDraft(): Promise<boolean> {
+    const seq = ++this.transition;
+    const allowed = await (this.draftLeave?.() ?? true);
+    return allowed && seq === this.transition;
+  }
+
+  async changeTab(tab: string): Promise<void> {
+    if (tab === this.tab || !(await this.mayLeaveDraft())) return;
+    this.tab = tab;
+  }
+
+  async changeView(view: 'stories' | 'learnings'): Promise<void> {
+    if (view === this.view || !(await this.mayLeaveDraft())) return;
+    this.view = view;
+  }
+
+  /** Capture both identity and lifetime; A → B → A is a new view of A. */
+  private owner(key?: string, workspaceOnly = false): () => boolean {
+    const workspace = ws.currentId;
+    // Workspace effects call list loaders synchronously before their first
+    // await. Never subscribe those effects to a story they do not own.
+    const story = workspaceOnly ? null : this.selectedId;
+    const generation = workspaceOnly ? 0 : this.selectionGeneration;
+    const request = key ? (this.requests.get(key) ?? 0) + 1 : 0;
+    if (key) this.requests.set(key, request);
+    return () => ws.currentId === workspace &&
+      (workspaceOnly || (this.selectedId === story && this.selectionGeneration === generation)) &&
+      (!key || this.requests.get(key) === request);
+  }
+
+  private clearSelectionData(): void {
+    ++this.selectionGeneration;
+    this.detail = null; this.detailError = null;
+    this.versions = []; this.analyses = []; this.questions = []; this.notes = [];
+    this.events = []; this.testcaseRuns = []; this.transcripts = [];
+    this.loadingDetail = false; this.loadingVersions = false; this.loadingAnalyses = false;
+    this.loadingQuestions = false; this.loadingNotes = false; this.loadingEvents = false;
+    this.loadingTestcases = false; this.loadingTranscripts = false;
+  }
+
   // ── Stories ────────────────────────────────────────────────────────────────
 
   async loadStories(): Promise<void> {
     const wsId = this.wsId();
+    const current = this.owner('loadStories', true);
     this.loadingStories = true;
     try {
-      this.stories = await api.get<ProductStory[]>(`/workspaces/${wsId}/product/stories`);
-      this.error = null;
+      const rows = await api.get<ProductStory[]>(`/workspaces/${wsId}/product/stories`);
+      if (current()) this.stories = rows;
+      if (current()) this.error = null;
     } catch (e) {
-      this.error = loadErrorText(e);
+      if (current()) this.error = loadErrorText(e);
       throw e;
     } finally {
-      this.loadingStories = false;
+      if (current()) this.loadingStories = false;
     }
   }
 
   async importStory(req: ImportStoryReq): Promise<ProductStory> {
+    const sameWorkspace = this.owner(undefined, true);
     const wsId = this.wsId();
     // The endpoint returns a ProductStoryDetail wrapper ({ story, source, counts }),
     // not a bare ProductStory — same shape as the drafts endpoint. Unwrap `.story`
     // so callers get a real id (reading `.id` off the wrapper yields undefined,
     // which made the import dialog throw "No story selected" after a successful import).
     const detail = await api.post<ProductStoryDetail>(`/workspaces/${wsId}/product/stories`, req);
-    this.stories = [detail.story, ...this.stories];
+    if (sameWorkspace()) this.stories = [detail.story, ...this.stories];
     return detail.story;
   }
 
   async select(id: string): Promise<void> {
-    if (this.selectedId !== id) this.revokeBlobCache();
+    if (this.selectedId !== id) {
+      if (!(await this.mayLeaveDraft())) return;
+      this.revokeBlobCache();
+      this.clearSelectionData();
+    }
     this.selectedId = id;
     await this.loadDetail();
   }
 
   async loadDetail(): Promise<void> {
     const id = this.storyId();
+    const current = this.owner('loadDetail', false);
     this.loadingDetail = true;
     try {
       const detail = await api.get<ProductStoryDetail>(`/product/stories/${id}`);
       // A later select() (e.g. a click right after the page auto-selected its
       // first story) owns `detail` now — drop this stale response.
-      if (this.selectedId === id) {
+      if (current()) {
         this.detail = detail;
         this.detailError = null;
       }
     } catch (e) {
-      if (this.selectedId === id) this.detailError = loadErrorText(e);
+      if (current()) this.detailError = loadErrorText(e);
       throw e;
     } finally {
-      this.loadingDetail = false;
+      if (current()) this.loadingDetail = false;
     }
   }
 
   async updateStory(patch: UpdateStoryReq): Promise<ProductStory> {
+    const current = this.owner();
+    const sameWorkspace = this.owner(undefined, true);
     const id = this.storyId();
     const updated = await api.patch<ProductStory>(`/product/stories/${id}`, patch);
-    this.stories = this.stories.map((s) => (s.id === id ? updated : s));
-    if (this.detail) this.detail = { ...this.detail, story: updated };
+    if (sameWorkspace()) this.stories = this.stories.map((s) => (s.id === id ? updated : s));
+    if (current() && this.detail) this.detail = { ...this.detail, story: updated };
     return updated;
   }
 
   /** PATCH any story by id (not only the selected one) and sync local state. */
   async patchStory(id: string, patch: UpdateStoryReq): Promise<ProductStory> {
+    const current = this.owner();
+    const sameWorkspace = this.owner(undefined, true);
     const updated = await api.patch<ProductStory>(`/product/stories/${id}`, patch);
-    this.stories = this.stories.map((s) => (s.id === id ? updated : s));
-    if (this.detail && this.detail.story.id === id) this.detail = { ...this.detail, story: updated };
+    if (sameWorkspace()) this.stories = this.stories.map((s) => (s.id === id ? updated : s));
+    if (current() && this.detail && this.detail.story.id === id) this.detail = { ...this.detail, story: updated };
     return updated;
   }
 
@@ -293,12 +355,14 @@ class ProductStore {
 
   /** Create a child draft under an epic and select it. */
   async createChild(parentId: string, req: CreateChildReq): Promise<ProductStory> {
+    const current = this.owner();
+    const sameWorkspace = this.owner(undefined, true);
     const detail = await api.post<ProductStoryDetail>(
       `/product/stories/${parentId}/children`,
       req,
     );
-    this.stories = [detail.story, ...this.stories];
-    await this.select(detail.story.id);
+    if (sameWorkspace()) this.stories = [detail.story, ...this.stories];
+    if (current()) await this.select(detail.story.id);
     return detail.story;
   }
 
@@ -338,33 +402,38 @@ class ProductStore {
   }
 
   async refresh(): Promise<void> {
+    const current = this.owner();
     const id = this.storyId();
     await api.post(`/product/stories/${id}/refresh`);
-    await this.loadDetail();
+    if (current()) await this.loadDetail();
   }
 
   // ── Drafts ─────────────────────────────────────────────────────────────────
 
   async createDraft(title?: string | null): Promise<ProductStory> {
+    const current = this.owner();
+    const sameWorkspace = this.owner(undefined, true);
     const wsId = this.wsId();
     const req: NewDraftReq = title ? { title } : {};
     const detail = await api.post<ProductStoryDetail>(
       `/workspaces/${wsId}/product/drafts`,
       req,
     );
-    this.stories = [detail.story, ...this.stories];
-    await this.select(detail.story.id);
+    if (sameWorkspace()) this.stories = [detail.story, ...this.stories];
+    if (current()) await this.select(detail.story.id);
     return detail.story;
   }
 
   async updateDraft(req: UpdateDraftReq): Promise<void> {
+    const current = this.owner();
+    const sameWorkspace = this.owner(undefined, true);
     const id = this.storyId();
     const detail = await api.patch<ProductStoryDetail>(
       `/product/stories/${id}/draft`,
       req,
     );
-    this.detail = detail;
-    this.stories = this.stories.map((s) =>
+    if (current()) this.detail = detail;
+    if (sameWorkspace()) this.stories = this.stories.map((s) =>
       s.id === detail.story.id ? detail.story : s,
     );
   }
@@ -373,52 +442,60 @@ class ProductStore {
 
   async loadTranscripts(): Promise<void> {
     const id = this.storyId();
+    const current = this.owner('loadTranscripts', false);
     this.loadingTranscripts = true;
     try {
-      this.transcripts = await api.get<ProductTranscript[]>(
+      const rows = await api.get<ProductTranscript[]>(
         `/product/stories/${id}/transcripts`,
       );
+      if (current()) this.transcripts = rows;
     } finally {
-      this.loadingTranscripts = false;
+      if (current()) this.loadingTranscripts = false;
     }
   }
 
   async addTranscript(req: NewTranscriptReq): Promise<ProductTranscript> {
+    const current = this.owner();
     const id = this.storyId();
     const t = await api.post<ProductTranscript>(
       `/product/stories/${id}/transcripts`,
       req,
     );
-    this.transcripts = [...this.transcripts, t];
+    if (current()) this.transcripts = [...this.transcripts, t];
     return t;
   }
 
   async deleteTranscript(trid: string): Promise<void> {
+    const current = this.owner();
     await api.del(`/product/transcripts/${trid}`);
-    this.transcripts = this.transcripts.filter((t) => t.id !== trid);
+    if (current()) this.transcripts = this.transcripts.filter((t) => t.id !== trid);
   }
 
   // ── Publish ────────────────────────────────────────────────────────────────
 
   async publishAsRfc(req: PublishAsRfcReq): Promise<ProductStoryDetail> {
+    const current = this.owner();
+    const sameWorkspace = this.owner(undefined, true);
     const id = this.storyId();
     const detail = await api.post<ProductStoryDetail>(
       `/product/stories/${id}/publish-as-rfc`,
       req,
     );
-    this.detail = detail;
-    await this.loadStories();
+    if (current()) this.detail = detail;
+    if (sameWorkspace()) await this.loadStories();
     return detail;
   }
 
   async publishAsStory(req: PublishAsStoryReq): Promise<ProductStoryDetail> {
+    const current = this.owner();
+    const sameWorkspace = this.owner(undefined, true);
     const id = this.storyId();
     const detail = await api.post<ProductStoryDetail>(
       `/product/stories/${id}/publish-as-story`,
       req,
     );
-    this.detail = detail;
-    await this.loadStories();
+    if (current()) this.detail = detail;
+    if (sameWorkspace()) await this.loadStories();
     return detail;
   }
 
@@ -426,11 +503,13 @@ class ProductStore {
 
   async loadVersions(): Promise<void> {
     const id = this.storyId();
+    const current = this.owner('loadVersions', false);
     this.loadingVersions = true;
     try {
-      this.versions = await api.get<ProductStoryVersion[]>(`/product/stories/${id}/versions`);
+      const rows = await api.get<ProductStoryVersion[]>(`/product/stories/${id}/versions`);
+      if (current()) this.versions = rows;
     } finally {
-      this.loadingVersions = false;
+      if (current()) this.loadingVersions = false;
     }
   }
 
@@ -445,23 +524,26 @@ class ProductStore {
   // ── Analyses ───────────────────────────────────────────────────────────────
 
   async analyze(req: AnalyzeReq): Promise<ProductAnalysis> {
+    const current = this.owner();
     const wsId = this.wsId();
     const id = this.storyId();
     const analysis = await api.post<ProductAnalysis>(
       `/workspaces/${wsId}/product/stories/${id}/analyze`,
       req,
     );
-    this.analyses = [analysis, ...this.analyses];
+    if (current()) this.analyses = [analysis, ...this.analyses];
     return analysis;
   }
 
   async loadAnalyses(): Promise<void> {
     const id = this.storyId();
+    const current = this.owner('loadAnalyses', false);
     this.loadingAnalyses = true;
     try {
-      this.analyses = await api.get<ProductAnalysis[]>(`/product/stories/${id}/analyses`);
+      const rows = await api.get<ProductAnalysis[]>(`/product/stories/${id}/analyses`);
+      if (current()) this.analyses = rows;
     } finally {
-      this.loadingAnalyses = false;
+      if (current()) this.loadingAnalyses = false;
     }
   }
 
@@ -487,91 +569,105 @@ class ProductStore {
 
   async loadQuestions(): Promise<void> {
     const id = this.storyId();
+    const current = this.owner('loadQuestions', false);
     this.loadingQuestions = true;
     try {
-      this.questions = await api.get<ProductQuestion[]>(`/product/stories/${id}/questions`);
+      const rows = await api.get<ProductQuestion[]>(`/product/stories/${id}/questions`);
+      if (current()) this.questions = rows;
     } finally {
-      this.loadingQuestions = false;
+      if (current()) this.loadingQuestions = false;
     }
   }
 
   async addQuestion(req: NewQuestionReq): Promise<ProductQuestion> {
+    const current = this.owner();
     const id = this.storyId();
     const q = await api.post<ProductQuestion>(`/product/stories/${id}/questions`, req);
-    this.questions = [...this.questions, q];
+    if (current()) this.questions = [...this.questions, q];
     return q;
   }
 
   async updateQuestion(qid: string, req: UpdateQuestionReq): Promise<ProductQuestion> {
+    const current = this.owner();
     const q = await api.patch<ProductQuestion>(`/product/questions/${qid}`, req);
-    this.questions = this.questions.map((x) => (x.id === qid ? q : x));
+    if (current()) this.questions = this.questions.map((x) => (x.id === qid ? q : x));
     return q;
   }
 
   async deleteQuestion(qid: string): Promise<void> {
+    const current = this.owner();
     await api.del(`/product/questions/${qid}`);
-    this.questions = this.questions.filter((q) => q.id !== qid);
+    if (current()) this.questions = this.questions.filter((q) => q.id !== qid);
   }
 
   async postQuestions(req: PostQuestionsReq): Promise<void> {
+    const current = this.owner();
     const id = this.storyId();
     await api.post(`/product/stories/${id}/questions/post`, req);
-    await this.loadQuestions();
+    if (current()) await this.loadQuestions();
   }
 
   // ── Notes ──────────────────────────────────────────────────────────────────
 
   async loadNotes(): Promise<void> {
     const id = this.storyId();
+    const current = this.owner('loadNotes', false);
     this.loadingNotes = true;
     try {
-      this.notes = await api.get<ProductNote[]>(`/product/stories/${id}/notes`);
+      const rows = await api.get<ProductNote[]>(`/product/stories/${id}/notes`);
+      if (current()) this.notes = rows;
     } finally {
-      this.loadingNotes = false;
+      if (current()) this.loadingNotes = false;
     }
   }
 
   async addNote(req: NewNoteReq): Promise<ProductNote> {
+    const current = this.owner();
     const id = this.storyId();
     const note = await api.post<ProductNote>(`/product/stories/${id}/notes`, req);
-    this.notes = [...this.notes, note];
+    if (current()) this.notes = [...this.notes, note];
     return note;
   }
 
   async updateNote(nid: string, body: UpdateNoteReq): Promise<ProductNote> {
+    const current = this.owner();
     const note = await api.patch<ProductNote>(`/product/notes/${nid}`, body);
-    this.notes = this.notes.map((n) => (n.id === nid ? note : n));
+    if (current()) this.notes = this.notes.map((n) => (n.id === nid ? note : n));
     return note;
   }
 
   async deleteNote(nid: string): Promise<void> {
+    const current = this.owner();
     await api.del(`/product/notes/${nid}`);
-    this.notes = this.notes.filter((n) => n.id !== nid);
+    if (current()) this.notes = this.notes.filter((n) => n.id !== nid);
   }
 
   // ── Events ─────────────────────────────────────────────────────────────────
 
   async loadEvents(section?: string): Promise<void> {
     const id = this.storyId();
+    const current = this.owner('loadEvents', false);
     this.loadingEvents = true;
     try {
       const qs = section ? `?section=${encodeURIComponent(section)}` : '';
-      this.events = await api.get<ProductEvent[]>(`/product/stories/${id}/events${qs}`);
+      const rows = await api.get<ProductEvent[]>(`/product/stories/${id}/events${qs}`);
+      if (current()) this.events = rows;
     } finally {
-      this.loadingEvents = false;
+      if (current()) this.loadingEvents = false;
     }
   }
 
   // ── Rewrite ────────────────────────────────────────────────────────────────
 
   async rewrite(req: RewriteReq): Promise<ProductStoryVersion> {
+    const current = this.owner();
     const wsId = this.wsId();
     const id = this.storyId();
     const version = await api.post<ProductStoryVersion>(
       `/workspaces/${wsId}/product/stories/${id}/rewrite`,
       req,
     );
-    await this.loadDetail();
+    if (current()) await this.loadDetail();
     return version;
   }
 
@@ -597,9 +693,10 @@ class ProductStore {
    * Kanban board. Refreshes the detail so the linked-project badge appears.
    */
   async sendToSwarm(req: ToSwarmReq = {}): Promise<ToSwarmResp> {
+    const current = this.owner();
     const id = this.storyId();
     const resp = await api.post<ToSwarmResp>(`/product/stories/${id}/to-swarm`, req);
-    await this.loadDetail();
+    if (current()) await this.loadDetail();
     return resp;
   }
 
@@ -802,6 +899,8 @@ class ProductStore {
   /** Leaving the Design module / switching workspace: revoke every cached blob
    *  URL and drop editor bases (pending timers are flushed by the arena first). */
   teardown(): void {
+    this.clearSelectionData();
+    this.selectedId = null;
     this.revokeBlobCache();
     for (const aid of this.contentBase.keys()) {
       if (!this.hasUnsavedContent(aid)) this.contentBase.delete(aid);
@@ -960,53 +1059,61 @@ class ProductStore {
   // ── Test cases ─────────────────────────────────────────────────────────────
 
   async generateTests(req: GenerateTestsReq): Promise<void> {
+    const current = this.owner();
     const wsId = this.wsId();
     const id = this.storyId();
     await api.post(`/workspaces/${wsId}/product/stories/${id}/testcases/generate`, req);
-    await this.loadTestcases();
+    if (current()) await this.loadTestcases();
   }
 
   async loadTestcases(): Promise<void> {
     const id = this.storyId();
+    const current = this.owner('loadTestcases', false);
     this.loadingTestcases = true;
     try {
-      this.testcaseRuns = await api.get<ProductTestcaseRunDetail[]>(
+      const rows = await api.get<ProductTestcaseRunDetail[]>(
         `/product/stories/${id}/testcases`,
       );
+      if (current()) this.testcaseRuns = rows;
     } finally {
-      this.loadingTestcases = false;
+      if (current()) this.loadingTestcases = false;
     }
   }
 
   async updateTestcase(tid: string, req: UpdateTestcaseReq): Promise<void> {
+    const current = this.owner();
     await api.patch(`/product/testcases/${tid}`, req);
-    await this.loadTestcases();
+    if (current()) await this.loadTestcases();
   }
 
   async bulkApproveTestcases(rid: string, ids: string[]): Promise<{ approved: number }> {
+    const current = this.owner();
     const result = await api.post<{ approved: number }>(
       `/product/testcase-runs/${rid}/testcases/bulk-approve`,
       { ids },
     );
-    await this.loadTestcases();
+    if (current()) await this.loadTestcases();
     return result;
   }
 
   async reorderTestcases(rid: string, orderedIds: string[]): Promise<void> {
+    const current = this.owner();
     await api.post(`/product/testcase-runs/${rid}/testcases/reorder`, {
       ordered_ids: orderedIds,
     });
-    await this.loadTestcases();
+    if (current()) await this.loadTestcases();
   }
 
   async approveRun(rid: string): Promise<void> {
+    const current = this.owner();
     await api.post(`/product/testcase-runs/${rid}/approve`);
-    await this.loadTestcases();
+    if (current()) await this.loadTestcases();
   }
 
   async publishTests(rid: string, req: PublishTestsReq): Promise<void> {
+    const current = this.owner();
     await api.post(`/product/testcase-runs/${rid}/publish`, req);
-    await this.loadTestcases();
+    if (current()) await this.loadTestcases();
   }
 
   // ── Inject ─────────────────────────────────────────────────────────────────
@@ -1026,38 +1133,44 @@ class ProductStore {
 
   async loadLearnings(activeOnly?: boolean): Promise<void> {
     const wsId = this.wsId();
+    const current = this.owner('loadLearnings', true);
     this.loadingLearnings = true;
     try {
       const qs = activeOnly ? '?active=true' : '';
-      this.learnings = await api.get<ProductLearning[]>(
+      const rows = await api.get<ProductLearning[]>(
         `/workspaces/${wsId}/product/learnings${qs}`,
       );
+      if (current()) this.learnings = rows;
     } finally {
-      this.loadingLearnings = false;
+      if (current()) this.loadingLearnings = false;
     }
   }
 
   async addLearning(req: NewLearningReq): Promise<ProductLearning> {
+    const sameWorkspace = this.owner(undefined, true);
     const wsId = this.wsId();
     const l = await api.post<ProductLearning>(`/workspaces/${wsId}/product/learnings`, req);
-    this.learnings = [l, ...this.learnings];
+    if (sameWorkspace()) this.learnings = [l, ...this.learnings];
     return l;
   }
 
   async updateLearning(lid: string, req: UpdateLearningReq): Promise<ProductLearning> {
+    const sameWorkspace = this.owner(undefined, true);
     const l = await api.patch<ProductLearning>(`/product/learnings/${lid}`, req);
-    this.learnings = this.learnings.map((x) => (x.id === lid ? l : x));
+    if (sameWorkspace()) this.learnings = this.learnings.map((x) => (x.id === lid ? l : x));
     return l;
   }
 
   async deleteLearning(lid: string): Promise<void> {
+    const sameWorkspace = this.owner(undefined, true);
     await api.del(`/product/learnings/${lid}`);
-    this.learnings = this.learnings.filter((l) => l.id !== lid);
+    if (sameWorkspace()) this.learnings = this.learnings.filter((l) => l.id !== lid);
   }
 
   async acceptLearning(lid: string): Promise<ProductLearning> {
+    const sameWorkspace = this.owner(undefined, true);
     const l = await api.post<ProductLearning>(`/product/learnings/${lid}/accept`);
-    this.learnings = this.learnings.map((x) => (x.id === lid ? l : x));
+    if (sameWorkspace()) this.learnings = this.learnings.map((x) => (x.id === lid ? l : x));
     return l;
   }
 

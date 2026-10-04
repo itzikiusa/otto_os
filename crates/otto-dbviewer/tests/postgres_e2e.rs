@@ -476,3 +476,52 @@ async fn postgres_truncated_read_keeps_its_session() {
         "a truncated, server-bounded read must not close its pooled session"
     );
 }
+
+/// The observable counter establishes SERVER-side bounding, not merely a
+/// truncated display. The backend id also pins same-session batch execution.
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn postgres_batch_bounds_select_on_the_same_session() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = PostgresDriver::default();
+    let result = d.run(&cfg(), &QueryRequest {
+        statement: "CREATE TEMP SEQUENCE otto_preview_seen; SELECT nextval('otto_preview_seen') AS n, pg_backend_pid() AS backend FROM generate_series(1,10000); SELECT currval('otto_preview_seen') AS seen, pg_backend_pid() AS backend".into(),
+        max_rows: Some(2),
+        ..Default::default()
+    }).await.unwrap();
+    assert_eq!(result.more_results.len(), 2);
+    let preview = &result.more_results[0];
+    let after = &result.more_results[1];
+    assert_eq!(preview.rows.len(), 2);
+    assert!(preview.truncated);
+    assert_eq!(after.rows[0][0].to_string().trim_matches('"'), "3");
+    assert_eq!(preview.rows[0][1], after.rows[0][1]);
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn postgres_batch_preserves_explicit_limit_forms() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let driver = PostgresDriver::default();
+    for clause in [
+        "LIMIT ALL",
+        "LIMIT (2)",
+        "LIMIT\n2",
+        "FETCH FIRST 2 ROWS ONLY",
+    ] {
+        let result = driver.run(&cfg(), &QueryRequest {
+            statement: format!("SELECT pg_backend_pid() AS backend FROM generate_series(1,10) {clause}; SELECT pg_backend_pid() AS backend"),
+            max_rows: Some(2), ..Default::default()
+        }).await.unwrap();
+        assert!(!result.rows.is_empty(), "{clause}");
+        assert_eq!(result.more_results.len(), 1, "{clause}");
+        assert_eq!(
+            result.rows[0][0], result.more_results[0].rows[0][0],
+            "{clause}"
+        );
+    }
+}

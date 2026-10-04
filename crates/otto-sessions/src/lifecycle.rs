@@ -51,35 +51,66 @@ pub fn claude_transcript_path(home: &Path, cwd: &str, provider_session_id: &str)
         .join(format!("{provider_session_id}.jsonl"))
 }
 
+/// Only a completed metadata lookup can prove absence; access/IO errors
+/// must never become permission to delete the owning session.
+#[allow(clippy::disallowed_methods)] // synchronous helper; lifecycle callers offload it
+fn file_resumability(path: &Path) -> Resumability {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => Resumability::Exists,
+        Ok(_) => Resumability::Gone,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Resumability::Gone,
+        Err(_) => Resumability::Unknown,
+    }
+}
+
 /// Does a claude transcript for `provider_session_id` exist under `home`?
 ///
 /// Primary check: the exact cwd-encoded path. Fallback (covers cwd-encoding
 /// edge cases, e.g. the session was created from a slightly different cwd
 /// string): scan every immediate subdirectory of `~/.claude/projects` for a
-/// `<provider_session_id>.jsonl`. Returns `Exists`/`Gone`; never `Unknown`
-/// (the caller decides `Unknown` when it has no home/session id).
+/// `<provider_session_id>.jsonl`. Returns `Unknown` on incomplete or failed filesystem inspection.
 #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
 pub fn claude_transcript_exists(home: &Path, cwd: &str, provider_session_id: &str) -> Resumability {
-    // Fast path: exact encoded location.
-    if claude_transcript_path(home, cwd, provider_session_id).is_file() {
-        return Resumability::Exists;
+    let exact = file_resumability(&claude_transcript_path(home, cwd, provider_session_id));
+    if exact == Resumability::Exists {
+        return exact;
     }
-    // Fallback: the file is named exactly `<sid>.jsonl`; look in every project
-    // directory. This makes a positive "exists" reliable even if the stored
-    // cwd doesn't encode 1:1 to the on-disk project dir.
+    let mut unknown = exact == Resumability::Unknown;
     let projects = home.join(".claude").join("projects");
     let target = format!("{provider_session_id}.jsonl");
-    if let Ok(entries) = std::fs::read_dir(&projects) {
-        for entry in entries.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            if entry.path().join(&target).is_file() {
-                return Resumability::Exists;
+    match std::fs::read_dir(&projects) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(_) => {
+                        unknown = true;
+                        continue;
+                    }
+                };
+                match entry.file_type() {
+                    Ok(kind) if kind.is_dir() || kind.is_symlink() => {}
+                    Ok(_) => continue,
+                    Err(_) => {
+                        unknown = true;
+                        continue;
+                    }
+                }
+                match file_resumability(&entry.path().join(&target)) {
+                    Resumability::Exists => return Resumability::Exists,
+                    Resumability::Unknown => unknown = true,
+                    Resumability::Gone => {}
+                }
             }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => unknown = true,
     }
-    Resumability::Gone
+    if unknown {
+        Resumability::Unknown
+    } else {
+        Resumability::Gone
+    }
 }
 
 /// Resolve the on-disk transcript for an agent session (conversation view,
@@ -151,18 +182,22 @@ pub fn transcript_path_in_roots(
 /// Does an agy (Antigravity Gemini CLI) conversation for `provider_session_id`
 /// exist under `home`? agy stores each conversation as
 /// `~/.gemini/antigravity-cli/conversations/<id>.db` (or `.pb`). Returns
-/// `Exists`/`Gone`; never `Unknown` (the caller decides `Unknown` when it has no
-/// home/session id).
+/// `Unknown` on filesystem errors; another present format still proves `Exists`.
 pub fn agy_conversation_exists(home: &Path, provider_session_id: &str) -> Resumability {
     let dir = home
         .join(".gemini")
         .join("antigravity-cli")
         .join("conversations");
-    if ["db", "pb"]
-        .iter()
-        .any(|ext| dir.join(format!("{provider_session_id}.{ext}")).is_file())
-    {
-        Resumability::Exists
+    let mut unknown = false;
+    for ext in ["db", "pb"] {
+        match file_resumability(&dir.join(format!("{provider_session_id}.{ext}"))) {
+            Resumability::Exists => return Resumability::Exists,
+            Resumability::Unknown => unknown = true,
+            Resumability::Gone => {}
+        }
+    }
+    if unknown {
+        Resumability::Unknown
     } else {
         Resumability::Gone
     }
@@ -194,6 +229,34 @@ pub fn check_resumability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_transcript_is_unknown_not_gone() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir().unwrap();
+        let path = claude_transcript_path(home.path(), "/x", "id");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // ELOOP is deterministic even when the test runner has root privileges.
+        symlink(&path, &path).unwrap();
+        assert_eq!(
+            claude_transcript_exists(home.path(), "/x", "id"),
+            Resumability::Unknown
+        );
+        let dir = home.path().join(".gemini/antigravity-cli/conversations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("id.db");
+        symlink(&path, &path).unwrap();
+        assert_eq!(
+            agy_conversation_exists(home.path(), "id"),
+            Resumability::Unknown
+        );
+        std::fs::write(dir.join("id.pb"), b"present").unwrap();
+        assert_eq!(
+            agy_conversation_exists(home.path(), "id"),
+            Resumability::Exists
+        );
+    }
 
     #[test]
     fn project_dir_encoding_matches_claude() {

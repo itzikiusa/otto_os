@@ -36,7 +36,10 @@ pub use images::ImageStore;
 pub use model::*;
 pub use peek::{peek, Peek};
 pub use records::{for_each_record, parse_records, read_head_tail, read_records};
-pub use subagents::{read_subagents, subagent_path, subagents_dir, SubagentScanner};
+pub use subagents::{
+    read_subagents, read_subagents_limited, subagent_charge, subagent_path, subagents_dir,
+    SubagentScanner,
+};
 pub use tailer::{TailDelta, Tailer};
 pub use util::{TOOL_INPUT_CAP, TOOL_TEXT_CAP};
 
@@ -117,6 +120,30 @@ impl<'a> Folder<'a> {
         }
     }
 
+    /// Finalized newest turns without cloning older turns, provider indexes or
+    /// the artifact registry. Cumulative stats/metadata are preserved. As for
+    /// `page`, the newest eligible turn is kept even if it exceeds byte_limit.
+    /// `artifacts` is empty: use `artifacts()` when that registry is needed.
+    pub fn bounded_snapshot(&self, limit: usize, byte_limit: usize) -> Folded {
+        match self {
+            Folder::Claude(c) => c.bounded_snapshot(limit, byte_limit),
+            Folder::Codex(c) => c.bounded_snapshot(limit, byte_limit),
+        }
+    }
+
+    /// Equivalent to snapshot().page(), copying only the requested window.
+    pub fn page(
+        &self,
+        before: Option<usize>,
+        limit: usize,
+        subagents: Vec<SubagentMeta>,
+    ) -> Transcript {
+        match self {
+            Folder::Claude(c) => c.page(before, limit, subagents),
+            Folder::Codex(c) => c.page(before, limit, subagents),
+        }
+    }
+
     pub fn snapshot(&self) -> Folded {
         match self {
             Folder::Claude(c) => c.snapshot(),
@@ -130,6 +157,14 @@ impl<'a> Folder<'a> {
         match self {
             Folder::Claude(c) => c.turns_since(since),
             Folder::Codex(c) => c.turns_since(since),
+        }
+    }
+
+    /// Copy one tool block without snapshotting unrelated history.
+    pub fn tool_block(&self, tool_id: &str) -> Option<Block> {
+        match self {
+            Folder::Claude(c) => c.tool_block(tool_id),
+            Folder::Codex(c) => c.tool_block(tool_id),
         }
     }
 
@@ -164,6 +199,86 @@ pub fn fold_file(
 ) -> std::io::Result<Folded> {
     let bytes = std::fs::read(path)?;
     Ok(fold_bytes(provider, &bytes, opts))
+}
+
+/// Explicit interactive-read limits. The charge is conservative accounting,
+/// not an RSS measurement; parsing holds at most one bounded record at a time.
+#[derive(Clone, Copy)]
+pub struct FoldReadLimits {
+    pub input_bytes: usize,
+    pub record_bytes: usize,
+    pub charge_bytes: usize,
+}
+impl Default for FoldReadLimits {
+    fn default() -> Self {
+        Self {
+            input_bytes: 128 * 1024 * 1024,
+            record_bytes: 16 * 1024 * 1024,
+            charge_bytes: 256 * 1024 * 1024,
+        }
+    }
+}
+
+/// Stream a fixed file prefix; Codex first scans that SAME prefix for its
+/// era flags. Refuse excessive input before allocation and excessive retained
+/// charge before parsing/pushing another record. Never silently truncate.
+pub fn fold_file_limited(
+    provider: Provider,
+    path: &std::path::Path,
+    opts: FoldOpts<'_>,
+    limits: FoldReadLimits,
+) -> std::io::Result<Folded> {
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+    fn exceeded() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::OutOfMemory, "transcript resource limit exceeded; open the provider transcript directly or select a smaller subagent transcript")
+    }
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len > limits.input_bytes as u64 {
+        return Err(exceeded());
+    }
+    let mut folder = Folder::new(provider, opts);
+    let passes = if provider == Provider::Codex { 2 } else { 1 };
+    for pass in 0..passes {
+        file.seek(SeekFrom::Start(0))?;
+        let mut reader = BufReader::new((&mut file).take(len));
+        let mut line = Vec::new();
+        let mut charge = 0usize;
+        loop {
+            line.clear();
+            let size = (&mut reader)
+                .take(limits.record_bytes.saturating_add(1) as u64)
+                .read_until(b'\n', &mut line)?;
+            if size > limits.record_bytes {
+                return Err(exceeded());
+            }
+            if size == 0 || !line.ends_with(b"\n") {
+                break;
+            }
+            let text = String::from_utf8_lossy(&line);
+            if text.trim().is_empty() {
+                continue;
+            }
+            charge = charge
+                .saturating_add(size.saturating_mul(4))
+                .saturating_add(2048);
+            if charge > limits.charge_bytes {
+                return Err(exceeded());
+            }
+            let record = records::parse_line(&text);
+            if pass == 0 && passes == 2 {
+                if let Folder::Codex(c) = &mut folder {
+                    c.prescan(&record);
+                }
+            } else {
+                folder.push(&record);
+            }
+        }
+    }
+    Ok(match folder {
+        Folder::Claude(c) => c.into_folded(),
+        Folder::Codex(c) => c.into_folded(),
+    })
 }
 
 /// Guess the provider from a transcript path: Codex rollouts are named

@@ -1452,11 +1452,16 @@ impl McpApprovalRepo {
             ));
         }
         let status = if approved { "approved" } else { "denied" };
-        sqlx::query(
-            "UPDATE mcp_approvals SET status = ?, decided_by = ?, decision_note = ?, decided_at = ? WHERE id = ?",
+        let changed = sqlx::query(
+            "UPDATE mcp_approvals SET status = ?, decided_by = ?, decision_note = ?, decided_at = ? WHERE id = ? AND status = 'pending'",
         )
         .bind(status).bind(decided_by).bind(note).bind(fmt(Utc::now())).bind(id)
         .execute(&self.pool).await.map_err(dberr("decide approval"))?;
+        if changed.rows_affected() != 1 {
+            return Err(otto_core::Error::Conflict(
+                "approval was already decided".into(),
+            ));
+        }
         let row = self.get(id).await?;
         approval_changed(Some(&row.id), row.workspace_id.as_deref(), &row.status);
         Ok(row)
@@ -1471,12 +1476,13 @@ impl McpApprovalRepo {
         server_id: Option<&str>,
         tool: &str,
         args_hash: &str,
+        requested_by: Option<&str>,
     ) -> Result<Option<String>> {
         let now = fmt(Utc::now());
         let r = sqlx::query(
             "SELECT id FROM mcp_approvals
              WHERE status = 'approved' AND consumed_at IS NULL
-               AND tool = ? AND args_hash = ?
+               AND tool = ? AND args_hash = ? AND requested_by IS ?
                AND (server_id IS ? OR server_id = ?)
                AND (workspace_id IS ? OR workspace_id = ?)
                AND (expires_at IS NULL OR expires_at > ?)
@@ -1484,6 +1490,7 @@ impl McpApprovalRepo {
         )
         .bind(tool)
         .bind(args_hash)
+        .bind(requested_by)
         .bind(server_id)
         .bind(server_id)
         .bind(workspace_id)
@@ -1536,10 +1543,11 @@ impl McpApprovalRepo {
     /// from `approved` to `consumed` (false if it was already consumed — a replay).
     pub async fn consume(&self, id: &str) -> Result<bool> {
         let res = sqlx::query(
-            "UPDATE mcp_approvals SET status = 'consumed', consumed_at = ? WHERE id = ? AND status = 'approved' AND consumed_at IS NULL",
+            "UPDATE mcp_approvals SET status = 'consumed', consumed_at = ? WHERE id = ? AND status = 'approved' AND consumed_at IS NULL AND (expires_at IS NULL OR expires_at > ?)",
         )
         .bind(fmt(Utc::now()))
         .bind(id)
+        .bind(fmt(Utc::now()))
         .execute(&self.pool)
         .await
         .map_err(dberr("consume approval"))?;
@@ -1732,6 +1740,45 @@ mod tests {
         assert!(repo.decide(&a.id, true, "owner", None).await.is_err());
     }
 
+    #[tokio::test]
+    async fn simultaneous_approval_decisions_have_one_winner() {
+        let pool = mem_pool().await;
+        let (ws, _) = seed(&pool).await;
+        let repo = McpApprovalRepo::new(pool);
+        let a = repo
+            .create(NewApproval {
+                workspace_id: Some(ws),
+                kind: "assistant_outward".into(),
+                server_id: None,
+                server_name: None,
+                tool: Some("publish".into()),
+                title: "publish".into(),
+                detail: None,
+                args_redacted_json: "{}".into(),
+                args_hash: None,
+                risk_label: None,
+                requested_by: Some("owner".into()),
+                requested_by_kind: Some("assistant".into()),
+                requested_by_session_id: None,
+                expires_at: None,
+            })
+            .await
+            .unwrap();
+        let (yes, no) = tokio::join!(
+            repo.decide(&a.id, true, "reviewer", Some("yes")),
+            repo.decide(&a.id, false, "reviewer", Some("no")),
+        );
+        assert_ne!(
+            yes.is_ok(),
+            no.is_ok(),
+            "exactly one pending decision may commit"
+        );
+        let winner = yes.or(no).unwrap();
+        let saved = repo.get(&a.id).await.unwrap();
+        assert_eq!(saved.status, winner.status);
+        assert_eq!(saved.decision_note, winner.decision_note);
+    }
+
     /// Every state change reaches the process-wide hook (→ the WS event
     /// `mcp_approval_changed`): create, decide, consume and a bulk expiry.
     #[tokio::test]
@@ -1836,23 +1883,106 @@ mod tests {
 
         // Gate finds it only for the exact (tool, args_hash, server, ws).
         let found = repo
-            .find_usable(Some(&ws), Some("srv1"), "delete_thing", "HASH_A")
+            .find_usable(
+                Some(&ws),
+                Some("srv1"),
+                "delete_thing",
+                "HASH_A",
+                Some("requester"),
+            )
             .await
             .unwrap();
         assert!(found.is_some());
         // Swapped args => not usable.
         assert!(repo
-            .find_usable(Some(&ws), Some("srv1"), "delete_thing", "HASH_B")
+            .find_usable(
+                Some(&ws),
+                Some("srv1"),
+                "delete_thing",
+                "HASH_B",
+                Some("requester")
+            )
             .await
             .unwrap()
             .is_none());
+
+        // Another caller's approval cannot be selected, including a NULL caller.
+        assert!(repo
+            .find_usable(
+                Some(&ws),
+                Some("srv1"),
+                "delete_thing",
+                "HASH_A",
+                Some("other")
+            )
+            .await
+            .unwrap()
+            .is_none());
+        assert!(repo
+            .find_usable(Some(&ws), Some("srv1"), "delete_thing", "HASH_A", None)
+            .await
+            .unwrap()
+            .is_none());
+
+        let other = repo
+            .create(NewApproval {
+                workspace_id: Some(ws.clone()),
+                kind: "tool_call".into(),
+                server_id: Some("srv1".into()),
+                server_name: Some("srv".into()),
+                tool: Some("delete_thing".into()),
+                title: "other caller".into(),
+                detail: None,
+                args_redacted_json: "{}".into(),
+                args_hash: Some("HASH_A".into()),
+                risk_label: Some("dangerous".into()),
+                requested_by: Some("other".into()),
+                requested_by_kind: Some("ui".into()),
+                requested_by_session_id: None,
+                expires_at: None,
+            })
+            .await
+            .unwrap();
+        repo.decide(&other.id, true, "approver", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.find_usable(
+                Some(&ws),
+                Some("srv1"),
+                "delete_thing",
+                "HASH_A",
+                Some("requester")
+            )
+            .await
+            .unwrap(),
+            Some(a.id.clone())
+        );
+        assert_eq!(
+            repo.find_usable(
+                Some(&ws),
+                Some("srv1"),
+                "delete_thing",
+                "HASH_A",
+                Some("other")
+            )
+            .await
+            .unwrap(),
+            Some(other.id.clone())
+        );
 
         // Single-use: first consume succeeds, replay fails.
         assert!(repo.consume(&a.id).await.unwrap());
         assert!(!repo.consume(&a.id).await.unwrap());
         // After consume the gate no longer finds it.
         assert!(repo
-            .find_usable(Some(&ws), Some("srv1"), "delete_thing", "HASH_A")
+            .find_usable(
+                Some(&ws),
+                Some("srv1"),
+                "delete_thing",
+                "HASH_A",
+                Some("requester")
+            )
             .await
             .unwrap()
             .is_none());

@@ -4,7 +4,7 @@
   import { api } from '../../lib/api/client';
   import type { IssueProject, IssueSummary } from '../../lib/api/types';
   import type { ConfluenceSpace, ConfluencePageSummary } from './types';
-  import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Skeleton from '../../lib/components/Skeleton.svelte';
 
   interface PickedItem {
@@ -43,6 +43,11 @@
   // Only the newest search may land: a slow earlier query (or a multi-second
   // "load more") must never overwrite / append to a newer one. The superseded
   // request is aborted too, so it stops holding a webview connection.
+  let searchError = $state('');
+  let filterError = $state('');
+  let searched = $state(false);
+  let retrySearch: (() => void) | null = null;
+  let filterSeq = 0;
   let searchSeq = 0;
   let searchCtl: AbortController | null = null;
   $effect(() => () => searchCtl?.abort());
@@ -64,6 +69,8 @@
   });
 
   function resetSearch(): void {
+    ++searchSeq; searchCtl?.abort();
+    searching = false; loadingMore = false; searchError = ''; searched = false; retrySearch = null;
     query = '';
     jiraResults = [];
     confluenceResults = [];
@@ -75,30 +82,38 @@
   }
 
   async function loadProjects(aid: string): Promise<void> {
+    const seq = ++filterSeq;
+    const current = () => seq === filterSeq && accountId === aid && sourceKind === 'jira';
+    filterError = '';
     projectsLoading = true;
     projects = [];
     try {
-      projects = await api.get<IssueProject[]>(
+      const rows = await api.get<IssueProject[]>(
         `/issue/projects?account_id=${encodeURIComponent(aid)}`,
       );
-    } catch {
-      projects = [];
+      if (current()) projects = rows;
+    } catch (e) {
+      if (current()) filterError = loadErrorText(e);
     } finally {
-      projectsLoading = false;
+      if (current()) projectsLoading = false;
     }
   }
 
   async function loadSpaces(aid: string): Promise<void> {
+    const seq = ++filterSeq;
+    const current = () => seq === filterSeq && accountId === aid && sourceKind === 'confluence';
+    filterError = '';
     spacesLoading = true;
     spaces = [];
     try {
-      spaces = await api.get<ConfluenceSpace[]>(
+      const rows = await api.get<ConfluenceSpace[]>(
         `/issue/confluence/spaces?account_id=${encodeURIComponent(aid)}`,
       );
-    } catch {
-      spaces = [];
+      if (current()) spaces = rows;
+    } catch (e) {
+      if (current()) filterError = loadErrorText(e);
     } finally {
-      spacesLoading = false;
+      if (current()) spacesLoading = false;
     }
   }
 
@@ -106,6 +121,8 @@
   $effect(() => {
     const proj = selectedProjectKey;
     const space = selectedSpaceKey;
+    ++searchSeq; searchCtl?.abort();
+    searching = false; loadingMore = false; searchError = ''; searched = false; retrySearch = null;
     jiraResults = [];
     confluenceResults = [];
     jiraOffset = 0;
@@ -148,7 +165,9 @@
     const ctl = new AbortController();
     searchCtl = ctl;
     const seq = ++searchSeq;
-    const current = () => seq === searchSeq;
+    const aid = accountId, kind = sourceKind, project = projectOverride ?? selectedProjectKey, space = selectedSpaceKey;
+    const current = () => seq === searchSeq && accountId === aid && sourceKind === kind;
+    searchError = ''; retrySearch = null;
     if (append) {
       loadingMore = true;
     } else {
@@ -182,9 +201,13 @@
         if (!current()) return;
         confluenceResults = pages;
       }
+      if (current()) searched = true;
     } catch (e) {
       if (!current() || ctl.signal.aborted) return;
-      toasts.error('Search failed', e instanceof Error ? e.message : String(e));
+      searchError = loadErrorText(e);
+      retrySearch = () => {
+        if (accountId === aid && sourceKind === kind && selectedSpaceKey === space && selectedProjectKey === project) void search(q, startAt, append, project);
+      };
       if (!append) {
         jiraResults = [];
         confluenceResults = [];
@@ -263,6 +286,11 @@
   </div>
 {/if}
 
+{#if filterError}
+  <div role="alert">Couldn’t load the filters. {filterError}</div>
+  <button class="btn small" onclick={() => sourceKind === 'jira' ? void loadProjects(accountId) : void loadSpaces(accountId)}>Retry filters</button>
+{/if}
+
 <!-- Search input -->
 <div class="picker-field">
   <label class="picker-label" for="ss-query">
@@ -279,11 +307,16 @@
   />
 </div>
 
+{#if searchError}
+  <div role="alert">Search failed. {searchError}</div>
+  <button class="btn small" onclick={() => retrySearch?.()}>Retry search</button>
+{/if}
+
 <!-- Results -->
 <div class="picker-results">
   {#if searching}
     <Skeleton rows={3} height={44} />
-  {:else if !hasResults && query.trim() !== ''}
+  {:else if !hasResults && searched && !searchError && query.trim() !== ''}
     <div class="no-results dim">No results found.</div>
   {:else if sourceKind === 'jira'}
     {#each jiraResults as issue (issue.key)}

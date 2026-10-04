@@ -31,8 +31,8 @@ use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_state::{NewSession, NewTrail, SessionsRepo, TranscriptIndexRepo};
 use otto_transcript::{
-    fold_file, read_subagents, subagent_path, Artifact, ArtifactKind, FoldOpts, Folded,
-    HistoryEntry, ImageStore, Provider, Transcript, UnavailableReason,
+    fold_file_limited, read_subagents_limited, subagent_path, Artifact, ArtifactKind, FoldOpts,
+    Folded, HistoryEntry, ImageStore, Provider, Transcript, UnavailableReason,
 };
 use serde::Deserialize;
 
@@ -185,7 +185,12 @@ pub(crate) async fn resolve_transcript(
 ) -> Result<Resolved, UnavailableReason> {
     let repo = SessionsRepo::new(ctx.pool.clone());
     let persisted = repo.transcript_path(&session.id).await.ok().flatten();
-    let (resolved, fresh) = resolve_transcript_sync(&ctx.data_dir, persisted.as_deref(), session)?;
+    let data_dir = ctx.data_dir.clone();
+    let owned_session = session.clone();
+    let (resolved, fresh) = crate::offload::blocking(move || {
+        resolve_transcript_sync(&data_dir, persisted.as_deref(), &owned_session)
+    })
+    .await?;
     if fresh {
         let _ = repo
             .set_transcript_path(&session.id, &resolved.path.to_string_lossy())
@@ -295,7 +300,13 @@ pub(crate) fn fold_with(
 ) -> Result<(Folded, Vec<otto_transcript::SubagentMeta>), Error> {
     let store = image_store(ctx, &store_key(provider, path));
     let subagents = if sub.is_none() && provider == Provider::Claude {
-        read_subagents(path)
+        read_subagents_limited(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::OutOfMemory {
+                Error::PayloadTooLarge(e.to_string())
+            } else {
+                Error::Internal(format!("read subagent metadata: {e}"))
+            }
+        })?
     } else {
         Vec::new()
     };
@@ -311,7 +322,7 @@ pub(crate) fn fold_with(
         }
     };
     let price: otto_transcript::PriceFn<'_> = &otto_usage::estimate_cost;
-    let folded = fold_file(
+    let folded = fold_file_limited(
         provider,
         &target,
         FoldOpts {
@@ -319,8 +330,15 @@ pub(crate) fn fold_with(
             price: Some(price),
             subagents: subagents.clone(),
         },
+        Default::default(),
     )
-    .map_err(|e| Error::Internal(format!("read transcript: {e}")))?;
+    .map_err(|e| {
+        if e.kind() == std::io::ErrorKind::OutOfMemory {
+            Error::PayloadTooLarge(e.to_string())
+        } else {
+            Error::Internal(format!("read transcript: {e}"))
+        }
+    })?;
     Ok((folded, subagents))
 }
 
@@ -454,7 +472,7 @@ pub async fn get_transcript(
 ) -> ApiResult<Json<Transcript>> {
     let session = session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     let before = parse_before(q.before.as_deref())?;
-    let limit = q.limit.unwrap_or(DEFAULT_LIMIT);
+    let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let provider_name = effective_provider(&session);
     let resolved = match resolve_transcript(&ctx, &session).await {
         Ok(r) => r,
@@ -482,20 +500,18 @@ pub async fn get_transcript(
     }
     let live = match sub {
         None if is_live => {
-            crate::transcript_tail::live_page_settled(&id, provider, &resolved.path).await
+            crate::transcript_tail::live_page_settled(&id, provider, &resolved.path, before, limit)
+                .await
         }
-        None => crate::transcript_tail::live_page(&id, provider, &resolved.path).await,
+        None => {
+            crate::transcript_tail::live_page(&id, provider, &resolved.path, before, limit).await
+        }
         Some(_) => None,
     };
     // Paging sizes (serializes) up to a 2 MB page of turns — off the runtime.
     let sub_owned = sub.map(str::to_string);
     let mut t = match live {
-        Some((folded, subagents)) => {
-            crate::offload::blocking(move || {
-                page(&folded, before, limit, sub_owned.as_deref(), subagents)
-            })
-            .await
-        }
+        Some(page) => page,
         None => {
             let snapshot = cached_fold(&ctx, provider, &resolved.path, sub).await?;
             crate::offload::blocking(move || {
@@ -628,22 +644,23 @@ pub async fn transcript_tool(
     let resolved = resolve_transcript(&ctx, &session)
         .await
         .map_err(|_| ApiError(Error::NotFound("transcript not available".into())))?;
-    let block =
-        match crate::transcript_tail::live_page(&id, resolved.provider, &resolved.path).await {
-            Some((folded, _)) => {
-                crate::offload::blocking(move || {
-                    crate::transcript_tail::find_tool_block(&folded, &tool_id)
-                })
-                .await
-            }
-            None => {
-                let snapshot = cached_fold(&ctx, resolved.provider, &resolved.path, None).await?;
-                crate::offload::blocking(move || {
-                    crate::transcript_tail::find_tool_block(&snapshot.folded, &tool_id)
-                })
-                .await
-            }
-        };
+    let block = match crate::transcript_tail::live_tool(
+        &id,
+        resolved.provider,
+        &resolved.path,
+        tool_id.clone(),
+    )
+    .await
+    {
+        Some(block) => block,
+        None => {
+            let snapshot = cached_fold(&ctx, resolved.provider, &resolved.path, None).await?;
+            crate::offload::blocking(move || {
+                crate::transcript_tail::find_tool_block(&snapshot.folded, &tool_id)
+            })
+            .await
+        }
+    };
     block
         .map(Json)
         .ok_or_else(|| ApiError(Error::NotFound("tool call not found".into())))
@@ -1260,7 +1277,7 @@ pub async fn history_transcript(
     let (path, provider) = confine_history_path(&ctx, &q.path)?;
     history_path_gate(&ctx, &user, &wid, &path).await?;
     let before = parse_before(q.before.as_deref())?;
-    let limit = q.limit.unwrap_or(DEFAULT_LIMIT);
+    let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let sub = q.sub.as_deref().filter(|s| !s.is_empty());
     let snapshot = cached_fold(&ctx, provider, &path, sub).await?;
     Ok(Json(page(

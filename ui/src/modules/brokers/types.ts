@@ -1,24 +1,14 @@
 // Module-local types for the B6 broker operator workflow features.
-// Do NOT import from or add to ui/src/lib/api/types.ts.
+// Shared wire contracts are re-exported from lib/api/types.ts.
 
 import { nextTabIndex } from '../../lib/tabKeys';
 
 // ---- Schema registry version history & compat --------------------------------
 
-export interface SchemaVersion {
-  version: number;
-  id: number;
-  schema_type: string;
-  schema: string;
-}
-
-export interface SchemaVersionDetail {
-  subject: string;
-  version: number;
-  id: number;
-  schema_type: string;
-  schema: string;
-}
+export type {
+  BrokerSchemaVersion as SchemaVersion,
+  BrokerSchemaVersionDetail as SchemaVersionDetail,
+} from '../../lib/api/types';
 
 export interface CompatCheckResp {
   compatible: boolean;

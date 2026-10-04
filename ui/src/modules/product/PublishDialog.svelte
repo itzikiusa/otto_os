@@ -62,6 +62,9 @@
   // suggested, else draft, else source; mirrors `best_content_version`). ─────
   const storyTitle = $derived(product.detail?.story.title ?? '');
   const isDraft = $derived(product.detail?.story.source_kind === 'draft');
+  let previewError = $state('');
+  let previewStoryId = $state<string | null>(null);
+  let previewSequence = 0;
   let previewBody = $state<string | null>(null); // null = loading
   // Converting a Confluence RFC → story: the daemon prepends a "> RFC: <url>"
   // reference line to the Jira description (`publish_as_story`), so the
@@ -78,14 +81,17 @@
   });
 
   async function loadPreview(sid: string | null): Promise<void> {
-    if (!sid) { previewBody = ''; return; }
+    const seq = ++previewSequence;
+    previewBody = null; previewError = ''; previewStoryId = null;
+    if (!sid) { previewError = 'Select a story before publishing.'; return; }
+    const current = () => seq === previewSequence && product.selectedId === sid;
     try {
       const vs = await api.get<ProductStoryVersion[]>(`/product/stories/${sid}/versions`);
       const pick = vs.find((v) => v.kind === 'suggested') ?? vs.find((v) => v.kind === 'draft') ?? vs.find((v) => v.kind === 'source');
-      if (!pick) { previewBody = ''; return; }
-      previewBody = pick.body_md ? pick.body_md : (await product.getVersion(pick.id)).body_md;
-    } catch {
-      previewBody = '';
+      const body = pick ? (pick.body_md || (await product.getVersion(pick.id)).body_md) : '';
+      if (current()) { previewBody = body; previewStoryId = sid; }
+    } catch (e) {
+      if (current()) previewError = `Couldn’t load the content preview. ${e instanceof Error ? e.message : String(e)}`;
     }
   }
 
@@ -184,6 +190,7 @@
   }
 
   async function submit(): Promise<void> {
+    if (submitting || previewBody === null || previewError || previewStoryId !== product.selectedId) return;
     formError = '';
     formErrorDetail = '';
     if (!accountId) { formError = 'Select an account.'; return; }
@@ -357,7 +364,10 @@
       <div class="pd-preview" data-testid="publish-preview">
         <div class="label">What is published</div>
         <div class="pd-preview-title">{(mode === 'rfc' && rfcTitle.trim()) || storyTitle || 'Untitled'}</div>
-        {#if previewBody === null}
+        {#if previewError}
+          <div class="field-error" role="alert">{previewError}</div>
+          <button class="btn small" onclick={() => void loadPreview(product.selectedId)}>Retry preview</button>
+        {:else if previewBody === null}
           <div class="loading-inline">Loading the content…</div>
         {:else if previewLines.head.length === 0}
           <div class="loading-inline">No body — only the title is published.</div>
@@ -389,7 +399,7 @@
     <button
       class="btn primary"
       onclick={submit}
-      disabled={submitting || accountsLoading || accounts.length === 0}
+      disabled={submitting || accountsLoading || accounts.length === 0 || previewBody === null || !!previewError || previewStoryId !== product.selectedId}
     >
       {submitting ? 'Publishing…' : (mode === 'story' ? 'Publish story' : 'Publish RFC')}
     </button>

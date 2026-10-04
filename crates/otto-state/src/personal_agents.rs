@@ -638,12 +638,27 @@ impl PersonalAgentsRepo {
     // -- Schedules ----------------------------------------------------------
 
     pub async fn create_schedule(&self, s: NewAgentSchedule) -> Result<PersonalAgentSchedule> {
+        self.create_schedule_once(s, None, "directed").await
+    }
+
+    /// A retry of the same create returns its first committed schedule.
+    pub async fn create_schedule_once(
+        &self,
+        s: NewAgentSchedule,
+        request_key: Option<&str>,
+        permission: &str,
+    ) -> Result<PersonalAgentSchedule> {
+        if request_key.is_some_and(|k| k.is_empty() || k.len() > 128 || !k.is_ascii()) {
+            return Err(otto_core::Error::Invalid(
+                "idempotency_key must contain 1–128 ASCII characters".into(),
+            ));
+        }
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO personal_agent_schedules (id, agent_id, schedule_json, timezone, \
-             directive, enabled, created_at, updated_at, armed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             directive, enabled, created_at, updated_at, armed_at, request_key, permission) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(agent_id, request_key) DO NOTHING",
         )
         .bind(&id)
         .bind(&s.agent_id)
@@ -655,10 +670,34 @@ impl PersonalAgentsRepo {
         .bind(&now)
         // Armed at creation: the first fire is the next one after now.
         .bind(&now)
+        .bind(request_key)
+        .bind(permission)
         .execute(&self.pool)
         .await
         .map_err(dberr("create personal agent schedule"))?;
-        self.get_schedule(&id).await
+        let saved = if let Some(key) = request_key {
+            let row = sqlx::query(
+                "SELECT * FROM personal_agent_schedules WHERE agent_id = ? AND request_key = ?",
+            )
+            .bind(&s.agent_id)
+            .bind(key)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("schedule retry"))?;
+            row_to_schedule(&row)?
+        } else {
+            self.get_schedule(&id).await?
+        };
+        if saved.schedule != s.schedule
+            || saved.timezone != s.timezone
+            || saved.directive != s.directive
+            || saved.permission != permission
+        {
+            return Err(otto_core::Error::Conflict(
+                "idempotency_key was already used for different schedule settings".into(),
+            ));
+        }
+        Ok(saved)
     }
 
     pub async fn get_schedule(&self, id: &str) -> Result<PersonalAgentSchedule> {
@@ -806,24 +845,39 @@ impl PersonalAgentsRepo {
     // -- Runs ----------------------------------------------------------------
 
     pub async fn create_run(&self, r: NewAgentRun) -> Result<PersonalAgentRun> {
-        let id = new_id();
+        self.create_run_configured(&new_id(), r, "directed", false, None)
+            .await
+    }
+
+    /// The engine reserves cancellation for `id` before this atomic insert.
+    pub async fn create_run_configured(
+        &self,
+        id: &str,
+        r: NewAgentRun,
+        mode: &str,
+        read_only: bool,
+        goal_id: Option<&str>,
+    ) -> Result<PersonalAgentRun> {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO personal_agent_runs (id, agent_id, schedule_id, workspace_id, status, \
-             trigger, started_at, summary, delivered, created_at) \
-             VALUES (?, ?, ?, ?, 'running', ?, ?, '', 0, ?)",
+             trigger, started_at, summary, delivered, created_at, mode, read_only, goal_id) \
+             VALUES (?, ?, ?, ?, 'running', ?, ?, '', 0, ?, ?, ?, ?)",
         )
-        .bind(&id)
+        .bind(id)
         .bind(&r.agent_id)
         .bind(&r.schedule_id)
         .bind(&r.workspace_id)
         .bind(&r.trigger)
         .bind(&now)
         .bind(&now)
+        .bind(mode)
+        .bind(read_only as i64)
+        .bind(goal_id)
         .execute(&self.pool)
         .await
         .map_err(dberr("create personal agent run"))?;
-        self.get_run(&id).await
+        self.get_run(id).await
     }
 
     /// Settle a run. A `None` session id keeps the one recorded when the
@@ -1537,6 +1591,37 @@ mod tests {
             created_by: Some("u1".into()),
             ..NewPersonalAgent::defaults(ws.into(), name.into())
         }
+    }
+
+    #[tokio::test]
+    async fn schedule_create_retry_after_lost_response_is_idempotent() {
+        let p = pool().await;
+        seed_ws(&p, "retry-ws").await;
+        let repo = PersonalAgentsRepo::new(p);
+        let agent = repo.create(new_agent("retry-ws", "Recap")).await.unwrap();
+        let input = || NewAgentSchedule {
+            agent_id: agent.id.clone(),
+            schedule: json!({"cadence":"interval","every_min":60}),
+            timezone: "UTC".into(),
+            directive: "recap".into(),
+            enabled: true,
+        };
+        let (a, b) = tokio::join!(
+            repo.create_schedule_once(input(), Some("template"), "read_only"),
+            repo.create_schedule_once(input(), Some("template"), "read_only")
+        );
+        let a = a.unwrap();
+        let b = b.unwrap();
+        assert_eq!(a.id, b.id);
+        assert_eq!(a.permission, "read_only");
+        assert_eq!(repo.list_schedules(&agent.id).await.unwrap().len(), 1);
+        let mut changed = input();
+        changed.directive = "different".into();
+        assert!(repo
+            .create_schedule_once(changed, Some("template"), "read_only")
+            .await
+            .is_err());
+        assert_eq!(repo.list_schedules(&agent.id).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

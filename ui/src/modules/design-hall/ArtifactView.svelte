@@ -408,7 +408,7 @@
       void loadVersions();
     } else if (value === 'mine') {
       if (!latest) {
-        await load(id);
+        toasts.error('Couldn’t read the current version', 'Your edits are kept. Try Save again to retry.');
         return;
       }
       try {

@@ -17,6 +17,90 @@ async fn fixture() -> (Arc<VaultEngine>, tempfile::TempDir, i64) {
 }
 
 #[tokio::test]
+async fn backlink_context_reads_are_bounded_to_the_requested_window() {
+    let (e, dir, id) = fixture().await;
+    for i in 0..125 {
+        std::fs::write(
+            dir.path().join(format!("source-{i:03}.md")),
+            format!("# Source {i}\nSee [[b]]"),
+        )
+        .unwrap();
+    }
+    e.scan(id).await.unwrap();
+    let first = e.backlinks("ws", id, "b.md").await.unwrap();
+    assert_eq!(first.len(), 126);
+    assert_eq!(
+        first.iter().filter(|row| !row.context.is_empty()).count(),
+        100
+    );
+    assert_eq!(
+        e.backlink_ctx.lock().unwrap().len(),
+        100,
+        "only visible contexts are read"
+    );
+    let next = e
+        .backlinks_context_window("ws", id, "b.md", 100, usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(next.len(), 126);
+    assert_eq!(
+        next.iter().filter(|row| !row.context.is_empty()).count(),
+        26
+    );
+    assert_eq!(next[100].path, first[100].path);
+}
+
+#[tokio::test]
+async fn warm_status_and_scoped_reads_do_not_recount_notes_and_links() {
+    let (e, _dir, id) = fixture().await;
+    let first = e.status("ws", id).await.unwrap();
+    assert_eq!((first.notes, first.links), (2, 1));
+    let reads = e.store.status_count_reads.load(Relaxed);
+    for _ in 0..10 {
+        e.get_scoped("ws", id).await.unwrap();
+        let status = e.status("ws", id).await.unwrap();
+        assert_eq!((status.notes, status.links), (2, 1));
+    }
+    assert_eq!(e.store.status_count_reads.load(Relaxed), reads);
+    e.write_note("ws", id, "a.md", "# No link", None)
+        .await
+        .unwrap();
+    let updated = e.status("ws", id).await.unwrap();
+    assert_eq!((updated.notes, updated.links), (2, 0));
+    assert!(e.store.status_count_reads.load(Relaxed) > reads);
+    assert_eq!(e.store.list_vaults().await.unwrap()[0].notes, 2);
+}
+
+#[tokio::test]
+async fn case_only_rename_preserves_distinct_destination_or_renames_one_entry() {
+    let (e, dir, id) = fixture().await;
+    let source = dir.path().join("Case.md");
+    let target = dir.path().join("case.md");
+    std::fs::write(&source, "# Source").unwrap();
+    let case_sensitive = !target.exists();
+    if case_sensitive {
+        std::fs::write(&target, "# Destination").unwrap();
+    }
+    e.scan(id).await.unwrap();
+    let result = e.rename("ws", id, "Case.md", "case.md").await;
+    if case_sensitive {
+        assert!(matches!(result, Err(Error::Conflict(_))));
+        assert_eq!(std::fs::read_to_string(source).unwrap(), "# Source");
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "# Destination");
+    } else {
+        result.unwrap();
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "# Source");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(names.contains(&std::ffi::OsString::from("case.md")));
+        assert!(!names.contains(&std::ffi::OsString::from("Case.md")));
+        eprintln!("Case-insensitive fixture: distinct-case destination branch needs a case-sensitive volume");
+    }
+}
+
+#[tokio::test]
 async fn warm_save_does_not_scan_unrelated_files() {
     let (e, _dir, id) = fixture().await;
     e.dir("ws", id, "").await.unwrap();

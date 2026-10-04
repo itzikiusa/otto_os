@@ -3,13 +3,14 @@
   // subject is selected. Fetches all registered versions and lets the operator
   // compare any two via the shared DiffView component (word-level diff).
 
+  import { SchemaVersionCache } from './schemaVersionCache';
   import { api } from '../../lib/api/client';
   import { toastError } from '../../lib/toastError';
   import DiffView from '../../lib/components/DiffView.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import type { BrokerCluster } from '../../lib/api/types';
-  import type { SchemaVersion, CompatCheckResp } from './types';
+  import type { SchemaVersion, SchemaVersionDetail, CompatCheckResp } from './types';
 
   interface Props {
     cluster: BrokerCluster;
@@ -22,9 +23,41 @@
   /** Failed load — inline with Retry (it used to toast AND claim "No versions found."). */
   let loadError = $state<string | null>(null);
   // The two versions selected for the diff.
-  let diffA = $state<SchemaVersion | null>(null);
-  let diffB = $state<SchemaVersion | null>(null);
+  let diffA = $state<SchemaVersionDetail | null>(null);
+  let diffB = $state<SchemaVersionDetail | null>(null);
   let showDiff = $state(false);
+  const cache = new SchemaVersionCache();
+  let generation = 0;
+  let listController: AbortController | null = null;
+  const detailControllers: Record<'A' | 'B', AbortController | null> = { A:null, B:null };
+  let detailErrors = $state<Record<'A' | 'B', string | null>>({ A:null, B:null });
+  const detailError = $derived(detailErrors.A ?? detailErrors.B);
+  let selectedA = $state<number | null>(null);
+  let selectedB = $state<number | null>(null);
+  const versionBase = () => `/brokers/clusters/${cluster.id}/schema-registry/subjects/${encodeURIComponent(subject)}/versions`;
+  function cancelLoads() {
+    listController?.abort(); detailControllers.A?.abort(); detailControllers.B?.abort();
+  }
+  async function selectVersion(side: 'A' | 'B', version: number, reveal = true): Promise<void> {
+    detailControllers[side]?.abort();
+    const controller = new AbortController(); detailControllers[side] = controller;
+    const gen = generation, base = versionBase();
+    if (side === 'A') { selectedA = version; diffA = null; } else { selectedB = version; diffB = null; }
+    detailErrors[side] = null;
+    try {
+      const detail = cache.get(base, version) ?? await api.get<SchemaVersionDetail>(`${base}/${version}`, controller.signal);
+      if (controller.signal.aborted || gen !== generation) return;
+      cache.set(base, detail);
+      if (side === 'A') diffA = detail; else diffB = detail;
+      if (reveal) showDiff = true;
+    } catch (e) {
+      if (!controller.signal.aborted && gen === generation) detailErrors[side] = loadErrorText(e);
+    }
+  }
+  function retryDetails() {
+    if (selectedA !== null) void selectVersion('A', selectedA);
+    if (selectedB !== null) void selectVersion('B', selectedB);
+  }
 
   // Compatibility check against latest.
   let compatSchema = $state('');
@@ -35,27 +68,30 @@
     void cluster.id;
     void subject;
     loadVersions();
+    return cancelLoads;
   });
 
   function loadVersions(): void {
+    cancelLoads();
+    const gen = ++generation;
+    const controller = new AbortController(); listController = controller;
     loading = true;
     loadError = null;
+    detailErrors = { A:null, B:null };
     versions = [];
-    diffA = null;
-    diffB = null;
+    diffA = null; diffB = null;
+    selectedA = null; selectedB = null;
     showDiff = false;
     compatResult = null;
-    api
-      .get<SchemaVersion[]>(
-        `/brokers/clusters/${cluster.id}/schema-registry/subjects/${encodeURIComponent(subject)}/versions`,
-      )
+    api.get<SchemaVersion[]>(versionBase(), controller.signal)
       .then((v) => {
+        if (gen !== generation || controller.signal.aborted) return;
         versions = v;
-        if (v.length >= 1) diffB = v[v.length - 1];
-        if (v.length >= 2) diffA = v[v.length - 2];
+        if (v.length >= 1) void selectVersion('B', v[v.length - 1].version, false);
+        if (v.length >= 2) void selectVersion('A', v[v.length - 2].version, false);
       })
-      .catch((e) => (loadError = loadErrorText(e)))
-      .finally(() => (loading = false));
+      .catch((e) => { if (gen === generation && !controller.signal.aborted) loadError = loadErrorText(e); })
+      .finally(() => { if (gen === generation && !controller.signal.aborted) loading = false; });
   }
 
   function pretty(schema: string): string {
@@ -98,19 +134,19 @@
         {#each versions as v (v.version)}
           <div class="vrow">
             <span class="vnum">v{v.version}</span>
-            <span class="vid muted">#{v.id}</span>
-            <span class="vtype muted">{v.schema_type}</span>
+            <span class="vid muted">{diffA?.version === v.version ? `#${diffA.id}` : diffB?.version === v.version ? `#${diffB.id}` : ''}</span>
+            <span class="vtype muted">{diffA?.version === v.version ? diffA.schema_type : diffB?.version === v.version ? diffB.schema_type : ''}</span>
             <div class="vbtns">
               <button
                 class="btn small"
-                class:active={diffA?.version === v.version}
-                onclick={() => { diffA = v; showDiff = !!(diffA && diffB); }}
+                class:active={selectedA === v.version}
+                onclick={() => selectVersion('A', v.version)}
                 title="Set as 'before' side of diff"
               >A</button>
               <button
                 class="btn small"
-                class:active={diffB?.version === v.version}
-                onclick={() => { diffB = v; showDiff = !!(diffA && diffB); }}
+                class:active={selectedB === v.version}
+                onclick={() => selectVersion('B', v.version)}
                 title="Set as 'after' side of diff"
               >B</button>
             </div>
@@ -118,6 +154,12 @@
         {/each}
       </div>
     </section>
+
+    {#if detailError}
+      <LoadState what="selected schema versions" error={detailError} empty onretry={retryDetails} />
+    {:else if (selectedA !== null && !diffA) || (selectedB !== null && !diffB)}
+      <p class="muted pad">Loading selected versions…</p>
+    {/if}
 
     <!-- Version diff -->
     {#if diffA && diffB && showDiff}

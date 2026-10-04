@@ -143,7 +143,9 @@ impl McpService {
     /// Drop pooled clients idle past the TTL (their stdio children die with them).
     pub fn reap_idle_clients(&self) {
         if let Ok(mut m) = self.clients.lock() {
-            m.retain(|_, c| c.last_used.elapsed() < CLIENT_IDLE_TTL);
+            m.retain(|_, c| {
+                Arc::strong_count(&c.client) > 1 || c.last_used.elapsed() < CLIENT_IDLE_TTL
+            });
         }
     }
 
@@ -410,7 +412,9 @@ impl McpService {
         let (secret_env, secret_headers) = self.resolve_secrets(server).await;
         let hash = client_config_hash(server, &secret_env, &secret_headers);
         if let Ok(mut m) = self.clients.lock() {
-            m.retain(|_, c| c.last_used.elapsed() < CLIENT_IDLE_TTL);
+            m.retain(|_, c| {
+                Arc::strong_count(&c.client) > 1 || c.last_used.elapsed() < CLIENT_IDLE_TTL
+            });
             if let Some(entry) = m.get_mut(&server.id) {
                 if entry.config_hash == hash {
                     entry.last_used = Instant::now();
@@ -420,10 +424,19 @@ impl McpService {
         }
         let client = Arc::new(Self::build_client(server, secret_env, secret_headers));
         if let Ok(mut m) = self.clients.lock() {
+            // Another caller may have installed the same client while secrets
+            // were resolved. Share its admission slots instead of a second pool.
+            if let Some(entry) = m.get_mut(&server.id) {
+                if entry.config_hash == hash {
+                    entry.last_used = Instant::now();
+                    return entry.client.clone();
+                }
+            }
             if m.len() >= CLIENT_POOL_CAP && !m.contains_key(&server.id) {
                 // Evict the least recently used entry.
                 if let Some(oldest) = m
                     .iter()
+                    .filter(|(_, c)| Arc::strong_count(&c.client) == 1)
                     .min_by_key(|(_, c)| c.last_used)
                     .map(|(k, _)| k.clone())
                 {
@@ -522,10 +535,9 @@ impl McpService {
                 .await?;
             return self.registry().get(&server.id).await;
         }
-        // Health is a one-shot probe that the server can START; it never
-        // touches (or parks) the pooled session.
-        let (secret_env, secret_headers) = self.resolve_secrets(&server).await;
-        let client = Self::build_client(&server, secret_env, secret_headers);
+        // Startup probes use the same server admission slots as discovery and
+        // tool calls. The probe replaces one parked session while testing startup.
+        let client = self.client_for(&server).await;
         let start = Instant::now();
         let res = client.health().await;
         let latency = start.elapsed().as_millis() as i64;
@@ -798,6 +810,7 @@ impl McpService {
                     Some(&server.id),
                     tool_name,
                     &args_hash,
+                    ctx.caller_user_id.as_deref(),
                 )
                 .await?
             {

@@ -21,8 +21,8 @@
 //! **Concurrency (perf2/10-mcp R3).** A client parks up to [`SESSION_SLOTS`]
 //! sessions. An op takes an idle parked session; when every opened session is
 //! busy it waits up to [`BUSY_WAIT`] for one (most ops are far shorter than a
-//! spawn), then opens a second parked session in a free slot, and only when
-//! all slots are busy past the wait does it fall back to a one-shot child.
+//! spawn), then opens a second parked session in a free slot, and queues with a deadline when
+//! all slots are busy. No operation opens more than these two sessions.
 //! Two concurrent `gateway_call`s to one `npx` server used to pay a fresh
 //! 1–3 s spawn for the second; now it reuses the first session or the second
 //! slot. `health` is always one-shot (it probes that the server can START).
@@ -82,11 +82,13 @@ enum Live {
     Stdio {
         io: Box<StdioIo>,
         next_id: i64,
+        _permit: tokio::sync::OwnedSemaphorePermit,
     },
     Http {
         client: reqwest::Client,
         session_id: Option<String>,
         next_id: i64,
+        _permit: tokio::sync::OwnedSemaphorePermit,
     },
 }
 
@@ -120,10 +122,10 @@ impl McpClient {
             .any(|s| s.try_lock().map(|g| g.is_some()).unwrap_or(true))
     }
 
-    /// The slot an op runs on, or `None` ⇒ run it on a one-shot session.
+    /// The slot an op runs on, or `None` when the admission deadline expires.
     /// Order: an idle parked session → (nothing in flight) the first free slot
     /// → wait up to [`BUSY_WAIT`] for a busy session → a free slot (a second
-    /// parked session) → `None`.
+    /// parked session) → wait for a slot up to the admission deadline.
     async fn checkout(&self) -> Option<SlotGuard<'_>> {
         let mut free: Option<SlotGuard<'_>> = None;
         let mut busy: Vec<usize> = Vec::with_capacity(SESSION_SLOTS);
@@ -157,7 +159,19 @@ impl McpClient {
             .ok(),
             [] => None,
         };
-        waited.or(free)
+        if let Some(slot) = waited.or(free) {
+            return Some(slot);
+        }
+        // Admission is bounded by the parked slots. Queue with a deadline;
+        // never spill a burst into additional server processes.
+        tokio::time::timeout(OP_TIMEOUT, async {
+            tokio::select! {
+                slot = self.live[0].lock() => slot,
+                slot = self.live[1].lock() => slot,
+            }
+        })
+        .await
+        .ok()
     }
 
     /// `tools/list` → the advertised tool objects.
@@ -195,65 +209,60 @@ impl McpClient {
     /// Health probe = an `initialize` round-trip on a ONE-SHOT session (it must
     /// prove the server can start, not that a parked session is still up).
     pub async fn health(&self) -> Result<(), String> {
+        let mut slot = self
+            .checkout()
+            .await
+            .ok_or_else(|| "MCP server busy; try again".to_string())?;
+        // Probe startup within the same process budget, replacing this parked session.
+        *slot = None;
         self.open().await.map(drop)
     }
 
     /// Run one post-initialize op, returning its `result`. Uses (and keeps) a
-    /// parked session ([`Self::checkout`]); only when every slot stays busy
-    /// past [`BUSY_WAIT`] does this op run on a one-shot session.
+    /// parked session ([`Self::checkout`]); saturated callers queue with a
+    /// deadline and never launch extra fallback transports.
     async fn op(&self, request: Value) -> Result<Value, String> {
-        let Some(mut guard) = self.checkout().await else {
-            return self.one_shot(request).await;
-        };
+        let mut guard = self
+            .checkout()
+            .await
+            .ok_or_else(|| "MCP server busy; try again".to_string())?;
         let reused = guard.is_some();
-        if guard.is_none() {
-            *guard = Some(self.open().await?);
-        }
-        let res = {
-            let live = guard.as_mut().expect("session just opened");
-            tokio::time::timeout(OP_TIMEOUT, run_on(live, &self.transport, request.clone())).await
+        // Own the transport outside the slot until success. Cancellation drops
+        // it as well: unread responses must never leak into the next operation.
+        let mut live = match guard.take() {
+            Some(live) => live,
+            None => self.open().await?,
         };
-        match res {
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(OpError::NotDelivered(e))) if reused => {
-                // The parked session died while idle (child exited, HTTP session
-                // expired). Nothing reached the server: one fresh attempt.
-                *guard = None;
+        let result = tokio::time::timeout(
+            OP_TIMEOUT,
+            run_on(&mut live, &self.transport, request.clone()),
+        )
+        .await;
+        match result {
+            Ok(Ok(value)) => {
+                *guard = Some(live);
+                Ok(value)
+            }
+            Ok(Err(OpError::NotDelivered(error))) if reused => {
+                drop(live);
                 let mut fresh = self.open().await?;
-                let out =
+                let result =
                     tokio::time::timeout(OP_TIMEOUT, run_on(&mut fresh, &self.transport, request))
                         .await
-                        .map_err(|_| timeout_msg())
-                        .and_then(|r| {
-                            r.map_err(|e| match e {
-                                OpError::NotDelivered(m) | OpError::Failed(m) => m,
-                            })
+                        .map_err(|_| timeout_msg())?
+                        .map_err(|err| match err {
+                            OpError::NotDelivered(e) | OpError::Failed(e) => {
+                                format!("{e} (after stale session: {error})")
+                            }
                         });
-                if out.is_ok() {
+                if result.is_ok() {
                     *guard = Some(fresh);
                 }
-                out.map_err(|m| format!("{m} (after stale session: {e})"))
+                result
             }
-            Ok(Err(OpError::NotDelivered(e) | OpError::Failed(e))) => {
-                *guard = None; // drop (and kill) the broken session
-                Err(e)
-            }
-            Err(_) => {
-                *guard = None;
-                Err(timeout_msg())
-            }
+            Ok(Err(OpError::NotDelivered(error) | OpError::Failed(error))) => Err(error),
+            Err(_) => Err(timeout_msg()),
         }
-    }
-
-    /// A throwaway session for one op (the parked one is busy).
-    async fn one_shot(&self, request: Value) -> Result<Value, String> {
-        let mut live = self.open().await?;
-        tokio::time::timeout(OP_TIMEOUT, run_on(&mut live, &self.transport, request))
-            .await
-            .map_err(|_| timeout_msg())?
-            .map_err(|e| match e {
-                OpError::NotDelivered(m) | OpError::Failed(m) => m,
-            })
     }
 
     /// Spawn / connect and complete the `initialize` handshake.
@@ -285,11 +294,26 @@ fn init_request() -> Value {
     })
 }
 
+/// Bounds live transports across servers and config replacements, including
+/// parked sessions. The permit is released on failure, cancellation and drop.
+async fn transport_permit() -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+    static LIMIT: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    let limit = LIMIT
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(64)))
+        .clone();
+    tokio::time::timeout(OP_TIMEOUT, limit.acquire_owned())
+        .await
+        .map_err(|_| "MCP transport budget busy; try again".to_string())?
+        .map_err(|_| "MCP transport admission closed".to_string())
+}
+
 async fn open_stdio(
     command: &str,
     args: &[String],
     env: &BTreeMap<String, String>,
 ) -> Result<Live, String> {
+    let permit = transport_permit().await?;
     let mut child = Command::new(command)
         .args(args)
         .envs(env)
@@ -316,11 +340,13 @@ async fn open_stdio(
             reader,
         }),
         next_id: 2,
+        _permit: permit,
     })
 }
 
 /// SSRF-validate the URL, pin the vetted IP, build the client and initialize.
 async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live, String> {
+    let permit = transport_permit().await?;
     otto_netguard::check_url(url).await?;
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
     let host = parsed.host_str().ok_or("url has no host")?.to_string();
@@ -360,6 +386,7 @@ async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live
         client,
         session_id,
         next_id: 2,
+        _permit: permit,
     })
 }
 
@@ -401,7 +428,7 @@ fn with_id(request: &Value, id: i64) -> Value {
 /// One request on a live session, with a fresh JSON-RPC id.
 async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Result<Value, OpError> {
     match live {
-        Live::Stdio { io, next_id } => {
+        Live::Stdio { io, next_id, .. } => {
             let StdioIo {
                 child,
                 stdin,
@@ -423,6 +450,7 @@ async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Resul
             client,
             session_id,
             next_id,
+            ..
         } => {
             let Transport::Http { url, headers } = transport else {
                 return Err(OpError::Failed("not an http transport".into()));
@@ -460,7 +488,7 @@ async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Resul
 /// Read the JSON-RPC message from an HTTP response, honoring content negotiation
 /// (a JSON body, or an SSE `text/event-stream` whose `data:` lines carry it).
 /// Body is size-capped.
-async fn parse_http_message(resp: reqwest::Response) -> Result<Value, String> {
+async fn parse_http_message(mut resp: reqwest::Response) -> Result<Value, String> {
     let status = resp.status();
     let ct = resp
         .headers()
@@ -468,9 +496,18 @@ async fn parse_http_message(resp: reqwest::Response) -> Result<Value, String> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let bytes = resp.bytes().await.map_err(|e| format!("read body: {e}"))?;
-    if bytes.len() > MAX_BODY_BYTES {
-        return Err(format!("response too large ({} bytes)", bytes.len()));
+    if resp
+        .content_length()
+        .is_some_and(|len| len > MAX_BODY_BYTES as u64)
+    {
+        return Err("response exceeded size cap".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read body: {e}"))? {
+        if chunk.len() > MAX_BODY_BYTES - bytes.len() {
+            return Err("response exceeded size cap".into());
+        }
+        bytes.extend_from_slice(&chunk);
     }
     let text = String::from_utf8_lossy(&bytes);
     if !status.is_success() {
@@ -508,22 +545,35 @@ async fn read_until_id<R: AsyncBufReadExt + Unpin>(
     reader: &mut R,
     want_id: i64,
 ) -> Result<Value, String> {
-    let mut line = String::new();
+    let mut line = Vec::new();
     let mut total = 0usize;
     loop {
         line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("read: {e}"))?;
-        if n == 0 {
-            return Err("server closed before responding".into());
+        loop {
+            let available = reader.fill_buf().await.map_err(|e| format!("read: {e}"))?;
+            if available.is_empty() {
+                if line.is_empty() {
+                    return Err("server closed before responding".into());
+                }
+                break;
+            }
+            let n = available
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(available.len(), |i| i + 1);
+            if n > MAX_BODY_BYTES - total {
+                return Err("response exceeded size cap".into());
+            }
+            let complete = available[n - 1] == b'\n';
+            line.extend_from_slice(&available[..n]);
+            total += n;
+            reader.consume(n);
+            if complete {
+                break;
+            }
         }
-        total += n;
-        if total > MAX_BODY_BYTES {
-            return Err("response exceeded size cap".into());
-        }
-        let trimmed = line.trim();
+        let text = String::from_utf8_lossy(&line);
+        let trimmed = text.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -545,6 +595,99 @@ async fn read_until_id<R: AsyncBufReadExt + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn newline_free_response_stops_at_cap() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(8192);
+        let producer = tokio::spawn(async move {
+            loop {
+                if writer.write_all(&[b'x'; 8192]).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let mut reader = BufReader::new(reader);
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), read_until_id(&mut reader, 1)).await;
+        drop(reader);
+        producer.await.unwrap();
+        assert!(result.unwrap().unwrap_err().contains("size cap"));
+    }
+
+    #[tokio::test]
+    async fn notifications_share_the_response_budget() {
+        let notification = b"{\"method\":\"progress\"}\n";
+        let bytes = notification.repeat(MAX_BODY_BYTES / notification.len() + 1);
+        let mut reader = BufReader::new(bytes.as_slice());
+        assert!(read_until_id(&mut reader, 1)
+            .await
+            .unwrap_err()
+            .contains("size cap"));
+    }
+
+    #[tokio::test]
+    async fn chunked_http_and_sse_stop_at_cap_before_the_stream_ends() {
+        use tokio::io::AsyncWriteExt;
+        for content_type in ["application/json", "text/event-stream"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let producer = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                socket.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\n\r\n"
+                ).as_bytes()).await.unwrap();
+                // Intentionally never send the terminating HTTP chunk. The
+                // reader must reject over-budget bytes before waiting for EOF.
+                let chunk = [b'x'; 8192];
+                loop {
+                    if socket.write_all(b"2000\r\n").await.is_err()
+                        || socket.write_all(&chunk).await.is_err()
+                        || socket.write_all(b"\r\n").await.is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            let result = tokio::time::timeout(Duration::from_secs(3), async {
+                let response = reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .unwrap()
+                    .get(format!("http://{address}/stream"))
+                    .send()
+                    .await
+                    .unwrap();
+                parse_http_message(response).await
+            })
+            .await;
+            producer.abort();
+            let _ = producer.await;
+            assert!(result
+                .expect("size cap must precede EOF")
+                .unwrap_err()
+                .contains("size cap"));
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_burst_keeps_two_server_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("spawns");
+        let client = std::sync::Arc::new(stdio_client_with(&[
+            ("SPAWNS", log.display().to_string()),
+            ("CALL_SLEEP", "0.3".into()),
+        ]));
+        let mut calls = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let client = client.clone();
+            calls.spawn(async move { client.call_tool("echo", &json!({})).await });
+        }
+        while let Some(result) = calls.join_next().await {
+            assert!(result.unwrap().is_ok());
+        }
+        assert!(spawns(&log) <= SESSION_SLOTS);
+    }
 
     // Drives the stdio client against a tiny shell MCP server so the framing +
     // initialize→list/call sequence is exercised end to end (no external deps).

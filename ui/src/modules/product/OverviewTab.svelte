@@ -20,9 +20,9 @@
   import { api, authedBlobUrl } from '../../lib/api/client';
   import type { ProductStoryVersion, IssueFull, JiraTransition, JiraUser, EditableField, FieldOption, DevStatus } from './types';
   import type { ProductAttachment } from './types';
+  import { router } from '../../lib/router.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
-  import { guardUnsaved } from '../../lib/leaveGuard';
   import { ctxMenu, type MenuItem, type MenuOptions } from '../../lib/contextmenu.svelte';
   import PublishDialog from './PublishDialog.svelte';
   import { reseedDraft, type DraftSeed } from './draftSeed';
@@ -121,9 +121,18 @@
   let draftBody = $state('');
   /** The draft form differs from the saved draft (Save enabled; leaving asks). */
   const draftDirty = $derived(
-    isDraft && !!story && !!source && (draftTitle !== story.title || draftBody !== (source.body_md ?? '')),
+    isDraft && !!story && (draftTitle !== story.title || draftBody !== (source?.body_md ?? '')),
   );
-  $effect(() => guardUnsaved(() => draftDirty, { what: 'this draft' }));
+  async function approveDraftLeave(): Promise<boolean> {
+    if (!draftDirty) return true;
+    const allowed = await confirmer.ask('You have unsaved changes to this draft. Leaving now discards them.', {
+      title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing',
+    });
+    if (allowed) { draftTitle = story?.title ?? ''; draftBody = source?.body_md ?? ''; }
+    return allowed;
+  }
+  $effect(() => product.registerDraftLeave(approveDraftLeave));
+  $effect(() => router.guard(approveDraftLeave));
   let draftSaving = $state(false);
 
   // ── AttachmentsPanel ref + screenshot paste counter ───────────────────────
@@ -308,11 +317,11 @@
         newTranscriptBody = '';
         expandedTranscripts = {};
       }
-      if (!draft || !s || !src) {
+      if (!draft || !s) {
         seeded = { ...seeded, id };
         return;
       }
-      const next: DraftSeed = { id, title: s.title, body: src.body_md ?? '' };
+      const next: DraftSeed = { id, title: s.title, body: src?.body_md ?? '' };
       const form = reseedDraft(seeded, { title: draftTitle, body: draftBody }, next);
       draftTitle = form.title;
       draftBody = form.body;
@@ -348,7 +357,7 @@
     try {
       await product.discover(discoverySwarmId ? { swarm_id: discoverySwarmId } : {});
       toasts.success('Discovery started', 'The swarm is now analysing the story.');
-      product.tab = 'discovery';
+      await product.changeTab('discovery');
     } catch (e) {
       toasts.error('Discovery failed', e instanceof Error ? e.message : String(e));
     } finally {

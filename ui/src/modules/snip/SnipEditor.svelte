@@ -66,8 +66,9 @@
   // Auto-copy machinery.
   let copyState: 'idle' | 'pending' | 'copying' | 'copied' | 'failed' = $state('idle');
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
-  let copyInFlight = false;
-  let copyAgain = false;
+  let copyInFlight: Promise<boolean> | null = null;
+  let leavePending: Promise<boolean> | null = null;
+  let allowClose = false;
   // Fingerprint of the annotations last saved successfully — an unchanged
   // state is never re-encoded or re-uploaded. `annosHash([])` = the original.
   let savedHash = annosHash([]);
@@ -138,14 +139,7 @@
       destroyed = true;
       if (frameQueued) cancelAnimationFrame(frameQueued);
       if (baseLayer) { baseLayer.width = baseLayer.height = 0; baseLayer = null; }
-      if (copyTimer) {
-        // Closed inside the 800 ms debounce: still copy/save the last
-        // annotation instead of silently dropping it. (The loaded image stays
-        // drawable after its object URL is revoked.)
-        clearTimeout(copyTimer);
-        copyTimer = null;
-        void copyNow();
-      }
+      if (copyTimer) { clearTimeout(copyTimer); copyTimer = null; }
       if (imageUrl) URL.revokeObjectURL(imageUrl);
     };
   });
@@ -265,39 +259,85 @@
     copyTimer = setTimeout(() => void copyNow(), 800);
   }
 
-  async function copyNow(): Promise<void> {
-    if (!img) {
-      copyState = 'idle'; // never stick on "Copying…" before the image loads
-      return;
-    }
-    if (copyInFlight) {
-      copyAgain = true;
-      return;
-    }
-    const hash = uploadNeeded(annos, savedHash);
-    if (hash === null) {
-      copyState = 'copied'; // already saved + on the clipboard
-      return;
-    }
-    copyInFlight = true;
+  /** Return persistence success independently of clipboard success. */
+  async function copyNow(explicit = false): Promise<boolean> {
+    if (copyTimer) { clearTimeout(copyTimer); copyTimer = null; }
+    while (copyInFlight) await copyInFlight;
+    if (!img) return uploadNeeded(annos, savedHash) === null;
+    const snapshot = annos;
+    const hash = uploadNeeded(snapshot, savedHash);
+    if (hash === null && !explicit) return true;
     copyState = 'copying';
-    try {
-      const blob = await flatten(img, annos);
-      // Raw image/png body — no base64 inflation, no JSON parse server-side.
-      const resp = await snipApi.saveAnnotatedPng(snipId, blob);
-      savedHash = hash;
-      copyState = resp.copied ? 'copied' : 'failed';
-    } catch (e) {
-      copyState = 'failed';
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
-    } finally {
-      copyInFlight = false;
-      if (copyAgain) {
-        copyAgain = false;
-        void copyNow();
+    const pending = (async () => {
+      try {
+        const resp = hash === null
+          ? await snipApi.copy(snipId)
+          : await snipApi.saveAnnotatedPng(snipId, await flatten(img!, snapshot));
+        if (hash !== null) savedHash = hash;
+        copyState = resp.copied ? 'copied' : 'failed';
+        return true;
+      } catch (e) {
+        copyState = 'failed';
+        toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+        return hash === null;
       }
-    }
+    })();
+    copyInFlight = pending;
+    try { return await pending; }
+    finally { if (copyInFlight === pending) copyInFlight = null; }
   }
+
+  async function drainPersistence(): Promise<boolean> {
+    commitText();
+    if (copyTimer) { clearTimeout(copyTimer); copyTimer = null; }
+    while (copyInFlight) await copyInFlight;
+    while (uploadNeeded(annos, savedHash) !== null) {
+      if (!(await copyNow())) return false;
+    }
+    return true;
+  }
+
+  async function approveLeave(): Promise<boolean> {
+    if (allowClose) return true;
+    if (leavePending) return leavePending;
+    const pending = (async () => {
+      if (await drainPersistence()) return true;
+      const { value } = await confirmer.choose('The latest annotations could not be saved. Keep the editor open to try again, or discard these changes.', {
+        title: 'Annotations not saved',
+        options: [
+          { label: 'Retry saving', value: 'retry', kind: 'primary' },
+          { label: 'Discard changes', value: 'discard', kind: 'danger' },
+        ],
+      });
+      if (value === 'retry') return drainPersistence();
+      return value === 'discard';
+    })();
+    leavePending = pending;
+    try { return await pending; }
+    finally { if (leavePending === pending) leavePending = null; }
+  }
+
+  $effect(() => router.guard(approveLeave));
+  onMount(() => {
+    if (!isTauri) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import('@tauri-apps/api/window').then(async ({ getCurrentWindow }) => {
+      const win = getCurrentWindow();
+      const stop = await win.onCloseRequested((event) => {
+        if (allowClose) return;
+        event.preventDefault();
+        void approveLeave().then(async (allowed) => {
+          if (!allowed || disposed) return;
+          allowClose = true;
+          try { await win.close(); }
+          catch (e) { allowClose = false; toasts.error('Couldn’t close the editor', String(e)); }
+        });
+      });
+      if (disposed) stop(); else unlisten = stop;
+    }).catch((e) => toasts.error('Couldn’t register the close guard', String(e)));
+    return () => { disposed = true; unlisten?.(); };
+  });
 
   function undo(): void {
     const prev = undoStack.at(-1);
@@ -576,7 +616,7 @@
       else undo();
     } else if (mod && e.key.toLowerCase() === 'c' && selected === null) {
       e.preventDefault();
-      void copyNow();
+      void copyNow(true);
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && selected !== null) {
       e.preventDefault();
       snapshot();
@@ -617,12 +657,15 @@
 
   async function close(): Promise<void> {
     if (isTauri && isSecondaryWindow) {
+      if (!(await approveLeave())) return;
+      allowClose = true;
       try {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
         await getCurrentWindow().close();
         return;
       } catch {
-        // fall through to routing
+        allowClose = false;
+        // fall through to the guarded router
       }
     }
     if (router.parts.length && history.length > 1) router.back();
@@ -637,6 +680,7 @@
     if (!ok) return;
     try {
       await snipApi.remove(snipId);
+      allowClose = true;
       toasts.info('Snip deleted');
       await close();
     } catch (e) {
@@ -749,7 +793,7 @@
     >
     <div class="group actions">
       <button class="btn small ghost snip-action" data-act="close" title="Close the editor (the clipboard keeps the latest copy)" onclick={() => void close()}>Close</button>
-      <button class="btn small primary snip-action" data-act="copy" title="Copy now (⌘C)" onclick={() => void copyNow()}><Icon name="copy" size={12} /> Copy</button>
+      <button class="btn small primary snip-action" data-act="copy" title="Copy now (⌘C)" onclick={() => void copyNow(true)}><Icon name="copy" size={12} /> Copy</button>
     </div>
   </header>
 

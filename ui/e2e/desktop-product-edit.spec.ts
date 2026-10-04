@@ -271,3 +271,40 @@ test('product: manually edit Jira story title and description', async ({
   // No extra description PUT fired on cancel.
   expect(fx.descPuts.length).toBe(1);
 });
+
+test('product: canceled keyboard tab change restores the selected tab focus', async ({ page }) => {
+  await openStoryOverview(page);
+  const editor = page.getByPlaceholder('Write your story or paste notes here…');
+  await editor.fill('Keep this unsaved draft');
+  const tabs = page.getByRole('tablist', { name: 'Story tabs', exact: true });
+  const selected = tabs.locator('[aria-selected="true"]');
+  const label = await selected.innerText();
+  await selected.focus();
+  await selected.press('ArrowRight');
+  await page.getByRole('dialog').getByRole('button', { name: 'Keep editing' }).click();
+  await expect(editor).toHaveValue('Keep this unsaved draft');
+  await expect(selected).toHaveText(label);
+  await expect(selected).toBeFocused();
+});
+
+test('product: saved local draft body survives the real detail endpoint and reload', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const body = 'Saved local draft body, preserved when reopened.';
+  try {
+    const saved = await ctx.patch(`${base}/api/v1/product/stories/${storyId}/draft`, {
+      data: { title: ROW_TITLE, body_md: body },
+    });
+    expect(saved.ok(), await saved.text()).toBeTruthy();
+    const response = await ctx.get(`${base}/api/v1/product/stories/${storyId}`);
+    expect(response.ok(), await response.text()).toBeTruthy();
+    const detail = await response.json();
+    expect(detail.source).toMatchObject({ kind: 'draft', body_md: body });
+    await openStoryOverview(page);
+    await expect(page.getByPlaceholder('Write your story or paste notes here…')).toHaveValue(body);
+    await page.reload();
+    await openStoryOverview(page);
+    await expect(page.getByPlaceholder('Write your story or paste notes here…')).toHaveValue(body);
+  } finally {
+    await ctx.dispose();
+  }
+});

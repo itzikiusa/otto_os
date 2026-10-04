@@ -75,7 +75,7 @@
 
 <ActionCard icon="compass" kind="Browser" summary={task.title} attention={youHaveIt} testid="card-browser">
   {#snippet pill()}
-    {#if youHaveIt}
+    {#if youHaveIt && task.kind !== 'delegation'}
       <StatePill tone="warn" label="You have control" />
     {:else}
       <StatePill tone={taskTone(task)} label={taskStateLabel(task)} live={task.state === 'running'} />
@@ -107,7 +107,7 @@
           </li>
         {/each}
       </ol>
-      {#if youHaveIt}
+      {#if youHaveIt && task.kind !== 'delegation'}
         <p class="note warn">You have the browser. Otto is paused until you hand it back.</p>
       {:else if progress.note}
         <p class="note">{progress.note}</p>
@@ -118,9 +118,9 @@
     <button class="btn small" onclick={watch} disabled={!progress.tab_id} title={progress.tab_id ? 'Open the live tab in Browser' : 'The live tab isn’t available yet'}>
       <Icon name="eye" size={12} /> Watch live
     </button>
-    {#if youHaveIt}
+    {#if youHaveIt && task.kind !== 'delegation'}
       <button class="btn small primary" onclick={() => void run('handback')} disabled={busy}>{busy ? 'Handing back…' : 'Hand back'}</button>
-    {:else}
+    {:else if task.kind !== 'delegation'}
       <button class="btn small" onclick={() => void run('takeover')} disabled={busy || finished} title={finished ? 'This task has finished' : 'Pause Otto and use the browser yourself'}>
         <Icon name="cursor" size={12} /> {busy ? 'Taking over…' : 'Take over'}
       </button>

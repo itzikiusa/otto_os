@@ -398,6 +398,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         "/access/{kind}/{id}"
             | "/access/{kind}/{id}/subjects"
             | "/access/{kind}/{id}/capabilities"
+            | "/access/{kind}/{id}/capabilities/batch"
             | "/access/{kind}/{id}/effective"
             | "/access/{kind}/{id}/preview"
     ) {
@@ -933,7 +934,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/insights/run" {
         return Require(Insights, Edit);
     }
-    if p == "/insights/reports" || p == "/insights/report" {
+    if p == "/insights/reports" || p == "/insights/report" || p == "/insights/report-status" {
         return Require(Insights, View);
     }
 
@@ -2416,6 +2417,10 @@ mod tests {
         );
         assert_eq!(
             pol(Method::GET, "/api/v1/insights/reports"),
+            Require(Insights, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/insights/report-status"),
             Require(Insights, View)
         );
         assert_eq!(

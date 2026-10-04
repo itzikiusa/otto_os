@@ -45,6 +45,8 @@
     (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]')[view === 'list' ? 0 : 1]?.focus();
   }
   let selectedId = $state<string | null>(null);
+  let detailPane: ReturnType<typeof WorkItemDetail> | undefined = $state();
+  let selectionGeneration = 0;
   /** The user closed the detail pane: don't auto-open it again this visit. */
   let userClosed = false;
 
@@ -58,7 +60,11 @@
 
   /** Select an item (or close with null): the URL carries the selection so a
    *  reload / share lands on the same item, and the last pick is remembered. */
-  function select(id: string | null): void {
+  async function select(id: string | null): Promise<void> {
+    if (id === selectedId) return;
+    const generation = ++selectionGeneration;
+    if (detailPane && !await detailPane.canLeave()) return;
+    if (generation !== selectionGeneration) return;
     selectedId = id;
     if (id === null) userClosed = true;
     rememberSelection('mission-control', id);
@@ -415,6 +421,7 @@
         ></div>
         <!-- ↑ a focusable separator: drag, or ←/→ to resize; Enter / double-click resets. -->
         <WorkItemDetail
+          bind:this={detailPane}
           wsId={ws.currentId ?? ''}
           id={selectedId}
           onClose={() => select(null)}

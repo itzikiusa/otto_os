@@ -79,6 +79,55 @@ async function stubClipboard(page: Page): Promise<void> {
 }
 const copied = (page: Page) => page.evaluate(() => (window as unknown as { __copied: string[] }).__copied);
 
+test('pending image upload still blocks Send and Enter after composer remount', async ({ page }) => {
+  const s = await seedChat('Pending attachment');
+  await openChat(page, [s.id]);
+  let releaseUpload!: () => void;
+  const uploadGate = new Promise<void>((resolve) => { releaseUpload = resolve; });
+  let uploadStarted = false;
+  const submitted: string[] = [];
+  await page.route(`**/sessions/${s.id}/inbox`, async (route) => {
+    uploadStarted = true;
+    await uploadGate;
+    await route.continue();
+  });
+  await page.route(`**/sessions/${s.id}/input`, async (route) => {
+    submitted.push(route.request().postData() ?? '');
+    await route.fulfill({ status: 204 });
+  });
+  const composer = page.locator('.conv .composer');
+  const draft = 'Please inspect this image';
+  try {
+    await composer.locator('textarea').fill(draft);
+    await composer.evaluate((el) => {
+      const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+      const file = new File([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], 'pending.png', { type: 'image/png' });
+      const data = new DataTransfer();
+      data.items.add(file);
+      el.dispatchEvent(new DragEvent('drop', { dataTransfer: data, bubbles: true, cancelable: true }));
+    });
+    await expect.poll(() => uploadStarted).toBe(true);
+    await expect(composer.locator('.send')).toBeDisabled();
+    await page.locator('.view-seg button', { hasText: 'Terminal' }).click();
+    await expect(page.locator('.conv')).toHaveCount(0);
+    await page.locator('.view-seg button', { hasText: 'Chat' }).click();
+    await expect(composer.locator('textarea')).toHaveValue(draft);
+    await expect(composer.locator('.send'), 'pending upload belongs to the session, across view remounts').toBeDisabled();
+    await composer.locator('textarea').press('Enter');
+    await expect(composer.locator('textarea')).toHaveValue(draft);
+    expect(submitted).toEqual([]);
+    releaseUpload();
+    await expect(composer.locator('.thumb')).toHaveCount(1);
+    await expect(composer.locator('.send')).toBeEnabled();
+    await composer.locator('.send').click();
+    await expect.poll(() => submitted.length).toBe(1);
+    expect(submitted[0]).toContain(draft);
+    expect(submitted[0]).toContain('[Image:');
+  } finally {
+    releaseUpload();
+  }
+});
+
 test.beforeEach(async ({ page }, info) => {
   test.skip(!isDesktopProject(info.project.name), 'desktop projects only');
   ({ ctx, base } = await apiCtx());
@@ -486,3 +535,52 @@ test('six tiled panes: every chat fits its narrow pane', async ({ page }) => {
     expect(bubble.x + bubble.width).toBeLessThanOrEqual(box.x + box.width + 1);
   }
 });
+
+for (const scheme of ['light', 'dark'] as const) {
+  test(`short chat tiles retain reachable composer controls (${scheme})`, async ({ page }, info) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.addInitScript((value) => {
+      localStorage.setItem('otto_theme', 'native');
+      localStorage.setItem('otto_scheme', value);
+    }, scheme);
+    const seeded = [];
+    for (let i = 0; i < 9; i++) seeded.push(await seedChat(`Tile ${i + 1}`));
+    await page.route('**/sessions/*/slash-commands', (route) => route.fulfill({
+      json: Array.from({ length: 12 }, (_, i) => ({ name: `command-${i}`, description: `Command ${i}`, source: 'builtin' })),
+    }));
+    await openChat(page, seeded.map((s) => s.id));
+    await page.locator('button[aria-label="Tiled view"]').first().click();
+    const tile = page.locator('[data-tile-id]').filter({ has: page.locator('.conv[data-loaded="true"]') }).first();
+    await expect(tile).toBeVisible();
+    const composer = tile.locator('.composer');
+    const text = Array.from({ length: 30 }, (_, i) => `Line ${i}: a draft that wraps in this narrow pane`).join('\n');
+    await composer.locator('textarea').fill(text);
+    for (const height of [900, 760]) {
+      await page.setViewportSize({ width: 1280, height });
+      await expect.poll(async () => {
+        const outer = (await tile.boundingBox())!;
+        const send = (await composer.locator('.send').boundingBox())!;
+        const list = (await tile.locator('.conv-list').boundingBox())!;
+        return { sendInside: send.y >= outer.y && send.y + send.height <= outer.y + outer.height + 1, listHeight: Math.floor(list.height) };
+      }, { message: 'Send stays inside the tile and conversation retains visible space' }).toMatchObject({ sendInside: true, listHeight: expect.any(Number) });
+      const lineHeight = await tile.locator('.conv-col').evaluate((el) => {
+        const style = getComputedStyle(el);
+        return Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.2;
+      });
+      expect((await tile.locator('.conv-list').boundingBox())!.height, 'conversation has room for at least one readable line').toBeGreaterThanOrEqual(lineHeight);
+      await composer.locator('.send').click({ trial: true });
+    }
+    await page.screenshot({ path: info.outputPath(`chat-tiles-${scheme}.png`) });
+    await composer.locator('textarea').fill('/');
+    const popup = tile.locator('[data-slash-pop]');
+    await expect(popup).toBeVisible();
+    const bounds = (await tile.boundingBox())!;
+    const pop = (await popup.boundingBox())!;
+    expect(pop.y).toBeGreaterThanOrEqual(bounds.y - 1);
+    expect(pop.y + pop.height).toBeLessThanOrEqual(bounds.y + bounds.height + 1);
+    for (let i = 0; i < 12; i++) {
+      await composer.locator('textarea').press('ArrowDown');
+      await popup.locator('.cmd-row.active').click({ trial: true });
+    }
+  });
+}

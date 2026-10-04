@@ -63,6 +63,7 @@
 
   const SEARCH_DEBOUNCE_MS = 250;
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  let searchError = $state<string | null>(null);
 
   /** Kick off a debounced cross-module search. Cancels any in-flight request. */
   function scheduleSearch(q: string): void {
@@ -70,30 +71,35 @@
     // Cancel in-flight request immediately so we don't show stale hits.
     searchAbort?.abort();
     searchAbort = null;
+    searchError = null;
+    searchHits = [];
     if (q.trim().length < 2 || !ws.currentId) {
       searchHits = [];
       searchBusy = false;
       return;
     }
     searchBusy = true;
+    const workspaceId = ws.currentId;
     searchTimer = setTimeout(() => {
-      void doSearch(q.trim(), ws.currentId!);
+      void doSearch(q.trim(), workspaceId);
     }, SEARCH_DEBOUNCE_MS);
   }
 
   async function doSearch(q: string, wsId: string): Promise<void> {
     const ctrl = new AbortController();
     searchAbort = ctrl;
+    searchBusy = true;
+    searchError = null;
     try {
       const hits = await api.get<SearchHit[]>(
         `/workspaces/${wsId}/search?q=${encodeURIComponent(q)}`,
         ctrl.signal,
       );
-      searchHits = hits ?? [];
+      if (searchAbort === ctrl && !ctrl.signal.aborted) searchHits = hits ?? [];
     } catch (e) {
-      if (!isAbortError(e)) {
-        // Silently swallow search errors — the palette still shows commands.
+      if (searchAbort === ctrl && !ctrl.signal.aborted && !isAbortError(e)) {
         searchHits = [];
+        searchError = e instanceof Error ? e.message : String(e);
       }
     } finally {
       if (searchAbort === ctrl) {
@@ -514,9 +520,15 @@
             </button>
           {/if}
 
-          {#if searchHits.length > 0 || searchBusy}
+          {#if searchHits.length > 0 || searchBusy || searchError}
             <div class="pal-section-header">
               {searchBusy ? 'Searching…' : 'Results'}
+            </div>
+          {/if}
+          {#if searchError}
+            <div role="alert" class="pal-section-header">
+              Search failed: {searchError}
+              <button class="btn small" onclick={() => scheduleSearch(query)}>Retry</button>
             </div>
           {/if}
           {#each searchHits as hit, h (hit.kind + ':' + hit.id)}

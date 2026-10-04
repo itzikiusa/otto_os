@@ -498,7 +498,7 @@ class NotificationStore {
           toasts.warn('Workspace unavailable', 'It may have been removed, or you no longer have access.');
           return;
         }
-        await ws.select(workspaceId);
+        if (!(await ws.select(workspaceId))) return;
       }
       const target = parseNoticeRoute(route);
       const signal = new AbortController().signal;

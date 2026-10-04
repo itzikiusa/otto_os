@@ -64,3 +64,54 @@ test('big integer keys keep every digit and stay unquoted', () => {
   assert.equal(c.valueLiteral('mysql', '9007199254740993', 'VARCHAR'), "'9007199254740993'");
   assert.equal(c.valueLiteral('mysql', 42, 'BIGINT'), '42');
 });
+
+function sqlModule(): Record<string, any> {
+  const ctx = { exports: {} as Record<string, any>, require: () => ({isComplex:()=>false,cellStr:String,compactJson:JSON.stringify,escapeSqlString:(s:string)=>s.replace(/'/g, "''")}) };
+  runInNewContext(ts.transpileModule(readFileSync(new URL('../src/modules/database/edit-sql.ts', import.meta.url), 'utf8'),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, ctx);
+  return ctx.exports;
+}
+
+test('row mutations require direct, unique column provenance and a complete single FROM', () => {
+  const { parseSimpleSelect, sqlAdapter } = sqlModule();
+  for (const sql of ['SELECT other_id AS id, name FROM app.users', 'SELECT id + 1 AS id FROM app.users',
+    'SELECT name AS other_id, id FROM app.users', 'SELECT id, id FROM app.users',
+    'SELECT * FROM app.users, app.other', 'SELECT * FROM app.users u',
+    'SELECT * FROM app.users CROSS JOIN app.other', 'SELECT * FROM app.users FINAL']) {
+    assert.equal(parseSimpleSelect(sql), null, sql);
+  }
+  assert.equal(JSON.stringify(parseSimpleSelect('SELECT id, name FROM app.users WHERE id = 1')), '{"db":"app","table":"users"}');
+  assert.equal(JSON.stringify(parseSimpleSelect('SELECT * FROM "app"."users" ORDER BY id LIMIT 5')), '{"db":"app","table":"users"}');
+  assert.equal(sqlAdapter.target('SELECT * FROM app.users', ['id', 'id']).target, null);
+  assert.equal(sqlAdapter.target('SELECT "id", name FROM app.users', ['id','name'], {engine:'mysql',activeDb:'app'}).target, null);
+  assert.notEqual(sqlAdapter.target('SELECT "id", name FROM app.users', ['id','name'], {engine:'postgres',activeDb:'app'}).target, null);
+});
+
+test('ClickHouse mutation builders reject nonunique keys while inserts remain available', () => {
+  const { sqlAdapter } = sqlModule();
+  const ctx = {engine:'clickhouse',target:{db:'app',table:'events',pkCols:['account_id']},
+    columns:[{name:'account_id'},{name:'note'}],liveRows:[[7,'a']],qid:(s: string)=>s};
+  assert.equal(sqlAdapter.buildDelete([0],ctx),null);
+  assert.equal(sqlAdapter.buildUpdate([{rowIdx:0,patch:{cells:new Map([[1,'changed']])}}],ctx),null);
+  assert.equal(sqlAdapter.buildReplace(0,{note:'changed'},ctx),null);
+  assert.equal(sqlAdapter.buildInsert([0],ctx),"INSERT INTO app.events (account_id, note) VALUES (7, 'a');");
+});
+
+test('Postgres table and schema names fold only unquoted identifiers', () => {
+  const {parseSimpleSelect} = sqlModule();
+  for(const [sql,db,table] of [
+    ['SELECT id FROM app.Users','app','users'],['SELECT id FROM APP.users','app','users'],
+    ['SELECT id FROM app."Users"','app','Users'],['SELECT id FROM "APP".users','APP','users'],
+  ]) assert.equal(JSON.stringify(parseSimpleSelect(sql,'postgres')),JSON.stringify({db,table}));
+  assert.equal(parseSimpleSelect('SELECT id FROM `app`.`users`','postgres'),null);
+});
+
+test('Postgres mutation builder quotes the resolved source table, not its unquoted spelling', () => {
+  const {parseSimpleSelect,sqlAdapter,qid}=sqlModule();
+  for(const [source,expected] of [['app.Users','"app"."users"'],['app."Users"','"app"."Users"'],['APP.users','"app"."users"'],['"APP".users','"APP"."users"']]) {
+    const target={...parseSimpleSelect(`SELECT id, name FROM ${source}`,'postgres'),pkCols:['id']};
+    const ctx={engine:'postgres',target,columns:[{name:'id'},{name:'name'}],liveRows:[[1,'source']],qid:(s:string)=>qid('postgres',s)};
+    const update=sqlAdapter.buildUpdate([{rowIdx:0,patch:{cells:new Map([[1,'changed']])}}],ctx);
+    assert.equal(update.sql,`UPDATE ${expected} SET "name" = 'changed' WHERE "id" = 1;`);
+  }
+});

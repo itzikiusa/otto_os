@@ -94,6 +94,11 @@ test('a closed tab stays closed after reload', async ({ page }) => {
 
   // Close the middle tab, then reload.
   await tabs(page).nth(1).locator('.req-tab-close').click();
+  await expect(page.getByRole('dialog')).toContainText('unsaved changes');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(tabs(page)).toHaveCount(3);
+  await tabs(page).nth(1).locator('.req-tab-close').click();
+  await page.getByRole('button', { name: 'Discard changes', exact: true }).click();
   await expect(tabs(page)).toHaveCount(2);
   await settleWrite(page);
   await page.reload();

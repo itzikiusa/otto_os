@@ -27,17 +27,34 @@ async function fixture(page: Page, text: string | ((cols: number) => string) = '
 }
 async function clickText(page: Page, text: string) {
   const span = page.locator('.xterm-rows span').filter({ hasText: text }).first();
-  await expect(span).toBeVisible();
-  const point = await span.evaluate((el, needle) => {
-    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-    let node; while ((node = walker.nextNode())) {
-      const index = node.textContent?.indexOf(needle) ?? -1;
-      if (index >= 0) { const range = document.createRange(); range.setStart(node, index); range.setEnd(node, index + 1); const rect = range.getBoundingClientRect(); return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }; }
-    }
-    throw new Error('text missing');
-  }, text);
+  let point = { x: NaN, y: NaN };
+  // xterm replaces row spans during repaint. A handle resolved as visible can
+  // detach before evaluate, making its text Range report an all-zero rect.
+  await expect.poll(async () => {
+    const measured = await span.evaluate((el, needle) => {
+      if (!el.isConnected) return null;
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const index = node.textContent?.indexOf(needle) ?? -1;
+        if (index < 0) continue;
+        const range = document.createRange();
+        range.setStart(node, index);
+        range.setEnd(node, index + 1);
+        const rect = range.getBoundingClientRect();
+        const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+        if (!node.isConnected || ![x, y, rect.width, rect.height].every(Number.isFinite)
+          || rect.width <= 0 || rect.height <= 0
+          || x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return null;
+        return { x, y };
+      }
+      return null;
+    }, text);
+    if (measured) point = measured;
+    return measured !== null;
+  }, { message: `connected, visible terminal text range for ${text}` }).toBe(true);
   await page.mouse.move(point.x, point.y);
-  await page.waitForTimeout(80);
+  await page.waitForTimeout(80); // Preserve the existing hover interval after geometry readiness.
   await page.mouse.click(point.x, point.y);
 }
 test('external explicit file is visible despite unavailable workspace, and preserves workspace identity', async ({ page }) => {
@@ -79,14 +96,18 @@ test('share terminal does not dispatch file references using logged-in owner sta
 test('wrapped path and HTTP URL clicks use full targets', async ({ page }) => {
   const path = `ui/${'nested/'.repeat(22)}wrap.ts`;
   await fixture(page, `Read ${path}:2\r\nhttps://example.invalid/report?q=yes\r\n`);
-  await page.evaluate(() => document.addEventListener('click', event => {
-    const anchor = (event.target as Element).closest('a');
-    if (anchor?.href.startsWith('https://example.invalid/')) { event.preventDefault(); document.body.dataset.openedUrl = anchor.href; }
-  }, true));
+  // The browser external-link path uses window.open; intercept its first
+  // navigation at context scope so the popup stays entirely inside the fixture.
+  await page.context().route('https://example.invalid/**', route => route.fulfill({
+    contentType: 'text/html', body: '<title>External URL fixture</title>',
+  }));
   await clickText(page, 'wrap.ts');
   await expect(page.getByLabel('Opened file')).toContainText(`/work/${path}`);
+  const opened = page.waitForEvent('popup');
   await clickText(page, 'https://example.invalid/');
-  await expect(page.locator('body')).toHaveAttribute('data-opened-url', 'https://example.invalid/report?q=yes');
+  const popup = await opened;
+  await expect(popup).toHaveURL('https://example.invalid/report?q=yes');
+  await popup.close();
 });
 
 test('readable file stays visible when its own parent cannot be listed', async ({ page }) => {

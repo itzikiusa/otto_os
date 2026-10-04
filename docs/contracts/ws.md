@@ -526,7 +526,7 @@ every event it is allowed). Otto: `ui/src/lib/topicSocket.ts` (the tray).
 Every variant of `otto_core::event::Event` (`crates/otto-core/src/event.rs`). The tag is
 the `type` field (snake_case of the variant name); the remaining keys are the payload.
 Delivery scope: **session-family events** (`session_status`, `session_created`,
-`session_meta_updated`, `session_renamed`, `session_removed`, `trail_appended`,
+`session_meta_updated`, `session_renamed`, `session_archive_changed`, `session_removed`, `trail_appended`,
 `tasks_updated`, `transcript_appended`, `transcript_live`, `artifact_added`) reach only the session's owner (`created_by`), a workspace
 `admin`, or root — and only after the `viewer`+ membership gate on the event's
 `workspace_id`; other **workspace-scoped events** (improvement, swarm,
@@ -545,12 +545,17 @@ Session lifecycle (session-family — owner/admin/root, viewer-gated):
 ```json
 {"type":"session_status","session_id":"…","workspace_id":"…","status":{…SessionStatus…}}
 {"type":"session_created","session":{…Session…}}
+{"type":"session_archive_changed","session":{…Session…}}
 {"type":"session_meta_updated","session_id":"…","workspace_id":"…","meta":{…}}
 {"type":"session_renamed","session_id":"…","workspace_id":"…","title":"…"}
 {"type":"session_removed","session_id":"…","workspace_id":"…"}
 ```
 
 - `session_status` — a session's live status changed (`SessionStatus` enum).
+- `session_archive_changed` — archive or restore committed; carries the complete authoritative
+  session row (including `archived` and `status`). Clients update active/archive membership
+  idempotently in every window. It has the same session-owner/workspace visibility as
+  `session_created`; ordinary `session_status: exited` does not imply archival.
 - `session_created` — a session was created (by any client or the orchestrator); carries
   the full `Session`.
 - `session_meta_updated` — a session's `meta` changed; carries the full merged `meta`

@@ -2027,9 +2027,10 @@ async fn run_write(
 /// once to the whole batch (so a concurrent cancel `KILL QUERY`s whichever
 /// statement is running). Each statement's result carries its preview label; on
 /// the first failing statement execution stops and an `errored` entry is appended
-/// — the completed results are returned, not discarded (§2.2). No auto-LIMIT/OFFSET
-/// injection for batches (the pager is single-statement only), but each read is
-/// still capped at `max_rows`.
+/// — the completed results are returned, not discarded (§2.2). Eligible SELECTs
+/// are bounded at the server, without enabling the single-statement pager.
+/// Non-rewritable reads preserve their SQL and session semantics; if clipped,
+/// SQLx drains their remainder before the next statement on this same session.
 async fn run_batch(
     pool: &sqlx::MySqlPool,
     spans: &[StatementSpan],
@@ -2051,16 +2052,23 @@ async fn run_batch(
         let stmt = span.text.as_str();
         let started = Instant::now();
         let outcome = if is_read_statement(stmt) {
-            exec_read_conn(&mut conn, stmt, max_rows, false, &mut budget)
-                .await
-                .map(|out| {
-                    // A LATER statement would drain the unread rows anyway (same
-                    // session); the last one's are skipped by closing it.
-                    if out.unread {
-                        conn.close_on_drop();
-                    }
-                    out.result
-                })
+            let limited = types::inject_row_limit(stmt, max_rows.saturating_add(1), None);
+            exec_read_conn(
+                &mut conn,
+                &limited.sql,
+                max_rows,
+                limited.limited,
+                &mut budget,
+            )
+            .await
+            .map(|out| {
+                // A LATER statement would drain the unread rows anyway (same
+                // session); the last one's are skipped by closing it.
+                if out.unread {
+                    conn.close_on_drop();
+                }
+                out.result
+            })
         } else {
             exec_write_conn(&mut conn, stmt).await
         };
@@ -2786,12 +2794,12 @@ async fn governed_read(
     let mut unread = false;
     for span in spans {
         let started = Instant::now();
-        let limited = types::inject_row_limit(&span.text, max_rows.saturating_add(1), req.offset);
-        let mut sql = if single {
-            limited.sql
-        } else {
-            span.text.clone()
-        };
+        let limited = types::inject_row_limit(
+            &span.text,
+            max_rows.saturating_add(1),
+            if single { req.offset } else { None },
+        );
+        let mut sql = limited.sql;
         if let Some(ms) = req.timeout_ms.filter(|ms| *ms > 0) {
             if sql.trim_start().to_uppercase().starts_with("SELECT") {
                 sql = sql.replacen(
@@ -2801,7 +2809,7 @@ async fn governed_read(
                 );
             }
         }
-        let bounded = single && limited.limited;
+        let bounded = limited.limited;
         let out = match exec_read_conn(&mut tx, &sql, max_rows, bounded, &mut budget).await {
             Ok(out) => out,
             // A batch keeps its completed results and flags the failing

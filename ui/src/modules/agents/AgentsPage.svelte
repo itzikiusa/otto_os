@@ -35,7 +35,7 @@
   // empty state alone (the user just chose that).
   let autoOpenedFor: string | null | undefined = undefined;
   $effect(() => {
-    if (!ws.layoutReady || ws.sessionsLoading) return;
+    if (!ws.layoutReady || ws.sessionsLoading || ws.sessionsError) return;
     const key = ws.currentId;
     if (autoOpenedFor === key) return;
     autoOpenedFor = key;
@@ -52,7 +52,15 @@
   <!-- Scratch-session discovery can begin after the no-workspace coach has
        accepted a draft. Keep that form mounted; real workspace navigation
        and the ordinary empty state still show their loading skeleton. -->
-  {#if ws.sessionsLoading && ws.sessions.length === 0 && !preserveCoachDraft}
+  {#if ws.sessionsError}
+    <div role="alert">
+      <p>Could not load sessions: {ws.sessionsError}</p>
+      <button class="btn" onclick={() => void ws.retrySessions()}>Retry</button>
+    </div>
+  {/if}
+  {#if ws.sessionsError && !ws.layoutReady}
+    <!-- A failed selection must not mount another workspace's panes. -->
+  {:else if ws.sessionsLoading && ws.sessions.length === 0 && !preserveCoachDraft}
     <div style="padding: 16px">
       <Skeleton rows={3} height={48} />
     </div>

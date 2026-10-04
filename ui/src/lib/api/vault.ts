@@ -80,8 +80,8 @@ export function createVaultFolder(ws: string, id: number, path: string) {
   return api.post<void>(`${base(ws)}/${id}/folder`, { path });
 }
 
-export function vaultBacklinks(ws: string, id: number, path: string) {
-  return api.get<VaultBacklink[]>(`${base(ws)}/${id}/backlinks?path=${enc(path)}`);
+export function vaultBacklinks(ws: string, id: number, path: string, contextOffset = 0) {
+  return api.get<VaultBacklink[]>(`${base(ws)}/${id}/backlinks?path=${enc(path)}&context_offset=${contextOffset}&context_limit=100`);
 }
 
 export function vaultSearch(ws: string, id: number, req: VaultSearchReq) {

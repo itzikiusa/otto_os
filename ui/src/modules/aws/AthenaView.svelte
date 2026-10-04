@@ -68,6 +68,7 @@
   let qid = $state<string | null>(null);
   /** Region the running query was started in (status/cancel must follow it). */
   let qRegion = '';
+  let executionGeneration = 0;
   let qstate = $state<AthenaQueryState | null>(null);
   let qreason = $state('');
   let scanned = $state(0);
@@ -84,11 +85,17 @@
   let history = $state<AthenaExecution[]>([]);
   let historyLoading = $state(false);
   let historyError = $state('');
+  let historyRegion = '';
+  let historyGeneration = 0;
+  let catalogGeneration = 0;
 
   async function loadCatalog(): Promise<void> {
+    const seq = ++catalogGeneration;
+    const requestedRegion = rq;
     catLoading = true;
     try {
       const c = await aws.loadAthenaCatalog(account.id, rq);
+      if (seq !== catalogGeneration || requestedRegion !== rq) return;
       catError = '';
       // A workgroup / database remembered from another region does not exist here.
       if (workgroup && !c.workgroups.some((w) => w.name === workgroup)) workgroup = '';
@@ -96,9 +103,10 @@
       if (!workgroup && c.workgroups.length) workgroup = c.workgroups.find((w) => w.name === 'primary')?.name ?? c.workgroups[0].name;
       if (!database && c.databases.length) database = c.databases[0];
     } catch (e) {
+      if (seq !== catalogGeneration || requestedRegion !== rq) return;
       catError = e instanceof Error ? e.message : String(e);
     } finally {
-      catLoading = false;
+      if (seq === catalogGeneration && requestedRegion === rq) catLoading = false;
     }
   }
 
@@ -120,6 +128,11 @@
   $effect(() => {
     void rq;
     untrack(() => {
+      historyGeneration++;
+      history = [];
+      historyError = '';
+      historyLoading = false;
+      if (tab === 'history') void loadHistory();
       if (!catalog) void loadCatalog();
       else {
         if (!workgroup && catalog.workgroups.length) workgroup = catalog.workgroups[0].name;
@@ -209,6 +222,7 @@
     if (!canRun || running) return;
     const text = (editorSel.text.trim() || sql).trim();
     if (!text) return;
+    const seq = ++executionGeneration;
     submitting = true;
     resultError = null;
     result = null;
@@ -224,16 +238,18 @@
         database: database || undefined,
         workgroup: workgroup || undefined,
       }, started || undefined);
+      if (seq !== executionGeneration) return;
       qRegion = started;
       qid = r.query_execution_id;
       qstate = 'QUEUED';
       pollN = 0;
       schedulePoll(0);
     } catch (e) {
+      if (seq !== executionGeneration) return;
       qstate = 'FAILED';
       resultError = e instanceof Error ? e.message : String(e);
     } finally {
-      submitting = false;
+      if (seq === executionGeneration) submitting = false;
     }
   }
 
@@ -254,9 +270,11 @@
   async function poll(): Promise<void> {
     if (!qid) return;
     const id = qid;
+    const seq = executionGeneration;
+    const requestedRegion = qRegion;
     try {
-      const s = await awsApi.athenaStatus(account.id, id, undefined, undefined, qRegion || undefined);
-      if (qid !== id) return; // a newer query superseded this one
+      const s = await awsApi.athenaStatus(account.id, id, undefined, undefined, requestedRegion || undefined);
+      if (qid !== id || seq !== executionGeneration) return;
       qstate = s.state;
       scanned = s.stats?.data_scanned_bytes ?? 0;
       execMs = s.stats?.execution_ms ?? 0;
@@ -272,7 +290,7 @@
       }
       void loadHistory();
     } catch (e) {
-      if (qid !== id) return;
+      if (qid !== id || seq !== executionGeneration) return;
       qstate = 'FAILED';
       resultError = e instanceof Error ? e.message : String(e);
     }
@@ -289,19 +307,30 @@
   }
 
   async function loadHistory(): Promise<void> {
+    const seq = ++historyGeneration;
+    const requestedRegion = rq;
+    const requestedWorkgroup = workgroup;
     historyLoading = true;
     try {
-      history = (await awsApi.athenaHistory(account.id, workgroup || undefined, 50, rq || undefined)).executions;
+      const rows = (await awsApi.athenaHistory(account.id, requestedWorkgroup || undefined, 50, requestedRegion || undefined)).executions;
+      if (seq !== historyGeneration || requestedRegion !== rq || requestedWorkgroup !== workgroup) return;
+      history = rows;
+      historyRegion = requestedRegion;
       historyError = '';
     } catch (e) {
+      if (seq !== historyGeneration || requestedRegion !== rq || requestedWorkgroup !== workgroup) return;
       historyError = e instanceof Error ? e.message : String(e);
     } finally {
-      historyLoading = false;
+      if (seq === historyGeneration) historyLoading = false;
     }
   }
 
   /** Open a past execution: put its SQL in the editor and fetch its result. */
   function openExecution(x: AthenaExecution): void {
+    if (historyRegion !== rq || !history.includes(x)) return;
+    executionGeneration++;
+    qRegion = historyRegion;
+    submitting = false;
     sql = x.query;
     stopPoll();
     qid = x.id;
@@ -340,7 +369,7 @@
     ]);
   }
 
-  onDestroy(stopPoll);
+  onDestroy(() => { executionGeneration++; historyGeneration++; catalogGeneration++; stopPoll(); });
 
   const loginNeeded = $derived(isLoginRequired(new Error(catError)));
   let treeOpen = $state(!viewport.isMobile);

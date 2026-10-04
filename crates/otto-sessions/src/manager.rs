@@ -5019,13 +5019,17 @@ impl SessionManager {
         self.repo.set_archived(id, true).await?;
         self.repo.update_status(id, SessionStatus::Exited).await?;
         self.record_lifecycle(&session, "Archived");
-        // Clients refresh on this event and move the row to the archive.
+        // Preserve the status event for lifecycle consumers.
         let _ = self.events.send(Event::SessionStatus {
             session_id: id.clone(),
             workspace_id: session.workspace_id.clone(),
             status: SessionStatus::Exited,
         });
-        self.repo.get(id).await
+        let session = self.repo.get(id).await?;
+        let _ = self.events.send(Event::SessionArchiveChanged {
+            session: session.clone(),
+        });
+        Ok(session)
     }
 
     /// Auto-archive channel-spawned agent sessions (ticket/chat) idle longer
@@ -5096,6 +5100,9 @@ impl SessionManager {
             .await?;
         let session = self.repo.get(id).await?;
         self.record_lifecycle(&session, "Unarchived");
+        let _ = self.events.send(Event::SessionArchiveChanged {
+            session: session.clone(),
+        });
         Ok(session)
     }
 
@@ -8567,6 +8574,79 @@ mod tests {
             ),
             Some(NetworkPolicy::None)
         );
+    }
+
+    #[tokio::test]
+    async fn archive_and_restore_emit_authoritative_rows_to_every_subscriber() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let session = repo
+            .create(NewSession {
+                workspace_id: ws.id.clone(),
+                kind: SessionKind::Agent,
+                provider: "claude".into(),
+                title: "archive test".into(),
+                cwd: "/tmp".into(),
+                provider_session_id: Some("provider-id".into()),
+                connection_id: None,
+                created_by: user,
+                meta: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        let mut a = mgr.events.subscribe();
+        let mut b = mgr.events.subscribe();
+        for archived in [true, false] {
+            let row = if archived {
+                mgr.archive(&session.id).await.unwrap()
+            } else {
+                mgr.unarchive(&session.id).await.unwrap()
+            };
+            for receiver in [&mut a, &mut b] {
+                let event = loop {
+                    match receiver
+                        .try_recv()
+                        .expect("committed transition must emit a row")
+                    {
+                        Event::SessionArchiveChanged { session } => break session,
+                        _ => continue,
+                    }
+                };
+                assert_eq!(event.id, row.id);
+                assert_eq!(event.workspace_id, row.workspace_id);
+                assert_eq!(event.archived, archived);
+                assert_eq!(event.status, row.status);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prune_keeps_background_session_when_transcript_lookup_fails() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let home = tempfile::tempdir().unwrap();
+        let session = repo
+            .create(NewSession {
+                workspace_id: ws.id,
+                kind: SessionKind::Agent,
+                provider: "claude".into(),
+                title: "retain on IO error".into(),
+                cwd: "/tmp/proj".into(),
+                provider_session_id: Some("unreadable".into()),
+                connection_id: None,
+                created_by: user,
+                meta: serde_json::json!({"source":"review"}),
+            })
+            .await
+            .unwrap();
+        repo.update_status(&session.id, SessionStatus::Exited)
+            .await
+            .unwrap();
+        let path =
+            crate::lifecycle::claude_transcript_path(home.path(), &session.cwd, "unreadable");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+        assert_eq!(mgr.prune_dead_sessions_with_home(home.path()).await, 0);
+        assert!(repo.get(&session.id).await.is_ok());
     }
 
     /// A FOREGROUND (Agents-tab) session survives the pruner even when its

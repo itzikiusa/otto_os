@@ -172,6 +172,8 @@
   const TAIL_MAX_MS = 15_000;
   /** Messages the last tail tick appended (inline badge — no per-tick toast). */
   let tailAdded = $state(0);
+  let tailError = $state<string | null>(null);
+  let tailLastSuccess = $state<number | null>(null);
   /** Bumped whenever a tail tick appends messages (drives the adaptive cadence;
    *  `tailAdded` alone can't tell a failed tick from an empty one). */
   let tailSeq = 0;
@@ -249,6 +251,8 @@
     lastReq = null;
     tab = 'messages';
     autoPoll = false;
+    tailError = null;
+    tailLastSuccess = null;
     tailOffsets = new Map();
     loadDetail();
   });
@@ -327,12 +331,13 @@
    * normal full peek and seed the offsets.
    */
   async function consumeWithTail(incremental: boolean) {
+    const owner = consumeUrl();
     const hasCursors = tailOffsets.size > 0;
 
     if (!incremental || !hasCursors) {
       // Seed pass: normal peek, then seed offsets from what comes back.
       await consume();
-      if (result) updateTailOffsets(result.messages);
+      if (owner === consumeUrl() && result && !tailError) updateTailOffsets(result.messages);
       return;
     }
 
@@ -357,10 +362,16 @@
       };
       let r: ConsumeResp;
       try {
-        r = await api.post<ConsumeResp>(consumeUrl(), req);
-      } catch {
-        return; // a failed tick leaves the buffer as is; the next tick retries
+        r = await api.post<ConsumeResp>(owner, req);
+      } catch (e) {
+        if (owner !== consumeUrl()) return;
+        tailError = loadErrorText(e);
+        tailAdded = 0;
+        return; // Preserve the last good buffer; polling retries automatically.
       }
+      if (owner !== consumeUrl()) return;
+      tailError = null;
+      tailLastSuccess = Date.now();
       tailAdded = r.messages.length;
       if (r.messages.length > 0) {
         tailSeq += 1;
@@ -400,6 +411,7 @@
 
   async function consume(preview = true) {
     if (consuming || consumeError) return;
+    const owner = consumeUrl();
     const req: ConsumeReq = {
       partition: partition === '' ? null : Number(partition),
       start: buildStart(),
@@ -419,7 +431,11 @@
     fullCtl?.abort();
     tailAdded = 0;
     try {
-      result = await api.post<ConsumeResp>(consumeUrl(), req);
+      const next = await api.post<ConsumeResp>(owner, req);
+      if (owner !== consumeUrl()) return;
+      result = next;
+      tailError = null;
+      tailLastSuccess = Date.now();
       lastReq = req;
       tw.reset(msgListEl);
       // Reset tail cursors: a manual peek replaces the view and reseeds offsets.
@@ -427,7 +443,9 @@
       // An empty range renders inline ("No messages in the selected range.");
       // no toast for what is already on screen.
     } catch (e) {
-      toasts.error("Couldn't read messages", e instanceof Error ? e.message : String(e));
+      if (owner !== consumeUrl()) return;
+      tailError = loadErrorText(e);
+      if (!autoPoll) toasts.error("Couldn't read messages", tailError);
     } finally {
       consuming = false;
     }
@@ -756,9 +774,14 @@
         {#if result?.masked}
           <p class="masked-badge pad small">PII masked — sensitive values were redacted server-side.</p>
         {/if}
-        {#if autoPoll && tailOffsets.size > 0}
+        {#if autoPoll && (tailOffsets.size > 0 || tailError)}
           <p class="muted pad small tail-note" role="status">
-            Live tail active — appending new messages (cap {TAIL_CAP}){tailAdded > 0 ? ` · +${tailAdded} new` : ''}.
+            {#if tailError}
+              Live tail interrupted — retrying. {tailError}{tailLastSuccess ? ` Last received successfully at ${fmtTs(tailLastSuccess)}.` : ''}
+              <button class="btn small" disabled={consuming} onclick={() => consumeWithTail(true)}>Retry now</button>
+            {:else}
+              Live tail active — appending new messages (cap {TAIL_CAP}){tailAdded > 0 ? ` · +${tailAdded} new` : ''}.
+            {/if}
           </p>
         {/if}
       </div>

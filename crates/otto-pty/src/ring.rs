@@ -20,6 +20,8 @@ pub const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub struct RingBuffer {
     lines: VecDeque<Arc<Vec<u8>>>,
     bytes: usize,
+    /// Logical prefix dropped from the first line; compact only once per cap.
+    head: usize,
     max_lines: usize,
     max_bytes: usize,
     /// True when the last stored line ended with a newline (i.e. the next
@@ -32,6 +34,7 @@ impl RingBuffer {
         Self {
             lines: VecDeque::new(),
             bytes: 0,
+            head: 0,
             max_lines,
             max_bytes,
             last_complete: true,
@@ -48,10 +51,18 @@ impl RingBuffer {
 
     /// Append raw PTY output, splitting into lines on `\n`.
     pub fn push(&mut self, data: &[u8]) {
-        if self.max_lines == 0 {
+        if self.max_lines == 0 || self.max_bytes == 0 {
             return;
         }
         for chunk in data.split_inclusive(|&b| b == b'\n') {
+            if self.head >= self.max_bytes {
+                if let Some(first) = self.lines.front_mut() {
+                    let first = Arc::make_mut(first);
+                    first.copy_within(self.head.., 0);
+                    first.truncate(first.len() - self.head);
+                    self.head = 0;
+                }
+            }
             let ends_line = chunk.ends_with(b"\n");
             if !self.last_complete {
                 if let Some(last) = self.lines.back_mut() {
@@ -74,7 +85,8 @@ impl RingBuffer {
             && (self.lines.len() > self.max_lines || self.bytes > self.max_bytes)
         {
             if let Some(front) = self.lines.pop_front() {
-                self.bytes -= front.len();
+                self.bytes -= front.len() - self.head;
+                self.head = 0;
             }
         }
         // One line with no newline in sight (a minified bundle / JSON blob, a
@@ -82,12 +94,8 @@ impl RingBuffer {
         // whole-line eviction never touches the last line, so it grew without
         // limit (and `tail`/`search` cloned all of it). Drop its oldest bytes.
         if self.bytes > self.max_bytes {
-            if let Some(only) = self.lines.front_mut() {
-                let excess = (self.bytes - self.max_bytes).min(only.len());
-                let only = Arc::make_mut(only);
-                *only = only.split_off(excess);
-                self.bytes -= excess;
-            }
+            self.head += self.bytes - self.max_bytes;
+            self.bytes = self.max_bytes;
         }
     }
 
@@ -96,8 +104,8 @@ impl RingBuffer {
         let n = lines.min(self.lines.len());
         let start = self.lines.len() - n;
         let mut out = Vec::new();
-        for line in self.lines.iter().skip(start) {
-            out.extend_from_slice(line.as_slice());
+        for (index, line) in self.lines.iter().enumerate().skip(start) {
+            out.extend_from_slice(&line[if index == 0 { self.head } else { 0 }..]);
         }
         out
     }
@@ -123,10 +131,20 @@ impl RingBuffer {
         search_lines(&self.lines(), query, limit)
     }
 
-    /// A consistent copy of every retained line (refcount bumps, no byte
-    /// copies) to scan after the ring's lock is released ([`search_lines`]).
+    /// A consistent copy for off-lock search. Whole lines use refcount bumps;
+    /// only an evicted partial prefix needs a compact copy, at read time.
     pub fn lines(&self) -> Vec<Arc<Vec<u8>>> {
-        self.lines.iter().cloned().collect()
+        self.lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                if index == 0 && self.head > 0 {
+                    Arc::new(line[self.head..].to_vec())
+                } else {
+                    line.clone()
+                }
+            })
+            .collect()
     }
 }
 

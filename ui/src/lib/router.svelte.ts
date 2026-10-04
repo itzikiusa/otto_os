@@ -307,6 +307,16 @@ class Router {
     };
   }
 
+  /** Workspace identity changes unmount editors without changing the hash.
+   * Ask the same guards with no route destination, so allowlists for routes
+   * within an editor cannot bypass this context change. The existing guard
+   * generation also fences a competing route or workspace decision.
+   * Without guards return synchronously, preserving startup selection timing. */
+  mayChangeWorkspace(): boolean | Promise<boolean> {
+    if (this.guards.size === 0) { ++this.guardSeq; return true; }
+    return this.mayLeave('');
+  }
+
   /** Ask every guard about leaving for `hash`; true = go ahead. A newer guarded
    *  navigation started meanwhile makes this one resolve false. */
   private async mayLeave(hash: string): Promise<boolean> {
@@ -377,16 +387,21 @@ class Router {
   }
 
   go(path: string): void {
+    void this.goChecked(path);
+  }
+
+  /** Await the leave decision before moving focus to a destination tab. */
+  async goChecked(path: string): Promise<boolean> {
     const hash = this.toHash(path);
-    if (hash === this.currentHash()) return;
-    if (this.divert(hash)) return;
+    if (hash === this.currentHash()) return true;
+    if (this.divert(hash)) return false;
     if (this.guards.size === 0) {
       window.location.hash = hash;
-      return;
+      return true;
     }
-    void this.mayLeave(hash).then((ok) => {
-      if (ok) this.setHash(hash);
-    });
+    const ok = await this.mayLeave(hash);
+    if (ok) this.setHash(hash);
+    return ok;
   }
 
   replace(path: string): void {

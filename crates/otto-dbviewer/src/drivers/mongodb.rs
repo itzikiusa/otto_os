@@ -3490,20 +3490,41 @@ async fn collect_docs(
     }
     // BSON → JSON for tens of thousands of cells is a long synchronous stretch;
     // run a big conversion on the blocking pool instead of a runtime worker.
-    let mut result = if cells < OFF_RUNTIME_CELLS {
-        docs_to_result(docs, truncated, started)
-    } else {
-        tokio::task::spawn_blocking(move || docs_to_result(docs, truncated, started))
-            .await
-            .map_err(|e| types::upstream(format!("mongodb: decode task failed: {e}")))?
-    };
-    result.truncated_reason = truncated_reason;
+    let mut result =
+        if cells.max(docs.len().saturating_mul(MAX_DOC_COLUMNS + 1)) < OFF_RUNTIME_CELLS {
+            docs_to_result(docs, truncated, started)
+        } else {
+            tokio::task::spawn_blocking(move || docs_to_result(docs, truncated, started))
+                .await
+                .map_err(|e| types::upstream(format!("mongodb: decode task failed: {e}")))?
+        };
+    result.truncated_reason = result.truncated_reason.or(truncated_reason);
     Ok(result)
 }
 
 /// Most distinct top-level keys shown as their own grid columns; the rest of a
 /// document's keys go into [`SPILL_COLUMN`] as one JSON object.
 const MAX_DOC_COLUMNS: usize = 500;
+/// Bound resident Value slots as well as their much smaller serialized nulls.
+const MAX_RESULT_CELLS: usize = 1_000_000;
+
+/// Exact JSON byte count without allocating a second serialized row buffer.
+fn grid_json_len(value: &impl serde::Serialize) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)
+        .expect("JSON grid values serialize to a counting writer");
+    counter.0
+}
 /// The overflow column for keys beyond [`MAX_DOC_COLUMNS`]. `$`-prefixed so it
 /// can never collide with a real field and a stray `$set` of it is refused by
 /// the server instead of writing junk.
@@ -3565,48 +3586,73 @@ fn docs_to_result(docs: Vec<Document>, truncated: bool, started: Instant) -> Que
     // Spill detection must see every doc (the loop above stops at the cap).
     let spilled = spilled || docs.iter().any(|d| d.keys().any(|k| !seen.contains(k)));
 
-    let rows: Vec<Vec<Value>> = docs
-        .iter()
-        .map(|doc| {
-            let mut row: Vec<Value> = columns
-                .iter()
-                .map(|col| {
-                    // Cap oversized cells like every other engine — a single
-                    // huge embedded document/string must not freeze the grid.
-                    doc.get(col)
-                        .map(|b| types::cap_cell(bson_to_json_typed(b)))
-                        .unwrap_or(Value::Null)
-                })
-                .collect();
-            if spilled {
-                let rest: Map<String, Value> = doc
-                    .iter()
-                    .filter(|(k, _)| !seen.contains(k.as_str()))
-                    .map(|(k, v)| (k.clone(), bson_to_json_typed(v)))
-                    .collect();
-                row.push(if rest.is_empty() {
-                    Value::Null
-                } else {
-                    types::cap_cell(Value::Object(rest))
-                });
-            }
-            row
-        })
-        .collect();
+    let width = columns.len() + usize::from(spilled);
+    let mut result_columns: Vec<Column> = columns.iter().cloned().map(Column::new).collect();
     if spilled {
-        columns.push(SPILL_COLUMN.to_string());
+        result_columns.push(Column::new(SPILL_COLUMN));
+    }
+    let mut budget = types::ByteBudget::default();
+    // Reserve the fixed result envelope and account for column names/metadata.
+    let mut byte_truncated = !budget.charge(1024 + grid_json_len(&result_columns));
+    // Pathological field names can themselves exceed the wire budget.
+    if byte_truncated {
+        result_columns.clear();
+    }
+    let mut rows = Vec::new();
+    'rows: for doc in &docs {
+        if byte_truncated || rows.len().saturating_add(1).saturating_mul(width) > MAX_RESULT_CELLS {
+            byte_truncated = true;
+            break;
+        }
+        let mut row = Vec::with_capacity(width);
+        if !budget.charge(3) {
+            byte_truncated = true;
+            break;
+        } // [, ], row comma
+        for col in &columns {
+            let value = doc
+                .get(col)
+                .map(|b| types::cap_cell(bson_to_json_typed(b)))
+                .unwrap_or(Value::Null);
+            // Charge each cell before retaining it; don't allocate an entire
+            // wide row of large strings only to discover it exceeds the budget.
+            if !budget.charge(grid_json_len(&value) + 1) {
+                byte_truncated = true;
+                break 'rows;
+            }
+            row.push(value);
+        }
+        if spilled {
+            let rest: Map<String, Value> = doc
+                .iter()
+                .filter(|(k, _)| !seen.contains(k.as_str()))
+                .map(|(k, v)| (k.clone(), bson_to_json_typed(v)))
+                .collect();
+            let value = if rest.is_empty() {
+                Value::Null
+            } else {
+                types::cap_cell(Value::Object(rest))
+            };
+            if !budget.charge(grid_json_len(&value) + 1) {
+                byte_truncated = true;
+                break;
+            }
+            row.push(value);
+        }
+        rows.push(row);
     }
 
     let row_count = rows.len();
     QueryResult {
-        columns: columns.into_iter().map(Column::new).collect(),
+        columns: result_columns,
         rows,
         stats: QueryStats {
             duration_ms: started.elapsed().as_millis() as u64,
             row_count,
             bytes_read: None,
         },
-        truncated,
+        truncated: truncated || byte_truncated,
+        truncated_reason: byte_truncated.then_some(types::TruncatedReason::Bytes),
         ..QueryResult::empty()
     }
 }
@@ -3742,6 +3788,44 @@ mod tests {
     /// the line cap and bytes past the byte budget are counted as truncation,
     /// never buffered; chunk boundaries never split a line; the tail survives
     /// for error reports.
+    #[test]
+    fn grid_expansion_counts_escaped_values_and_late_columns() {
+        // Control characters expand to six JSON bytes each, and the last
+        // document widens every preceding row by hundreds of null slots.
+        let mut docs = (0..500)
+            .map(|i| doc! {"_id": i, "text": "\u{0001}".repeat(16_000)})
+            .collect::<Vec<_>>();
+        let mut late = Document::new();
+        for i in 0..498 {
+            late.insert(format!("late_{i}"), i);
+        }
+        docs.push(late);
+        let r = docs_to_result(docs, false, Instant::now());
+        assert_eq!(r.columns.len(), 500);
+        assert!(r.truncated);
+        assert_eq!(r.truncated_reason, Some(types::TruncatedReason::Bytes));
+        assert!(serde_json::to_vec(&r).unwrap().len() <= types::RESULT_BYTE_BUDGET);
+        assert_eq!(r.rows[0][0], serde_json::json!(0));
+        assert_eq!(r.rows[0][499], Value::Null);
+    }
+
+    #[test]
+    fn sparse_grid_expansion_obeys_cell_and_byte_budgets() {
+        let docs = (0..100_000)
+            .map(|i| {
+                let mut d = doc! {"_id": i};
+                d.insert(format!("field_{}", i % 499), i);
+                d
+            })
+            .collect();
+        let r = docs_to_result(docs, false, Instant::now());
+        assert!(r.rows.len() * r.columns.len() <= 1_000_000);
+        assert!(r.truncated);
+        assert_eq!(r.truncated_reason, Some(types::TruncatedReason::Bytes));
+        assert!(serde_json::to_vec(&r).unwrap().len() < 32 * 1024 * 1024);
+        assert_eq!(r.rows[0][0], serde_json::json!(0));
+    }
+
     #[test]
     fn script_output_is_bounded_while_streaming() {
         let mut out = ScriptOutput::new(3, 1024);
