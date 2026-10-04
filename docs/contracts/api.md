@@ -2891,7 +2891,7 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | DELETE /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `?path=` | 204 — soft delete → `<vault>/.trash/` (never destroys files) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rename | ws editor | `{from, to}` | `VaultRenameResult{from, to, links_updated, links_failed}` — file OR folder move; rewrites every referencing wikilink/markdown link across the vault on disk (style-preserving); case-only renames use a two-step move. All index reads run before the move; once the move succeeds the call never fails halfway — a source whose links could not be rewritten is listed in `links_failed` (left untouched), and the index is always refreshed to the new path |
 | POST /workspaces/{ws}/vault/vaults/{id}/folder | ws editor | `{path}` | 204 |
-| GET /workspaces/{ws}/vault/vaults/{id}/backlinks | ws viewer | `?path=` | `VaultBacklink[]` (linked mentions with a context snippet; the snippet is cached per source note's indexed hash, so only changed sources are re-read) |
+| GET /workspaces/{ws}/vault/vaults/{id}/backlinks | ws viewer | `?path=&context_offset=0&context_limit=100` | `VaultBacklink[]` (all lightweight linked-mention identities ordered by path/kind; at most 100 context snippets are hydrated in the requested window, other contexts are empty. Snippets are cached per indexed source hash with bounded eviction; identity metadata remains O(total backlinks)) |
 | POST /workspaces/{ws}/vault/vaults/{id}/search | ws viewer | `{query, tag?, path_prefix?, okf_type?, limit?}` | `VaultSearchHit[]` — FTS5 bm25 + snippets; `tag:`/`path:`/`type:` operators inside `query`. Filters are applied in SQL before the limit (`tag:x` also matches nested `x/…`; `path:` is a case-sensitive prefix; `type:` is case-insensitive), so a filtered match ranked below the first page is still returned |
 | GET /workspaces/{ws}/vault/vaults/{id}/switcher | ws viewer | `?q=` | `VaultSwitchHit[]` — server-side fuzzy over title/aliases/path (quick switcher + `[[` completion) |
 | GET /workspaces/{ws}/vault/vaults/{id}/tags | ws viewer | — | `VaultTagCount[]` |
@@ -5367,6 +5367,7 @@ An absent rule is inherited/no grant. Matching group and user allows combine; an
 | GET / PUT | `/access/{kind}/{id}` | Read / replace policy; `manage_access` |
 | GET | `/access/{kind}/{id}/subjects` | Available users, groups, roles; `manage_access` |
 | GET | `/access/{kind}/{id}/capabilities?child=` | Current caller's effective decisions; visible resource |
+| POST | `/access/{kind}/{id}/capabilities/batch` | Self-scoped; same visibility/page/workspace gates as capabilities. Body `EffectiveAccessBatchRequest {children: string[]}` (at most 1,000 children, 4,096 bytes each); returns `EffectiveAccess[]` in input order, including child-specific denials. Administrative rule IDs are omitted. Invalid bounds return 400; invisible resource returns 404. No side effects. |
 | GET | `/access/{kind}/{id}/effective?user_id=&child=` | Target user's effective decisions; `manage_access` |
 | POST | `/access/{kind}/{id}/preview` | Candidate access impact; `manage_access` |
 

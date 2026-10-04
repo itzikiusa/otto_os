@@ -6899,6 +6899,7 @@ export interface WriteTextFileReq {
 export interface VaultBacklink {
   path: string;
   title: string;
+  /** Empty outside the requested context window (default first 100 rows). */
   context: string;
   kind: string;
 }
@@ -9908,6 +9909,7 @@ export interface AccessRule {
 }
 export interface AccessPolicy { kind: ResourceKind; resource_id: Id; mode: AccessMode; revision: number; rules: AccessRule[] }
 export interface AccessDecision { allowed: boolean; reason: string; matched_rule_ids: Id[]; mode: AccessMode }
+export interface EffectiveAccessBatchRequest { children: string[] }
 export interface EffectiveAccess { kind: ResourceKind; resource_id: Id; user_id: Id; child: string | null; mode: AccessMode; operations: Record<string, AccessDecision> }
 export interface AccessGroup { id: Id; name: string; description: string | null; created_at: string; updated_at: string }
 export interface AccessRole { id: Id; name: string; description: string | null; kind: ResourceKind; operations: string[]; grantable_operations: string[]; created_at: string; updated_at: string }
