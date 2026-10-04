@@ -198,6 +198,7 @@ const RULES = {
   'heavy-weight': 'font-weight ≥ 700 — chrome uses 400/500/600',
   'focus-accent': 'outline in var(--accent) — focus rings use var(--accent-text)',
   'physical-shorthand': '4-value padding/margin/inset with different left/right — use -block / -inline',
+  'private-keyframes': 'private @keyframes — spinners use .spinner / otto-spin, live-dot pulses otto-pulse, entrances otto-fade-in / otto-pop-in (app.css); keep a local one only when the motion is genuinely different',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
 };
 
@@ -279,6 +280,9 @@ function hit(rule, f, index, detail) {
 for (const f of files) {
   for (const { css: raw, offset } of styleBlocks(f)) {
     const css = raw.replace(/\/\*[\s\S]*?\*\//g, blank);
+    if (f.rel !== 'src/app.css') {
+      for (const k of css.matchAll(/@keyframes\s+([\w-]+)/g)) hit('private-keyframes', f, offset + k.index, `@keyframes ${k[1]}`);
+    }
     for (const d of css.matchAll(DECL)) {
       const prop = d[3].toLowerCase();
       const value = d[4];
