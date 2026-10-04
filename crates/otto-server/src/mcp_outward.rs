@@ -1786,7 +1786,13 @@ pub(crate) async fn governed_invoke(
         match ctx
             .mcp
             .approvals()
-            .find_usable(ws.as_deref(), None, tool, &args_hash)
+            .find_usable(
+                ws.as_deref(),
+                None,
+                tool,
+                &args_hash,
+                Some(&auth.effective_user.id),
+            )
             .await
             .map_err(ApiError)?
         {

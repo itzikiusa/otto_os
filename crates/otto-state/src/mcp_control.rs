@@ -1471,12 +1471,13 @@ impl McpApprovalRepo {
         server_id: Option<&str>,
         tool: &str,
         args_hash: &str,
+        requested_by: Option<&str>,
     ) -> Result<Option<String>> {
         let now = fmt(Utc::now());
         let r = sqlx::query(
             "SELECT id FROM mcp_approvals
              WHERE status = 'approved' AND consumed_at IS NULL
-               AND tool = ? AND args_hash = ?
+               AND tool = ? AND args_hash = ? AND requested_by IS ?
                AND (server_id IS ? OR server_id = ?)
                AND (workspace_id IS ? OR workspace_id = ?)
                AND (expires_at IS NULL OR expires_at > ?)
@@ -1484,6 +1485,7 @@ impl McpApprovalRepo {
         )
         .bind(tool)
         .bind(args_hash)
+        .bind(requested_by)
         .bind(server_id)
         .bind(server_id)
         .bind(workspace_id)
@@ -1536,10 +1538,11 @@ impl McpApprovalRepo {
     /// from `approved` to `consumed` (false if it was already consumed — a replay).
     pub async fn consume(&self, id: &str) -> Result<bool> {
         let res = sqlx::query(
-            "UPDATE mcp_approvals SET status = 'consumed', consumed_at = ? WHERE id = ? AND status = 'approved' AND consumed_at IS NULL",
+            "UPDATE mcp_approvals SET status = 'consumed', consumed_at = ? WHERE id = ? AND status = 'approved' AND consumed_at IS NULL AND (expires_at IS NULL OR expires_at > ?)",
         )
         .bind(fmt(Utc::now()))
         .bind(id)
+        .bind(fmt(Utc::now()))
         .execute(&self.pool)
         .await
         .map_err(dberr("consume approval"))?;
@@ -1836,23 +1839,70 @@ mod tests {
 
         // Gate finds it only for the exact (tool, args_hash, server, ws).
         let found = repo
-            .find_usable(Some(&ws), Some("srv1"), "delete_thing", "HASH_A")
+            .find_usable(
+                Some(&ws),
+                Some("srv1"),
+                "delete_thing",
+                "HASH_A",
+                Some("requester"),
+            )
             .await
             .unwrap();
         assert!(found.is_some());
         // Swapped args => not usable.
         assert!(repo
-            .find_usable(Some(&ws), Some("srv1"), "delete_thing", "HASH_B")
+            .find_usable(
+                Some(&ws),
+                Some("srv1"),
+                "delete_thing",
+                "HASH_B",
+                Some("requester")
+            )
             .await
             .unwrap()
             .is_none());
+
+        // Another caller's approval cannot be selected, including a NULL caller.
+        assert!(repo
+            .find_usable(
+                Some(&ws),
+                Some("srv1"),
+                "delete_thing",
+                "HASH_A",
+                Some("other")
+            )
+            .await
+            .unwrap()
+            .is_none());
+        assert!(repo
+            .find_usable(Some(&ws), Some("srv1"), "delete_thing", "HASH_A", None)
+            .await
+            .unwrap()
+            .is_none());
+
+        let other = repo.create(NewApproval {
+            workspace_id: Some(ws.clone()), kind: "tool_call".into(), server_id: Some("srv1".into()),
+            server_name: Some("srv".into()), tool: Some("delete_thing".into()), title: "other caller".into(),
+            detail: None, args_redacted_json: "{}".into(), args_hash: Some("HASH_A".into()),
+            risk_label: Some("dangerous".into()), requested_by: Some("other".into()),
+            requested_by_kind: Some("ui".into()), requested_by_session_id: None, expires_at: None,
+        }).await.unwrap();
+        repo.decide(&other.id, true, "approver", None).await.unwrap();
+        assert_eq!(repo.find_usable(Some(&ws), Some("srv1"), "delete_thing", "HASH_A", Some("requester")).await.unwrap(), Some(a.id.clone()));
+        assert_eq!(repo.find_usable(Some(&ws), Some("srv1"), "delete_thing", "HASH_A", Some("other")).await.unwrap(), Some(other.id.clone()));
 
         // Single-use: first consume succeeds, replay fails.
         assert!(repo.consume(&a.id).await.unwrap());
         assert!(!repo.consume(&a.id).await.unwrap());
         // After consume the gate no longer finds it.
         assert!(repo
-            .find_usable(Some(&ws), Some("srv1"), "delete_thing", "HASH_A")
+            .find_usable(
+                Some(&ws),
+                Some("srv1"),
+                "delete_thing",
+                "HASH_A",
+                Some("requester")
+            )
             .await
             .unwrap()
             .is_none());
