@@ -89,6 +89,8 @@ pub struct AssistantTask {
     pub schedule_id: Option<String>,
     pub agent_id: Option<String>,
     pub agent_run_id: Option<String>,
+    #[serde(skip)]
+    pub thread_execution_id: Option<String>,
     pub needs_you: Option<Value>,
     pub result: Option<Value>,
     pub created_at: String,
@@ -150,6 +152,7 @@ pub struct NewTask {
     pub schedule: Option<Value>,
     pub agent_id: Option<String>,
     pub needs_you: Option<Value>,
+    pub thread_execution_id: Option<String>,
 }
 
 /// Task states that end a task (stamp `finished_at`).
@@ -226,6 +229,7 @@ fn row_to_task(r: &sqlx::sqlite::SqliteRow) -> AssistantTask {
         schedule_id: r.get("schedule_id"),
         agent_id: r.get("agent_id"),
         agent_run_id: r.get("agent_run_id"),
+        thread_execution_id: r.get("thread_execution_id"),
         needs_you: opt_json(r, "needs_you_json"),
         result: opt_json(r, "result_json"),
         created_at: r.get("created_at"),
@@ -659,8 +663,8 @@ impl AssistantRepo {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO assistant_tasks (id, owner_user_id, thread_id, kind, state, title, detail, \
-             origin, run_at, timezone, schedule_json, agent_id, needs_you_json, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             origin, run_at, timezone, schedule_json, agent_id, needs_you_json, created_at, updated_at, thread_execution_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&t.owner_user_id)
@@ -677,6 +681,7 @@ impl AssistantRepo {
         .bind(t.needs_you.as_ref().map(|v| v.to_string()))
         .bind(&now)
         .bind(&now)
+        .bind(&t.thread_execution_id)
         .execute(&self.pool)
         .await
         .map_err(dberr("create assistant task"))?;
@@ -760,6 +765,19 @@ impl AssistantRepo {
         needs_you: Option<Value>,
         result: Option<Value>,
     ) -> Result<AssistantTask> {
+        self.set_task_state_with_execution(id, state, needs_you, result, None)
+            .await
+    }
+
+    /// Commit state and an explicitly resumed execution in one row update.
+    pub async fn set_task_state_with_execution(
+        &self,
+        id: &str,
+        state: &str,
+        needs_you: Option<Value>,
+        result: Option<Value>,
+        execution_id: Option<&str>,
+    ) -> Result<AssistantTask> {
         if !TASK_STATES.contains(&state) {
             return Err(Error::Invalid(format!("task state '{state}'")));
         }
@@ -767,23 +785,35 @@ impl AssistantRepo {
         let finished = TERMINAL_STATES.contains(&state).then(|| now.clone());
         let ny_set = needs_you.is_some() as i64;
         let ny = needs_you.filter(|v| !v.is_null()).map(|v| v.to_string());
-        sqlx::query(
+        let changed = sqlx::query(
             "UPDATE assistant_tasks SET state = ?, \
              needs_you_json = CASE WHEN ? THEN ? ELSE needs_you_json END, \
              result_json = COALESCE(?, result_json), \
-             finished_at = COALESCE(?, finished_at), updated_at = ? WHERE id = ?",
+             thread_execution_id = COALESCE(?, thread_execution_id), \
+             finished_at = COALESCE(?, finished_at), updated_at = ? WHERE id = ? \
+             AND state NOT IN ('done', 'failed', 'cancelled')",
         )
         .bind(state)
         .bind(ny_set)
         .bind(ny)
         .bind(result.map(|v| v.to_string()))
+        .bind(execution_id)
         .bind(finished)
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
         .await
         .map_err(dberr("set assistant task state"))?;
+        if changed.rows_affected() != 1 {
+            return Err(Error::Conflict("task already finished".into()));
+        }
         self.get_task_any(id).await
+    }
+
+    pub async fn bind_task_execution(&self, id: &str, execution_id: &str) -> Result<()> {
+        sqlx::query("UPDATE assistant_tasks SET thread_execution_id = ? WHERE id = ? AND state NOT IN ('done', 'failed', 'cancelled')")
+            .bind(execution_id).bind(id).execute(&self.pool).await.map_err(dberr("bind task execution"))?;
+        Ok(())
     }
 
     /// Compare-and-swap a task's state (`from` → `to`); true when this caller
@@ -1005,6 +1035,28 @@ mod tests {
 
     async fn repo() -> AssistantRepo {
         AssistantRepo::new(crate::db::test_pool().await)
+    }
+
+    #[tokio::test]
+    async fn cancellation_cannot_be_revived_by_a_late_completion() {
+        let r = repo().await;
+        let t = r
+            .create_task(NewTask {
+                owner_user_id: "u".into(),
+                kind: "delegation".into(),
+                state: "running".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        r.set_task_state(&t.id, "cancelled", None, None)
+            .await
+            .unwrap();
+        assert!(r
+            .set_task_state(&t.id, "done", None, Some(json!({"summary":"late"})))
+            .await
+            .is_err());
+        assert_eq!(r.get_task_any(&t.id).await.unwrap().state, "cancelled");
     }
 
     fn thread(owner: &str, slot: Option<i64>) -> NewThread {

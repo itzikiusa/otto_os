@@ -178,6 +178,7 @@ pub async fn run(ctx: &ServerCtx, auth: &AuthContext, tool: &str, body: Value) -
             let task = tasks::agent_update(
                 ctx,
                 owner,
+                tid,
                 req_arg(&body, "task_id")?,
                 req_arg(&body, "state")?,
                 body.get("result").cloned().filter(|v| !v.is_null()),

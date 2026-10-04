@@ -37,6 +37,23 @@ use crate::cancel_signal::CancelSignal;
 use crate::state::ServerCtx;
 
 const TICK: Duration = Duration::from_secs(30);
+
+fn task_lock(id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    static LOCKS: OnceLock<Mutex<std::collections::HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    locks.retain(|_, v| v.strong_count() > 0);
+    if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(id.into(), Arc::downgrade(&lock));
+    lock
+}
 /// Incognito threads are deleted this long after their last turn.
 const INCOGNITO_TTL_HOURS: i64 = 24;
 /// Max wait an approval tool call may block for a decision.
@@ -60,6 +77,10 @@ pub fn next_state(
     let open = state == "needs_you";
     let live = matches!(state, "queued" | "running");
     match action {
+        "takeover" | "handback" if task_kind == "delegation" => Err(
+            "delegated runs cannot pause and resume; open the agent session or cancel the task"
+                .into(),
+        ),
         "approve" | "deny" if open && needs != Some("takeover") => Ok(match (needs, action) {
             // A plain task that asked a question resumes on an answer and is
             // cancelled on a "no"; every other item is settled either way.
@@ -164,6 +185,11 @@ pub async fn create(
                     thread_id: req.thread_id.clone(),
                     kind: "task".into(),
                     state: if from_agent { "running" } else { "queued" }.into(),
+                    thread_execution_id: if from_agent {
+                        req.thread_id.as_deref().and_then(threads::execution_id)
+                    } else {
+                        None
+                    },
                     title: req.title.trim().to_string(),
                     detail: req.detail.clone().unwrap_or_default(),
                     origin,
@@ -199,9 +225,11 @@ pub async fn create(
 }
 
 /// The agent moves its own task along (`assistant_update_task`).
+#[allow(clippy::too_many_arguments)] // caller identity accompanies the existing tool payload
 pub async fn agent_update(
     ctx: &ServerCtx,
     owner: &str,
+    caller_thread: Option<&str>,
     task_id: &str,
     state: &str,
     result: Option<Value>,
@@ -213,10 +241,8 @@ pub async fn agent_update(
             "state must be running|needs_you|done|failed".into(),
         ));
     }
-    let task = repo(ctx).get_task(owner, task_id).await?;
-    if otto_state::assistant::TERMINAL_STATES.contains(&task.state.as_str()) {
-        return Err(Error::Conflict(format!("task is already {}", task.state)));
-    }
+    let lock = task_lock(task_id);
+    let _guard = lock.lock().await;
     let needs = if state == "needs_you" {
         let q = question
             .map(str::trim)
@@ -232,9 +258,16 @@ pub async fn agent_update(
     } else {
         Some(Value::Null)
     };
-    let updated = repo(ctx)
-        .set_task_state(&task.id, state, needs, result)
-        .await?;
+    let (task, updated) = apply_agent_update(
+        &repo(ctx),
+        owner,
+        caller_thread,
+        task_id,
+        state,
+        needs,
+        result,
+    )
+    .await?;
     emit_task_change(ctx, &updated, &task.state).await;
     if let (Some(tid), true) = (updated.thread_id.as_deref(), state != "running") {
         let text = match state {
@@ -253,6 +286,47 @@ pub async fn agent_update(
         .await;
     }
     Ok(updated)
+}
+
+/// The caller holds the task lock. Only an explicit update by this task's
+/// owning thread can associate it with a later execution; ordinary Stop keeps
+/// the stored binding so an untouched stale task never stops a replacement.
+pub(super) async fn apply_agent_update(
+    assistant: &otto_state::AssistantRepo,
+    owner: &str,
+    caller_thread: Option<&str>,
+    task_id: &str,
+    state: &str,
+    needs: Option<Value>,
+    result: Option<Value>,
+) -> Result<(AssistantTask, AssistantTask)> {
+    let task = assistant.get_task(owner, task_id).await?;
+    if task.thread_id.as_deref() != caller_thread {
+        return Err(Error::Forbidden(
+            "the task belongs to another thread".into(),
+        ));
+    }
+    if needs_kind(&task).as_deref() == Some("takeover") {
+        return Err(Error::Conflict("the user has control of this task".into()));
+    }
+    if otto_state::assistant::TERMINAL_STATES.contains(&task.state.as_str()) {
+        return Err(Error::Conflict(format!("task is already {}", task.state)));
+    }
+    let execution = if state == "running" {
+        caller_thread
+            .map(|thread| {
+                threads::execution_id(thread).ok_or_else(|| {
+                    Error::Conflict("the calling thread has no active execution".into())
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let updated = assistant
+        .set_task_state_with_execution(task_id, state, needs, result, execution.as_deref())
+        .await?;
+    Ok((task, updated))
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +587,8 @@ pub async fn act(
     req: DecisionReq,
 ) -> Result<AssistantTask> {
     let owner = user.id.as_str();
+    let lock = task_lock(task_id);
+    let _guard = lock.lock().await;
     let task = repo(ctx).get_task(owner, task_id).await?;
     let needs = needs_kind(&task);
     let to =
@@ -540,7 +616,9 @@ pub async fn act(
                 .as_ref()
                 .and_then(|n| n.get("approval"))
                 .and_then(|c| serde_json::from_value(c.clone()).ok());
-            if approved && req.always_allow {
+            // Validate the optional grant before deciding, but never install it
+            // until this request has won the canonical pending decision.
+            let grant = if approved && req.always_allow {
                 let card = card
                     .as_ref()
                     .ok_or_else(|| Error::Invalid("approval card missing".into()))?;
@@ -553,25 +631,26 @@ pub async fn act(
                 let resource = always_allow_resource(card).ok_or_else(|| {
                     Error::Invalid("always allow needs a tool and a destination".into())
                 })?;
-                let principal = repo(ctx).assistant_principal(owner).await?;
-                repo(ctx)
-                    .set_grant(&principal, "tool_destination", &resource, "allow")
-                    .await?;
-                result["always_allow"] = json!(resource);
-            }
-            if let Some(aid) = task
+                Some(resource)
+            } else {
+                None
+            };
+            let aid = task
                 .needs_you
                 .as_ref()
                 .and_then(|n| n.get("mcp_approval_id"))
                 .and_then(Value::as_str)
-            {
-                // Already decided in the MCP queue is fine (Conflict ignored).
-                let _ = ctx
-                    .mcp
-                    .approvals()
-                    .decide(&aid.to_string(), approved, owner, reason.as_deref())
-                    .await;
-            }
+                .ok_or_else(|| Error::Invalid("canonical approval missing".into()))?;
+            result = settle_approval(
+                &repo(ctx),
+                &ctx.mcp.approvals(),
+                aid,
+                approved,
+                owner,
+                reason.as_deref(),
+                grant,
+            )
+            .await?;
         }
         ("approve", Some("question")) => {
             let answer = req
@@ -638,11 +717,7 @@ pub async fn act(
             }
         }
         ("takeover", _) => {
-            // Pause the agent: interrupt its current turn (Esc), keep the
-            // task open as a takeover item until the user hands back.
-            if let Some(sid) = thread_session(ctx, owner, task.thread_id.as_deref()).await {
-                let _ = ctx.manager.input(&sid, b"\x1b").await;
-            }
+            stop_task_execution(ctx, &task, true).await?;
         }
         ("handback", _) => {
             let note = req.reason.as_deref().unwrap_or("").trim();
@@ -655,7 +730,41 @@ pub async fn act(
                 )
             });
         }
+        ("cancel", _) | ("deny", Some("question")) => {
+            stop_task_execution(ctx, &task, false).await?;
+            if let Some(aid) = task
+                .needs_you
+                .as_ref()
+                .and_then(|n| n.get("mcp_approval_id"))
+                .and_then(Value::as_str)
+            {
+                let (canonical, _) =
+                    canonical_decision(&ctx.mcp.approvals(), aid, false, owner, reason.as_deref())
+                        .await?;
+                result["decision"] = json!(canonical.status);
+                result["reason"] = json!(canonical.decision_note);
+            }
+        }
         _ => {}
+    }
+
+    // A failed continuation keeps the question/takeover open and recoverable.
+    if let (Some(text), Some(tid)) = (followup, task.thread_id.as_deref()) {
+        threads::send(
+            ctx,
+            owner,
+            tid,
+            SendReq {
+                text,
+                origin: Some("app".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await?;
+        if let Some(id) = threads::execution_id(tid) {
+            repo(ctx).bind_task_execution(&task.id, &id).await?;
+        }
     }
 
     let needs_payload = match to {
@@ -670,26 +779,105 @@ pub async fn act(
         .await?;
     emit_task_change(ctx, &updated, &task.state).await;
 
-    if let (Some(text), Some(tid)) = (followup, updated.thread_id.clone()) {
-        let _ = threads::send(
-            ctx,
-            owner,
-            &tid,
-            SendReq {
-                text,
-                origin: Some("app".into()),
-                ..Default::default()
-            },
-            None,
-        )
-        .await;
-    }
     Ok(updated)
 }
 
-async fn thread_session(ctx: &ServerCtx, owner: &str, thread_id: Option<&str>) -> Option<String> {
-    let t = repo(ctx).get_thread(owner, thread_id?).await.ok()?;
-    t.session_id
+/// Only the first canonical decision wins. A card that has not received the
+/// queue's update yet reconciles to that decision, including its reason.
+async fn canonical_decision(
+    approvals: &otto_state::McpApprovalRepo,
+    id: &str,
+    approved: bool,
+    owner: &str,
+    reason: Option<&str>,
+) -> Result<(otto_state::McpApproval, bool)> {
+    let id = id.to_string();
+    match approvals.decide(&id, approved, owner, reason).await {
+        Ok(a) => Ok((a, true)),
+        Err(Error::Conflict(_)) => {
+            let a = approvals.get(&id).await?;
+            if !matches!(a.status.as_str(), "approved" | "denied" | "expired") {
+                return Err(Error::Conflict(format!("approval is {}", a.status)));
+            }
+            Ok((a, false))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn settle_approval(
+    assistant: &otto_state::AssistantRepo,
+    approvals: &otto_state::McpApprovalRepo,
+    id: &str,
+    approved: bool,
+    owner: &str,
+    reason: Option<&str>,
+    grant: Option<String>,
+) -> Result<Value> {
+    let (canonical, won) = canonical_decision(approvals, id, approved, owner, reason).await?;
+    let mut result = json!({
+        "decision": canonical.status, "reason": canonical.decision_note,
+        "decided_at": canonical.decided_at, "via": "mcp_approvals",
+    });
+    if let Some(resource) = grant.filter(|_| won && canonical.status == "approved") {
+        let principal = assistant.assistant_principal(owner).await?;
+        assistant
+            .set_grant(&principal, "tool_destination", &resource, "allow")
+            .await?;
+        result["always_allow"] = json!(resource);
+    }
+    Ok(result)
+}
+
+async fn stop_task_execution(ctx: &ServerCtx, task: &AssistantTask, takeover: bool) -> Result<()> {
+    if task.kind == "delegation" {
+        if let Some(id) = task.agent_run_id.as_deref() {
+            if !crate::personal_agents_engine::cancel_run(id) {
+                let run = PersonalAgentsRepo::new(ctx.pool.clone())
+                    .get_run(id)
+                    .await?;
+                if run.status == "running" {
+                    return Err(Error::Conflict(
+                        "the delegated run cannot be stopped here; open its session".into(),
+                    ));
+                }
+            } else {
+                // The card settles only after the engine has killed its owned
+                // session and committed the canceled (or already-finished) run.
+                let pa = PersonalAgentsRepo::new(ctx.pool.clone());
+                let until = tokio::time::Instant::now() + Duration::from_secs(30);
+                while pa.get_run(id).await?.status == "running" {
+                    if tokio::time::Instant::now() >= until {
+                        return Err(Error::Conflict(
+                            "the delegated run is still stopping; retry shortly".into(),
+                        ));
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+        return Ok(());
+    }
+    if task.kind != "task" {
+        return Ok(());
+    }
+    if !takeover && task.state == "queued" && task.thread_execution_id.is_none() {
+        return Ok(());
+    }
+    if let (Some(thread), Some(execution)) = (&task.thread_id, &task.thread_execution_id) {
+        if takeover && threads::execution_id(thread).as_ref() != Some(execution) {
+            return Err(Error::Conflict(
+                "this task no longer owns a running turn".into(),
+            ));
+        }
+        return threads::stop_execution(thread, execution).await;
+    }
+    if takeover || task.thread_id.as_deref().is_some_and(threads::is_in_flight) {
+        return Err(Error::Conflict(
+            "this task has no owned execution to stop".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Re-send the thread's last user message on `provider` (the "continue on
@@ -975,6 +1163,14 @@ async fn settle_delegations(ctx: &ServerCtx) {
     };
     let pa = PersonalAgentsRepo::new(ctx.pool.clone());
     for t in running {
+        let lock = task_lock(&t.id);
+        let _guard = lock.lock().await;
+        let Ok(t) = repo(ctx).get_task_any(&t.id).await else {
+            continue;
+        };
+        if t.state != "running" {
+            continue;
+        }
         let Some(run_id) = t.agent_run_id.as_deref() else {
             continue;
         };
@@ -1023,7 +1219,13 @@ async fn settle_delegations(ctx: &ServerCtx) {
         if let Ok(done) = repo(ctx)
             .set_task_state(
                 &t.id,
-                if ok { "done" } else { "failed" },
+                if ok {
+                    "done"
+                } else if run.status == "canceled" {
+                    "cancelled"
+                } else {
+                    "failed"
+                },
                 None,
                 Some(json!({
                     "run_id": run.id, "status": run.status, "summary": run.summary,
@@ -1095,6 +1297,76 @@ async fn expire_incognito(ctx: &ServerCtx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_canonical_denial_never_becomes_approved_or_creates_a_grant() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let assistant = otto_state::AssistantRepo::new(pool.clone());
+        let approvals = otto_state::McpApprovalRepo::new(pool);
+        let approval = approvals
+            .create(NewApproval {
+                workspace_id: None,
+                kind: "assistant_outward".into(),
+                server_id: None,
+                server_name: None,
+                tool: Some("publish".into()),
+                title: "publish".into(),
+                detail: None,
+                args_redacted_json: "{}".into(),
+                args_hash: None,
+                risk_label: None,
+                requested_by: Some("owner".into()),
+                requested_by_kind: Some("assistant".into()),
+                requested_by_session_id: None,
+                expires_at: None,
+            })
+            .await
+            .unwrap();
+        approvals
+            .decide(&approval.id, false, "reviewer", Some("Do not publish"))
+            .await
+            .unwrap();
+        let result = settle_approval(
+            &assistant,
+            &approvals,
+            &approval.id,
+            true,
+            "owner",
+            None,
+            Some("publish:destination".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["decision"], "denied");
+        assert_eq!(result["reason"], "Do not publish");
+        assert!(result.get("always_allow").is_none());
+        let principal = assistant.assistant_principal("owner").await.unwrap();
+        assert_eq!(
+            assistant
+                .grant_mode(&principal, "tool_destination", "publish:destination")
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn delegated_runs_cannot_claim_resumable_takeover() {
+        assert!(next_state("delegation", "running", None, "takeover").is_err());
+        assert!(next_state("delegation", "needs_you", Some("takeover"), "handback").is_err());
+        assert_eq!(
+            next_state("delegation", "running", None, "cancel"),
+            Ok("cancelled")
+        );
+    }
 
     #[test]
     fn approvals_settle_either_way() {

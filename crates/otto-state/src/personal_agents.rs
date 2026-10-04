@@ -845,24 +845,39 @@ impl PersonalAgentsRepo {
     // -- Runs ----------------------------------------------------------------
 
     pub async fn create_run(&self, r: NewAgentRun) -> Result<PersonalAgentRun> {
-        let id = new_id();
+        self.create_run_configured(&new_id(), r, "directed", false, None)
+            .await
+    }
+
+    /// The engine reserves cancellation for `id` before this atomic insert.
+    pub async fn create_run_configured(
+        &self,
+        id: &str,
+        r: NewAgentRun,
+        mode: &str,
+        read_only: bool,
+        goal_id: Option<&str>,
+    ) -> Result<PersonalAgentRun> {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO personal_agent_runs (id, agent_id, schedule_id, workspace_id, status, \
-             trigger, started_at, summary, delivered, created_at) \
-             VALUES (?, ?, ?, ?, 'running', ?, ?, '', 0, ?)",
+             trigger, started_at, summary, delivered, created_at, mode, read_only, goal_id) \
+             VALUES (?, ?, ?, ?, 'running', ?, ?, '', 0, ?, ?, ?, ?)",
         )
-        .bind(&id)
+        .bind(id)
         .bind(&r.agent_id)
         .bind(&r.schedule_id)
         .bind(&r.workspace_id)
         .bind(&r.trigger)
         .bind(&now)
         .bind(&now)
+        .bind(mode)
+        .bind(read_only as i64)
+        .bind(goal_id)
         .execute(&self.pool)
         .await
         .map_err(dberr("create personal agent run"))?;
-        self.get_run(&id).await
+        self.get_run(id).await
     }
 
     /// Settle a run. A `None` session id keeps the one recorded when the

@@ -9,8 +9,8 @@
 //! seeded with a hand-off packet — the thread keeps one visible history, and
 //! every switch is announced with a `route` turn (never silent).
 
-use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use otto_core::api::CreateSessionReq;
@@ -24,7 +24,9 @@ use super::limits::{self, LimitState};
 use super::router::{self, RouteDecision, RouteInput, RouteTarget, RoutingSettings};
 use super::types::{SendReq, SendResp};
 use super::{assistant_dir, check_text, emit_turn, repo, system_turn, SESSION_SOURCE};
+use crate::cancel_signal::CancelSignal;
 use crate::review_session::submit_prompt;
+use crate::scheduled_tasks_engine::until_cancelled;
 use crate::state::ServerCtx;
 
 /// Max bytes of one user turn.
@@ -50,9 +52,17 @@ const INDEX_EVERY: Duration = Duration::from_secs(15);
 // In-flight turns (one per thread)
 // ---------------------------------------------------------------------------
 
-fn in_flight() -> &'static Mutex<HashSet<String>> {
-    static SET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    SET.get_or_init(|| Mutex::new(HashSet::new()))
+#[derive(Default)]
+struct TurnControl {
+    id: String,
+    cancel: CancelSignal,
+    finished: CancelSignal,
+    stop_error: Mutex<Option<String>>,
+}
+
+fn in_flight() -> &'static Mutex<HashMap<String, Arc<TurnControl>>> {
+    static SET: OnceLock<Mutex<HashMap<String, Arc<TurnControl>>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Is a turn of `thread_id` being driven right now?
@@ -60,18 +70,25 @@ pub fn is_in_flight(thread_id: &str) -> bool {
     in_flight()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .contains(thread_id)
+        .contains_key(thread_id)
 }
 
 /// RAII claim on a thread's single in-flight turn; released on drop (also
 /// when the driver task panics).
-pub struct TurnClaim(String);
+pub struct TurnClaim(String, Arc<TurnControl>);
 
 impl TurnClaim {
     pub fn claim(thread_id: &str) -> Option<Self> {
         let mut set = in_flight().lock().unwrap_or_else(|e| e.into_inner());
-        set.insert(thread_id.to_string())
-            .then(|| TurnClaim(thread_id.to_string()))
+        if set.contains_key(thread_id) {
+            return None;
+        }
+        let control = Arc::new(TurnControl {
+            id: otto_core::new_id(),
+            ..Default::default()
+        });
+        set.insert(thread_id.to_string(), control.clone());
+        Some(TurnClaim(thread_id.to_string(), control))
     }
 }
 
@@ -81,6 +98,44 @@ impl Drop for TurnClaim {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.0);
+        self.1.finished.cancel();
+    }
+}
+
+pub fn execution_id(thread_id: &str) -> Option<String> {
+    in_flight()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(thread_id)
+        .map(|c| c.id.clone())
+}
+
+/// Stops only the operation bound to the task. A stale task never signals a
+/// replacement operation, even when both use the same resumed CLI session.
+pub async fn stop_execution(thread_id: &str, execution_id: &str) -> Result<()> {
+    let control = in_flight()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(thread_id)
+        .filter(|c| c.id == execution_id)
+        .cloned();
+    let Some(control) = control else {
+        return Ok(());
+    };
+    control.cancel.cancel();
+    if !control.finished.sleep(Duration::from_secs(60)).await {
+        return Err(Error::Conflict(
+            "the execution is still stopping; retry shortly".into(),
+        ));
+    }
+    let error = control
+        .stop_error
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    match error {
+        Some(e) => Err(Error::Internal(e)),
+        None => Ok(()),
     }
 }
 
@@ -267,7 +322,8 @@ pub async fn send(
     let (ctx2, owner2, decision2) = (ctx.clone(), owner.to_string(), decision.clone());
     tokio::spawn(async move {
         let _claim = claim;
-        if let Err(e) = drive_turn(&ctx2, &owner2, thread, decision2, attachments).await {
+        if let Err(e) = drive_turn(&ctx2, &owner2, thread, decision2, attachments, &_claim.1).await
+        {
             warn!("assistant: turn failed: {e}");
         }
     });
@@ -300,7 +356,11 @@ async fn drive_turn(
     thread: AssistantThread,
     decision: RouteDecision,
     attachments: Vec<AssistantAttachment>,
+    control: &TurnControl,
 ) -> Result<()> {
+    if control.cancel.is_cancelled() {
+        return Ok(());
+    }
     let target = decision.target();
     let switching = needs_new_session(&thread, &decision);
     if switching && thread.session_id.is_some() {
@@ -341,91 +401,108 @@ async fn drive_turn(
                 return Err(e);
             }
         };
-    let handoff = if fresh_session {
-        handoff_for(ctx, owner, &thread).await
-    } else {
-        None
-    };
-    let prompt = compose_prompt(&decision.text, &attachments, handoff.as_deref());
-
-    let _hold = ctx.manager.hold_for_turn(&session.id);
-    if !submit_prompt(&ctx.manager, &session.id, &prompt).await {
-        system_turn(
-            ctx,
-            owner,
-            &thread.id,
-            "message",
-            "Couldn't deliver the message — the session exited before it was ready. Try again.",
-            None,
-        )
-        .await;
-        return Err(Error::Internal("session died before the prompt".into()));
-    }
-    ctx.manager
-        .record_user_message(&session.id, &decision.text)
-        .await;
-
-    // Wait for the turn to end, indexing finished blocks as they land.
-    let started = Instant::now();
-    let mut last_index = Instant::now();
-    // The turn's fold, kept across ticks: each index reads only what the
-    // agent appended since the previous one (dropped with the turn).
-    let mut index = ReplyIndex::default();
-    loop {
-        tokio::time::sleep(POLL).await;
-        let Some(h) = ctx.manager.live_handle(&session.id) else {
-            break;
+    // Session creation is allowed to finish so cancellation can always stop
+    // the exact process it created. Everything after creation is cancellable.
+    let execution = async {
+        let handoff = if fresh_session {
+            handoff_for(ctx, owner, &thread).await
+        } else {
+            None
         };
-        if started.elapsed() >= MAX_TURN {
-            break;
+        let prompt = compose_prompt(&decision.text, &attachments, handoff.as_deref());
+
+        let _hold = ctx.manager.hold_for_turn(&session.id);
+        if !submit_prompt(&ctx.manager, &session.id, &prompt).await {
+            system_turn(
+                ctx,
+                owner,
+                &thread.id,
+                "message",
+                "Couldn't deliver the message — the session exited before it was ready. Try again.",
+                None,
+            )
+            .await;
+            return Err(Error::Internal("session died before the prompt".into()));
         }
-        if started.elapsed() >= MIN_TURN && h.last_output_at().elapsed() >= QUIET {
-            break;
-        }
-        if last_index.elapsed() >= INDEX_EVERY {
-            last_index = Instant::now();
-            let _ = index_replies(ctx, owner, &thread.id, &session, &mut index).await;
-        }
-    }
-    // The transcript record lands when a block completes: retry briefly.
-    for _ in 0..3 {
-        if index_replies(ctx, owner, &thread.id, &session, &mut index).await > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-    let screen = ctx
-        .manager
-        .live_handle(&session.id)
-        .map(|h| h.screen_rows().join("\n"))
-        .unwrap_or_default();
-    if let Some(hit) = limits::detect_limit(&screen) {
-        // A banner still on screen from an EARLIER turn is not a new hit.
-        let (_, snapshot) = load_settings(ctx, owner).await;
-        let seen = snapshot
-            .iter()
-            .any(|s| s.limited && s.provider == target.provider && s.message == hit.message);
-        if !seen {
-            super::tasks::on_limit(ctx, owner, &thread.id, &target, &hit, "pty").await;
-        }
-    }
-    // Push the settled thread (status back to idle) to the clients.
-    if let Ok(t) = repo(ctx).get_thread(owner, &thread.id).await {
-        if let Some(last) = repo(ctx)
-            .list_turns(&t.id, None, 1)
-            .await
-            .ok()
-            .and_then(|mut v| v.pop())
-        {
-            let mut t = with_status(ctx, t).await;
-            if t.status == "working" {
-                // The claim is still held by this driver until it returns.
-                t.status = "idle".into();
+        ctx.manager
+            .record_user_message(&session.id, &decision.text)
+            .await;
+
+        // Wait for the turn to end, indexing finished blocks as they land.
+        let started = Instant::now();
+        let mut last_index = Instant::now();
+        // The turn's fold, kept across ticks: each index reads only what the
+        // agent appended since the previous one (dropped with the turn).
+        let mut index = ReplyIndex::default();
+        loop {
+            tokio::time::sleep(POLL).await;
+            let Some(h) = ctx.manager.live_handle(&session.id) else {
+                break;
+            };
+            if started.elapsed() >= MAX_TURN {
+                break;
             }
-            emit_turn(ctx, owner, &last, Some(&t));
+            if started.elapsed() >= MIN_TURN && h.last_output_at().elapsed() >= QUIET {
+                break;
+            }
+            if last_index.elapsed() >= INDEX_EVERY {
+                last_index = Instant::now();
+                let _ = index_replies(ctx, owner, &thread.id, &session, &mut index).await;
+            }
         }
+        // The transcript record lands when a block completes: retry briefly.
+        for _ in 0..3 {
+            if index_replies(ctx, owner, &thread.id, &session, &mut index).await > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        let screen = ctx
+            .manager
+            .live_handle(&session.id)
+            .map(|h| h.screen_rows().join("\n"))
+            .unwrap_or_default();
+        if let Some(hit) = limits::detect_limit(&screen) {
+            // A banner still on screen from an EARLIER turn is not a new hit.
+            let (_, snapshot) = load_settings(ctx, owner).await;
+            let seen = snapshot
+                .iter()
+                .any(|s| s.limited && s.provider == target.provider && s.message == hit.message);
+            if !seen {
+                super::tasks::on_limit(ctx, owner, &thread.id, &target, &hit, "pty").await;
+            }
+        }
+        // Push the settled thread (status back to idle) to the clients.
+        if let Ok(t) = repo(ctx).get_thread(owner, &thread.id).await {
+            if let Some(last) = repo(ctx)
+                .list_turns(&t.id, None, 1)
+                .await
+                .ok()
+                .and_then(|mut v| v.pop())
+            {
+                let mut t = with_status(ctx, t).await;
+                if t.status == "working" {
+                    // The claim is still held by this driver until it returns.
+                    t.status = "idle".into();
+                }
+                emit_turn(ctx, owner, &last, Some(&t));
+            }
+        }
+        Ok(())
+    };
+    tokio::select! {
+        biased;
+        _ = until_cancelled(&control.cancel) => {
+            // Suspend releases the PTY while retaining transcript/resume state
+            // for an explicit handback. No automatic failover follows a stop.
+            let result = ctx.manager.suspend(&session.id).await;
+            if let Err(e) = &result {
+                *control.stop_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
+            }
+            result
+        }
+        result = execution => result,
     }
-    Ok(())
 }
 
 pub fn display_provider(p: &str) -> String {
@@ -725,6 +802,8 @@ pub struct ReplyIndex {
         otto_transcript::Tailer,
     )>,
     stamp: Option<(u64, Option<std::time::SystemTime>)>,
+    indexed_records: usize,
+    recent_replies: std::collections::VecDeque<(String, Option<String>, String)>,
 }
 
 impl ReplyIndex {
@@ -753,7 +832,30 @@ impl ReplyIndex {
         }
         self.stamp = Some(stamp);
         let (_, _, folder, _) = self.live.as_ref()?;
-        Some(reply_texts(&folder.snapshot().turns))
+        if !fresh {
+            self.recent_replies.clear();
+        }
+        let replies = if fresh {
+            reply_turn_texts(folder.turns_since(self.indexed_records).iter())
+        } else {
+            // Preserve the initial last-30 backfill while excluding all older
+            // payload, provider indices and artifacts from the snapshot.
+            reply_texts(&folder.bounded_snapshot(30, usize::MAX).turns)
+        };
+        self.indexed_records = folder.record_count();
+        let mut changed = Vec::new();
+        for reply in replies {
+            if self.recent_replies.iter().any(|r| r == &reply) {
+                continue;
+            }
+            self.recent_replies.retain(|r| r.0 != reply.0);
+            self.recent_replies.push_back(reply.clone());
+            while self.recent_replies.len() > 30 {
+                self.recent_replies.pop_front();
+            }
+            changed.push(reply);
+        }
+        Some(changed)
     }
 
     /// Fold the whole file; the tailer resumes exactly where the read stopped
@@ -784,12 +886,17 @@ impl ReplyIndex {
 /// text (tool-only turns are skipped), text capped at [`MAX_INDEXED_BYTES`].
 pub fn reply_texts(turns: &[otto_transcript::FoldedTurn]) -> Vec<(String, Option<String>, String)> {
     let start = turns.len().saturating_sub(30);
-    turns[start..]
-        .iter()
-        .filter(|ft| matches!(ft.turn.role, otto_transcript::Role::Assistant))
-        .filter_map(|ft| {
-            let text = ft
-                .turn
+    reply_turn_texts(turns[start..].iter().map(|ft| &ft.turn))
+}
+
+fn reply_turn_texts<'a>(
+    turns: impl Iterator<Item = &'a otto_transcript::Turn>,
+) -> Vec<(String, Option<String>, String)> {
+    turns
+        .filter(|turn| matches!(turn.role, otto_transcript::Role::Assistant))
+        .filter_map(|turn| {
+            let mut text = String::new();
+            for md in turn
                 .blocks
                 .iter()
                 .filter_map(|b| match b {
@@ -797,14 +904,22 @@ pub fn reply_texts(turns: &[otto_transcript::FoldedTurn]) -> Vec<(String, Option
                     _ => None,
                 })
                 .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n");
+            {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                let left = MAX_INDEXED_BYTES.saturating_sub(text.len());
+                text.push_str(&cap_bytes(md, left));
+                if text.len() >= MAX_INDEXED_BYTES {
+                    break;
+                }
+            }
             if text.is_empty() {
                 return None;
             }
             Some((
-                ft.turn.id.clone(),
-                ft.turn.model.clone(),
+                turn.id.clone(),
+                turn.model.clone(),
                 cap_bytes(&text, MAX_INDEXED_BYTES),
             ))
         })
@@ -825,6 +940,191 @@ fn cap_bytes(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+
+    async fn task_repo() -> otto_state::AssistantRepo {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        otto_state::AssistantRepo::new(pool)
+    }
+
+    #[tokio::test]
+    async fn explicit_task_resume_rebinds_stop_to_the_new_execution() {
+        let repo = task_repo().await;
+        let thread = repo
+            .create_thread(otto_state::assistant::NewThread {
+                owner_user_id: "owner".into(),
+                title: "Resume".into(),
+                provider: "claude".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let first = TurnClaim::claim(&thread.id).unwrap();
+        let task = repo
+            .create_task(otto_state::NewAssistantTask {
+                owner_user_id: "owner".into(),
+                thread_id: Some(thread.id.clone()),
+                kind: "task".into(),
+                state: "needs_you".into(),
+                thread_execution_id: Some(first.1.id.clone()),
+                needs_you: Some(json!({"kind": "question", "prompt": "Continue?"})),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        drop(first);
+        let next = TurnClaim::claim(&thread.id).unwrap();
+        // An untouched E1 task remains unable to interrupt E2.
+        stop_execution(&thread.id, task.thread_execution_id.as_deref().unwrap())
+            .await
+            .unwrap();
+        assert!(!next.1.cancel.is_cancelled());
+        let (_, resumed) = super::super::tasks::apply_agent_update(
+            &repo,
+            "owner",
+            Some(&thread.id),
+            &task.id,
+            "running",
+            Some(Value::Null),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed.state, "running");
+        assert!(resumed.needs_you.is_none());
+        assert_eq!(
+            resumed.thread_execution_id.as_deref(),
+            Some(next.1.id.as_str())
+        );
+        assert_ne!(resumed.thread_execution_id, task.thread_execution_id);
+        let observed = next.1.cancel.clone();
+        let stopped = observed.clone();
+        let driver = tokio::spawn(async move {
+            until_cancelled(&stopped).await;
+            drop(next);
+        });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            stop_execution(&thread.id, resumed.thread_execution_id.as_deref().unwrap()),
+        )
+        .await
+        .expect("the explicitly resumed driver must receive Stop")
+        .unwrap();
+        driver.await.unwrap();
+        assert!(observed.is_cancelled());
+        repo.set_task_state(&task.id, "cancelled", None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_task("owner", &task.id).await.unwrap().state,
+            "cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_thread_or_owner_cannot_rebind_an_agent_task() {
+        let repo = task_repo().await;
+        let thread = repo
+            .create_thread(otto_state::assistant::NewThread {
+                owner_user_id: "owner".into(),
+                title: "Owned".into(),
+                provider: "claude".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let current = TurnClaim::claim(&thread.id).unwrap();
+        let foreign = TurnClaim::claim("foreign-task-resume-test").unwrap();
+        let task = repo
+            .create_task(otto_state::NewAssistantTask {
+                owner_user_id: "owner".into(),
+                thread_id: Some(thread.id.clone()),
+                kind: "task".into(),
+                state: "running".into(),
+                thread_execution_id: Some(current.1.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        for (owner, caller) in [
+            ("owner", Some("foreign-task-resume-test")),
+            ("owner", None),
+            ("other-owner", Some(thread.id.as_str())),
+        ] {
+            assert!(super::super::tasks::apply_agent_update(
+                &repo,
+                owner,
+                caller,
+                &task.id,
+                "running",
+                Some(Value::Null),
+                None,
+            )
+            .await
+            .is_err());
+            assert_eq!(
+                repo.get_task_any(&task.id)
+                    .await
+                    .unwrap()
+                    .thread_execution_id,
+                task.thread_execution_id
+            );
+        }
+        assert!(!current.1.cancel.is_cancelled());
+        assert!(!foreign.1.cancel.is_cancelled());
+        drop(current);
+        assert!(matches!(
+            super::super::tasks::apply_agent_update(
+                &repo,
+                "owner",
+                Some(&thread.id),
+                &task.id,
+                "running",
+                Some(Value::Null),
+                None,
+            )
+            .await,
+            Err(Error::Conflict(_))
+        ));
+        assert_eq!(
+            repo.get_task_any(&task.id)
+                .await
+                .unwrap()
+                .thread_execution_id,
+            task.thread_execution_id
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_an_old_task_never_signals_a_replacement_turn() {
+        let first = TurnClaim::claim("owned-execution-test").unwrap();
+        let old_id = first.1.id.clone();
+        drop(first);
+        let next = TurnClaim::claim("owned-execution-test").unwrap();
+        stop_execution("owned-execution-test", &old_id)
+            .await
+            .unwrap();
+        assert!(!next.1.cancel.is_cancelled());
+        let signal = next.1.cancel.clone();
+        let done = tokio::spawn(async move {
+            until_cancelled(&signal).await;
+            drop(next);
+        });
+        let next_id = execution_id("owned-execution-test").unwrap();
+        stop_execution("owned-execution-test", &next_id)
+            .await
+            .unwrap();
+        done.await.unwrap();
+        assert!(!is_in_flight("owned-execution-test"));
+    }
 
     /// SI-02: the incremental index answers exactly what a whole-file fold
     /// did, skips an unchanged file, and survives a replaced (shorter) file.
@@ -844,9 +1144,14 @@ mod tests {
             )
         };
         let mut ix = ReplyIndex::default();
+        let mut indexed = std::collections::BTreeMap::new();
         let mut at = bytes.len() / 4;
         std::fs::write(&path, &bytes[..at]).unwrap();
-        assert_eq!(ix.replies(Provider::Claude, &path), Some(want(&path)));
+        let first = ix.replies(Provider::Claude, &path).unwrap();
+        assert_eq!(first, want(&path));
+        for row in first {
+            indexed.insert(row.0.clone(), row);
+        }
         assert_eq!(
             ix.replies(Provider::Claude, &path),
             None,
@@ -859,7 +1164,12 @@ mod tests {
             std::fs::write(&path, &all).unwrap();
             at = end;
             // (`fs::write` rewrites in place: same inode, longer file.)
-            assert_eq!(ix.replies(Provider::Claude, &path), Some(want(&path)));
+            for row in ix.replies(Provider::Claude, &path).unwrap() {
+                indexed.insert(row.0.clone(), row);
+            }
+            for row in want(&path) {
+                assert_eq!(indexed.get(&row.0), Some(&row));
+            }
         }
         assert!(!want(&path).is_empty());
         // Replaced by a shorter file → refolded from scratch.

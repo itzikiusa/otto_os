@@ -11134,6 +11134,7 @@ export type AssistantTaskState =
 
 export interface AssistantTask {
   id: Id;
+  /** Agent updates require this owning thread; explicit running updates rebind its current execution. */
   thread_id: Id | null;
   kind:
     | 'task'
