@@ -799,10 +799,10 @@ async fn run_attempt(
         if !crate::swarm_runtime::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
             return RunOutcome::failed(Some(sid), FailReason::Stopped);
         }
-        if !dispatched(&ctx.manager, &sid, before).await {
-            if !crate::swarm_runtime::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
-                return RunOutcome::failed(Some(sid), FailReason::Stopped);
-            }
+        if !dispatched(&ctx.manager, &sid, before).await
+            && !crate::swarm_runtime::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await
+        {
+            return RunOutcome::failed(Some(sid), FailReason::Stopped);
         }
     } else {
         tracing::warn!("swarm: TUI never settled for session {sid} — brief not injected");

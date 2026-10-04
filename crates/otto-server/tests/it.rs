@@ -30,10 +30,10 @@ mod email_sender_storage;
 mod grants_api;
 #[path = "impersonation.rs"]
 mod impersonation;
-#[path = "k8s_monitor_clickhouse.rs"]
-mod k8s_monitor_clickhouse;
 #[path = "k8s_backfill_budget.rs"]
 mod k8s_backfill_budget;
+#[path = "k8s_monitor_clickhouse.rs"]
+mod k8s_monitor_clickhouse;
 #[path = "mcp_auto_approve.rs"]
 mod mcp_auto_approve;
 #[path = "personal_agent_policy.rs"]

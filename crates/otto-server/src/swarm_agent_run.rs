@@ -276,12 +276,11 @@ pub async fn run_swarm_agent(
                 last_reason = Some(FailReason::Stopped);
                 break;
             }
-            if !dispatched(&ctx.manager, &sid, before).await {
-                if !crate::swarm_runtime::send_run_input(ctx, swarm_id, &run_id, &sid, b"\r").await
-                {
-                    last_reason = Some(FailReason::Stopped);
-                    break;
-                }
+            if !dispatched(&ctx.manager, &sid, before).await
+                && !crate::swarm_runtime::send_run_input(ctx, swarm_id, &run_id, &sid, b"\r").await
+            {
+                last_reason = Some(FailReason::Stopped);
+                break;
             }
         } else {
             tracing::warn!(
