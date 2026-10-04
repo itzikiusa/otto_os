@@ -27,7 +27,20 @@ export interface TestResult {
   error?: string;
 }
 
+export type VariableWrites = Record<string, string | null>;
+
+/** Apply only explicit set/unset calls; last completed script wins per key. */
+export function mergeVariableWrites(current: Record<string, string>, writes: VariableWrites): Record<string, string> {
+  const next = { ...current };
+  for (const [key, value] of Object.entries(writes)) {
+    if (value === null) delete next[key];
+    else Object.defineProperty(next, key, {value, enumerable:true, configurable:true, writable:true});
+  }
+  return next;
+}
+
 export interface ScriptRun {
+  writes?: VariableWrites;
   logs: string[];
   error?: string;
   tests: TestResult[];
@@ -54,11 +67,15 @@ function expect(actual: unknown) {
   return api;
 }
 
-function varApi(vars: Record<string, string>) {
+function varApi(vars: Record<string, string>, writes: VariableWrites) {
   return {
     get: (k: string): string | undefined => vars[k],
-    set: (k: string, v: unknown): void => { vars[k] = typeof v === 'string' ? v : JSON.stringify(v); },
-    unset: (k: string): void => { delete vars[k]; },
+    set: (k: string, v: unknown): void => {
+      const value = typeof v === 'string' ? v : JSON.stringify(v);
+      Object.defineProperty(vars, k, {value, enumerable:true, configurable:true, writable:true});
+      writes[k] = value;
+    },
+    unset: (k: string): void => { delete vars[k]; writes[k] = null; },
     has: (k: string): boolean => k in vars,
     toObject: (): Record<string, string> => ({ ...vars }),
   };
@@ -117,7 +134,8 @@ export function runPreRequest(code: string, req: PreRequestReq, vars: Record<str
     remove: (k: string) => { req.headers = req.headers.filter((x) => x.key.toLowerCase() !== k.toLowerCase()); },
     get: (k: string) => req.headers.find((x) => x.key.toLowerCase() === k.toLowerCase())?.value,
   };
-  const v = varApi(vars);
+  const writes: VariableWrites = Object.create(null);
+  const v = varApi(vars, writes);
   const pm = {
     environment: v,
     variables: v,
@@ -134,13 +152,14 @@ export function runPreRequest(code: string, req: PreRequestReq, vars: Record<str
       addHeader: headers.add,
     },
   };
-  return run(code, pm);
+  return { ...run(code, pm), writes };
 }
 
 /** Run a post-response (test) script. Reads the response, may set `vars`. */
 export function runPostResponse(code: string, resp: ResponseCtx, vars: Record<string, string>): ScriptRun {
   if (!code.trim()) return { logs: [], tests: [] };
-  const v = varApi(vars);
+  const writes: VariableWrites = Object.create(null);
+  const v = varApi(vars, writes);
   const response = {
     code: resp.code,
     status: resp.status,
@@ -165,5 +184,5 @@ export function runPostResponse(code: string, resp: ResponseCtx, vars: Record<st
       pm.__recordTest(result);
     },
   };
-  return run(code, pm);
+  return { ...run(code, pm), writes };
 }

@@ -1,3 +1,4 @@
+import { mergeVariableWrites } from '../api/scripts';
 import type { ApiAutomationRun, StartApiAutomationRunReq } from '../api/types';
 // API client ("Postman") store — workspace-scoped collections, requests,
 // environments, history, plus a live "draft" request the builder edits and
@@ -1375,7 +1376,7 @@ class ApiClientStore {
         if (pre.run.error) throw new Error(`Pre-request script failed: ${pre.run.error}`);
         if (!pre.request) throw new Error('Pre-request script returned no request.');
         reqCtx = pre.request; runtimeVars = pre.vars;
-        this.runtimeScopes = {...this.runtimeScopes, [wid]: {...runtimeVars}};
+        this.runtimeScopes = {...this.runtimeScopes, [wid]: mergeVariableWrites(this.runtimeScopes[wid] ?? {}, pre.run.writes ?? {})};
       }
       checkCurrent();
       let effectiveBody = reqCtx.body;
@@ -1425,7 +1426,7 @@ class ApiClientStore {
         logs.push(...post.run.logs.map(l => `[test] ${l}`));
         if (ownsView()) this.patchSlot(tabId, { tests: post.run.tests });
         if (post.run.error) logs.push(`[test] error: ${post.run.error}`);
-        else this.runtimeScopes = {...this.runtimeScopes, [wid]: {...post.vars}};
+        else this.runtimeScopes = {...this.runtimeScopes, [wid]: mergeVariableWrites(this.runtimeScopes[wid] ?? {}, post.run.writes ?? {})};
       }
       if (ownsView()) this.patchSlot(tabId, { logs });
       return resp;

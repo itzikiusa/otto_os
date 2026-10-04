@@ -5,6 +5,7 @@ import {runInNewContext} from 'node:vm';
 import {randomUUID} from 'node:crypto';
 import ts from 'typescript';
 import { HistoryRefresh, HistoryDetail } from '../src/lib/stores/apiHistory.ts';
+import * as scriptRuntime from '../src/lib/api/scripts.ts';
 import * as secretShapes from '../src/lib/api/apiSecretShapes.ts';
 
 function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: any[]) => Promise<any>) {
@@ -23,7 +24,7 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
       : p.endsWith('/apiSecretShapes') ? secretShapes
       : p.endsWith('/scriptRunner') ? {runScript}
       : p.endsWith('/lazyModule') ? {announceModule() {}}
-      : p.endsWith('/scripts') ? {runPreRequest: () => ({logs:[],tests:[]})}
+      : p.endsWith('/scripts') ? scriptRuntime
       : p.endsWith('/importers') ? {isImportedEnvironment: (d: any) => d.format === 'postman-env'}
       : p.endsWith('/types') ? {isSecretRef: (v: any) => !!v?.$secret} : {},
   };
@@ -101,7 +102,7 @@ test('closing the initiating tab cancels a pending pre-script', async () => {
 test('replaced execution ignores late pre-script even with the same tab identity', async () => {
   let release!: (value: unknown) => void;let sent=0;
   const slow=new Promise(r=>{release=r;});let scripts=0;
-  const {v}=setup({post:async()=>{sent++;return {headers:[],status:200};}},async input=>++scripts===1?slow:{run:{logs:[],tests:[]},request:input.request,vars:{current:'yes'}});
+  const {v}=setup({post:async()=>{sent++;return {headers:[],status:200};}},async input=>++scripts===1?slow:{run:{logs:[],tests:[],writes:{current:'yes'}},request:input.request,vars:{current:'yes'}});
   v.draft={...v.draft,url:'https://example.test',pre_request_script:'console.log(1)'};
   const first=v.execute();await v.execute();
   release({run:{logs:[],tests:[]},request:{method:'GET',url:'https://old.test',headers:[],body:''},vars:{old:'no'}});
@@ -395,3 +396,23 @@ test('api_history_appended refetches only a history list someone asked for (perf
   await new Promise((r) => setTimeout(r, 250));
   assert.equal(summaries(), 2, 'the History list stays live once loaded');
 });
+
+for (const code of ["console.log('done')", "pm.variables.set('a','one')", "pm.variables.unset('remove')"]) {
+  test(`concurrent script writes preserve newer unrelated variables: ${code}`, async () => {
+    let release!: () => void;
+    const pending = new Promise<void>(r => {release=r;});
+    const {v} = setup({post:async()=>({headers:[],status:200,status_text:'OK',body:'',duration_ms:1})}, async input => {
+      if (input.code === code) await pending;
+      const run = scriptRuntime.runPostResponse(input.code,input.response,input.vars);
+      return {run,vars:input.vars};
+    });
+    v.setRuntimeVar('token','old');v.setRuntimeVar('remove','yes');
+    v.draft={...v.draft,url:'https://slow.test',post_response_script:code};
+    const slow=v.execute();
+    v.newDraft();v.draft={...v.draft,url:'https://fast.test',post_response_script:"pm.variables.set('token','new'); pm.variables.set('b','two')"};
+    await v.execute();v.setRuntimeVar('manual','kept');release();await slow;
+    assert.equal(v.runtimeVars.token,'new');assert.equal(v.runtimeVars.b,'two');assert.equal(v.runtimeVars.manual,'kept');
+    if(code.includes('unset')) assert.equal(v.runtimeVars.remove,undefined);
+    if(code.includes("set('a'")) assert.equal(v.runtimeVars.a,'one');
+  });
+}
