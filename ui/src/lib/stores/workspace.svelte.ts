@@ -107,6 +107,7 @@ class WorkspaceStore {
    *  Terminal applies each injection exactly once (e.g. DB rows → running agent). */
   injections: Record<Id, { text: string; n: number }> = $state({});
   sessionsLoading = $state(false);
+  sessionsError = $state<string | null>(null);
   /** The first workspace-list load has picked the selection (or failed).
    *  Workspace-scoped boot loads (Home's Today) wait for it instead of
    *  loading once unscoped and again when the saved workspace resolves. */
@@ -331,7 +332,7 @@ class WorkspaceStore {
   /** Open a session that lives in another workspace: switch there, then focus
    *  it (the sidebar's grouped rows route through this). */
   async openInWorkspace(wsId: Id, sessionId: Id): Promise<void> {
-    if (wsId !== this.currentId) await this.select(wsId);
+    if (wsId !== this.currentId && !(await this.select(wsId))) return;
     if (this.currentId !== wsId) return;
     this.navigateToSession(sessionId);
   }
@@ -535,8 +536,35 @@ class WorkspaceStore {
     return { key: `${token}|${wsId}|${q}`, own, scratch };
   }
 
-  async select(id: Id): Promise<void> {
-    if (this.currentId === id && this.sessions.length > 0) return;
+  private workspaceSelectionRequest = 0;
+
+  /** Ask before changing the API/persistence context. A newer selection (even
+   * selecting the current workspace again) or auth reset cancels an older
+   * pending decision. The no-guard path stays synchronous for boot/retry. */
+  private maySelectWorkspace(id: Id | null): boolean | Promise<boolean> {
+    const request = ++this.workspaceSelectionRequest;
+    const generation = this.selectionGeneration;
+    if (this.currentId === id || this.currentId === null) return true;
+    const decision = router.mayChangeWorkspace();
+    if (typeof decision === 'boolean') return decision;
+    return decision.then((ok) => ok && request === this.workspaceSelectionRequest && generation === this.selectionGeneration);
+  }
+
+  async select(id: Id): Promise<boolean> {
+    const decision = this.maySelectWorkspace(id);
+    if (decision !== true && !(await decision)) return false;
+    return this.selectApproved(id);
+  }
+
+  /** Selection after leave approval; also used by an approved archive so its
+   * fallback does not ask to leave an already archived workspace again. */
+  private async selectApproved(id: Id): Promise<boolean> {
+    if (this.currentId === id && this.sessions.length > 0 && !this.sessionsError && this.layoutReady) return true;
+    if (this.currentId !== id) {
+      this.sessions = [];
+      this.otherWsSessions = [];
+      this.openTabs = [];
+    }
     const generation = ++this.selectionGeneration;
     this.currentId = id;
     this.resetArchived();
@@ -551,16 +579,32 @@ class WorkspaceStore {
     // clobbering this workspace's saved layout before `restoreLayout` reads it.
     await this.refreshSessions({ reconcile: false });
     await this.waitForSessions(generation);
-    if (generation !== this.selectionGeneration || this.currentId !== id) return;
+    if (generation !== this.selectionGeneration || this.currentId !== id) return false;
+    if (this.sessionsError) return true; // Context changed; list failure remains retryable.
     void this.refreshActiveWorkflowRuns();
     void this.refreshOtherSessions();
     this.restoreLayout(id);
+    return true;
+  }
+
+  /** Retry discovery and complete the layout restoration interrupted by failure. */
+  async retrySessions(): Promise<void> {
+    if (!this.layoutReady) {
+      if (this.currentId) await this.select(this.currentId);
+      else await this.selectNone();
+    } else await this.refreshSessions();
   }
 
   /** Zero-workspace mode (a fresh account, or the last workspace archived):
    *  no current workspace, only scratch sessions, layout keyed on
    *  `SCRATCH_WORKSPACE_ID` so tabs/panes still survive reloads. */
-  private async selectNone(): Promise<void> {
+  private async selectNone(): Promise<boolean> {
+    const decision = this.maySelectWorkspace(null);
+    if (decision !== true && !(await decision)) return false;
+    return this.selectNoneApproved();
+  }
+
+  private async selectNoneApproved(): Promise<boolean> {
     const generation = ++this.selectionGeneration;
     this.currentId = null;
     this.resetArchived();
@@ -570,8 +614,10 @@ class WorkspaceStore {
     this.bindTabsKey(SCRATCH_WORKSPACE_ID);
     await this.refreshSessions({ reconcile: false });
     await this.waitForSessions(generation);
-    if (generation !== this.selectionGeneration || this.currentId !== null) return;
+    if (generation !== this.selectionGeneration || this.currentId !== null) return false;
+    if (this.sessionsError) return true;
     this.restoreLayout(SCRATCH_WORKSPACE_ID);
+    return true;
   }
 
   /** Point both persistence keys at `key` and stop writing under it until
@@ -802,6 +848,7 @@ class WorkspaceStore {
     const wsId = this.currentId;
     const current = () => generation === this.sessionsGeneration && selection === this.selectionGeneration && wsId === this.currentId;
     this.sessionsLoading = true;
+    this.sessionsError = null;
     try {
       // The current workspace's sessions (when one is selected) plus the
       // scratch workspace's — always, best-effort (a daemon without the
@@ -886,7 +933,7 @@ class WorkspaceStore {
       this.pruneStatusMap();
       if (opts.reconcile !== false) this.reconcileTabs();
     } catch (e) {
-      if (current()) throw e;
+      if (current()) this.sessionsError = e instanceof Error ? e.message : String(e);
     } finally {
       if (current()) this.sessionsLoading = false;
     }
@@ -1154,16 +1201,24 @@ class WorkspaceStore {
   }
 
   /** Archive (soft-delete) a workspace: it leaves the sidebar; its sessions and
-   *  files are untouched. Switches away first when it's the current one. */
-  async archiveWorkspace(id: Id): Promise<void> {
+   *  files are untouched. Current-workspace editors approve leaving before
+   *  the archive request; a successful archive selects the fallback. */
+  async archiveWorkspace(id: Id): Promise<boolean> {
+    if (this.currentId === id) {
+      const decision = this.maySelectWorkspace(null);
+      if (decision !== true && !(await decision)) return false;
+    }
+    const generation = this.selectionGeneration;
     await api.del(`/workspaces/${id}`);
     this.workspaces = this.workspaces.filter((x) => x.id !== id);
     this.otherWsSessions = this.otherWsSessions.filter((s) => s.workspace_id !== id);
-    if (this.currentId === id) {
+    // A switch that completed during DELETE owns the current context.
+    if (this.currentId === id && generation === this.selectionGeneration) {
       const next = this.workspaces[0];
-      if (next) await this.select(next.id);
-      else await this.selectNone();
+      if (next) await this.selectApproved(next.id);
+      else await this.selectNoneApproved();
     }
+    return true;
   }
 
   /** Remove the tab (local bookkeeping only — the session keeps running).
@@ -1483,6 +1538,26 @@ class WorkspaceStore {
     if (this.archivedLoaded) this.archivedSessions = [s, ...this.archivedSessions.filter((x) => x.id !== s.id)];
   }
 
+  /** HTTP responses and events share the same idempotent membership update. */
+  private applyArchiveState(s: Session): void {
+    this.pendingStatus.delete(s.id);
+    this.statusMap[s.id] = s.status;
+    this.clearNeedsYou(s.id);
+    if (s.archived) {
+      this.closeTab(s.id);
+      if (this.belongsHere(s.workspace_id) && visibleOnThisDevice(s)) this.moveToArchived(s);
+      else this.otherWsSessions = this.otherWsSessions.filter(x => x.id !== s.id);
+      return;
+    }
+    this.dropArchived(s.id);
+    this.archivedKnown = false;
+    this.hasArchived = this.archivedSessions.length > 0 || this.archivedHasMore || !this.archivedLoaded;
+    if (!visibleOnThisDevice(s)) return;
+    if (this.belongsHere(s.workspace_id)) this.sessions = [...this.sessions.filter(x => x.id !== s.id), s];
+    else if (this.allWorkspaces && s.kind === 'agent' && isForeground(s))
+      this.otherWsSessions = [...this.otherWsSessions.filter(x => x.id !== s.id), s];
+  }
+
   /** Bulk archive (sidebar multi-select): one toast for the batch instead of
    *  N, and one error report — never stops at the first failure. */
   async archiveSessions(ids: Id[]): Promise<number> {
@@ -1490,10 +1565,7 @@ class WorkspaceStore {
     for (const id of ids) {
       try {
         const s = await api.post<Session>(`/sessions/${id}/archive`);
-        this.closeTab(id);
-        this.moveToArchived(s);
-        this.statusMap[id] = s.status;
-        this.clearNeedsYou(id);
+        this.applyArchiveState(s);
       } catch {
         failed++;
       }
@@ -1517,25 +1589,13 @@ class WorkspaceStore {
   /** Archive: kill the PTY but keep the row + history in the Archived section. */
   async archiveSession(id: Id): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/archive`);
-    this.closeTab(id);
-    // Archived rows leave the live lists (and the all-workspaces view).
-    this.moveToArchived(s);
-    this.statusMap[id] = s.status;
+    this.applyArchiveState(s);
     toasts.info('Session archived', s.title);
   }
 
   async unarchiveSession(id: Id): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/unarchive`);
-    this.dropArchived(id);
-    // Maybe that was the last one: the next refresh probes again.
-    this.archivedKnown = false;
-    this.hasArchived = this.archivedSessions.length > 0 || this.archivedHasMore || !this.archivedLoaded;
-    this.sessions = this.sessionById.has(id)
-      ? this.sessions.map((x) => (x.id === id ? s : x))
-      : this.belongsHere(s.workspace_id)
-        ? [...this.sessions, s]
-        : this.sessions;
-    this.statusMap[id] = s.status;
+    this.applyArchiveState(s);
   }
 
   /** Bumped per session on every successful restart. The embedded Terminal
@@ -1628,6 +1688,10 @@ class WorkspaceStore {
   /** Event-bus feed (WS /ws/events). */
   applyEvent(ev: OttoEvent): void {
     switch (ev.type) {
+      case 'session_archive_changed': {
+        this.applyArchiveState(ev.session);
+        break;
+      }
       case 'session_status': {
         // Unread dot: a background tab's session just finished a stretch of
         // work (working → idle/exited) while the user was looking elsewhere.

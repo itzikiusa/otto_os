@@ -22,6 +22,8 @@ pub enum Event {
     },
     /// A session was created (by any client or by the orchestrator).
     SessionCreated { session: Session },
+    /// Authoritative row after either archive transition.
+    SessionArchiveChanged { session: Session },
     /// A session's `meta` changed. Carries the full merged meta so clients can
     /// update their cached session in place (e.g. live handover-progress flags).
     SessionMetaUpdated {
@@ -794,6 +796,7 @@ impl Event {
         match self {
             Event::SessionStatus { .. } => "session_status",
             Event::SessionCreated { .. } => "session_created",
+            Event::SessionArchiveChanged { .. } => "session_archive_changed",
             Event::SessionMetaUpdated { .. } => "session_meta_updated",
             Event::SessionRenamed { .. } => "session_renamed",
             Event::SessionRemoved { .. } => "session_removed",

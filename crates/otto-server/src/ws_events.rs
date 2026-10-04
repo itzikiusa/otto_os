@@ -366,7 +366,7 @@ fn scope_of(event: &Event) -> Scope<'_> {
             session_id,
             owner: None,
         },
-        Event::SessionCreated { session } => Scope::Session {
+        Event::SessionCreated { session } | Event::SessionArchiveChanged { session } => Scope::Session {
             workspace_id: &session.workspace_id,
             session_id: &session.id,
             owner: Some(&session.created_by),

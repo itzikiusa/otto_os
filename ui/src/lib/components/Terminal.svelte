@@ -744,13 +744,22 @@
    *  paste rides that rather than inventing a second image store. */
   async function uploadPastedImage(file: File): Promise<void> {
     if (socketFactory || readOnly) return;
+    const targetSession = sessionId;
+    const targetSocket = sock;
+    const targetTransform = transformFrame;
     try {
       const png = await toPngBytes(file);
       // Raw image/png body (no base64 inflation).
       const snip = await snipApi.uploadPng(new Blob([png as Uint8Array<ArrayBuffer>], { type: 'image/png' }));
       // Bracketed paste: the path lands as one literal chunk the TUI will not
       // auto-submit, so the user can still type a prompt around it.
-      sendJson({ type: 'input', data: textToBase64(`\x1b[200~${snip.path}\x1b[201~`) });
+      if (readOnly || sessionId !== targetSession || sock !== targetSocket ||
+          !targetSocket || targetSocket.readyState !== WebSocket.OPEN || transformFrame !== targetTransform) {
+        throw new Error('The original terminal is no longer available. Paste the image again in the intended session.');
+      }
+      const input = { type: 'input', data: textToBase64(`\x1b[200~${snip.path}\x1b[201~`) };
+      const frame = targetTransform ? targetTransform(input) : input;
+      if (frame !== null) targetSocket.send(JSON.stringify(frame));
     } catch (e) {
       toasts.error('Could not paste image', e instanceof Error ? e.message : String(e));
     }

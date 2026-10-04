@@ -13,11 +13,12 @@ const lazyComponent = {
   },
 };
 
-function workspace() {
+function workspace(mayChangeWorkspace: () => boolean | Promise<boolean> = () => true) {
   const requests: { path: string; result: ReturnType<typeof deferred<any[]>> }[] = [];
   const restored: string[] = [];
+  const deleted: string[] = [];
   const layout = { panes: [], focusedIndex: 0, bindKey() {}, restore: (id: string) => restored.push(id), retain() {} };
-  const api = { get: (path: string) => {
+  const api = { del: async (path: string) => { deleted.push(path); }, get: (path: string) => {
     // Scratch, the archived probe and fetch-by-id answer at once; the main
     // (shown) list of the selected workspace is the deferred under test.
     if (path.includes('/scratch/') || path.includes('archived=true') || path.startsWith('/sessions?ids=')) return Promise.resolve([]);
@@ -25,14 +26,14 @@ function workspace() {
   } };
   const { ws } = loadSource(new URL('../src/lib/stores/workspace.svelte.ts', import.meta.url), {
     '../api/client': { api }, '../api/workflows': { listActiveWorkflowRuns: async () => [] }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
-    '../router.svelte': { router: {} }, '../toast.svelte': { toasts: {} }, '../confirm.svelte': { confirmer: {} },
+    '../router.svelte': { router: { mayChangeWorkspace } }, '../toast.svelte': { toasts: {} }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
     '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets, '../lazy-component.svelte': lazyComponent,
   });
   ws.refreshOtherSessions = async () => {};
-  return { ws, requests, restored };
+  return { ws, requests, restored, deleted, api };
 }
 
 /** The store with a saved workspace id and a transport that logs every GET in
@@ -184,4 +185,101 @@ test('old History pagination cannot append to a new provider list', async () => 
   page.resolve({ entries: [{ session_id: 'stale', provider: 'claude' }], next_cursor: null }); await loading;
   assert.equal(history.entries.length, 1);
   assert.equal(history.entries[0].provider, 'codex');
+});
+
+test('failed workspace selection clears foreign sessions and retry restores the selected layout', async () => {
+  const {ws, requests, restored} = workspace();
+  const a = ws.select('A'); requests.find(r => r.path.includes('/A/'))!.result.resolve([{id: 'a', workspace_id: 'A', status: 'idle'}]); await a;
+  const b = ws.select('B'); requests.find(r => r.path.includes('/B/'))!.result.reject(new Error('offline')); await b.catch(() => {});
+  assert.equal(ws.currentId, 'B');
+  assert.equal(ws.sessions.length, 0, 'A must not appear under B');
+  assert.match(ws.sessionsError, /offline/);
+  const retry = ws.retrySessions();
+  requests.filter(r => r.path.includes('/B/')).at(-1)!.result.resolve([{id: 'b', workspace_id: 'B', status: 'idle'}]); await retry;
+  assert.equal(ws.sessionsError, null);
+  assert.equal(ws.sessions[0].id, 'b');
+  assert.equal(restored.at(-1), 'B');
+});
+
+test('archive events synchronize membership in two independent windows', () => {
+  const a = workspace().ws, b = workspace().ws;
+  const session = {id: 's', workspace_id: 'A', kind: 'agent', status: 'idle', meta: {}, archived: false};
+  for (const ws of [a, b]) {
+    ws.currentId = 'A'; ws.sessions = [session]; ws.archivedLoaded = true;
+    ws.closeTab = () => {}; ws.clearNeedsYou = () => {};
+    ws.applyEvent({type: 'session_archive_changed', session: {...session, archived: true, status: 'exited'}});
+    assert.equal(ws.sessions.length, 0); assert.equal(ws.archivedSessions[0].id, 's');
+    ws.applyEvent({type: 'session_archive_changed', session: {...session, archived: false, status: 'reconnectable'}});
+    assert.equal(ws.archivedSessions.length, 0); assert.equal(ws.sessions[0].status, 'reconnectable');
+  }
+});
+
+test('workspace changes ask before identity, tabs or persistence are replaced', async () => {
+  const answer=deferred<boolean>();
+  const {ws}=workspace(()=>answer.promise);
+  ws.currentId='A';ws.sessions=[{id:'kept'}];ws.openTabs=['kept'];ws.layoutReady=true;
+  const changing=ws.select('B');
+  assert.equal(ws.currentId,'A');assert.deepEqual([...ws.openTabs],['kept']);
+  answer.resolve(false);await changing;
+  assert.equal(ws.currentId,'A');assert.deepEqual([...ws.openTabs],['kept']);
+});
+
+test('same-workspace selection cancels a pending workspace leave decision', async () => {
+  const answer=deferred<boolean>();
+  const {ws}=workspace(()=>answer.promise);
+  ws.currentId='A';ws.sessions=[{id:'kept'}];ws.layoutReady=true;
+  const changing=ws.select('B');
+  assert.equal(ws.currentId,'A');
+  await ws.select('A');answer.resolve(true);await changing;
+  assert.equal(ws.currentId,'A');
+});
+
+test('a successful workspace leave saves against the original workspace before switching', async () => {
+  const answer=deferred<boolean>();
+  const {ws}=workspace(()=>answer.promise);
+  ws.currentId='A';ws.sessions=[{id:'kept'}];ws.layoutReady=true;
+  ws.refreshSessions=async()=>{};ws.waitForSessions=async()=>{};ws.restoreLayout=()=>{};
+  ws.refreshActiveWorkflowRuns=async()=>{};
+  const changing=ws.select('B');
+  assert.equal(ws.currentId,'A','Save still uses A API base');
+  answer.resolve(true);await changing;assert.equal(ws.currentId,'B');
+});
+
+test('canceling current workspace archive sends no archive request', async () => {
+  const answer=deferred<boolean>();
+  const {ws,deleted}=workspace(()=>answer.promise);
+  ws.currentId='A';ws.workspaces=[{id:'A'},{id:'B'}];
+  const removing=ws.archiveWorkspace('A');
+  assert.deepEqual(deleted,[]);
+  answer.resolve(false);await removing;
+  assert.deepEqual(deleted,[]);assert.equal(ws.currentId,'A');assert.equal(ws.workspaces.length,2);
+});
+
+test('approved workspace archive asks once and selects its fallback', async () => {
+  let decisions=0;
+  const {ws,deleted}=workspace(()=>{decisions++;return true;});
+  ws.currentId='A';ws.workspaces=[{id:'A'},{id:'B'}];
+  ws.refreshSessions=async()=>{};ws.waitForSessions=async()=>{};ws.restoreLayout=()=>{};
+  ws.refreshActiveWorkflowRuns=async()=>{};
+  await ws.archiveWorkspace('A');
+  assert.equal(decisions,1);assert.deepEqual(deleted,['/workspaces/A']);assert.equal(ws.currentId,'B');
+});
+
+test('an archive response cannot redirect a newer completed workspace selection', async () => {
+  const removed=deferred<void>();
+  const {ws,api}=workspace();
+  api.del=()=>removed.promise;
+  ws.currentId='A';ws.workspaces=[{id:'A'},{id:'B'},{id:'C'}];
+  ws.refreshSessions=async()=>{};ws.waitForSessions=async()=>{};ws.restoreLayout=()=>{};
+  ws.refreshActiveWorkflowRuns=async()=>{};
+  const removing=ws.archiveWorkspace('A');await ws.select('C');
+  removed.resolve();await removing;assert.equal(ws.currentId,'C');
+});
+
+test('archiving the last workspace asks once then enters scratch context', async () => {
+  let decisions=0;
+  const {ws}=workspace(()=>{decisions++;return true;});
+  ws.currentId='A';ws.workspaces=[{id:'A'}];
+  ws.refreshSessions=async()=>{};ws.waitForSessions=async()=>{};ws.restoreLayout=()=>{};
+  await ws.archiveWorkspace('A');assert.equal(decisions,1);assert.equal(ws.currentId,null);
 });

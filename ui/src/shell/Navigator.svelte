@@ -390,7 +390,7 @@
     );
     if (!ok) return;
     try {
-      await ws.archiveWorkspace(w.id);
+      if (!(await ws.archiveWorkspace(w.id))) return;
       toasts.info('Workspace removed', w.name);
     } catch (e) {
       toasts.error('Couldn’t remove the workspace', e instanceof Error ? e.message : String(e));
@@ -964,7 +964,7 @@
               { separator: true as const },
             ] : []),
             { label: 'Add workspace…', icon: 'plus', action: () => (ui.newWorkspaceOpen = true) },
-            { label: 'Workspace context', icon: 'note', action: async () => { await ws.select(w.id); router.go('settings/context-soul'); } },
+            { label: 'Workspace context', icon: 'note', action: async () => { if (await ws.select(w.id)) router.go('settings/context-soul'); } },
           ])}
           title={w.root_path}
         >

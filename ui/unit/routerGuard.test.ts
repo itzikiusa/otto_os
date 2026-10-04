@@ -151,3 +151,20 @@ test('openModule resumes a module where it was left; the active module goes home
   await flush();
   assert.equal(f.location.hash, '#/git');
 });
+
+test('workspace leave decisions run guards without navigating or accepting same-route exemptions', async () => {
+  const f=fixture('#/api');
+  let target: string | undefined;
+  f.router.guard((to:string)=>{target=to;return false;});
+  assert.equal(await f.router.mayChangeWorkspace(),false);
+  assert.equal(target,'');assert.equal(f.location.hash,'#/api');
+});
+
+test('a newer route decision invalidates a pending workspace decision', async () => {
+  const f=fixture('#/api');let release!: (value:boolean)=>void;
+  const pending=new Promise<boolean>(r=>{release=r;});
+  f.router.guard((to:string)=>to===''?pending:true);
+  const changing=f.router.mayChangeWorkspace();f.router.go('git');
+  await flush();release(true);
+  assert.equal(await changing,false);assert.equal(f.location.hash,'#/git');
+});

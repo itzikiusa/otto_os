@@ -84,3 +84,17 @@ test('awaiting-input banners only for a session you are not watching (A2)', () =
   assert.equal(other.wantsNative(notice({ source_key: 'session:s1:finished', action: { type: 'open_session', session_id: 's1' } })), false, 'other info notices stay quiet');
   assert.equal(other.wantsNative(notice({ severity: 'warn', action: null })), true, 'warn/error always banner');
 });
+
+test('canceling a workspace switch prevents a notification from navigating in the old workspace', async () => {
+  const routes: string[]=[];
+  const {notifications}=loadSource(new URL('../src/lib/stores/notifications.svelte.ts',import.meta.url),{
+    svelte:{untrack:(fn:()=>unknown)=>fn()},
+    '../api/client':{api:{}},'../toast.svelte':{toasts:{warn(){},error(){}}},
+    '../external':{openExternal:async()=>{}},'../desktop':{isEmbedded:false},
+    './workspace.svelte':{ws:{sessions:[],currentId:'A',workspaces:[{id:'A'},{id:'B'}],select:async()=>false}},
+    '../router.svelte':{router:{go:(route:string)=>routes.push(route)}},
+    '../noticeRoute':{parseNoticeRoute:(route:string)=>({kind:'route',route})},
+  });
+  await notifications.openRoute('personal-agents/agent-b','B');
+  assert.deepEqual(routes,[]);
+});
