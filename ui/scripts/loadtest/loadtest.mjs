@@ -60,6 +60,7 @@ const OTTOD =
 const RUNS = process.env.OTTO_LOADTEST_RUNS ?? path.join(os.tmpdir(), 'otto-loadtest');
 const OUT = path.resolve(A.out ?? path.join(RUNS, `${MODE}-${Date.now()}`));
 const STACKS = A.stacks !== 'false';
+const HEADED = A.headed === 'true';
 const MAX_LOAD = Number(A['max-load'] ?? 12);
 const MIN_FREE_GB = Number(A['min-free-gb'] ?? 2);
 const API = `http://127.0.0.1:${PORT}/api/v1`;
@@ -370,7 +371,7 @@ const PAGE_PROBE = () => {
   Object.assign(w.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
 };
 async function startBrowser(wsId) {
-  const browser = await chromium.launch({ headless: true, args: ['--enable-precise-memory-info', '--js-flags=--expose-gc'] });
+  const browser = await chromium.launch({ headless: !HEADED, args: ['--enable-precise-memory-info', '--js-flags=--expose-gc'] });
   // Playwright exposes the browser process only for launchServer; find it by our unique user-data-dir parent.
   const rows = psTable();
   const cands = [...rows.values()].filter((r) => r.ppid === process.pid && /chrom/i.test(r.cmd));
@@ -636,7 +637,7 @@ async function teardown(B) {
 
 // ── main ────────────────────────────────────────────────────────────────────
 async function main() {
-  log(`mode=${MODE} steps=${STEPS} hold=${HOLD}s out=${OUT} ottod=${OTTOD}`);
+  log(`mode=${MODE} steps=${STEPS} hold=${HOLD}s headed=${HEADED} out=${OUT} ottod=${OTTOD}`);
   safetyCheck('start');
   let B = null;
   let aborted = null;
