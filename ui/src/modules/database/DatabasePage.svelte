@@ -8,7 +8,6 @@
   import { paneResizer, loadPaneWidth } from '../../lib/paneResizer';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
-  import { initialSelection, rememberSelection, recallSelection } from '../../lib/lastSelection';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { envTone } from '../../lib/status';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -718,13 +717,6 @@
         // `#/database/<connId>` (a pop-out window, a link) opens that tab.
         const deep = router.module === 'database' ? router.parts[1] : undefined;
         if (deep && database.connections.some((c) => c.id === deep)) await database.openConnection(deep);
-        else if (!deep && !viewport.isMobile && !hasAnyTab) {
-          // Open on the last-used connection instead of a "pick one" pane. Never
-          // auto-connect production on the fallback: only a remembered prod pick.
-          const id = initialSelection('database', database.connections, (c) => c.id);
-          const c = database.connections.find((x) => x.id === id);
-          if (c && (c.environment !== 'prod' || id === recallSelection('database'))) await database.openConnection(c.id);
-        }
       })();
       void loadSections();
       void brokers.load(ws.currentId); // clusters render in the same tree
@@ -860,9 +852,8 @@
   const hasAnyTab = $derived(
     openConns.length > 0 || brokers.openClusters.length > 0 || database.sshTabs.length > 0,
   );
-  $effect(() => {
-    if (database.selectedConnId) rememberSelection('database', database.selectedConnId);
-  });
+  // No auto-open on arrival: opening a connection connects to the server (it
+  // may be prod), so the empty main pane shows the collection summary instead.
   // "6 connections · 2 prod · 1 Kafka cluster" — what the empty main pane says.
   const hubSummary = $derived.by(() => {
     const dbs = database.connections.length + database.otherConnections.length;
