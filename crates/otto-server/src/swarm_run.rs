@@ -658,6 +658,18 @@ async fn run_attempt(
     run_id: &str,
     cancel: &Arc<AtomicBool>,
 ) -> RunOutcome {
+    let swarm_id = meta
+        .get("swarm_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let operation = crate::swarm_runtime::operation_guard(swarm_id).await;
+    // Recheck under the lifecycle boundary, including a stop before this
+    // attempt registered its cancellation handle or between retries.
+    let live = ctx.swarm_repo.get_run(&run_id.to_string()).await;
+    if !matches!(live, Ok(ref run) if matches!(run.status.as_str(), "queued" | "running" | "waiting"))
+    {
+        return RunOutcome::failed(None, FailReason::Stopped);
+    }
     if cancel.load(Ordering::Relaxed) {
         return RunOutcome::failed(None, FailReason::Stopped);
     }
@@ -744,6 +756,7 @@ async fn run_attempt(
         )
         .await;
     emit_run(ctx, run_id).await;
+    drop(operation);
 
     // Re-provision into the (possibly reused) cwd is already done by the caller.
     // Inject the brief once the TUI has drawn + settled. A dead/exited PTY here
@@ -762,13 +775,34 @@ async fn run_attempt(
         Some(psid) => crate::review_session::transcript_len(cwd, &psid),
         None => 0,
     };
-    if wait_for_tui(&ctx.manager, &sid).await {
-        let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
+    if crate::swarm_runtime::while_run_active(
+        &ctx.swarm_repo,
+        run_id,
+        wait_for_tui(&ctx.manager, &sid),
+    )
+    .await
+        == Some(true)
+    {
+        if !crate::swarm_runtime::send_run_input(
+            ctx,
+            swarm_id,
+            run_id,
+            &sid,
+            &bracketed_paste(prompt),
+        )
+        .await
+        {
+            return RunOutcome::failed(Some(sid), FailReason::Stopped);
+        }
         tokio::time::sleep(PASTE_TO_ENTER).await;
         let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-        let _ = ctx.manager.input(&sid, b"\r").await;
+        if !crate::swarm_runtime::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
+            return RunOutcome::failed(Some(sid), FailReason::Stopped);
+        }
         if !dispatched(&ctx.manager, &sid, before).await {
-            let _ = ctx.manager.input(&sid, b"\r").await;
+            if !crate::swarm_runtime::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
+                return RunOutcome::failed(Some(sid), FailReason::Stopped);
+            }
         }
     } else {
         tracing::warn!("swarm: TUI never settled for session {sid} — brief not injected");
@@ -779,27 +813,49 @@ async fn run_attempt(
     // paste. One re-injection round, then fail the attempt so recovery respawns
     // — a live-but-promptless session used to sit until someone stopped it by hand.
     if provider == "claude"
-        && !crate::review_session::claude_prompt_landed(
-            &ctx.manager,
-            &sid,
-            cwd,
-            transcript_offset,
-            crate::review_session::PROMPT_LAND_WAIT,
+        && !crate::swarm_runtime::while_run_active(
+            &ctx.swarm_repo,
+            run_id,
+            crate::review_session::claude_prompt_landed(
+                &ctx.manager,
+                &sid,
+                cwd,
+                transcript_offset,
+                crate::review_session::PROMPT_LAND_WAIT,
+            ),
         )
         .await
+        .unwrap_or(false)
     {
         tracing::warn!("swarm: brief didn't land in session {sid} — re-injecting once");
-        let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let _ = ctx.manager.input(&sid, b"\r").await;
-        if !crate::review_session::claude_prompt_landed(
-            &ctx.manager,
+        if !crate::swarm_runtime::send_run_input(
+            ctx,
+            swarm_id,
+            run_id,
             &sid,
-            cwd,
-            transcript_offset,
-            crate::review_session::PROMPT_LAND_WAIT,
+            &bracketed_paste(prompt),
         )
         .await
+        {
+            return RunOutcome::failed(Some(sid), FailReason::Stopped);
+        }
+        tokio::time::sleep(PASTE_TO_ENTER).await;
+        if !crate::swarm_runtime::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
+            return RunOutcome::failed(Some(sid), FailReason::Stopped);
+        }
+        if !crate::swarm_runtime::while_run_active(
+            &ctx.swarm_repo,
+            run_id,
+            crate::review_session::claude_prompt_landed(
+                &ctx.manager,
+                &sid,
+                cwd,
+                transcript_offset,
+                crate::review_session::PROMPT_LAND_WAIT,
+            ),
+        )
+        .await
+        .unwrap_or(false)
         {
             tracing::warn!("swarm: brief never landed in session {sid} — failing the attempt");
             return RunOutcome::failed(Some(sid), FailReason::Stuck);

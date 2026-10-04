@@ -30,6 +30,136 @@ use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 use crate::swarm_run::{self, SwarmTurnResult};
 
+/// Lifecycle and session-dispatch share this boundary. Weak entries avoid
+/// retaining every swarm ever visited after its last operation finishes.
+pub(crate) async fn operation_guard(swarm_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    type Gates = HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>;
+    static GATES: OnceLock<Mutex<Gates>> = OnceLock::new();
+    let gate = {
+        let mut gates = GATES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        let gate = gates
+            .get(swarm_id)
+            .and_then(std::sync::Weak::upgrade)
+            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
+        gates.insert(swarm_id.to_string(), Arc::downgrade(&gate));
+        gate
+    };
+    gate.lock_owned().await
+}
+
+pub(crate) async fn run_is_active(repo: &otto_state::SwarmRepo, run_id: &str) -> bool {
+    matches!(repo.get_run(&run_id.to_string()).await,
+        Ok(run) if matches!(run.status.as_str(), "queued" | "running" | "waiting"))
+}
+
+/// Readiness can take minutes. Never hold the lifecycle boundary while waiting;
+/// a stop interrupts the wait, and each following write rechecks under the gate.
+pub(crate) async fn while_run_active<T>(
+    repo: &otto_state::SwarmRepo,
+    run_id: &str,
+    future: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        value = future => Some(value),
+        _ = async {
+            loop {
+                if !run_is_active(repo, run_id).await { break; }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        } => None,
+    }
+}
+
+async fn guarded_dispatch(
+    repo: &otto_state::SwarmRepo,
+    swarm_id: &str,
+    run_id: &str,
+    send: impl std::future::Future<Output = bool>,
+) -> bool {
+    let _operation = operation_guard(swarm_id).await;
+    if !run_is_active(repo, run_id).await {
+        return false;
+    }
+    send.await
+}
+
+pub(crate) async fn send_run_input(
+    ctx: &ServerCtx,
+    swarm_id: &str,
+    run_id: &str,
+    session_id: &str,
+    input: &[u8],
+) -> bool {
+    guarded_dispatch(&ctx.swarm_repo, swarm_id, run_id, async {
+        ctx.manager
+            .input(&session_id.to_string(), input)
+            .await
+            .is_ok()
+    })
+    .await
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    #[tokio::test]
+    async fn stopping_during_readiness_does_not_wait_or_send_late_input() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let repo = otto_state::SwarmRepo::new(pool);
+        let sid = "dispatch-stop-test".to_string();
+        let run = repo
+            .create_run(NewRun {
+                swarm_id: sid.clone(),
+                workspace_id: "ws".into(),
+                project_id: None,
+                task_id: None,
+                agent_id: "agent".into(),
+                kind: "task".into(),
+                trigger: "coordinator".into(),
+            })
+            .await
+            .unwrap();
+        let waiting = while_run_active(&repo, &run.id, std::future::pending::<()>());
+        let stop = async {
+            let _operation = operation_guard(&sid).await;
+            repo.stop_active_runs(&sid).await.unwrap();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(waiting, stop)
+        })
+        .await
+        .unwrap();
+        assert!(
+            result.is_none(),
+            "stop interrupts readiness without waiting for the provider"
+        );
+        let sent = AtomicBool::new(false);
+        assert!(
+            !guarded_dispatch(&repo, &sid, &run.id, async {
+                sent.store(true, Ordering::Relaxed);
+                true
+            })
+            .await
+        );
+        assert!(
+            !sent.load(Ordering::Relaxed),
+            "a stopped run cannot send a prompt after readiness completes"
+        );
+    }
+}
+
 // --- Registry --------------------------------------------------------------
 
 /// A running Coordinator's control handles.
@@ -262,6 +392,7 @@ async fn tick_inner(
     swarm_id: &Id,
     waiting: &mut HashMap<Id, (&'static str, String)>,
 ) -> otto_core::Result<()> {
+    let _operation = operation_guard(swarm_id).await;
     let repo = &ctx.swarm_repo;
     let swarm = repo.get_swarm(swarm_id).await?;
     if swarm.status != "active" {
@@ -387,8 +518,6 @@ async fn tick_inner(
         // Count this scheduled turn against the task's attempt ceiling. The
         // ceiling itself is enforced in `route_result` once the turn returns a
         // non-terminal status, so the work still happens this tick.
-        let _ = repo.bump_task_attempt(&task.id).await;
-        emit_task(ctx, &task.id).await;
 
         let is_leader = has_reports_in(&agents, &agent.id);
         let kind = if is_leader && !task.delegated {
@@ -397,15 +526,18 @@ async fn tick_inner(
             "task"
         };
         let run = match repo
-            .create_run(NewRun {
-                swarm_id: swarm.id.clone(),
-                workspace_id: swarm.workspace_id.clone(),
-                project_id: Some(task.project_id.clone()),
-                task_id: Some(task.id.clone()),
-                agent_id: agent.id.clone(),
-                kind: kind.to_string(),
-                trigger: "coordinator".to_string(),
-            })
+            .reserve_run(
+                NewRun {
+                    swarm_id: swarm.id.clone(),
+                    workspace_id: swarm.workspace_id.clone(),
+                    project_id: Some(task.project_id.clone()),
+                    task_id: Some(task.id.clone()),
+                    agent_id: agent.id.clone(),
+                    kind: kind.to_string(),
+                    trigger: "coordinator".to_string(),
+                },
+                false,
+            )
             .await
         {
             Ok(run) => run,
@@ -427,6 +559,8 @@ async fn tick_inner(
                 continue;
             }
         };
+        let _ = repo.bump_task_attempt(&task.id).await;
+        emit_task(ctx, &task.id).await;
         budget -= 1;
         busy.insert(agent.id.clone());
         if let Some(projected) = projected_total_runs.as_mut() {
@@ -2039,6 +2173,7 @@ async fn start(
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
     check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&sid).await;
 
     // Point-of-action budget gate (A2): check workspace-level cap before the
     // Coordinator starts scheduling runs. Mirrors the review start_review gate.
@@ -2069,6 +2204,7 @@ async fn pause(
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
     check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&sid).await;
     ctx.swarm_repo
         .set_swarm_status(&sid, "paused")
         .await
@@ -2093,6 +2229,11 @@ async fn abort(
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
     check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&sid).await;
+    ctx.swarm_repo
+        .set_swarm_status(&sid, "aborted")
+        .await
+        .map_err(ApiError)?;
     stop_coordinator(&ctx, &sid);
     // Stop any in-flight verification controllers (own cancel + kill verify/fix
     // sessions, short-circuiting run_swarm_agent retries; review B3).
@@ -2110,10 +2251,6 @@ async fn abort(
     for s in swarm_session_ids(&ctx, &ws, &sid).await {
         let _ = ctx.manager.kill_session(&s).await;
     }
-    ctx.swarm_repo
-        .set_swarm_status(&sid, "aborted")
-        .await
-        .map_err(ApiError)?;
     emit_status(&ctx, &ws, &sid, "aborted");
     Ok(Json(
         ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?,
@@ -2126,6 +2263,7 @@ async fn resume(
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
     check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&sid).await;
 
     // Point-of-action budget gate (A2): also checked on resume (a pause may have
     // been triggered by a BudgetExceeded event; block the resume when still over cap).
@@ -2243,6 +2381,7 @@ async fn clear_project_h(
 ) -> ApiResult<Json<serde_json::Value>> {
     let project = ctx.swarm_repo.get_project(&pid).await.map_err(ApiError)?;
     check(&ctx, &user, &project.workspace_id, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&project.swarm_id).await;
     let stopped = ctx
         .swarm_repo
         .stop_active_runs_for_project(&pid)
@@ -2288,6 +2427,7 @@ async fn run_task(
 ) -> ApiResult<Json<otto_state::SwarmRun>> {
     let task = ctx.swarm_repo.get_task(&tid).await.map_err(ApiError)?;
     check(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&task.swarm_id).await;
     let swarm = ctx
         .swarm_repo
         .get_swarm(&task.swarm_id)
@@ -2343,15 +2483,18 @@ async fn run_task(
     };
     let run = ctx
         .swarm_repo
-        .create_run(NewRun {
-            swarm_id: swarm.id.clone(),
-            workspace_id: swarm.workspace_id.clone(),
-            project_id: Some(task.project_id.clone()),
-            task_id: Some(task.id.clone()),
-            agent_id: agent.id.clone(),
-            kind: kind.to_string(),
-            trigger: "manual".to_string(),
-        })
+        .reserve_run(
+            NewRun {
+                swarm_id: swarm.id.clone(),
+                workspace_id: swarm.workspace_id.clone(),
+                project_id: Some(task.project_id.clone()),
+                task_id: Some(task.id.clone()),
+                agent_id: agent.id.clone(),
+                kind: kind.to_string(),
+                trigger: "manual".to_string(),
+            },
+            true,
+        )
         .await
         .map_err(ApiError)?;
     let _ = ctx
@@ -2387,6 +2530,7 @@ async fn stop_run(
 ) -> ApiResult<Json<otto_state::SwarmRun>> {
     let run = ctx.swarm_repo.get_run(&rid).await.map_err(ApiError)?;
     check(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&run.swarm_id).await;
     swarm_run::signal_cancel(&ctx.swarm_run_cancels, &rid);
     let stopped = ctx
         .swarm_repo
