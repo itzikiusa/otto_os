@@ -36,8 +36,10 @@
   let { thread, onopentasks, onopenmemory }: Props = $props();
 
   // ── data ───────────────────────────────────────────────────────────────────
+  // Metadata updates keep the same acquisition; only a new thread releases it.
+  const threadId = $derived(thread.id);
   $effect(() => {
-    const id = thread.id;
+    const id = threadId;
     return untrack(() => assistant.acquireTurns(id));
   });
   $effect(() => {

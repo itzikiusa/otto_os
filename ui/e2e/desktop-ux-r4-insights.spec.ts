@@ -135,16 +135,27 @@ test('History long paged transcript supports keyboard search across mounted wind
 
 test('Assistant incremental turns remain readable and running task cancellation recovers', async ({ page }, info) => {
   const state = assistantState(); const taskIndex = state.tasks.findIndex(t => t.id === 'task-hotels'); state.tasks[taskIndex] = { ...state.tasks[taskIndex], result: null, title: 'Synthetic long research', detail: 'Reviewing synthetic notes' };
+  let turnReads = 0;
+  page.on('request', request => {
+    if (new URL(request.url()).pathname === '/api/v1/assistant/threads/th-personal/turns') {
+      turnReads++;
+    }
+  });
   await mockAssistant(page, state);
   let send!: (data: string) => void;
   await page.routeWebSocket('**/ws/events**', socket => { const server = socket.connectToServer(); send = data => socket.send(data); socket.onMessage(data => server.send(data)); server.onMessage(data => socket.send(data)); });
   await page.goto('/#/assistant/th-personal');
   await expect.poll(() => !!send).toBe(true);
+  // The socket connects before the routed view mounts. Start this live-update
+  // scenario after its initial history loads, just as an active chat would.
+  await expect(page.getByTestId('assistant-thread')).toContainText('Three good fits.');
+  const initialTurnReads = turnReads;
   const base = state.turns['th-personal'].find(t => t.role === 'assistant')!;
   const thread = { ...state.threads[0], updated_at: new Date().toISOString() };
   for (const text of ['Research started.', 'Research started. The dependency review is complete.']) {
     send(JSON.stringify({ type: 'assistant_turn', thread_id: thread.id, thread, turn: { ...base, id: 'incremental', text, created_at: new Date().toISOString() } }));
     await expect(page.getByTestId('assistant-thread')).toContainText(text);
+    expect(turnReads, 'same-thread metadata updates preserve the acquired history').toBe(initialTurnReads);
   }
   const task = page.getByTestId('card-task').filter({ hasText: 'Synthetic long research' });
   await task.getByRole('button', { name: 'Stop', exact: true }).click();
