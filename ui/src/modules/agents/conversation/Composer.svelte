@@ -1,3 +1,18 @@
+<script module lang="ts">
+  import { SvelteMap } from 'svelte/reactivity';
+
+  /** Image uploads still in flight, per session. Module-level on purpose: the
+   *  composer is keyed by session and remounts when you switch tabs, but an
+   *  upload started in A keeps running and lands in A's draft — so A's Send
+   *  must stay blocked after a remount until it finishes. */
+  const pendingUploads = new SvelteMap<string, number>();
+  function addPending(owner: string, n: number): void {
+    const next = (pendingUploads.get(owner) ?? 0) + n;
+    if (next > 0) pendingUploads.set(owner, next);
+    else pendingUploads.delete(owner);
+  }
+</script>
+
 <script lang="ts">
   // Chat composer (sessionId mode, editor role, session not exited). One box
   // that grows with the text (2 lines at rest, up to ~40% of the window) with
@@ -58,7 +73,7 @@
   const text = $derived(transcript.draft(ownerId));
   const shortCwd = $derived(cwd.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~'));
   const sending = $derived(transcript.sending(ownerId));
-  let uploading = $state(0);
+  const uploading = $derived(pendingUploads.get(ownerId) ?? 0);
   let ta = $state<HTMLTextAreaElement | null>(null);
 
   interface Attachment {
@@ -89,13 +104,31 @@
   // The cap is the smaller of 40% of the window and half of the PANE the composer
   // sits in (a short tile or split pane), so the box never crowds out the chat;
   // past it the textarea scrolls inside.
+  // Half the pane is not enough on its own: in a short tile the composer's own
+  // rows (attachments, toolbar) and the pane's fixed rows (header, status) eat
+  // the rest, so the cap also reserves MIN_CHAT px for the conversation itself.
   let paneH = $state(0);
+  /** Conversation viewport kept visible however tall the draft gets (~5 lines). */
+  const MIN_CHAT = 96;
+  function paneBudget(): number {
+    const pane = composerEl?.parentElement;
+    if (!pane || !composerEl || !ta) return Infinity;
+    let fixed = 0;
+    for (const el of Array.from(pane.children) as HTMLElement[]) {
+      if (el === composerEl || parseFloat(getComputedStyle(el).flexGrow) > 0) continue;
+      fixed += el.offsetHeight;
+    }
+    const chrome = composerEl.offsetHeight - ta.offsetHeight;
+    return pane.clientHeight - fixed - chrome - MIN_CHAT;
+  }
   function autosize(): void {
     if (!ta) return;
+    const budget = paneBudget();
     ta.style.height = 'auto';
     const byWindow = Math.floor(window.innerHeight * 0.4);
     const byPane = paneH > 0 ? Math.floor(paneH * 0.5) : byWindow;
-    const cap = Math.max(48, Math.min(byWindow, byPane));
+    // One line is the floor when the pane is too short for the budget.
+    const cap = Math.max(24, Math.min(byWindow, byPane, Math.floor(budget)));
     ta.style.height = `${Math.min(cap, Math.max(ta.scrollHeight, 0))}px`;
   }
   let composerEl = $state<HTMLDivElement | null>(null);
@@ -193,7 +226,9 @@
     if (!cmdOpen || !wrapEl) return;
     const paneTop = Math.max(0, composerEl?.parentElement?.getBoundingClientRect().top ?? 0);
     const room = wrapEl.getBoundingClientRect().top - paneTop - 12;
-    popMax = Math.floor(Math.max(72, Math.min(320, window.innerHeight * 0.5, room)));
+    // Honour the real room even when it is tiny (a short split + attachments):
+    // a taller floor would push the list past the pane's clip. It scrolls.
+    popMax = Math.floor(Math.max(0, Math.min(320, window.innerHeight * 0.5, room)));
   });
   function acceptCmd(c: SlashCommand): void {
     transcript.setDraft(ownerId, `/${c.name} `);
@@ -276,7 +311,7 @@
   async function addImages(files: File[]): Promise<void> {
     const imgs = files.filter((f) => f.type.startsWith('image/'));
     if (!imgs.length) return;
-    uploading += imgs.length;
+    addPending(ownerId, imgs.length);
     for (const f of imgs) {
       try {
         const name = f.name && f.name !== 'image.png' ? f.name : `paste-${Date.now()}.${(f.type.split('/')[1] ?? 'png').replace('jpeg', 'jpg')}`;
@@ -285,7 +320,7 @@
       } catch (e) {
         toastError('Couldn’t upload the image', e);
       } finally {
-        uploading -= 1;
+        addPending(ownerId, -1);
       }
     }
     ta?.focus();
