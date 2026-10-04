@@ -1359,13 +1359,44 @@ fn measure_series() -> Vec<SeriesSpec> {
     v
 }
 
+/// `max_server_memory_usage` for the rows-read ratchet's engine only (4 GiB;
+/// GitHub's Linux runners have 16 GB).
+const BENCH_SERVER_MEMORY: u64 = 4 << 30;
+
 #[tokio::test]
 async fn rows_read_per_refresh_before_and_after() {
     let tmp = tempfile::tempdir().unwrap();
+    // The daemon's hard 1 GiB `max_server_memory_usage` is a SERVER-WIDE RSS
+    // cap. Compressing 26 h × 600 pods into a couple of minutes of bulk
+    // inserts keeps five raw→tier MVs plus their background merges in flight
+    // at once — on CI's Linux runner (26.8, RSS accounting) total RSS crossed
+    // 1 GiB even with collector-cycle-sized statements, while macOS stays far
+    // under it. The cap guards the daemon, not what this ratchet measures
+    // (rows read per refresh), so only this bench's engine gets headroom:
+    // `clickhouse server` merges `config.d/*.xml` next to its config file.
+    let conf_d = tmp.path().join("clickhouse/server/config.d");
+    std::fs::create_dir_all(&conf_d).unwrap();
+    std::fs::write(
+        conf_d.join("bench-memory.xml"),
+        format!("<clickhouse><max_server_memory_usage>{BENCH_SERVER_MEMORY}</max_server_memory_usage></clickhouse>\n"),
+    )
+    .unwrap();
     let Some(engine) = start_engine(&tmp).await else {
         return;
     };
     let sink = EngineSink(engine.clone());
+    // The override took (a silently ignored drop-in would bring the cap back).
+    let cap = sink
+        .query_rows(
+            "SELECT value FROM system.server_settings WHERE name = 'max_server_memory_usage'",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cap[0]["value"].as_str(),
+        Some(BENCH_SERVER_MEMORY.to_string().as_str()),
+        "bench memory override not applied"
+    );
     schema::ensure(&sink, 14).await.unwrap();
     // Scale: OTTO_K8S_MEASURE_PODS pods (3 per workload), 60 s cycles, 26 h.
     let pods: u64 = std::env::var("OTTO_K8S_MEASURE_PODS")
