@@ -94,6 +94,56 @@ class ResourceAccessStore {
     this.loading.set(key, task);
     return task;
   }
+  private batches = new Map<symbol, { kind: ResourceKind; id: string; children: string[]; names: Set<string> }>();
+  private batchLoading = new Map<symbol, Promise<void>>();
+  /** Mounted catalogue ownership: release removes unused child decisions and
+   * their periodic refresh work, including responses still in flight. */
+  retainChildren(kind: ResourceKind, id: string, children: string[]): () => void {
+    const owner = Symbol();
+    this.batches.set(owner, { kind, id, children: [...new Set(children)], names: new Set(children) });
+    void this.loadChildren(owner);
+    return () => {
+      const batch = this.batches.get(owner);
+      this.batches.delete(owner);
+      if (!batch) return;
+      for (const child of batch.children) {
+        if (![...this.batches.values()].some((b) => b.kind === kind && b.id === id && b.names.has(child))) {
+          delete this.entries[this.key(kind, id, child)];
+        }
+      }
+    };
+  }
+  private async loadChildren(owner: symbol, background = false): Promise<void> {
+    const pending = this.batchLoading.get(owner);
+    if (pending) return pending;
+    const batch = this.batches.get(owner);
+    if (!batch) return;
+    const { kind, id, children } = batch;
+    const generation = this.generation;
+    const identity = this.key(kind, id);
+    const owns = () => this.batches.has(owner) && generation === this.generation && identity === this.key(kind, id);
+    const install = (child: string, value: EffectiveAccess | null) => {
+      if (!owns()) return;
+      const key = this.key(kind, id, child);
+      const before = this.entries[key]?.value ?? null;
+      this.entries[key] = { value, expires: Date.now() + (value ? ttl() : 3000), kind, id, child };
+      this.notify({ type: 'decision', kind, id, child, before, after: value });
+    };
+    const task = (async () => {
+      for (let offset = 0; offset < children.length && owns(); offset += 1000) {
+        const chunk = children.slice(offset, offset + 1000);
+        try {
+          const values = await checkGate(() => accessApi.capabilitiesBatch(kind, id, chunk, background));
+          chunk.forEach((child, i) => install(child, values[i]?.child === child ? values[i] : null));
+        } catch { chunk.forEach((child) => install(child, null)); }
+      }
+    })();
+    this.batchLoading.set(owner, task);
+    try { await task; } finally { if (this.batchLoading.get(owner) === task) this.batchLoading.delete(owner); }
+  }
+  private isBatched(e: Entry): boolean {
+    return e.child !== undefined && [...this.batches.values()].some((b) => b.kind === e.kind && b.id === e.id && b.names.has(e.child!));
+  }
   can(
     kind: ResourceKind,
     id: string,
@@ -114,14 +164,18 @@ class ResourceAccessStore {
     this.generation++;
     this.entries = {};
     this.loading.clear();
+    this.batchLoading.clear();
+    if (identity) for (const owner of this.batches.keys()) void this.loadChildren(owner);
     this.notify({ type: 'reset', identity });
   }
   /** Re-check every cached decision, at most 2 requests at a time: the cache
    *  holds one entry per resource ever shown (every connection row), and an
    *  unbounded fan-out took every webview socket each 15 s tick. */
   async refresh(match?: { kind?: string; resource_id?: string }) {
+    await mapLimit([...this.batches.entries()].filter(([, b]) => !match?.kind || (b.kind === match.kind && (!match.resource_id || b.id === match.resource_id))), 2,
+      ([owner]) => this.loadChildren(owner, true));
     const entries = Object.values(this.entries).filter(
-      (e) => !match?.kind || (e.kind === match.kind && (!match.resource_id || e.id === match.resource_id)),
+      (e) => !this.isBatched(e) && (!match?.kind || (e.kind === match.kind && (!match.resource_id || e.id === match.resource_id))),
     );
     await mapLimit(entries, 2, (e) => this.load(e.kind, e.id, e.child, true, true).catch(() => {}));
   }
@@ -131,7 +185,9 @@ class ResourceAccessStore {
    *  namespace seen this session. */
   async refreshStale() {
     const now = Date.now();
-    const stale = Object.values(this.entries).filter((e) => e.expires <= now);
+    await mapLimit([...this.batches.entries()].filter(([, b]) => b.children.some((child) => (this.entries[this.key(b.kind, b.id, child)]?.expires ?? 0) <= now)), 2,
+      ([owner]) => this.loadChildren(owner, true));
+    const stale = Object.values(this.entries).filter((e) => !this.isBatched(e) && e.expires <= now);
     await mapLimit(stale, 2, (e) => this.load(e.kind, e.id, e.child, true, true).catch(() => {}));
   }
 }

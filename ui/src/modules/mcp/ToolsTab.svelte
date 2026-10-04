@@ -36,40 +36,34 @@
   /** Failed load — inline with Retry, never the empty state. */
   let loadError = $state<string | null>(null);
   let busyTool = $state<Record<string, boolean>>({});
-  const loadedAccessIds = new Set<string>();
-
   $effect(() => {
     const serverId = selectedServerId;
     if (!serverId) return;
-    const serverKey = `server:${serverId}`;
-    if (!embedded && !loadedAccessIds.has(serverKey)) {
-      loadedAccessIds.add(serverKey);
-      void resourceAccess.load('mcp_server', serverId);
-    }
-    for (const tool of tools) {
-      const toolKey = `${serverId}:${tool.id}`;
-      if (loadedAccessIds.has(toolKey)) continue;
-      loadedAccessIds.add(toolKey);
-      void resourceAccess.load('mcp_server', serverId, tool.name);
-    }
+    if (!embedded) void resourceAccess.load('mcp_server', serverId);
+    return resourceAccess.retainChildren('mcp_server', serverId, tools.map((tool) => tool.name));
   });
 
   const server = $derived(servers.find((s) => s.id === selectedServerId) ?? null);
 
+  let toolsGeneration = 0;
   async function loadTools(): Promise<void> {
+    const generation = ++toolsGeneration;
     const id = selectedServerId;
     if (!id) {
       tools = [];
       return;
     }
     loading = true;
+    tools = [];
     try {
-      tools = await mcpCpApi.cpTools(id);
+      const rows = await mcpCpApi.cpTools(id);
+      if (generation !== toolsGeneration || id !== selectedServerId) return;
+      tools = rows;
       loadError = null;
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (generation === toolsGeneration && id === selectedServerId) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (generation === toolsGeneration && id === selectedServerId) loading = false;
     }
   }
 

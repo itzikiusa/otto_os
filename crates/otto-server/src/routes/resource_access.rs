@@ -209,6 +209,10 @@ pub fn api_router<S: AccessCtx>() -> Router<S> {
         )
         .route("/access/{kind}/{id}/subjects", get(subjects::<S>))
         .route("/access/{kind}/{id}/capabilities", get(capabilities::<S>))
+        .route(
+            "/access/{kind}/{id}/capabilities/batch",
+            post(capabilities_batch::<S>),
+        )
         .route("/access/{kind}/{id}/effective", get(effective::<S>))
         .route("/access/{kind}/{id}/preview", post(preview::<S>))
 }
@@ -445,41 +449,127 @@ async fn decisions(
     policy: &AccessPolicy,
     child: Option<String>,
 ) -> Result<EffectiveAccess> {
-    let resource = ResourceRef {
-        kind: policy.kind,
-        id: policy.resource_id.clone(),
-        child: child.clone(),
-    };
-    let access = ResourceAccess::new(pool.clone());
-    let mut operations = BTreeMap::new();
+    let groups = ResourceAccessRepo::new(pool.clone())
+        .groups_for_user(&user.id)
+        .await?;
+    Ok(decisions_batch(pool, user, policy, &[child], &groups)
+        .await?
+        .remove(0))
+}
+
+/// Membership and page/legacy ceilings are invariant across a catalogue.
+/// Child-specific deny precedence remains in the same pure policy evaluator.
+async fn decisions_batch(
+    pool: &DbPool,
+    user: &User,
+    policy: &AccessPolicy,
+    children: &[Option<String>],
+    groups: &[Id],
+) -> Result<Vec<EffectiveAccess>> {
+    let mut ceilings = BTreeMap::new();
     for op in operations_for(policy.kind) {
-        let mut decision = access.preview(user, policy, &resource, op).await?;
-        if let Err(e) = page_access(pool, user, policy.kind, &policy.resource_id, op).await {
-            decision.allowed = false;
-            decision.reason = e.to_string();
-        }
-        // Legacy authorization still uses feature tiers at the execution route.
-        if policy.mode == AccessMode::Legacy && !user.is_root {
+        let mut reason = page_access(pool, user, policy.kind, &policy.resource_id, op)
+            .await
+            .err()
+            .map(|e| e.to_string());
+        if reason.is_none() && policy.mode == AccessMode::Legacy && !user.is_root {
             let cap = GrantsRepo::new(pool.clone())
                 .capability_of(user, feature_for(policy.kind, op))
                 .await?;
             let need = legacy_capability(op);
             if cap < need {
-                decision.allowed = false;
-                decision.reason = format!("legacy access requires {}", need.as_str());
+                reason = Some(format!("legacy access requires {}", need.as_str()));
             }
         }
-        operations.insert((*op).to_string(), decision);
+        ceilings.insert(*op, reason);
     }
-    Ok(EffectiveAccess {
-        kind: policy.kind,
-        resource_id: policy.resource_id.clone(),
-        user_id: user.id.clone(),
-        child,
-        mode: policy.mode,
-        operations,
-    })
+    children
+        .iter()
+        .map(|child| {
+            let resource = ResourceRef {
+                kind: policy.kind,
+                id: policy.resource_id.clone(),
+                child: child.clone(),
+            };
+            let mut operations = BTreeMap::new();
+            for op in operations_for(policy.kind) {
+                let mut decision = ResourceAccess::evaluate_policy(
+                    &user.id,
+                    user.is_root,
+                    user.disabled,
+                    groups,
+                    policy,
+                    &resource,
+                    op,
+                )?;
+                if let Some(Some(reason)) = ceilings.get(op) {
+                    decision.allowed = false;
+                    decision.reason = reason.clone();
+                }
+                operations.insert((*op).to_string(), decision);
+            }
+            Ok(EffectiveAccess {
+                kind: policy.kind,
+                resource_id: policy.resource_id.clone(),
+                user_id: user.id.clone(),
+                child: child.clone(),
+                mode: policy.mode,
+                operations,
+            })
+        })
+        .collect()
 }
+
+#[derive(Deserialize)]
+struct CapabilitiesBatchRequest {
+    children: Vec<String>,
+}
+
+async fn capabilities_batch<S: AccessCtx>(
+    State(ctx): State<S>,
+    CurrentAuthContext(auth): CurrentAuthContext,
+    Path((kind, id)): Path<(ResourceKind, Id)>,
+    Json(req): Json<CapabilitiesBatchRequest>,
+) -> ApiResult<Json<Vec<EffectiveAccess>>> {
+    if req.children.len() > 1000 || req.children.iter().any(|child| child.len() > 4096) {
+        return Err(
+            Error::Invalid("at most 1000 children of at most 4096 bytes each".into()).into(),
+        );
+    }
+    let pool = ctx.access_pool();
+    let user = &auth.effective_user;
+    page_access(&pool, user, kind, &id, "discover").await?;
+    let repo = ResourceAccessRepo::new(pool.clone());
+    let policy = repo.get_live_policy(kind, &id).await?;
+    let groups = repo.groups_for_user(&user.id).await?;
+    let resource = ResourceRef {
+        kind,
+        id,
+        child: None,
+    };
+    if !ResourceAccess::evaluate_policy(
+        &user.id,
+        user.is_root,
+        user.disabled,
+        &groups,
+        &policy,
+        &resource,
+        "discover",
+    )?
+    .allowed
+    {
+        return Err(Error::NotFound("resource".into()).into());
+    }
+    let children = req.children.into_iter().map(Some).collect::<Vec<_>>();
+    let mut response = decisions_batch(&pool, user, &policy, &children, &groups).await?;
+    for entry in &mut response {
+        for decision in entry.operations.values_mut() {
+            decision.matched_rule_ids.clear();
+        }
+    }
+    Ok(Json(response))
+}
+
 fn legacy_capability(op: &str) -> Capability {
     if matches!(
         op,
