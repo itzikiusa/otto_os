@@ -1287,6 +1287,7 @@ export interface EventsSubscribeAckFrame {
 export type OttoEvent =
   | { type: 'session_status'; session_id: Id; workspace_id: Id; status: SessionStatus }
   | { type: 'session_created'; session: Session }
+  | { type: 'session_archive_changed'; session: Session }
   | {
       type: 'session_meta_updated';
       session_id: Id;
@@ -11666,4 +11667,15 @@ export interface WorkbenchDocChangedEvent {
   rev: number;
   updated_at: string;
   client_id?: string | null;
+}
+
+/** Broker schema history returns identifiers only, oldest first. */
+export interface BrokerSchemaVersion { version: number; }
+/** Immutable numeric version body (the detail endpoint also accepts latest). */
+export interface BrokerSchemaVersionDetail {
+  subject: string;
+  version: number;
+  id: number;
+  schema_type: string;
+  schema: string;
 }

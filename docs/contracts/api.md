@@ -614,6 +614,16 @@ current assistant turn, or on the next one when none is open yet.
 `stats.output_tokens`; a resumed Codex rollout's stats include the earlier
 thread's tokens, its turns only this file's calls.
 
+Interactive transcript reads (session and history routes) return **413
+`payload_too_large`** with an explicit `transcript resource limit` message when
+source input exceeds 128 MiB, one JSONL record exceeds 16 MiB, estimated fold
+charge exceeds 256 MiB, or subagent metadata exceeds its separate 8 MiB charge
+budget (one sidecar may be at most 1 MiB). Parsing is streamed; limits are
+checked before accepting additional records. No transcript is deleted or
+silently truncated. The user can open the provider file directly or select a
+smaller subagent transcript. Live folds have stricter admission bounds and use
+coalesced file-change invalidations plus this read path when not admitted.
+
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /sessions/{id}/transcript?before=&limit=&sub= | ws viewer + owner-or-admin | `before` = opaque cursor from a prior page (exclusive), `limit` turns (default 60, max 500), `sub` = subagent id (Claude `subagents/agent-<id>.jsonl`) | `Transcript` — the last `limit` turns (or the page before `before`); `cursor` = record index of the oldest returned turn, `has_earlier` drives "Load earlier". No resolvable transcript → **200** with `turns: []` and `unavailable_reason` ∈ `no_provider_session_id \| transcript_missing \| provider_unsupported \| codex_rollout_unresolved` (agy is always `provider_unsupported`). A `sub` view carries only turns + `stats.turns/tool_calls`. `subagents` (the full tree) rides on the newest page only — a `before` page returns `subagents: []` (the client keeps the first page's). For a live session the call first (re)arms the live tail (`transcript_appended` events; ≤ 64 concurrent, stops 60 s after exit / 2 min without a touch — see `POST …/transcript/touch`) and pages the TAIL's fold, waiting up to 15 s for its initial fold when it is just starting: one fold of the file per open, the page is the state the deltas continue from, and an agent appending to the file never makes the read 409. Without a tail (not live, cap reached) the fold cache below serves it |
@@ -985,12 +995,19 @@ the wire when absent (back-compat); every other engine ignores `cursor`.
 `QueryResult.truncated_reason?: "bytes"` — **response byte budget (MySQL,
 Postgres, ClickHouse, MongoDB `find`/`aggregate`).** Besides the row cap (`max_rows`, up to "All" = 1,000,000), a read
 stops once the response's estimated JSON size passes **32 MiB** (summed over
-every result set of a batch; at least one row is always kept). It is then
+every result set of a batch; SQL readers keep at least one row). It is then
 `truncated: true` with `truncated_reason: "bytes"`; a row-cap clip leaves
 `truncated_reason` absent (omitted from the wire — back-compat). "Export all
 rows…" still streams the full result to a file. Past either cap the driver stops
-pulling rows and discards the session instead of draining the rest of a
-non-LIMIT-able read (UNION, batch statements, SHOW…). MySQL cells decode by
+pulling rows and discards an unread standalone session instead of draining the rest.
+MySQL/Postgres batches apply the conservative SELECT limiter to each eligible
+statement, including governed reads, while preserving one connection and execution
+order. Non-rewritable statements (for example UNION, explicit LIMIT, locking reads
+or SHOW) keep their SQL unchanged; a later statement on that same connection may
+still drain the unread result. No connection switch or skipped later write is hidden.
+Mongo shaping additionally accounts for escaped cell bytes, null padding and column
+metadata, with a 1,000,000-cell resident cap; either expansion budget truncates with
+reason `bytes`, and an oversized first row can yield zero retained rows. MySQL cells decode by
 column type: only a native `JSON` column is parsed as JSON — text that looks
 like JSON (`'null'`, `'123'`, a 30-digit id) is returned as the string it is.
 
@@ -3127,12 +3144,14 @@ policy prefixes (`/usage/`→Usage, `/brokers/cluster`→Database, `/product/`�
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /brokers/clusters/{id}/replay | ws editor | `ReplayReq {source_topic, target_topic, selector, transform?}` | `ReplayResp {produced, evidence_id}` |
-| GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions | ws viewer | — | `SchemaVersion[]` |
+| GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions | ws viewer | — | `SchemaVersion[]` (`{version:number}` only; oldest first) |
 | GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions/{version} | ws viewer | — | `SchemaVersionDetail` |
 | POST /brokers/clusters/{id}/schema-registry/subjects/{subject}/compatibility | ws editor | `{schema}` | `CompatibilityResult {compatible, messages}` |
 | GET /brokers/clusters/{id}/lag-alerts | ws viewer | — | `LagAlert[]` |
 | POST /brokers/clusters/{id}/lag-alerts | ws editor | `UpsertLagAlertReq` | `LagAlert` |
 | DELETE /brokers/clusters/{id}/lag-alerts/{alert_id} | ws editor | — | 204 |
+
+Schema history lists identifiers only; opening it does not fetch every schema body. `GET .../versions/{version}` returns `{subject,version,id,schema_type,schema}` for a numeric version or `latest`. The comparison fetches its two selected bodies lazily, cancels superseded loads and retains immutable numeric versions in an 8 MiB / 64-entry UI cache. History entries no longer contain `id`, `schema_type` or `schema`; use the detail endpoint for these fields.
 
 `POST /brokers/clusters/{id}/groups/{group}/reset` now also accepts `?dry_run=true` — returns the computed target vs current offsets + lag delta **without writing**.
 
