@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { brokers } from '../../lib/stores/brokers.svelte';
@@ -104,7 +105,7 @@
       toasts.success(editing ? 'Cluster updated' : 'Cluster added');
       onclose();
     } catch (e) {
-      toasts.error("Couldn't save the cluster", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the cluster', e);
     } finally {
       saving = false;
     }

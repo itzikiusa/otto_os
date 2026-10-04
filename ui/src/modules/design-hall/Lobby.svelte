@@ -276,7 +276,7 @@
     <button class="btn small" data-overflow="-1" data-icon="download" onclick={onimport}>
       <Icon name="download" size={12} /> Import
     </button>
-    <button class="btn small" onclick={onnew} aria-haspopup="menu" data-testid="design-new" data-keep>
+    <button class="btn small primary" onclick={onnew} aria-haspopup="menu" data-testid="design-new" data-keep>
       <Icon name="plus" size={12} /> New <Icon name="chevronDown" size={12} />
     </button>
   {/snippet}

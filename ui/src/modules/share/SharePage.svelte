@@ -11,6 +11,7 @@
   // After verification, `getSharedSession` is retried. An "Extend" control allows
   // re-sending a fresh OTP to the locked original recipient.
   import { onDestroy } from 'svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import Icon from '../../lib/components/Icon.svelte';
@@ -98,7 +99,7 @@
         // The share requires email-OTP verification before attaching.
         viewState = 'otp';
       } else {
-        loadError = e instanceof Error ? e.message : String(e);
+        loadError = loadErrorText(e);
         loadCause = shareErrorCause(e);
         viewState = 'error';
       }
@@ -499,7 +500,9 @@
     transition: border-color 120ms;
   }
   .otp-input:focus {
-    border-color: var(--accent);
+    outline: none;
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .otp-error {
     font-size: var(--fs-s);

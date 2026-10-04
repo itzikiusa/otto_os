@@ -12,6 +12,7 @@
   // A decided card stays in the thread with its outcome.
   import ActionCard from './ActionCard.svelte';
   import StatePill from './StatePill.svelte';
+  import ApprovalActions from '../../../lib/components/ApprovalActions.svelte';
   import DenySheet from '../../../lib/components/DenySheet.svelte';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import { assistant, describeError } from '../../../lib/stores/assistant.svelte';
@@ -48,6 +49,16 @@
     submit: 'Submit',
     prod: 'Run on prod',
     other: 'Approve',
+  };
+  // Busy label for each verb: name the action while it is in flight.
+  const BUSY: Record<string, string> = {
+    Send: 'Sending…',
+    Post: 'Posting…',
+    Publish: 'Publishing…',
+    Buy: 'Buying…',
+    Delete: 'Deleting…',
+    Submit: 'Submitting…',
+    'Run on prod': 'Running…',
   };
   const verb = $derived(a ? VERB[a.category] ?? 'Approve' : 'Approve');
   // Never for purchases or prod, whatever the payload says.
@@ -158,14 +169,23 @@
   {#snippet footer()}
     {#if pending}
       {#if kind === 'approval'}
-        {#if canAlwaysAllow}
-          <label class="always checkbox-row">
-            <input type="checkbox" bind:checked={always} />
-            Always allow for {a?.destination ?? a?.where}
-          </label>
-        {/if}
-        <button class="btn small" onclick={() => (denying = true)} disabled={busy !== null}>{busy === 'deny' ? 'Denying…' : 'Deny…'}</button>
-        <button class="btn small primary" onclick={() => void run('approve', canAlwaysAllow && always ? { always_allow: true } : {}, verb)} disabled={busy !== null}>{busy === verb ? 'Working…' : verb}</button>
+        <ApprovalActions
+          approveLabel={verb}
+          approveBusyLabel={BUSY[verb] ?? 'Approving…'}
+          busy={busy === 'deny' ? 'deny' : busy !== null ? 'approve' : null}
+          denyTarget={`this ${verb.toLowerCase()}`}
+          onapprove={() => run('approve', canAlwaysAllow && always ? { always_allow: true } : {}, verb)}
+          ondeny={(reason) => run('deny', reason ? { reason } : {}, 'deny')}
+        >
+          {#snippet extra()}
+            {#if canAlwaysAllow}
+              <label class="always checkbox-row">
+                <input type="checkbox" bind:checked={always} />
+                Always allow for {a?.destination ?? a?.where}
+              </label>
+            {/if}
+          {/snippet}
+        </ApprovalActions>
       {:else if kind === 'limit'}
         <button class="btn small ghost" onclick={() => void run('deny', {}, 'wait')} disabled={busy !== null} title="Stay on this provider and wait for the reset">Wait</button>
         {#if suggestion}
@@ -184,19 +204,15 @@
     {/if}
   {/snippet}
 </ActionCard>
-{#if denying}
-  {#if kind === 'question'}
-    <DenySheet
-      action="answer"
-      title="Skip question"
-      confirmLabel="Skip"
-      hint="Otto gets no answer to this question. It sees your reason and can carry on another way."
-      onclose={() => (denying = false)}
-      ondeny={deny}
-    />
-  {:else}
-    <DenySheet action={verb} onclose={() => (denying = false)} ondeny={deny} />
-  {/if}
+{#if denying && kind === 'question'}
+  <DenySheet
+    action="answer"
+    title="Skip question"
+    confirmLabel="Skip"
+    hint="Otto gets no answer to this question. It sees your reason and can carry on another way."
+    onclose={() => (denying = false)}
+    ondeny={deny}
+  />
 {/if}
 
 <style>

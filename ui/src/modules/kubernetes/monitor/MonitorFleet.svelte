@@ -554,7 +554,7 @@
     { label: 'Kubernetes', onclick: () => router.go('kubernetes') },
     { label: 'Monitor', onclick: () => router.go('kubernetes/monitor') },
   ]}
-  subtitle="Every monitored cluster in one dashboard — restarts & OOMs, memory, requests, latency — straight from ClickHouse. Filters, grouping and ordering stick."
+  subtitle="Restarts, memory, requests and latency across every cluster"
 >
   {#snippet actions()}
     <div class="segmented win-seg" role="radiogroup" aria-label="Window" data-keep>
@@ -666,7 +666,7 @@
     {:else if tableError}
       <EmptyState actionKind="secondary" icon="warning" title="Couldn't load the table" body={tableError} actionLabel="Retry" onaction={() => void loadTable()} />
     {:else if !rows.length}
-      <EmptyState icon="clock" title="No data in this window" body="Nothing was collected for this selection. Widen the window, clear a filter, or enable monitoring on a cluster." />
+      <EmptyState icon="clock" title="No data in this window" body="Nothing was collected for this selection. Widen the window, clear a filter, or enable monitoring on a cluster. Data comes straight from ClickHouse; filters, grouping and ordering are remembered." />
     {:else}
       <div class="tablewrap card">
         <div class="vt" role="table" aria-label={group === 'pod' ? 'Fleet pods' : 'Fleet workloads'} aria-rowcount={visibleRows.length + 1} data-testid="k8s-fleet-table" bind:this={tableEl}>

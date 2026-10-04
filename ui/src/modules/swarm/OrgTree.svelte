@@ -3,6 +3,7 @@
   // agent, a status dot, task/run counts, and its open sessions (click → open).
   // Supports drag-and-drop to reparent agents within the hierarchy.
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import { sessionState } from '../../lib/status';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
@@ -11,7 +12,6 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import type { SwarmAgent } from './types';
 
@@ -77,7 +77,7 @@
     try {
       await swarm.updateAgent(aid, { reports_to: reportsTo });
     } catch (e) {
-      toasts.error("Couldn't move the agent", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t move the agent', e);
     }
   }
 
@@ -100,7 +100,7 @@
     try {
       await swarm.deleteAgent(a.id);
     } catch (e) {
-      toasts.error("Couldn't delete the agent", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete the agent', e);
     }
   }
 

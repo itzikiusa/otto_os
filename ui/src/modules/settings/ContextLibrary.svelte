@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { toastError } from '../../lib/toastError';
   import { onTabKey } from '../../lib/tabKeys';
   import { sectionLabel } from './sections';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -244,7 +245,7 @@
       selected = name;
       await loadTab(tab, name);
     } catch (e) {
-      toasts.error(`Couldn’t save the ${meta.singular}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t save the ${meta.singular}`, e);
     } finally {
       saving = false;
     }
@@ -274,7 +275,7 @@
       rememberSelection(`context-library.${tab}`, null);
       await loadTab(tab);
     } catch (e) {
-      toasts.error(`Couldn’t delete ${name}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t delete ${name}`, e);
     }
   }
 
@@ -290,7 +291,7 @@
       toasts.success('Default soul updated', resp.name ?? 'None');
     } catch (e) {
       defaultSoul = prev;
-      toasts.error('Couldn’t set the default soul', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t set the default soul', e);
     }
   }
 </script>

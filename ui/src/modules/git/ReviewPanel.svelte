@@ -3,6 +3,8 @@
   // approve/decline individual draft comments. Supports live per-agent progress
   // cards, a configure-agents modal, and a merge-readiness panel.
   import { onDestroy, untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
+  import { verdictLabel } from '../../lib/labels';
   import { api, ApiError, isAbortError } from '../../lib/api/client';
   import { prDiffFile, prDiffSummary } from './diff-load';
   import type {
@@ -503,7 +505,7 @@
       // Start the fallback poll; the WS reviewBus will replace it when events arrive.
       if (review.status === 'running') schedulePoll();
     } catch (e) {
-      toasts.error('Could not start review', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start review', e);
     } finally {
       if (!disposed) starting = false;
     }
@@ -524,7 +526,7 @@
       history = history.map((r) => (r.id === updated.id ? updated : r));
       toasts.info('Review stopped');
     } catch (e) {
-      toasts.error('Could not stop the review', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t stop the review', e);
     } finally {
       if (!disposed) {
         cancelling = false;
@@ -592,7 +594,7 @@
       if (!confirmed) toasts.success('Comment posted', prWhere);
       return true;
     } catch (e) {
-      if (!quiet) toasts.error("Couldn't post the comment", e instanceof Error ? e.message : String(e));
+      if (!quiet) toastError('Couldn’t post the comment', e);
       return false;
     } finally {
       const next = { ...actionBusy };
@@ -642,7 +644,7 @@
       }
       toasts.info('Comment declined');
     } catch (e) {
-      toasts.error('Could not decline comment', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t decline comment', e);
     } finally {
       const next = { ...actionBusy };
       delete next[c.id];
@@ -694,7 +696,7 @@
       selectedPresetId = binding.preset_id ?? '';
       seedEditFields(configScope === 'global' ? cfg : binding.config);
     } catch (e) {
-      toasts.error('Could not load config', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t load config', e);
       showConfig = false;
     } finally {
       configLoading = false;
@@ -747,7 +749,7 @@
       if (globalCfg) seedEditFields(globalCfg);
       toasts.success('Repo now uses the global review config');
     } catch (e) {
-      toasts.error('Could not revert to global', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t revert to global', e);
     } finally {
       configSaving = false;
     }
@@ -774,7 +776,7 @@
       presetNameDraft = '';
       toasts.success(existing ? `Preset “${name}” updated` : `Preset “${name}” created`, 'This repo now uses it');
     } catch (e) {
-      toasts.error('Could not save preset', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save preset', e);
     } finally {
       configSaving = false;
     }
@@ -828,7 +830,7 @@
       await api.put('/settings/pr-review', cfg);
       globalCfg = cfg;
     } catch (e) {
-      toasts.error('Could not persist presets', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t persist presets', e);
     }
   }
 
@@ -943,7 +945,7 @@
       }
       showConfig = false;
     } catch (e) {
-      toasts.error('Could not save config', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save config', e);
     } finally {
       configSaving = false;
     }
@@ -1044,7 +1046,7 @@
     <div class="rp-precheck" role="status">
       <span class="rp-precheck-icon"><Icon name="warning" size={14} /></span>
       <span class="rp-precheck-msg">
-        {#if missingReviewSkills > 0}{missingReviewSkills} review skill{missingReviewSkills === 1 ? " isn't" : "s aren't"} installed{/if}{#if missingReviewSkills > 0 && outdatedReviewSkills > 0}{' · '}{/if}{#if outdatedReviewSkills > 0}{outdatedReviewSkills} {outdatedReviewSkills === 1 ? 'has an update' : 'have updates'}{/if}
+        {#if missingReviewSkills > 0}{missingReviewSkills} review skill{missingReviewSkills === 1 ? " isn’t" : "s aren’t"} installed{/if}{#if missingReviewSkills > 0 && outdatedReviewSkills > 0}{' · '}{/if}{#if outdatedReviewSkills > 0}{outdatedReviewSkills} {outdatedReviewSkills === 1 ? 'has an update' : 'have updates'}{/if}
       </span>
       <button class="btn small ghost rp-precheck-btn" onclick={openSkillSettings}>
         Open skill settings
@@ -1208,7 +1210,7 @@
           <Icon name="zap" size={13} /> {blockerCount} blocker{blockerCount === 1 ? '' : 's'} before merge
         {/if}
         {#if review.verdict}
-          <span class="rp-verdict">Verdict: {review.verdict.replaceAll('_', ' ')}</span>
+          <span class="rp-verdict">Verdict: {verdictLabel(review.verdict)}</span>
         {/if}
       </div>
     {/if}
@@ -1220,7 +1222,7 @@
         <div class="rp-readiness-row">
           <span class="rp-readiness-label">Merge readiness</span>
           {#if mergeReadinessLoading}
-            <span class="dim" style="font-size: var(--fs-xs)">Loading…</span>
+            <span class="dim" style="font-size: var(--fs-xs)">Checking merge readiness…</span>
           {:else if mergeReadiness !== null}
             <!-- CI status pill -->
             {@const ciState = (mergeReadiness as any).ci_status ?? 'none'}
@@ -1265,7 +1267,7 @@
       </div>
     {/if}
 
-    <!-- Per-agent breakdown: open each agent's (archived) session + its own
+    <!-- Per-agent breakdown: open each agent’s (archived) session + its own
          findings. Shared with the local review; excludes the summarizer. -->
     {#if review.agents.length > 1}
       <ReviewAgents {review} view="done" onretried={onAgentRetried} />
@@ -1275,13 +1277,13 @@
       <p class="dim" style="font-size: var(--fs-s); padding: 16px 0">No comments generated.</p>
     {:else}
       {#if draftedBy}
-        <!-- Attribution: the comments are the summarizer's merge of every
-             lens (per-comment origin isn't recorded), and stay drafts here
+        <!-- Attribution: the comments are the summarizer’s merge of every
+             lens (per-comment origin isn’t recorded), and stay drafts here
              until a person posts them. -->
         <p class="rp-attrib" data-testid="rp-attrib">
           <ProviderIcon provider={draftedBy.provider} size={12} />
           <span>
-            Drafted by Otto's review ({draftedBy.provider}{draftedBy.model ? ` · ${draftedBy.model}` : ''}){draftedBy.lenses.length > 0 ? ` from ${draftedBy.lenses.join(', ')}` : ''}. Nothing reaches the PR until you post it.
+            Drafted by Otto’s review ({draftedBy.provider}{draftedBy.model ? ` · ${draftedBy.model}` : ''}){draftedBy.lenses.length > 0 ? ` from ${draftedBy.lenses.join(', ')}` : ''}. Nothing reaches the PR until you post it.
           </span>
         </p>
       {/if}

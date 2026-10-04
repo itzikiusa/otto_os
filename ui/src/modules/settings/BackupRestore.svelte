@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Settings export/import and state backup/restore (C3).
@@ -68,7 +69,7 @@
           : 'No secrets in export',
       );
     } catch (e) {
-      toasts.error('Couldn’t export settings', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t export settings', e);
     } finally {
       exporting = false;
     }
@@ -101,7 +102,7 @@
       await api.post('/settings/import', { settings: parsed.settings ?? {} });
       toasts.success('Settings imported', `${keyCount} entr${keyCount === 1 ? 'y' : 'ies'} merged.`);
     } catch (err) {
-      toasts.error('Couldn’t import settings', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t import settings', err);
     } finally {
       importing = false;
     }
@@ -119,7 +120,7 @@
       downloadJson(resp, `otto-state-backup-${dateSlug()}.json`);
       toasts.success('Settings backup downloaded', `${resp.manifest.workspace_count} workspace${resp.manifest.workspace_count === 1 ? '' : 's'} in manifest.`);
     } catch (e) {
-      toasts.error('Couldn’t download the settings backup', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t download the settings backup', e);
     } finally {
       backingUp = false;
     }
@@ -152,7 +153,7 @@
       await api.post('/state/restore', { backup, confirm: true });
       toasts.success('Settings restored', `${keyCount} setting${keyCount === 1 ? '' : 's'} applied.`);
     } catch (err) {
-      toasts.error('Couldn’t restore settings', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t restore settings', err);
     } finally {
       restoring = false;
     }

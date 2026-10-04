@@ -4,7 +4,7 @@
   // compare any two via the shared DiffView component (word-level diff).
 
   import { api } from '../../lib/api/client';
-  import { toasts } from '../../lib/toast.svelte';
+  import { toastError } from '../../lib/toastError';
   import DiffView from '../../lib/components/DiffView.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -76,7 +76,7 @@
         { schema: compatSchema },
       );
     } catch (e) {
-      toasts.error("Couldn't check compatibility", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t check compatibility', e);
     } finally {
       compatLoading = false;
     }

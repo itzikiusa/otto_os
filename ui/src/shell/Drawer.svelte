@@ -21,6 +21,9 @@
     side?: 'left' | 'right';
     /** Accessible label for the dialog. */
     label?: string;
+    /** A visible header (title + ✕) above a scrolling body, instead of the
+     *  floating ✕ over the content — for drawers that host a long form/list. */
+    title?: string;
     /** Panel width (CSS length). Defaults to a touch-friendly, viewport-capped value. */
     width?: string;
     children: Snippet;
@@ -31,6 +34,7 @@
     inline = false,
     side = 'left',
     label = 'Panel',
+    title,
     width = 'min(86vw, 320px)',
     children,
   }: Props = $props();
@@ -85,16 +89,26 @@
     style:width={inline ? undefined : width}
     role={inline ? undefined : 'dialog'}
     aria-modal={inline ? undefined : true}
-    aria-label={inline ? undefined : label}
+    aria-label={inline ? undefined : (title ?? label)}
   >
     <!-- Always-visible close affordance: tapping the thin backdrop sliver left by
          a wide drawer is hard on a phone, so give an explicit ✕. -->
-    {#if !inline}
-    <button class="icon-btn drawer-close" onclick={close} aria-label="Close {label}" title="Close">
-      <Icon name="x" size={14} />
-    </button>
+    {#if !inline && title}
+      <header class="drawer-head">
+        <h2>{title}</h2>
+        <button class="icon-btn" onclick={close} aria-label="Close {title.toLowerCase()}" title="Close (Esc)">
+          <Icon name="x" size={14} />
+        </button>
+      </header>
+      <div class="drawer-body">{@render children()}</div>
+    {:else}
+      {#if !inline}
+        <button class="icon-btn drawer-close" onclick={close} aria-label="Close {label}" title="Close">
+          <Icon name="x" size={14} />
+        </button>
+      {/if}
+      {@render children()}
     {/if}
-    {@render children()}
   </div>
 {/if}
 
@@ -122,6 +136,26 @@
   }
   .drawer[hidden] {
     display: none;
+  }
+  /* Titled drawers: a header row (title + ✕) over a body that scrolls itself. */
+  .drawer-head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .drawer-head h2 {
+    margin: 0;
+    font-size: var(--fs-l);
+    font-weight: 600;
+  }
+  .drawer-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
   }
   /* Floating close button pinned to the panel's top corner, above content. */
   .drawer-close {

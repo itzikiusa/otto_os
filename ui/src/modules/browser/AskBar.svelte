@@ -8,6 +8,7 @@
   // marked do?" resolves without the agent guessing which element is meant.
 
   import { browser } from '../../lib/stores/browser.svelte';
+  import { toastError } from '../../lib/toastError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -79,7 +80,7 @@
       // screen (collapsed dock, or the embedded bar) say where it went.
       if (!terminalVisible) toasts.success('Sent to the agent', session?.title ?? undefined);
     } catch (e) {
-      toasts.error('Ask failed', e instanceof Error ? e.message : undefined);
+      toastError('Couldn’t ask the question', e);
     } finally {
       sending = false;
     }

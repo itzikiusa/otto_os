@@ -3,6 +3,7 @@
   // Lists them with a click-to-open deep-link into the Canvas module, and a
   // "New canvas" action that creates one already linked to the story.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import { api } from '../../lib/api/client';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { router } from '../../lib/router.svelte';
@@ -42,7 +43,7 @@
   async function openPicker(): Promise<void> {
     picking = !picking;
     if (picking && !canvas.scenes.length) {
-      await canvas.loadScenes().catch((e) => toasts.error("Couldn't load your canvases", e instanceof Error ? e.message : String(e)));
+      await canvas.loadScenes().catch((e) => toastError('Couldn’t load your canvases', e));
     }
   }
 
@@ -55,7 +56,7 @@
       await load();
       toasts.success('Canvas linked', 'Attached to this story');
     } catch (e) {
-      toasts.error('Link failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t link the canvas', e);
     } finally {
       linkingId = '';
     }
@@ -102,7 +103,7 @@
       router.go('canvas');
       toasts.success('Canvas created', 'Linked to this story');
     } catch (e) {
-      toasts.error('Could not create canvas', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create canvas', e);
     } finally {
       creating = false;
     }

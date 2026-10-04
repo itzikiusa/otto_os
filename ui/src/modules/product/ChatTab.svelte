@@ -6,7 +6,7 @@
   // conversation works from an EMPTY/Untitled draft to help with early
   // discovery & research.
   import { product } from '../../lib/stores/product.svelte';
-  import { toasts } from '../../lib/toast.svelte';
+  import { toastError } from '../../lib/toastError';
   import DiscoveryChat from './DiscoveryChat.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import ListPane from './ui/ListPane.svelte';
@@ -69,7 +69,7 @@
       chats = [newChat, ...chats];
       activeCid = newChat.id;
     } catch (e) {
-      toasts.error('Could not create chat', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create chat', e);
     } finally {
       creating = false;
     }
@@ -87,7 +87,7 @@
         activeCid = next?.id ?? null;
       }
     } catch (e) {
-      toasts.error('Could not archive chat', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t archive chat', e);
     }
   }
 

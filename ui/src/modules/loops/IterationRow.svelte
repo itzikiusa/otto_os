@@ -1,6 +1,6 @@
 <script lang="ts">
   import { loops } from '../../lib/stores/loops.svelte';
-  import { toasts } from '../../lib/toast.svelte';
+  import { toastError } from '../../lib/toastError';
   import type { GoalLoopIteration, LoopAgentState } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -67,7 +67,7 @@
     try {
       await loops.retryExecutor(loopId, iter.idx, agentIndex);
     } catch (e) {
-      toasts.error('Couldn’t retry the agent', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t retry the agent', e);
     }
   }
 

@@ -150,5 +150,5 @@ test('exclusions kind menu stays inside the viewport near the bottom of the page
   await expect(menu).toBeVisible();
   await expectFullyInViewport(page, menu);
   await page.getByRole('menuitem', { name: /Pod name glob/ }).click();
-  await expect(page.locator('.ex .chip')).toHaveText('pod');
+  await expect(page.locator('.ex .chip')).toHaveText('Pod');
 });

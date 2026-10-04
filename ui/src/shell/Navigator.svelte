@@ -2304,7 +2304,7 @@
     flex-shrink: 0;
     width: 14px;
     height: 14px;
-    border-radius: 99px;
+    border-radius: 999px;
     color: var(--warning);
     background: color-mix(in srgb, var(--status-warn) 18%, transparent);
   }

@@ -4,6 +4,7 @@
   // Evidence is recorded server-side (broker_replays table).
 
   import { api } from '../../lib/api/client';
+  import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmProd } from '../../lib/confirmProd';
   import type { BrokerCluster } from '../../lib/api/types';
@@ -104,7 +105,7 @@
         `${result.count} message${result.count === 1 ? '' : 's'} replayed to "${result.target_topic}"`,
       );
     } catch (e) {
-      toasts.error("Couldn't replay messages", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t replay messages', e);
     } finally {
       running = false;
     }

@@ -3,6 +3,7 @@
   // (title, reports-to, specialization, soul, skills, provider, schedule) → edit
   // → Hire.
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import Modal from '../../lib/components/Modal.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { isAbortError } from '../../lib/api/client';
@@ -108,7 +109,7 @@
       step = 1;
     } catch (e) {
       if (isAbortError(e)) toasts.info('Recruiting stopped');
-      else toasts.error("The Recruiter couldn't propose an agent", e instanceof Error ? e.message : String(e));
+      else toastError('The Recruiter couldn’t propose an agent', e);
     } finally {
       busy = false;
       recruitCtl = null;

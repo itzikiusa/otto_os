@@ -69,7 +69,7 @@ test('Health support bundle failure leaves download available for retry', async 
   await page.goto('/#/insights/health');
   const download = page.getByRole('button', { name: 'Download support bundle', exact: true });
   await download.click();
-  await expect(page.getByText("Couldn't download the support bundle", { exact: true })).toBeVisible();
+  await expect(page.getByText('Couldn’t download the support bundle', { exact: true })).toBeVisible();
   await expect(download).toBeEnabled(); fail = false;
   const pending = page.waitForEvent('download'); await download.click();
   expect((await pending).suggestedFilename()).toMatch(/^otto-support-bundle-/);
@@ -152,7 +152,7 @@ test('Assistant incremental turns remain readable and running task cancellation 
   await expect(task.getByRole('button', { name: 'Stop', exact: true })).toBeEnabled();
   await task.getByRole('button', { name: 'Stop', exact: true }).click();
   await page.getByRole('dialog', { name: 'Stop task' }).getByRole('button', { name: 'Stop', exact: true }).click();
-  await expect(task).toContainText('Cancelled');
+  await expect(task).toContainText('Canceled');
   expect(state.calls.some(c => c.path.endsWith('/task-hotels/cancel'))).toBe(true);
   await task.scrollIntoViewIfNeeded();
   await page.screenshot({ path: info.outputPath('assistant-cancelled.png') });

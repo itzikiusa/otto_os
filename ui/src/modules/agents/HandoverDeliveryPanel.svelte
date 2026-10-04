@@ -1,8 +1,10 @@
 <script lang="ts">
   import { api } from '../../lib/api/client';
+  import { toastError } from '../../lib/toastError';
   import type { HandoverDelivery, Session } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { handoverStateLabel } from '../../lib/labels';
 
   let { session, readonly = false }: { session: Session; readonly?: boolean } = $props();
   const delivery = $derived(session.meta?.handover as HandoverDelivery | undefined);
@@ -17,14 +19,14 @@
       ws.sessions = ws.sessions.map((s) => s.id === targetId ? updated : s);
       toasts.success(action === 'retry' ? 'Handover retry started' : 'Receipt confirmed');
     } catch (e) {
-      toasts.error('Handover action failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update the handover', e);
     } finally { busy = false; }
   }
 </script>
 
 {#if delivery}
   <details class="handover-delivery">
-    <summary>Handover · {delivery.state.replaceAll('_', ' ')}</summary>
+    <summary>Handover · {handoverStateLabel(delivery.state).toLowerCase()}</summary>
     {#if delivery.error}<p role="alert">{delivery.error}</p>{/if}
     {#if delivery.focus}<p><strong>Focus:</strong> {delivery.focus}</p>{/if}
     {#if delivery.brief}<pre>{delivery.brief}</pre>{:else}<p>Preparing the saved brief…</p>{/if}

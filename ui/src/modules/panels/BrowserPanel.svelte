@@ -12,6 +12,7 @@
   // "Take over" mode reloads the active tab via the daemon's proxy endpoint so a
   // picker script is injected; clicking elements captures a CSS-selector
   // description, the user comments, and all comments are sent to the active agent.
+  import { tick } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { onTabKey } from '../../lib/tabKeys';
@@ -67,6 +68,9 @@
   type Popover = { open: boolean; x: number; y: number; desc: string; url: string };
   let popover = $state<Popover>({ open: false, x: 0, y: 0, desc: '', url: '' });
   let popoverComment = $state('');
+  let browserEl = $state<HTMLDivElement | null>(null);
+  let popEl = $state<HTMLDivElement | null>(null);
+  let takeoverBtnEl = $state<HTMLButtonElement | null>(null);
 
   // The iframe DOM node — bound below with bind:this (web build / take-over only)
   let frame = $state<HTMLIFrameElement | null>(null);
@@ -383,11 +387,31 @@
     syncTakeoverMessage();
   });
 
+  // Clamp the popover into the panel using its REAL size (the estimate above
+  // can't know how tall the description + textarea render) — a popover near the
+  // bottom/inline-end edge would otherwise hang off the panel.
+  $effect(() => {
+    if (!popover.open || !popEl || !browserEl) return;
+    const pad = 8;
+    const maxX = Math.max(pad, browserEl.clientWidth - popEl.offsetWidth - pad);
+    const maxY = Math.max(pad, browserEl.clientHeight - popEl.offsetHeight - pad);
+    const x = Math.min(Math.max(pad, popover.x), maxX);
+    const y = Math.min(Math.max(pad, popover.y), maxY);
+    if (x !== popover.x || y !== popover.y) popover = { ...popover, x, y };
+  });
+
+  // Closing the popover with Esc hands focus back to the take-over toggle (the
+  // control that opened this mode) instead of dropping it on <body>.
+  function closePopover(): void {
+    popover = { ...popover, open: false };
+    void tick().then(() => takeoverBtnEl?.focus());
+  }
+
   // ── Global Esc handler ────────────────────────────────────────────────────
   $effect(() => {
     function onKeydown(e: KeyboardEvent): void {
       if (e.key === 'Escape') {
-        if (popover.open) popover = { ...popover, open: false };
+        if (popover.open) closePopover();
         else if (takeover) releaseTakeover();
       }
     }
@@ -438,7 +462,7 @@
   }
 </script>
 
-<div class="browser">
+<div class="browser" bind:this={browserEl}>
   <!-- ── Tab strip ─────────────────────────────────────────────────────────── -->
   <!-- The "+" sits OUTSIDE the scrolling tab list so it can never be scrolled
        or clipped out of reach when there are many tabs. -->
@@ -492,10 +516,10 @@
 
   <!-- ── Toolbar ──────────────────────────────────────────────────────────── -->
   <div class="toolbar">
-    <button class="tb-btn" title="Reload" aria-label="Reload" disabled={!current} onclick={reload}>
+    <button class="icon-btn" title="Reload" aria-label="Reload" disabled={!current} onclick={reload}>
       <Icon name="refresh" size={13} />
     </button>
-    <button class="tb-btn" title="Start page" aria-label="Start page" disabled={!current} onclick={home}>
+    <button class="icon-btn" title="Start page" aria-label="Start page" disabled={!current} onclick={home}>
       <Icon name="home" size={13} />
     </button>
     <input
@@ -508,13 +532,14 @@
       onblur={() => (urlFocused = false)}
       onkeydown={onEnter}
     />
-    <button class="tb-btn" title="Go" aria-label="Go" disabled={!urlInput.trim()} onclick={() => load(urlInput)}>
+    <button class="icon-btn" title="Go" aria-label="Go" disabled={!urlInput.trim()} onclick={() => load(urlInput)}>
       <Icon name="chevronRight" size={13} />
     </button>
 
     <!-- Take-over toggle -->
     <button
-      class="tb-btn takeover-btn"
+      class="icon-btn takeover-btn"
+      bind:this={takeoverBtnEl}
       class:takeover-active={takeover}
       title={takeover
         ? 'Release (Esc)'
@@ -529,7 +554,7 @@
 
     {#if nativeBrowserAvailable}
       <button
-        class="tb-btn"
+        class="icon-btn"
         title="DevTools — console, network, elements"
         aria-label="DevTools"
         disabled={!current}
@@ -540,7 +565,7 @@
     {/if}
 
     <button
-      class="tb-btn"
+      class="icon-btn"
       title="Open in system browser"
       aria-label="Open in system browser"
       disabled={!(current || urlInput.trim())}
@@ -573,6 +598,7 @@
     {#if popover.open}
       <div
         class="popover"
+        bind:this={popEl}
         style="left:{popover.x}px; top:{popover.y}px;"
         role="dialog"
         aria-label="Add comment"
@@ -590,11 +616,11 @@
           autofocus
         ></textarea>
         <div class="popover-actions">
-          <button class="btn" onclick={() => (popover = { ...popover, open: false })}>
+          <button class="btn" onclick={closePopover}>
             Cancel
           </button>
           <button class="btn primary" disabled={!popoverComment.trim()} onclick={addAnnotation}>
-            Add
+            Add comment
           </button>
         </div>
       </div>
@@ -799,31 +825,9 @@
     height: 28px;
     font-size: var(--fs-s);
   }
-  .tb-btn {
-    width: 28px;
-    height: 28px;
-    flex-shrink: 0;
-    display: grid;
-    place-items: center;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-  }
-  .tb-btn:hover:not(:disabled) {
-    border-color: var(--accent);
-    color: var(--accent-text);
-  }
-  .tb-btn:disabled {
-    opacity: 0.35;
-    cursor: default;
-  }
-
   /* Take-over toggle highlighted state */
   .takeover-btn.takeover-active {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
 
@@ -939,6 +943,9 @@
     position: absolute;
     z-index: var(--z-sticky);
     width: 300px;
+    max-width: calc(100% - 16px);
+    max-height: calc(100% - 16px);
+    overflow-y: auto;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);

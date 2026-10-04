@@ -1,5 +1,6 @@
 <script lang="ts">
   import {onMount} from 'svelte';
+  import {recapStateLabel, sentenceCase} from '../../lib/labels';
   import {pollWhileVisible} from '../../lib/poll';
   import type {RecapDetail, RecapDraft, RecapEventData} from '../../lib/api/room-recap-types';
   import {recapRequest, recapBlob} from './recap-client';
@@ -23,7 +24,7 @@
   function terminalText(data: string): string { try { return new TextDecoder().decode(Uint8Array.from(atob(data), c => c.charCodeAt(0))).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, ''); } catch { return 'Terminal text could not be decoded.'; } }
   function activity(payload: RecapEventData): string {
     switch (payload.type) {
-      case 'capture': return `Capture ${payload.state.replaceAll('_', ' ')}${payload.reason ? `: ${payload.reason}` : ''}`;
+      case 'capture': return `Capture ${recapStateLabel(payload.state).toLowerCase()}${payload.reason ? `: ${payload.reason}` : ''}`;
       case 'participants': return `Participants: ${payload.members.map(m => m.name).join(', ')}`;
       case 'presentation': return `${payload.operation}: ${payload.presentation.title}`;
       case 'annotation': return `${payload.annotation.tool} annotation on source ${payload.annotation.source_id}`;
@@ -39,7 +40,7 @@
   {:else if error}<p class="error" role="alert">{error} <button class="btn small" onclick={() => load()}>Retry</button></p>{/if}
   {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
   {#if detail}
-    <div class="recap-heading"><div><strong>{detail.metadata.session_title}</strong><p>{detail.metadata.status.replaceAll('_', ' ')} · {formatBytes(detail.metadata.bytes_used)} of {formatBytes(detail.metadata.quota_bytes)}</p></div><button class="btn small" disabled={exporting} onclick={exportArchive}>{exporting ? 'Exporting…' : 'Export full archive'}</button></div>
+    <div class="recap-heading"><div><strong>{detail.metadata.session_title}</strong><p>{recapStateLabel(detail.metadata.status)} · {formatBytes(detail.metadata.bytes_used)} of {formatBytes(detail.metadata.quota_bytes)}</p></div><button class="btn small" disabled={exporting} onclick={exportArchive}>{exporting ? 'Exporting…' : 'Export full archive'}</button></div>
     {#if !detail.metadata.speech_available}<p class="coverage">Speech is unavailable: {detail.metadata.speech_error ?? 'The archive contains available room activity only.'}</p>{/if}
     <nav aria-label="Recap sections">{#each ['transcript', 'activity', 'summary'] as value}<button class="btn" aria-pressed={tab === value} onclick={() => tab = value as typeof tab}>{value === 'transcript' ? 'Transcript' : value === 'activity' ? 'Activity & screens' : 'Summary'}</button>{/each}</nav>
     {#if tab === 'summary'}
@@ -54,7 +55,7 @@
       <p class="hint">Archive events {detail.events[0]?.seq ?? 0}–{detail.events.at(-1)?.seq ?? 0}. Speech and room activity are paginated; export includes the full archive.</p>
       <div class="events">{#each detail.events as event (event.seq)}{@const payload = event.payload}
         {#if tab === 'activity' || ['speech', 'chat', 'terminal', 'gap', 'capture', 'audio_pending'].includes(payload.type)}<article class:gap={payload.type === 'gap'}>
-          <header><span>#{event.seq} · {new Date(event.created_at).toLocaleTimeString()}</span><span>{payload.type.replaceAll('_', ' ')}</span></header>
+          <header><span>#{event.seq} · {new Date(event.created_at).toLocaleTimeString()}</span><span>{sentenceCase(payload.type)}</span></header>
           {#if payload.type === 'speech'}<strong>{payload.member_name}</strong>{#each payload.segments as segment}<p>{segment.text}</p>{/each}
           {:else if payload.type === 'chat'}<strong>{payload.message.name}</strong><p>{payload.message.text}</p>
           {:else if payload.type === 'terminal'}<pre>{terminalText(payload.data_base64)}</pre>

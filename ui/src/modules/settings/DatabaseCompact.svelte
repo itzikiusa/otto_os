@@ -17,6 +17,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { formatBytes } from '../../lib/metric-format';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { RUN_HISTORY_CHOICES, runHistoryDays, runHistoryLabel, withRunHistoryDays } from './runHistory';
 
   let stats = $state<DbStatsResp | null>(null);
@@ -42,7 +44,7 @@
     try {
       settings = await api.get<Record<string, unknown>>('/settings');
     } catch (e) {
-      historyError = `Couldn’t read the retention setting. ${msg(e)}`;
+      historyError = loadErrorText(e);
     }
   }
 
@@ -53,7 +55,7 @@
     try {
       stats = await api.get<DbStatsResp>('/admin/db/stats');
     } catch (e) {
-      loadError = `Couldn’t read the database size. ${msg(e)}`;
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -169,8 +171,7 @@
         {/each}
       </select>
     {:else if historyError}
-      <span class="error inline" role="alert">{historyError}</span>
-      <button class="btn" onclick={loadSettings}>Retry</button>
+      <LoadState what="the retention setting" variant="compact" error={historyError} empty={true} onretry={loadSettings} />
     {:else}
       <span class="dim" role="status">Reading…</span>
     {/if}
@@ -178,12 +179,9 @@
   <p id="run-history-hint" class="dim">
     Finished Run with Otto runs, swarm runs and messages, and old goal-loop iterations. Off by default; at least 14 days.
   </p>
-  {#if loading && !stats}
-    <p class="dim" role="status">Reading database size…</p>
-  {:else if loadError}
-    <p class="error" role="alert">{loadError}</p>
-    <div class="controls"><button class="btn" onclick={load}>Retry</button></div>
-  {:else if stats}
+  {#if !stats}
+    <LoadState what="the database size" {loading} error={loadError} empty={true} onretry={load} />
+  {:else}
     <dl class="facts">
       <div><dt>Size</dt><dd>{formatBytes(stats.size_bytes)}</dd></div>
       <div><dt>Reclaimable</dt><dd>{formatBytes(stats.free_bytes)}</dd></div>
@@ -227,8 +225,6 @@
   .facts dd { margin: 2px 0 0; font-weight: 500; font-variant-numeric: tabular-nums; }
   .controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
   .notice { margin: 10px 0 0; color: var(--success); }
-  .error { margin: 10px 0 0; color: var(--danger); overflow-wrap: anywhere; }
-  .error.inline { margin: 0; }
   .history { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 10px 0 4px; font-size: var(--fs-s); }
   .history label { font-weight: 500; }
   .history select { min-inline-size: 12rem; max-inline-size: 100%; }

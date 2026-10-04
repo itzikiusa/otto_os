@@ -3,6 +3,7 @@
   // Mirrors AttachIssue.svelte but calls POST /sessions/{id}/attach-product
   // which also injects the full refined context bundle into the live PTY.
   import type { ProductStory } from '../product/types';
+  import { toastError } from '../../lib/toastError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
@@ -57,7 +58,7 @@
       toasts.success('Context attached', story.title);
       onclose();
     } catch (e) {
-      toasts.error('Attach failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t attach the story', e);
     } finally {
       attaching = false;
     }

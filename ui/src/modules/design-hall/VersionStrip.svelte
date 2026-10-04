@@ -3,6 +3,7 @@
   // with its author (agents marked). Clicking chips selects up to two for
   // Compare; versions are the undo model, so nothing here ever deletes.
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import type { DesignVersion } from '../../lib/api/types';
   import { stripOrder, versionAuthor } from './model';
 
@@ -59,9 +60,8 @@
   <div class="chips" bind:this={scroller} role="group" aria-label="Versions">
     {#if loading && !versions.length}
       <span class="dim">Loading versions…</span>
-    {:else if error}
-      <span class="err"><Icon name="warning" size={12} /> Couldn’t load versions.</span>
-      <button class="btn small ghost" onclick={onretry}>Retry</button>
+    {:else if error && !versions.length}
+      <LoadState what="versions" variant="compact" {loading} {error} empty={true} {onretry} />
     {:else}
       {#each ordered as v, i (v.id)}
         {@const author = versionAuthor(v, meId)}
@@ -82,6 +82,11 @@
           {#if v.id === approvedId}<span class="appr" title="Approved version"><Icon name="check" size={12} /></span>{/if}
         </button>
       {/each}
+      {#if error}
+        <!-- Stale: keep the versions already loaded; say the refresh failed. -->
+        <span class="err" role="status" title={error}><Icon name="warning" size={12} /> Refresh failed</span>
+        <button class="btn small ghost" onclick={onretry} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>
+      {/if}
     {/if}
   </div>
   <span class="hint">{hint}</span>

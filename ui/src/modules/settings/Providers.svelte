@@ -18,6 +18,8 @@
   import SettingToggle from './SettingToggle.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
 
   interface ProviderDef {
     cmd: string;
@@ -102,12 +104,19 @@
   let catalog: Record<string, CatalogEntry> = $state({});
   let refreshingModels: string | null = $state(null); // provider slug, or '*' for all
 
+  let catalogError = $state<string | null>(null);
+  let catalogLoading = $state(false);
   async function loadCatalog(): Promise<void> {
+    catalogLoading = true;
+    catalogError = null;
     try {
       const r = await api.get<{ providers: Record<string, CatalogEntry> }>('/providers/models');
       catalog = r.providers;
-    } catch {
-      // Non-fatal — the section just renders empty.
+    } catch (e) {
+      // Non-fatal for the page, but an unread catalog must not read as "none yet".
+      catalogError = loadErrorText(e);
+    } finally {
+      catalogLoading = false;
     }
   }
 
@@ -121,7 +130,7 @@
       catalog = r.providers;
       toasts.info('Model catalog refreshed');
     } catch (e) {
-      toasts.error('Refresh failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t refresh the model catalog', e);
     } finally {
       refreshingModels = null;
     }
@@ -158,7 +167,7 @@
       ws.addSession(session); // navigates to the update session
       toasts.info('Updating CLIs…', 'Watch the Update CLIs session for progress');
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update the provider', e);
     } finally {
       updating = false;
     }
@@ -226,7 +235,7 @@
       toasts.success('Providers saved', 'Available immediately for new sessions');
       formOpen = false;
     } catch (e) {
-      toasts.error('Couldn’t save providers', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save providers', e);
     } finally {
       saving = false;
     }
@@ -246,7 +255,7 @@
           : `PR and commit drafts use ${draftModel}`,
       );
     } catch (e) {
-      toasts.error('Couldn’t save the draft model', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the draft model', e);
     } finally {
       saving = false;
     }
@@ -267,7 +276,7 @@
           : `New sessions and channel replies default to ${defaultProvider}`,
       );
     } catch (e) {
-      toasts.error('Couldn’t save the default agent', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the default agent', e);
     } finally {
       saving = false;
     }
@@ -297,7 +306,7 @@
       if (enable) revert.add(nameOfProvider);
       else revert.delete(nameOfProvider);
       disabled = revert;
-      toasts.error(`Couldn’t ${enable ? 'enable' : 'hide'} ${nameOfProvider}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t ${enable ? 'enable' : 'hide'} ${nameOfProvider}`, e);
     }
   }
 
@@ -324,7 +333,7 @@
         autoUpdate.enabled ? `Daily at ${autoUpdate.time_of_day} ${autoUpdate.use_utc ? 'UTC' : 'local time'}` : undefined,
       );
     } catch (e) {
-      toasts.error('Couldn’t save automatic updates', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save automatic updates', e);
       // Re-read so the controls never show a schedule that isn't saved.
       autoUpdate = {
         ...AUTO_UPDATE_DEFAULTS,
@@ -361,7 +370,7 @@
       );
     } catch (e) {
       skipPermissions = !skipPermissions; // revert the optimistic toggle on failure
-      toasts.error('Couldn’t save the permission setting', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the permission setting', e);
     } finally {
       savingSkip = false;
     }
@@ -421,7 +430,7 @@
         data-icon="download"
         onclick={updateAllCLIs}
         disabled={updating || loading}
-        title="Run every CLI's update command now, in a new session"
+        title="Run every CLI’s update command now, in a new session"
       >
         <Icon name="download" size={12} /> {updating ? 'Updating…' : 'Update all CLIs'}
       </button>
@@ -463,7 +472,7 @@
           </select>
           <span class="hint">
             Only for drafting a PR title/description or a commit message from a diff — a short job that blocks the
-            dialog you're looking at, so it doesn't inherit the agent's model and skips MCP servers and tools. Raise
+            dialog you’re looking at, so it doesn’t inherit the agent’s model and skips MCP servers and tools. Raise
             it if drafts come out thin.
           </span>
         </div>
@@ -479,7 +488,7 @@
           disabled={savingAuto}
           onchange={(v) => { autoUpdate.enabled = v; return saveAutoUpdate(); }}
         >
-          Runs each CLI's update command on a schedule. Default 03:00 UTC, when new versions are usually
+          Runs each CLI’s update command on a schedule. Default 03:00 UTC, when new versions are usually
           published; a missed window (Mac asleep or off) runs at the next opportunity.
           {#if lastRun}<span title={new Date(lastRun).toLocaleString()}>Last run {rel(lastRun)}.</span>{/if}
         </SettingToggle>
@@ -527,7 +536,7 @@
           On (default): built-in agents launch with their bypass flag
           (<code class="flag">--dangerously-skip-permissions</code>; codex
           <code class="flag">--dangerously-bypass-approvals-and-sandbox</code>) so tool use never blocks.
-          Off: each CLI's own permission mode (ask / auto) — tool use prompts in the session terminal.
+          Off: each CLI’s own permission mode (ask / auto) — tool use prompts in the session terminal.
           Applies to new sessions; running ones are unchanged. Background agent runs (workflow steps,
           scheduled tasks, swarms, self-improvement) still skip prompts — nobody is at their terminal to answer.
         </SettingToggle>
@@ -575,7 +584,7 @@
       </div>
       <p class="hint">
         Uncheck <strong>Enabled</strong> to hide a provider from every picker (Default agent, New session,
-        workflows, …) — useful when a CLI is installed but you don't want to use it. Sessions already using it
+        workflows, …) — useful when a CLI is installed but you don’t want to use it. Sessions already using it
         keep working.
       </p>
     </section>
@@ -624,7 +633,7 @@
         {#each Object.entries(catalog).sort() as [prov, cat] (prov)}
           <div class="item">
             <span class="mono name">{prov}</span>
-            <span class="dim sm">{cat.models.length} models</span>
+            <span class="dim sm">{plural(cat.models.length, 'model')}</span>
             {#if cat.stale}<span class="chip warn" title={cat.last_error ?? 'The last refresh failed; showing the last good list'}>Stale</span>{/if}
             <span class="grow"></span>
             <span
@@ -643,11 +652,15 @@
             </button>
           </div>
         {:else}
-          <div class="empty">No catalog yet — Refresh all to discover models.</div>
+          {#if catalogError}
+            <LoadState what="the model catalog" variant="compact" loading={catalogLoading} error={catalogError} empty={true} onretry={loadCatalog} />
+          {:else}
+            <div class="empty">No catalog yet — Refresh all to discover models.</div>
+          {/if}
         {/each}
       </div>
       <p class="hint">
-        Model ids discovered at runtime from each provider's CLI or public docs (no API keys). Model pickers
+        Model ids discovered at runtime from each provider’s CLI or public docs (no API keys). Model pickers
         across Otto offer these; a failed refresh keeps the last good list and marks it Stale.
       </p>
     </section>

@@ -22,7 +22,9 @@
   import SchemaTab from './SchemaTab.svelte';
   import ReplayPanel from './ReplayPanel.svelte';
   import LagAlertsPanel from './LagAlertsPanel.svelte';
-  import { paneResizer } from '../../lib/paneResizer';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import { onTabKey } from '../../lib/tabKeys';
 
   type Tab = ClusterView;
@@ -48,45 +50,16 @@
   // chosen width survives reloads. Mirrors the Database page's sidebar resizer.
   // (On phones the list is a full-width stacked band — the width var is ignored
   // by the media query there and the divider is hidden.)
-  const SIDE_W_DEFAULT = 220;
-  let sideW = $state(loadSideW());
-  function loadSideW(): number {
-    if (typeof localStorage === 'undefined') return SIDE_W_DEFAULT;
-    const v = Number(localStorage.getItem('brokers.sideW'));
-    return Number.isFinite(v) && v >= 180 ? Math.min(420, v) : SIDE_W_DEFAULT;
-  }
-  function persistSideW(): void {
-    try {
-      localStorage.setItem('brokers.sideW', String(Math.round(sideW)));
-    } catch {
-      /* storage unavailable — non-fatal */
-    }
-  }
-  function startSideResize(e: PointerEvent): void {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = sideW;
-    const onMove = (ev: PointerEvent): void => {
-      // The list is pinned to the LEFT edge, so dragging RIGHT widens it.
-      sideW = Math.max(180, Math.min(420, startW + (ev.clientX - startX)));
-    };
-    const onUp = (): void => {
-      persistSideW();
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-  function resetSideW(): void {
-    sideW = SIDE_W_DEFAULT;
-    persistSideW();
-  }
-  function setSideW(w: number): void {
-    sideW = w;
-    persistSideW();
-  }
-  const pxText = (v: number): string => `${Math.round(v)} pixels wide`;
+  let sideW = $state(loadPaneWidth('brokers.sideW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
+
+  // "3 clusters · 2 prod · 1 staging" — the empty detail pane's summary.
+  const clusterSummary = $derived.by(() => {
+    const n = brokers.clusters.length;
+    const byEnv = new Map<string, number>();
+    for (const c of brokers.clusters) byEnv.set(c.environment, (byEnv.get(c.environment) ?? 0) + 1);
+    const envs = [...byEnv].map(([e, k]) => `${k} ${e}`).join(' · ');
+    return `${n} ${n === 1 ? 'cluster' : 'clusters'}${envs ? ` · ${envs}` : ''}.`;
+  });
 
   $effect(() => {
     const id = ws.currentId;
@@ -376,6 +349,7 @@
     {/if}
   {/snippet}
 </PageHeader>
+<PageBody fill padded={false}>
 <div class="brokers-page">
   {#if !isEmpty}
   <aside class="clusters" class:collapsed={!clustersOpen} style="--clusters-w:{sideW}px">
@@ -443,19 +417,7 @@
     </div>
   </aside>
 
-  <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-  <div
-    class="side-resizer"
-    role="separator"
-    tabindex="0"
-    aria-orientation="vertical"
-    aria-label="Resize cluster list"
-    title="Drag or use ←/→ to resize · double-click or Enter to reset"
-    ondblclick={resetSideW}
-    onpointerdown={startSideResize}
-    use:paneResizer={{ value: sideW, min: 180, max: 420, onChange: setSideW, onReset: resetSideW, text: pxText }}
-  ></div>
+  <PaneDivider bind:width={sideW} storageKey="brokers.sideW" label="Resize cluster list" />
   {/if}
 
   <main class="cluster-main" class:collapsed={!contentOpen}>
@@ -536,12 +498,13 @@
           variant="page"
           icon="box"
           title="Pick a cluster"
-          body={`${brokers.clusters.length} ${brokers.clusters.length === 1 ? 'cluster' : 'clusters'} in this workspace. Open one from the list to browse its topics, consumer groups and schemas.`}
+          body={`${clusterSummary} Open one from the list to browse its topics, consumer groups and schemas.`}
         />
       {/if}
     {/if}
   </main>
 </div>
+</PageBody>
 </div>
 
 {#snippet sectionNode(node: TreeNode, depth: number)}
@@ -641,32 +604,14 @@
     min-height: 0;
   }
   .clusters {
-    /* Default width; drag-resizable via the .side-resizer (persisted). The
+    /* Default width; drag-resizable via the PaneDivider (persisted). The
        phone media query below overrides back to a full-width band. */
-    width: var(--clusters-w, 220px);
+    width: var(--clusters-w, 280px);
     border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
     flex: none;
-  }
-  /* Draggable divider between the cluster list and the content. Sits flush
-     against the list's inline-end border; a hit-area wider than its visible
-     line makes it easy to grab. */
-  .side-resizer {
-    flex: none;
-    width: 5px;
-    margin-inline-start: -3px;
-    cursor: col-resize;
-    background: transparent;
-    position: relative;
-    z-index: 2;
-    touch-action: none;
-  }
-  .side-resizer:hover,
-  .side-resizer:focus-visible {
-    outline: none;
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .aside-head {
     display: flex;
@@ -990,10 +935,6 @@
       border-bottom: 1px solid var(--border);
       flex: none;
       min-height: 0;
-    }
-    /* Stacked layout — nothing to drag sideways. */
-    .side-resizer {
-      display: none;
     }
     .aside-head {
       padding: 12px 14px;

@@ -222,7 +222,7 @@ test.describe('tasks from the board', () => {
     // queued nudge would be pasted into a bare shell and EXECUTED. The daemon
     // refuses (409) and the card says so — keeping the draft, adding nothing.
     await input.press('Enter');
-    await expect(page.locator('.toast.error', { hasText: 'Could not add sub-task' })).toBeVisible();
+    await expect(page.locator('.toast.error', { hasText: 'Couldn’t add sub-task' })).toBeVisible();
     await expect(page.locator('.toast.error')).toContainText('agent not running in this terminal');
     await expect(input).toHaveValue(title);
     expect((await tasksOf(page, boardId)).length).toBe(before);

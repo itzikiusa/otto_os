@@ -1,5 +1,7 @@
 <script lang="ts">
   import { dialogFocus } from '../../lib/dialogFocus';
+  import { toastError } from '../../lib/toastError';
+  import { sentenceCase } from '../../lib/labels';
   import { branchTracking } from './refTracking';
   import { planSection } from './ref-budget';
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
@@ -917,7 +919,7 @@
       await copyTextOrThrow(text);
       toasts.success('Copied', label);
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy to the clipboard', e);
     }
   }
 
@@ -1066,7 +1068,7 @@
         toasts.success(okTitle, okDetail);
       }
     } catch (e) {
-      toasts.error(`${okTitle} failed`, e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t complete the Git action', e);
       // A failed mutation can still have partially landed — most notably a
       // "local + remote" delete whose LOCAL half succeeded before the remote
       // push errored. Re-sync refs/log so the graph reflects what's actually
@@ -1670,7 +1672,7 @@
       git.openRepoTab(repo.id);
       toasts.success('Opened worktree', repo.name);
     } catch (e) {
-      toasts.error('Open worktree failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t open worktree', e);
     } finally {
       openWtBusy = '';
     }
@@ -1698,7 +1700,7 @@
       });
       toasts.success('Worktree removed', wtName(w));
     } catch (e) {
-      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove the worktree', e);
     }
   }
 
@@ -1707,7 +1709,7 @@
       worktrees = await api.post<WorktreeInfo[]>(`/repos/${repoId}/worktrees/prune`, {});
       toasts.success('Pruned', 'Stale worktree entries removed');
     } catch (e) {
-      toasts.error('Prune failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t prune the worktrees', e);
     }
   }
 
@@ -1751,7 +1753,7 @@
       });
       toasts.success('Submodules updated', path ?? 'all');
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update the submodule', e);
     }
   }
 
@@ -1817,7 +1819,7 @@
           }
         }
       } else {
-        toasts.error('Checkout failed', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t check out the branch', e);
       }
     } finally {
       checkoutBusy = '';
@@ -1850,7 +1852,7 @@
       toasts.success('Branch created', `${localName} tracking ${remoteRef}`);
       await refreshAfterCheckout(s, false);
     } catch (e) {
-      toasts.error('Checkout failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t check out the branch', e);
     } finally {
       checkoutBusy = '';
     }
@@ -2969,7 +2971,7 @@
         resp.resolved ?? 'default branch',
       );
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t set the cleanup base branch', e);
     }
   }
 
@@ -3513,7 +3515,7 @@
                 <Icon name="shapes" size={10} />
                 <span class="ref-name stash-msg">{sub.path}</span>
                 {#if sub.state !== 'ok'}
-                  <span class="wt-flag mono" class:sub-warn={sub.state !== 'uninitialized'}>{sub.state}</span>
+                  <span class="wt-flag mono" class:sub-warn={sub.state !== 'uninitialized'}>{sentenceCase(sub.state)}</span>
                 {/if}
                 <Icon name="more" size={13} />
               </button>

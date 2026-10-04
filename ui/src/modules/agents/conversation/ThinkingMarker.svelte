@@ -51,7 +51,7 @@
     max-width: 100%;
     padding-block: 2px; padding-inline: 7px 9px;
     border: 1px dashed color-mix(in srgb, var(--cat-4) 45%, transparent);
-    border-radius: 99px;
+    border-radius: 999px;
     background: color-mix(in srgb, var(--cat-4) 9%, transparent);
     color: var(--think);
     font: inherit;

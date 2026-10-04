@@ -284,7 +284,7 @@ export const TASK_STATE: Record<AssistantTaskState, { label: string; tone: Tone 
   queued: { label: 'Queued', tone: 'neutral' },
   done: { label: 'Done', tone: 'ok' },
   failed: { label: 'Failed', tone: 'bad' },
-  cancelled: { label: 'Cancelled', tone: 'neutral' },
+  cancelled: { label: 'Canceled', tone: 'neutral' },
 };
 
 export const TASK_KIND: Record<AssistantTask['kind'], string> = {

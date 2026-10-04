@@ -46,7 +46,7 @@
   }
 </script>
 
-<Modal {title} width={640} onclose={close}>
+<Modal {title} width={640} onclose={close} dismissable={!running}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="review-modal" onkeydown={onReviewKeydown}>
     <div class="review-body">
@@ -93,36 +93,18 @@
         rows="5"
       ></textarea>
     </div>
-    <div class="review-foot">
-      <span class="review-kbd mono">⌘↵ to run · Esc to cancel</span>
-      <span class="grow"></span>
-      <button class="tb-btn" onclick={onclose} disabled={running}>Cancel</button>
-      <button class="tb-btn primary" onclick={onrun} disabled={running || !sql.trim()}>
-        <Icon name="play" size={12} />{running ? 'Running…' : 'Run'}
-      </button>
-    </div>
   </div>
+  {#snippet footer()}
+    <span class="review-kbd mono">⌘↵ to run · Esc to cancel</span>
+    <span class="grow"></span>
+    <button class="btn" onclick={onclose} disabled={running}>Cancel</button>
+    <button class="btn primary" onclick={onrun} disabled={running || !sql.trim()}>
+      <Icon name="play" size={12} />{running ? 'Running…' : 'Run'}
+    </button>
+  {/snippet}
 </Modal>
 
 <style>
-  /* Scoped copy of the shared dialog rules (see CellViewer.svelte). */
-  .tb-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 22px;
-    padding: 0 9px;
-    border-radius: var(--radius-s);
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    font-size: var(--fs-s);
-    cursor: pointer;
-  }
-  .tb-btn:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent-text);
-  }
   /* ── Review-SQL modal ── */
   .review-modal {
     display: flex;
@@ -238,29 +220,8 @@
   .review-sql:disabled {
     opacity: 0.6;
   }
-  .review-foot {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding-top: 10px;
-    border-top: 1px solid var(--border);
-  }
   .review-kbd {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-  .tb-btn.primary {
-    border-color: transparent;
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-    font-weight: 600;
-  }
-  .tb-btn.primary:hover {
-    color: var(--accent-contrast);
-    background: color-mix(in srgb, var(--accent-solid) 88%, black);
-  }
-  .tb-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 </style>

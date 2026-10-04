@@ -444,7 +444,7 @@
       await api.post(`/sessions/${sessionId}/input`, { text: snippet, submit: false });
       toasts.success('Sent to agent', `${path} lines ${sel.startLine}-${sel.endLine}`);
     } catch {
-      toasts.error('Failed to send', 'Could not inject text into the agent session.');
+      toasts.error('Couldn’t send to the session', 'The text couldn’t be injected into the agent session.');
     }
   }
 

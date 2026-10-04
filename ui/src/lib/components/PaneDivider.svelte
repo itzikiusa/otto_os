@@ -65,13 +65,13 @@
 ></div>
 
 <style>
-  /* A 1px --separator hairline in a wider hit area; it lights up on hover/focus. */
+  /* A 1px --separator hairline in a 9px grab area; it lights up on hover/focus. */
   .pane-divider {
     flex: none;
     position: relative;
     z-index: var(--z-sticky);
-    inline-size: 7px;
-    margin-inline: -3px;
+    inline-size: 9px;
+    margin-inline: -4px;
     cursor: col-resize;
     touch-action: none;
   }
@@ -79,12 +79,12 @@
     content: '';
     position: absolute;
     inset-block: 0;
-    inset-inline: 3px;
+    inset-inline: 4px;
     background: var(--separator);
   }
   .pane-divider:hover::after,
   .pane-divider:focus-visible::after {
-    inset-inline: 2px;
+    inset-inline: 3px;
     background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .pane-divider:focus-visible {

@@ -15,6 +15,7 @@
   // or a local export. Cloud 3D providers are opt-in and disabled without a
   // Keychain key; nothing is sent anywhere without an explicit click.
   import { onTabKey } from '../../../lib/tabKeys';
+  import { toastError } from '../../../lib/toastError';
   import type { Snippet } from 'svelte';
   import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
@@ -273,7 +274,7 @@
         saveBlob(b, glbFileName(artifact.title, kind));
       }
     } catch (e) {
-      toasts.error('Export failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t export the model', e);
     }
   }
   function exportMenu(e: MouseEvent): void {
@@ -330,7 +331,7 @@
       toasts.success('Saved the web GLB', `${res.artifact.title} — embed it as otto://design/${res.artifact.id}@approved`);
       opt = null;
     } catch (e) {
-      toasts.error('Couldn’t save the GLB', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the GLB', e);
     } finally {
       savingGlb = false;
     }
@@ -388,7 +389,7 @@
       edit(r.doc);
       selectedId = r.id;
     } catch (err) {
-      toasts.error('Couldn’t import the model', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t import the model', err);
     }
   }
 

@@ -7,7 +7,9 @@
   // OverviewTab (which also splices a markdown ref into draftBody).
 
   import { product } from '../../lib/stores/product.svelte';
+  import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
+  import { kindLabel } from '../../lib/labels';
   import { authedBlobUrl } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -166,7 +168,7 @@
       try {
         await uploadBlob(file, { filename: file.name });
       } catch (e) {
-        toasts.error(`Upload failed: ${file.name}`, e instanceof Error ? e.message : String(e));
+        toastError(`Couldn’t upload ${file.name}`, e);
       }
     }
   }
@@ -184,7 +186,7 @@
           try {
             await uploadBlob(blob, { filename: `screenshot-${idx}.png`, kind: 'image' });
           } catch (ex) {
-            toasts.error('Screenshot upload failed', ex instanceof Error ? ex.message : String(ex));
+            toastError('Couldn’t upload the screenshot', ex);
           }
         })();
         break; // handle first image item only
@@ -226,7 +228,7 @@
       localAtts = localAtts.map((a) => (a.id === att.id ? updated : a));
       toasts.info('Marked as mockup');
     } catch (e) {
-      toasts.error('Could not update attachment', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update attachment', e);
     }
   }
 
@@ -307,7 +309,7 @@
             <span class="att-fname" title={att.filename}>{att.filename}</span>
             <span class="att-size">{fmtBytes(att.size_bytes)}</span>
             {#if att.kind && att.kind !== 'image'}
-              <span class="att-kind-badge">{att.kind}</span>
+              <span class="att-kind-badge">{kindLabel(att.kind)}</span>
             {/if}
           </div>
 

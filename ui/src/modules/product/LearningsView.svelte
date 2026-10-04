@@ -653,7 +653,7 @@
     padding: 5px 9px;
     box-sizing: border-box;
   }
-  .field-input:focus { outline: none; border-color: var(--accent); }
+  .field-input:focus { outline: none; border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
   .field-textarea {
     width: 100%;
     min-height: 70px;
@@ -668,7 +668,7 @@
     font-family: inherit;
     line-height: 1.5;
   }
-  .field-textarea:focus { outline: none; border-color: var(--accent); }
+  .field-textarea:focus { outline: none; border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
   .field-textarea.mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
   .mini-select {
     background: var(--surface);

@@ -20,7 +20,7 @@ test('network profiles preserve conflict drafts, select saved endpoints, and sho
   await page.goto('/e2e/fixtures/network-profiles.html');
   await page.getByRole('button', {name:'Manage network profiles'}).click();
   await page.getByLabel('Network profile name').fill('Private DB');
-  await page.getByLabel('SSH connection').selectOption('ssh');
+  await page.getByLabel('SSH connection', { exact: true }).selectOption('ssh');
   await page.getByLabel('Endpoint 1 name').fill('DB');
   await page.getByLabel('Endpoint 1 remote host').fill('db.internal');
   await page.getByLabel('Endpoint 1 remote port').fill('5432');

@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import SectionIntro from './SectionIntro.svelte';
@@ -219,7 +220,7 @@
         );
       }
     } catch (e) {
-      toasts.error(`Couldn’t materialize ${provider}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t materialize ${provider}`, e);
     } finally {
       materializing = null;
     }

@@ -47,6 +47,13 @@
 //                     (.btn .chip .row .card .input .icon-btn) outside
 //                     :global() → rename the local class (prefix it), or style
 //                     the shared one via :global() on purpose.
+//   local-button-class  a component <style> that (re)defines the shared button
+//                     system: a `.tb-btn` selector, or a bare `.btn` / `.icon-btn`
+//                     rule (`.btn`, `.btn:hover`, `.icon-btn:disabled`; a compound
+//                     like `.btn.accent` or `.icon-btn.spin` is a variant, not a
+//                     redefinition) → use the global `.btn` (+ `small` / `primary`
+//                     / `ghost`) and `.icon-btn`; keep a page-specific class for
+//                     layout-only tweaks (components.md §1).
 //   accent-text       `color: var(--accent)` → var(--accent-text) (the fill
 //                     colour fails contrast as text).
 //   accent-fill       a rule set with `background(-color): var(--accent)` AND
@@ -188,6 +195,7 @@ const RULES = {
   'z-index-literal': 'z-index literal outside -1…10 — use a layer token var(--z-*) (tokens.css)',
   'physical-prop': 'physical left/right property — use the logical one (…-inline-start/-end, text-align: start/end)',
   'global-class': 'local style on a global app.css class — prefix the class name, or wrap it in :global() on purpose',
+  'local-button-class': 'local style redefining the shared button system (.tb-btn, bare .btn/.icon-btn) — use the global .btn / .icon-btn; a page-specific class for layout tweaks',
   'accent-text': 'color: var(--accent) as text — use var(--accent-text)',
   'accent-fill': 'text on background: var(--accent) — fill with var(--accent-solid) and set color: var(--accent-contrast)',
   'outline-removed': 'outline: none with no replacement focus indicator — add a :focus-visible / :focus-within border-color + box-shadow ring (app.css .input / .input-group)',
@@ -245,6 +253,9 @@ const NAMED = /(?<![\w-])(white|black)(?![\w-])/g;
 const SCRIM = /^\s*0\s*[,\s]\s*0\s*[,\s]\s*0(?:\s*[,/]|\s*$)/; // rgba(0,0,0,x) / rgb(0 0 0 / x)
 const DECL = /(^|[{;])(\s*)((?:--)?[a-zA-Z][\w-]*)\s*:([^;{}]*)/g;
 const PRELUDE = /(^|[{};])([^{};@]*[^{};@\s][^{};@]*)\{/g;
+// A selector that IS the shared button (`.btn`, `.icon-btn:disabled`), or any `.tb-btn`.
+// `.row .btn` (a context tweak) and `.btn.accent` (a variant) are not redefinitions.
+const LOCAL_BUTTON = /^\.(?:btn|icon-btn)(?::[\w-]+(?:\([^()]*\))*)*$|\.tb-btn(?![\w-])/;
 const GLOBAL_CLASS = /\.(btn|chip|row|card|input|icon-btn)(?![\w-])/g;
 /** Custom properties declared in lib/tokens.css (a fallback on one is dead code). */
 const TOKEN_NAMES = new Set(
@@ -324,6 +335,9 @@ for (const f of files) {
         // prefix form, then look for a bare global class.
         const local = sel.replace(/:global\((?:[^()]|\([^()]*\))*\)/g, (m) => blank(m));
         if (/(^|\s|,):global\s/.test(local)) continue;
+        for (const one of local.split(',')) {
+          if (LOCAL_BUTTON.test(one.trim())) hit('local-button-class', f, offset + p.index + p[1].length, `selector "${one.trim()}" redefines the shared button`);
+        }
         for (const m of local.matchAll(GLOBAL_CLASS)) {
           hit('global-class', f, offset + p.index + p[1].length + m.index, `selector "${sel.trim()}" styles .${m[1]}`);
         }

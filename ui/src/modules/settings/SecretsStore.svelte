@@ -12,6 +12,8 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   let status = $state<SecretsStatus | null>(null);
   let loading = $state(true);
@@ -26,7 +28,7 @@
     try {
       status = await api.get<SecretsStatus>('/admin/secrets/status');
     } catch (e) {
-      loadError = `Couldn’t read the secret store status. ${msg(e)}`;
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -82,12 +84,9 @@
 
 <section class="secrets-card" aria-label="Secret storage">
   <h2 class="card-title"><Icon name="key" size={14} /> Secret storage</h2>
-  {#if loading && !status}
-    <p class="dim" role="status">Reading secret store status…</p>
-  {:else if loadError}
-    <p class="error" role="alert">{loadError}</p>
-    <div class="controls"><button class="btn" onclick={load}>Retry</button></div>
-  {:else if status}
+  {#if !status}
+    <LoadState what="the secret store status" {loading} error={loadError} empty={true} onretry={load} />
+  {:else}
     {#if status.mode === 'plaintext'}
       <div class="banner" role="alert">
         <Icon name="warning" size={14} />
@@ -132,10 +131,10 @@
   .secrets-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); box-shadow: var(--shadow-card); padding: 16px 18px; margin: 16px; max-width: var(--settings-col); }
   .card-title { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: var(--fs-m); font-weight: 600; }
   p { margin: 0 0 8px; font-size: var(--fs-s); line-height: 1.5; }
-  .dim { color: var(--text-dim); }
   .banner { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; margin: 0 0 10px; border-radius: var(--radius-s); background: var(--warning-soft); color: var(--text); border: 1px solid var(--warning); }
   .banner :global(svg) { flex: none; color: var(--warning); margin-block-start: 2px; }
   .banner p { margin: 0; }
+  .dim { color: var(--text-dim); }
   .banner code { font-family: var(--font-mono); font-size: var(--fs-xs); }
   .facts { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 6px 0 0; font-size: var(--fs-s); }
   .facts dt { color: var(--text-dim); }

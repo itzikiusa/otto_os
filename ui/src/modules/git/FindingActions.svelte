@@ -2,8 +2,10 @@
   // The per-finding action bar for the Findings workflow board: the two headline
   // actions (ask an agent to fix / verify resolved) inline, and everything else
   // (jira / false-positive / require-approval / repo-rule / regression-test,
-  // then accept / waive / approve / reject) in one ⋯ menu — seven equal buttons
-  // on every card was a wall nobody could scan.
+  // then accept / waive) in one ⋯ menu — seven equal buttons
+  // on every card was a wall nobody could scan. A finding gated on human
+  // approval gets its own visible Approve / Deny… row (the shared
+  // ApprovalActions) instead of two buried menu items.
   // Each button is disabled per the legal status transitions (mirrors
   // FindingStatus::can_transition in crates/otto-core/src/finding.rs); on click it
   // calls the client method and reports the updated finding back to the board (the
@@ -25,6 +27,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
+  import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
+  import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {
@@ -55,6 +59,18 @@
   const canJira = $derived(!finding.jira_key);
   const canRepoRule = $derived(!finding.repo_rule_id);
   const canRegressionTest = $derived(!finding.linked_test);
+
+  // Names the in-flight action in the status line (the bar's own buttons name theirs).
+  const BUSY_TEXT: Record<string, string> = {
+    'mark false positive': 'Marking false positive…',
+    'require approval': 'Requiring approval…',
+    'add to repo rule': 'Adding to repo rules…',
+    'convert to Jira': 'Creating the Jira issue…',
+    accept: 'Accepting…',
+    waive: 'Waiving…',
+    approve: 'Approving…',
+    deny: 'Denying…',
+  };
 
   /** Run an action that returns the updated finding; report it back + toast. */
   async function run(
@@ -239,23 +255,30 @@
       disabled: !canWaive || !!busy,
       action: () => void run('waive', () => waiveFinding(finding.id), 'Waived'),
     });
-    if (finding.requires_human_approval && !finding.approved_at) {
-      items.push({
-        label: 'Approve',
-        disabled: !!busy,
-        action: () =>
-          void run('approve', () => approveFinding(finding.id, 'approve'), 'Approved'),
-      });
-      items.push({
-        label: 'Reject',
-        disabled: !!busy,
-        action: () =>
-          void run('reject', () => approveFinding(finding.id, 'reject'), 'Rejected'),
-      });
-    }
     ctxMenu.show(e, items);
   }
 </script>
+
+{#if canApprove}
+  <div class="fa-gate" role="group" aria-label="Approval needed">
+    <span class="fa-gate-text">This finding needs a human decision. Approving accepts it; denying marks it a false positive.</span>
+    <ApprovalActions
+      busy={busy === 'approve' ? 'approve' : busy === 'deny' ? 'deny' : null}
+      disabled={!!busy}
+      denyTarget="this finding"
+      denyTitle="Deny finding"
+      onapprove={() => run('approve', () => approveFinding(finding.id, 'approve'), 'Approved')}
+      ondeny={(reason) => run('deny', () => approveFinding(finding.id, 'reject', reason ?? undefined), 'Denied')}
+    />
+  </div>
+{:else if finding.approval_decision && finding.approved_at}
+  <div class="fa-gate-done">
+    <ApprovalOutcome
+      outcome={finding.approval_decision === 'approved' ? 'approved' : 'denied'}
+      at={finding.approved_at}
+    />
+  </div>
+{/if}
 
 <div class="fa">
   <button
@@ -277,7 +300,7 @@
     {busy === 'verify' ? 'Verifying…' : 'Verify resolved'}
   </button>
   {#if busy && busy !== 'ask agent to fix' && busy !== 'verify'}
-    <span class="fa-busy dim" role="status">Working…</span>
+    <span class="fa-busy dim" role="status">{BUSY_TEXT[busy] ?? 'Saving…'}</span>
   {/if}
   <button
     class="icon-btn fa-overflow"
@@ -315,6 +338,25 @@
   }
   .fa {
     align-items: center;
+  }
+  .fa-gate {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    margin-top: 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--warning-soft);
+  }
+  .fa-gate-done {
+    margin-top: 8px;
+  }
+  .fa-gate-text {
+    flex: 1 1 220px;
+    min-width: 0;
+    font-size: var(--fs-s);
   }
   .fa-busy {
     font-size: var(--fs-xs);

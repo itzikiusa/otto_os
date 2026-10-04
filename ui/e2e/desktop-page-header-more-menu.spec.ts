@@ -17,8 +17,8 @@ import { expectFullyInViewport, openPage } from './helpers';
 
 // Pages whose header carries enough collapsible actions to overflow once the
 // window is narrowed; the first one that shows a "⋯" is used.
-const CANDIDATES = ['product', 'swarm', 'workflows', 'vault', 'api'];
-const WIDTHS = [1100, 960, 820, 700];
+const CANDIDATES = ['product', 'swarm', 'workflows', 'vault', 'usage', 'insights', 'proof', 'api'];
+const WIDTHS = [1100, 960, 820, 700, 600];
 
 test.beforeEach(async ({ page }, info) => {
   test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');

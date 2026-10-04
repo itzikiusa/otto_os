@@ -5,6 +5,7 @@
   // workspace_id. Evaluation is most-restrictive-wins; priority only orders
   // display and which reason is shown.
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import Modal from '../../lib/components/Modal.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
@@ -99,7 +100,7 @@
       onsaved();
       onclose();
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the policy', e);
     } finally {
       saving = false;
     }

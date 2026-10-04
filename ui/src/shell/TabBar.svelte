@@ -2,6 +2,7 @@
   // Session tabs: click activates, middle-click closes, ⌘W closes active,
   // ⌃Tab cycles (handled in keys.ts → workspace store).
   import Icon from '../lib/components/Icon.svelte';
+  import { toastError } from '../lib/toastError';
   import StatusDot from '../lib/components/StatusDot.svelte';
   import { events } from '../lib/events.svelte';
   import { sessionState, type SessionStateInfo } from '../lib/status';
@@ -16,7 +17,6 @@
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { popoutItems } from '../lib/popoutMenu';
   import { confirmer } from '../lib/confirm.svelte';
-  import { toasts } from '../lib/toast.svelte';
   import type { MenuItem } from '../lib/contextmenu.svelte';
 
   // Share modal: tracks the session id we're sharing; null = closed.
@@ -128,7 +128,7 @@
     try {
       await ws.renameSession(id, next);
     } catch (e) {
-      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename the session', e);
     }
   }
 
@@ -167,7 +167,7 @@
     try {
       await ws.archiveSession(id);
     } catch (e) {
-      toasts.error('Archive failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t archive the session', e);
     }
   }
 
@@ -506,7 +506,7 @@
     flex-shrink: 0;
     width: 14px;
     height: 14px;
-    border-radius: 99px;
+    border-radius: 999px;
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 18%, transparent);
   }
@@ -561,7 +561,7 @@
     flex-shrink: 0;
     width: 6px;
     height: 6px;
-    border-radius: 99px;
+    border-radius: 999px;
     background: var(--accent);
   }
   .tab.unread:not(.active) {

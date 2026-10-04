@@ -17,7 +17,7 @@
   import { k8sApi } from '../../lib/api/k8s';
   import { k8s } from '../../lib/stores/k8s.svelte';
   import type { K8sPodAction, K8sPodHttpMethod, K8sPodHttpReq, K8sPodHttpResult } from '../../lib/api/types';
-  import { typedConfirm } from './actions';
+  import { confirmProd, isProdEnv } from '../../lib/confirmProd';
   import { clusterLabel } from './k8s-util';
   import { ACTUATOR_PRESETS, LOG_LEVELS, defaultPort, fillTemplate, pathProblem, prettyBody, templateVars } from './podHttp';
 
@@ -38,7 +38,7 @@
 
   const METHODS: K8sPodHttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
   const cluster = $derived(k8s.clusters.find((c) => c.id === clusterId) ?? null);
-  const guarded = $derived(cluster?.environment === 'prod' || !!(cluster as { read_only?: boolean } | null)?.read_only);
+  const guarded = $derived(isProdEnv(cluster?.environment) || !!(cluster as { read_only?: boolean } | null)?.read_only);
 
   let method = $state<K8sPodHttpMethod>('GET');
   let port = $state(untrack(() => defaultPort(manifest)));
@@ -125,8 +125,16 @@
     else if (pod) req.pod = pod;
     if (mutating && guarded) {
       const scope = req.pod ? `pod ${req.pod}` : `every pod of ${workload?.kind} ${workload?.name}`;
-      const where = `${ns ? ` in ${ns}` : ''} on ${clusterLabel(cluster)} (${cluster?.environment === 'prod' ? 'PRODUCTION' : 'read-only cluster'})`;
-      const ok = await typedConfirm(`Send ${method} ${req.path} to ${scope}${where}?`, targetName, { title: `${method} to pods`, confirmLabel: `Send ${method}` });
+      const where = `${scope}${ns ? ` · namespace ${ns}` : ''} · ${clusterLabel(cluster)}${isProdEnv(cluster?.environment) ? '' : ' (read-only cluster)'}`;
+      const ok = await confirmProd({
+        env: cluster?.environment,
+        where,
+        verb: `Send ${method}`,
+        what: `${method} ${req.path}`,
+        typed: targetName,
+        title: `${method} to pods?`,
+        danger: true,
+      });
       if (!ok) return;
       req.confirm_name = targetName;
     }
@@ -282,7 +290,7 @@
       </button>
     </div>
     {#if problem && path}<div class="dim small">{problem}</div>{/if}
-    {#if mutating && guarded}<div class="guard small" role="note"><Icon name="warning" size={12} /> {cluster?.environment === 'prod' ? 'Production' : 'Read-only'} cluster — you'll be asked to type the target name.</div>{/if}
+    {#if mutating && guarded}<div class="guard small" role="note"><Icon name="warning" size={12} /> {isProdEnv(cluster?.environment) ? 'Production' : 'Read-only'} cluster — you'll be asked to type the target name.</div>{/if}
 
     {#if runError}
       <div class="err" role="alert">{runError}</div>

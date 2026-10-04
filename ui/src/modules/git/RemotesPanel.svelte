@@ -4,6 +4,7 @@
   // credentialed is ever rendered here. Push/checkout still use `origin`
   // explicitly — renaming or removing it does not re-point them.
   import type { RemoteInfo, RemoteOpReq } from '../../lib/api/types';
+  import { loadErrorText } from '../../lib/loadError';
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -38,7 +39,7 @@
         error = null;
       })
       .catch((e: unknown) => {
-        error = e instanceof Error ? e.message : String(e);
+        error = loadErrorText(e);
         loadFailed = true;
       })
       .finally(() => {

@@ -5,6 +5,8 @@
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
   import { untrack } from 'svelte';
   import { marked } from 'marked';
+  import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
+  import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
@@ -92,6 +94,8 @@
   let triggersOpen = $state(false);
   let triggers = $state<WorkflowTrigger[]>([]);
   let approving = $state(false);
+  // Which decision is in flight, so the busy label reads "Approving…" / "Denying…".
+  let approvingKind = $state<'approve' | 'deny'>('approve');
 
   // Instructions editor: standing free-text guidance every step follows,
   // distinct from `description`. Saved via an explicit action (like graph
@@ -1197,15 +1201,17 @@
     }
   }
 
-  async function approveRun(approved: boolean): Promise<void> {
+  async function approveRun(approved: boolean, note?: string | null): Promise<void> {
     if (!run?.waiting_approval || !run.approval_node_id || approving) return;
     approving = true;
+    approvingKind = approved ? 'approve' : 'deny';
     try {
       await api.post(`/workflow-runs/${run.id}/approve`, {
         node_id: run.approval_node_id,
         approved,
+        ...(note ? { note } : {}),
       });
-      toasts.success(approved ? 'Approved — run resuming' : 'Rejected — run will error');
+      toasts.success(approved ? 'Approved — run resuming' : 'Denied — the run will stop with an error');
     } catch (e) {
       toasts.error('Couldn’t record the approval', e instanceof Error ? e.message : String(e));
     } finally {
@@ -1711,7 +1717,7 @@
       {#if runActive}
         <!-- While the VIEWED run is live its Cancel takes the primary's place (same word as
              the inspector's "Cancel run" and the run's final "Cancelled"). -->
-        <button class="btn small danger" data-keep onclick={stop} title="Cancel this run (finishes the current step, then halts)"><Icon name="square" size={11} /> Cancel run…</button>
+        <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="square" size={11} /> Stop run…</button>
       {:else}
         <button
           class="btn primary small"
@@ -1940,15 +1946,27 @@
       {/if}
 
       {#if run?.waiting_approval && run.approval_node_id}
-        <div class="approval-banner">
+        <div class="approval-banner" role="group" aria-label="Approval needed">
           <Icon name="userCheck" size={14} />
-          <span>Run paused — waiting for approval at <strong title={run.approval_node_id}>{nodeName(run.approval_node_id)}</strong></span>
-          <button class="btn primary small" disabled={approving} onclick={() => approveRun(true)}>
-            Approve
-          </button>
-          <button class="btn small danger" disabled={approving} onclick={() => approveRun(false)}>
-            Reject
-          </button>
+          <span>
+            Run paused — waiting for your approval at <strong title={run.approval_node_id}>{nodeName(run.approval_node_id)}</strong>
+            <span class="approval-sub">Run started <RelTime iso={run.started_at} /> · approving continues the run, denying stops it with an error.</span>
+          </span>
+          <ApprovalActions
+            busy={approving ? approvingKind : null}
+            denyTarget={`the run at ${nodeName(run.approval_node_id)}`}
+            denyTitle="Deny approval"
+            onapprove={() => approveRun(true)}
+            ondeny={(reason) => approveRun(false, reason)}
+          />
+        </div>
+      {:else if run?.approved_at && !run.waiting_approval}
+        <div class="approval-outcome">
+          <ApprovalOutcome
+            outcome={run.approved_by ? 'approved' : 'denied'}
+            at={run.approved_at}
+            note={run.approval_note && run.approval_note !== 'rejected' ? run.approval_note : null}
+          />
         </div>
       {/if}
 
@@ -2109,9 +2127,9 @@
                   class="btn small danger"
                   data-testid="run-cancel"
                   onclick={stop}
-                  title="Cancel this run (finishes the current step, then halts)"
+                  title="Stop this run (finishes the current step, then halts)"
                 >
-                  <Icon name="square" size={11} /> Cancel run
+                  <Icon name="square" size={11} /> Stop run…
                 </button>
               {/if}
               <button
@@ -3663,7 +3681,7 @@
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 0 5px;
-    border-radius: 99px;
+    border-radius: 999px;
     flex-shrink: 0;
   }
   .run-id {
@@ -3795,7 +3813,7 @@
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 1px 7px;
-    border-radius: 99px;
+    border-radius: 999px;
   }
   .grow {
     flex: 1;
@@ -4152,7 +4170,7 @@
     flex-shrink: 0;
     padding: 5px 10px;
     border: 1px solid var(--border);
-    border-radius: 99px;
+    border-radius: 999px;
     background: var(--surface-2);
     color: var(--text);
     font-size: var(--fs-s);
@@ -4256,7 +4274,7 @@
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     padding: 0 5px;
-    border-radius: 99px;
+    border-radius: 999px;
   }
   .ctx-pathline {
     padding: 4px 10px;
@@ -4400,7 +4418,7 @@
     border-inline-end-color: transparent;
     border-radius: 50%;
     display: inline-block;
-    animation: otto-spin 0.7s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
   
   /* Triggers panel: collapsible section below the canvas */
@@ -4531,6 +4549,16 @@
   }
   .approval-banner > span {
     flex: 1;
+    min-width: 0;
+  }
+  .approval-sub {
+    display: block;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .approval-outcome {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
   }
   /* Node hint / info text in the inspector */
   .node-hint {

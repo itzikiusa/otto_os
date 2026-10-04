@@ -1,6 +1,6 @@
 // Per-kind action registry (contract §4.6) → `POST /k8s/clusters/{id}/actions`.
 // Every entry is Edit-gated by the caller (`auth.can('kubernetes','edit')`);
-// destructive ones go through `confirmer` with a typed-name confirm and send
+// destructive ones go through `confirmProd` with a typed-name confirm and send
 // `params.confirm_name` (the daemon refuses them without it). Dialog-backed
 // actions (scale / ArgoCD sync) are surfaced via `needs` so the workspace can
 // open the matching sheet instead of posting straight away.
@@ -9,6 +9,7 @@ import type { IconName } from '../../lib/components/Icon.svelte';
 import { k8sApi } from '../../lib/api/k8s';
 import type { K8sAction, K8sActionResp, K8sResourceKind, K8sRow } from '../../lib/api/types';
 import { confirmer } from '../../lib/confirm.svelte';
+import { confirmProd, isProdEnv } from '../../lib/confirmProd';
 import { toasts } from '../../lib/toast.svelte';
 import { k8s } from '../../lib/stores/k8s.svelte';
 import { clusterLabel, kindDef } from './k8s-util';
@@ -120,34 +121,27 @@ export async function runAction(
     (def.id === 'scale' && Number(merged.replicas) === 0) ||
     (def.id === 'argocd_sync' && merged.prune === true);
   // Name the cluster (and flag prod) in every confirm, so a delete fired from
-  // the wrong cluster tab reads as such before it's sent.
+  // the wrong cluster tab reads as such before it's sent. confirmProd adds the
+  // one shared PRODUCTION line and the typed-name gate.
   const cl = k8s.clusters.find((c) => c.id === clusterId) ?? null;
-  const where =
-    `${row.namespace ? ` in ${row.namespace}` : ''}` +
-    `${cl ? ` on ${clusterLabel(cl)}` : ''}${cl?.environment === 'prod' ? ' (PRODUCTION)' : ''}`;
+  const prod = isProdEnv(cl?.environment);
+  const where = `${cl ? clusterLabel(cl) : 'this cluster'}${row.namespace ? ` · namespace ${row.namespace}` : ''}`;
   const verb = def.label.replace(/…$/, '');
   // "Delete pod Pod “x”" read twice — drop the kind when the label already has it,
   // and say what a scale actually does when it's the destructive 0.
   const noun = verb.toLowerCase().includes(singular.toLowerCase()) ? '' : ` ${singular}`;
-  const what = def.id === 'scale' ? `Scale${noun} “${row.name}”${where} to 0 replicas` : `${verb}${noun} “${row.name}”${where}`;
+  const what = def.id === 'scale' ? `Scale${noun} “${row.name}” to 0 replicas` : `${verb}${noun} “${row.name}”`;
   if (destructive) {
-    const ok = await typedConfirm(`${what}?`, row.name, {
-      title: verb,
-      confirmLabel: verb,
-    });
+    const ok = await confirmProd({ env: cl?.environment, where, verb, what, typed: row.name, danger: true });
     if (!ok) return null;
     merged.confirm_name = row.name;
-  } else if (def.danger || (cl?.environment === 'prod' && isMutating(def, merged))) {
+  } else if (def.danger || (prod && isMutating(def, merged))) {
     // Danger-flagged entries without a typed confirm (rollout abort, ArgoCD
     // terminate operation) were one click from the red menu item — ask once.
     // On a PRODUCTION cluster every mutating action asks too (restart, promote,
     // pause/resume, cronjob trigger/suspend, ArgoCD restart/hard refresh/sync),
     // naming the action and where it lands.
-    const ok = await confirmer.ask(`${what}?`, {
-      title: verb,
-      confirmLabel: verb,
-      danger: !!def.danger,
-    });
+    const ok = await confirmProd({ env: cl?.environment, where, verb, what, danger: !!def.danger });
     if (!ok) return null;
   }
   try {

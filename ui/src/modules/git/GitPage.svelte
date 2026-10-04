@@ -27,6 +27,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
 
   // The PR detail (+ its review panel, comment threads and merge dialog) is a
@@ -355,6 +356,7 @@
 
     {#if activeRepo}
       {#key activeRepo.id}
+        <PageBody fill padded={false}>
         <div class="gitpage-body">
           <RepoView
             repo={activeRepo}
@@ -367,15 +369,18 @@
             onaddrepo={(mode) => { addMode = mode; addOpen = true; }}
           />
         </div>
+        </PageBody>
       {/key}
     {:else if landingFocus}
-      <div class="landing-focus">
-        <FocusView />
-      </div>
+      <PageBody fill padded={false}>
+        <div class="landing-focus">
+          <FocusView />
+        </div>
+      </PageBody>
     {:else}
       <!-- ── Compact, centered hub (no tab open). Adding/opening also live in
            the + tab, so this is just a tidy launcher, not a separate screen. ── -->
-      <div class="landing">
+      <PageBody>
         <LoadState
           what="repositories"
           variant="page"
@@ -473,7 +478,7 @@
             </div>
           </div>
         </LoadState>
-      </div>
+      </PageBody>
     {/if}
   </div>
 {/if}
@@ -645,12 +650,6 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-  }
-  .landing {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 18px 20px 40px;
   }
   /* Focus view opened from the landing (no repo tab): slim header + the view. */
   .landing-focus {
@@ -871,9 +870,6 @@
      the Add Repository modal. The modal box itself is already viewport-clamped
      (Modal.svelte: min(width, 100vw-24px)). ── */
   @media (max-width: 1024px) {
-    .landing {
-      padding: 16px 12px 32px;
-    }
     /* One column on phone — minmax(320px) would otherwise force a track wider
        than the content box on a 375px screen. */
     .repo-grid {

@@ -6,6 +6,7 @@
   // that scrolls the hunk list. When every conflict has a choice the file can
   // be "marked resolved" — we recompose the full file text and POST it.
   import type { ConflictFile, ConflictSegment } from '../../lib/api/types';
+  import { toastError } from '../../lib/toastError';
   import { git } from '../../lib/stores/git.svelte';
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -177,7 +178,7 @@
     try {
       await api.post(`/repos/${repoId}/conflict/resolve`, { path, side });
       onresolved(path);
-    } catch (e) { toasts.error('Resolve failed', e instanceof Error ? e.message : String(e)); }
+    } catch (e) { toastError('Couldn’t resolve the file', e); }
     finally { saving = false; }
   }
 
@@ -190,7 +191,7 @@
       toasts.success('File resolved', path);
       onresolved(path);
     } catch (e) {
-      toasts.error('Resolve failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t resolve the file', e);
     } finally {
       saving = false;
     }

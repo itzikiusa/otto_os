@@ -400,11 +400,14 @@
     }
   }
 
-  async function decide(choice: ApprovalChoice): Promise<void> {
+  async function decide(choice: ApprovalChoice, reason?: string | null): Promise<void> {
     const a = approval;
     if (!a || deciding) return;
     let note: string | undefined;
-    if (choice === 'deny') {
+    if (choice === 'deny' && reason !== undefined) {
+      // The card's DenySheet already collected the (optional) reason.
+      note = reason?.trim() || undefined;
+    } else if (choice === 'deny') {
       const why = await confirmer.promptText("Tell the agent why (optional). It won't send this request.", {
         title: 'Deny the request',
         confirmLabel: 'Deny',
@@ -966,7 +969,7 @@
           profile={session?.profile ?? null}
           busy={deciding}
           error={decideError}
-          ondecide={(c) => void decide(c)}
+          ondecide={(c, reason) => void decide(c, reason)}
         />
       {:else if pageDialog}
         <PageDialogCard

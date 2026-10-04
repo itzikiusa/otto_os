@@ -7,6 +7,7 @@
   //   3. create the kept ones (passwords are never imported — the user sets them
   //      after, exactly like a hand-made connection).
   import Modal from '../../lib/components/Modal.svelte';
+  import { toastError } from '../../lib/toastError';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api, importSources, importScan, importCreate } from '../../lib/api/client';
@@ -116,7 +117,7 @@
       // Supported rows are kept by default; unsupported can never be selected.
       keep = res.connections.map((c) => c.supported);
     } catch (e) {
-      toasts.error('Scan failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t scan for connections', e);
       // Drop back to the picker so the user can retry / choose another tool.
       step = 'pick';
       activeSource = null;
@@ -192,7 +193,7 @@
       onimported();
       onclose();
     } catch (e) {
-      toasts.error('Import failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t import the connections', e);
     } finally {
       creating = false;
     }

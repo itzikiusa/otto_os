@@ -9,7 +9,7 @@
   //   • ActionCards parsed from each agent message's `actions_json`.
   // Props: { cid } (the chat id). Parent (ChatTab) controls which chat is active.
   import { product } from '../../lib/stores/product.svelte';
-  import { toasts } from '../../lib/toast.svelte';
+  import { toastError } from '../../lib/toastError';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -117,7 +117,7 @@
       // Roll back the optimistic bubble, restore the typed text, show an error.
       messages = messages.filter((m) => m.id !== optimisticMsg.id);
       inputText = body;
-      toasts.error('Send failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t send the message', e);
     } finally {
       sending = false;
     }

@@ -5,6 +5,7 @@
   // and a "Run now". Offers to create the agent from the template when the
   // workspace has none.
   import { loadErrorText } from '../../../lib/loadError';
+  import { toastError } from '../../../lib/toastError';
   import { onDestroy, untrack } from 'svelte';
   import { marked } from 'marked';
   import { router } from '../../../lib/router.svelte';
@@ -120,7 +121,7 @@
       toasts.success('Watchdog started', 'The report appears here when the run finishes.');
       refreshTimer = setTimeout(() => void load(), 4000);
     } catch (e) {
-      if (version === loadVersion) toasts.error('Run failed', e instanceof Error ? e.message : String(e));
+      if (version === loadVersion) toastError('Couldn’t run the insights', e);
     } finally {
       if (version === loadVersion) running = false;
     }

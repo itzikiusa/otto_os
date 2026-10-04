@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
   import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -160,7 +161,7 @@
       }
       await load();
     } catch (e) {
-      toasts.error(`Couldn’t install ${s.name}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t install ${s.name}`, e);
     } finally {
       setBusy(s.name, false);
     }
@@ -184,7 +185,7 @@
       toasts.info('Removed', s.name);
       await load();
     } catch (e) {
-      toasts.error(`Couldn’t remove ${s.name}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t remove ${s.name}`, e);
     } finally {
       setBusy(s.name, false);
     }
@@ -225,7 +226,7 @@
       }
       await load();
     } catch (e) {
-      toasts.error(`Couldn’t install the ${category} skills`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t install the ${category} skills`, e);
     } finally {
       busyCategory = null;
     }

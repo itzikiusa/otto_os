@@ -94,7 +94,7 @@
 <PageHeader
   title="Monitor"
   crumbs={[{ label: 'Kubernetes', onclick: () => router.go('kubernetes') }]}
-  subtitle="Pod-level metrics from your services' own endpoints, restart classification and a health digest per cluster."
+  subtitle="Pod metrics, restarts and a health digest per cluster"
 >
   {#snippet actions()}
     <div class="segmented" role="radiogroup" aria-label="Window" data-keep>
@@ -114,7 +114,7 @@
   {:else if error && !rows.length}
     <EmptyState actionKind="secondary" icon="warning" title="Couldn't load the overview" body={error} actionLabel="Retry" onaction={() => void load()} />
   {:else if !rows.length}
-    <EmptyState icon="helm" title="No clusters yet" body="Add a cluster in the Kubernetes console first, then enable monitoring on it here." actionLabel="Open clusters" onaction={() => router.go('kubernetes')} />
+    <EmptyState icon="helm" title="No clusters yet" body="Add a cluster in the Kubernetes console first, then enable monitoring on it here. Pod-level metrics come from your services’ own endpoints." actionLabel="Open clusters" onaction={() => router.go('kubernetes')} />
   {:else}
     <div class="grid" data-testid="k8s-monitor-grid">
       {#each rows as r (r.cluster.id)}

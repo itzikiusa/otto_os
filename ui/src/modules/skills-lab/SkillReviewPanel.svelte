@@ -5,6 +5,7 @@
   // Live-refreshes on the skill_review_updated bus, with a fallback poll while a
   // review is running.
   import { onDestroy } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import type { LibrarySkill, BundledSkillView, ProviderSkillInfo, SkillReview } from '../../lib/api/types';
   import { skillReviewApi } from '../../lib/api/skillReview';
   import { skillLabApi } from '../../lib/api/skillLab';
@@ -15,6 +16,8 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import SkillReviewAgents from './SkillReviewAgents.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
@@ -107,11 +110,12 @@
       listLoading = false;
       return;
     }
+    listLoading = true;
     try {
       reviews = await skillReviewApi.list(wsId);
       listError = null;
     } catch (e) {
-      listError = e instanceof Error ? e.message : String(e);
+      listError = loadErrorText(e);
     } finally {
       listLoading = false;
     }
@@ -134,7 +138,7 @@
       const review = await skillReviewApi.get(id);
       if (generation === detailGeneration && workspace === wsId) selected = review;
     } catch (e) {
-      if (generation === detailGeneration && workspace === wsId && !quiet) toasts.error("Couldn't open the review", e instanceof Error ? e.message : String(e));
+      if (generation === detailGeneration && workspace === wsId && !quiet) toastError('Couldn’t open the review', e);
     } finally {
       if (quiet && refreshPending === generation) refreshPending = null;
       if (!quiet && selectionPending === generation) selectionPending = null;
@@ -162,7 +166,7 @@
       selected = rev;
       await loadList();
     } catch (e) {
-      toasts.error("Couldn't start the review", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start the review', e);
     } finally {
       starting = false;
     }
@@ -179,7 +183,7 @@
       fixTermOpen = true;
       toasts.info('Fixer agent starting…');
     } catch (e) {
-      toasts.error("Couldn't start the fixer agent", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start the fixer agent', e);
     } finally {
       applying = false;
     }
@@ -198,7 +202,7 @@
       selected = await skillReviewApi.cancel(selected.id);
       await loadList();
     } catch (e) {
-      toasts.error("Couldn't stop the review", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t stop the review', e);
     }
   }
 
@@ -217,7 +221,7 @@
       if (selected?.id === rev.id) selected = null;
       await loadList();
     } catch (e) {
-      toasts.error("Couldn't delete the review", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete the review', e);
     }
   }
 
@@ -316,19 +320,14 @@
   <div class="review-toolbar"><button class="btn small ghost" aria-label={listHidden ? 'Show reviews list' : 'Hide reviews list'} title={listHidden ? 'Show reviews list' : 'Hide reviews list'} aria-expanded={!listHidden} aria-controls="reviews-list" onclick={() => (listHidden = !listHidden)}><Icon name="sidebar" size={14} /></button></div>
 <div class="lab-review" class:list-hidden={listHidden} data-testid="skill-review">
   <aside class="lr-side" id="reviews-list">
-    <!-- Same list head as the Evaluator's runs. Not .primary: the form's
-         "Start review" is the view's primary. -->
+    <!-- Same list head as the Evaluator’s runs. Not .primary: the form’s
+         "Start review" is the view’s primary. -->
     <div class="lr-side-head">
       <span class="lr-side-title">Reviews</span>
       <button class="btn small" onclick={newReview} aria-pressed={!selected} title="New review" data-testid="new-skill-review"><Icon name="plus" size={12} /> New</button>
     </div>
-    {#if listError && reviews.length === 0}
-      <div class="lr-empty lr-list-err" role="alert">
-        <span><Icon name="warning" size={12} /> <strong>Couldn't load reviews.</strong> <span class="lr-err-detail">{listError}</span></span>
-        <button class="btn small" onclick={loadList}>Retry</button>
-      </div>
-    {:else if listLoading && reviews.length === 0}
-      <p class="lr-empty" role="status">Loading reviews…</p>
+    {#if (listError || listLoading) && reviews.length === 0}
+      <LoadState what="reviews" variant="compact" loading={listLoading} error={listError} empty={true} onretry={loadList} />
     {:else if reviews.length === 0}
       <p class="lr-empty">No skill reviews yet. Start one with the form.</p>
     {:else}
@@ -570,9 +569,7 @@
   .lr-side-head { display: flex; align-items: center; gap: 8px; padding: 12px 4px 8px; }
   .lr-side-title { flex: 1; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); }
   .lr-empty { color: var(--text-dim); font-size: var(--fs-s); padding: 8px; }
-  .lr-list-err { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; color: var(--text); overflow-wrap: anywhere; }
-  .lr-list-err :global(svg), .lr-error :global(svg) { color: var(--danger); vertical-align: -1px; }
-  .lr-err-detail { color: var(--text-dim); }
+  .lr-error :global(svg) { color: var(--danger); vertical-align: -1px; }
   .lr-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .lr-list li { display: flex; }
   .lr-item {

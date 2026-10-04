@@ -20,9 +20,9 @@
   // content changed) is silently skipped rather than erroring.
 
   import { tick } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import { renderNote } from '../vault/mdRender';
   import { browser } from '../../lib/stores/browser.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -172,7 +172,7 @@
       const at = document.activeElement;
       if (!at || at === document.body) markButton?.focus();
     } catch (e) {
-      toasts.error('Failed to save mark', e instanceof Error ? e.message : undefined);
+      toastError('Couldn’t save mark', e);
     } finally {
       saving = false;
     }

@@ -22,6 +22,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import SkillDetail, { type DetailTab } from './SkillDetail.svelte';
   import NewSkillModal from './NewSkillModal.svelte';
@@ -74,7 +76,7 @@
       skillLabApi.listProvider(),
     ]);
     if (lib.status === 'rejected' && bun.status === 'rejected' && prov.status === 'rejected') {
-      loadError = lib.reason instanceof Error ? lib.reason.message : String(lib.reason);
+      loadError = loadErrorText(lib.reason);
     }
     const failed = [
       lib.status === 'rejected' ? 'your library' : '',
@@ -335,15 +337,7 @@
       <section class="detail-pane"><p class="dim pad" role="status">Loading skills…</p></section>
     </div>
   {:else if loadError}
-    <div class="load-error" role="alert">
-      <Icon name="warning" size={16} />
-      <div>
-        <strong>Couldn't load skills.</strong>
-        <p class="dim">Otto couldn't read the library or the bundled catalog. Retry, or check Settings → Logs.</p>
-        <p class="dim mono small">{loadError}</p>
-      </div>
-      <button class="btn small" onclick={retryLoad} disabled={retrying}>{retrying ? 'Retrying…' : 'Retry'}</button>
-    </div>
+    <LoadState what="skills" variant="page" loading={retrying} error={loadError} empty={true} onretry={retryLoad} />
   {:else if groups.length === 0}
     <EmptyState
       variant="page"
@@ -721,30 +715,6 @@
   }
   .no-match p {
     margin: 0 0 6px;
-  }
-  .load-error {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    margin: 20px;
-    padding: 14px 16px;
-    max-width: 720px;
-    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-  }
-  .load-error > :global(svg) {
-    color: var(--danger);
-    margin-top: 2px;
-  }
-  .load-error > div {
-    flex: 1;
-  }
-  .load-error p {
-    margin: 4px 0 0;
-  }
-  .small {
-    font-size: var(--fs-xs);
   }
   @media (max-width: 640px) {
     .list-pane {

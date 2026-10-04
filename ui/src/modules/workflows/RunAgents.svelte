@@ -20,6 +20,7 @@
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
   import { reviewIds, reviewSessions, reviewAgentStatus } from './reviewAgents';
+  import { plural } from '../../lib/plural';
 
   interface Props {
     run: WorkflowRun;
@@ -217,7 +218,7 @@
       case 'skipped':
         return { ...base, key: 'ended', label: 'Skipped', tone: 'neutral', hint: 'Skipped' };
       case 'cancelled':
-        return { ...base, key: 'ended', label: 'Cancelled', tone: 'neutral', hint: 'The review was cancelled' };
+        return { ...base, key: 'ended', label: 'Canceled', tone: 'neutral', hint: 'The review was cancelled' };
       case 'fallback':
         return { ...base, key: 'failed', label: 'Fallback', tone: 'warning', hint: 'The configured summarizer was unavailable — a deterministic fallback ran' };
       case 'error':
@@ -248,7 +249,7 @@
           <span class="grp-name" title={nodeName(g.id)}>{nodeName(g.id)}</span>
           <span class="grp-status"><StatusBadge status={runStatus(g.status)} variant="text" /></span>
           <span class="grow"></span>
-          <span class="grp-count" title="{g.sessions.length} session(s)">{g.sessions.length}</span>
+          <span class="grp-count" title={plural(g.sessions.length, 'session')}>{g.sessions.length}</span>
         </div>
         {#each g.sessions as sid (sid)}
           <div class="sess" data-sess={sid}>
@@ -347,7 +348,7 @@
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     padding: 0 6px;
-    border-radius: 99px;
+    border-radius: 999px;
   }
   .sess {
     border: 1px solid var(--border);

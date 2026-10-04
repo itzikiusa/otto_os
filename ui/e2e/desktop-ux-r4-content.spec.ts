@@ -168,7 +168,7 @@ test('Product rejected autosave retains both artifacts through switching and res
     const panes = page.getByRole('tablist', { name: 'Design panes' });
     if (await panes.isVisible()) await panes.getByRole('tab', { name: 'Assets', exact: true }).click();
     await page.locator('.mockup-row', { hasText: name }).click();
-    await page.locator('.stage-toolbar .tb-btn', { hasText: 'Source' }).click();
+    await page.locator('.stage-toolbar .btn', { hasText: 'Source' }).click();
     await expect(page.locator('.code-view')).toBeVisible();
   };
   await select('alpha.html');

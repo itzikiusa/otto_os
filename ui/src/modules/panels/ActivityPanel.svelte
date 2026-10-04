@@ -10,8 +10,8 @@
   // with a `from board` badge). A user task waits as *queued* until the nudge
   // sweep hands it to the agent's PTY (idle, or after the 120 s max defer).
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { toastError } from '../../lib/toastError';
   import { activity } from '../../lib/stores/activity.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -59,7 +59,7 @@
       await activity.addTask(session.id, title, taskDesc.trim() || undefined);
       cancelAddTask();
     } catch (e) {
-      toasts.error('Could not add task', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t add task', e);
     } finally {
       taskBusy = false;
     }
@@ -115,7 +115,7 @@
       await activity.addNote(wsId, session.id, text);
       note = '';
     } catch (e) {
-      toasts.error('Could not add note', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t add note', e);
     } finally {
       adding = false;
     }
@@ -465,7 +465,8 @@
     resize: vertical;
   }
   .task-input:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .task-input.desc {
     min-height: 34px;
@@ -627,7 +628,8 @@
     outline: none;
   }
   .search:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
 
   /* Note input */
@@ -647,7 +649,8 @@
     outline: none;
   }
   .note-input:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .note-btn {
     flex-shrink: 0;

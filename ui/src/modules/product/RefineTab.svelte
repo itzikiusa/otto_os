@@ -9,8 +9,8 @@
   // all lives in `children` (unlike ChatTab/MockupsTab, whose empty state has
   // nothing else to keep showing).
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import { product } from '../../lib/stores/product.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import RefineChat from './RefineChat.svelte';
   import ListPane from './ui/ListPane.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -81,7 +81,7 @@
       threads = [newThread, ...threads];
       activeTid = newThread.id;
     } catch (e) {
-      toasts.error('Could not create thread', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create thread', e);
     } finally {
       creating = false;
     }
@@ -96,7 +96,7 @@
       activeTid = newThread.id;
       selectedRunId = '';
     } catch (e) {
-      toasts.error('Could not create thread', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create thread', e);
     } finally {
       creating = false;
     }
@@ -114,7 +114,7 @@
         activeTid = next?.id ?? null;
       }
     } catch (e) {
-      toasts.error('Could not archive thread', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t archive thread', e);
     }
   }
 

@@ -39,7 +39,7 @@
 
   function badge(fg: string | null, bg: string, label: string): { text: string; tone: string; title: string } {
     const r = fg ? contrast(fg, bg) : null;
-    if (r == null) return { text: `${label} —`, tone: 'fail', title: 'Not a hex colour yet' };
+    if (r == null) return { text: `${label} —`, tone: 'fail', title: 'Not a hex color yet' };
     const lvl = contrastLevel(r);
     const tone = lvl === 'AAA' || lvl === 'AA' ? 'pass' : lvl === 'AA-large' ? 'mid' : 'fail';
     const sub =
@@ -48,13 +48,13 @@
   }
 
   async function add(): Promise<void> {
-    const name = await askTokenName('Add colour', Object.keys(doc.color), { placeholder: uniqueName('brand', Object.keys(doc.color)), confirmLabel: 'Add' });
+    const name = await askTokenName('Add color', Object.keys(doc.color), { placeholder: uniqueName('brand', Object.keys(doc.color)), confirmLabel: 'Add' });
     if (!name) return;
     doc.color[name] = { $value: '#888888' };
   }
 
   async function rename(from: string): Promise<void> {
-    const to = await askTokenName('Rename colour', Object.keys(doc.color), { initial: from, confirmLabel: 'Rename' });
+    const to = await askTokenName('Rename color', Object.keys(doc.color), { initial: from, confirmLabel: 'Rename' });
     if (to) doc.color = renameKey(doc.color, from, to);
   }
 
@@ -102,7 +102,7 @@
         <div class="swc-c" style:background={hex ?? 'transparent'} class:invalid={!hex}>
           {#if !readonly}
             <label class="pick" title="Edit {tokenLabel(name)}">
-              <input type="color" value={(hex ?? '#888888').slice(0, 7).toLowerCase()} oninput={(e) => onPick(name, e)} aria-label="Edit {tokenLabel(name)} colour" data-testid="brand-color-input" />
+              <input type="color" value={(hex ?? '#888888').slice(0, 7).toLowerCase()} oninput={(e) => onPick(name, e)} aria-label="Edit {tokenLabel(name)} color" data-testid="brand-color-input" />
               <Icon name="edit" size={13} />
             </label>
           {/if}
@@ -137,7 +137,7 @@
 
   {#if !readonly}
     <div class="presets">
-      <button class="btn small" onclick={add} data-testid="brand-color-add"><Icon name="plus" size={12} /> Add colour</button>
+      <button class="btn small" onclick={add} data-testid="brand-color-add"><Icon name="plus" size={12} /> Add color</button>
       {#if primaryName}
         <span class="sep" aria-hidden="true"></span>
         <span class="dim">Try a {tokenLabel(primaryName).toLowerCase()}</span>

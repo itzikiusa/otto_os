@@ -69,7 +69,7 @@
 
 {#if loading}
   <!-- tiny inline spinner — don't block toolbar -->
-  <span class="slc-loading dim">Loading…</span>
+  <span class="slc-loading dim">Loading story…</span>
 {:else if story}
   <div class="story-link-card">
     <Icon name="note" size={12} />

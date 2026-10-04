@@ -93,7 +93,6 @@ a:hover {
 :focus-visible {
   outline: 2px solid var(--accent-text);
   outline-offset: 1px;
-  border-radius: var(--radius-s);
 }
 
 /* ---------- buttons ---------- */
@@ -169,7 +168,7 @@ a:hover {
   background: transparent;
 }
 .btn.ghost:hover {
-  background: var(--surface-2);
+  background: var(--hover);
 }
 
 .icon-btn {
@@ -660,6 +659,16 @@ textarea.input {
     opacity: 0;
   }
 }
+/* Skeleton loading rows: a sweep, and a fade-in that starts transparent so the
+   150 ms grace in Skeleton.svelte never flashes a placeholder on a fast load. */
+@keyframes otto-shimmer {
+  0% {
+    background-position: 120% 0;
+  }
+  100% {
+    background-position: -120% 0;
+  }
+}
 @keyframes otto-pop-in {
   from {
     opacity: 0;
@@ -794,4 +803,15 @@ textarea.input {
 @keyframes nav-pending-slide {
   from { inset-inline-start: -30%; }
   to { inset-inline-start: 100%; }
+}
+
+/* Windows / macOS high-contrast (forced colors): box-shadow focus rings and
+   tinted selection disappear, so give every focus a system-colour outline. */
+@media (forced-colors: active) {
+  :focus-visible,
+  .input:focus,
+  .input-group:focus-within {
+    outline: 2px solid Highlight;
+    outline-offset: 1px;
+  }
 }

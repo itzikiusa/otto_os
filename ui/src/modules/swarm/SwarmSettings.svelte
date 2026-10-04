@@ -1,5 +1,6 @@
 <script lang="ts">
   import PathField from '../../lib/components/PathField.svelte';
+  import { toastError } from '../../lib/toastError';
   // Swarm settings: three tabs —
   //   • Standing goals — the swarm's quality bar, applied to every task (PUT set)
   //   • Team skills    — library skills every agent inherits (config.skills)
@@ -85,7 +86,7 @@
       await swarm.putStandingGoals(detail.id, draftGoals);
       toasts.success('Standing goals saved');
     } catch (e) {
-      toasts.error("Couldn't save the standing goals", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the standing goals', e);
     } finally {
       savingGoals = false;
     }
@@ -99,7 +100,7 @@
     try {
       await swarm.updateSwarm(detail.id, { config: cfg } as Partial<Swarm>);
     } catch (e) {
-      toasts.error("Couldn't save the team skills", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the team skills', e);
     }
   }
 
@@ -157,7 +158,7 @@
       triggerForm = null;
       triggerEditId = null;
     } catch (e) {
-      toasts.error("Couldn't save the trigger", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the trigger', e);
     } finally {
       savingTrigger = false;
     }
@@ -166,7 +167,7 @@
     try {
       await swarm.updateTrigger(t.id, { enabled: !t.enabled });
     } catch (e) {
-      toasts.error("Couldn't update the trigger", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update the trigger', e);
     }
   }
   async function delTrigger(t: SwarmChannelTrigger) {
@@ -180,7 +181,7 @@
       try {
         await swarm.deleteTrigger(t.id);
       } catch (e) {
-        toasts.error("Couldn't delete the trigger", e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t delete the trigger', e);
       }
     }
   }

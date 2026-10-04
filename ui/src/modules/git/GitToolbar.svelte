@@ -34,6 +34,8 @@
   // no branch to push or pull, so both would only fail with git's
   // "You are not currently on a branch".
   const detached = $derived(status.branch === '(detached)');
+  // Push is the header's primary action only while there is something to push.
+  const pushPrimary = $derived(status.upstream != null && status.ahead > 0 && !detached);
   // Known-empty stash list → Pop can only fail, so say so up front. Unknown
   // (the graph hasn't reported yet) keeps it enabled.
   const stashCount = $derived(gitBridge.stashCount[repoId]);
@@ -141,6 +143,27 @@
     }
   }
 
+  function branchMenu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: 'New branch…', icon: 'plus', title: `Create a new branch from ${status.branch} and switch to it`, action: () => void doCreateBranch() },
+      { separator: true },
+      {
+        label: 'Stash changes',
+        icon: 'stash',
+        disabled: status.changes.length === 0,
+        title: status.changes.length === 0 ? 'Nothing to stash — the working tree is clean' : 'Stash working changes (including untracked files)',
+        action: () => void doStash(),
+      },
+      {
+        label: 'Pop stash',
+        icon: 'archive',
+        disabled: nothingToPop,
+        title: nothingToPop ? 'Nothing to pop — there are no stashes' : 'Apply the latest stash and drop it',
+        action: () => void doPop(),
+      },
+    ]);
+  }
+
   async function doStash(): Promise<void> {
     busy = 'stash';
     try {
@@ -196,15 +219,15 @@
 {#if !inHeader}<span class="divider"></span>{/if}
 
 <!-- Fetch -->
-<button class="btn ghost tbtn" data-overflow="3" data-icon="fetch" data-label="Fetch" disabled={busy !== ''} onclick={doFetch} title="Fetch from remote">
-  <Icon name="fetch" size={14} />
+<button class="btn small ghost tbtn" data-overflow="3" data-icon="fetch" data-label="Fetch" disabled={busy !== ''} onclick={doFetch} title="Fetch from remote">
+  <Icon name="fetch" size={12} />
   {busy === 'fetch' ? 'Fetching…' : 'Fetch'}
 </button>
 
 <!-- Pull (split button: the repo's configured mode, ▾ overrides it once) -->
 <span class="split">
   <button
-    class="btn ghost tbtn"
+    class="btn small ghost tbtn"
     data-icon="arrowDown"
     data-label="Pull ({MODE_LABEL[pullMode]})"
     disabled={busy !== '' || detached}
@@ -213,23 +236,25 @@
       ? 'HEAD is detached — check out a branch to pull'
       : "Pull from upstream using the repo's configured mode"}
   >
-    <Icon name="arrowDown" size={14} />
+    <Icon name="arrowDown" size={12} />
     {busy === 'pull' ? 'Pulling…' : `Pull (${MODE_LABEL[pullMode]})`}
   </button>
   <button
-    class="btn ghost tbtn caret"
+    class="btn small ghost tbtn caret"
     data-icon="chevronDown"
     data-label="Pull options…"
     disabled={busy !== '' || detached}
     onclick={pullMenu}
     title="Pull with a different mode"
     aria-label="Pull options"
-  ><Icon name="chevronDown" size={12} /></button>
+  ><Icon name="chevronDown" size={11} /></button>
 </span>
 
 <!-- Push -->
 <button
-  class="btn ghost tbtn"
+  class="btn small tbtn"
+  class:ghost={!pushPrimary}
+  class:primary={pushPrimary}
   data-overflow="4"
   data-icon="arrowUp"
   data-label={status.upstream ? 'Push' : 'Publish'}
@@ -243,23 +268,38 @@
       : `Nothing to push — ${status.branch} has no commits that ${status.upstream} doesn’t`
     : `Publish ${status.branch} to origin`}
 >
-  <Icon name="arrowUp" size={14} />
+  <Icon name="arrowUp" size={12} />
   {busy === 'push' ? 'Pushing…' : status.upstream ? 'Push' : 'Publish'}
 </button>
 
-{#if !inHeader}<span class="divider"></span>{/if}
+{#if inHeader}
+  <!-- Header: Fetch / Pull / Push stay; Branch / Stash / Pop fold into one menu
+       so the repo's header carries three verbs, not six. -->
+  <button
+    class="btn small ghost tbtn"
+    data-keep
+    data-icon="branch"
+    data-label="Branch & stash"
+    disabled={busy !== ''}
+    aria-haspopup="menu"
+    aria-label="Branch and stash"
+    title="New branch, stash, pop stash"
+    onclick={branchMenu}
+  ><Icon name="stash" size={12} /> <Icon name="chevronDown" size={11} /></button>
+{:else}
+<span class="divider"></span>
 
 <!-- Branch (create) -->
-<button class="btn ghost tbtn" data-overflow="-2" data-icon="plus" data-label="New branch" disabled={busy !== ''} onclick={() => void doCreateBranch()} title="Create a new branch from {status.branch} and switch to it">
-  <Icon name="plus" size={14} />
+<button class="btn small ghost tbtn" data-overflow="-2" data-icon="plus" data-label="New branch" disabled={busy !== ''} onclick={() => void doCreateBranch()} title="Create a new branch from {status.branch} and switch to it">
+  <Icon name="plus" size={12} />
   {busy === 'branch' ? 'Creating…' : 'Branch'}
 </button>
 
-{#if !inHeader}<span class="divider"></span>{/if}
+<span class="divider"></span>
 
 <!-- Stash -->
 <button
-  class="btn ghost tbtn"
+  class="btn small ghost tbtn"
   data-overflow="-3"
   data-icon="stash"
   data-label="Stash"
@@ -267,13 +307,13 @@
   onclick={doStash}
   title={status.changes.length === 0 ? 'Nothing to stash — the working tree is clean' : 'Stash working changes (including untracked files)'}
 >
-  <Icon name="stash" size={14} />
+  <Icon name="stash" size={12} />
   {busy === 'stash' ? 'Stashing…' : 'Stash'}
 </button>
 
 <!-- Pop -->
 <button
-  class="btn ghost tbtn"
+  class="btn small ghost tbtn"
   data-overflow="-4"
   data-icon="archive"
   data-label="Pop stash"
@@ -281,9 +321,10 @@
   onclick={doPop}
   title={nothingToPop ? 'Nothing to pop — there are no stashes' : 'Apply the latest stash and drop it'}
 >
-  <Icon name="archive" size={14} />
+  <Icon name="archive" size={12} />
   {busy === 'pop' ? 'Popping…' : 'Pop'}
 </button>
+{/if}
 {/snippet}
 
 {#if inHeader}
@@ -352,6 +393,10 @@
   }
   .tbtn:hover:not(:disabled) {
     color: var(--text);
+  }
+  .tbtn.primary,
+  .tbtn.primary:hover:not(:disabled) {
+    color: var(--accent-contrast);
   }
   /* Pull split button: one visual unit — the halves share a square seam with a
      hairline between them, and hovering either half outlines both. */

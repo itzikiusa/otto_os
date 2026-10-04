@@ -764,17 +764,6 @@
   code {
     font-family: var(--font-mono);
   }
-  .icon-btn {
-    display: inline-grid;
-    place-items: center;
-    width: 24px;
-    height: 24px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-  }
   .icon-btn.danger {
     color: var(--danger);
   }

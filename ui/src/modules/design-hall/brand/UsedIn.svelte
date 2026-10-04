@@ -5,7 +5,7 @@
   // names. Opening a row opens that design.
   import type { BrandConsumer, BrandImpactResp } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
-  import Skeleton from '../../../lib/components/Skeleton.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import StudioBadge from '../StudioBadge.svelte';
   import StatusPill from '../StatusPill.svelte';
   import { openArtifact } from '../nav';
@@ -38,10 +38,8 @@
   </div>
 
   <div class="card" data-testid="brand-used-in">
-    {#if loading && !usage}
-      <Skeleton rows={2} height={32} />
-    {:else if error && !usage}
-      <p class="err" role="alert"><Icon name="warning" size={14} /> Couldn’t load where this kit is used. <span class="dim">{error}</span> <button class="btn small" onclick={onretry}>Retry</button></p>
+    {#if (loading || error) && !usage}
+      <LoadState what="where this kit is used" variant="compact" rows={2} {loading} {error} empty={true} {onretry} />
     {:else if usage && usage.artifact_count === 0}
       <p class="empty">
         Nothing uses this kit yet. A design uses it once it links the kit — a site’s <span class="mono">brand</span> field set to
@@ -158,22 +156,11 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .empty,
-  .err {
+  .empty {
     margin: 0;
     font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.6;
-  }
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    color: var(--text);
-  }
-  .err > :global(svg) {
-    color: var(--danger);
   }
   @media (max-width: 640px) {
     .studio,

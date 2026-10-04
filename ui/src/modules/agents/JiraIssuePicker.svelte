@@ -2,8 +2,8 @@
   // Shared Jira issue picker block — used by both ReviewPanel and AttachIssue.
   // Handles account selection, project selection, and debounced search.
   import { api } from '../../lib/api/client';
+  import { toastError } from '../../lib/toastError';
   import type { IssueAccount, IssueProject, IssueSummary } from '../../lib/api/types';
-  import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { router } from '../../lib/router.svelte';
@@ -44,7 +44,7 @@
       accounts = await api.get<IssueAccount[]>('/issue/accounts');
       if (accounts.length > 0) selectedAccountId = accounts[0].id;
     } catch (e) {
-      toasts.error('Could not load Jira accounts', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t load Jira accounts', e);
     } finally {
       accountsLoading = false;
     }

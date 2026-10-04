@@ -428,16 +428,6 @@
     color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
   }
-  .icon-btn {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    width: 24px;
-    height: 24px;
-    line-height: 1;
-  }
   .dt {
     display: flex;
     flex-direction: column;

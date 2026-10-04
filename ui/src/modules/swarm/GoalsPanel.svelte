@@ -98,7 +98,7 @@
   <div class="bar">
     {#if running}
       <span class="running" role="status"><span class="spinner-xs" aria-hidden="true"></span> Verifying…</span>
-      <button class="btn small" onclick={stop}><Icon name="square" size={12} /> Stop</button>
+      <button class="btn small" onclick={stop} title="Stop verifying — goals already checked keep their result"><Icon name="stop" size={12} /> Stop</button>
     {:else}
       <button class="btn small primary" onclick={runVerify} disabled={verifying || !goals.length} title={goals.length ? 'Run every goal check for this task now' : 'Add a goal first'}>
         <Icon name="check" size={12} /> Verify now
@@ -172,7 +172,7 @@
     border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-top-color: var(--accent);
     border-radius: 50%;
-    animation: otto-spin 0.7s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
   
   .goals {
@@ -286,7 +286,7 @@
     color: var(--danger);
   }
   .status.pulse {
-    animation: otto-pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   
   @media (prefers-reduced-motion: reduce) {

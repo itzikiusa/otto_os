@@ -11,6 +11,9 @@
   import type { GoldenTask, GoldenTaskReq, SkillEval } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { toastError } from '../../lib/toastError';
 
   let { onopenrun } = $props<{ onopenrun?: (e: SkillEval) => void }>();
 
@@ -52,7 +55,7 @@
     try {
       tasks = await skillsEvalApi.listGolden(wsId);
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -141,7 +144,7 @@
       }
       closeForm();
     } catch (e) {
-      toasts.error("Couldn't save the golden task", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the golden task', e);
     } finally {
       saving = false;
     }
@@ -158,7 +161,7 @@
       onopenrun?.(result);
       toasts.success('Evaluation started', `Scoring “${t.name}” against the working tree.`);
     } catch (e) {
-      toasts.error("Couldn't run the golden task", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t run the golden task', e);
     } finally {
       runningId = null;
     }
@@ -172,7 +175,7 @@
       if (editingId === t.id) closeForm();
       toasts.success('Golden task deleted', t.name);
     } catch (e) {
-      toasts.error("Couldn't delete the golden task", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete the golden task', e);
     }
   }
 
@@ -273,13 +276,8 @@
   <div class="gt-body">
     {#if !ws.currentId}
       <EmptyState icon="zap" title="No workspace selected" body="Pick a workspace to manage its golden tasks." />
-    {:else if loading && tasks.length === 0}
-      <div class="gt-muted" role="status">Loading golden tasks…</div>
-    {:else if loadError && tasks.length === 0}
-      <div class="gt-muted gt-err" role="alert">
-        <span><Icon name="warning" size={12} /> <strong>Couldn't load golden tasks.</strong> <span class="gt-err-detail">{loadError}</span></span>
-        <button class="btn small" onclick={() => ws.currentId && load(ws.currentId)} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>
-      </div>
+    {:else if (loading || loadError) && tasks.length === 0}
+      <LoadState what="golden tasks" {loading} error={loadError} empty={true} onretry={() => ws.currentId && load(ws.currentId)} />
     {:else if tasks.length === 0}
       {#if !showForm}
       <EmptyState
@@ -425,26 +423,6 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
-  }
-  .gt-muted {
-    padding: 16px 4px;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-  }
-  .gt-err {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
-    color: var(--text);
-    overflow-wrap: anywhere;
-  }
-  .gt-err :global(svg) {
-    color: var(--danger);
-    vertical-align: -1px;
-  }
-  .gt-err-detail {
-    color: var(--text-dim);
   }
   .gt-group {
     display: flex;

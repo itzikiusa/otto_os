@@ -227,7 +227,7 @@
   {#if !slides.length}
     <div class="empty">
       <p>This scene has no slides yet.</p>
-      <button class="btn accent" onclick={autoBuild}>Auto-build slides</button>
+      <button class="btn primary" onclick={autoBuild}>Auto-build slides</button>
       <button class="btn" onclick={onexit}>Exit</button>
     </div>
   {:else}
@@ -512,18 +512,5 @@
     flex-direction: column;
     align-items: center;
     gap: 12px;
-  }
-  .btn {
-    padding: 8px 16px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--text);
-    border-radius: var(--radius-m);
-    cursor: pointer;
-  }
-  .btn.accent {
-    background: var(--accent-solid);
-    border-color: var(--accent-solid);
-    color: var(--accent-contrast);
   }
 </style>

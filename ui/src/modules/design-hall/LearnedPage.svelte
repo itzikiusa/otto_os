@@ -12,6 +12,7 @@
   //   Settings  the workspace setting `design_learning` (off / suggest only)
   // The evidence pane shows the signals behind the selected rule.
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import { onTabKey } from '../../lib/tabKeys';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -244,7 +245,7 @@
       else toasts.info('No new rules', `${r.candidates.filter((c) => !c.ready).length} pattern(s) are still forming.`);
       await load();
     } catch (e) {
-      toasts.error('Couldn’t look for rules', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t look for rules', e);
     } finally {
       extracting = false;
     }

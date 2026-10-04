@@ -141,7 +141,7 @@
     font-weight: 600;
     color: var(--danger);
     background: var(--danger-soft);
-    border-radius: 99px;
+    border-radius: 999px;
     padding: 1px 7px;
   }
   .steps-meta {
@@ -183,7 +183,7 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .spin {
-      animation: otto-spin 0.9s linear infinite;
+      animation: otto-spin 0.8s linear infinite;
     }
   }
   

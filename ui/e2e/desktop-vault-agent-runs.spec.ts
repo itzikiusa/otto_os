@@ -128,7 +128,7 @@ test('ui: a run survives a full page reload as history and reopens', async ({ pa
   // Selecting the history row opens the detail view with its agent rows.
   await panel2.locator('.run-row', { hasText: 'RELOAD-SURVIVOR run' }).first().click();
   await expect(panel2.locator('.agent-card').first()).toBeVisible();
-  await expect(panel2.locator('.run-head .kind-chip')).toHaveText('docs');
+  await expect(panel2.locator('.run-head .kind-chip')).toHaveText('Docs');
 });
 
 test('ui: refine turns appear in the runs history with the note path', async ({ page }) => {

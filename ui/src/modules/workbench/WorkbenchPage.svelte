@@ -843,7 +843,7 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .wb-skel span {
-      animation: otto-pulse 1.2s ease-in-out infinite;
+      animation: otto-pulse 1.4s ease-in-out infinite;
     }
   }
   

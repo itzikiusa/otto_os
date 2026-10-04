@@ -7,6 +7,7 @@
   // they slide (tabs, ←/→, swipe, ⌘K) and can cycle every 30 s. Any widget
   // zooms to fill the page. Layout is per device (see home.svelte.ts).
   import { untrack } from 'svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -176,9 +177,11 @@
           {#each home.views as v, i (v.id)}
             <button
               class="space"
+              onkeydown={onTabKey}
               class:active={i === home.activeIndex}
               role="tab"
               aria-selected={i === home.activeIndex}
+              tabindex={i === home.activeIndex ? 0 : -1}
               aria-label={v.name}
               title="Space {spaceNumber(i)} · {v.name}"
               onclick={() => home.goTo(i)}
@@ -217,7 +220,7 @@
           {home.autoRotate ? '30s' : 'Paused'}
         </button>
       {/if}
-      <!-- One primary per page: an empty space's EmptyState owns "Add widget". -->
+      <!-- One primary per page: an empty space’s EmptyState owns "Add widget". -->
       {#if home.active && home.active.boxes.length > 0}
         <button class="btn small primary" onclick={() => (picking = true)} disabled={full} title={full ? `A space holds at most ${MAX_BOXES} widgets` : 'Add a widget to this space'}>
           <Icon name="plus" size={12} />Add widget
@@ -250,7 +253,7 @@
     <!-- Every space stays mounted (review 06 F3): switching only toggles
          `hidden` + `inert`, and the off-screen boxes pause their pollers but
          keep their data — a slide no longer remounts and re-fetches every
-         widget (or re-runs a "manual only" DB widget's SQL). While a widget
+         widget (or re-runs a "manual only" DB widget’s SQL). While a widget
          is zoomed the grid stays mounted underneath, paused. -->
     <div class="desk" class:phone={viewport.isPhone} hidden={!!(home.zoomed && home.active)}>
       <HomeToday />

@@ -3,6 +3,7 @@
   // The message can be drafted by an agent from the branch diff, and the branch
   // is pushed automatically (with --set-upstream) right before the PR is opened.
   import Modal from '../../lib/components/Modal.svelte';
+  import { toastError } from '../../lib/toastError';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { api } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -188,7 +189,7 @@
       draftSessionId = d.session_id ?? null;
       toasts.info('Draft ready', 'Review and edit before creating.');
     } catch (e) {
-      toasts.error('Draft failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t draft the description', e);
     } finally {
       clearInterval(tick);
       drafting = false;
@@ -207,7 +208,7 @@
       } catch (e) {
         // "Everything up-to-date" surfaces as a normal push; a real failure
         // (e.g. auth) should stop us before trying to open the PR.
-        toasts.error('Push failed', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t push the branch', e);
         return;
       }
       phase = 'creating';
@@ -225,7 +226,7 @@
       }
       oncreated(pr);
     } catch (e) {
-      toasts.error('Couldn’t open the pull request', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t open the pull request', e);
     } finally {
       busy = false;
       phase = '';
@@ -494,7 +495,7 @@
     border: 1.5px solid currentColor;
     border-top-color: transparent;
     border-radius: 50%;
-    animation: otto-spin 0.7s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
     vertical-align: middle;
     margin-inline-end: 4px;
   }

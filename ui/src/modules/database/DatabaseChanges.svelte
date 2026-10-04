@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
+  import { sentenceCase, runStateLabel } from '../../lib/labels';
   import { pollWhileVisible } from '../../lib/poll';
   import { databaseChangesApi as changesApi, type DatabaseChange, type ChangeDetail, type ChangeInput, type ChangeTarget } from '../../lib/api/database-changes';
   import { database } from '../../lib/stores/database.svelte';
@@ -133,7 +134,7 @@
         {#each changes as change (change.id)}
           <button class="item" class:active={selected?.id===change.id} onclick={()=>void select(change)} disabled={busy}>
             <strong>{change.title}</strong>
-            <span>{change.status.replaceAll('_',' ')} · r{change.revision}</span>
+            <span>{sentenceCase(change.status)} · r{change.revision}</span>
           </button>
         {/each}
       </LoadState>
@@ -167,7 +168,7 @@
           <button class="btn" onclick={()=>editing=false} disabled={busy}>Close editor</button>
         </div>
       {:else if selected && detail}
-        <div class="title"><h3>{selected.title}</h3><span class="badge">{selected.status.replaceAll('_',' ')}</span></div>
+        <div class="title"><h3>{selected.title}</h3><span class="badge">{sentenceCase(selected.status)}</span></div>
         <p>{selected.description}</p>
         <p class="hint">Revision {selected.revision} · Author {selected.author_id}</p>
         <div class="targets">
@@ -221,7 +222,7 @@
           <h4>Target attempts</h4>
           {#each detail.attempts as attempt}
             <article>
-              <strong>{attempt.node?.replace(/^db:/,'')}</strong><span class="badge">{attempt.state.replaceAll('_',' ')}</span>
+              <strong>{attempt.node?.replace(/^db:/,'')}</strong><span class="badge">{runStateLabel(attempt.state)}</span>
               <p>{attempt.summary}</p>
               {#if attempt.state==='outcome_unknown' && selected.status==='outcome_unknown' && can('change_execute')}
                 <p class="hint">Inspect the target database before recording an outcome. This does not replay SQL.</p>
@@ -238,7 +239,7 @@
         <details>
           <summary>History ({detail.history.length})</summary>
           {#each detail.history as event}
-            <p>{new Date(event.created_at).toLocaleString()} · {event.action.replaceAll('_',' ')} · {event.actor_id}{event.real_actor_id!==event.actor_id ? ` (via ${event.real_actor_id})` : ''}</p>
+            <p>{new Date(event.created_at).toLocaleString()} · {sentenceCase(event.action)} · {event.actor_id}{event.real_actor_id!==event.actor_id ? ` (via ${event.real_actor_id})` : ''}</p>
           {/each}
         </details>
       {:else}<div class="empty">Choose a change to review its script, approvals, and execution history.</div>{/if}

@@ -1,12 +1,13 @@
 <script lang="ts">
   import type { RestorePreview } from '../../lib/api/types';
+  import { plural } from '../../lib/plural';
   let { preview, busy, reviewed = $bindable(false), onrestore }: {
     preview: RestorePreview; busy: boolean; reviewed?: boolean; onrestore: () => void;
   } = $props();
 </script>
 
     <div class="preview" aria-label="Restore preview">
-      <strong>{preview.record_count} records · {preview.file_count} files · {preview.conflicts.length} conflicts</strong>
+      <strong>{plural(preview.record_count, 'record')} · {plural(preview.file_count, 'file')} · {plural(preview.conflicts.length, 'conflict')}</strong>
       <details open><summary>Included records</summary><div class="scroll"><table><thead><tr><th scope="col">Area</th><th scope="col" class="num">Records</th></tr></thead><tbody>{#each Object.entries(preview.table_counts).sort(([a], [b]) => a.localeCompare(b)) as [table, count]}<tr><td>{table.replaceAll('_', ' ')}</td><td class="num">{count}</td></tr>{/each}</tbody></table></div></details>
       {#if preview.conflicts.length}<details><summary>Existing items ({preview.conflicts.length})</summary><ul>{#each preview.conflicts.slice(0, 100) as conflict}<li>{conflict.location}: {conflict.reason}</li>{/each}{#if preview.conflicts.length > 100}<li>Showing the first 100 conflicts.</li>{/if}</ul></details>{/if}
       {#if preview.excluded.length}<details><summary>Excluded items</summary><ul>{#each preview.excluded as item}<li>{item}</li>{/each}</ul></details>{/if}

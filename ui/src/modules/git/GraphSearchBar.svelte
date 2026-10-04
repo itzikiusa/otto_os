@@ -9,8 +9,8 @@
   // cheap, and it finds commits outside the loaded page — "search all history"
   // with no second mode to toggle.
   import type { CommitInfo } from '../../lib/api/types';
+  import { toastError } from '../../lib/toastError';
   import { api, isAbortError } from '../../lib/api/client';
-  import { toasts } from '../../lib/toast.svelte';
   import { gitBridge } from './gitBridge.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
@@ -101,7 +101,7 @@
       if (isAbortError(e)) return;
       results = [];
       ran = term;
-      toasts.error('Search failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t search the graph', e);
     } finally {
       if (ac === inflight) {
         searching = false;

@@ -4,6 +4,7 @@
   // match the server's `default_tool_access` applies. Edited as a grid, saved in
   // one bulk PUT (the server replaces the whole workspace allowlist).
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
@@ -70,7 +71,7 @@
       toasts.success('Allowlist saved', `${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`);
       await load();
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the allowlist', e);
     } finally {
       saving = false;
     }
