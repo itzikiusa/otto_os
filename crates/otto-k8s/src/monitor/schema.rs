@@ -867,11 +867,9 @@ mod tests {
         assert_eq!(fresh.len(), 5, "1m, 5m, 1h, latest, pods");
         assert!(fresh[0].starts_with("INSERT INTO k8s_samples_1m"));
         assert!(fresh[0].contains("cluster_id = 'c\\'1' AND sample_date = '2026-10-01'"));
-        assert!(
-            fresh
-                .iter()
-                .all(|q| q.contains("SETTINGS max_threads = 1, max_memory_usage = 402653184"))
-        );
+        assert!(fresh
+            .iter()
+            .all(|q| q.contains("SETTINGS max_threads = 1, max_memory_usage = 402653184")));
         let old = backfill_sql("c1", "2026-09-20", 12, 14);
         let tables: Vec<&str> = old
             .iter()

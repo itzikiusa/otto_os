@@ -2,8 +2,8 @@
 //! actual memory limit, including high-cardinality label maps. Kept separate
 //! from dashboard query benchmarks: this exercises schema initialization.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use otto_core::Result;

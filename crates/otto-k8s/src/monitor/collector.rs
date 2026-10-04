@@ -8,8 +8,8 @@
 //! cluster.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -18,17 +18,17 @@ use otto_core::api::AuditLogQuery;
 use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_state::{AuditRepo, K8sCluster, K8sMonitorRepo, K8sMonitorStatusRow};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::classify::{self, ActionHint, Classified, EventHint, PodSnap, Snapshot};
 use super::gateway::{self, KubeProxy};
 use super::parse::{self, Parsed, Sample};
-use super::probes::{self, MonitorConfig, PodRef, ProbeFormat, Transport, is_excluded};
+use super::probes::{self, is_excluded, MonitorConfig, PodRef, ProbeFormat, Transport};
 use super::schema;
 use super::scrape::{self, ScrapeTarget, TransportUsed};
 use super::wide;
 use crate::cli::Kubectl;
-use crate::clusters::{Clusters, kubectl_for};
+use crate::clusters::{kubectl_for, Clusters};
 use crate::resources::{self, arr, s};
 use crate::{K8sCtx, MonitorSink};
 
@@ -1353,11 +1353,9 @@ mod tests {
         };
         let running = snap("Running");
         // First write (no baseline): snapshot stored.
-        assert!(
-            store_status(&repo, &st, Some(&running), None)
-                .await
-                .unwrap()
-        );
+        assert!(store_status(&repo, &st, Some(&running), None)
+            .await
+            .unwrap());
         // Same snapshot again (a fresh, equal value): the status fields move,
         // the snapshot isn't rewritten.
         st.cycle_ms = 77;
@@ -1368,11 +1366,9 @@ mod tests {
         );
         assert_eq!(repo.get_status("c1").await.unwrap().unwrap().cycle_ms, 77);
         // A failed cycle (no snapshot) keeps the stored one.
-        assert!(
-            !store_status(&repo, &st, None, Some(&running))
-                .await
-                .unwrap()
-        );
+        assert!(!store_status(&repo, &st, None, Some(&running))
+            .await
+            .unwrap());
         // A changed snapshot is written.
         assert!(
             store_status(&repo, &st, Some(&snap("Failed")), Some(&running))
