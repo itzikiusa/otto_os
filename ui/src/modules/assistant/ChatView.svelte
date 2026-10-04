@@ -38,7 +38,7 @@
   // ── data ───────────────────────────────────────────────────────────────────
   $effect(() => {
     const id = thread.id;
-    untrack(() => void assistant.loadTurns(id));
+    return untrack(() => assistant.acquireTurns(id));
   });
   $effect(() => {
     if (untrack(() => assistant.tasks.state) === 'idle') void assistant.loadTasks();

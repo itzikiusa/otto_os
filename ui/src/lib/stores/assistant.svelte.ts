@@ -99,8 +99,11 @@ class AssistantStore {
   accounts: Loadable<(ProviderAccount & { signed_in: boolean | null })[]> = $state(initial([]));
 
   private tickets: Record<string, number> = {};
+  private turnReaders = new Map<string, number>();
+  private turnRequests = new Map<string, AbortController>();
+  private serial = 0;
   private ticket(key: string): () => boolean {
-    const mine = (this.tickets[key] = (this.tickets[key] ?? 0) + 1);
+    const mine = (this.tickets[key] = ++this.serial);
     return () => this.tickets[key] === mine;
   }
 
@@ -131,11 +134,15 @@ class AssistantStore {
   }
 
   async loadTurns(threadId: string): Promise<void> {
+    if (!this.turnReaders.has(threadId)) return;
+    this.turnRequests.get(threadId)?.abort();
+    const request = new AbortController();
+    this.turnRequests.set(threadId, request);
     const current = this.ticket(`turns:${threadId}`);
     const have = untrack(() => this.turns[threadId]);
     this.setTurns(threadId, { state: have?.state === 'ready' ? 'ready' : 'loading', data: have?.data ?? [], error: '' });
     try {
-      const data = await assistantApi.turns(threadId);
+      const data = await assistantApi.turns(threadId, undefined, 200, request.signal);
       if (!current()) return;
       // Keep live-appended rows the GET raced past.
       const ids = new Set(data.map((t) => t.id));
@@ -145,7 +152,30 @@ class AssistantStore {
     } catch (e) {
       if (!current()) return;
       this.setTurns(threadId, { state: 'error', data: have?.data ?? [], error: describeError(e) });
+    } finally {
+      if (this.turnRequests.get(threadId) === request) this.turnRequests.delete(threadId);
     }
+  }
+
+  /** Turn payload belongs to mounted views; pending sends live separately. */
+  acquireTurns(threadId: string): () => void {
+    const readers = this.turnReaders.get(threadId) ?? 0;
+    this.turnReaders.set(threadId, readers + 1);
+    if (!readers) void this.loadTurns(threadId);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.turnReaders.get(threadId) ?? 1) - 1;
+      if (remaining) { this.turnReaders.set(threadId, remaining); return; }
+      this.turnReaders.delete(threadId);
+      this.turnRequests.get(threadId)?.abort();
+      this.turnRequests.delete(threadId);
+      delete this.tickets[`turns:${threadId}`];
+      const next = { ...this.turns };
+      delete next[threadId];
+      this.turns = next;
+    };
   }
 
   async loadNeedsYou(): Promise<void> {
@@ -270,7 +300,7 @@ class AssistantStore {
     if (this.tasks.state !== 'idle') void this.loadTasks();
     if (this.threads.state !== 'idle') void this.loadThreads();
     if (this.limits.state !== 'idle') void this.loadLimits();
-    for (const id of Object.keys(this.turns)) void this.loadTurns(id);
+    void mapLimit([...this.turnReaders.keys()], 2, (id) => this.loadTurns(id));
   }
 
   // ── actions ────────────────────────────────────────────────────────────────
@@ -387,6 +417,7 @@ class AssistantStore {
   }
 
   private appendTurn(threadId: string, turn: AssistantTurn): void {
+    this.settlePending(threadId, [turn]);
     const have = this.turns[threadId];
     if (!have) return; // not open — it loads fresh when opened
     const i = have.data.findIndex((t) => t.id === turn.id);
@@ -396,7 +427,19 @@ class AssistantStore {
   }
 
   private setTurns(threadId: string, v: Loadable<AssistantTurn[]>): void {
-    this.turns = { ...untrack(() => this.turns), [threadId]: v };
+    if (!this.turnReaders.has(threadId)) return;
+    // Bound a live view as well as its initial page. Release discards payload;
+    // reacquiring reads a fresh page. Pending sends remain independent.
+    const data = v.data.slice(-200);
+    let bytes = 0;
+    let start = data.length;
+    while (start > 0) {
+      const cost = JSON.stringify(data[start - 1]).length * 2;
+      if (start < data.length && bytes + cost > 2 * 1024 * 1024) break;
+      bytes += cost;
+      start--;
+    }
+    this.turns = { ...untrack(() => this.turns), [threadId]: { ...v, data: data.slice(start) } };
   }
 
   private settlePending(threadId: string, turns: AssistantTurn[]): void {

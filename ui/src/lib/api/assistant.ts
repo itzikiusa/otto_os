@@ -33,8 +33,8 @@ export const assistantApi = {
   updateThread: (id: string, body: UpdateAssistantThreadReq) => api.patch<AssistantThread>(`/assistant/threads/${enc(id)}`, body),
   deleteThread: (id: string) => api.del<{ ok: boolean }>(`/assistant/threads/${enc(id)}`),
   /** Oldest first; `before` pages further back. */
-  turns: (id: string, before?: string, limit = 200) =>
-    api.get<AssistantTurn[]>(`/assistant/threads/${enc(id)}/turns?limit=${limit}${before ? `&before=${enc(before)}` : ''}`),
+  turns: (id: string, before?: string, limit = 200, signal?: AbortSignal) =>
+    api.get<AssistantTurn[]>(`/assistant/threads/${enc(id)}/turns?limit=${limit}${before ? `&before=${enc(before)}` : ''}`, signal),
   send: (id: string, body: AssistantSendReq) => api.post<AssistantSendResp>(`/assistant/threads/${enc(id)}/turns`, body),
   attach: (id: string, body: { name: string; content_base64: string; mime?: string }) =>
     api.post<AssistantAttachment>(`/assistant/threads/${enc(id)}/attachments`, body),
