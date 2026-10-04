@@ -205,7 +205,7 @@ const RUN_INFO: Record<RunStatusKey, Omit<StatusInfo, 'key'>> = {
   queued: { label: 'Queued', tone: 'neutral' },
   waiting: { label: 'Waiting', tone: 'warning' },
   running: { label: 'Running', tone: 'info', live: true },
-  cancelled: { label: 'Cancelled', tone: 'neutral' },
+  cancelled: { label: 'Canceled', tone: 'neutral' },
   skipped: { label: 'Skipped', tone: 'neutral' },
 };
 
@@ -256,8 +256,8 @@ export const STORY_STAGES = ['draft', 'review', 'approved', 'done'] as const;
 
 const STAGE_INFO: Record<string, Omit<StatusInfo, 'key'>> = {
   draft: { label: 'Draft', tone: 'neutral', hint: 'Draft — not reviewed yet' },
-  imported: { label: 'Imported', tone: 'neutral', hint: 'Imported from the source, not analysed yet' },
-  analyzed: { label: 'Analyzed', tone: 'info', hint: 'Agents analysed the story' },
+  imported: { label: 'Imported', tone: 'neutral', hint: 'Imported from the source, not analyzed yet' },
+  analyzed: { label: 'Analyzed', tone: 'info', hint: 'Agents analyzed the story' },
   refined: { label: 'Refined', tone: 'info', hint: 'An agent suggested a rewrite' },
   tests_drafted: { label: 'Tests drafted', tone: 'info', hint: 'Test cases were generated' },
   planned: { label: 'Planned', tone: 'info', hint: 'An implementation plan exists' },

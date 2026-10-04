@@ -88,7 +88,7 @@ test('runStatus normalises every module vocabulary', () => {
   assert.deepEqual([runStatus('waiting').label, runStatus('waiting').tone], ['Waiting', 'warning']);
   assert.deepEqual([runStatus('running').tone, runStatus('running').live], ['info', true]);
   assert.equal(runStatus('in progress').key, 'running');
-  for (const s of ['cancelled', 'canceled']) assert.equal(runStatus(s).label, 'Cancelled');
+  for (const s of ['cancelled', 'canceled']) assert.equal(runStatus(s).label, 'Canceled');
   assert.equal(runStatus('skipped').label, 'Skipped');
   // Running must never share the success tone (Mission Control bug).
   assert.notEqual(runStatus('running').tone, runStatus('succeeded').tone);
