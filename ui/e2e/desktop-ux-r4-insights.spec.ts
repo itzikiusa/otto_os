@@ -152,7 +152,7 @@ test('Assistant incremental turns remain readable and running task cancellation 
   await expect(task.getByRole('button', { name: 'Stop', exact: true })).toBeEnabled();
   await task.getByRole('button', { name: 'Stop', exact: true }).click();
   await page.getByRole('dialog', { name: 'Stop task' }).getByRole('button', { name: 'Stop', exact: true }).click();
-  await expect(task).toContainText('Cancelled');
+  await expect(task).toContainText('Canceled');
   expect(state.calls.some(c => c.path.endsWith('/task-hotels/cancel'))).toBe(true);
   await task.scrollIntoViewIfNeeded();
   await page.screenshot({ path: info.outputPath('assistant-cancelled.png') });

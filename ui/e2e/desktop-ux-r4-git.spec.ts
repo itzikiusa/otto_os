@@ -202,7 +202,7 @@ test('local review finishes and hands only selected findings to a synthetic agen
   await page.getByRole('button', {name: 'Send to agent (1)', exact: true}).click();
   await page.getByRole('menuitem', {name: 'claude', exact: true}).click();
   await expect.poll(() => body).toEqual({provider: 'claude', comment_ids: ['finding-4']});
-  await expect(page.getByText('Handoff failed', {exact: true})).toBeVisible();
+  await expect(page.getByText('Couldn’t hand off the review', {exact: true})).toBeVisible();
   await expect(page.locator('.lrp-chk')).toBeChecked();
   launchFails = false;
   await page.getByRole('button', {name: 'Send to agent (1)', exact: true}).click();
