@@ -381,15 +381,6 @@ fn row_to_story(r: &sqlx::sqlite::SqliteRow) -> Result<ProductStory> {
     })
 }
 
-/// `raw_json` projected down to `{"version": n}` (the Confluence page version
-/// — the only field any reader of a version LIST uses), else NULL. The full
-/// blob stays readable through `get_version`.
-/// (Nested CASE, not AND: SQLite may evaluate both AND operands, and the
-/// JSON functions raise on a malformed blob.)
-const SLIM_RAW_JSON: &str = "CASE WHEN json_valid(raw_json) THEN \
-     CASE WHEN json_type(raw_json, '$.version') IN ('integer', 'real') \
-     THEN json_object('version', json_extract(raw_json, '$.version')) END END AS raw_json";
-
 fn row_to_version(r: &sqlx::sqlite::SqliteRow) -> Result<ProductStoryVersion> {
     Ok(ProductStoryVersion {
         id: r.get("id"),
@@ -833,17 +824,15 @@ impl ProductRepo {
     }
 
     /// List versions for a story; `body_md` is omitted (empty string) for
-    /// brevity and `raw_json` is SLIM (see [`SLIM_RAW_JSON`]). A Confluence
+    /// brevity and `raw_json` is precomputed slim metadata. A Confluence
     /// row's `raw_json` is the whole page storage body, and the Rewrite/Plan
     /// tabs poll this list every 3 s: 30 versions × 500 KB was 16.8 MB per
     /// poll (backlog B6 / SE-03). Read one version in full via `get_version`.
     pub async fn list_versions(&self, story: &Id) -> Result<Vec<ProductStoryVersion>> {
-        let sql = format!(
-            "SELECT id, story_id, version_no, kind, title, '' AS body_md, {SLIM_RAW_JSON},
+        let sql = "SELECT id, story_id, version_no, kind, title, '' AS body_md, raw_json,
                     change_notes, created_by, created_at
-             FROM product_story_versions WHERE story_id = ? ORDER BY version_no DESC"
-        );
-        let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+             FROM product_revision_summaries WHERE story_id = ? ORDER BY version_no DESC";
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(story)
             .fetch_all(&self.pool)
             .await
@@ -892,18 +881,17 @@ impl ProductRepo {
     /// (only the page `version` survives) — every story-detail response
     /// carries this row, and nothing reads the raw page body from it.
     pub async fn latest_source_version(&self, story: &Id) -> Result<Option<ProductStoryVersion>> {
-        let sql = format!(
-            "SELECT id, story_id, version_no, kind, title, body_md, {SLIM_RAW_JSON},
-                    change_notes, created_by, created_at
-             FROM product_story_versions
-             WHERE story_id = ? AND kind = 'source'
-             ORDER BY version_no DESC LIMIT 1"
-        );
-        let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-            .bind(story)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(dberr("latest source version"))?;
+        let row = sqlx::query(
+            "SELECT s.id, s.story_id, s.version_no, s.kind, s.title, v.body_md, s.raw_json,
+                    s.change_notes, s.created_by, s.created_at
+             FROM product_revision_summaries s JOIN product_story_versions v ON v.id = s.id
+             WHERE s.story_id = ? AND s.kind = 'source'
+             ORDER BY s.version_no DESC LIMIT 1",
+        )
+        .bind(story)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("latest source version"))?;
         row.as_ref().map(row_to_version).transpose()
     }
 
@@ -2190,6 +2178,64 @@ mod tests {
     /// B6 / SE-03: version lists and the latest source carry a SLIM
     /// `raw_json` (just the page version), counts and the synced page version
     /// come from SQL, and the full blob stays readable per version.
+    #[tokio::test]
+    async fn revision_summary_backfill_and_updates_preserve_slim_semantics() {
+        let pool = mem_pool().await;
+        let repo = ProductRepo::new(pool.clone());
+        let user = seed_user(&pool).await;
+        let ws = seed_workspace(&pool, &user).await;
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
+        // Exercise upgrade of existing rows, not only triggers on a fresh DB.
+        sqlx::raw_sql("DROP TRIGGER product_revision_summary_insert; DROP TRIGGER product_revision_summary_update; DROP TABLE product_revision_summaries;")
+            .execute(&pool).await.unwrap();
+        let mut ids = Vec::new();
+        for raw in [
+            Some("{\"version\":1.5}"),
+            Some("{\"version\":\"9\"}"),
+            Some("bad JSON"),
+            None,
+        ] {
+            let version = repo
+                .add_version(NewVersion {
+                    story_id: story.id.clone(),
+                    kind: "source".into(),
+                    title: "Title".into(),
+                    body_md: "large body".repeat(1000),
+                    raw_json: raw.map(str::to_owned),
+                    change_notes: None,
+                    created_by: user.clone(),
+                })
+                .await
+                .unwrap();
+            ids.push(version.id);
+        }
+        sqlx::raw_sql(include_str!(
+            "../migrations/0167_product_revision_summaries.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let versions = repo.list_versions(&story.id).await.unwrap();
+        assert_eq!(versions.len(), 4);
+        assert_eq!(versions[3].raw_json.as_deref(), Some("{\"version\":1.5}"));
+        assert!(versions[..3].iter().all(|v| v.raw_json.is_none()));
+        assert!(versions.iter().all(|v| v.body_md.is_empty()));
+        sqlx::query("UPDATE product_story_versions SET title = 'Changed', raw_json = '{\"version\":7}' WHERE id = ?")
+            .bind(&ids[3]).execute(&pool).await.unwrap();
+        let latest = repo.list_versions(&story.id).await.unwrap().remove(0);
+        assert_eq!(latest.title, "Changed");
+        assert_eq!(latest.raw_json.as_deref(), Some("{\"version\":7}"));
+        sqlx::query("DELETE FROM product_story_versions WHERE id = ?")
+            .bind(&ids[3])
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(repo.list_versions(&story.id).await.unwrap().len(), 3);
+    }
+
     #[tokio::test]
     async fn version_lists_ship_slim_raw_json() {
         let pool = mem_pool().await;
