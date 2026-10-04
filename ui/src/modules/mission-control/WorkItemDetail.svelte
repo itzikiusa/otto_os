@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { router } from '../../lib/router.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { missionControlBus } from '../../lib/events.svelte';
@@ -55,8 +55,43 @@
   let editRisk = $state<RiskLevel>('low');
   let approveReason = $state('');
 
+  type EditSnapshot = { goal: string; result_summary: string; risk_level: RiskLevel };
+  let editBaseline = $state<EditSnapshot | null>(null);
+  let detailOwner = '';
+  let viewGeneration = 0;
+  let readGeneration = 0;
+  let alive = true;
+  onDestroy(() => { alive = false; ++viewGeneration; ++readGeneration; });
+
+  function snapshot(item: Pick<WorkItemDetail, 'goal' | 'result_summary' | 'risk_level'>): EditSnapshot {
+    return { goal: item.goal ?? '', result_summary: item.result_summary ?? '', risk_level: item.risk_level };
+  }
+  function draftSnapshot(): EditSnapshot {
+    return { goal: editGoal, result_summary: editResult, risk_level: editRisk };
+  }
+  function sameDraft(a: EditSnapshot, b: EditSnapshot): boolean {
+    return a.goal === b.goal && a.result_summary === b.result_summary && a.risk_level === b.risk_level;
+  }
+  function resetDraft(): void {
+    if (!detail) return;
+    editBaseline = snapshot(detail);
+    editGoal = editBaseline.goal;
+    editResult = editBaseline.result_summary;
+    editRisk = editBaseline.risk_level;
+  }
+  function beginEdit(): void {
+    resetDraft();
+    editing = true;
+  }
+  function cancelEdits(): void {
+    editing = false;
+    resetDraft();
+  }
   function isDirty(): boolean {
-    return !!detail && editing && (editGoal !== (detail.goal ?? '') || editResult !== (detail.result_summary ?? '') || editRisk !== detail.risk_level);
+    return !!detail && editing && !!editBaseline && !sameDraft(draftSnapshot(), editBaseline);
+  }
+  function ownsView(workspaceId: string, itemId: string, generation: number): boolean {
+    return alive && wsId === workspaceId && id === itemId && viewGeneration === generation;
   }
   export async function canLeave(): Promise<boolean> {
     if (busy) return false;
@@ -70,27 +105,34 @@
   $effect(() => router.guard(() => canLeave()));
 
   async function load(): Promise<void> {
-    // Another item: never show the previous item's facts (or its half-typed
-    // edit) under the new title while it loads.
-    if (detail && detail.id !== id) {
+    const owner = JSON.stringify([wsId, id]);
+    if (detailOwner !== owner) {
+      detailOwner = owner;
+      ++viewGeneration;
       detail = null;
       editing = false;
+      editBaseline = null;
+      busy = false;
+      deciding = null;
     }
     const want = id;
     const workspaceId = wsId;
+    const view = viewGeneration;
+    const request = ++readGeneration;
+    const ownsRead = () => ownsView(workspaceId, want, view) && request === readGeneration;
     loading = true;
     err = '';
     try {
       const d = await missionControlApi.item(workspaceId, want);
-      if (want !== id || workspaceId !== wsId) return;
+      if (!ownsRead()) return;
       detail = d;
-      editGoal = detail.goal ?? '';
-      editResult = detail.result_summary ?? '';
-      editRisk = detail.risk_level;
+      // A read may begin before Edit, or follow an approval while editing.
+      // Only the persisted detail changes; the draft keeps its edit baseline.
+      if (!editing) resetDraft();
     } catch (e) {
-      if (want === id && workspaceId === wsId) err = e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.';
+      if (ownsRead()) err = e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.';
     } finally {
-      if (want === id && workspaceId === wsId) loading = false;
+      if (ownsRead()) loading = false;
     }
   }
 
@@ -105,7 +147,7 @@
 
   // Live: reload when THIS item changes (or on a reconnect resync) — the
   // pane used to keep showing a stale status while the list updated. Never
-  // while the user is editing (a reload resets the edit fields).
+  // while the user is editing; approval refreshes may still update the detail.
   let seenTick = untrack(() => missionControlBus.tick);
   $effect(() => {
     const tick = missionControlBus.tick;
@@ -119,56 +161,65 @@
   });
 
   async function saveEdits(): Promise<void> {
-    if (!detail) return;
+    if (!detail || busy) return;
+    const workspaceId = wsId, itemId = id, view = viewGeneration;
+    const submitted = draftSnapshot();
     busy = true;
+    ++readGeneration; // A pre-save read cannot overwrite the committed response.
     try {
-      await missionControlApi.patch(wsId, id, {
-        risk_level: editRisk,
-        goal: editGoal,
-        result_summary: editResult,
-      });
-      editing = false;
+      const saved = await missionControlApi.patch(workspaceId, itemId, submitted);
+      if (!ownsView(workspaceId, itemId, view) || !detail) return;
+      ++readGeneration; // Also invalidate reads that started during the PATCH.
+      detail = { ...detail, ...saved };
+      editBaseline = snapshot(saved);
+      // Inputs remain editable during Save. Retain anything typed after submit.
+      if (sameDraft(draftSnapshot(), submitted)) cancelEdits();
       await load();
-      onChange?.();
+      if (ownsView(workspaceId, itemId, view)) onChange?.();
       toasts.success('Work item saved');
     } catch (e) {
       toasts.error("Couldn't save the work item", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
     } finally {
-      busy = false;
+      if (ownsView(workspaceId, itemId, view)) { busy = false; loading = false; }
     }
   }
 
   async function requestApproval(): Promise<void> {
+    if (busy) return;
+    const workspaceId = wsId, itemId = id, view = viewGeneration;
     busy = true;
     try {
-      await missionControlApi.requestApproval(wsId, id, { reason: approveReason || undefined });
+      await missionControlApi.requestApproval(workspaceId, itemId, { reason: approveReason || undefined });
+      if (!ownsView(workspaceId, itemId, view)) return;
       approveReason = '';
       await load();
-      onChange?.();
+      if (ownsView(workspaceId, itemId, view)) onChange?.();
       toasts.success('Approval requested');
     } catch (e) {
       toasts.error("Couldn't request approval", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
     } finally {
-      busy = false;
+      if (ownsView(workspaceId, itemId, view)) busy = false;
     }
   }
 
   /** Which approval is mid-decision, and which way. */
   let deciding = $state<{ id: string; kind: 'approve' | 'deny' } | null>(null);
   async function decide(aid: string, decision: 'approved' | 'rejected', note?: string | null): Promise<void> {
+    if (busy) return;
+    const workspaceId = wsId, itemId = id, view = viewGeneration;
     busy = true;
     deciding = { id: aid, kind: decision === 'approved' ? 'approve' : 'deny' };
     try {
       // The wire keeps `rejected`; the UI says Deny (one queue vocabulary).
-      await missionControlApi.decideApproval(wsId, aid, { decision, note: note?.trim() || undefined });
+      await missionControlApi.decideApproval(workspaceId, aid, { decision, note: note?.trim() || undefined });
+      if (!ownsView(workspaceId, itemId, view)) return;
       await load();
-      onChange?.();
+      if (ownsView(workspaceId, itemId, view)) onChange?.();
       toasts.success(decision === 'approved' ? 'Approved' : 'Denied');
     } catch (e) {
       toasts.error("Couldn't record the decision", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
     } finally {
-      busy = false;
-      deciding = null;
+      if (ownsView(workspaceId, itemId, view)) { busy = false; deciding = null; }
     }
   }
 
@@ -276,7 +327,7 @@
       <section class="d-sec">
         <div class="sec-head">
           <h3 class="section-title">Goal &amp; context</h3>
-          {#if !editing}<button class="btn ghost small" onclick={() => (editing = true)}><Icon name="edit" size={12} />Edit</button>{/if}
+          {#if !editing}<button class="btn ghost small" onclick={beginEdit}><Icon name="edit" size={12} />Edit</button>{/if}
         </div>
         {#if editing}
           <label class="fld"><span class="flabel">Goal</span><textarea class="input fld-in" rows="2" bind:value={editGoal}></textarea></label>
@@ -288,7 +339,7 @@
             </select>
           </label>
           <div class="edit-actions">
-            <button class="btn small" disabled={busy} onclick={() => { editing = false; editGoal = detail?.goal ?? ''; editResult = detail?.result_summary ?? ''; editRisk = detail?.risk_level ?? 'low'; }}>Cancel</button>
+            <button class="btn small" disabled={busy} onclick={cancelEdits}>Cancel</button>
             <button class="btn primary small" disabled={busy} onclick={saveEdits}>{busy ? 'Saving…' : 'Save'}</button>
           </div>
         {:else}

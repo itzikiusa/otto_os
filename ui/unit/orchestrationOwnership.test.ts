@@ -95,7 +95,8 @@ test('dirty work item selection retains draft and route until discard is accepte
   let discard = false; const routes: string[] = [];
   const state = compile(`let detail={goal:'old',result_summary:'',risk_level:'low'}, editing=true, editGoal='draft', editResult='',editRisk='low',busy=false;
     let selectedId='A', userClosed=false, selectionGeneration=0;
-    ${methods('modules/mission-control/WorkItemDetail.svelte', ['isDirty', 'canLeave'])}
+    let editBaseline={goal:'old',result_summary:'',risk_level:'low'};
+    ${methods('modules/mission-control/WorkItemDetail.svelte', ['draftSnapshot', 'sameDraft', 'isDirty', 'canLeave'])}
     const detailPane={canLeave};
     ${methods('modules/mission-control/MissionControlPage.svelte', ['select'])}
     return {select, read(){return {selectedId,editGoal,editing}}};`, {
@@ -118,4 +119,87 @@ test('mounted tool catalogue batches 1000 decisions and releases refresh work', 
   assert.equal(batches, 1); assert.equal(store.can('mcp_server','server','invoke','mcp','edit','tool-999'), true);
   await store.refresh(); assert.equal(batches, 2); assert.equal(singles, 0);
   release(); await store.refresh(); assert.equal(batches, 2); assert.equal(store.get('mcp_server','server','tool-999'), null);
+});
+
+
+// These tests execute the actual detail loader, approval and save methods, not
+// only the leave guard: same-item responses must respect editor ownership too.
+function missionDetail() {
+  const reads: { id: string; result: ReturnType<typeof deferred<any>> }[] = [];
+  const writes: { body: any; result: ReturnType<typeof deferred<any>> }[] = [];
+  const initial = { id: 'A', goal: 'old', result_summary: 'old result', risk_level: 'low', approvals: [] };
+  const state = compile(`
+    let wsId='ws', id='A', detail=initial, loading=false, err='', busy=false, editing=false;
+    let editGoal='old', editResult='old result', editRisk='low', editBaseline=null, approveReason='', deciding=null;
+    let detailOwner=JSON.stringify([wsId,id]), viewGeneration=0, readGeneration=0, alive=true;
+    ${methods('modules/mission-control/WorkItemDetail.svelte', [
+      'snapshot', 'draftSnapshot', 'sameDraft', 'resetDraft', 'beginEdit', 'cancelEdits', 'isDirty', 'ownsView',
+      'load', 'saveEdits', 'requestApproval', 'decide',
+    ])}
+    return {load,beginEdit,cancelEdits,saveEdits,requestApproval,decide,
+      type(goal='draft', result='draft result', risk='high'){editGoal=goal;editResult=result;editRisk=risk;},
+      switchTo(next){id=next;return load();},
+      read(){return {detail,editing,editGoal,editResult,editRisk,dirty:isDirty(),loading,busy,err};}};
+  `, { initial, toasts: toast, onChange() {}, ApiError: Error,
+    missionControlApi: {
+      item(_ws: string, id: string) { const result = deferred<any>(); reads.push({id,result}); return result.promise; },
+      patch(_ws: string, _id: string, body: any) { const result = deferred<any>(); writes.push({body,result}); return result.promise; },
+      requestApproval: async () => ({}), decideApproval: async () => ({}),
+    },
+  });
+  return { state, reads, writes, initial };
+}
+for (const action of ['request', 'approve', 'deny']) test(`Mission ${action} refresh updates approvals without replacing active draft`, async () => {
+  const h = missionDetail(); h.state.beginEdit(); h.state.type();
+  const pending = action === 'request' ? h.state.requestApproval() : h.state.decide('gate', action === 'approve' ? 'approved' : 'rejected');
+  await flush();
+  h.reads[0].result.resolve({...h.initial, goal:'remote goal', approvals:[{id:'gate',status:action}]}); await pending;
+  const state = h.state.read();
+  assert.equal(state.detail.approvals[0].status, action);
+  assert.equal(state.editGoal, 'draft'); assert.equal(state.editResult, 'draft result'); assert.equal(state.editRisk, 'high');
+  assert.equal(state.editing, true); assert.equal(state.dirty, true);
+});
+test('Mission refresh begun before Edit cannot overwrite later typing', async () => {
+  const h = missionDetail(); const read = h.state.load(); h.state.beginEdit(); h.state.type();
+  h.reads[0].result.resolve({...h.initial, result_summary:'remote result'}); await read;
+  assert.equal(h.state.read().editGoal, 'draft'); assert.equal(h.state.read().editResult, 'draft result');
+  assert.equal(h.state.read().editRisk, 'high'); assert.equal(h.state.read().dirty, true);
+});
+test('Mission refresh keeps the original edit baseline when server fields change', async () => {
+  const h = missionDetail(); h.state.beginEdit(); const read = h.state.load();
+  h.reads[0].result.resolve({...h.initial,goal:'remote goal'}); await read;
+  assert.equal(h.state.read().editGoal, 'old'); assert.equal(h.state.read().dirty, false);
+  h.state.cancelEdits(); h.state.beginEdit();
+  assert.equal(h.state.read().editGoal, 'remote goal'); assert.equal(h.state.read().dirty, false);
+});
+test('Mission successful Save supersedes an older same-item read', async () => {
+  const h = missionDetail(); const oldRead = h.state.load(); h.state.beginEdit(); h.state.type();
+  const save = h.state.saveEdits(); const saved = {...h.initial,...h.writes[0].body};
+  h.writes[0].result.resolve(saved); await flush();
+  h.reads[1].result.resolve(saved); await save;
+  h.reads[0].result.resolve(h.initial); await oldRead;
+  assert.equal(h.state.read().detail.goal,'draft'); assert.equal(h.state.read().editGoal,'draft');
+  assert.equal(h.state.read().editing,false); assert.equal(h.state.read().dirty,false);
+});
+test('Mission Save preserves changes typed after submission and Cancel restores saved values', async () => {
+  const h = missionDetail(); h.state.beginEdit(); h.state.type(); const save = h.state.saveEdits();
+  const saved = {...h.initial,...h.writes[0].body}; h.state.type('newer draft','newer result','medium');
+  h.writes[0].result.resolve(saved); await flush(); h.reads[0].result.resolve(saved); await save;
+  assert.equal(h.state.read().detail.goal,'draft'); assert.equal(h.state.read().editGoal,'newer draft');
+  assert.equal(h.state.read().editResult,'newer result'); assert.equal(h.state.read().editRisk,'medium');
+  assert.equal(h.state.read().editing,true); assert.equal(h.state.read().dirty,true);
+  h.state.cancelEdits(); assert.equal(h.state.read().editGoal,'draft'); assert.equal(h.state.read().dirty,false);
+});
+test('Mission failed Save retains the draft and baseline', async () => {
+  const h = missionDetail(); h.state.beginEdit(); h.state.type(); const save = h.state.saveEdits();
+  h.writes[0].result.reject(Error('offline')); await save;
+  assert.equal(h.state.read().editGoal,'draft'); assert.equal(h.state.read().dirty,true); assert.equal(h.state.read().busy,false);
+});
+test('Mission A-B-A reads retain the newest item visit and seed clean navigation', async () => {
+  const h = missionDetail(); const oldA = h.state.load(); const b = h.state.switchTo('B');
+  h.reads[1].result.resolve({...h.initial,id:'B',goal:'B goal'}); await b;
+  assert.equal(h.state.read().editGoal,'B goal');
+  const newA = h.state.switchTo('A'); h.reads[2].result.resolve({...h.initial,goal:'new A goal'}); await newA;
+  h.state.beginEdit(); h.state.type(); h.reads[0].result.resolve(h.initial); await oldA;
+  assert.equal(h.state.read().detail.goal,'new A goal'); assert.equal(h.state.read().editGoal,'draft'); assert.equal(h.state.read().dirty,true);
 });
