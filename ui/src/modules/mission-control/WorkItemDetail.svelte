@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { router } from '../../lib/router.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { missionControlBus } from '../../lib/events.svelte';
   import { missionControlApi } from '../../lib/api/missionControl';
@@ -53,6 +54,20 @@
   let editRisk = $state<RiskLevel>('low');
   let approveReason = $state('');
 
+  function isDirty(): boolean {
+    return !!detail && editing && (editGoal !== (detail.goal ?? '') || editResult !== (detail.result_summary ?? '') || editRisk !== detail.risk_level);
+  }
+  export async function canLeave(): Promise<boolean> {
+    if (busy) return false;
+    if (!isDirty()) return true;
+    const discard = await confirmer.ask('You have unsaved work item changes. Leaving discards them.', {
+      title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing',
+    });
+    if (discard) editing = false;
+    return discard;
+  }
+  $effect(() => router.guard(() => canLeave()));
+
   async function load(): Promise<void> {
     // Another item: never show the previous item's facts (or its half-typed
     // edit) under the new title while it loads.
@@ -61,19 +76,20 @@
       editing = false;
     }
     const want = id;
+    const workspaceId = wsId;
     loading = true;
     err = '';
     try {
-      const d = await missionControlApi.item(wsId, want);
-      if (want !== id) return;
+      const d = await missionControlApi.item(workspaceId, want);
+      if (want !== id || workspaceId !== wsId) return;
       detail = d;
       editGoal = detail.goal ?? '';
       editResult = detail.result_summary ?? '';
       editRisk = detail.risk_level;
     } catch (e) {
-      err = e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.';
+      if (want === id && workspaceId === wsId) err = e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.';
     } finally {
-      loading = false;
+      if (want === id && workspaceId === wsId) loading = false;
     }
   }
 
