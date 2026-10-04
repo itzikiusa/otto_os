@@ -5,13 +5,13 @@
   // group tabs inline-start, the active group's sub-views as pills inline-end —
   // with the selected sub-view's content below.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
+  import { nextTabIndex } from '../../lib/tabKeys';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { storyStage } from '../../lib/status';
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { recallSelection, rememberSelection } from '../../lib/lastSelection';
   import { product, buildTree, type TreeNode } from '../../lib/stores/product.svelte';
@@ -304,8 +304,10 @@
     if (ws.currentId) {
       // A workspace switch leaves no artifact open: release the arena's cached
       // blob URLs / editor bases before the new list loads.
-      product.teardown();
-      void loadStories();
+      untrack(() => {
+        product.teardown();
+        void loadStories();
+      });
     }
   });
 
@@ -381,10 +383,36 @@
 
   /** Click a group: if the current sub isn't already inside it, land on the
    *  group's first sub (otherwise keep the current sub so re-clicking is a no-op). */
-  function selectGroup(g: Group): void {
+  async function selectGroup(g: Group): Promise<void> {
     if (!g.subs.some((s) => s.id === product.tab)) {
-      void product.changeTab(g.subs[0].id);
+      await product.changeTab(g.subs[0].id);
     }
+  }
+
+  let tabTransition = 0;
+  async function activateProductTab(event: MouseEvent, activate: () => Promise<void>): Promise<void> {
+    const list = (event.currentTarget as HTMLElement).closest<HTMLElement>('[role="tablist"]');
+    const seq = ++tabTransition;
+    await activate();
+    // Dialog teardown queues its own focus restoration. Let that and the new
+    // aria-selected state settle before focusing the actual accepted tab.
+    await tick();
+    await Promise.resolve();
+    if (seq !== tabTransition || !list?.isConnected || list.closest('[inert]')) return;
+    list.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')?.focus();
+  }
+
+  function onTabKey(event: KeyboardEvent): void {
+    const list = event.currentTarget as HTMLElement;
+    const tabs = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]:not(:disabled):not([aria-disabled="true"])')];
+    const current = tabs.findIndex(tab => tab.getAttribute('aria-selected') === 'true');
+    if (current < 0) return;
+    const next = nextTabIndex(event.key, current, tabs.length, { rtl: getComputedStyle(list).direction === 'rtl' });
+    if (next < 0) return;
+    event.preventDefault();
+    // The click handler owns async activation and final focus. Moving focus
+    // first would make the discard dialog restore an unaccepted destination.
+    tabs[next].click();
   }
 
   function sourceIcon(kind: string): IconName {
@@ -613,14 +641,14 @@
         role="tab"
         aria-selected={product.view === 'stories'}
         tabindex={product.view === 'stories' ? 0 : -1}
-        onclick={() => void product.changeView('stories')}
+        onclick={(event) => void activateProductTab(event, () => product.changeView('stories'))}
       >Stories</button>
       <button
         class:active={product.view === 'learnings'}
         role="tab"
         aria-selected={product.view === 'learnings'}
         tabindex={product.view === 'learnings' ? 0 : -1}
-        onclick={() => void product.changeView('learnings')}
+        onclick={(event) => void activateProductTab(event, () => product.changeView('learnings'))}
       >Learnings</button>
     </div>
   {/snippet}
@@ -785,7 +813,7 @@
               role="tab"
               aria-selected={activeGroup.id === g.id}
               tabindex={activeGroup.id === g.id ? 0 : -1}
-              onclick={() => selectGroup(g)}
+              onclick={(event) => void activateProductTab(event, () => selectGroup(g))}
             >
               <Icon name={g.icon} size={13} />
               {g.label}
@@ -804,7 +832,7 @@
                 role="tab"
                 aria-selected={product.tab === s.id}
                 tabindex={product.tab === s.id ? 0 : -1}
-                onclick={() => void product.changeTab(s.id)}
+                onclick={(event) => void activateProductTab(event, () => product.changeTab(s.id))}
               >{s.label}</button>
             {/each}
           </div>

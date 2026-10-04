@@ -120,7 +120,7 @@
   let draftBody = $state('');
   /** The draft form differs from the saved draft (Save enabled; leaving asks). */
   const draftDirty = $derived(
-    isDraft && !!story && !!source && (draftTitle !== story.title || draftBody !== (source.body_md ?? '')),
+    isDraft && !!story && (draftTitle !== story.title || draftBody !== (source?.body_md ?? '')),
   );
   async function approveDraftLeave(): Promise<boolean> {
     if (!draftDirty) return true;
@@ -316,11 +316,11 @@
         newTranscriptBody = '';
         expandedTranscripts = {};
       }
-      if (!draft || !s || !src) {
+      if (!draft || !s) {
         seeded = { ...seeded, id };
         return;
       }
-      const next: DraftSeed = { id, title: s.title, body: src.body_md ?? '' };
+      const next: DraftSeed = { id, title: s.title, body: src?.body_md ?? '' };
       const form = reseedDraft(seeded, { title: draftTitle, body: draftBody }, next);
       draftTitle = form.title;
       draftBody = form.body;

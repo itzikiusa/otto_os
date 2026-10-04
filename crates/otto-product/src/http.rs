@@ -361,27 +361,7 @@ async fn get_story<S: ProductCtx>(
     ctx.roles()
         .check(&user, &story.workspace_id, WorkspaceRole::Viewer)
         .await?;
-    let source = ctx.product_repo().latest_source_version(&sid).await?;
-    let version_count = ctx.product_repo().count_versions(&sid).await?;
-    let analyses = ctx.product_repo().list_analyses(&sid).await?;
-    let questions = ctx.product_repo().list_questions(&sid).await?;
-    let notes = ctx.product_repo().list_notes(&sid).await?;
-    let open_questions = questions.iter().filter(|q| q.status == "open").count() as i64;
-    // Use a single COUNT(*) query instead of fetching every testcase row.
-    let testcases = ctx.product_repo().count_testcases_for_story(&sid).await?;
-    let swarm_link = ctx.product_repo().swarm_link_for_story(&sid).await?;
-    let detail = crate::types::ProductStoryDetail {
-        story,
-        source,
-        counts: crate::types::StoryCounts {
-            versions: version_count,
-            analyses: analyses.len() as i64,
-            open_questions,
-            notes: notes.len() as i64,
-            testcases,
-        },
-        swarm_link,
-    };
+    let detail = ctx.product().story_detail(&sid).await?;
     Ok(Json(detail).into_response())
 }
 

@@ -320,10 +320,11 @@ pub struct PublishAsStoryReq {
 // Response types
 // ---------------------------------------------------------------------------
 
-/// Detailed story view: the story itself + its latest source version + counts.
+/// Detailed story view: the story, its editable draft/imported source and counts.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProductStoryDetail {
     pub story: ProductStory,
+    /// Latest `draft` revision for local drafts; latest `source` for imports.
     pub source: Option<ProductStoryVersion>,
     pub counts: StoryCounts,
     /// The swarm project created from this story (Plan → Swarm), if any. Drives

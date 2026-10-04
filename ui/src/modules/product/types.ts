@@ -194,6 +194,7 @@ export interface SwarmStoryLink {
 
 export interface ProductStoryDetail {
   story: ProductStory;
+  /** Latest editable draft revision for local drafts; latest source revision for imports. */
   source: ProductStoryVersion | null;
   counts: StoryCounts;
   /** The swarm project created from this story (Plan → Swarm), or null. */

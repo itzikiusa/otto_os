@@ -237,7 +237,11 @@ class ProductStore {
 
   /** Capture both identity and lifetime; A → B → A is a new view of A. */
   private owner(key?: string, workspaceOnly = false): () => boolean {
-    const workspace = ws.currentId, story = this.selectedId, generation = this.selectionGeneration;
+    const workspace = ws.currentId;
+    // Workspace effects call list loaders synchronously before their first
+    // await. Never subscribe those effects to a story they do not own.
+    const story = workspaceOnly ? null : this.selectedId;
+    const generation = workspaceOnly ? 0 : this.selectionGeneration;
     const request = key ? (this.requests.get(key) ?? 0) + 1 : 0;
     if (key) this.requests.set(key, request);
     return () => ws.currentId === workspace &&

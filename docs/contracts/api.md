@@ -1406,7 +1406,7 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 |---|---|---|---|
 | GET /workspaces/{ws}/product/stories | ws viewer | — | `Story[]` (flat; the UI derives the tree from `parent_id` → `folder`) |
 | POST /workspaces/{ws}/product/stories | ws editor | ImportStoryReq | Story |
-| GET /product/stories/{sid} | ws viewer | — | Story |
+| GET /product/stories/{sid} | ws viewer | — | `ProductStoryDetail`: `source` contains the latest `draft` revision for local draft stories, or the latest imported `source` revision otherwise, including its full editable `body_md`. It is null only when that revision does not exist; an unapplied suggested rewrite does not replace it. |
 | PATCH /product/stories/{sid} | ws editor | PatchStoryReq (`+ parent_id?, tree_kind?, folder?`) | Story |
 | DELETE /product/stories/{sid} | ws editor | — | 204 (re-parents children; removes attachment/annotation rows + `product/attachments/<sid>/` + each artifact's `product/mockup_assist/<aid>/` scratch dir, best effort) |
 | POST /product/stories/{sid}/children | ws editor | CreateChildReq `{ title?, tree_kind?: 'story'\|'doc' (default doc), folder? }` | ProductStoryDetail — a draft child filed under the epic `sid` (400 if `sid` is itself a child or `tree_kind` is `epic`) |

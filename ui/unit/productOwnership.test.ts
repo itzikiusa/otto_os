@@ -14,6 +14,14 @@ function fixture(api: Record<string, unknown>) {
 }
 const detail = (id: string) => ({ story: { id, title: id }, source: { body_md: id } });
 
+test('workspace-only loads never read the reactive story selection', async () => {
+  const { product } = fixture({ get: async () => [] });
+  let reads = 0;
+  Object.defineProperty(product, 'selectedId', { get: () => { ++reads; return 'A'; } });
+  await product.loadStories();
+  assert.equal(reads, 0, 'workspace effects must not subscribe to selection through ownership capture');
+});
+
 test('late draft mutation cannot replace a newly selected story', async () => {
   const a = deferred<unknown>();
   const { product } = fixture({ patch: () => a.promise, get: async () => detail('B') });
