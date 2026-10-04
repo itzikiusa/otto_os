@@ -26,9 +26,33 @@ function qs(f?: MissionFilterQuery): string {
   return s ? `?${s}` : '';
 }
 
+/** Home's Today panel and the Mission Control box both read the summary on a
+ *  cold boot, a moment apart: one request serves both — shared while in
+ *  flight and reused for SUMMARY_REUSE_MS after it settles. Every
+ *  `work_graph_updated` event (and a resync) drops it, so a change is never
+ *  served stale (`invalidateMissionSummary`, called by the event bus). */
+const SUMMARY_REUSE_MS = 2_000;
+const summaryCache = new Map<string, { p: Promise<MissionSummary>; at: number }>();
+
+export function invalidateMissionSummary(ws?: string): void {
+  if (ws) summaryCache.delete(ws);
+  else summaryCache.clear();
+}
+
 export const missionControlApi = {
   /** Header summary: counts by kind/status/risk, total cost, active, needs-approval. */
-  summary: (ws: string) => api.get<MissionSummary>(`/workspaces/${ws}/workgraph/summary`),
+  summary: (ws: string): Promise<MissionSummary> => {
+    const hit = summaryCache.get(ws);
+    // `at` is 0 while in flight; set when the request settles.
+    if (hit && (hit.at === 0 || Date.now() - hit.at < SUMMARY_REUSE_MS)) return hit.p;
+    const entry = { p: api.get<MissionSummary>(`/workspaces/${ws}/workgraph/summary`), at: 0 };
+    summaryCache.set(ws, entry);
+    entry.p.then(
+      () => (entry.at = Date.now()),
+      () => summaryCache.get(ws) === entry && summaryCache.delete(ws),
+    );
+    return entry.p;
+  },
 
   /** Filtered work-item list, newest-updated first. */
   items: (ws: string, f?: MissionFilterQuery) =>

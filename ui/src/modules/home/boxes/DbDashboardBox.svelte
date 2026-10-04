@@ -45,8 +45,14 @@
     if (!active) return;
     untrack(() => void ensureLoaded());
   });
+  // Manual refresh (frame button): reload on a CHANGED tick only — on mount
+  // the effect above is already loading, and a forced second pass doubled
+  // connections + dashboards + widgets on every cold Home boot.
+  let seenTick = untrack(() => tick);
   $effect(() => {
-    void tick;
+    const t = tick;
+    if (t === seenTick) return;
+    seenTick = t;
     untrack(() => void ensureLoaded(true));
   });
 

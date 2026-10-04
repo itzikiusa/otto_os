@@ -3,6 +3,7 @@
 
 import { resumeAltLoopback, suspendAltLoopback, wsConnect } from './api/client';
 import { inLane } from './api/lane';
+import { invalidateMissionSummary } from './api/missionControl';
 import { auth } from './stores/auth.svelte';
 import { appLive, type LiveEvent } from './live';
 import type { EventsResyncFrame, NodeRunState, OttoEvent, UiHelloAckFrame } from './api/types';
@@ -250,6 +251,7 @@ export class MissionControlBus {
   status: string = $state('');
 
   apply(workspaceId: string, itemId: string, status: string): void {
+    invalidateMissionSummary(workspaceId || undefined);
     this.workspaceId = workspaceId;
     this.itemId = itemId;
     this.status = status;

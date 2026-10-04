@@ -2020,7 +2020,20 @@ class DatabaseStore {
   /** Load connections for the current workspace. DB kinds drive the workbench
    *  (`connections`); ssh/custom land in `otherConnections` so the unified
    *  sidebar tree can render EVERY profile (opens route by type). */
-  async loadConnections(): Promise<void> {
+  /** In-flight connection-list load, keyed by workspace + access epoch: a
+   *  Home box and a page mounting together share one request. */
+  private connectionsInFlight: { key: string; p: Promise<void> } | null = null;
+  loadConnections(): Promise<void> {
+    const key = `${ws.currentId ?? ''}:${this.accessEpoch}`;
+    if (this.connectionsInFlight?.key === key) return this.connectionsInFlight.p;
+    const p = this.fetchConnections().finally(() => {
+      if (this.connectionsInFlight?.p === p) this.connectionsInFlight = null;
+    });
+    this.connectionsInFlight = { key, p };
+    return p;
+  }
+
+  private async fetchConnections(): Promise<void> {
     const wid = ws.currentId;
     const accessEpoch=this.accessEpoch;
     if (!wid) return;
@@ -4177,7 +4190,19 @@ class DatabaseStore {
 
   // ── Dashboards ────────────────────────────────────────────────────────────
 
-  async loadDashboards(): Promise<void> {
+  /** In-flight dashboards(+widgets) load per workspace, shared like connections. */
+  private dashboardsInFlight: { key: string; p: Promise<void> } | null = null;
+  loadDashboards(): Promise<void> {
+    const key = this.wsBase() ?? '';
+    if (this.dashboardsInFlight?.key === key) return this.dashboardsInFlight.p;
+    const p = this.fetchDashboards().finally(() => {
+      if (this.dashboardsInFlight?.p === p) this.dashboardsInFlight = null;
+    });
+    this.dashboardsInFlight = { key, p };
+    return p;
+  }
+
+  private async fetchDashboards(): Promise<void> {
     const base = this.wsBase();
     if (!base) return;
     try {
