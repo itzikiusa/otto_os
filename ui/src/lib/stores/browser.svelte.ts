@@ -70,6 +70,7 @@ class BrowserStore {
   /** Request token for page loads: a slow fetch (up to 30 s) for tab A must
    *  not land over tab B's page — or another workspace's — after a switch. */
   private pageSeq = 0;
+  private annotationSeq = 0;
 
   get activeTab(): BrowserTab | null {
     return this.tabs.find((t) => t.id === this.activeId) ?? null;
@@ -131,6 +132,7 @@ class BrowserStore {
     // The summary panel belongs to the page it summarized.
     if (id !== this.activeId) this.summary = '';
     this.activeId = id;
+    this.annotations = [];
     const tab = this.activeTab;
     // A live tab that's actually rendered natively skips the reader fetch —
     // off Tauri it still falls back to reader (isNativeLive is false there).
@@ -293,14 +295,15 @@ class BrowserStore {
   }
 
   async loadAnnotations(url: string): Promise<void> {
-    const ws = this.wsId;
+    const ws = this.wsId, tab = this.activeId, page = this.pageSeq;
+    const request = ++this.annotationSeq;
     let next: BrowserAnnotation[];
     try {
       next = await browserApi.listAnnotations(ws, url);
     } catch {
       next = [];
     }
-    if (ws === this.wsId) this.annotations = next;
+    if (ws === this.wsId && tab === this.activeId && page === this.pageSeq && request === this.annotationSeq && this.activeTab?.url === url) this.annotations = next;
   }
 
   async summarize(url: string) {
@@ -339,10 +342,12 @@ class BrowserStore {
     comment?: string;
     color?: string;
   }): Promise<BrowserAnnotation> {
-    const ann = await browserApi.createAnnotation(this.wsId, {
+    const ws = this.wsId, tab = this.activeId, page = this.pageSeq;
+    const ann = await browserApi.createAnnotation(ws, {
       ...body,
-      tab_id: this.activeId ?? undefined,
+      tab_id: tab ?? undefined,
     });
+    if (ws !== this.wsId || tab !== this.activeId || page !== this.pageSeq || this.activeTab?.url !== body.url) return ann;
     if (!this.annotations.some((a) => a.id === ann.id)) {
       this.annotations = [...this.annotations, ann];
     }
