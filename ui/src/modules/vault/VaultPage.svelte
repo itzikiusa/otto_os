@@ -648,7 +648,7 @@
   .scan-chip {
     font-size: var(--fs-xs);
     color: var(--accent-text);
-    animation: otto-pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   .scan-chip.err {
     display: inline-flex;
@@ -676,7 +676,7 @@
     padding: 2px 9px;
     cursor: pointer;
     white-space: nowrap;
-    animation: otto-pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   .run-chip:hover {
     animation: none;

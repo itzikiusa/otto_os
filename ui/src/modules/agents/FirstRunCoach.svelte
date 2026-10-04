@@ -456,7 +456,7 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 1px 6px;
-    border-radius: 99px;
+    border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);
   }
@@ -491,7 +491,7 @@
     gap: 4px;
     font-size: var(--fs-xs);
     padding: 2px 8px;
-    border-radius: 99px;
+    border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);
   }

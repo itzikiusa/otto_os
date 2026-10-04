@@ -1645,7 +1645,7 @@
   }
   .qe-tab-dot.running {
     background: var(--accent);
-    animation: otto-pulse 1s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   .qe-tab-dot.error {
     background: var(--status-exited);

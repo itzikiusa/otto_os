@@ -172,7 +172,7 @@
     border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-top-color: var(--accent);
     border-radius: 50%;
-    animation: otto-spin 0.7s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
   
   .goals {
@@ -286,7 +286,7 @@
     color: var(--danger);
   }
   .status.pulse {
-    animation: otto-pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   
   @media (prefers-reduced-motion: reduce) {

@@ -451,7 +451,7 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .spin {
-      animation: otto-spin 0.9s linear infinite;
+      animation: otto-spin 0.8s linear infinite;
     }
   }
   
@@ -580,7 +580,7 @@
     max-width: 100%;
     font-size: var(--fs-xs);
     padding: 2px 8px;
-    border-radius: 99px;
+    border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text-dim);

@@ -229,7 +229,7 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 1px 6px;
-    border-radius: 99px;
+    border-radius: 999px;
     flex-shrink: 0;
   }
   .badge.advisory {
@@ -267,7 +267,7 @@
   .chip {
     font-size: var(--fs-xs);
     padding: 1px 7px;
-    border-radius: 99px;
+    border-radius: 999px;
     background: var(--surface-2);
     border: 1px solid var(--border);
   }

@@ -261,7 +261,7 @@
     cursor: default;
   }
   .icon-btn.spin :global(svg) {
-    animation: otto-spin 0.9s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
   .pad {
     padding: 4px 0;

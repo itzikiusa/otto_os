@@ -3663,7 +3663,7 @@
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 0 5px;
-    border-radius: 99px;
+    border-radius: 999px;
     flex-shrink: 0;
   }
   .run-id {
@@ -3795,7 +3795,7 @@
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 1px 7px;
-    border-radius: 99px;
+    border-radius: 999px;
   }
   .grow {
     flex: 1;
@@ -4152,7 +4152,7 @@
     flex-shrink: 0;
     padding: 5px 10px;
     border: 1px solid var(--border);
-    border-radius: 99px;
+    border-radius: 999px;
     background: var(--surface-2);
     color: var(--text);
     font-size: var(--fs-s);
@@ -4256,7 +4256,7 @@
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     padding: 0 5px;
-    border-radius: 99px;
+    border-radius: 999px;
   }
   .ctx-pathline {
     padding: 4px 10px;
@@ -4400,7 +4400,7 @@
     border-inline-end-color: transparent;
     border-radius: 50%;
     display: inline-block;
-    animation: otto-spin 0.7s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
   
   /* Triggers panel: collapsible section below the canvas */

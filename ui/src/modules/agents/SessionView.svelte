@@ -1199,7 +1199,7 @@
     flex-shrink: 0;
     height: 18px;
     padding: 0 7px;
-    border-radius: 99px;
+    border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--warning);
@@ -1261,7 +1261,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     padding: 0 6px;
-    border-radius: 99px;
+    border-radius: 999px;
     cursor: pointer;
   }
   .crumb-text {
@@ -1283,7 +1283,7 @@
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     padding: 0 7px;
-    border-radius: 99px;
+    border-radius: 999px;
     white-space: nowrap;
   }
   /* The details chip: provider icon (+ name · idle countdown · folder on a

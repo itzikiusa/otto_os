@@ -504,14 +504,14 @@
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 1px 7px;
-    border-radius: 99px;
+    border-radius: 999px;
   }
   .chip {
     font-size: var(--fs-xs);
     color: var(--warning);
     background: var(--warning-soft);
     padding: 1px 7px;
-    border-radius: 99px;
+    border-radius: 999px;
   }
   /* Sub-agent chip: neutral, not the warn colour the retry chip uses. */
   .chip.subagents {

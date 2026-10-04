@@ -1203,7 +1203,7 @@
   .sk-agent {
     width: 120px;
     height: 22px;
-    border-radius: 99px;
+    border-radius: 999px;
     background: color-mix(in srgb, var(--agent) 14%, var(--surface-2));
   }
   .sk-line {
@@ -1254,7 +1254,7 @@
     background: var(--surface);
     color: var(--text);
     border: 1px solid var(--border-strong);
-    border-radius: 99px;
+    border-radius: 999px;
     padding-block: 4px; padding-inline: 10px 12px;
     font-size: var(--fs-xs);
     font-weight: 600;

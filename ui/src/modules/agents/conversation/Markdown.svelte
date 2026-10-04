@@ -405,7 +405,7 @@
     align-items: center;
     gap: 4px;
     padding: 0 7px;
-    border-radius: 99px;
+    border-radius: 999px;
     border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
     background: var(--accent-soft);
     color: var(--accent-text);

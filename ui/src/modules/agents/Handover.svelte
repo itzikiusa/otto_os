@@ -423,7 +423,7 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 1px 6px;
-    border-radius: 99px;
+    border-radius: 999px;
   }
   .badge.muted {
     background: color-mix(in srgb, var(--text-dim) 20%, transparent);

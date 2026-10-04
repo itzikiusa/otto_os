@@ -506,7 +506,7 @@
     flex-shrink: 0;
     width: 14px;
     height: 14px;
-    border-radius: 99px;
+    border-radius: 999px;
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 18%, transparent);
   }
@@ -561,7 +561,7 @@
     flex-shrink: 0;
     width: 6px;
     height: 6px;
-    border-radius: 99px;
+    border-radius: 999px;
     background: var(--accent);
   }
   .tab.unread:not(.active) {

@@ -653,7 +653,7 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 1px 5px;
-    border-radius: 99px;
+    border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 15%, transparent);
     color: var(--text-dim);
   }

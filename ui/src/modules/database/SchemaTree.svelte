@@ -790,7 +790,7 @@
   .spin {
     display: grid;
     place-items: center;
-    animation: otto-spin 0.9s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
   
   .node-icon {

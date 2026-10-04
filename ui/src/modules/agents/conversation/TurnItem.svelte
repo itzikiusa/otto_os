@@ -449,7 +449,7 @@
     font-weight: 600;
     color: var(--danger);
     background: var(--danger-soft);
-    border-radius: 99px;
+    border-radius: 999px;
     padding: 1px 7px;
   }
   .fold-body {
@@ -536,7 +536,7 @@
     gap: 4px;
     background: none;
     border: 1px solid var(--border);
-    border-radius: 99px;
+    border-radius: 999px;
     color: var(--text-dim);
     font-size: var(--fs-xs);
     padding: 0 7px;

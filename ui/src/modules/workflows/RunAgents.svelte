@@ -347,7 +347,7 @@
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     padding: 0 6px;
-    border-radius: 99px;
+    border-radius: 999px;
   }
   .sess {
     border: 1px solid var(--border);
