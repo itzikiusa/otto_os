@@ -285,20 +285,34 @@ test('rooms: a late previous-room reply cannot replace the selected conversation
   await expect(page.getByLabel('Message to the room')).toHaveValue('Current room draft');
 });
 
-test('rooms: a full 200-message page continues to the latest evidence', async ({ page }) => {
+test('rooms: opens the latest 200 messages and pages earlier evidence', async ({ page }) => {
   const { ctx, base, ws } = await setup(page);
   const room = await (await ctx.post(`${base}/api/v1/workspaces/${ws}/agent-rooms`, { data: { name: 'Long evidence review' } })).json();
   await ctx.dispose();
   const messages = Array.from({ length: 201 }, (_, i) => ({ id: String(i).padStart(26, '0'), room_id: room.id, author_kind: 'user', author_id: 'synthetic-user', text: `Evidence note ${i + 1}`, created_at: '2026-09-25T12:00:00Z' }));
-  const cursors: (string | null)[] = [];
+  const requests: { after: string | null; before: string | null; tail: boolean; limit: number }[] = [];
   await page.route(`**/api/v1/agent-rooms/${room.id}/messages*`, r => {
-    const after = new URL(r.request().url()).searchParams.get('after'); cursors.push(after);
-    return r.fulfill({ json: after ? messages.slice(200) : messages.slice(0, 200) });
+    const query = new URL(r.request().url()).searchParams;
+    const after = query.get('after'), before = query.get('before');
+    const tail = query.get('tail') === 'true';
+    const limit = Math.min(500, Math.max(1, Number(query.get('limit') ?? 100)));
+    requests.push({ after, before, tail, limit });
+    // Match the contract: after takes precedence; tail/before select the
+    // newest matching page, still returned in chronological order.
+    const eligible = after
+      ? messages.slice(messages.findIndex(m => m.id === after) + 1)
+      : before ? messages.slice(0, Math.max(0, messages.findIndex(m => m.id === before))) : messages;
+    return r.fulfill({ json: !after && (before || tail) ? eligible.slice(-limit) : eligible.slice(0, limit) });
   });
   await page.goto('/#/personal-agents/rooms');
   await expect(page.getByText('Evidence note 201', { exact: true })).toBeVisible();
-  expect(cursors).toContain(messages[199].id);
+  await expect(page.getByText('Evidence note 1', { exact: true })).toHaveCount(0);
+  await expect(page.locator('.msg-text')).toHaveCount(200);
+  expect(requests).toEqual([{ after: null, before: null, tail: true, limit: 200 }]);
+  await page.getByRole('button', { name: 'Show earlier messages', exact: true }).click();
   await expect(page.locator('.msg-text')).toHaveCount(201);
+  await expect(page.getByText('Evidence note 1', { exact: true })).toBeVisible();
+  expect(requests.at(-1)).toEqual({ after: null, before: messages[1].id, tail: false, limit: 200 });
 });
 
 test.describe('Swarm organization keyboard flow in five themes', () => {
