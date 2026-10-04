@@ -71,26 +71,41 @@
   // Phone: push navigation between the list and the editor.
   let phonePane = $state<'list' | 'main'>('main');
 
-  function showRequest(): void {
-    view = { kind: 'request' };
+  let automationEditor: { approveLeave: () => Promise<boolean> } | undefined = $state();
+  let viewTransition = 0;
+  async function changeView(next: View): Promise<boolean> {
+    if (view.kind === 'automation' && next.kind === 'automation' && view.id === next.id) return true;
+    const generation = ++viewTransition;
+    if (view.kind === 'automation' && automationEditor && !(await automationEditor.approveLeave())) return false;
+    if (generation !== viewTransition) return false;
+    view = next;
     phonePane = 'main';
+    return true;
+  }
+  async function showRequest(): Promise<void> {
+    await changeView({ kind: 'request' });
+  }
+  async function switchRequestTab(i: number): Promise<void> {
+    const id = apiClient.tabs[i]?.tabId;
+    if (!(await changeView({ kind: 'request' }))) return;
+    const current = apiClient.tabs.findIndex((tab) => tab.tabId === id);
+    if (current >= 0) apiClient.switchTab(current);
   }
   /** New request: reuse the active tab while it is an untouched blank
    *  draft (no pile of empty tabs), else open a new one; focus the URL. */
-  function newRequest(): void {
+  async function newRequest(): Promise<void> {
+    if (!(await changeView({ kind: 'request' }))) return;
     started = true;
     const d = apiClient.draft;
     if (d.requestId || apiClient.isDirty(d)) apiClient.newDraft();
     showRequest();
     requestAnimationFrame(() => document.querySelector<HTMLInputElement>('input[aria-label="Request URL"]')?.focus());
   }
-  /** Close a request tab. A SAVED request with unsaved edits asks first
-   *  (patterns §7 "Discard"); a scratch draft still closes silently — its
-   *  sends are in History. */
+  /** Protect unsent scratch work as well as changes to saved requests. */
   async function closeRequestTab(i: number): Promise<void> {
     const t = apiClient.tabs[i];
-    if (t?.requestId && apiClient.isDirty(t)) {
-      const ok = await confirmer.ask(`“${apiClient.tabLabel(t)}” has unsaved changes. Close the tab and discard them? The saved request is kept.`, {
+    if (t && apiClient.isDirty(t)) {
+      const ok = await confirmer.ask(`“${apiClient.tabLabel(t)}” has unsaved changes. Close the tab and discard them?${t.requestId ? " The saved request is kept." : " This unsaved draft will be removed."}`, {
         title: 'Discard changes?',
         confirmLabel: 'Discard changes',
         danger: true,
@@ -101,13 +116,11 @@
     const at = t?.tabId ? apiClient.tabs.findIndex((x) => x.tabId === t.tabId) : i;
     if (at >= 0) apiClient.closeTab(at);
   }
-  function openEnvironments(envId: Id | null = null): void {
-    view = { kind: 'environments', envId };
-    phonePane = 'main';
+  async function openEnvironments(envId: Id | null = null): Promise<void> {
+    await changeView({ kind: 'environments', envId });
   }
-  function openAutomation(id: Id): void {
-    view = { kind: 'automation', id };
-    phonePane = 'main';
+  async function openAutomation(id: Id): Promise<void> {
+    await changeView({ kind: 'automation', id });
   }
 
   // Load everything when the workspace changes. Keyed on the workspace ONLY:
@@ -349,7 +362,7 @@
                   {@const active = view.kind === 'request' && apiClient.activeTab === i}
                   {@const st = apiClient.tabStatus(t.tabId)}
                   <div class="req-tab" class:active>
-                    <button class="req-tab-main" aria-current={active ? 'true' : undefined} onclick={() => { apiClient.switchTab(i); showRequest(); }}
+                    <button class="req-tab-main" aria-current={active ? 'true' : undefined} onclick={() => switchRequestTab(i)}
                       title={apiClient.isDirty(t) ? `${apiClient.tabLabel(t)} (unsaved changes)` : apiClient.tabLabel(t)}>
                       <MethodTag method={t.kind === 'http' || t.kind === 'sse' ? t.method : t.kind === 'grpc' ? 'gRPC' : 'WS'} />
                       <span class="req-tab-label">{apiClient.tabLabel(t)}</span>
@@ -377,7 +390,7 @@
               <EnvironmentsView initialId={view.envId} />
             {:else if view.kind === 'automation'}
               {#key view.id}
-                <AutomationEditor automationId={view.id} ondeleted={showRequest} />
+                <AutomationEditor bind:this={automationEditor} automationId={view.id} ondeleted={showRequest} />
               {/key}
             {:else}
               <div

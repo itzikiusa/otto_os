@@ -4,6 +4,7 @@
   // from it into variables that later steps use as {{name}}. Edits are a
   // working copy until Save; Run saves first, then runs in the daemon and
   // polls the saved report.
+  import { router } from '../../lib/router.svelte';
   import { editableSteps } from './automationInput';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -36,6 +37,23 @@
   let datasetText = $state('');
   let historyRun = $state<ApiAutomationRun | null>(null);
   let loadedFor = $state<string | null>(null);
+  let leavePending: Promise<boolean> | null = null;
+  export function approveLeave(): Promise<boolean> {
+    if (!dirty) return Promise.resolve(true);
+    if (leavePending) return leavePending;
+    leavePending = (async () => {
+      const { value } = await confirmer.choose('This automation has unsaved changes.', {
+        title: 'Save automation changes?',
+        options: [{label:'Save', value:'save', kind:'primary'}, {label:'Discard', value:'discard', kind:'danger'}],
+      });
+      if (value === 'save') return save();
+      if (value !== 'discard') return false;
+      dirty = false;
+      return true;
+    })().finally(() => { leavePending = null; });
+    return leavePending;
+  }
+  $effect(() => router.guard(() => approveLeave()));
 
   /** Run-list rows are summaries (no steps / snapshot): load the whole run. */
   async function openHistoryRun(id: string): Promise<void> {
@@ -155,6 +173,7 @@
 
   async function save(): Promise<boolean> {
     if (!automation || !canEdit) return false;
+    const snapshot = JSON.stringify(steps);
     const clean = steps.map((s) => ({
       request_id: s.request_id,
       assertions: s.assertions.map((a) => ({ ...a })),
@@ -163,10 +182,10 @@
     }));
     const saved = await apiClient.saveAutomation({ name: automation.name, steps: clean }, automation.id);
     if (saved) {
-      dirty = false;
+      dirty = JSON.stringify(steps) !== snapshot;
       toasts.success('Automation saved', saved.name);
     }
-    return !!saved;
+    return !!saved && !dirty;
   }
 
   let datasetError = $state('');
