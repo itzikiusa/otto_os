@@ -4,23 +4,23 @@ Reports contain source traces, severity and proposed reproductions. A report is 
 
 | ID | Finding | Owner | Status |
 |---|---|---|---|
-| C1-01 | Transcript filesystem errors can prune valid sessions | Implementation 1 | Accepted; regression pending |
-| C1-02 | Long reconnect gaps create unreachable middle history | Implementation 1 | Accepted; regression pending |
-| C1-03 | Delayed image paste targets newly selected session | Implementation 1 | Accepted; regression pending |
-| C1-04 | Archive/unarchive membership fails to synchronize | Implementation 1 | Accepted; regression pending |
-| P1-1 | Newline-free output repeatedly copies entire ring | Implementation 1 | Accepted; benchmark pending |
-| P1-2 | Live folds lack aggregate byte budget | Implementation 1 | Accepted; bounded design pending |
-| P1-3 | Live page requests clone full fold | Implementation 1 | Accepted; page-level snapshot pending |
-| P1-4 | Load earlier disables trimming indefinitely | Implementation 1 | Accepted; preserve historical reading anchor |
-| P1-5 | Transcript fallback resolution blocks async worker | Implementation 1 | Accepted; offload with focused test |
+| C1-01 | Transcript filesystem errors can prune valid sessions | Implementation 1 | Implemented; focused checks pass; final combined/performance gates pending |
+| C1-02 | Long reconnect gaps create unreachable middle history | Implementation 1 | Implemented; focused checks pass; final combined/performance gates pending |
+| C1-03 | Delayed image paste targets newly selected session | Implementation 1 | Implemented; focused checks pass; final combined/performance gates pending |
+| C1-04 | Archive/unarchive membership fails to synchronize | Implementation 1 | Implemented; focused checks pass; final combined/performance gates pending |
+| P1-1 | Newline-free output repeatedly copies entire ring | Implementation 1 | Implemented; focused checks pass; final combined/performance gates pending |
+| P1-2 | Live folds lack aggregate byte budget | Implementation 1 | Implemented; focused checks pass; final combined/performance gates pending |
+| P1-3 | Live page requests clone full fold | Implementation 1 | Implemented; focused checks pass; final combined/performance gates pending |
+| P1-4 | Load earlier disables trimming indefinitely | Implementation 1 | Implemented; focused checks pass; final combined/performance gates pending |
+| P1-5 | Transcript fallback resolution blocks async worker | Implementation 1 | Implemented; focused checks pass; final combined/performance gates pending |
 
-| C2-01 | Aliased SQL projections can mutate wrong row | Implementation 2 | Accepted; provenance regression pending |
-| C2-02 | ClickHouse sorting keys are not unique row identity | Implementation 2 | Accepted; reject unsafe row mutations |
-| C2-03 | Auto-stash loses index staging | Implementation 2 | Accepted; disposable Git regression pending |
-| C2-04 | Concurrent API scripts overwrite unrelated variables | Implementation 2 | Accepted; operation-level merge pending |
-| P2-1 | Sparse Mongo expansion exceeds response budget | Implementation 2 | Review with report; expanded budget needed |
-| P2-2 | SQL batches drain capped selects | Implementation 2 | Review connection lifecycle before fix |
-| P2-3 | Schema history fetches all versions serially | Implementation 2 | Review lazy/bounded fetching approach |
+| C2-01 | Aliased SQL projections can mutate wrong row | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
+| C2-02 | ClickHouse sorting keys are not unique row identity | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
+| C2-03 | Auto-stash loses index staging | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
+| C2-04 | Concurrent API scripts overwrite unrelated variables | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
+| P2-1 | Sparse Mongo expansion exceeds response budget | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
+| P2-2 | SQL batches drain capped selects | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
+| P2-3 | Schema history fetches all versions serially | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
 
 | C3-01 | Product in-page navigation drops unsaved drafts | Implementation 3 | Accepted; coordinate handlers with design effort |
 | C3-02 | Design keep-mine conflict fallback discards draft | Implementation 3 | Accepted; regression pending |
@@ -51,13 +51,13 @@ Reports contain source traces, severity and proposed reproductions. A report is 
 | P5-03 | Insights polling rereads complete archive | Implementation 5 | Accepted; summary/new-report lookup |
 | D1-01 / D1-02 / D1-03 | Composer height, popup clamp, preview focus | Claude design iteration 2 | Accepted externally; verify merged fixes |
 | D2-01 / D2-02 | Grid accessible cursor and row-detail contrast | Claude design iteration 2 | Accepted externally; verify merged fixes |
-| UX1-01 | Session load failure lacks recovery and ownership | Implementation 1 | Accepted; explicit load/error state |
+| UX1-01 | Session load failure lacks recovery and ownership | Implementation 1 | Implemented; focused checks pass; final combined/performance gates pending |
 | UX1-02 | Composer sends during pending upload | Claude design iteration 2 | Accepted externally; verify merged fix |
-| UX1-03 | Palette search failure appears as no results | Implementation 1 | Accepted; explicit search error |
-| UX2-01 | API scratch close discards unsent work | Implementation 2 | Accepted; nonempty dirty draft guard |
-| UX2-02 | Automation navigation discards unsaved steps | Implementation 2 | Accepted; guarded transitions |
-| UX2-03 | Kafka tail failure retains active claim | Implementation 2 | Accepted; recoverable stale state |
-| P-live-k8s | Rollup backfill hits memory limit and restarts indefinitely | Root integration | Confirmed in live logs; bounded migration repair pending |
+| UX1-03 | Palette search failure appears as no results | Implementation 1 | Implemented; focused checks pass; final combined/performance gates pending |
+| UX2-01 | API scratch close discards unsent work | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
+| UX2-02 | Automation navigation discards unsaved steps | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
+| UX2-03 | Kafka tail failure retains active claim | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
+| P-live-k8s | Rollup backfill hits memory limit and restarts indefinitely | Root integration | Fixed; 3M-series interrupted/retried migration passes under 1 GiB server limit |
 
 | UX3-01 | Publish allowed before successful content preview | Implementation 3 | Accepted; preview state + submit gate |
 | UX3-02 | Brand keep-mine nested save exits while busy | Implementation 3 | Accepted; single save/retry state machine |
@@ -77,10 +77,10 @@ Reports contain source traces, severity and proposed reproductions. A report is 
 | D5-02 | Kubeconfig checkbox group uses listbox semantics | Claude design iteration 2 | Accepted externally; verify merged fixes |
 | D5-03 | Phone token rows conceal textual expiry | Claude design iteration 2 | Accepted externally; verify merged fixes |
 
-| C2-R2-01 | PostgreSQL identifier folding retargets mixed-case table edits | Implementation 2 | Confirmed regression; repair underway |
-| C2-R2-02 | LIMIT ALL/expression/newline rewritten with duplicate LIMIT | Implementation 2 | Confirmed regression; tokenizer repair underway |
-| C2-R2-03 | Workspace change bypasses unsaved editor leave guards | Implementation 2 | Confirmed regression; guarded identity change and dependent actions |
-| History focus | Keyboard test expects focus to activate Load earlier | Claude test / Implementation 1 scroll test | Focus+Enter correction passes on Claude branch; actual scroll regression pending |
+| C2-R2-01 | PostgreSQL identifier folding retargets mixed-case table edits | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
+| C2-R2-02 | LIMIT ALL/expression/newline rewritten with duplicate LIMIT | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
+| C2-R2-03 | Workspace change bypasses unsaved editor leave guards | Implementation 2 | Implemented; focused checks pass; final combined/performance gates pending |
+| History focus | Keyboard test expects focus to activate Load earlier | Claude test / Implementation 1 scroll test | Focus+Enter fixed externally; separate real-scroll pagination passes with HMR disabled |
 
 ## Baseline verification
 

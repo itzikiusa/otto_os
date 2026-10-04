@@ -36,3 +36,15 @@ Passing a focused group does not yet establish full UI/Rust integration. Full ch
 - Updated full UI gate: 0 errors/warnings, 1,027 unit tests passed (`/tmp/otto-review-wave1-final-{check,unit}.log`). This includes corrected notification fixture; its earlier failure did not exercise production behavior and is not valid behavioral-red evidence.
 - Full `otto-pty` and `otto-transcript` tests including integration/doc targets passed (`/tmp/otto-review-transcript-pty-green.log`).
 - Expanded isolated K8s interrupted-backfill/retry scale test is running; final Rust consumer/clippy gates, rendered flows and final performance runs remain pending.
+
+- K8s expanded isolated regression passed (51.59s test runtime): 3 million distinct raw series, injected interruption after first rollup tier, successful retry, exact aggregate counts across all tiers, completed no-op. `/tmp/otto-review-backfill-retry-green.log`. Server retained its 1 GiB hard limit; no installed server data/config changed.
+- Main design iteration one integrated at `04917dd7`, including PR75 nightly test headroom. Auto-merges inspected; no conflict markers.
+- Role3 real-store red tests: 5/5 expected stale-state failures, `/tmp/otto-review-role3-ui-red.log` (Product selection/collections/workspace and Browser annotations).
+
+- Database type/parser suite passed: 56 tests including explicit LIMIT/FETCH/locking and trailing-comment cases (`/tmp/otto-review-r2-sql-green.log`).
+- API persistence browser suite passed 4 tests. Initial History run was invalidated by Vite HMR (trace proves component remount); rerun with HMR disabled passed actual wheel paging with cursors 120 then 60. `/tmp/otto-review-wave1-e2e-stable.log`.
+- Added rendered automation leave regression passed: Cancel preserves draft, failed Save stays in editor, successful Save persists before leaving, Discard leaves without overwriting saved steps (`/tmp/otto-review-automation-leave.log`, 1 test, 2.1s). Initial selector assumed expanded Navigator; corrected for collapsed Modules navigation.
+- Design stale snapshot CAS regression passed after concurrent implementer fix (`/tmp/otto-review-design-cas-red.log`, despite filename this was a GREEN run).
+
+- Disposable SQL integration: MySQL 8 passed 3 batch tests, PostgreSQL 17 passed 2. Actual server-side counters reached 3 for a max_rows=2 preview, and following statements retained the same backend connection. Explicit limit forms preserved. Created dedicated loopback-only containers (768 MiB/one CPU each, sequential), then removed both; `docker ps` empty. `/tmp/otto-review-sql-fixtures.log`.
+- Knowledge recovery unit tests now 5/5 pass: explicit recopy, failed-save leave, pending save drain, publish preview retry, artifact keep-mine failure. `/tmp/otto-review-knowledge-green.log`.
