@@ -52,6 +52,32 @@
     const timer = setInterval(() => void auth.boot(true), 2000);
     return () => clearInterval(timer);
   });
+
+  // The first ~15 s offline is a normal first launch ("starting…"); past that
+  // the daemon is probably not coming up on its own, so say so and point at
+  // the log instead of promising a start forever.
+  const OFFLINE_GIVE_UP_MS = 15_000;
+  let offlineLong = $state(false);
+  $effect(() => {
+    if (auth.phase !== 'offline') {
+      offlineLong = false;
+      return;
+    }
+    const t = setTimeout(() => (offlineLong = true), OFFLINE_GIVE_UP_MS);
+    return () => clearTimeout(t);
+  });
+  // "Retry now" is inert while its own attempt is in flight (the 2 s poll
+  // already dedupes inside auth.boot, but the button gave no feedback).
+  let retrying = $state(false);
+  async function retryNow(): Promise<void> {
+    if (retrying) return;
+    retrying = true;
+    try {
+      await auth.boot(true);
+    } finally {
+      retrying = false;
+    }
+  }
 </script>
 
 {#if router.module === 'room'}
@@ -81,10 +107,17 @@
 {:else if auth.phase === 'offline'}
   <div class="boot">
     <div class="boot-mark">Otto</div>
-    <div class="boot-sub" role="status">
-      Starting the Otto daemon — first launch can take a few seconds…
-    </div>
-    <button class="btn primary" onclick={() => auth.boot(true)}>Retry now</button>
+    {#if offlineLong}
+      <div class="boot-sub" role="status">Otto can’t reach the daemon on 127.0.0.1:7700.</div>
+      <div class="boot-hint">
+        Check the daemon log at <span class="mono">~/Library/Logs/Otto/ottod.log</span>, then retry. Otto keeps trying in the background.
+      </div>
+    {:else}
+      <div class="boot-sub" role="status">
+        Starting the Otto daemon — first launch can take a few seconds…
+      </div>
+    {/if}
+    <button class="btn primary" onclick={retryNow} disabled={retrying}>{retrying ? 'Retrying…' : 'Retry now'}</button>
   </div>
 {:else if auth.phase === 'onboarding'}
   {#await onboarding()}{@render chunkWait()}{:then m}<m.default />{:catch}{@render chunkError()}{/await}
@@ -123,8 +156,8 @@
     background: var(--bg);
   }
   .boot-mark {
-    font-size: 28px;
-    font-weight: 700;
+    font-size: var(--fs-hero);
+    font-weight: 600;
     letter-spacing: -0.02em;
     background: linear-gradient(120deg, var(--accent), color-mix(in srgb, var(--accent) 50%, var(--text)));
     -webkit-background-clip: text;
@@ -132,7 +165,15 @@
     color: transparent;
   }
   .boot-sub {
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
+  }
+  .boot-hint {
+    max-width: 420px;
+    padding-inline: 24px;
+    text-align: center;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+    overflow-wrap: anywhere;
   }
 </style>

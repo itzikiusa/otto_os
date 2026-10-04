@@ -154,7 +154,7 @@
 <div class="discovery-tab">
   <!-- ── Toolbar ─────────────────────────────────────────────────────── -->
   <div class="toolbar">
-    <span class="toolbar-title">Discovery Runs</span>
+    <span class="toolbar-title">Discovery runs</span>
     <span class="grow"></span>
 
     <!-- Team picker — mirrors PlanTab pattern -->
@@ -422,7 +422,7 @@
   .run-progress {
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    margin-left: auto;
+    margin-inline-start: auto;
   }
 
   .view-swarm-btn {

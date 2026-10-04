@@ -47,16 +47,13 @@
     <button class="btn small" onclick={() => void load()} title="Refresh" aria-label="Refresh"><Icon name="refresh" size={13} /></button>
   </div>
 
-  {#if loadError && stats.length === 0}
-    <LoadState what="tool stats" {loading} error={loadError} empty onretry={() => void load()} />
-  {:else if loading && stats.length === 0}
-    <p class="muted pad">Loading…</p>
-  {:else if stats.length === 0}
+  <LoadState what="tool stats" {loading} error={loadError} empty={stats.length === 0} onretry={() => void load()}>
+    {#snippet emptyView()}
     <div class="empty">
       <Icon name="chart" size={22} />
       <p>No tool calls recorded yet. Stats build up from the audit ledger.</p>
     </div>
-  {:else}
+    {/snippet}
     <div class="grid">
       <div class="thead">
         <span>Tool</span>
@@ -85,7 +82,7 @@
         </div>
       {/each}
     </div>
-  {/if}
+  </LoadState>
 </div>
 
 <style>
@@ -143,7 +140,7 @@
     white-space: nowrap;
   }
   .num {
-    text-align: right;
+    text-align: end;
   }
   .num.ok {
     color: var(--success);
@@ -167,9 +164,6 @@
   .small {
     font-size: var(--fs-xs);
   }
-  .pad {
-    padding: 16px;
-  }
   .empty {
     display: flex;
     flex-direction: column;
@@ -180,7 +174,7 @@
     padding: 36px 24px;
   }
 
-  @media (max-width: 900px) {
+  @media (max-width: 1024px) {
     .thead {
       display: none;
     }

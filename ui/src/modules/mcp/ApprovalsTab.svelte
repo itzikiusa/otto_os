@@ -122,6 +122,12 @@
     }
   }
 
+  /** `approved` → “Approved” — the raw enum never reaches the screen. */
+  const statusLabel = (status: string): string => {
+    const t = status.replace(/_/g, ' ');
+    return t.charAt(0).toUpperCase() + t.slice(1);
+  };
+
   function prettyArgs(json: string): string {
     try {
       return JSON.stringify(JSON.parse(json), null, 2);
@@ -143,16 +149,16 @@
     <button class="btn small" onclick={() => void load()} title="Refresh" aria-label="Refresh approvals"><Icon name="refresh" size={13} /></button>
   </div>
 
-  {#if loadError && approvals.length === 0}
-    <LoadState what="approvals" {loading} error={loadError} empty onretry={() => void load()} />
-  {:else if loading && approvals.length === 0}
-    <p class="muted pad">Loading…</p>
-  {:else if approvals.length === 0}
-    <div class="empty">
-      <Icon name="check" size={24} />
-      <p>{showAll ? 'No approvals yet.' : 'Nothing waiting on you — the queue is clear.'}</p>
-    </div>
-  {:else}
+  <!-- One wrapper owns every state: skeleton on first load, inline error + Retry,
+       and — when a REFRESH fails with approvals on screen — the stale bar, so a
+       security queue never silently shows old data as current. -->
+  <LoadState what="approvals" {loading} error={loadError} empty={approvals.length === 0} onretry={() => void load()}>
+    {#snippet emptyView()}
+      <div class="empty">
+        <Icon name="check" size={24} />
+        <p>{showAll ? 'No approvals yet.' : 'Nothing waiting on you — the queue is clear.'}</p>
+      </div>
+    {/snippet}
     <div class="list">
       {#each approvals as a (a.id)}
         <div class="card">
@@ -195,7 +201,7 @@
                 value={notes[a.id] ?? ''}
                 oninput={(e) => (notes = { ...notes, [a.id]: (e.currentTarget as HTMLInputElement).value })}
               />
-              <button class="btn small ok" disabled={busy[a.id] || !canDecide(a)} title={canDecide(a) ? undefined : decideBlockedReason(a)} onclick={() => void decide(a, true)}>
+              <button class="btn small primary" disabled={busy[a.id] || !canDecide(a)} title={canDecide(a) ? undefined : decideBlockedReason(a)} onclick={() => void decide(a, true)}>
                 {busy[a.id] ? '…' : 'Approve'}
               </button>
               {#if canAlwaysAllow(a)}
@@ -215,14 +221,14 @@
             </div>
           {:else}
             <div class="decided">
-              {a.status}{a.decided_by ? ` by ${a.decided_by}` : ''}
+              {statusLabel(a.status)}{a.decided_by ? ` by ${a.decided_by}` : ''}
               {#if a.decision_note}· “{a.decision_note}”{/if}
             </div>
           {/if}
         </div>
       {/each}
     </div>
-  {/if}
+  </LoadState>
 </div>
 
 {#if allowFor}
@@ -283,7 +289,7 @@
   }
   .card {
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     background: var(--surface);
     padding: 10px 12px;
   }
@@ -335,7 +341,7 @@
     font-size: var(--fs-s);
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     padding: 8px;
     max-height: 220px;
     overflow: auto;
@@ -352,7 +358,7 @@
     flex: 1;
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     color: var(--text);
     padding: 6px 9px;
     font-size: var(--fs-m);
@@ -370,9 +376,6 @@
     outline: 2px solid var(--accent-solid);
     outline-offset: 2px;
   }
-  .btn.ok {
-    color: var(--success);
-  }
   .btn.danger {
     color: var(--danger);
   }
@@ -380,12 +383,6 @@
     margin-top: 8px;
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .muted {
-    color: var(--text-dim);
-  }
-  .pad {
-    padding: 16px;
   }
   .empty {
     display: flex;

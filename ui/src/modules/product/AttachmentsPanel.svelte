@@ -346,7 +346,7 @@
                   onclick={() => loadAttUrl(att.id)}
                   disabled={localAttUrlLoading[att.id]}
                 >
-                  {localAttUrlLoading[att.id] ? 'Loading…' : 'Preview PDF'}
+                  {localAttUrlLoading[att.id] ? 'Loading preview…' : 'Preview PDF'}
                 </button>
               {/if}
             </div>

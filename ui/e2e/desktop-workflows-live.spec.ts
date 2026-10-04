@@ -192,7 +192,8 @@ test('viewing another run is not stomped by an in-flight run started from the pa
 
   // Now open the OLD, completed run from the Runs dropdown — the user wants to
   // inspect it while the new one keeps running in the background.
-  await page.getByRole('button', { name: 'Runs' }).click();
+  await page.getByRole('button', { name: 'More actions', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Runs', exact: true }).click();
   await page.locator('.runs-pop .run-item', { hasText: 'Succeeded' }).first().click();
   await expect(label).toContainText('Succeeded');
 

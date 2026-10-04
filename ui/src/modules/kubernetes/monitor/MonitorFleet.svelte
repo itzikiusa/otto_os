@@ -6,6 +6,7 @@
   // workload, pod), the table grouping / sort and the events sort are all
   // persisted per device, and every row is a drill-down (cluster → namespace
   // → workload → pod → events).
+  import { loadErrorText } from '../../../lib/loadError';
   import { tick, untrack } from 'svelte';
   import { radioKey } from '../../../lib/radioKey';
   import { router } from '../../../lib/router.svelte';
@@ -147,7 +148,7 @@
       filtersError = '';
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
-      filtersError = e instanceof Error ? e.message : String(e);
+      filtersError = loadErrorText(e);
     }
   }
   $effect(() => {
@@ -214,7 +215,7 @@
       if (append && rows.length > before) void scrollTableTo(before);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
-      tableError = e instanceof Error ? e.message : String(e);
+      tableError = loadErrorText(e);
     } finally {
       tableLoading = false;
       if (tAppendCtrl === ctrl) tAppendCtrl = null;
@@ -284,7 +285,7 @@
       chartsError = '';
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
-      chartsError = e instanceof Error ? e.message : String(e);
+      chartsError = loadErrorText(e);
     } finally {
       chartsLoading = false;
     }
@@ -359,7 +360,7 @@
       evError = '';
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
-      evError = e instanceof Error ? e.message : String(e);
+      evError = loadErrorText(e);
     } finally {
       evLoading = false;
       if (eAppendCtrl === ctrl) eAppendCtrl = null;
@@ -404,7 +405,7 @@
       reqError = '';
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
-      reqError = e instanceof Error ? e.message : String(e);
+      reqError = loadErrorText(e);
     } finally {
       reqLoading = false;
     }
@@ -1145,7 +1146,7 @@
     flex-wrap: wrap;
     gap: 6px;
   }
-  @media (max-width: 720px) {
+  @media (max-width: 640px) {
     .charts {
       grid-template-columns: 1fr;
     }

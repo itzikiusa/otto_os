@@ -74,7 +74,7 @@
       <button class="btn primary" onclick={() => onanswer(true, text)}>Send answer</button>
     {:else}
       <button class="btn" onclick={() => onanswer(false)}>Cancel</button>
-      <button class="btn primary" onclick={() => onanswer(true)}>Confirm</button>
+      <button class="btn primary" onclick={() => onanswer(true)}>Continue</button>
     {/if}
   </div>
 </div>

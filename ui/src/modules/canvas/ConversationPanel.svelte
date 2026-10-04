@@ -65,10 +65,10 @@
 
   const working = $derived(busy || editor?.isGenerating());
 
-  // Version history (C5): snapshots taken before each Ask AI commit, before a
+  // Version history (C5): snapshots taken before each Ask Otto commit, before a
   // restore, and at most every 10 min across manual saves. Offer the newest few.
   const ORIGIN_LABEL: Record<string, string> = {
-    agent: 'Before Ask AI',
+    agent: 'Before Ask Otto',
     user: 'Manual edit',
     restore: 'Before restore',
   };
@@ -87,7 +87,7 @@
     try {
       const versions = await canvas.listVersions(id);
       if (!versions.length) {
-        toasts.info('No previous versions yet', 'A version is kept before each Ask AI turn and every 10 minutes of editing.');
+        toasts.info('No previous versions yet', 'A version is kept before each Ask Otto turn and every 10 minutes of editing.');
         return;
       }
       const picked = await confirmer.choose(

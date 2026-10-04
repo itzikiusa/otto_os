@@ -84,7 +84,7 @@
     font-weight: 600;
   }
   .ab-model {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .ab-sep {
     opacity: 0.7;

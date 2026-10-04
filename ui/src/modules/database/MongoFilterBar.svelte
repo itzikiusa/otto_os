@@ -157,7 +157,7 @@
     cursor: pointer;
   }
   .mfb-seg + .mfb-seg {
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
   }
   .mfb-seg.on {
     background: var(--surface);

@@ -154,7 +154,7 @@
         ? raw.elements
         : [];
     if (!els.length) return [];
-    // Mixed: an Ask AI turn rewrites the shapes in the simplified form while the
+    // Mixed: an Ask Otto turn rewrites the shapes in the simplified form while the
     // daemon merges the elements it set aside (images, freehand, lines, frames)
     // back in their FULL form — build the former, restore the latter.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -193,7 +193,7 @@
     const elements = normalizeScene(raw);
     suppressSave = true;
     try {
-      // Re-register the scene's image files (kept across an Ask AI turn) so
+      // Re-register the scene's image files (kept across an Ask Otto turn) so
       // image elements never render as broken placeholders. Refs resolve via
       // the immutable file route; files the editor already holds aren't
       // fetched again.
@@ -231,14 +231,14 @@
       // Bound to THIS editor's scene: a switch during the (long) agent turn
       // must not pour the result into the newly-open scene.
       if (canvas.currentId !== sceneId) {
-        toasts.success('Ask AI finished', 'The drawing was saved to the scene you asked from.');
+        toasts.success('Ask Otto finished', 'The drawing was saved to the scene you asked from.');
         return;
       }
       canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'excalidraw', source: src }, sceneId);
       toasts.success('Drawn on canvas', res.note || 'Diagram updated.');
       void canvas.refreshSession();
     } catch (e) {
-      toasts.error('Ask AI failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Ask Otto failed', e instanceof Error ? e.message : String(e));
     } finally {
       generating = false;
     }

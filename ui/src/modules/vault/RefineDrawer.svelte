@@ -1,5 +1,5 @@
 <script lang="ts">
-  // "Refine with AI" — a bottom drawer under the note editor/reading view.
+  // "Refine with Otto" — a bottom drawer under the note editor/reading view.
   // One refine session per note (server-side): the first Send spawns it (the
   // POST is LONG — it resolves when the agent's turn completes), and ~800ms
   // after POSTing we poll GET refine-session until the session id lands so the
@@ -12,7 +12,9 @@
   import { liveQuery } from '../../lib/live';
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
-  import { refineNote, refineSession, resetRefineSession } from '../../lib/api/vault';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { refineNote, refineSession, resetRefineSession, vaultNote, writeVaultNote } from '../../lib/api/vault';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { toasts } from '../../lib/toast.svelte';
   import { vault } from './vault.svelte';
@@ -28,6 +30,38 @@
   let epoch = 0;
 
   const providers = $derived(agentProviders());
+
+  /** What the last refine turn did to the note — the agent's edit lands on disk
+   *  directly, so we keep the pre-turn text to show a summary and offer Undo
+   *  (patterns §1: agent output is attributed and reversible). */
+  interface RefineResult {
+    before: string;
+    hash: string;
+    added: number;
+    removed: number;
+    summary: string;
+    provider: string;
+    at: number;
+  }
+  let result = $state<RefineResult | null>(null);
+  let undoing = $state(false);
+  /** A queued "Review + fix" prompt waits for an explicit Send. */
+  let queued = $state(false);
+
+  /** Rough line delta (multiset diff) — enough for a "+N / −M lines" summary. */
+  function lineDelta(before: string, after: string): { added: number; removed: number } {
+    const count = new Map<string, number>();
+    for (const l of before.split('\n')) count.set(l, (count.get(l) ?? 0) + 1);
+    let added = 0;
+    for (const l of after.split('\n')) {
+      const n = count.get(l) ?? 0;
+      if (n > 0) count.set(l, n - 1);
+      else added += 1;
+    }
+    let removed = 0;
+    for (const n of count.values()) removed += n;
+    return { added, removed };
+  }
 
   // -- session polling (starts ~800ms after the POST goes out) -----------------
   // Event-fed: the refine agent's session announces itself (`session_created`);
@@ -69,15 +103,43 @@
     const p = prompt.trim();
     if (!p || sending || !vault.current) return;
     sending = true;
+    queued = false;
+    result = null;
     const myEpoch = epoch;
+    const wsId = vault.wsId;
+    const vaultId = vault.current.id;
+    // Snapshot the note as it is on disk BEFORE the agent touches it (Undo).
+    let before: string | null = null;
+    try {
+      before = (await vaultNote(wsId, vaultId, path)).raw;
+    } catch {
+      /* no snapshot → the turn still runs, just without Undo */
+    }
     startSessionPoll();
     try {
-      const r = await refineNote(vault.wsId, vault.current.id, { path, prompt: p, provider });
+      const r = await refineNote(wsId, vaultId, { path, prompt: p, provider });
       if (myEpoch !== epoch) return; // reset happened mid-turn — stale result
       sessionId = r.session_id;
       stopPolling();
       prompt = '';
       toasts.success('Refined', (r.reply.split('\n')[0] || 'done').slice(0, 200));
+      if (before !== null) {
+        try {
+          const after = await vaultNote(wsId, vaultId, path);
+          if (after.raw !== before) {
+            result = {
+              before,
+              hash: after.meta.hash,
+              ...lineDelta(before, after.raw),
+              summary: (r.reply.split('\n')[0] || '').slice(0, 200),
+              provider,
+              at: Date.now(),
+            };
+          }
+        } catch {
+          /* summary is best-effort */
+        }
+      }
       // Reload the agent's changes — but never clobber in-flight local edits.
       if (!vault.dirty && !vault.editing && vault.notePath === path) {
         void vault.open(path);
@@ -88,6 +150,27 @@
       toasts.error('Refine failed', e instanceof Error ? e.message : String(e));
     } finally {
       if (myEpoch === epoch) sending = false;
+    }
+  }
+
+  /** Put the pre-turn text back (the agent's edit is the thing being undone). */
+  async function undoRefine(): Promise<void> {
+    const r = result;
+    if (!r || undoing || !vault.current) return;
+    if (vault.dirty) {
+      toasts.error('Couldn’t undo the refine', 'Save or discard your own edits to this note first.');
+      return;
+    }
+    undoing = true;
+    try {
+      await writeVaultNote(vault.wsId, vault.current.id, { path, content: r.before, if_hash: r.hash });
+      result = null;
+      toasts.success('Refine undone', 'The note is back to what it was before the agent’s edit.');
+      if (!vault.editing && vault.notePath === path) void vault.open(path);
+    } catch (e) {
+      toasts.error('Couldn’t undo the refine', e instanceof Error ? e.message : String(e));
+    } finally {
+      undoing = false;
     }
   }
 
@@ -105,17 +188,19 @@
     }
     sessionId = null;
     sending = false;
+    result = null;
   }
 
   onMount(() => {
     // Reattach an existing refine session for this note (survives drawer close).
     void checkSession();
-    // "Review + fix" from the tree: consume the queued prompt and fire it.
+    // "Review + fix" from the tree: consume the queued prompt but wait for an
+    // explicit Send — the agent edits the note on disk, so it never starts on mount.
     const pending = vault.pendingRefine;
     if (pending && pending.path === path) {
       vault.pendingRefine = null;
       prompt = pending.prompt;
-      void send();
+      queued = true;
     }
     return () => stopPolling();
   });
@@ -152,10 +237,23 @@
         title="Detach this note’s agent session — unblocks a stuck or exited agent; the next Send starts a fresh one"
         onclick={() => void reset()}
       >
-        <Icon name="refresh" size={12} /> New agent
+        <Icon name="refresh" size={12} /> Stop and start over
       </button>
     {/if}
   </div>
+
+  {#if queued && !sending}
+    <div class="notice" role="status">Review + fix is ready — press Send to start. The agent edits this note in place; you can undo it afterwards.</div>
+  {/if}
+  {#if result}
+    <div class="notice result" role="status" data-testid="refine-result">
+      <AgentByline provider={result.provider} at={result.at} label="Refined this note" />
+      <span class="delta">+{result.added} / −{result.removed} lines{result.summary ? ` · ${result.summary}` : ''}</span>
+      <button class="reset" disabled={undoing} onclick={() => void undoRefine()}>
+        {#if undoing}<span class="spinner-xs"></span> Undoing…{:else}Undo refine{/if}
+      </button>
+    </div>
+  {/if}
 
   {#if sessionId}
     <div class="term">
@@ -251,6 +349,24 @@
   .reset:hover {
     color: var(--text);
     border-color: var(--text-dim);
+  }
+  .notice {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+  }
+  .notice .delta {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .term {
     flex: 1;

@@ -330,7 +330,7 @@
     flex-direction: column;
     gap: 10px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     background: var(--surface);
     padding: 12px;
   }
@@ -353,7 +353,7 @@
     font-size: var(--fs-s);
     padding: 5px 9px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
   }
@@ -371,7 +371,7 @@
     max-height: 220px;
     overflow-y: auto;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     padding: 10px;
   }
   .pick-grp {
@@ -407,7 +407,7 @@
   .token-once {
     border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
     background: color-mix(in srgb, var(--warning) 10%, transparent);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     padding: 10px 12px;
     display: flex;
     flex-direction: column;
@@ -429,7 +429,7 @@
     font-size: var(--fs-s);
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     padding: 8px 10px;
     word-break: break-all;
     color: var(--text);
@@ -441,7 +441,7 @@
     display: flex;
     flex-direction: column;
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     overflow: hidden;
   }
   .tok-row {

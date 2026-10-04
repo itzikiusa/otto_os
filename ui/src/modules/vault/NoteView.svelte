@@ -54,7 +54,7 @@
   import { structuredModel } from './structuredNote';
   import { vault, vaultConflictKind } from './vault.svelte';
 
-  // -- "Refine with AI" drawer — open state lives here keyed BY PATH (outside
+  // -- "Refine with Otto" drawer — open state lives here keyed BY PATH (outside
   // the note data), so reloading the note after the agent edits it does not
   // close the drawer or drop its terminal.
   let refineOpen = $state<Record<string, boolean>>({});
@@ -67,7 +67,7 @@
   }
 
   // "Review + fix" (tree context menu) queues a pending refine — force the
-  // drawer open for that note; the drawer itself consumes + auto-sends it.
+  // drawer open for that note; the drawer itself consumes it (the user presses Send).
   $effect(() => {
     const pending = vault.pendingRefine;
     if (pending && vault.notePath === pending.path && !refineOpen[pending.path]) {
@@ -183,7 +183,7 @@
     if (raw && t.getAttribute('data-unresolved')) {
       e.preventDefault();
       const p = raw.endsWith('.md') ? raw : `${raw}.md`;
-      void confirmer.ask(`Create "${p}"?`, { title: 'Create note', confirmLabel: 'Create', danger: false }).then((ok) => {
+      void confirmer.ask(`Create “${p}”?`, { title: 'Create note', confirmLabel: 'Create', danger: false }).then((ok) => {
         if (ok) void vault.createNote(p, `# ${raw}\n\n`);
       });
     }
@@ -403,8 +403,8 @@
         <button
           class="mode-btn"
           class:refine-on={refineShown}
-          title="Refine with AI"
-          aria-label="Refine with AI"
+          title="Refine with Otto"
+          aria-label="Refine with Otto"
           aria-pressed={refineShown}
           onclick={toggleRefine}
         >

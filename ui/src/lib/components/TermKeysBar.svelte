@@ -137,7 +137,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text);

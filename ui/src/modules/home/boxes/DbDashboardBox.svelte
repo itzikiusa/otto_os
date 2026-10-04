@@ -5,7 +5,8 @@
   // the box config); an unset box shows an inline picker.
   import { untrack } from 'svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
-  import Skeleton from '../../../lib/components/Skeleton.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
   import WidgetCard from '../../database/WidgetCard.svelte';
   import { database } from '../../../lib/stores/database.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
@@ -22,7 +23,9 @@
   }
   let { box, viewId, zoomed, tick, active = true }: Props = $props();
 
-  let loading = $state(false);
+  // Starts true: a cold box shows the skeleton, never a flash of "No DB dashboards yet".
+  let loading = $state(true);
+  let loadError = $state('');
   let loadedFor = '';
 
   // Dashboards + widgets are workspace-scoped; load them once per workspace
@@ -30,12 +33,22 @@
   // per-widget connection chip.
   async function ensureLoaded(force = false): Promise<void> {
     const id = ws.currentId;
-    if (!id || (loadedFor === id && !force)) return;
+    if (!id) {
+      loading = false;
+      return;
+    }
+    if (loadedFor === id && !force) return;
     loadedFor = id;
     loading = true;
+    loadError = '';
     try {
       if (database.connections.length === 0) await database.loadConnections();
       await database.loadDashboards();
+      // The store reports its own failures as toasts and keeps the old list —
+      // surface a failed connection load here so it can't read as "none yet".
+      if (database.connectionsError) loadError = loadErrorText(database.connectionsError);
+    } catch (e) {
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -66,8 +79,8 @@
 </script>
 
 <div class="dbd" class:zoomed>
-  {#if loading && database.dashboards.length === 0}
-    <Skeleton rows={3} />
+  {#if (loading || loadError) && database.dashboards.length === 0}
+    <LoadState what="DB dashboards" variant="compact" {loading} error={loadError} empty={true} onretry={() => void ensureLoaded(true)} />
   {:else if database.dashboards.length === 0}
     <!-- Secondary CTAs inside widgets: the page's one primary is "Add widget". -->
     <EmptyState icon="db" title="No DB dashboards yet" body="Create one in Connections → a database → Dashboards, then pick it here.">

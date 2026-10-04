@@ -40,5 +40,5 @@
   {@const C = lazy.component}
   <C {...props} />
 {:else if !quiet}
-  <LoadState {what} {variant} loading={!lazy.error} error={lazy.error} onretry={() => lazy.retry()} />
+  <LoadState {what} {variant} empty loading={!lazy.error} error={lazy.error} onretry={() => lazy.retry()} />
 {/if}

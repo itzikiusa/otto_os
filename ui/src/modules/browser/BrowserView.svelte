@@ -690,7 +690,7 @@
     <input
       type="text"
       dir="ltr"
-      placeholder="Enter URL"
+      placeholder="e.g. https://example.com"
       aria-label="Address"
       enterkeyhint="go"
       inputmode="url"

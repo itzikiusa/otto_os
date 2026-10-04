@@ -8,7 +8,9 @@
   //
   // Rendered only on phone (App.svelte gates it behind viewport.isPhone), so it
   // adds nothing to the desktop layout.
+  import { untrack } from 'svelte';
   import Icon from '../lib/components/Icon.svelte';
+  import { dialogFocus } from '../lib/dialogFocus';
   import { router } from '../lib/router.svelte';
   import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
@@ -54,6 +56,20 @@
 
   let moreOpen = $state(false);
 
+  // The sheet is a modal dialog: register it as an open overlay (native webview
+  // hides, global shortcuts stand down) exactly like Modal/Drawer do. untrack:
+  // pushModal reads modalCount, so the effect may depend only on `moreOpen`.
+  $effect(() => {
+    if (!moreOpen) return;
+    untrack(() => ui.pushModal());
+    return () => untrack(() => ui.popModal());
+  });
+
+  /** Focus, Esc and Tab-trapping for the sheet (lib/dialogFocus). */
+  function sheetFocus(node: HTMLElement) {
+    return dialogFocus(node, () => (moreOpen = false));
+  }
+
   function go(id: string): void {
     router.openModule(id);
     moreOpen = false;
@@ -84,7 +100,7 @@
 
   <!-- Always present: besides the spilled modules it holds Commands (the
        phone's only palette entry off the Agents page) and Settings. -->
-  <button class="bn-btn" class:active={moreActive} onclick={() => (moreOpen = true)}>
+  <button class="bn-btn" class:active={moreActive} aria-haspopup="dialog" aria-expanded={moreOpen} onclick={() => (moreOpen = true)}>
     <span class="bn-icon"><Icon name="command" size={20} /></span>
     <span class="bn-label">More</span>
   </button>
@@ -92,11 +108,14 @@
 
 {#if moreOpen}
   <!-- Overflow sheet: the remaining modules + Settings as a bottom sheet. -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="sheet-backdrop" onclick={() => (moreOpen = false)}></div>
-  <div class="more-sheet" role="dialog" aria-modal="true" aria-label="More modules">
-    <div class="sheet-grip"></div>
+  <div class="sheet-backdrop" role="presentation" onclick={() => (moreOpen = false)}></div>
+  <div class="more-sheet" role="dialog" aria-modal="true" aria-label="More modules" use:sheetFocus>
+    <div class="sheet-header">
+      <div class="sheet-grip"></div>
+      <button class="icon-btn sheet-close" onclick={() => (moreOpen = false)} aria-label="Close" title="Close (Esc)">
+        <Icon name="x" size={14} />
+      </button>
+    </div>
     <div class="sheet-grid">
       <button
         class="sheet-item"
@@ -105,7 +124,7 @@
           ui.openPalette('commands');
         }}
       >
-        <Icon name="search" size={22} />
+        <Icon name="command" size={22} />
         <span>Commands</span>
       </button>
       {#each overflow as m (m.id)}
@@ -187,7 +206,7 @@
     background: color-mix(in srgb, var(--success) 24%, var(--bg-sidebar));
     color: var(--success);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     display: grid;
     place-items: center;
   }
@@ -199,7 +218,7 @@
   .sheet-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.45);
+    background: var(--scrim);
     z-index: calc(var(--z-drawer) + 2);
   }
   .more-sheet {
@@ -219,6 +238,10 @@
     display: flex;
     flex-direction: column;
   }
+  .sheet-header {
+    position: relative;
+    flex-shrink: 0;
+  }
   .sheet-grip {
     width: 36px;
     height: 4px;
@@ -226,6 +249,11 @@
     background: var(--text-dim);
     opacity: 0.4;
     margin: 4px auto 12px;
+  }
+  .sheet-close {
+    position: absolute;
+    inset-block-start: -2px;
+    inset-inline-end: 0;
   }
   .sheet-grid {
     display: grid;

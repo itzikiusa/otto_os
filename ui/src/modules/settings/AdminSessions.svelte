@@ -244,7 +244,7 @@
             </span>
             <span class="col-title ellip" title={s.title}>{s.title || '—'}</span>
             <span class="col-status">
-              <StatusBadge variant="text" tone={info.tone} label={info.label} title={`Stored status: ${s.status}`} />
+              <StatusBadge variant="text" tone={info.tone} label={info.label} title={`Stored status: ${sentenceCase(s.status)}`} />
             </span>
             <span class="col-viewers dim">{s.viewers > 0 ? s.viewers : '—'}</span>
             <span class="col-action">

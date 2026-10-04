@@ -410,9 +410,10 @@ PageHeader: Home  [01 Overview][02][03] + ⋯           [30s]  [+ Add widget]
   - A multi-field form has an explicit **Save** as its primary action, which
     stays disabled until something changes.
   - A page doesn't mix both models.
-- Long settings navigation (Settings has 26 sections) is itself a list/detail
-  page. **TBD:** grouping Settings sections the same way as the sidebar
-  (Personal / Workspace / Integrations / Admin).
+- Long settings navigation (Settings has 33 sections) is itself a list/detail
+  page, already grouped General / Integrations / Agents / System / People
+  (`modules/settings/sections.ts`, the single source for the nav, page titles
+  and ⌘K). A new section is one entry there.
 
 ### 4.5 Canvas/studio
 

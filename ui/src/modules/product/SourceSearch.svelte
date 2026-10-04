@@ -301,7 +301,7 @@
         onclick={loadMoreJira}
         disabled={loadingMore}
       >
-        {loadingMore ? 'Loading…' : 'Load more'}
+        {loadingMore ? 'Loading more results…' : 'Load more'}
       </button>
     {/if}
   {:else}

@@ -205,7 +205,7 @@
 
   <div class="pick-tools">
     <!-- svelte-ignore a11y_autofocus -->
-    <input class="input filter-input" placeholder="Filter…" bind:this={filterElement} bind:value={filter} autofocus />
+    <input class="input filter-input" placeholder="Filter…" aria-label="Filter folders" bind:this={filterElement} bind:value={filter} autofocus />
     <label class="hidden-toggle" title="Show dotfiles (names starting with .)">
       <input type="checkbox" bind:checked={showHidden} />
       Show hidden

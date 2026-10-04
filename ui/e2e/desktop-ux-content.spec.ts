@@ -40,7 +40,7 @@ for (const scheme of ['light', 'dark'] as const) {
     await openPage(page, 'canvas');
     await page.locator('.scene-list .row', { hasText: sceneTitle }).getByRole('button').first().click();
     await expect(page.locator('.board svg').first()).toBeVisible();
-    await page.getByRole('button', { name: 'Ask AI', exact: true }).click();
+    await page.locator('.ai-fab').click();
     const panel = page.locator('.convo-panel');
     await expectFullyInViewport(page, panel, 'Canvas assistant');
     await expectFullyInViewport(page, panel.getByRole('button', { name: 'Close assistant' }));

@@ -501,7 +501,7 @@
           <thead><tr><th>State</th><th>Query</th><th class="hide-sm">Submitted</th><th class="num hide-sm">Scanned</th><th class="num hide-sm">Time</th></tr></thead>
           <tbody>
             {#each history as x (x.id)}
-              <tr class="trow" tabindex="0" onclick={() => openExecution(x)} onkeydown={(e) => { if (e.key === 'Enter') openExecution(x); }} oncontextmenu={(e) => ctxMenu.show(e, [
+              <tr class="trow" tabindex="0" onclick={() => openExecution(x)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openExecution(x); } }} oncontextmenu={(e) => ctxMenu.show(e, [
                 { label: 'Load into editor', icon: 'edit', action: () => { sql = x.query; } },
                 { label: 'Open result', icon: 'play', action: () => openExecution(x) },
                 { label: 'Copy SQL', icon: 'copy', action: () => void copy(x.query, 'SQL') },
@@ -544,7 +544,7 @@
     background: var(--surface);
   }
   .tree {
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -606,7 +606,7 @@
     border: 0;
     background: transparent;
     color: var(--text);
-    text-align: left;
+    text-align: start;
     cursor: pointer;
     font: inherit;
     font-size: var(--fs-m);
@@ -628,7 +628,7 @@
     font-size: var(--fs-xs);
   }
   .tables .node {
-    padding-left: 22px;
+    padding-inline-start: 22px;
   }
   .cols {
     padding: 0 0 2px 44px;
@@ -769,7 +769,7 @@
     top: 0;
     z-index: 1;
     background: var(--surface);
-    text-align: left;
+    text-align: start;
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
@@ -787,15 +787,18 @@
     max-width: 480px;
   }
   .hist .num {
-    text-align: right;
+    text-align: end;
   }
   .trow {
     cursor: pointer;
   }
-  .trow:hover,
+  .trow:hover {
+    background: var(--surface-2);
+  }
   .trow:focus-visible {
     background: var(--surface-2);
     outline: none;
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
   .q {
     font-size: var(--fs-s);

@@ -10,6 +10,7 @@
   import { aws } from '../../lib/stores/aws.svelte';
   import { awsApi, isLoginRequired } from '../../lib/api/aws';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -62,6 +63,15 @@
     return q ? list.filter((x) => x.name.toLowerCase().includes(q)) : list;
   });
 
+  // A list/detail page opens on an item, never on an empty "pick one" pane:
+  // the remembered queue, else the first. (On a phone the list IS the first screen.)
+  function autoSelect(list: readonly SqsQueue[]): void {
+    if (viewport.isMobile || selectedUrl) return;
+    const url = initialSelection('aws.sqs', list, (q) => q.url);
+    const q = list.find((x) => x.url === url);
+    if (q) select(q);
+  }
+
   async function load(): Promise<void> {
     loading = true;
     try {
@@ -72,6 +82,7 @@
       // each is an `aws` process, and 40 at once took every webview socket to
       // the daemon for seconds. The list is usable while they fill in.
       loading = false;
+      autoSelect(list);
       void mapLimit(list.slice(0, 40), 2, (q) =>
         aws.loadSqsAttrs(account.id, q.url, rq).catch(() => undefined),
       );
@@ -88,6 +99,7 @@
     untrack(() => {
       selectedUrl = null;
       if (!queues) void load();
+      else autoSelect(queues);
     });
   });
 
@@ -106,6 +118,7 @@
   function select(q: SqsQueue): void {
     keepDraft();
     selectedUrl = q.url;
+    rememberSelection('aws.sqs', q.url);
     const draft = drafts.get(q.url);
     sendBody = draft?.body ?? '';
     sendDelay = draft?.delay ?? 0;
@@ -311,7 +324,7 @@
                 class:sel={q.url === selectedUrl}
                 tabindex="0"
                 onclick={() => select(q)}
-                onkeydown={(e) => { if (e.key === 'Enter') select(q); }}
+                onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); select(q); } }}
                 oncontextmenu={(e) => queueMenu(e, q)}
               >
                 <td class="name" title={q.url}>
@@ -472,12 +485,12 @@
     grid-template-columns: minmax(0, 1fr);
   }
   .list {
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     overflow: auto;
     min-height: 0;
   }
   .split.mobile .list {
-    border-right: 0;
+    border-inline-end: 0;
   }
   .detail {
     min-width: 0;
@@ -499,7 +512,7 @@
     top: 0;
     z-index: 1;
     background: var(--surface);
-    text-align: left;
+    text-align: start;
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
@@ -517,7 +530,7 @@
     max-width: 320px;
   }
   .tbl .num {
-    text-align: right;
+    text-align: end;
     width: 64px;
   }
   .kvt th {
@@ -536,17 +549,20 @@
   .trow {
     cursor: pointer;
   }
-  .trow:hover,
+  .trow:hover {
+    background: var(--surface-2);
+  }
   .trow:focus-visible {
     background: var(--surface-2);
     outline: none;
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
   .trow.sel {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .name :global(svg) {
     vertical-align: -2px;
-    margin-right: 6px;
+    margin-inline-end: 6px;
   }
   .qn {
     overflow: hidden;
@@ -633,7 +649,7 @@
     font-size: var(--fs-m);
   }
   .bar select {
-    margin-left: 4px;
+    margin-inline-start: 4px;
   }
   .msgs {
     list-style: none;

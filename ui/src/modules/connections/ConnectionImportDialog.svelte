@@ -504,10 +504,10 @@
   }
   @keyframes imp-indet {
     0% {
-      margin-left: -40%;
+      margin-inline-start: -40%;
     }
     100% {
-      margin-left: 100%;
+      margin-inline-start: 100%;
     }
   }
 

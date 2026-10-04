@@ -180,16 +180,11 @@
   }
   .adb-dot.live {
     background: var(--info);
-    animation: adb-pulse 1.4s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   .adb-dot.warn {
     background: var(--status-warn);
-    animation: adb-pulse 1.4s ease-in-out infinite;
-  }
-  @keyframes adb-pulse {
-    50% {
-      opacity: 0.35;
-    }
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   @media (prefers-reduced-motion: reduce) {
     .adb-dot.live,

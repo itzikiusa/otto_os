@@ -314,7 +314,7 @@
       ...assigns,
       { separator: true },
       {
-        label: 'Delete',
+        label: 'Delete…',
         icon: 'trash',
         danger: true,
         action: async () => {

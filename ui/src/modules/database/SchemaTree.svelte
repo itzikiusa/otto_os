@@ -979,7 +979,7 @@
     border: none;
     color: var(--text);
     font-size: var(--fs-s);
-    text-align: left;
+    text-align: start;
     cursor: pointer;
   }
   .hit.selected {

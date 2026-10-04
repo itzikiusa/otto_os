@@ -20,8 +20,10 @@
   import RunAgents from './RunAgents.svelte';
   import FileTree from '../panels/FileTree.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
-  import { ui } from '../../lib/stores/ui.svelte';
+  import { ui, WF_CTX_MIN, WF_CTX_MAX } from '../../lib/stores/ui.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
+  import { paneResizer } from '../../lib/paneResizer';
+  import { onTabKey } from '../../lib/tabKeys';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -267,7 +269,7 @@
     a { color: var(--accent-text); } code { background: var(--surface-2); padding: .15em .35em; border-radius: 4px; font-family: var(--font-mono); }
     pre { background: var(--surface-2); padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
     table { border-collapse: collapse; } th,td { border: 1px solid var(--border); padding: 4px 8px; }
-    blockquote { border-left: 3px solid var(--border-strong); margin: 0; padding-left: 12px; color: var(--text-dim); }
+    blockquote { border-inline-start: 3px solid var(--border-strong); margin: 0; padding-inline-start: 12px; color: var(--text-dim); }
     img { max-width: 100%; }
   `;
   const FINAL_OUTPUT_TOKENS = ['--text', '--text-dim', '--border', '--border-strong', '--surface-2', '--accent-text', '--font-ui', '--font-mono'];
@@ -379,7 +381,42 @@
   // horizontally under their button (clamped into the pane).
   let mainEl = $state<HTMLElement | null>(null);
   let popRight = $state(8);
+  // The control that opened a popover — Esc / outside-click closes it and
+  // returns focus there (the Node button, or the ⋯ menu button for Runs).
+  let popOpener: HTMLElement | null = null;
+  function closePops(refocus: boolean): void {
+    const opener = popOpener;
+    paletteOpen = false;
+    runsOpen = false;
+    popOpener = null;
+    if (refocus && opener?.isConnected) opener.focus();
+  }
+  $effect(() => {
+    if (!paletteOpen && !runsOpen) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      e.preventDefault();
+      e.stopPropagation();
+      closePops(true);
+    };
+    const onDown = (e: PointerEvent): void => {
+      const t = e.target;
+      if (!(t instanceof Node)) return;
+      if ((t as Element).closest?.('.wf-pop, .ctx-menu, [role="menu"]')) return;
+      if (popOpener?.contains(t)) return;
+      closePops(false);
+    };
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('pointerdown', onDown, true);
+    // Keyboard users land on the first entry of what they just opened.
+    queueMicrotask(() => document.querySelector<HTMLElement>('.wf-pop .pal-item, .wf-pop .run-item')?.focus());
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('pointerdown', onDown, true);
+    };
+  });
   function anchorPop(e: MouseEvent, width: number): void {
+    popOpener = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
     const b = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect();
     const m = mainEl?.getBoundingClientRect();
     // A button collapsed into the header's "⋯" menu has no box — pin right.
@@ -402,16 +439,17 @@
 
   /** The header's ⋯ menu: panel toggles (checked rows) and one-off tools. */
   function wfMenu(e: MouseEvent): void {
+    const opener = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
     const items: MenuItem[] = [];
     if (viewport.isPhone) {
       items.push(
-        { label: 'Add node…', icon: 'plus', action: () => { popRight = 8; paletteOpen = true; } },
+        { label: 'Add node…', icon: 'plus', action: () => { popRight = 8; popOpener = opener; paletteOpen = true; } },
         { label: 'Save', icon: 'check', disabled: !dirty || savingGraph, title: dirty ? undefined : 'No unsaved changes', action: () => void save() },
-        { label: 'Runs', icon: 'clock', action: () => { popRight = 8; runsOpen = true; void loadRuns(); } },
-        { separator: true },
       );
     }
     items.push(
+      { label: 'Runs', icon: 'clock', title: 'Past and live runs of this workflow', action: () => { popRight = 8; popOpener = opener; runsOpen = true; void loadRuns(); } },
+      { separator: true },
       { label: 'Instructions', checked: instructionsOpen, title: 'Standing rules every step follows, by the letter', action: () => (instructionsOpen = !instructionsOpen) },
       { label: 'Triggers', checked: triggersOpen, title: 'Configure what starts this workflow', action: () => (triggersOpen = !triggersOpen) },
       { label: 'Versions', checked: versionsOpen, title: 'Version history', action: () => { versionsOpen = !versionsOpen; if (versionsOpen) void loadVersions(); } },
@@ -1028,6 +1066,11 @@
   // strip). Only meaningful when something is selected/running.
   const sideDock = $derived(ui.wfDockSide);
 
+  const pxText = (v: number): string => `${Math.round(v)} pixels wide`;
+  function resetInsp(): void {
+    if (sideDock) ui.setWfInspSideWidth(400);
+    else ui.setRunDetailHeight(300);
+  }
   function startInspResize(e: MouseEvent): void {
     e.preventDefault();
     runDetailMax = false;
@@ -1626,18 +1669,16 @@
   {/snippet}
   {#snippet actions()}
     {#if current}
-      <!-- Four everyday verbs stay in the bar (Node, Save, Runs, Run…); the
-           panel toggles and one-off tools live in the ⋯ menu (wfMenu) so the
-           row stays at ≤ 5 controls. On a phone Node/Save/Runs join the menu
-           too, so there is never a second, auto-generated ⋯ next to ours. -->
+      <!-- Anatomy: [secondary…][primary][⋯]. Node + Save stay in the bar with the
+           primary Run…; Runs, the panel toggles and the one-off tools live in
+           the ⋯ menu (wfMenu), so the row stays at ≤ 5 controls. On a phone
+           Node/Save join the menu too, so there is never a second,
+           auto-generated ⋯ next to ours. The ⋯ collapses first. -->
       {#if !viewport.isPhone}
-        <button class="btn small" data-overflow="1" data-icon="plus" aria-expanded={paletteOpen} onclick={(e) => { anchorPop(e, 230); paletteOpen = !paletteOpen; }}>
+        <button class="btn small" data-overflow="1" data-icon="plus" aria-expanded={paletteOpen} aria-haspopup="dialog" onclick={(e) => { anchorPop(e, 230); paletteOpen = !paletteOpen; }}>
           <Icon name="plus" size={12} /> Node
         </button>
         <button class="btn small" data-overflow="2" data-icon="check" disabled={!dirty || savingGraph} title={dirty ? 'Save the canvas changes' : 'No unsaved changes'} onclick={save}>Save</button>
-        <button class="btn small" data-overflow="1" data-icon="clock" aria-expanded={runsOpen} onclick={(e) => { anchorPop(e, 200); runsOpen = !runsOpen; if (runsOpen) void loadRuns(); }}>
-          <Icon name="clock" size={12} /> Runs
-        </button>
       {/if}
       <!-- Context/Agents panel toggle: the sidebar's ONLY toggle when collapsed
            (no second full-height rail beside the app shell's right rail). -->
@@ -1656,9 +1697,6 @@
           <Icon name="panel" size={14} />
         </button>
       {/if}
-      <button class="icon-btn" data-keep aria-haspopup="menu" aria-label="More actions" title="More actions" onclick={wfMenu}>
-        <Icon name="more" size={14} />
-      </button>
       {#if runActive}
         <!-- While the VIEWED run is live its Cancel takes the primary's place (same word as
              the inspector's "Cancel run" and the run's final "Cancelled"). -->
@@ -1674,6 +1712,9 @@
           <Icon name="play" size={12} /> Run…
         </button>
       {/if}
+      <button class="icon-btn" data-overflow="-10" data-icon="more" data-label="More actions…" aria-haspopup="menu" aria-label="More actions" title="More actions" onclick={wfMenu}>
+        <Icon name="more" size={14} />
+      </button>
     {/if}
   {/snippet}
 </PageHeader>
@@ -1756,8 +1797,19 @@
       {/if}
     </div>
     {#if !viewport.isPhone}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="side-resize" onmousedown={startSideResize} title="Drag to resize"></div>
+      <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <div
+        class="side-resize"
+        role="separator"
+        tabindex="0"
+        aria-orientation="vertical"
+        aria-label="Resize workflows list"
+        title="Drag or use ←/→ to resize · double-click or Enter to reset"
+        onmousedown={startSideResize}
+        ondblclick={() => ui.setWfSideWidth(270)}
+        use:paneResizer={{ value: ui.wfSideWidth, min: 200, max: 600, onChange: (w) => ui.setWfSideWidth(w), onReset: () => ui.setWfSideWidth(270), text: pxText }}
+      ></div>
     {/if}
   </aside>
   {/if}
@@ -1774,7 +1826,7 @@
     {#if current}
       <!-- Popovers for the header's Node / Runs buttons (see anchorPop). -->
       {#if paletteOpen}
-        <div class="palette wf-pop" style="right:{popRight}px">
+        <div class="palette wf-pop" role="dialog" aria-label="Add a node" style="right:{popRight}px">
           {#each types as t (t.kind)}
             <button class="pal-item" onclick={() => addNode(t)}>
               <span class="pal-ic" style="--c:{t.color}"><Icon name={asIcon(t.icon, 'box')} size={12} /></span>
@@ -1787,7 +1839,7 @@
         </div>
       {/if}
       {#if runsOpen}
-        <div class="palette runs-pop wf-pop" style="right:{popRight}px">
+        <div class="palette runs-pop wf-pop" role="dialog" aria-label="Runs" style="right:{popRight}px">
           <LoadState
             what="runs"
             variant="compact"
@@ -1998,13 +2050,20 @@
         <!-- Drag grip: bottom mode grows the height cap; side mode (docked to a
              right column) drags the left edge to change width. Double-click
              resets. (R6) -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="insp-grip"
           class:side={sideDock}
+          role="separator"
+          tabindex="0"
+          aria-orientation={sideDock ? 'vertical' : 'horizontal'}
+          aria-label="Resize node inspector"
+          title="Drag or use arrow keys to resize · double-click or Enter to reset"
           onmousedown={startInspResize}
-          ondblclick={() => (sideDock ? ui.setWfInspSideWidth(400) : ui.setRunDetailHeight(300))}
-          title="Drag to resize · double-click to reset"
+          ondblclick={resetInsp}
+          use:paneResizer={sideDock
+            ? { value: ui.wfInspSideWidth, min: 280, max: Math.max(300, Math.round(window.innerWidth * 0.6)), invert: true, onChange: (w) => ui.setWfInspSideWidth(w), onReset: resetInsp, text: pxText }
+            : { value: ui.runDetailHeight, min: 160, max: Math.max(160, Math.round(window.innerHeight * 0.85)), orientation: 'horizontal', invert: true, onChange: (h) => { runDetailMax = false; ui.setRunDetailHeight(h); }, onReset: resetInsp, text: (v) => `${Math.round(v)} pixels tall` }}
         ></div>
         <div
           class="inspector"
@@ -3094,15 +3153,26 @@
        no second full-height rail beside the app shell's right rail. Resizable. -->
   {#if viewport.isDesktop && run && run.context_dir && ui.wfCtxOpen}
     <aside class="ctx-sidebar" style="width:{ui.wfCtxWidth}px" data-testid="ctx-sidebar">
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="ctx-resize" onmousedown={startCtxResize} title="Drag to resize"></div>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <div
+        class="ctx-resize"
+        role="separator"
+        tabindex="0"
+        aria-orientation="vertical"
+        aria-label="Resize context panel"
+        title="Drag or use ←/→ to resize"
+        onmousedown={startCtxResize}
+        use:paneResizer={{ value: ui.wfCtxWidth, min: WF_CTX_MIN, max: WF_CTX_MAX, invert: true, onChange: (w) => ui.setWfCtxWidth(w), text: pxText }}
+      ></div>
       <div class="ctx-head">
-        <div class="ctx-tabs" role="tablist">
+        <div class="ctx-tabs" role="tablist" aria-label="Context panel sections">
           <button
             class="ctx-tab"
             class:active={ui.wfCtxTab === 'files'}
             role="tab"
             aria-selected={ui.wfCtxTab === 'files'}
+            tabindex={ui.wfCtxTab === 'files' ? 0 : -1}
+            onkeydown={onTabKey}
             onclick={() => ui.setWfCtxTab('files')}
           >
             <Icon name="folder" size={12} /> Files
@@ -3112,6 +3182,8 @@
             class:active={ui.wfCtxTab === 'agents'}
             role="tab"
             aria-selected={ui.wfCtxTab === 'agents'}
+            tabindex={ui.wfCtxTab === 'agents' ? 0 : -1}
+            onkeydown={onTabKey}
             data-testid="ctx-tab-agents"
             onclick={() => ui.setWfCtxTab('agents')}
           >
@@ -3279,7 +3351,13 @@
     cursor: col-resize;
     z-index: 5;
   }
-  .side-resize:hover {
+  .side-resize:focus-visible,
+  .ctx-resize:focus-visible,
+  .insp-grip:focus-visible {
+    outline: none;
+  }
+  .side-resize:hover,
+  .side-resize:focus-visible {
     background: linear-gradient(
       to right,
       transparent,
@@ -3803,10 +3881,12 @@
     border-radius: 3px;
     background: var(--border);
   }
-  .insp-grip:hover::after {
+  .insp-grip:hover::after,
+  .insp-grip:focus-visible::after {
     background: var(--accent);
   }
-  .insp-grip:hover {
+  .insp-grip:hover,
+  .insp-grip:focus-visible {
     background: linear-gradient(
       to bottom,
       color-mix(in srgb, var(--accent) 40%, transparent),
@@ -4097,7 +4177,8 @@
     cursor: col-resize;
     z-index: 5;
   }
-  .ctx-resize:hover {
+  .ctx-resize:hover,
+  .ctx-resize:focus-visible {
     background: linear-gradient(
       to right,
       transparent,

@@ -67,7 +67,7 @@
     background: var(--status-warn);
   }
   .dot.working.live {
-    animation: pulse 1.6s ease-in-out infinite;
+    animation: otto-pulse 1.6s ease-in-out infinite;
   }
   .dot.needs-you.live {
     animation: needs-you-pulse 1.2s ease-in-out infinite;
@@ -75,15 +75,6 @@
   @media (prefers-reduced-motion: reduce) {
     .dot.live {
       animation: none !important;
-    }
-  }
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.45;
     }
   }
   @keyframes needs-you-pulse {

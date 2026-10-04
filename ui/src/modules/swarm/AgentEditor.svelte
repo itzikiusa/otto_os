@@ -226,7 +226,7 @@
           </select>
         {/if}
       </div>
-      <textarea class="input" rows="2" placeholder="Standing directive (what to do each run)…" bind:value={directive}></textarea>
+      <textarea class="input" rows="2" aria-label="Standing directive" placeholder="Standing directive (what to do each run)…" bind:value={directive}></textarea>
     {/if}
   </div>
 

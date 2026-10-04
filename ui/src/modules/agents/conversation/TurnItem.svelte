@@ -226,6 +226,7 @@
       <header class="agent-head">
         <span class="avatar" aria-hidden="true"><ProviderIcon provider={ctx.provider} size={13} /></span>
         <span class="agent-name">{agentName}</span>
+        <span class="chip agent-label" title="Written by an agent — review before you apply it">Agent</span>
         {#if item.model}<span class="agent-model mono" title="Model">{item.model}</span>{/if}
         {#if clock}<time class="ts" datetime={item.ts ?? undefined} title={fullTime}>{clock}</time>{/if}
       </header>
@@ -360,8 +361,13 @@
     border-radius: 50%;
     flex-shrink: 0;
     background: color-mix(in srgb, var(--agent) 18%, var(--surface));
-    border: 1px solid color-mix(in srgb, var(--agent) 45%, var(--border));
+    border: 1px solid var(--border-strong);
     color: var(--text);
+  }
+  .agent-label {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    letter-spacing: 0.04em;
   }
   .agent-name {
     font-weight: 650;
@@ -389,7 +395,7 @@
     margin-inline-start: 11px;
     padding-block: 10px 12px;
     padding-inline: 18px 16px;
-    border-inline-start: 2px solid color-mix(in srgb, var(--agent) 60%, transparent);
+    border-inline-start: 2px solid var(--border-strong);
     background: color-mix(in srgb, var(--agent) 5%, transparent);
     border-start-end-radius: var(--radius-l);
     border-end-end-radius: var(--radius-l);
@@ -412,7 +418,7 @@
     width: 100%;
     padding: 4px 6px 6px;
     border: 0;
-    border-bottom: 1px solid color-mix(in srgb, var(--agent) 22%, var(--border));
+    border-bottom: 1px solid var(--border);
     border-radius: 0;
     background: none;
     color: var(--text-dim);
@@ -456,7 +462,7 @@
     gap: 6px;
     padding-block: 8px 6px;
     padding-inline: 12px 0;
-    border-inline-start: 1px dashed color-mix(in srgb, var(--agent) 35%, var(--border));
+    border-inline-start: 1px dashed var(--border-strong);
     margin-block: 4px 2px;
     margin-inline: 2px 0;
   }

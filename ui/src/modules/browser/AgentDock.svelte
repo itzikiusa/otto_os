@@ -9,6 +9,10 @@
   // (it also appears in Agents), remembered per workspace.
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import StatusDot from '../../lib/components/StatusDot.svelte';
+  import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
+  import { sessionState } from '../../lib/status';
+  import { events } from '../../lib/events.svelte';
   import AskBar from './AskBar.svelte';
   import { browser } from '../../lib/stores/browser.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -24,13 +28,12 @@
   const status = $derived(sessionId ? (ws.statusMap[sessionId] ?? session?.status ?? null) : null);
   const readOnly = $derived(ws.myRole === 'viewer');
   const open = $derived(ui.browserAgentOpen);
-  /** Sentence-case status words (the same ones the share view and session rows use). */
-  const STATUS_LABEL: Record<string, string> = {
-    running: 'Running',
-    idle: 'Idle',
-    exited: 'Ended',
-    reconnectable: 'Disconnected — resume it in Agents',
-  };
+  /** The one shared session state (lib/status.ts) — same dot and words as Agents. */
+  const sState = $derived(
+    session
+      ? sessionState(session, status, ws.needsYou[session.id] === true, { stale: events.state !== 'connected' })
+      : null,
+  );
 
   // Drop a stale binding once the session list is loaded: the session was
   // archived/deleted, or isn't an agent session any more.
@@ -131,8 +134,9 @@
     {/if}
     <span class="title"><Icon name="terminal" size={14} /> Agent</span>
     {#if session}
+      {#if hasProviderIcon(session.provider)}<ProviderIcon provider={session.provider ?? ''} size={13} />{/if}
       <span class="name" title={session.title}>{session.title}</span>
-      {#if status === 'working'}<span class="working">Working…</span>{:else if status}<span class="dim">{STATUS_LABEL[status] ?? status}</span>{/if}
+      {#if sState}<span class="state"><StatusDot state={sState} /> {sState.label}</span>{/if}
       <span class="spacer"></span>
       <button class="btn small" onclick={pick} title="Attach a different session">
         <Icon name="swap" size={12} /> Switch
@@ -233,10 +237,12 @@
     color: var(--text-dim);
     white-space: nowrap;
   }
-  .working {
+  .state {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     font-size: var(--fs-xs);
-    color: var(--accent-text);
-    font-weight: 600;
+    color: var(--text-dim);
     white-space: nowrap;
   }
   .spacer {

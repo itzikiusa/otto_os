@@ -21,6 +21,7 @@
   import DiffViewer from './DiffViewer.svelte';
   import { repoDiffFileLoader } from './diff-load';
   import Icon from '../../lib/components/Icon.svelte';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
   import { ListWindow } from './list-window.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -103,6 +104,8 @@
    *  arrives with the POST at the END of the turn; until then the freshest
    *  commit-draft session created since the draft began is the live one. */
   let draftSessionId = $state<string | null>(null);
+  /** When the agent's message landed — drives the byline above the fields. */
+  let draftedAt = $state<number | null>(null);
   let draftStartedAt = $state<string | null>(null);
   let draftElapsed = $state(0);
   let showDraftTerm = $state(false);
@@ -545,6 +548,19 @@
         {},
       );
       const text = d.message.trim();
+      // Never overwrite what the person already typed without asking.
+      if (subject.trim() || body.trim()) {
+        const ok = await confirmer.ask(
+          'The agent’s message will replace the summary and description you have typed.',
+          { title: 'Replace your title and description?', confirmLabel: 'Replace', cancelLabel: 'Keep mine', danger: false },
+        );
+        if (!ok) {
+          draftSessionId = d.session_id ?? null;
+          draftedAt = null;
+          return;
+        }
+      }
+      draftedAt = Date.now();
       const nl = text.indexOf('\n');
       if (nl === -1) {
         subject = text;
@@ -717,21 +733,14 @@
           <span class="wp-sec-count">{conflicted.length}</span>
           <span class="grow"></span>
           {#if onresolve}
-            <span
-              class="wp-sec-action"
-              role="button"
-              tabindex="-1"
+            <button
+              type="button"
+              class="btn ghost small wp-sec-action"
               onclick={(e) => {
                 e.stopPropagation();
                 onresolve?.();
               }}
-              onkeydown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.stopPropagation();
-                  onresolve?.();
-                }
-              }}
-            >Open resolver</span>
+            >Open resolver</button>
           {/if}
         </div>
         <div class="wp-list">
@@ -755,45 +764,32 @@
 
     <!-- Unstaged -->
     <div class="wp-section">
-      <button class="wp-sec-head" onclick={() => (unstagedOpen = !unstagedOpen)} aria-expanded={unstagedOpen}>
-        <Icon name={unstagedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-        <span>Unstaged files</span>
-        <span class="wp-sec-count">{unstaged.length}</span>
-        <span class="grow"></span>
+      <div class="wp-sec-head">
+        <button type="button" class="wp-sec-toggle" onclick={() => (unstagedOpen = !unstagedOpen)} aria-expanded={unstagedOpen}>
+          <Icon name={unstagedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+          <span>Unstaged files</span>
+          <span class="wp-sec-count">{unstaged.length}</span>
+        </button>
         {#if unstaged.length > 0}
-          <span
-            class="wp-sec-action"
-            role="button"
-            tabindex="-1"
+          <button
+            type="button"
+            class="btn ghost small wp-sec-action"
             onclick={(e) => {
               e.stopPropagation();
               void stagePaths(unstaged.map((c) => c.path), true);
             }}
-            onkeydown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.stopPropagation();
-                void stagePaths(unstaged.map((c) => c.path), true);
-              }
-            }}
-          >Stage all</span>
-          <span
-            class="wp-sec-action danger"
-            role="button"
-            tabindex="-1"
+          >Stage all</button>
+          <button
+            type="button"
+            class="btn ghost small wp-sec-action danger"
             title="Discard changes to all unstaged files"
             onclick={(e) => {
               e.stopPropagation();
               void discardPaths(unstaged.map((c) => c.path), 'all unstaged files', 'unstaged');
             }}
-            onkeydown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.stopPropagation();
-                void discardPaths(unstaged.map((c) => c.path), 'all unstaged files', 'unstaged');
-              }
-            }}
-          >Discard all</span>
+          >Discard all</button>
         {/if}
-      </button>
+      </div>
       {#if unstagedOpen}
         <div class="wp-list">
           {@render sectionRows(unstagedRows, 'unstaged', 'Nothing unstaged.')}
@@ -812,45 +808,32 @@
 
     <!-- Staged -->
     <div class="wp-section">
-      <button class="wp-sec-head" onclick={() => (stagedOpen = !stagedOpen)} aria-expanded={stagedOpen}>
-        <Icon name={stagedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-        <span>Staged files</span>
-        <span class="wp-sec-count">{staged.length}</span>
-        <span class="grow"></span>
+      <div class="wp-sec-head">
+        <button type="button" class="wp-sec-toggle" onclick={() => (stagedOpen = !stagedOpen)} aria-expanded={stagedOpen}>
+          <Icon name={stagedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+          <span>Staged files</span>
+          <span class="wp-sec-count">{staged.length}</span>
+        </button>
         {#if staged.length > 0}
-          <span
-            class="wp-sec-action"
-            role="button"
-            tabindex="-1"
+          <button
+            type="button"
+            class="btn ghost small wp-sec-action"
             onclick={(e) => {
               e.stopPropagation();
               void stagePaths(staged.map((c) => c.path), false);
             }}
-            onkeydown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.stopPropagation();
-                void stagePaths(staged.map((c) => c.path), false);
-              }
-            }}
-          >Unstage all</span>
-          <span
-            class="wp-sec-action danger"
-            role="button"
-            tabindex="-1"
+          >Unstage all</button>
+          <button
+            type="button"
+            class="btn ghost small wp-sec-action danger"
             title="Discard changes to all staged files"
             onclick={(e) => {
               e.stopPropagation();
               void discardPaths(staged.map((c) => c.path), 'all staged files');
             }}
-            onkeydown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.stopPropagation();
-                void discardPaths(staged.map((c) => c.path), 'all staged files');
-              }
-            }}
-          >Discard all</span>
+          >Discard all</button>
         {/if}
-      </button>
+      </div>
       {#if stagedOpen}
         <div class="wp-list">
           {@render sectionRows(stagedRows, 'staged', 'Nothing staged yet.')}
@@ -949,6 +932,9 @@
         </button>
       {/if}
     </div>
+    {#if draftedAt && (subject.trim() || body.trim())}
+      <div class="draft-by"><AgentByline label="Draft" at={draftedAt} /></div>
+    {/if}
     {#if liveDraftId && showDraftTerm}
       <div class="draft-term">
         <Terminal sessionId={liveDraftId} preferDom showToolbar={false} />
@@ -958,8 +944,8 @@
       class="input body-input"
       rows="2"
       bind:value={body}
-      placeholder="Description (optional)"
-      aria-label="Commit description"
+      placeholder="Why this change, in a sentence or two"
+      aria-label="Commit description (optional)"
       spellcheck="false"
       onkeydown={commitKey}
     ></textarea>
@@ -1063,6 +1049,19 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.03em;
+  }
+  .wp-sec-toggle {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
     cursor: pointer;
     text-align: start;
   }
@@ -1076,20 +1075,26 @@
     color: var(--text-dim);
     text-align: center;
   }
-  .wp-sec-action {
+  .draft-by {
+    padding: 2px 0;
+  }
+  .wp-sec-head .wp-sec-action {
+    height: auto;
+    border: none;
+    background: transparent;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
     padding: 2px 7px;
     border-radius: var(--radius-s);
   }
-  .wp-sec-action:hover {
+  .wp-sec-head .wp-sec-action:hover {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
-  .wp-sec-action.danger {
+  .wp-sec-head .wp-sec-action.danger {
     color: var(--danger);
   }
-  .wp-sec-action.danger:hover {
+  .wp-sec-head .wp-sec-action.danger:hover {
     background: color-mix(in srgb, var(--danger) 14%, transparent);
   }
   .wp-list {

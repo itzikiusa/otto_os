@@ -220,7 +220,7 @@
     min-width: 0;
   }
   .num {
-    text-align: right;
+    text-align: end;
   }
   .mono {
     font-family: var(--font-mono);

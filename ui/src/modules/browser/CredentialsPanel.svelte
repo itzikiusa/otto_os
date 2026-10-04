@@ -120,7 +120,7 @@
   async function remove(c: BrowserCredential): Promise<void> {
     const ok = await confirmer.ask(
       `Delete the credential for "${c.username}" on ${c.domain}? This also removes it from the Keychain.`,
-      { title: 'Delete Credential', confirmLabel: 'Delete', danger: true },
+      { title: 'Delete credential', confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
     try {
@@ -136,7 +136,7 @@
   async function reveal(c: BrowserCredential): Promise<void> {
     const ok = await confirmer.ask(
       `Show the password for "${c.username}" on ${c.domain}? Make sure no one else can see your screen.`,
-      { title: 'Reveal Password', confirmLabel: 'Reveal', danger: true },
+      { title: 'Reveal password', confirmLabel: 'Reveal', danger: true },
     );
     if (!ok) return;
     revealingId = c.id;
@@ -178,7 +178,7 @@
   </div>
 
   {#if loading}
-    <p class="empty">Loading…</p>
+    <p class="empty">Loading credentials…</p>
   {:else if creds.length === 0}
     <p class="empty">No saved credentials yet.</p>
   {:else}

@@ -60,20 +60,11 @@
     flex: none;
   }
   .sbadge-dot.live {
-    animation: sbadge-pulse 1.6s ease-in-out infinite;
+    animation: otto-pulse 1.6s ease-in-out infinite;
   }
   @media (prefers-reduced-motion: reduce) {
     .sbadge-dot.live {
       animation: none;
-    }
-  }
-  @keyframes sbadge-pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.4;
     }
   }
   .tone-info {

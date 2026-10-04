@@ -239,7 +239,7 @@
     a { color: ${p.link}; } code { background: ${p.fill}; padding: .15em .35em; border-radius: 4px; font-family: ui-monospace, monospace; }
     pre { background: ${p.fill}; padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
     table { border-collapse: collapse; } th,td { border: 1px solid ${p.line}; padding: 4px 8px; }
-    blockquote { border-left: 3px solid ${p.line}; margin: 0; padding-left: 12px; color: ${p.dim}; }
+    blockquote { border-inline-start: 3px solid ${p.line}; margin: 0; padding-inline-start: 12px; color: ${p.dim}; }
     img { max-width: 100%; }
   `;
   });

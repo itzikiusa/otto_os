@@ -230,7 +230,7 @@
     background: var(--status-working);
   }
   .val {
-    text-align: right;
+    text-align: end;
     font-size: var(--fs-s);
   }
   .dim {

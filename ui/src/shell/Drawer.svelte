@@ -7,8 +7,9 @@
   //
   // `inline` presents the same mounted children in the desktop layout. This
   // lets draft-bearing panels cross a breakpoint without destroying state.
-  import { tick, type Snippet } from 'svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
   import { dialogFocus } from '../lib/dialogFocus';
+  import { ui } from '../lib/stores/ui.svelte';
   import Icon from '../lib/components/Icon.svelte';
 
   interface Props {
@@ -51,6 +52,15 @@
       void tick().then(() => { if (focused.isConnected && (inline || open)) focused.focus(); });
     }
   });
+  // Register as an open overlay (like Modal) so the native browser webview and
+  // global shortcuts treat an open drawer as modal. untrack: pushModal reads
+  // modalCount — the effect must depend only on `inline`/`open`.
+  $effect(() => {
+    if (!inline && open) {
+      untrack(() => ui.pushModal());
+      return () => untrack(() => ui.popModal());
+    }
+  });
   $effect(() => {
     if (!inline && open && panel) {
       const focus = dialogFocus(panel, close);
@@ -80,7 +90,7 @@
     <!-- Always-visible close affordance: tapping the thin backdrop sliver left by
          a wide drawer is hard on a phone, so give an explicit ✕. -->
     {#if !inline}
-    <button class="drawer-close" onclick={close} aria-label="Close {label}" title="Close">
+    <button class="icon-btn drawer-close" onclick={close} aria-label="Close {label}" title="Close">
       <Icon name="x" size={14} />
     </button>
     {/if}
@@ -92,7 +102,7 @@
   .drawer-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.45);
+    background: var(--scrim);
     z-index: var(--z-drawer);
     animation: drawer-fade 140ms ease-out;
   }
@@ -119,17 +129,11 @@
     top: 8px;
     inset-inline-end: 8px;
     z-index: 2;
-    width: 32px;
-    height: 32px;
-    display: grid;
-    place-items: center;
+    /* The shared 24px .icon-btn (same as Modal's ✕); this only floats it over
+       the panel content with an opaque-enough tile. */
     border: 1px solid var(--border);
-    border-radius: 999px;
     background: color-mix(in srgb, var(--surface) 88%, transparent);
     color: var(--text);
-    line-height: 1;
-    cursor: pointer;
-    backdrop-filter: blur(4px);
   }
   .drawer-close:hover {
     background: var(--surface-2);

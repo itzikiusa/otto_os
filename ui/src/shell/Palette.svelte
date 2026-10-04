@@ -615,7 +615,7 @@
     position: fixed;
     inset: 0;
     z-index: var(--z-command);
-    background: rgba(0, 0, 0, 0.25);
+    background: var(--scrim-soft);
     display: flex;
     flex-direction: column;
     align-items: center;

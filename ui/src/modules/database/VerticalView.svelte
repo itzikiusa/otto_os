@@ -464,7 +464,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    margin-left: auto;
+    margin-inline-start: auto;
     font-size: var(--fs-xs);
   }
   /* Batch pager for the non-virtualized alt views. */

@@ -139,10 +139,10 @@
   .err {
     font-size: var(--fs-xs);
     color: var(--status-exited);
-    margin-right: auto;
+    margin-inline-end: auto;
   }
   .toggle {
-    margin-left: auto;
+    margin-inline-start: auto;
     font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: var(--radius-s);

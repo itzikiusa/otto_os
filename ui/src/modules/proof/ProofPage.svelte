@@ -294,7 +294,7 @@
   async function removeArtifact(id: string): Promise<void> {
     if (!detail) return;
     const name = detail.artifacts.find((x) => x.id === id)?.title;
-    if (!(await confirmer.ask(name ? `Delete the artifact “${name}” from this proof pack? The pack's status is re-derived without it.` : 'Delete this artifact from the proof pack?', { title: 'Delete artifact' }))) return;
+    if (!(await confirmer.ask(name ? `Delete the artifact “${name}” from this proof pack? The pack’s status is re-derived without it.` : 'Delete this artifact from the proof pack?', { title: 'Delete artifact' }))) return;
     try {
       await deleteArtifact(id);
       await proof.refreshDetail();
@@ -589,7 +589,7 @@
     if (!detail) return;
     const t = detail.pack.title || 'this pack';
     const n = detail.artifacts.length;
-    if (!(await confirmer.ask(`Delete proof pack "${t}"? Its ${n} artifact${n === 1 ? '' : 's'} and snapshots are deleted too.`, { title: 'Delete proof pack' }))) {
+    if (!(await confirmer.ask(`Delete proof pack “${t}”? Its ${n} artifact${n === 1 ? '' : 's'} and snapshots are deleted too.`, { title: 'Delete proof pack' }))) {
       return;
     }
     try {
@@ -673,7 +673,7 @@
 <div class="proof-page" class:phone={viewport.isPhone}>
   <PageHeader
     class="detail-head"
-    title={detail ? detail.pack.title || detail.pack.work_item_id : 'Proof Packs'}
+    title={detail ? detail.pack.title || detail.pack.work_item_id : 'Proof packs'}
   >
     {#snippet leading()}
       {#if viewport.isPhone && detail}
@@ -714,7 +714,7 @@
   {#if showRail}
   <aside class="rail" class:hide-phone={viewport.isPhone && detail}>
     <div class="rail-head">
-      <span class="section-title">Proof Packs</span>
+      <span class="section-title">Proof packs</span>
       <button class="icon-btn" onclick={newPack} aria-label="New proof pack" title="New proof pack">
         <Icon name="plus" size={14} />
       </button>
@@ -747,7 +747,7 @@
       {#if proof.nextCursor}
         <!-- Keyset paging: the list loads 100 packs at a time. -->
         <button class="btn small ghost load-more" disabled={proof.loadingMore} aria-busy={proof.loadingMore} onclick={() => void proof.loadMore()}>
-          {proof.loadingMore ? 'Loading…' : 'Load more'}
+          {proof.loadingMore ? 'Loading more packs…' : 'Load more'}
         </button>
       {/if}
       {#if proof.packs.length === 0 && !listError}
@@ -990,7 +990,7 @@
         placeholder="e.g. verified manually in staging; CI flaky on unrelated job"
       ></textarea>
       <span class="char-hint" class:short={waiveReason.trim().length < 10}>
-        {waiveReason.trim().length}/10 min
+        {waiveReason.trim().length}/10 characters minimum
       </span>
     </div>
     {#snippet footer()}

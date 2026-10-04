@@ -156,6 +156,7 @@
                 <div class="who">
                   <span class="avatar" aria-hidden="true"><Icon name="assistant" size={12} /></span>
                   <strong>Otto</strong>
+                  <span class="chip agent-label" title="Written by an agent — review before you apply it">Agent</span>
                   <span class="badge" data-testid="provider-badge" title={`Written by ${w.label}`}><ProviderIcon provider={w.provider} size={12} />{w.label}</span>
                   {#if m.item.ts}<span class="dim">· <time datetime={m.item.ts} title={new Date(m.item.ts).toLocaleString()}>{clock(m.item.ts)}</time></span>{/if}
                 </div>
@@ -281,6 +282,11 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text);
+  }
+  .agent-label {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    letter-spacing: 0.04em;
   }
   .badge {
     display: inline-flex;

@@ -173,6 +173,6 @@ test('Copy / Export / More menus stay inside the viewport', async ({ page }) => 
     await expect(menu).toBeHidden();
   }
   await page.getByRole('button', { name: 'More result actions' }).click();
-  await expect(page.locator('.ctx-item', { hasText: 'Examine with AI' })).toBeVisible();
+  await expect(page.locator('.ctx-item', { hasText: 'Examine with Otto' })).toBeVisible();
   await page.keyboard.press('Escape');
 });

@@ -309,7 +309,7 @@
           {#if hasOlder && messages.length > 0}
             <button class="btn small ghost earlier" onclick={() => void showEarlier()}
               disabled={!!personalAgents.olderLoading[selectedId ?? '']}>
-              {personalAgents.olderLoading[selectedId ?? ''] ? 'Loading…' : 'Show earlier messages'}
+              {personalAgents.olderLoading[selectedId ?? ''] ? 'Loading earlier messages…' : 'Show earlier messages'}
             </button>
           {/if}
           {#each shown as m (m.id)}
