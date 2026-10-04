@@ -98,6 +98,9 @@ class SwarmStore {
   triggers: SwarmChannelTrigger[] = $state([]);
   /** Cached library skills for the skill pickers (loaded once). */
   librarySkills: LibrarySkillMeta[] = $state([]);
+  librarySkillsLoading = $state(false);
+  librarySkillsError = $state('');
+  librarySkillsLoaded = $state(false);
   /** Set when a deep-link (e.g. Product → Swarm) wants the Kanban view shown
    *  for the just-opened project. SwarmPage reads + clears this on mount. */
   pendingKanban = $state(false);
@@ -866,12 +869,17 @@ class SwarmStore {
 
   // -- Library skills (for the skill pickers) --------------------------------
 
-  async loadLibrarySkills(): Promise<void> {
-    if (this.librarySkills.length) return;
+  async loadLibrarySkills(force = false): Promise<void> {
+    if (this.librarySkillsLoading || (this.librarySkillsLoaded && !force)) return;
+    this.librarySkillsLoading = true;
+    this.librarySkillsError = '';
     try {
       this.librarySkills = await api.get<LibrarySkillMeta[]>('/library/skills');
-    } catch {
-      this.librarySkills = [];
+      this.librarySkillsLoaded = true;
+    } catch (e) {
+      this.librarySkillsError = e instanceof Error ? e.message : 'Couldn’t load the skill library.';
+    } finally {
+      this.librarySkillsLoading = false;
     }
   }
 
