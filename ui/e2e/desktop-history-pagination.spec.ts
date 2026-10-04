@@ -26,14 +26,20 @@ test('History scrolling to the top loads each earlier cursor after initial layou
   // Let the explicit 1-second initial layout guard expire; this scenario is
   // actual user scrolling, separate from keyboard button activation.
   await page.waitForTimeout(1200);
+  // Boot can restore the workspace after History auto-selects a scratch row.
+  // Count those initial reads separately; scrolling must issue only its exact
+  // earlier cursors, with no duplicate pages or reset to the newest page.
+  expect(requested.length).toBeGreaterThan(0);
+  expect(requested.every(before => before === null)).toBe(true);
+  const startupRequests = requested.length;
   const scroller = conversation.locator('.conv-list');
   await scroller.hover();
   await page.mouse.wheel(0, -100_000);
-  await expect.poll(() => requested).toEqual([null, '120']);
+  await expect.poll(() => requested.slice(startupRequests)).toEqual(['120']);
   await expect(conversation).toContainText('Scroll checkpoint 60.');
   await expect.poll(() => scroller.evaluate(el => el.scrollTop)).toBeGreaterThan(40);
   await page.mouse.wheel(0, -100_000);
-  await expect.poll(() => requested).toEqual([null, '120', '60']);
+  await expect.poll(() => requested.slice(startupRequests)).toEqual(['120', '60']);
   await expect(conversation).toContainText('Scroll checkpoint 0.');
   await expect(conversation.getByRole('button', {name: 'Load earlier messages', exact: true})).toHaveCount(0);
 });
