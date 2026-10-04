@@ -6,11 +6,12 @@
 //!
 //! Cheap to construct (a pool handle, two paths, an optional event sender) —
 //! the server builds one per request from its context; nothing here is
-//! process-global except the import lock (see `import.rs`).
+//! process-global except the import and per-artifact publication locks.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use chrono::{DateTime, Utc};
 use otto_core::event::Event;
@@ -70,6 +71,33 @@ async fn extract_async(format: &str, bytes: &[u8]) -> Result<extract::Extraction
 const MAX_TITLE_CHARS: usize = 300;
 const MAX_TAGS: usize = 32;
 const MAX_TAG_CHARS: usize = 64;
+
+type CommitLocks = HashMap<(PathBuf, String), Weak<tokio::sync::Mutex<()>>>;
+
+/// Services are request-scoped. Share the complete publication boundary across
+/// instances, including aliases of the same filesystem root. Weak entries avoid
+/// retaining a mutex for every artifact ever edited.
+async fn commit_lock(root: PathBuf, id: &str) -> Result<Arc<tokio::sync::Mutex<()>>> {
+    tokio::fs::create_dir_all(&root)
+        .await
+        .map_err(|e| Error::Internal(format!("design root: {e}")))?;
+    let root = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|e| Error::Internal(format!("design root identity: {e}")))?;
+    static LOCKS: OnceLock<Mutex<CommitLocks>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    locks.retain(|_, value| value.strong_count() > 0);
+    let key = (root, id.to_owned());
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    Ok(lock)
+}
 
 /// Who a write is attributed to.
 #[derive(Debug, Clone)]
@@ -656,6 +684,27 @@ impl DesignService {
         bytes: Vec<u8>,
         opts: SaveOpts,
     ) -> Result<SaveResult> {
+        let lock = commit_lock(self.root(), &artifact.id).await?;
+        let _publication = lock.lock().await;
+        self.commit_bytes_locked(artifact, bytes, opts).await
+    }
+
+    /// The caller holds the artifact publication lock through the final event.
+    async fn commit_bytes_locked(
+        &self,
+        artifact: &DesignArtifact,
+        bytes: Vec<u8>,
+        opts: SaveOpts,
+    ) -> Result<SaveResult> {
+        let artifact = self.store.require_artifact(&artifact.id).await?;
+        if let Some(base) = &opts.base {
+            if artifact.head_version_id.as_deref().unwrap_or("") != base {
+                return Err(Error::Conflict(format!(
+                    "design artifact {} changed; reload before saving",
+                    artifact.id
+                )));
+            }
+        }
         let spec = format::spec(&artifact.format).ok_or_else(|| {
             Error::Invalid(format!("unknown design format {:?}", artifact.format))
         })?;
@@ -733,11 +782,19 @@ impl DesignService {
             .await?;
 
         // Mirror into the working copy (best-effort: the blob is the truth).
-        if let Some(path) = self.work_file(artifact) {
+        if let Some(path) = self.work_file(&artifact) {
             if let Some(parent) = path.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
-            if let Err(e) = tokio::fs::write(&path, &bytes).await {
+            // Same-directory replacement never exposes a partially written file.
+            let temp = path.with_file_name(format!(".otto-save-{}", new_id()));
+            let mirrored = async {
+                tokio::fs::write(&temp, &bytes).await?;
+                tokio::fs::rename(&temp, &path).await
+            }
+            .await;
+            if let Err(e) = mirrored {
+                let _ = tokio::fs::remove_file(&temp).await;
                 tracing::warn!(artifact = %artifact.id, "design working copy not written: {e}");
             }
         }
@@ -824,16 +881,19 @@ impl DesignService {
         if message.trim().is_empty() {
             return Err(Error::Invalid("a named version needs a message".into()));
         }
+        let lock = commit_lock(self.root(), &a.id).await?;
+        let _publication = lock.lock().await;
+        let a = self.store.require_artifact(&a.id).await?;
         let bytes = match content {
             Some(c) => c,
             None => {
-                let from_work = match self.work_file(a) {
+                let from_work = match self.work_file(&a) {
                     Some(p) => tokio::fs::read(&p).await.ok(),
                     None => None,
                 };
                 match from_work {
                     Some(b) => b,
-                    None => self.head_content(a).await?.1,
+                    None => self.head_content(&a).await?.1,
                 }
             }
         };
@@ -842,8 +902,8 @@ impl DesignService {
         } else {
             "named"
         };
-        self.commit_bytes(
-            a,
+        self.commit_bytes_locked(
+            &a,
             bytes,
             SaveOpts {
                 base,
@@ -1870,6 +1930,133 @@ mod tests {
         assert_eq!(
             decode_content(None, Some("aGk=".into())).unwrap().unwrap(),
             b"hi"
+        );
+    }
+
+    #[tokio::test]
+    async fn aliased_service_instances_serialize_commit_publication() {
+        let (s, dir, mut rx) = svc().await;
+        let alias_dir = tempfile::tempdir().unwrap();
+        let alias = alias_dir.path().join("data");
+        std::os::unix::fs::symlink(dir.path(), &alias).unwrap();
+        let other = DesignService::new(s.store.pool().clone(), alias, s.events.clone());
+        let initial = s
+            .create_artifact(input("html", "Concurrent", Some("<p>initial</p>")))
+            .await
+            .unwrap();
+        drain(&mut rx);
+        let first_lock = commit_lock(s.root(), &initial.artifact.id).await.unwrap();
+        let alias_lock = commit_lock(other.root(), &initial.artifact.id)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first_lock, &alias_lock));
+        let mut tasks = Vec::new();
+        for i in 0..8 {
+            let service = if i % 2 == 0 { s.clone() } else { other.clone() };
+            let artifact = initial.artifact.clone();
+            tasks.push(tokio::spawn(async move {
+                service
+                    .commit_bytes(
+                        &artifact,
+                        format!("<p>writer {i}</p>").into_bytes(),
+                        opts(None, Author::user("u1")),
+                    )
+                    .await
+                    .unwrap()
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let artifact = s
+            .store
+            .require_artifact(&initial.artifact.id)
+            .await
+            .unwrap();
+        let (head, bytes) = s.head_content(&artifact).await.unwrap();
+        assert_eq!(head.seq, 9);
+        assert_eq!(
+            tokio::fs::read(s.work_file(&artifact).unwrap())
+                .await
+                .unwrap(),
+            bytes
+        );
+        let updates: Vec<_> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::DesignArtifactUpdated {
+                    version_id: Some(id),
+                    content: Some(content),
+                    change,
+                    ..
+                } if change == "content" => Some((id, content)),
+                _ => None,
+            })
+            .collect();
+        let mut last_seq = 1;
+        for (id, _) in &updates {
+            let version = s.store.get_version(id).await.unwrap().unwrap();
+            assert!(
+                version.seq > last_seq,
+                "events must follow committed version order"
+            );
+            last_seq = version.seq;
+        }
+        assert_eq!(updates.last().unwrap().0, head.id);
+        assert_eq!(updates.last().unwrap().1.as_bytes(), bytes);
+        let named = other
+            .commit_named(
+                &initial.artifact,
+                None,
+                None,
+                Author::user("u1"),
+                "Named current".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(s.version_bytes(&named.version).await.unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn stale_artifact_snapshot_cannot_deduplicate_over_a_new_head() {
+        let (s, _dir, _rx) = svc().await;
+        let first = s
+            .create_artifact(input("html", "Draft", Some("<p>one</p>")))
+            .await
+            .unwrap();
+        let second = s
+            .commit_bytes(
+                &first.artifact,
+                b"<p>two</p>".to_vec(),
+                opts(None, Author::user("u1")),
+            )
+            .await
+            .unwrap();
+        let stale = s
+            .commit_bytes(
+                &first.artifact,
+                b"<p>one</p>".to_vec(),
+                opts(Some(&first.version.id), Author::user("u1")),
+            )
+            .await;
+        assert!(
+            matches!(stale, Err(Error::Conflict(_))),
+            "stale no-op must conflict: {stale:?}"
+        );
+        let restore = s
+            .commit_bytes(
+                &first.artifact,
+                b"<p>one</p>".to_vec(),
+                opts(None, Author::user("u1")),
+            )
+            .await
+            .unwrap();
+        assert!(restore.created);
+        assert_eq!(restore.version.seq, second.version.seq + 1);
+        assert_eq!(
+            std::fs::read(s.work_file(&restore.artifact).unwrap()).unwrap(),
+            b"<p>one</p>"
         );
     }
 

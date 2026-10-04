@@ -248,7 +248,15 @@
     const changes = localChanges;
     const message = commitMessage();
     try {
-      const res = await api.commitVersion(id, { content: text, base_version: base ?? '', message });
+      let res: DesignSaveResult;
+      try {
+        res = await api.commitVersion(id, { content: text, base_version: base ?? '', message });
+      } catch (e) {
+        if (!(e instanceof ApiError) || e.status !== 409) throw e;
+        const retryBase = await resolveConflict();
+        if (!retryBase) return;
+        res = await api.commitVersion(id, { content: text, base_version: retryBase, message });
+      }
       applySaved(res, text);
       showImpact = false;
       if (!res.created) {
@@ -269,8 +277,7 @@
         });
       }
     } catch (e) {
-      if (e instanceof ApiError && e.status === 409) await resolveConflict();
-      else toasts.error('Couldn’t save the brand kit', errText(e));
+      toasts.error('Couldn’t save the brand kit', errText(e));
     } finally {
       saving = false;
     }
@@ -290,7 +297,7 @@
     void loadUsage();
   }
 
-  async function resolveConflict(): Promise<void> {
+  async function resolveConflict(): Promise<string | null> {
     let latest: DesignVersion | null = null;
     try {
       latest = (await api.listVersions(id, { limit: 1 }))[0] ?? null;
@@ -306,8 +313,9 @@
       ],
     });
     if (value === 'theirs') await load();
-    else if (value === 'mine' && latest) await save(latest.id);
-    else if (value === 'mine') await load();
+    else if (value === 'mine' && latest) return latest.id;
+    else if (value === 'mine') toasts.error('Couldn’t read the current version', 'Your edits are kept. Try Save again to retry.');
+    return null;
   }
 
   async function revert(): Promise<void> {
