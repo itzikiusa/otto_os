@@ -28,6 +28,7 @@
   import { now } from '../../lib/stores/now.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { openExternal } from '../../lib/external';
   import { copyText } from '../../lib/clipboard';
   import { sentenceCase, type Tone } from '../../lib/status';
