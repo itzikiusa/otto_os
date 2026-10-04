@@ -306,7 +306,7 @@
   .chip.allowed {
     border-color: color-mix(in srgb, var(--status-working) 55%, transparent);
     background: color-mix(in srgb, var(--status-working) 14%, transparent);
-    color: var(--status-working);
+    color: var(--success);
   }
   .chip.denied {
     background: var(--surface-2);
@@ -334,13 +334,9 @@
     cursor: pointer;
   }
   .chip-refresh.spin :global(svg) {
-    animation: spin 0.9s linear infinite;
+    animation: otto-spin 0.9s linear infinite;
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   .login-row {
     display: flex;
     align-items: center;
@@ -349,7 +345,7 @@
     font-size: var(--fs-s);
   }
   .warn {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .card-foot {
     display: flex;

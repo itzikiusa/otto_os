@@ -4,6 +4,8 @@
   // hero to start a new canvas. You never write Mermaid — you describe what you
   // want in the Assistant and the agent edits the file; the board re-renders live.
   import { untrack } from 'svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
@@ -40,6 +42,8 @@
   >(undefined);
   // The Assistant panel (the agent shell + Ask-AI input) — opens on demand.
   let showConvo = $state(false);
+  // The scene list's width — drag / ←→ on the divider, remembered across visits.
+  let listW = $state(loadPaneWidth('canvas.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let showTabletScenes = $state(true);
   let workspaceEmpty: HTMLDivElement | undefined = $state();
 
@@ -212,9 +216,13 @@
       class="scenes"
       class:hidden={(readonly && canvas.currentId) || (viewport.isTablet && canvas.currentId && !showTabletScenes) || noScenes || listFailed}
       class:full={readonly && !canvas.currentId}
+      style="--list-pane-w:{listW}px"
     >
       <SceneList />
     </aside>
+    {#if !readonly && !viewport.isTablet && !noScenes && !listFailed}
+      <PaneDivider bind:width={listW} storageKey="canvas.listW" label="Resize the scenes list" />
+    {/if}
 
     <section class="main" class:hidden={readonly && !canvas.currentId && !noScenes && !listFailed && !canvas.loadError}>
       {#if canvas.loadError && canvas.scene && canvas.currentId}
@@ -316,9 +324,8 @@
     flex-direction: column;
   }
   .scenes {
-    width: 240px;
-    flex: 0 0 240px;
-    border-inline-end: 1px solid var(--border);
+    width: var(--list-pane-w, 280px);
+    flex: 0 0 var(--list-pane-w, 280px);
     overflow-y: auto;
     background: var(--surface);
   }

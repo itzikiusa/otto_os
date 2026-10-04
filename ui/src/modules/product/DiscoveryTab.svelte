@@ -384,7 +384,7 @@
     user-select: none;
   }
   .run-header:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .coll-arrow {
     display: inline-flex;
@@ -486,7 +486,7 @@
     margin: 0.4em 0;
   }
   :global(.md-body code) {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 0.9em;
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
     border-radius: var(--radius-s);
@@ -537,7 +537,7 @@
     color: var(--text);
   }
   .task-summary-text {
-    margin: 0 0 0 13px;
+    margin-block: 0; margin-inline: 13px 0;
     font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;

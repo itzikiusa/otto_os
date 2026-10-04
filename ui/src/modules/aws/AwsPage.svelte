@@ -8,6 +8,8 @@
   // over the whole page. Layout: account/service rail + content; on mobile the
   // rail collapses and the overview / service view take the full width.
   import { untrack } from 'svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import { aws } from '../../lib/stores/aws.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -134,6 +136,8 @@
   const canAdmin = $derived(auth.isRoot);
   // No accounts at all → the list pane is hidden and one page-level EmptyState
   // (with the single "Add account" CTA) owns the page.
+  // The accounts rail's width — drag / ←→ on the divider, remembered across visits.
+  let listW = $state(loadPaneWidth('aws.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   const noAccounts = $derived(aws.accountsLoaded && aws.accounts.length === 0 && !routeAccountId);
   const showRail = $derived(!noAccounts && (!viewport.isMobile || !routeAccountId));
   const showContent = $derived(noAccounts || !viewport.isMobile || !!routeAccountId);
@@ -193,7 +197,7 @@
 {:else}
   <div class="aws" class:mobile={viewport.isMobile} class:solo={!showRail}>
     {#if showRail}
-      <aside class="rail-col">
+      <aside class="rail-col" style="--list-pane-w:{listW}px">
         {#if viewport.isMobile}
           <AccountsOverview {filter} onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
         {:else}
@@ -207,6 +211,9 @@
           />
         {/if}
       </aside>
+      {#if !viewport.isMobile && showContent}
+        <PaneDivider bind:width={listW} storageKey="aws.listW" label="Resize the accounts list" />
+      {/if}
     {/if}
     {#if showContent}
       <section class="content">
@@ -310,15 +317,10 @@
     overflow-y: auto;
   }
   .aws {
-    display: grid;
-    grid-template-columns: 224px minmax(0, 1fr);
+    display: flex;
     flex: 1;
     min-height: 0;
     overflow: hidden;
-  }
-  .aws.mobile,
-  .aws.solo {
-    grid-template-columns: minmax(0, 1fr);
   }
   .svc-badge {
     font-size: var(--fs-xs);
@@ -341,7 +343,8 @@
     width: 160px;
   }
   .rail-col {
-    border-inline-end: 1px solid var(--border);
+    flex: none;
+    width: var(--list-pane-w, 280px);
     background: var(--bg-sidebar);
     min-height: 0;
     overflow: hidden;
@@ -349,11 +352,14 @@
     flex-direction: column;
   }
   .aws.mobile .rail-col {
-    border-inline-end: 0;
+    flex: 1;
+    width: auto;
+    min-width: 0;
     background: transparent;
     overflow: auto;
   }
   .content {
+    flex: 1;
     min-width: 0;
     min-height: 0;
     display: flex;

@@ -3,16 +3,14 @@
   "accent-text": {},
   "body-style": {},
   "color-literal": {
-    "src/app.css": 11,
+    "src/app.css": 1,
     "src/lib/components/Terminal.svelte": 5,
     "src/modules/agents/conversation/Composer.svelte": 1,
     "src/modules/agents/conversation/Lightbox.svelte": 2,
     "src/modules/canvas/PresentMode.svelte": 1,
     "src/modules/canvas/nodes/StickyNode.svelte": 1,
-    "src/modules/database/DatabasePage.svelte": 2,
     "src/modules/database/DiagramView.svelte": 3,
     "src/modules/database/ReviewModal.svelte": 1,
-    "src/modules/database/SchemaTree.svelte": 2,
     "src/modules/design-hall/ArtifactStage.svelte": 3,
     "src/modules/design-hall/ArtifactThumb.svelte": 2,
     "src/modules/help/TourFilm.svelte": 2,
@@ -33,6 +31,7 @@
     "src/modules/vault/NoteView.svelte": 1,
     "src/shell/TabBar.svelte": 2
   },
+  "focus-accent": {},
   "font-size-small": {
     "src/modules/database/DiagramView.svelte": 1
   },
@@ -59,7 +58,6 @@
     "src/modules/assistant/AssistantComposer.svelte": 2,
     "src/modules/assistant/MemoryTab.svelte": 5,
     "src/modules/assistant/cards/ActionCard.svelte": 3,
-    "src/modules/assistant/cards/DenySheet.svelte": 1,
     "src/modules/assistant/cards/NeedsYouCard.svelte": 1,
     "src/modules/aws/AccountsOverview.svelte": 7,
     "src/modules/aws/AthenaView.svelte": 1,
@@ -141,7 +139,7 @@
     "src/modules/kubernetes/monitor/MonitorInsights.svelte": 1,
     "src/modules/kubernetes/monitor/MonitorOverview.svelte": 1,
     "src/modules/kubernetes/monitor/MonitorSettings.svelte": 5,
-    "src/modules/mcp/ApprovalsTab.svelte": 2,
+    "src/modules/mcp/ApprovalsTab.svelte": 1,
     "src/modules/mcp/ExposePanel.svelte": 1,
     "src/modules/mcp/PoliciesTab.svelte": 1,
     "src/modules/mcp/TokensPanel.svelte": 1,
@@ -158,7 +156,6 @@
     "src/modules/settings/ContextSoul.svelte": 1,
     "src/modules/settings/Daemon.svelte": 1,
     "src/modules/settings/NewWorkspace.svelte": 1,
-    "src/modules/settings/Onboarding.svelte": 1,
     "src/modules/settings/PluginsSettings.svelte": 1,
     "src/modules/settings/SelfImprovement.svelte": 1,
     "src/modules/settings/TrustSafety.svelte": 1,
@@ -187,6 +184,7 @@
     "src/modules/workflows/RunSteps.svelte": 2,
     "src/modules/workflows/WorkflowsPage.svelte": 1
   },
+  "heavy-weight": {},
   "outline-removed": {
     "src/lib/components/CodeEditor.svelte": 1,
     "src/lib/components/FloatingBar.svelte": 1,
@@ -225,18 +223,72 @@
     "src/modules/workflows/WorkflowsPage.svelte": 1,
     "src/shell/NotificationBell.svelte": 3
   },
+  "physical-shorthand": {
+    "src/lib/components/PageHeader.svelte": 1,
+    "src/lib/components/Terminal.svelte": 2
+  },
+  "private-keyframes": {
+    "src/lib/components/Modal.svelte": 2,
+    "src/lib/components/Skeleton.svelte": 1,
+    "src/lib/components/StatusDot.svelte": 1,
+    "src/modules/agents/conversation/LiveDraft.svelte": 1,
+    "src/modules/agents/conversation/PreviewBody.svelte": 1,
+    "src/modules/api/ApiPage.svelte": 1,
+    "src/modules/aws/InstallPanel.svelte": 1,
+    "src/modules/connections/ConnectionImportDialog.svelte": 1,
+    "src/modules/database/ExportDialog.svelte": 1,
+    "src/modules/database/ImportDialog.svelte": 1,
+    "src/modules/database/ResultsGrid.svelte": 1,
+    "src/modules/design-hall/studio3d/Studio3D.svelte": 1,
+    "src/modules/git/GraphView.svelte": 1,
+    "src/modules/git/RepoView.svelte": 1,
+    "src/modules/git/ReviewPanel.svelte": 1,
+    "src/modules/home/HomePage.svelte": 2,
+    "src/modules/kubernetes/InstallPanel.svelte": 1,
+    "src/modules/kubernetes/LogsView.svelte": 1,
+    "src/modules/loops/LoopDetail.svelte": 1,
+    "src/modules/mcp/RulesDrawer.svelte": 2,
+    "src/modules/product/MockupAnnotations.svelte": 1,
+    "src/modules/run-with-otto/RunStageRail.svelte": 2,
+    "src/modules/skills-eval/SkillsEvalPage.svelte": 1,
+    "src/modules/vault/LinkPreview.svelte": 1,
+    "src/modules/vault/RefineDrawer.svelte": 1,
+    "src/shell/Drawer.svelte": 3,
+    "src/shell/NotificationBell.svelte": 1,
+    "src/shell/Palette.svelte": 2
+  },
+  "radius-literal": {
+    "src/app.css": 1,
+    "src/modules/api/HistoryList.svelte": 1,
+    "src/modules/brokers/BrokersPage.svelte": 1,
+    "src/modules/canvas/D2Canvas.svelte": 1,
+    "src/modules/canvas/MermaidCanvas.svelte": 1,
+    "src/modules/database/ResultsGrid.svelte": 3,
+    "src/modules/git/RecoveryTools.svelte": 1,
+    "src/modules/git/RepoView.svelte": 1,
+    "src/modules/git/ReviewPanel.svelte": 1,
+    "src/modules/product/design/DeviceFrame.svelte": 1,
+    "src/modules/vault/DocsAgentsView.svelte": 8,
+    "src/modules/vault/FileViewer.svelte": 1,
+    "src/modules/vault/NoteView.svelte": 2,
+    "src/modules/vault/OpenApiView.svelte": 3,
+    "src/modules/workbench/preview/MarkdownPreview.svelte": 1,
+    "src/modules/workbench/preview/PreviewError.svelte": 1,
+    "src/modules/workflows/WorkflowsPage.svelte": 3,
+    "src/shell/Navigator.svelte": 1,
+    "src/shell/NotificationBell.svelte": 1
+  },
   "raw-set-interval": {
     "src/modules/connections/SessionNetworkStatus.svelte": 1,
     "src/modules/panels/BrowserPanel.svelte": 1
   },
+  "status-as-text": {},
+  "token-fallback": {
+    "src/lib/components/Terminal.svelte": 4,
+    "src/modules/product/design/DeviceFrame.svelte": 1
+  },
   "z-index-literal": {
-    "src/lib/components/CodeEditor.svelte": 1,
     "src/modules/agents/SplitNode.svelte": 2,
-    "src/modules/agents/TiledView.svelte": 2,
-    "src/modules/canvas/AiPromptPill.svelte": 1,
-    "src/modules/git/GraphSearchBar.svelte": 1,
-    "src/modules/git/GraphView.svelte": 2,
-    "src/modules/kubernetes/NamespacePicker.svelte": 1,
-    "src/modules/workflows/WorkflowsPage.svelte": 1
+    "src/modules/agents/TiledView.svelte": 2
   }
 }

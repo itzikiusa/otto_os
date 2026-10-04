@@ -311,8 +311,8 @@ test('shell: repo tab strip + new-tab + sub-route nav + toolbar fit', async ({ p
   // tabs and never overflows the document (it scrolls within its own strip).
   await expect(page.locator('.rv-tabs')).toBeVisible({ timeout: 15_000 });
   expect(await page.locator('.rv-tabs .rv-tab').count()).toBeGreaterThanOrEqual(4);
-  // Toolbar (Fetch/Pull/Push/…) is present in the header.
-  await expect(page.locator('.rv-head .toolbar')).toBeVisible();
+  // The git verbs (Fetch/Pull/Push/…) live in the page header's actions.
+  await expect(page.locator('.ph-actions').first()).toBeVisible();
   await expectFitsWidth(page);
 });
 

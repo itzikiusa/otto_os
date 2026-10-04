@@ -10,6 +10,7 @@
   import { git } from '../../lib/stores/git.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
 
   interface Props {
     /** Open a repo as a tab (parent loads/wires the active RepoView). */
@@ -72,34 +73,25 @@
     );
   }
 
-  /** Tablist keys: Enter/Space open, ←/→ (Home/End) move + open, Delete or
-   *  Backspace closes (focus moves to the neighbour). RTL flips the arrows. */
-  function onTabKey(e: KeyboardEvent, id: string): void {
-    const ids = openRepos.map((r) => r.id);
-    const i = ids.indexOf(id);
-    const focusTab = (tid: string | undefined) => {
-      if (!tid) return;
-      onopen(tid);
-      queueMicrotask(() =>
-        listEl?.querySelector<HTMLElement>(`[data-repo-id="${CSS.escape(tid)}"]`)?.focus(),
-      );
-    };
+  /** Tablist keys: Enter/Space open, Delete or Backspace closes (focus moves to
+   *  the neighbour); ←/→ (Home/End, RTL-aware) move + open via the shared
+   *  roving-tabindex handler. */
+  function onRepoTabKey(e: KeyboardEvent, id: string): void {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       onopen(id);
-    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-      e.preventDefault();
-      const rtl = listEl ? getComputedStyle(listEl).direction === 'rtl' : false;
-      const fwd = e.key === (rtl ? 'ArrowLeft' : 'ArrowRight');
-      focusTab(ids[(i + (fwd ? 1 : -1) + ids.length) % ids.length]);
-    } else if (e.key === 'Home' || e.key === 'End') {
-      e.preventDefault();
-      focusTab(e.key === 'Home' ? ids[0] : ids[ids.length - 1]);
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
+      const ids = openRepos.map((r) => r.id);
+      const i = ids.indexOf(id);
       const next = ids[i + 1] ?? ids[i - 1];
       git.closeRepoTab(id);
-      if (next) focusTab(next);
+      if (next) {
+        onopen(next);
+        queueMicrotask(() => listEl?.querySelector<HTMLElement>(`[data-repo-id="${CSS.escape(next)}"]`)?.focus());
+      }
+    } else {
+      onTabKey(e);
     }
   }
 
@@ -163,7 +155,7 @@
       draggable="true"
       title={branchOf(r.id) ? `${r.path}\n${branchOf(r.id)}` : r.path}
       onclick={() => onopen(r.id)}
-      onkeydown={(e) => onTabKey(e, r.id)}
+      onkeydown={(e) => onRepoTabKey(e, r.id)}
       ondragstart={(e) => onDragStart(e, r.id)}
       ondragover={(e) => onDragOver(e, r.id)}
       ondragleave={() => onDragLeave(r.id)}
@@ -394,7 +386,7 @@
   .embedded .git-tab {
     border: 1px solid transparent;
     border-radius: var(--radius-s);
-    padding: 4px 6px 4px 9px;
+    padding-block: 4px; padding-inline: 9px 6px;
   }
   .embedded .git-tab.active {
     background: var(--surface-2);
@@ -420,7 +412,7 @@
     }
     .git-tab {
       max-width: 200px;
-      padding: 8px 6px 8px 12px;
+      padding-block: 8px; padding-inline: 12px 6px;
       font-size: var(--fs-m);
       flex-shrink: 0;
     }

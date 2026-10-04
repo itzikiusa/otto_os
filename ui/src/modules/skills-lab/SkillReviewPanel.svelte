@@ -638,7 +638,7 @@
   .lr-notes { color: var(--text-dim); }
   .lr-findings { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
   .lr-agents-sec h4, .lr-summary h5 { margin: 8px 0 4px; }
-  .lr-plan { margin: 4px 0 8px 18px; font-size: var(--fs-s); line-height: 1.5; }
+  .lr-plan { margin-block: 4px 8px; margin-inline: 18px 0; font-size: var(--fs-s); line-height: 1.5; }
 
   .rp-status-pill { display: inline-flex; align-items: center; }
   .rp-finding { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 6px; font-size: var(--fs-xs); line-height: 1.4; }

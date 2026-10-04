@@ -22,11 +22,11 @@
     isUlid,
   } from './lib';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { now } from '../../lib/stores/now.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
   import { openExternal } from '../../lib/external';
   import { copyText } from '../../lib/clipboard';
   import { sentenceCase, type Tone } from '../../lib/status';
@@ -136,29 +136,22 @@
     }
   }
 
-  async function decide(aid: string, decision: 'approved' | 'rejected'): Promise<void> {
-    // Reject asks why (optional) — the note is recorded with the decision.
-    let note: string | undefined;
-    if (decision === 'rejected') {
-      const r = await confirmer.promptText('Why are you rejecting this? (optional — recorded with the decision)', {
-        title: 'Reject approval',
-        confirmLabel: 'Reject',
-        placeholder: 'Reason',
-        danger: true,
-      });
-      if (r === null) return;
-      note = r.trim() || undefined;
-    }
+  /** Which approval is mid-decision, and which way. */
+  let deciding = $state<{ id: string; kind: 'approve' | 'deny' } | null>(null);
+  async function decide(aid: string, decision: 'approved' | 'rejected', note?: string | null): Promise<void> {
     busy = true;
+    deciding = { id: aid, kind: decision === 'approved' ? 'approve' : 'deny' };
     try {
-      await missionControlApi.decideApproval(wsId, aid, { decision, note });
+      // The wire keeps `rejected`; the UI says Deny (one queue vocabulary).
+      await missionControlApi.decideApproval(wsId, aid, { decision, note: note?.trim() || undefined });
       await load();
       onChange?.();
-      toasts.success(decision === 'approved' ? 'Approved' : 'Rejected');
+      toasts.success(decision === 'approved' ? 'Approved' : 'Denied');
     } catch (e) {
       toasts.error("Couldn't record the decision", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
     } finally {
       busy = false;
+      deciding = null;
     }
   }
 
@@ -245,7 +238,7 @@
       <div class="d-banner">
         <StatusBadge status={workStatus(detail.status)} />
         <span class="chip-risk" style="--c:{riskColor(detail.risk_level)}">{RISK_LABEL[detail.risk_level]} risk</span>
-        {#if detail.needs_approval}<span class="badge-approve">Needs approval ({detail.pending_approvals})</span>{/if}
+        {#if detail.needs_approval}<span class="chip warn">Needs approval ({detail.pending_approvals})</span>{/if}
         <span class="grow"></span>
         {#if detail.kind === 'session' || detail.kind === 'external_trigger'}
           <button class="btn small" onclick={openSession}><Icon name="terminal" size={12} />Open session</button>
@@ -298,17 +291,24 @@
             {#each detail.approvals as a (a.id)}
               <li class="ap" class:pending={a.status === 'pending'}>
                 <div class="ap-main">
-                  <StatusBadge tone={APPROVAL_TONE[a.status] ?? 'neutral'} label={sentenceCase(a.status)} />
+                  <StatusBadge tone={APPROVAL_TONE[a.status] ?? 'neutral'} label={a.status === 'rejected' ? 'Denied' : sentenceCase(a.status)} />
                   <span class="small ap-reason" title={a.reason ?? undefined}>{a.reason ?? 'Approval requested'}</span>
                   <span class="dim small" title={a.requested_by}>· {who(a.requested_by)}</span>
                 </div>
                 {#if a.status === 'pending'}
-                  <div class="ap-actions">
-                    <button class="btn small danger" disabled={busy} onclick={() => decide(a.id, 'rejected')}>Reject…</button>
-                    <button class="btn small primary" disabled={busy} onclick={() => decide(a.id, 'approved')}>Approve</button>
-                  </div>
+                  <ApprovalActions
+                    busy={deciding?.id === a.id ? deciding.kind : null}
+                    disabled={busy}
+                    denyTarget="this work item gate"
+                    onapprove={() => decide(a.id, 'approved')}
+                    ondeny={(reason) => decide(a.id, 'rejected', reason)}
+                  />
                 {:else if a.decided_by}
-                  <span class="dim small" title={a.decided_by}>{sentenceCase(a.status)} by {who(a.decided_by)}</span>
+                  <ApprovalActions
+                    onapprove={() => {}}
+                    ondeny={() => {}}
+                    decided={{ outcome: a.status === 'approved' ? 'approved' : 'denied', by: who(a.decided_by), at: a.decided_at, note: a.decision_note }}
+                  />
                 {/if}
               </li>
             {/each}
@@ -398,7 +398,7 @@
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    padding: 12px 10px 12px 14px;
+    padding-block: 12px; padding-inline: 14px 10px;
     border-bottom: 1px solid var(--border);
   }
   .d-title {
@@ -552,15 +552,6 @@
     background: color-mix(in srgb, var(--c) 14%, transparent);
     white-space: nowrap;
   }
-  .badge-approve {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: var(--warning-soft);
-    color: var(--warning);
-    border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
-  }
   .approvals,
   .edges,
   .artifacts,
@@ -598,11 +589,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .ap-actions {
-    display: flex;
-    gap: 6px;
-    flex: 0 0 auto;
   }
   .ap-req {
     display: flex;

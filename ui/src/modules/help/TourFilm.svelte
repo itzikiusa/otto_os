@@ -395,7 +395,7 @@
   .markers {
     position: relative;
     height: 8px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
   }
   .marker {

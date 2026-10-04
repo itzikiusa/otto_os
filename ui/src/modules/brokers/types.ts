@@ -1,6 +1,8 @@
 // Module-local types for the B6 broker operator workflow features.
 // Do NOT import from or add to ui/src/lib/api/types.ts.
 
+import { nextTabIndex } from '../../lib/tabKeys';
+
 // ---- Schema registry version history & compat --------------------------------
 
 export interface SchemaVersion {
@@ -92,15 +94,11 @@ export const CLUSTER_VIEWS: { id: ClusterView; label: string }[] = [
 /** ←/→/Home/End across a view tablist: returns the next view (and moves focus
  *  to its tab), or null when the key isn't a tablist key. */
 export function clusterViewKey(e: KeyboardEvent, current: ClusterView): ClusterView | null {
-  const i = CLUSTER_VIEWS.findIndex((v) => v.id === current);
-  let j = -1;
-  if (e.key === 'ArrowRight') j = (i + 1) % CLUSTER_VIEWS.length;
-  else if (e.key === 'ArrowLeft') j = (i - 1 + CLUSTER_VIEWS.length) % CLUSTER_VIEWS.length;
-  else if (e.key === 'Home') j = 0;
-  else if (e.key === 'End') j = CLUSTER_VIEWS.length - 1;
+  const list = e.currentTarget as HTMLElement | null;
+  const rtl = list ? getComputedStyle(list).direction === 'rtl' : false;
+  const j = nextTabIndex(e.key, CLUSTER_VIEWS.findIndex((v) => v.id === current), CLUSTER_VIEWS.length, { rtl });
   if (j < 0) return null;
   e.preventDefault();
-  const list = e.currentTarget as HTMLElement | null;
   queueMicrotask(() => list?.querySelectorAll<HTMLElement>('[role=tab]')[j]?.focus());
   return CLUSTER_VIEWS[j].id;
 }

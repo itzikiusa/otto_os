@@ -82,7 +82,7 @@
     border-radius: var(--radius-s);
   }
   .textnode.selected {
-    outline: 1px solid var(--accent);
+    outline: 1px solid var(--accent-text);
   }
   .body {
     width: 100%;
@@ -95,7 +95,7 @@
     height: 100%;
     resize: none;
     border: none;
-    outline: 1px solid var(--accent);
+    outline: 1px solid var(--accent-text);
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);

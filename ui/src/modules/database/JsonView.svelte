@@ -359,7 +359,7 @@
   }
   .jrec-copy:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    background: var(--hover);
   }
   .jrec .alt-json {
     padding: 6px 8px;

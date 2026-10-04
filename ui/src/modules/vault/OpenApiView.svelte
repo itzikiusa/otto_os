@@ -306,7 +306,7 @@
   .servers code {
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     padding: 2px 8px;
     font-size: var(--fs-s);
   }
@@ -412,7 +412,7 @@
   }
   .pname.req::after {
     content: '*';
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .ptype {
     color: var(--accent-text);
@@ -439,8 +439,8 @@
     font-size: var(--fs-s);
     margin-inline-end: 8px;
   }
-  .resp .code.ok { color: var(--status-working); }
-  .resp .code.bad { color: var(--status-exited); }
+  .resp .code.ok { color: var(--success); }
+  .resp .code.bad { color: var(--danger); }
   .rdesc {
     color: var(--text-dim);
     font-size: var(--fs-s);

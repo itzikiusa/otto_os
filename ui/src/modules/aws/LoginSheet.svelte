@@ -90,6 +90,6 @@
     color: var(--text-dim);
   }
   .status.ok {
-    color: var(--status-working);
+    color: var(--success);
   }
 </style>

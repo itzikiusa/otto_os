@@ -282,7 +282,7 @@
   .custom-list {
     list-style: none;
     margin: 0 0 8px;
-    padding: 4px 8px 4px 14px;
+    padding-block: 4px; padding-inline: 14px 8px;
     max-width: var(--settings-col);
     box-sizing: border-box;
   }

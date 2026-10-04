@@ -283,7 +283,7 @@
   }
   .ab-err {
     font-size: var(--fs-xs);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .ab-body {
     width: 100%;

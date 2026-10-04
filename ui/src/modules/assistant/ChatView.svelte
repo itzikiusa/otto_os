@@ -8,10 +8,11 @@
   // (threadCards → buildTimeline); each reply carries who wrote it.
   import { setContext, tick, untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import AgentChip from '../../lib/components/AgentChip.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import StatusDot from '../../lib/components/StatusDot.svelte';
+  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import TurnItem from '../agents/conversation/TurnItem.svelte';
   import { stableGroupTurns, type RenderItem } from '../agents/conversation/format';
   import { CONV_CTX, type ConvContext } from '../agents/conversation/context';
@@ -156,7 +157,7 @@
                 <div class="who">
                   <span class="avatar" aria-hidden="true"><Icon name="assistant" size={12} /></span>
                   <strong>Otto</strong>
-                  <span class="chip agent-label" title="Written by an agent — review before you apply it">Agent</span>
+                  <AgentChip />
                   <span class="badge" data-testid="provider-badge" title={`Written by ${w.label}`}><ProviderIcon provider={w.provider} size={12} />{w.label}</span>
                   {#if m.item.ts}<span class="dim">· <time datetime={m.item.ts} title={new Date(m.item.ts).toLocaleString()}>{clock(m.item.ts)}</time></span>{/if}
                 </div>
@@ -196,7 +197,7 @@
         {/each}
         {#if working}
           <p class="working" role="status">
-            <StatusDot status="working" size={7} /> Otto is working…
+            <LiveWorkingDot size={7} label="Otto is working…" />
           </p>
         {/if}
       {/if}
@@ -282,11 +283,6 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text);
-  }
-  .agent-label {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    letter-spacing: 0.04em;
   }
   .badge {
     display: inline-flex;

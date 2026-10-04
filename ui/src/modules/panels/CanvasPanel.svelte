@@ -423,7 +423,7 @@
     background: var(--surface-2);
   }
   .ref-body:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 2px;
     border-radius: var(--radius-s);
   }
@@ -473,7 +473,7 @@
   }
 
   .ref-preview {
-    margin: 2px 0 6px 18px;
+    margin-block: 2px 6px; margin-inline: 18px 0;
     padding: 8px;
     background: var(--surface-2);
     border-radius: var(--radius-s);

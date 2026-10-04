@@ -61,6 +61,7 @@ Rules:
 | `--hover` | Hover wash on rows and ghost controls (7% of `--text`, works on any surface) |
 | `--scrim` | The dimmed backdrop behind a `Modal`, `Drawer` or the phone "More" sheet (per scheme) |
 | `--scrim-soft` | A lighter backdrop for the command palette, which should keep the page legible |
+| `--scrim-media` | The veil behind a caption or control sitting on an image, video or 3D viewport (same in both schemes; text on it is white) |
 
 **Text**
 
@@ -155,8 +156,8 @@ UI graphics.
 | Pair | Native light | Native dark | Pro Dark | Warm light | Warm dark |
 |---|---|---|---|---|---|
 | `--text` on `--bg` | 15.5 | 14.9 | 14.8 | 10.8 | 13.0 |
-| `--text-dim` on `--surface-2` | 5.26 | 4.84 | 5.40 | 4.82 | 4.65 |
-| `--text-dim` on `--surface-3` | 4.81 | **4.29** | 4.83 | **4.40** | **4.18** |
+| `--text-dim` on `--surface-2` | 5.26 | 5.64 | 5.40 | 5.69 | 5.44 |
+| `--text-dim` on `--surface-3` | 4.81 | 5.00 | 4.83 | 5.19 | 4.88 |
 | `--accent-text` on `--bg` | 6.09 | 7.08 | 6.56 | 5.22 | 8.15 |
 | `--accent-contrast` on `--accent-solid` | 4.94 | 4.94 | 6.38 | 4.76 | 6.83 |
 | `--danger` on `--surface-2` | 5.75 | 5.58 | 6.57 | 5.60 | 5.70 |
@@ -167,10 +168,17 @@ UI graphics.
 
 Rules that follow from the table:
 
-- **`--text-dim` is not readable on `--surface-3`.** It falls below 4.5 in three
-  of five combinations. On `--surface-3`, use `--text`. (Native light's
-  `--text-dim` moved from `#69696e` to `#636368` in the ambient pass so dim text
-  clears AA on the sidebar glass; that also lifted it on `--surface-3`.)
+- **`--text-dim` clears AA on `--surface-3` in every theme.** Native dark
+  (`#9f9fa6` → `#acacb3`), Warm light (`#6b6760` → `#605c56`) and Warm dark
+  (`#a09a8e` → `#ada79b`) were nudged for it; it stays far dimmer than `--text`
+  (about 10:1 or more on the same surface), so the hierarchy still reads.
+  (Native light's `--text-dim` moved from `#69696e` to `#636368` in the ambient
+  pass so dim text clears AA on the sidebar glass.)
+- **Code colours are tokens.** Syntax tokens (`--code-keyword`, `--code-string`,
+  `--code-number`, `--code-builtin`) and the find-in-page highlights
+  (`--code-find`, `--code-find-current`, `--code-find-text`) are each ≥ 4.5:1 on
+  `--surface`, `--surface-2` and `--surface-3` of their scheme. Never write a
+  hex in a highlight rule.
 - Tones are safe on `--bg`, `--surface`, `--surface-2`, `--surface-3` and their
   own soft tint. Don't put a tone on another tone's tint (for example
   `--warning` text on `--danger-soft`).
@@ -225,6 +233,7 @@ Two families only:
 | `--fs-l` | 15 | The page title (`PageHeader` h1), page-level empty-state title |
 | `--fs-xl` | 18 | Hero numbers in KPI tiles, rare in-content headings |
 | `--fs-2xl` | 22 | Dashboard hero figures only |
+| `--fs-hero` | 28 | The wordmark on the boot, sign-in and onboarding screens only — never body or page titles |
 
 Rules:
 
@@ -496,6 +505,13 @@ Rules:
   the global reduced-motion override leaves a live dot "on". Under reduced
   motion `.spinner` becomes a static dotted ring, so "busy" is still shown
   without rotation.
+- **Entrances and timing.** `--dur-fast` (130 ms) is the hover/press duration,
+  `--dur-enter` (160 ms) the entrance of a floating layer, `--ease-out` the
+  easing. `app.css` ships `otto-fade-in` (opacity) and `otto-pop-in` (opacity +
+  ≤ 8 px rise) on those tokens; use them rather than a private keyframe.
+  `scripts/ui-guards.mjs` (`private-keyframes`) ratchets new `@keyframes` in
+  module styles; keep a local one only when the motion is genuinely different
+  (a blinking cursor, a sweep bar).
 
 ---
 

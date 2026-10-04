@@ -621,13 +621,13 @@
     color: var(--accent-text);
     border-radius: 999px;
     padding: 1px 8px;
-    font-size: 0.85em;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .read :global(div.note-embed) {
     border: 1px solid var(--border);
     border-inline-start: 3px solid var(--accent);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     padding: 8px 12px;
     margin: 8px 0;
   }
@@ -642,7 +642,7 @@
   .read :global(blockquote.callout) {
     border-inline-start: 3px solid var(--accent);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     padding: 8px 12px;
     margin: 8px 0;
   }
@@ -671,7 +671,7 @@
   }
   .read :global(div.diagram-block) {
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: var(--radius-m);
     padding: 14px;
     margin: 10px 0;
     background: var(--surface-2);
@@ -689,7 +689,7 @@
     height: auto;
   }
   .read :global(div.diagram-error) {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
     margin-bottom: 8px;
   }

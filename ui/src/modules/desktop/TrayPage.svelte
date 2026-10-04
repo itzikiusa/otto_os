@@ -9,7 +9,11 @@
   // The assistant's own threads/reminders arrive with the assistant API.
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  // StatusDot + sessionState directly, not LiveWorkingDot: the tray is in the
+  // entry bundle and LiveWorkingDot's default reads the main window's events
+  // client, which would drag the whole events/store graph into every window.
   import StatusDot from '../../lib/components/StatusDot.svelte';
+  import { sessionState } from '../../lib/status';
   import { api, isAbortError } from '../../lib/api/client';
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
@@ -56,6 +60,10 @@
     'mcp_approval_changed',
   ] as const;
 
+  /** The tray's own events socket is up (drives the stale-aware live dots). */
+  let sockUp = $state(false);
+  /** The "working" dot goes stale (Reconnecting…) while the tray socket is down. */
+  const workingDot = $derived(sessionState(null, 'working', false, { stale: !sockUp }));
   let workspaces: WorkspaceWithRole[] | null = $state(null);
   let working: Session[] | null = $state(null);
   let approvals: McpApproval[] | null = $state(null);
@@ -202,6 +210,9 @@
     if (auth.phase !== 'ready') return;
     const sock = new TopicSocket(TOPICS);
     sock.start();
+    // The tray has its own socket — its dots go stale when THAT one drops.
+    sockUp = sock.registry.connected();
+    const offConn = sock.registry.onConnection((c) => (sockUp = c));
     // Hidden most of its life, yet its counts drive the menu-bar glyph: with
     // the socket down it keeps the old cadence while hidden (`hidden`).
     const q = (on: readonly string[], run: (s: AbortSignal) => Promise<boolean>) =>
@@ -218,6 +229,7 @@
     pollers = ps;
     return () => {
       for (const p of ps) p.stop();
+      offConn();
       sock.stop();
       if (pollers === ps) pollers = [];
     };
@@ -244,7 +256,7 @@
   <header class="head">
     <span class="brand"><Icon name="sparkle" size={14} /> Otto</span>
     {#if running.length > 0}
-      <span class="pill"><StatusDot status="working" size={6} /> {running.length} running</span>
+      <span class="pill"><StatusDot state={workingDot} size={6} /> {running.length} running</span>
     {/if}
   </header>
 
@@ -294,7 +306,7 @@
         <h2 id="tray-running">Running{running.length ? ` · ${running.length}` : ''}</h2>
         {#each running as r (r.session.id)}
           <button class="row" onclick={() => open(`agents/${r.session.id}`)} title={r.session.title}>
-            <span class="row-icon"><StatusDot status="working" size={7} /></span>
+            <span class="row-icon"><StatusDot state={workingDot} size={7} /></span>
             <span class="row-text">
               <span class="row-title">{r.session.title}</span>
               {#if r.workspace}<span class="row-sub">{r.workspace}</span>{/if}
@@ -435,7 +447,7 @@
   }
   .row:focus-visible,
   .ask:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .row-icon {

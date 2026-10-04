@@ -10,6 +10,8 @@
   // The left pane only lists things; whatever you EDIT (a request, the
   // environments, an automation) opens in the main area. A brand-new
   // workspace shows an onboarding empty state instead of an empty editor.
+  import { paneResizer, pxWide, RESIZE_TITLE, RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
+  import { onTabKey } from '../../lib/tabKeys';
   import { untrack } from 'svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -56,14 +58,6 @@
     side = s;
     try { localStorage.setItem(SIDE_KEY, s); } catch { /* per-device convenience only */ }
   }
-  function onSideKey(e: KeyboardEvent, i: number): void {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
-    e.preventDefault();
-    const j = (i + (e.key === 'ArrowRight' ? 1 : SIDES.length - 1)) % SIDES.length;
-    setSide(SIDES[j].id);
-    (e.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLElement>('[role=tab]')[j]?.focus();
-  }
-
   // What the main area shows.
   type View = { kind: 'request' } | { kind: 'environments'; envId: Id | null } | { kind: 'automation'; id: Id };
   let view = $state<View>({ kind: 'request' });
@@ -223,18 +217,6 @@
       onEnd: () => ui.setApiBuilderHeight(ui.apiBuilderHeight),
     });
   }
-  function resizeKey(e: KeyboardEvent, axis: 'x' | 'y'): void {
-    const step = e.shiftKey ? 40 : 10;
-    if (axis === 'x' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-      e.preventDefault();
-      ui.setApiSideWidth(ui.apiSideWidth + (e.key === 'ArrowRight' ? step : -step));
-    } else if (axis === 'y' && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-      e.preventDefault();
-      const h = ui.apiBuilderHeight || builderEl?.offsetHeight || 300;
-      ui.setApiBuilderHeight(h + (e.key === 'ArrowDown' ? step : -step));
-    }
-  }
-
   // ── keyboard + ⌘K ─────────────────────────────────────────────────────────
   // ⌘T → new request tab and ⌘D → duplicate, instead of the global
   // new-session / split chords (which would act on the Agents page unseen).
@@ -311,9 +293,9 @@
         {#if showList}
           <aside class="api-side" style:width={viewport.isPhone ? null : `${ui.apiSideWidth}px`} aria-label="Collections, automations and history">
             <div class="segmented side-seg" role="tablist" aria-label="Show">
-              {#each SIDES as s, i (s.id)}
+              {#each SIDES as s (s.id)}
                 <button role="tab" aria-selected={side === s.id} class:active={side === s.id} tabindex={side === s.id ? 0 : -1}
-                  onclick={() => setSide(s.id)} onkeydown={(e) => onSideKey(e, i)} title={s.label}>
+                  onclick={() => setSide(s.id)} onkeydown={onTabKey} title={s.label}>
                   <span class="seg-label">{s.label}</span>
                 </button>
               {/each}
@@ -330,14 +312,18 @@
           </aside>
 
           {#if !viewport.isPhone}
-            <button
+            <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds the keys). -->
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+            <div
               class="resizer col"
+              role="separator"
+              tabindex="0"
               aria-label="Resize the sidebar"
-              title="Drag or use ←/→ to resize · double-click to reset"
+              title={RESIZE_TITLE}
               onmousedown={startSideResize}
-              onkeydown={(e) => resizeKey(e, 'x')}
               ondblclick={() => ui.setApiSideWidth(280)}
-            ></button>
+              use:paneResizer={{ value: ui.apiSideWidth, min: 220, max: 520, step: 10, bigStep: 40, onChange: (w) => ui.setApiSideWidth(w), onReset: () => ui.setApiSideWidth(280), text: pxWide }}
+            ></div>
           {/if}
         {/if}
 
@@ -389,14 +375,17 @@
                 <RequestBuilder bind:tab={builderTab} />
               </div>
               {#if !viewport.isPhone}
-                <button
+                <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+                <div
                   class="resizer row"
+                  role="separator"
+                  tabindex="0"
                   aria-label="Resize the request and response panes"
-                  title="Drag or use ↑/↓ to resize · double-click to reset"
+                  title={RESIZE_TITLE_VERTICAL}
                   onmousedown={startBuilderResize}
-                  onkeydown={(e) => resizeKey(e, 'y')}
                   ondblclick={() => ui.resetApiBuilderHeight()}
-                ></button>
+                  use:paneResizer={{ value: ui.apiBuilderHeight || builderEl?.offsetHeight || 300, min: 180, max: Math.round((typeof window === 'undefined' ? 900 : window.innerHeight) * 0.8), orientation: 'horizontal', step: 10, bigStep: 40, onChange: (h) => ui.setApiBuilderHeight(h), onReset: () => ui.resetApiBuilderHeight(), text: (v) => `${Math.round(v)} pixels tall` }}
+                ></div>
               {/if}
               <section class="resp-pane" aria-label="Response">
                 <ResponseViewer onsettings={() => (builderTab = 'settings')} />
@@ -561,7 +550,7 @@
     gap: 6px;
     min-width: 0;
     height: 30px;
-    padding: 0 6px 0 10px;
+    padding-block: 0; padding-inline: 10px 6px;
     border: none;
     background: transparent;
     color: inherit;

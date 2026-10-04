@@ -206,12 +206,10 @@
   /* Narrow panes keep the controls and "is driving …": the last-action text
      ellipsizes first, then (phone widths) the button labels go. In the side
      pane the iframe IS the viewport, so these track the pane. */
-  @media (max-width: 520px) {
+  @media (max-width: 640px) {
     .adb-last {
       display: none;
     }
-  }
-  @media (max-width: 640px) {
     .adb-btn-label {
       display: none;
     }

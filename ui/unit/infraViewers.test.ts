@@ -115,7 +115,7 @@ test('clipLongScalars cuts only >64 KiB strings and keeps untouched subtrees (SC
 });
 
 test('mergeS3Head refreshes the head and keeps the loaded pages (I9)', () => {
-  const { mergeS3Head } = loadSource(new URL('../src/modules/aws/util.ts', import.meta.url), {});
+  const { mergeS3Head } = loadSource(new URL('../src/modules/aws/util.ts', import.meta.url), { '../../lib/tabKeys': { onTabKey: () => {} } });
   const obj = (key: string, size = 1) => ({ key, size, last_modified: '2026-01-01T00:00:00Z' });
   // Loaded: page 1 (a..c) + a "Load more" page (d..f).
   const loaded = { prefixes: ['b/', 'e/'], objects: ['a', 'c', 'd', 'f'].map((k) => obj(k)) };

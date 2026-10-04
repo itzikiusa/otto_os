@@ -51,6 +51,9 @@ class SwarmStore {
   tasksByProject: Record<string, SwarmTask[]> = $state({});
   /** Raw (not deep-proxied): replaced wholesale, capped at MAX_RUNS. */
   runs: SwarmRun[] = $state.raw([]);
+  /** Cause of the last failed runs load (null = ok). A failure keeps the previous list. */
+  runsError: string | null = $state(null);
+  runsLoading = $state(false);
   /** Raw, newest-first, capped at MAX_POSTS. */
   board: SwarmMessage[] = $state.raw([]);
   /** Per-agent run stats in ONE pass per runs change (was a filter per agent
@@ -251,6 +254,7 @@ class SwarmStore {
       this.detail = null;
       this.tasksByProject = {};
       this.runs = [];
+      this.runsError = null;
       this.board = [];
       this.boardError = null;
       this.graph = null;
@@ -339,6 +343,7 @@ class SwarmStore {
     this.detail = null;
     this.tasksByProject = {};
     this.runs = [];
+    this.runsError = null;
     this.board = [];
     this.graph = null;
     this.selectedProjectId = null;
@@ -626,13 +631,18 @@ class SwarmStore {
     // `lite`: no per-run `result` blob (recruit runs keep theirs for "Hire");
     // RunInspector reads one run's result via GET /swarm/runs/{rid}.
     q.set('lite', 'true');
+    this.runsLoading = true;
     try {
       const list = await api.get<SwarmRun[]>(
         `/workspaces/${this.wsId}/swarm/runs?${q.toString()}`,
       );
       this.runs = list.length > MAX_RUNS ? list.slice(0, MAX_RUNS) : list;
-    } catch {
-      this.runs = [];
+      this.runsError = null;
+    } catch (e) {
+      // Keep the previous list: a failed refresh must not read as "No runs yet".
+      this.runsError = loadErrorText(e);
+    } finally {
+      this.runsLoading = false;
     }
   }
 

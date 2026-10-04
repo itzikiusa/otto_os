@@ -1322,7 +1322,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding: 10px 8px 10px 10px;
+    padding-block: 10px; padding-inline: 10px 8px;
     border-inline-end: 1px solid var(--border);
     min-height: 0;
   }
@@ -1392,7 +1392,7 @@
     background: var(--hover);
   }
   .pal-item:focus-visible {
-    outline: 1.5px solid var(--accent);
+    outline: 1.5px solid var(--accent-text);
     outline-offset: -1.5px;
   }
   .pal-item.on {
@@ -1519,7 +1519,7 @@
     align-items: center;
     gap: 6px;
     height: 30px;
-    padding: 0 4px 0 8px;
+    padding-block: 0; padding-inline: 8px 4px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
     cursor: grab;
@@ -1923,7 +1923,7 @@
     flex-direction: column;
   }
   .cgroup.nested {
-    padding: 4px 0 6px 10px;
+    padding-block: 4px 6px; padding-inline: 10px 0;
     border-inline-start: 2px solid var(--border-strong);
     flex: 1;
     min-width: 0;
@@ -1968,7 +1968,7 @@
     align-items: center;
     gap: 8px;
     height: 34px;
-    padding: 0 10px 0 14px;
+    padding-block: 0; padding-inline: 14px 10px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }

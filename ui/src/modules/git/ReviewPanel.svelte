@@ -522,9 +522,9 @@
       reviewGeneration++;
       review = updated;
       history = history.map((r) => (r.id === updated.id ? updated : r));
-      toasts.info('Review cancelled');
+      toasts.info('Review stopped');
     } catch (e) {
-      toasts.error('Could not cancel review', e instanceof Error ? e.message : String(e));
+      toasts.error('Could not stop the review', e instanceof Error ? e.message : String(e));
     } finally {
       if (!disposed) {
         cancelling = false;
@@ -563,7 +563,8 @@
     return `${loc}${c.body}`;
   }
 
-  async function postComment(c: ReviewComment, confirmed = false): Promise<boolean> {
+  /** `quiet` (bulk post): no per-comment toasts — the caller reports one summary. */
+  async function postComment(c: ReviewComment, confirmed = false, quiet = false): Promise<boolean> {
     if (!confirmed) {
       const ok = await confirmOutward({
         verb: 'Post to PR',
@@ -585,13 +586,13 @@
       // network, 5xx — never retried, a 5xx may have created it): the comment
       // is approved in Otto but `posted` stays false. Never report that as sent.
       if (!updated.posted) {
-        toasts.error("Couldn't post the comment", `${prWhere} refused it — it's approved in Otto but not on the PR. Check the repository's git account.`);
+        if (!quiet) toasts.error("Couldn't post the comment", `${prWhere} refused it — it's approved in Otto but not on the PR. Check the repository's git account.`);
         return false;
       }
       if (!confirmed) toasts.success('Comment posted', prWhere);
       return true;
     } catch (e) {
-      toasts.error("Couldn't post the comment", e instanceof Error ? e.message : String(e));
+      if (!quiet) toasts.error("Couldn't post the comment", e instanceof Error ? e.message : String(e));
       return false;
     } finally {
       const next = { ...actionBusy };
@@ -615,11 +616,20 @@
     postingAll = true;
     let posted = 0;
     try {
-      for (const c of drafts) if (await postComment(c, true)) posted++;
+      for (const c of drafts) if (await postComment(c, true, true)) posted++;
     } finally {
       postingAll = false;
     }
-    if (posted > 0) toasts.success(`${posted} comment${posted === 1 ? '' : 's'} posted`, prWhere);
+    const failed = drafts.length - posted;
+    if (failed === 0) toasts.success(`${posted} comment${posted === 1 ? '' : 's'} posted`, prWhere);
+    else {
+      // ONE summary instead of a toast per failure; the failed comments stay
+      // in the list (not posted) so they can be retried individually.
+      toasts.error(
+        `${failed} of ${drafts.length} comments couldn’t be posted`,
+        `${posted > 0 ? `${posted} posted. ` : ''}${prWhere} refused the rest — check the repository’s git account, then post them again.`,
+      );
+    }
   }
 
   async function declineComment(c: ReviewComment): Promise<void> {
@@ -1097,7 +1107,7 @@
         onclick={cancelReview}
         data-testid="review-cancel"
       >
-        {cancelling ? 'Cancelling…' : 'Cancel'}
+        <Icon name="stop" size={12} /> {cancelling ? 'Stopping…' : 'Stop review'}
       </button>
       <button class="btn small ghost" onclick={openConfig}><Icon name="gear" size={12} /> Configure…</button>
     </div>
@@ -1963,7 +1973,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     overflow-x: auto;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     line-height: 1.45;
   }
@@ -1986,7 +1996,7 @@
     color: var(--text-dim);
   }
   .rp-diff-target {
-    outline: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+    outline: 1px solid color-mix(in srgb, var(--accent-text) 50%, transparent);
     outline-offset: -1px;
     font-weight: 600;
   }
@@ -2102,7 +2112,7 @@
   }
   .cfg-textarea {
     resize: vertical;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     line-height: 1.5;
   }
@@ -2161,7 +2171,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 20px;
-    padding: 3px 8px 3px 10px;
+    padding-block: 3px; padding-inline: 10px 8px;
     font-size: var(--fs-xs);
   }
   .cfg-preset-name {

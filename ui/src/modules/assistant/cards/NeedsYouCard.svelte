@@ -12,7 +12,7 @@
   // A decided card stays in the thread with its outcome.
   import ActionCard from './ActionCard.svelte';
   import StatePill from './StatePill.svelte';
-  import DenySheet from './DenySheet.svelte';
+  import DenySheet from '../../../lib/components/DenySheet.svelte';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import { assistant, describeError } from '../../../lib/stores/assistant.svelte';
   import { rel } from '../../../lib/stores/now.svelte';

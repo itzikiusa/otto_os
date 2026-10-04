@@ -400,10 +400,10 @@
 <style>
   .att-panel {
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     padding: 10px 12px;
     margin-top: 12px;
-    background: var(--surface, transparent);
+    background: var(--surface);
     transition: border-color 120ms, background 120ms;
   }
   .att-panel.drag-over {
@@ -440,7 +440,7 @@
     text-align: center;
     padding: 10px 0;
     border: 1px dashed var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
   }
 
   .att-list {
@@ -450,9 +450,9 @@
   }
   .att-item {
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     padding: 8px 10px;
-    background: var(--bg, transparent);
+    background: var(--bg);
   }
   .att-meta-row {
     display: flex;
@@ -497,7 +497,7 @@
   .att-img {
     max-width: 100%;
     max-height: 200px;
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     object-fit: contain;
     display: block;
   }
@@ -508,7 +508,7 @@
     width: 100%;
     height: 100%;
     border: none;
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
   }
   .att-loading-hint {
     font-size: var(--fs-xs);
@@ -519,7 +519,7 @@
     font-size: var(--fs-xs);
     padding: 2px 8px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
@@ -570,7 +570,7 @@
     font-size: var(--fs-xs);
     padding: 2px 7px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;

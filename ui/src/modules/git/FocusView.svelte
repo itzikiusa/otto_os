@@ -819,8 +819,16 @@
     opacity: 0;
     flex-shrink: 0;
   }
-  .fx-issue:hover .fx-ext {
+  .fx-issue:hover .fx-ext,
+  .fx-issue:focus-within .fx-ext,
+  .fx-ext:focus-visible {
     opacity: 1;
+  }
+  /* No hover on touch: the external-link action stays visible. */
+  @media (hover: none) {
+    .fx-ext {
+      opacity: 1;
+    }
   }
   .fx-ext:hover {
     color: var(--accent-text);

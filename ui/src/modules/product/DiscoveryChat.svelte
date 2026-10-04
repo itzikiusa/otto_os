@@ -405,7 +405,7 @@
     margin: 0.35em 0;
   }
   :global(.bubble-body code) {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 0.88em;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     border-radius: var(--radius-s);

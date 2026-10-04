@@ -127,7 +127,7 @@
     border: none;
     background: none;
     color: var(--text);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     cursor: pointer;
   }
   .tool:hover {
@@ -166,7 +166,7 @@
     border: none;
     background: none;
     color: var(--text);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     font-size: var(--fs-m);
     cursor: pointer;
     white-space: nowrap;

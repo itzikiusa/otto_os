@@ -4,7 +4,7 @@
 import { api } from '../api/client';
 import type { BrokerCluster, ConnectionSection, Id, UpsertClusterReq } from '../api/types';
 import { ws } from './workspace.svelte';
-import { toasts } from '../toast.svelte';
+import { loadErrorText } from '../loadError';
 
 class BrokersStore {
   clusters: BrokerCluster[] = $state([]);
@@ -16,6 +16,8 @@ class BrokersStore {
   /** Clusters opened as tabs (Workbench-style), in tab order. */
   openIds: Id[] = $state([]);
   loading = $state(false);
+  /** Cause of the last failed cluster-list load (null = ok); rendered inline with Retry. */
+  loadError: string | null = $state(null);
 
   selected: BrokerCluster | null = $derived(
     this.clusters.find((c) => c.id === this.selectedId) ?? null,
@@ -30,13 +32,15 @@ class BrokersStore {
     this.loading = true;
     try {
       this.clusters = await api.get<BrokerCluster[]>(`/workspaces/${wsId}/brokers/clusters`);
+      this.loadError = null;
       // Prune tabs/selection for clusters that no longer exist.
       const exists = (id: Id) => this.clusters.some((c) => c.id === id);
       this.openIds = this.openIds.filter(exists);
       if (this.selectedId && !exists(this.selectedId)) this.selectedId = null;
       if (!this.selectedId && this.openIds.length > 0) this.selectedId = this.openIds[0];
     } catch (e) {
-      toasts.error('Failed to load clusters', String(e));
+      // Inline (LoadState + Retry), never a toast — and the previous list stays.
+      this.loadError = loadErrorText(e);
     } finally {
       this.loading = false;
     }

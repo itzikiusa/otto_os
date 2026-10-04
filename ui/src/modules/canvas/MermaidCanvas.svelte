@@ -11,6 +11,7 @@
   // source, with live preview), (3) — nothing is converted to Excalidraw; this stays
   // Mermaid. Mermaid's own renderer draws the full rich spectrum (subgraphs, classDef
   // colours, every shape). Pan/zoom the preview.
+  import { PAN_LABEL, panDelta } from './panKeys';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
@@ -192,6 +193,16 @@
     scale = ns;
   }
 
+  /** Arrow-key pan while the surface itself has focus (same state as a drag). */
+  function onSurfaceKey(e: KeyboardEvent): void {
+    const d = panDelta(e);
+    if (!d) return;
+    e.preventDefault();
+    userAdjusted = true;
+    tx -= d.dx;
+    ty -= d.dy;
+  }
+
   let dragging = $state(false);
   let lastX = 0;
   let lastY = 0;
@@ -341,12 +352,17 @@
     {/if}
 
     <div class="preview-wrap">
+      <!-- A focusable application surface: arrow keys pan it (panKeys.ts). -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <div
         class="surface"
         class:grabbing={dragging}
         role="application"
-        aria-label="Diagram — drag to pan, scroll to zoom"
+        tabindex="0"
+        aria-label={PAN_LABEL}
+        title="Drag to pan · scroll to zoom · arrow keys pan when focused (Shift = bigger steps)"
         bind:this={surface}
+        onkeydown={onSurfaceKey}
         onwheel={onWheel}
         onpointerdown={onPointerDown}
         onpointermove={onPointerMove}
@@ -505,6 +521,10 @@
     cursor: grab;
     touch-action: none;
   }
+  .surface:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
+  }
   .surface.grabbing {
     cursor: grabbing;
   }
@@ -629,7 +649,7 @@
     border-radius: 999px;
   }
   .zoombar button:hover {
-    background: color-mix(in srgb, var(--text) 8%, transparent);
+    background: var(--hover);
   }
   .zoombar .pct {
     font-size: var(--fs-s);

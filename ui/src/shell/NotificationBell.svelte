@@ -666,7 +666,7 @@
     background: var(--hover);
   }
   .nb-row:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .nb-dot {
@@ -728,7 +728,7 @@
   .nb-count {
     flex-shrink: 0;
     padding: 0 5px;
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
     font-size: var(--fs-xs);
@@ -765,7 +765,7 @@
     margin-inline-start: 41px;
     padding: 1px 4px;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--accent-text);
     font-size: var(--fs-xs);
@@ -786,7 +786,7 @@
     padding: 8px 10px;
     padding-inline-end: 64px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
     font-family: var(--font-mono);
@@ -810,7 +810,7 @@
     width: 20px;
     height: 20px;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
@@ -831,7 +831,7 @@
   }
   .nb-dismiss:focus-visible {
     opacity: 1;
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -1px;
   }
 </style>

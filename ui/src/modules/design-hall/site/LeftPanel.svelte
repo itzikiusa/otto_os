@@ -393,7 +393,7 @@
     color: var(--text-dim);
   }
   .row-main:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .name {
@@ -513,7 +513,7 @@
     box-shadow: var(--shadow);
   }
   .tile:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .tile:disabled {

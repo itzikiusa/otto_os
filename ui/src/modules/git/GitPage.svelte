@@ -6,6 +6,7 @@
   // via the git store). PR detail (#/git/:id/pr/:n) is still routed; a plain
   // #/git/:id/:tab deep-link opens that repo as a tab.
   import { untrack } from 'svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { GitAccount, GitProviderKind, Repo, RemoteRepoSummary } from '../../lib/api/types';
@@ -15,6 +16,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import GitTabs from './GitTabs.svelte';
   import RepoView from './RepoView.svelte';
+  import GitToolbar from './GitToolbar.svelte';
+  import { gitBridge } from './gitBridge.svelte';
   import { graphCache } from './graph-cache';
   import FocusView from './FocusView.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -37,6 +40,8 @@
 
   // The active repo is driven by the tab store, not the route.
   const activeRepo = $derived(git.allRepos.find((r) => r.id === git.activeRepoId) ?? null);
+  const activeStatus = $derived(activeRepo ? (git.statusById[activeRepo.id] ?? null) : null);
+  let repoView = $state<{ openMoreMenu: (e: MouseEvent) => void } | undefined>();
   const prRepo = $derived(git.allRepos.find((r) => r.id === routeRepoId) ?? null);
 
   // Focus view (my PRs + my Jira work) shown from the landing when no repo tab
@@ -54,21 +59,6 @@
   let busy = $state(false);
   let pickerOpen = $state(false);
 
-  /** ←/→ (Home/End) move between the view tabs, like any tablist. */
-  function onTabKey(e: KeyboardEvent): void {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
-    const list = (e.currentTarget as HTMLElement).closest<HTMLElement>('[role="tablist"]');
-    if (!list) return;
-    const btns = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
-    const i = btns.indexOf(document.activeElement as HTMLButtonElement);
-    if (i < 0) return;
-    e.preventDefault();
-    const rtl = getComputedStyle(list).direction === 'rtl';
-    const fwd = e.key === (rtl ? 'ArrowLeft' : 'ArrowRight');
-    const next = e.key === 'Home' ? 0 : e.key === 'End' ? btns.length - 1 : (i + (fwd ? 1 : -1) + btns.length) % btns.length;
-    btns[next].focus();
-    btns[next].click();
-  }
 
   // Clone destination dir — REMEMBERED across sessions so the user never has to
   // re-pick it (persisted to localStorage; defaults to the last-used location).
@@ -329,7 +319,30 @@
         <GitTabs embedded onopen={openRepo} onadd={(mode) => { addMode = mode; addOpen = true; }} />
       {/snippet}
       {#snippet actions()}
-        {#if !activeRepo && !landingFocus && git.allRepos.length > 0}
+        {#if activeRepo}
+          {@const repoId = activeRepo.id}
+          <!-- The repo's verbs live in the header (not a second toolbar row under
+               it); they collapse into ⋯ by data-overflow when the bar is tight. -->
+          {#if activeStatus}
+            <GitToolbar
+              inHeader
+              {repoId}
+              status={activeStatus}
+              onstatus={(s) => git.setStatus(repoId, s)}
+              onrefresh={() => gitBridge.refreshGraph(repoId)}
+            />
+          {/if}
+          <button
+            class="icon-btn"
+            data-keep
+            data-icon="more"
+            data-label="More repository actions"
+            title="More repository actions"
+            aria-label="More repository actions"
+            aria-haspopup="menu"
+            onclick={(e) => repoView?.openMoreMenu(e)}
+          ><Icon name="more" size={16} /></button>
+        {:else if !landingFocus && git.allRepos.length > 0}
           <button class="btn ghost" data-icon="zap" onclick={() => (landingFocus = true)} title="Your pull requests and Jira work across repositories">
             <Icon name="zap" size={14} /> Focus
           </button>
@@ -347,6 +360,8 @@
             repo={activeRepo}
             tab={git.subTabFor(activeRepo.id)}
             embedded
+            hostActions
+            bind:this={repoView}
             onTab={(t) => git.setSubTab(activeRepo.id, t)}
             onopenrepo={openRepo}
             onaddrepo={(mode) => { addMode = mode; addOpen = true; }}

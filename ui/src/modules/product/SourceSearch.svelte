@@ -333,7 +333,7 @@
     width: 100%;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
     padding: 4px 8px;

@@ -200,6 +200,6 @@
   }
   .ve-err {
     font-size: var(--fs-xs);
-    color: var(--status-exited);
+    color: var(--danger);
   }
 </style>

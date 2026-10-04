@@ -187,6 +187,28 @@
     showReport();
   }
 
+  // Stop the in-flight run: the requests already sent stay sent, the remaining
+  // steps never fire — so it confirms first, and a failure says so.
+  let stopping = $state(false);
+  async function stopRun(runId: Id): Promise<void> {
+    if (stopping) return;
+    const ok = await confirmer.ask('Stop this run? Steps that already ran stay run; the remaining steps won’t be sent.', {
+      title: 'Stop this run?',
+      confirmLabel: 'Stop run',
+      cancelLabel: 'Keep running',
+    });
+    if (!ok) return;
+    stopping = true;
+    try {
+      await apiClient.cancelAutomationRun(runId);
+      await apiClient.loadAutomationRuns(automationId);
+    } catch (e) {
+      toasts.error('Couldn’t stop the run', e instanceof Error ? e.message : String(e));
+    } finally {
+      stopping = false;
+    }
+  }
+
   // The report sits below the steps: bring it into view when a run finishes
   // (or from the header's result chip) so a Run never ends off-screen.
   let reportEl = $state<HTMLElement | null>(null);
@@ -241,7 +263,7 @@
         <button class="icon-btn" onclick={menu} aria-label="Automation options" title="Automation options"><Icon name="more" size={14} /></button>
         <button class="btn small" onclick={() => void save()} disabled={!canEdit || !dirty || apiClient.running}>Save</button>
         {#if runDetails?.status === 'running' && runDetails.automation_id === automationId}
-          <button class="btn small" onclick={async () => { await apiClient.cancelAutomationRun(runDetails!.id); await apiClient.loadAutomationRuns(automationId); }}>Cancel run</button>
+          <button class="btn small" onclick={() => void stopRun(runDetails!.id)} disabled={stopping} data-testid="automation-stop"><Icon name="stop" size={12} />{stopping ? 'Stopping…' : 'Stop run'}</button>
         {/if}
         <button class="btn small primary" onclick={run} disabled={!canEdit || steps.length === 0 || apiClient.running} title={steps.length === 0 ? 'Add a step first' : 'Save and run every step'}>
           <Icon name="play" size={12} />{apiClient.running ? 'Running…' : 'Run'}

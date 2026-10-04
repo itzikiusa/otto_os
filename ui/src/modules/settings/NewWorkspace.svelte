@@ -104,7 +104,7 @@
     font-family: var(--font-mono);
     font-size: 11px;
     padding: 0 3px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
   }
 </style>

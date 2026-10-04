@@ -174,5 +174,5 @@
   .error { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; padding: 8px 12px; border-radius: var(--radius-s); background: var(--danger-soft); color: var(--text); font-size: var(--fs-s); overflow-wrap: anywhere; }
   .revision-detail { min-width: 0; overflow: auto; } .actions { margin-bottom: 12px; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 500px; overflow: auto; font-size: var(--fs-s); }
-  @media (max-width: 700px) { .history-layout { grid-template-columns: minmax(0, 1fr); } nav { max-height: 240px; overflow: auto; } }
+  @media (max-width: 640px) { .history-layout { grid-template-columns: minmax(0, 1fr); } nav { max-height: 240px; overflow: auto; } }
 </style>

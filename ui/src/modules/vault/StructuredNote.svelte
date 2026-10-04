@@ -159,7 +159,7 @@
   }
   .status { text-transform: capitalize; }
   .op { font-family: var(--font-mono); font-size: var(--fs-s); overflow-wrap: anywhere; }
-  .method { font-weight: 700; color: var(--info); }
+  .method { font-weight: 600; color: var(--info); }
   .m-post { color: var(--success); } .m-delete { color: var(--danger); } .m-put, .m-patch { color: var(--warning); }
   .facts { display: grid; gap: 4px; margin: 10px 0 0; }
   .facts div { display: flex; gap: 10px; min-width: 0; }
@@ -188,5 +188,5 @@
   .lnkchip:hover:not(:disabled) { background: var(--hover); }
   .lnkchip.unresolved { color: var(--text-dim); border-style: dashed; cursor: default; }
   .dim { color: var(--text-dim); font-size: var(--fs-xs); margin: 0; }
-  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 1px; }
 </style>

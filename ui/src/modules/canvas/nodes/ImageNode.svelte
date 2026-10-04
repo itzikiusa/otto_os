@@ -74,7 +74,7 @@
     place-items: center;
   }
   .image.selected {
-    outline: 1px solid var(--accent);
+    outline: 1px solid var(--accent-text);
   }
   img {
     width: 100%;

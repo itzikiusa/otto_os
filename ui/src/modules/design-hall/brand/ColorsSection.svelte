@@ -225,7 +225,7 @@
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
   }
   .pick:focus-within {
-    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    outline: 2px solid color-mix(in srgb, var(--accent-text) 70%, transparent);
     outline-offset: 1px;
   }
   .pick input {

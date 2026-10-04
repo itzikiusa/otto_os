@@ -403,7 +403,7 @@
   }
   .section-title {
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.07em;
     color: var(--text-dim);

@@ -132,7 +132,7 @@
     font-size: var(--fs-m);
   }
   .srow:hover {
-    background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+    background: var(--hover);
   }
   .cell {
     overflow: hidden;

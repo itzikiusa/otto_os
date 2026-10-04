@@ -459,6 +459,7 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘U / ⌘⇧U', label: 'Update all agent CLIs (asks first; not in a text field)' },
       { keys: '⌘⇧S', label: 'Snip — capture screen region & annotate' },
       { keys: '⌘⇧R', label: 'Hard reload — refresh UI (sessions kept)' },
+      { keys: '⌘⇧N', label: 'New window (desktop app: File ▸ New Window)' },
       { keys: '⌘,', label: 'Settings' },
       { keys: '?', label: 'Keyboard shortcuts (this sheet)' },
     ],
@@ -469,6 +470,8 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘T', label: 'New session' },
       { keys: '⌘W', label: 'Close tab' },
       { keys: '⌘⇧T', label: 'Reopen closed tab' },
+      { keys: '⌃⇧T / ⌃⇧W', label: 'New session / close tab — aliases for ⌘T / ⌘W when Otto runs in a browser tab' },
+      { keys: '⌘⇧C', label: 'Flip an agent session between Terminal and Chat' },
       { keys: '⌃Tab', label: 'Next tab' },
       { keys: '⌃⇧Tab', label: 'Previous tab' },
       { keys: '⌘]', label: 'Next session (not in a code editor)' },
@@ -492,6 +495,24 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘T', label: 'New request tab (instead of a new session)' },
       { keys: '⌘D', label: 'Duplicate the request (instead of a split)' },
     ],
+  },
+  {
+    category: 'Vault (on the Vault page)',
+    bindings: [
+      { keys: '⌘O', label: 'Open or switch vault' },
+      { keys: '⌘N', label: 'New note' },
+    ],
+  },
+  {
+    category: 'Database (on the Database page)',
+    bindings: [
+      { keys: '⌘B', label: 'Collapse or restore the schema sidebar' },
+      { keys: '⌥⌘V', label: 'Paste from the clipboard ring (copies made in Otto)' },
+    ],
+  },
+  {
+    category: 'Browser (live tab)',
+    bindings: [{ keys: '⌘R', label: 'Reload the page (instead of reloading Otto)' }],
   },
   {
     category: 'View',

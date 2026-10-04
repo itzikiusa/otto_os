@@ -463,7 +463,7 @@
   .rbac {
     font-size: var(--fs-s);
     padding: 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, orange 8%, var(--surface));
     border: 1px solid color-mix(in srgb, orange 30%, var(--border));
   }
@@ -504,7 +504,7 @@
     align-items: center;
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-style: normal;
     font-size: var(--fs-xs);
   }
@@ -563,7 +563,7 @@
     font-family: var(--font-mono);
   }
   .error {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
   }
   .test {

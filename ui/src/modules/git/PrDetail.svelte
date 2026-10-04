@@ -3,6 +3,7 @@
   // threads, general comments, approve/merge/decline, "open as session".
   // Three tabs: Summary | Files | Review (AI agents).
   import { onDestroy, untrack } from 'svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import { api, isAbortError } from '../../lib/api/client';
   import type { DiffResp, NewPrCommentReq, PrComment, PrCommit, PrDetail } from '../../lib/api/types';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -229,18 +230,6 @@
   const prRepo = $derived(git.allRepos.find((r) => r.id === repoId) ?? git.repos.find((r) => r.id === repoId) ?? null);
   const providerName = $derived(prRepo?.provider ? (PROVIDER_LABEL[prRepo.provider] ?? prRepo.provider) : 'the provider');
 
-  /** ←/→ (Home/End) move between the PR tabs, like any tablist. */
-  function onTabKey(e: KeyboardEvent): void {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
-    const i = TABS.indexOf(activeTab);
-    const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
-    const fwd = e.key === (rtl ? 'ArrowLeft' : 'ArrowRight');
-    const next = e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : (i + (fwd ? 1 : -1) + TABS.length) % TABS.length;
-    e.preventDefault();
-    selectTab(TABS[next]);
-    const list = (e.currentTarget as HTMLElement).closest('[role="tablist"]');
-    list?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
-  }
 
   function startEdit(): void {
     if (!pr) return;

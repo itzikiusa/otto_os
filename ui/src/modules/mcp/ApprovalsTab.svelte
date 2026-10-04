@@ -14,6 +14,7 @@
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
@@ -28,13 +29,25 @@
 
   let approvals = $state<McpApproval[]>([]);
   const AGENT_REQUESTER_KINDS = ['mcp_server', 'gateway', 'agent'];
-  const requesterMayDecide = (a:McpApproval) => AGENT_REQUESTER_KINDS.includes(a.requested_by_kind ?? '');
-  const canDecide = (a:McpApproval) => (a.requested_by!==auth.me?.id || requesterMayDecide(a)) && (a.server_id ? resourceAccess.can('mcp_server',a.server_id,'approve','mcp','admin',a.tool ?? undefined) : auth.can('mcp','admin'));
-  $effect(()=>{for(const approval of approvals){if(approval.server_id)void resourceAccess.load('mcp_server',approval.server_id,approval.tool ?? undefined);}});
+  const requesterMayDecide = (a: McpApproval): boolean => AGENT_REQUESTER_KINDS.includes(a.requested_by_kind ?? '');
+  const canDecide = (a: McpApproval): boolean => {
+    // Not your own direct request (an agent raising it on your behalf is fine)…
+    const allowedRequester = a.requested_by !== auth.me?.id || requesterMayDecide(a);
+    // …and approve access on the server (or MCP admin for server-less asks).
+    const hasAccess = a.server_id
+      ? resourceAccess.can('mcp_server', a.server_id, 'approve', 'mcp', 'admin', a.tool ?? undefined)
+      : auth.can('mcp', 'admin');
+    return allowedRequester && hasAccess;
+  };
+  $effect(() => {
+    for (const approval of approvals) {
+      if (approval.server_id) void resourceAccess.load('mcp_server', approval.server_id, approval.tool ?? undefined);
+    }
+  });
   let loading = $state(false);
   /** Failed load — inline with Retry, never the empty state. */
   let loadError = $state<string | null>(null);
-  let busy = $state<Record<string, boolean>>({});
+  let busy = $state<Record<string, 'approve' | 'deny'>>({});
   let notes = $state<Record<string, string>>({});
   let showAll = $state(false);
   /** Told after a decision so the page header's pending badge updates now, not on its next poll. */
@@ -105,11 +118,11 @@
     };
   });
 
-  async function decide(a: McpApproval, approved: boolean): Promise<void> {
-    if(!canDecide(a))return;
-    busy = { ...busy, [a.id]: true };
+  async function decide(a: McpApproval, approved: boolean, reason?: string | null): Promise<void> {
+    if (!canDecide(a)) return;
+    busy = { ...busy, [a.id]: approved ? 'approve' : 'deny' };
     try {
-      await mcpCpApi.cpDecide(a.id, { approved, note: notes[a.id]?.trim() || null });
+      await mcpCpApi.cpDecide(a.id, { approved, note: reason?.trim() || notes[a.id]?.trim() || null });
       toasts.success(approved ? 'Approved' : 'Denied', a.title);
       ondecided?.();
       await load();
@@ -140,7 +153,7 @@
 <div class="appr" data-testid="mcp-approvals">
   <div class="bar">
     <h2>Approvals</h2>
-    <span class="count">{approvals.length} {showAll ? 'total' : 'pending'}</span>
+    <span class="count chip" class:warn={!showAll && approvals.length > 0}>{approvals.length} {showAll ? 'total' : 'pending'}</span>
     <span class="grow"></span>
     <label class="check">
       <input type="checkbox" bind:checked={showAll} />
@@ -163,7 +176,7 @@
       {#each approvals as a (a.id)}
         <div class="card">
           <div class="chead">
-            <span class="kind">{a.kind === 'human_ask' ? 'human ask' : 'tool call'}</span>
+            <span class="chip">{a.kind === 'human_ask' ? 'Human ask' : 'Tool call'}</span>
             <span class="title">{a.title}</span>
             {#if a.risk_label}<McpPill kind="risk" value={a.risk_label} small />{/if}
             <McpPill kind="status" value={a.status} small />
@@ -201,23 +214,36 @@
                 value={notes[a.id] ?? ''}
                 oninput={(e) => (notes = { ...notes, [a.id]: (e.currentTarget as HTMLInputElement).value })}
               />
-              <button class="btn small primary" disabled={busy[a.id] || !canDecide(a)} title={canDecide(a) ? undefined : decideBlockedReason(a)} onclick={() => void decide(a, true)}>
-                {busy[a.id] ? '…' : 'Approve'}
-              </button>
-              {#if canAlwaysAllow(a)}
-                <button
-                  class="btn small"
-                  disabled={busy[a.id] || allowLoading === a.id}
-                  title="Approve this call and stop asking for {a.tool} — opens the auto-approve rule form"
-                  data-testid="mcp-approve-always"
-                  onclick={() => void openAlwaysAllow(a)}
-                >
-                  {allowLoading === a.id ? '…' : 'Approve & always allow…'}
-                </button>
-              {/if}
-              <button class="btn small danger" disabled={busy[a.id] || !canDecide(a)} title={canDecide(a) ? undefined : decideBlockedReason(a)} onclick={() => void decide(a, false)}>
-                {busy[a.id] ? '…' : 'Deny'}
-              </button>
+              <ApprovalActions
+                busy={busy[a.id] ?? null}
+                disabled={!canDecide(a)}
+                disabledReason={decideBlockedReason(a)}
+                denyTarget="this {a.kind === 'human_ask' ? 'request' : 'tool call'}"
+                onapprove={() => decide(a, true)}
+                ondeny={(reason) => decide(a, false, reason)}
+              >
+                {#snippet extra()}
+                  {#if canAlwaysAllow(a)}
+                    <button
+                      class="btn small"
+                      disabled={busy[a.id] !== undefined || allowLoading === a.id}
+                      title="Approve this call and stop asking for {a.tool} — opens the auto-approve rule form"
+                      data-testid="mcp-approve-always"
+                      onclick={() => void openAlwaysAllow(a)}
+                    >
+                      {allowLoading === a.id ? '…' : 'Approve & always allow…'}
+                    </button>
+                  {/if}
+                {/snippet}
+              </ApprovalActions>
+            </div>
+          {:else if a.status === 'approved' || a.status === 'denied'}
+            <div class="decided">
+              <ApprovalActions
+                onapprove={() => {}}
+                ondeny={() => {}}
+                decided={{ outcome: a.status, by: a.decided_by, at: a.decided_at, note: a.decision_note }}
+              />
             </div>
           {:else}
             <div class="decided">
@@ -269,7 +295,6 @@
   }
   .count {
     font-size: var(--fs-s);
-    color: var(--text-dim);
   }
   .grow {
     flex: 1;
@@ -298,15 +323,6 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-  }
-  .kind {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    border-radius: 4px;
-    padding: 1px 6px;
   }
   .title {
     font-size: var(--fs-m);
@@ -375,9 +391,6 @@
   .link:focus-visible {
     outline: 2px solid var(--accent-solid);
     outline-offset: 2px;
-  }
-  .btn.danger {
-    color: var(--danger);
   }
   .decided {
     margin-top: 8px;

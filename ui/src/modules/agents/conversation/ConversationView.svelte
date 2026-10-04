@@ -946,7 +946,7 @@
     align-items: center;
     gap: 8px;
     height: 30px;
-    padding: 0 6px 0 12px;
+    padding-block: 0; padding-inline: 12px 6px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     flex-shrink: 0;
@@ -980,7 +980,7 @@
     border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
     border-radius: var(--radius-s);
     background: var(--bg);
-    padding: 0 4px 0 6px;
+    padding-block: 0; padding-inline: 6px 4px;
     height: 22px;
     color: var(--text-dim);
     min-width: 0;
@@ -1175,7 +1175,7 @@
     font-style: italic;
   }
   .conv :global(.hljs .hljs-strong) {
-    font-weight: 700;
+    font-weight: 600;
   }
   .earlier {
     display: flex;
@@ -1218,14 +1218,10 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .sk {
-      animation: sk-pulse 1.4s ease-in-out infinite;
+      animation: otto-pulse 1.4s ease-in-out infinite;
     }
   }
-  @keyframes sk-pulse {
-    50% {
-      opacity: 0.55;
-    }
-  }
+  
   .live-artifacts {
     display: flex;
     flex-wrap: wrap;
@@ -1259,7 +1255,7 @@
     color: var(--text);
     border: 1px solid var(--border-strong);
     border-radius: 99px;
-    padding: 4px 12px 4px 10px;
+    padding-block: 4px; padding-inline: 10px 12px;
     font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
@@ -1273,7 +1269,7 @@
     background: var(--surface-2);
   }
   .jump-pill:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 2px;
   }
   /* ≤560px: the stats go (they live in the title's tooltip too). */

@@ -105,7 +105,7 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-    padding: 4px 4px 4px 8px;
+    padding-block: 4px; padding-inline: 8px 4px;
     border: none;
     background: none;
     color: inherit;

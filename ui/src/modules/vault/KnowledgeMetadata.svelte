@@ -32,6 +32,6 @@
   .badges { display: flex; flex-wrap: wrap; gap: 5px; }
   .badges span { border: 1px solid var(--border); padding: 2px 6px; border-radius: var(--radius-s); }
   p { margin: 7px 0; } .hint, small { color: var(--text-dim); }
-  .warning { color: var(--status-warn); } summary { cursor: pointer; }
+  .warning { color: var(--warning); } summary { cursor: pointer; }
   .source { border-inline-start: 2px solid var(--border); padding-inline-start: 7px; margin-block: 8px; }
 </style>

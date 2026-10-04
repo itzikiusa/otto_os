@@ -13,6 +13,7 @@
   import { awsApi, awsDownloadBlob, awsS3Upload, isLoginRequired, saveBlob } from '../../lib/api/aws';
   import { ApiError } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmProd } from '../../lib/confirmProd';
   import S3Preview from './S3Preview.svelte';
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -419,26 +420,18 @@
 
   async function deleteObject(o: S3Object): Promise<void> {
     const where = `s3://${bucket}/${o.key}`;
-    const env = account.environment.toUpperCase();
-    let confirm: string | undefined;
-    if (isProd) {
-      const typed = await confirmer.promptText(
-        `Delete ${where} from ${account.name} (${env})? This can't be undone unless the bucket is versioned. Type the object key to confirm.`,
-        { title: 'Delete object — PRODUCTION', confirmLabel: 'Delete', placeholder: o.key, danger: true },
-      );
-      if (typed === null) return;
-      if (typed !== o.key) {
-        toasts.error('Not deleted', 'The typed key doesn’t match the object key.');
-        return;
-      }
-      confirm = typed;
-    } else {
-      const ok = await confirmer.ask(
-        `Delete ${where} from ${account.name} (${env})? This can't be undone unless the bucket is versioned.`,
-        { title: 'Delete object', confirmLabel: 'Delete' },
-      );
-      if (!ok) return;
-    }
+    // Prod asks the user to type the object key (and the server re-checks it).
+    const ok = await confirmProd({
+      env: account.environment,
+      verb: 'Delete',
+      title: isProd ? 'Delete object on production?' : 'Delete object?',
+      where: `${where} · ${account.name}`,
+      what: 'This can’t be undone unless the bucket is versioned.',
+      typed: isProd ? o.key : undefined,
+      danger: true,
+    });
+    if (!ok) return;
+    const confirm: string | undefined = isProd ? o.key : undefined;
     try {
       await awsApi.s3Delete(account.id, bucket, o.key, confirm);
       if (preview?.obj.key === o.key) preview = null;
@@ -466,10 +459,12 @@
     const dest = `s3://${bucket}/${prefix}`;
     const what = files.length === 1 ? files[0].name : `${files.length} files`;
     if (isProd) {
-      const ok = await confirmer.ask(
-        `Upload ${what} to ${dest} in ${account.name} (PRODUCTION)?`,
-        { title: 'Upload to production', confirmLabel: 'Upload', danger: true },
-      );
+      const ok = await confirmProd({
+        env: account.environment,
+        verb: 'Upload',
+        where: `${dest} · ${account.name}`,
+        what,
+      });
       if (!ok) return;
     }
     let okCount = 0;
@@ -482,10 +477,14 @@
           okCount++;
         } catch (e) {
           if (e instanceof ApiError && e.status === 409) {
-            const replace = await confirmer.ask(
-              `s3://${bucket}/${key} already exists in ${account.name} (${account.environment.toUpperCase()}). Replace it with the file you picked (${fmtBytes(f.size)})?`,
-              { title: 'Replace existing object?', confirmLabel: 'Replace' },
-            );
+            const replace = await confirmProd({
+              env: account.environment,
+              verb: 'Replace',
+              title: isProd ? 'Replace existing object on production?' : 'Replace existing object?',
+              where: `s3://${bucket}/${key} · ${account.name}`,
+              what: `Already exists — replace it with the file you picked (${fmtBytes(f.size)}).`,
+              danger: true,
+            });
             if (!replace) continue;
             try {
               await awsS3Upload(account.id, bucket, key, f, { overwrite: true });
@@ -873,7 +872,7 @@
     color: var(--text-dim);
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-m);
   }
   .crumbs {
@@ -889,7 +888,7 @@
     color: var(--accent-text);
     cursor: pointer;
     padding: 2px 4px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     font: inherit;
     font-size: var(--fs-m);
     display: inline-flex;
@@ -944,7 +943,7 @@
     position: relative;
   }
   .split.drag-over .tbl-wrap {
-    outline: 2px dashed var(--accent);
+    outline: 2px dashed var(--accent-text);
     outline-offset: -4px;
   }
   .s3-drop {

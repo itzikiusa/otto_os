@@ -233,7 +233,7 @@
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--text);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     padding: 3px 9px;
     font-size: var(--fs-s);
     font-weight: 600;

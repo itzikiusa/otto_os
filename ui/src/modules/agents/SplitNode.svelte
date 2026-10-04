@@ -375,7 +375,7 @@
   }
   .drop-veil.armed {
     background: color-mix(in srgb, var(--accent) 8%, transparent);
-    outline: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
+    outline: 1px dashed color-mix(in srgb, var(--accent-text) 60%, transparent);
     outline-offset: -2px;
   }
   .drop-ind {
@@ -389,10 +389,10 @@
     inset: 6px;
   }
   .drop-ind[data-ind='left'] {
-    inset: 6px 50% 6px 6px;
+    inset-block: 6px; inset-inline: 6px 50%;
   }
   .drop-ind[data-ind='right'] {
-    inset: 6px 6px 6px 50%;
+    inset-block: 6px; inset-inline: 50% 6px;
   }
   .drop-ind[data-ind='up'] {
     inset: 6px 6px 50% 6px;

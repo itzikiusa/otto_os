@@ -131,7 +131,7 @@
     min-width: 0;
     flex: 1 1 0;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     background: var(--bg);
     height: 24px;
     overflow: hidden;
@@ -173,7 +173,7 @@
     outline: none;
   }
   .nd-unit {
-    padding: 0 5px 0 0;
+    padding-block: 0; padding-inline: 0 5px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

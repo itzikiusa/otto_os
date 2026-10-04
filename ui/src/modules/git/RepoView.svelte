@@ -3,6 +3,7 @@
   // and history both live on the graph now (WIP row + detail panel), so there
   // are no separate Changes/History tabs.
   import type { GitOpInProgress, MergeResult, Repo, RepoStatusResp } from '../../lib/api/types';
+  import { onTabKey } from '../../lib/tabKeys';
   import { router } from '../../lib/router.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -45,8 +46,11 @@
     onopenrepo?: (repoId: string) => void;
     /** Git page: open its Add Repository sheet in the given mode. */
     onaddrepo?: (mode: 'register' | 'clone' | 'browse') => void;
+    /** Git page: the verbs (Fetch…Pop) and ⋯ live in the page's PageHeader, so
+     *  this row is only the in-pane view switcher. */
+    hostActions?: boolean;
   }
-  let { repo, tab, embedded = false, onTab, onopenrepo, onaddrepo }: Props = $props();
+  let { repo, tab, embedded = false, onTab, onopenrepo, onaddrepo, hostActions = false }: Props = $props();
 
   // Legacy deep links / persisted state may still say 'changes' or 'history';
   // both render the graph now, and the Graph tab must read as active for them.
@@ -204,7 +208,7 @@
 
   /** ⋯ in the toolbar row: the repo-level tools that don't earn a permanent
    *  button (remotes are a setting; recovery is rare and deliberate). */
-  function openMoreMenu(e: MouseEvent): void {
+  export function openMoreMenu(e: MouseEvent): void {
     ctxMenu.show(e, [
       { label: 'Remotes…', icon: 'globe', action: () => (remotesOpen = true) },
       { label: 'Recovery tools…', icon: 'undo', action: () => gitBridge.openRecovery(repo.id) },
@@ -258,21 +262,6 @@
     else router.go(`git/${repo.id}/${id}`);
   }
 
-  /** ←/→ (Home/End) move between the view tabs, like any tablist. */
-  function onTabKey(e: KeyboardEvent): void {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
-    const list = (e.currentTarget as HTMLElement).closest<HTMLElement>('[role="tablist"]');
-    if (!list) return;
-    const btns = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
-    const i = btns.indexOf(document.activeElement as HTMLButtonElement);
-    if (i < 0) return;
-    e.preventDefault();
-    const rtl = getComputedStyle(list).direction === 'rtl';
-    const fwd = e.key === (rtl ? 'ArrowLeft' : 'ArrowRight');
-    const next = e.key === 'Home' ? 0 : e.key === 'End' ? btns.length - 1 : (i + (fwd ? 1 : -1) + btns.length) % btns.length;
-    btns[next].focus();
-    btns[next].click();
-  }
 
   // Repo switcher: jump between repositories without going back to the list.
   // Prefer the workspace-independent global list (Git page); fall back to the
@@ -314,7 +303,7 @@
        the switcher only shows where there are no tabs (the agent right panel).
        It wraps (never overflows) when a long branch name or a narrow pane
        doesn't leave room. -->
-  <header class="rv-head">
+  <div class="rv-head" class:views={hostActions} role="group" aria-label="{repo.name} toolbar">
     {#if !embedded}
       <button class="btn ghost small" onclick={() => router.go('git')}><span class="rv-back-arrow" aria-hidden="true"><Icon name="chevronLeft" size={12} /></span> Repositories</button>
     {/if}
@@ -363,20 +352,22 @@
         </button>
       {/if}
     </div>
-    <span class="grow"></span>
-    {#if status}
-      <GitToolbar repoId={repo.id} {status} onstatus={setStatus} onrefresh={() => gitBridge.refreshGraph(repo.id)} />
-    {:else if !statusError}
-      <div class="toolbar-skeleton" aria-label="Loading repository status"></div>
+    {#if !hostActions}
+      <span class="grow"></span>
+      {#if status}
+        <GitToolbar repoId={repo.id} {status} onstatus={setStatus} onrefresh={() => gitBridge.refreshGraph(repo.id)} />
+      {:else if !statusError}
+        <div class="toolbar-skeleton" aria-label="Loading repository status"></div>
+      {/if}
+      <button
+        class="icon-btn rv-more"
+        title="More repository actions"
+        aria-label="More repository actions"
+        aria-haspopup="menu"
+        onclick={openMoreMenu}
+      ><Icon name="more" size={16} /></button>
     {/if}
-    <button
-      class="icon-btn rv-more"
-      title="More repository actions"
-      aria-label="More repository actions"
-      aria-haspopup="menu"
-      onclick={openMoreMenu}
-    ><Icon name="more" size={16} /></button>
-  </header>
+  </div>
 
   <!-- In-progress merge banner (shown when not already in the resolver). -->
   {#if merging && !resolving}
@@ -537,6 +528,11 @@
     padding: 7px 14px;
     box-sizing: border-box;
     border-bottom: 1px solid var(--border);
+  }
+  /* Verbs live in the PageHeader: this is just the in-pane view switcher. */
+  .rv-head.views {
+    min-height: 0;
+    padding-block: 6px;
   }
   .rv-head :global(.toolbar) {
     margin-inline-start: auto;

@@ -300,7 +300,7 @@
     padding: 10px 14px;
     border-block-start: 1px solid var(--border);
   }
-  @media (max-width: 720px) {
+  @media (max-width: 640px) {
     .frow {
       grid-template-columns: 32px minmax(0, 1fr) auto;
     }

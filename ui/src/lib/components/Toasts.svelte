@@ -65,19 +65,19 @@
     max-height: calc(100% - 54px - var(--toast-lift));
     overflow-y: auto;
     overscroll-behavior: contain;
-    transition: bottom 160ms ease-out;
+    transition: bottom var(--dur-enter) var(--ease-out);
   }
   .toast {
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    padding: 10px 10px 10px 0;
+    padding-block: 10px; padding-inline: 0 10px;
     /* Opaque, but the same edge + elevation as every floating layer. */
     background: var(--surface);
     border: 1px solid var(--glass-border);
     border-radius: var(--radius-m);
     box-shadow: var(--glass-shadow);
-    animation: toast-in 160ms ease-out;
+    animation: otto-pop-in var(--dur-enter) var(--ease-out);
     overflow: hidden;
     flex-shrink: 0;
   }
@@ -152,12 +152,6 @@
       bottom: calc(var(--mobile-bottomnav-h) + env(safe-area-inset-bottom, 0px) + 8px);
       inset-inline: 12px;
       width: auto;
-    }
-  }
-  @keyframes toast-in {
-    from {
-      opacity: 0;
-      transform: translateY(6px);
     }
   }
   @media (prefers-reduced-motion: reduce) {

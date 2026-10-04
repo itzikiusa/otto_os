@@ -589,7 +589,7 @@
     padding: 0 5px;
     border: 1px solid var(--border-strong);
     border-bottom-width: 2px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
     font-family: var(--font-ui);

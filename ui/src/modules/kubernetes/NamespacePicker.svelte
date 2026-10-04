@@ -273,13 +273,13 @@
   }
   .ns-pop {
     position: fixed;
-    z-index: 60;
+    z-index: var(--z-popover);
     overflow-y: auto;
     padding: 4px;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-l);
+    box-shadow: var(--glass-shadow);
   }
   .ns-opt {
     display: flex;

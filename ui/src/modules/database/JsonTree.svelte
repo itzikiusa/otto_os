@@ -214,7 +214,7 @@
     border-radius: var(--radius-s);
   }
   .toggle:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    background: var(--hover);
   }
   .chev {
     color: var(--text-dim);

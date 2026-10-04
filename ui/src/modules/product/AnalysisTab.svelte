@@ -1077,7 +1077,7 @@
   }
   .rp-agent-note.error-note {
     color: var(--danger);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .rp-agent-waiting {
     margin: 6px 0 0;
@@ -1092,7 +1092,7 @@
     height: 360px;
     margin: 8px 0 2px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 6px);
+    border-radius: var(--radius-m);
     overflow: hidden;
     background: #1b1b1b;
   }
@@ -1198,7 +1198,7 @@
     color: var(--warning);
   }
   .mono-sm {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
   }
 
@@ -1266,7 +1266,7 @@
     color: var(--danger);
     line-height: 1.5;
     margin: 4px 0 0;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
 
 

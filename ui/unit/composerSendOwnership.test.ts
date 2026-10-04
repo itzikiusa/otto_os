@@ -38,7 +38,7 @@ test('production send keeps a remounted draft and allows only one pending reques
   function mount() {
     const compiled = ts.transpileModule(`
       const ownerId = 'A', text = transcript.draft(ownerId), attachments = [];
-      let sending = false; const ta = null;
+      let sending = false; const ta = null; let uploading = 0;
       ${source.slice(method.getStart(parsed), method.end)}
       return send;
     `, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -54,4 +54,29 @@ test('production send keeps a remounted draft and allows only one pending reques
   pending.resolve(); await Promise.all([first, reopened]);
   assert.equal(transcript.draft('A'), 'new draft while waiting');
   assert.equal(transcript.sending('A'), false);
+});
+
+test('send is refused while an image upload is still pending', async () => {
+  const { readFileSync } = await import('node:fs');
+  const ts = (await import('typescript')).default;
+  const { transcript } = loadSource(new URL('../src/lib/stores/transcript.svelte.ts', import.meta.url), {
+    './transcriptLifecycle': { TranscriptLifecycle },
+    '../paneHeader': paneHeader,
+    '../win': { winKey: (key: string) => key }, '../api/client': { api: {} },
+  });
+  const source = readFileSync(new URL('../src/modules/agents/conversation/Composer.svelte', import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];
+  const parsed = ts.createSourceFile('composer.ts', source, ts.ScriptTarget.Latest, true);
+  const method = parsed.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'send')!;
+  let calls = 0;
+  const compiled = ts.transpileModule(`
+    const ownerId = 'A', text = transcript.draft(ownerId), attachments = [];
+    let sending = false; const ta = null; let uploading = 1;
+    ${source.slice(method.getStart(parsed), method.end)}
+    return send;
+  `, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  transcript.setDraft('A', 'with a screenshot');
+  await new Function('transcript', 'submitPrompt', 'queueMicrotask', 'autosize', 'toasts', compiled)(
+    transcript, () => { calls++; return Promise.resolve(); }, () => {}, () => {}, { error() {} })();
+  assert.equal(calls, 0);
+  assert.equal(transcript.draft('A'), 'with a screenshot');
 });

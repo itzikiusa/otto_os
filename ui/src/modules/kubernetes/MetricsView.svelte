@@ -12,6 +12,8 @@
   import { monitorPath } from './viewState';
   import { pollWhileVisible } from '../../lib/poll';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { k8sApi } from '../../lib/api/k8s';
   import type { K8sMonitorSeries, K8sPodMetrics } from '../../lib/api/types';
   import { formatBytes, formatMillicores } from './k8s-util';
@@ -82,7 +84,7 @@
       error = '';
     } catch (e) {
       if (seq !== metricsSeq || signal?.aborted) return;
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
     } finally {
       if (seq === metricsSeq) loading = false;
     }
@@ -109,42 +111,46 @@
 </script>
 
 <div class="metrics">
-  {#if loading && !metrics}
-    <Skeleton rows={3} height={40} />
-  {:else if error}
-    <div class="err" role="alert">Couldn’t load metrics: {error} <button class="btn small" onclick={() => (poller ? poller.now() : void load())}>Retry</button></div>
-  {:else if !available}
-    <div class="dim">metrics-server isn't installed in this cluster, so <span class="mono">kubectl top</span> has nothing to report.</div>
-  {:else if !metrics}
-    <div class="dim">No metrics for this pod yet (new pods take a minute to show up in metrics-server).</div>
-  {:else}
-    <div class="totals">
-      <div class="tot"><span class="lbl">CPU</span><span class="val mono">{formatMillicores(metrics.cpu_millicores)}</span></div>
-      <div class="tot"><span class="lbl">Memory</span><span class="val mono">{formatBytes(metrics.mem_bytes)}</span></div>
-    </div>
-    <div class="containers">
-      {#each metrics.containers as c (c.name)}
-        <div class="ctr">
-          <div class="ctr-name mono">{c.name}</div>
-          <div class="bar-row">
-            <span class="lbl">cpu</span>
-            <div class="bar" role="meter" aria-label="{c.name} CPU" aria-valuemin={0} aria-valuemax={maxCpu} aria-valuenow={c.cpu_millicores}>
-              <div class="fill cpu" style="width:{(100 * c.cpu_millicores) / maxCpu}%"></div>
+  <!-- A failed 10 s poll keeps the last good bars (stale bar + Retry); the full
+       error shows only when there is nothing to draw. -->
+  <LoadState what="metrics" {loading} {error} empty={!metrics} rows={3} onretry={() => (poller ? void poller.now() : void load())}>
+    {#snippet emptyView()}
+      {#if !available}
+        <div class="dim">metrics-server isn't installed in this cluster, so <span class="mono">kubectl top</span> has nothing to report.</div>
+      {:else}
+        <div class="dim">No metrics for this pod yet (new pods take a minute to show up in metrics-server).</div>
+      {/if}
+    {/snippet}
+    {#if metrics}
+      <div class="totals">
+        <div class="tot"><span class="lbl">CPU</span><span class="val mono">{formatMillicores(metrics.cpu_millicores)}</span></div>
+        <div class="tot"><span class="lbl">Memory</span><span class="val mono">{formatBytes(metrics.mem_bytes)}</span></div>
+      </div>
+      <div class="containers">
+        {#each metrics.containers as c (c.name)}
+          <div class="ctr">
+            <div class="ctr-name mono">{c.name}</div>
+            <div class="bar-row">
+              <span class="lbl">cpu</span>
+              <div class="bar" role="meter" aria-label="{c.name} CPU" aria-valuemin={0} aria-valuemax={maxCpu} aria-valuenow={c.cpu_millicores}>
+                <div class="fill cpu" style="width:{(100 * c.cpu_millicores) / maxCpu}%"></div>
+              </div>
+              <span class="val mono">{formatMillicores(c.cpu_millicores)}</span>
             </div>
-            <span class="val mono">{formatMillicores(c.cpu_millicores)}</span>
-          </div>
-          <div class="bar-row">
-            <span class="lbl">mem</span>
-            <div class="bar" role="meter" aria-label="{c.name} memory" aria-valuemin={0} aria-valuemax={maxMem} aria-valuenow={c.mem_bytes}>
-              <div class="fill mem" style="width:{(100 * c.mem_bytes) / maxMem}%"></div>
+            <div class="bar-row">
+              <span class="lbl">mem</span>
+              <div class="bar" role="meter" aria-label="{c.name} memory" aria-valuemin={0} aria-valuemax={maxMem} aria-valuenow={c.mem_bytes}>
+                <div class="fill mem" style="width:{(100 * c.mem_bytes) / maxMem}%"></div>
+              </div>
+              <span class="val mono">{formatBytes(c.mem_bytes)}</span>
             </div>
-            <span class="val mono">{formatBytes(c.mem_bytes)}</span>
           </div>
-        </div>
-      {/each}
-    </div>
-    <div class="dim small">Bars are relative to the busiest container in this pod. Refreshes every 10 s.</div>
-  {/if}
+        {/each}
+      </div>
+      <div class="dim small">Bars are relative to the busiest container in this pod. Refreshes every 10 s.</div>
+  
+    {/if}
+  </LoadState>
 
   <section class="history" aria-label="History from the Monitor" data-testid="k8s-metrics-history">
     <div class="hist-head">
@@ -239,9 +245,6 @@
   }
   .small {
     font-size: var(--fs-xs);
-  }
-  .err {
-    color: var(--status-exited);
   }
   .history {
     border-block-start: 1px solid var(--border);

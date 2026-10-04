@@ -209,7 +209,7 @@
     align-self: flex-start;
     padding: 1px 7px;
     font-size: var(--fs-xs);
-    color: var(--status-warn);
+    color: var(--warning);
     background: var(--status-warn-soft);
     border-radius: 999px;
   }
@@ -238,7 +238,7 @@
     font-size: var(--fs-s);
   }
   .row:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    background: var(--hover);
   }
   .cdot {
     width: 8px;
@@ -259,15 +259,15 @@
     color: var(--text-dim);
   }
   .health.ok {
-    color: var(--status-working);
+    color: var(--success);
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
   }
   .health.warn {
-    color: var(--status-warn);
+    color: var(--warning);
     background: var(--status-warn-soft);
   }
   .health.bad {
-    color: var(--status-exited);
+    color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 16%, transparent);
   }
   .m {
@@ -288,13 +288,13 @@
     border-radius: 999px;
   }
   .warn {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   em.warn {
     background: var(--status-warn-soft);
   }
   .bad {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   em.bad {
     background: color-mix(in srgb, var(--status-exited) 16%, transparent);

@@ -15,7 +15,6 @@
     FindingStatus,
     FindingSeverity,
   } from '../../lib/api/types';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { findingBus } from '../../lib/events.svelte';
@@ -32,6 +31,10 @@
   let loading = $state(true);
   /** Failed list load — inline with Retry, never "No tracked findings". */
   let loadError = $state<string | null>(null);
+  /** Failed silent refetch (WS bus) — the findings stay, with a stale bar + Retry. */
+  let reloadError = $state<string | null>(null);
+  /** Per-finding failed detail/timeline load → "Couldn't load the timeline · Retry". */
+  let detailError: Record<string, boolean> = $state({});
   let expanded: Record<string, boolean> = $state({});
   let details: Record<string, FindingDetail> = $state({});
   let detailLoading: Record<string, boolean> = $state({});
@@ -78,12 +81,14 @@
       const next = await listFindings(reviewId);
       findings = next;
       loadError = null;
+      reloadError = null;
       // Refresh any open detail so its timeline reflects the new events.
       for (const id of Object.keys(expanded)) {
         if (expanded[id] && details[id]) void loadDetail(id, true);
       }
-    } catch {
-      // non-blocking
+    } catch (e) {
+      // Non-blocking: keep what is on screen and say the refresh failed.
+      reloadError = loadErrorText(e);
     }
   }
 
@@ -103,8 +108,11 @@
       const d = await getFinding(id);
       details = { ...details, [id]: d };
       patchFinding(d.finding);
+      if (detailError[id]) detailError = { ...detailError, [id]: false };
     } catch {
-      // non-blocking — the card still shows the summary fields it already has
+      // Non-blocking — the card still shows the summary fields it already has;
+      // a silent (WS-driven) refresh failure keeps the last good timeline.
+      if (!silent) detailError = { ...detailError, [id]: true };
     } finally {
       if (!silent) detailLoading = { ...detailLoading, [id]: false };
     }
@@ -161,13 +169,18 @@
     </button>
   </div>
 
-  {#if loadError && findings.length === 0}
-    <LoadState what="findings" {loading} error={loadError} empty onretry={() => void load(reviewId)} />
-  {:else if loading}
-    <Skeleton rows={3} height={48} />
-  {:else if findings.length === 0}
-    <p class="dim fb-empty">No tracked findings for this review yet.</p>
-  {:else}
+  <!-- error + nothing → inline error; error + findings → the board with a stale bar. -->
+  <LoadState
+    what="findings"
+    {loading}
+    error={loadError ?? reloadError}
+    empty={findings.length === 0}
+    rows={3}
+    onretry={() => void load(reviewId)}
+  >
+    {#snippet emptyView()}
+      <p class="dim fb-empty">No tracked findings for this review yet.</p>
+    {/snippet}
     <!-- Filters -->
     <div class="fb-filters">
       <div class="fb-filter-row">
@@ -285,6 +298,11 @@
                   </ul>
                 {:else if detail}
                   <p class="dim" style="font-size: var(--fs-xs)">No events yet.</p>
+                {:else if detailError[f.id]}
+                  <p class="fb-tl-error" role="alert">
+                    Couldn’t load the timeline ·
+                    <button class="btn small ghost" onclick={() => void loadDetail(f.id)}>Retry</button>
+                  </p>
                 {/if}
               </div>
 
@@ -298,7 +316,7 @@
         <p class="dim fb-empty">No findings match the current filters.</p>
       {/if}
     </div>
-  {/if}
+  </LoadState>
 </div>
 
 {#if showProofPack}
@@ -440,20 +458,21 @@
     padding: 6px 8px;
     background: var(--surface-2);
     border-radius: var(--radius-s);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     line-height: 1.45;
     white-space: pre-wrap;
     overflow-x: auto;
     max-height: 200px;
   }
+  .fb-tl-error { margin: 0; font-size: var(--fs-xs); color: var(--danger); display: flex; align-items: center; gap: 6px; }
   .fb-timeline { list-style: none; margin: 0; padding: 0; }
   .fb-event { font-size: var(--fs-xs); line-height: 1.55; display: flex; gap: 6px; flex-wrap: wrap; }
   .fb-event-kind { font-weight: 600; text-transform: capitalize; }
 
   .grow { flex: 1; }
   .dim { color: var(--text-dim); }
-  .mono { font-family: var(--font-mono, monospace); }
+  .mono { font-family: var(--font-mono); }
 
   /* Status chips (shared vocabulary; high-contrast light-green + black for verified). */
   .chip.status-open { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }

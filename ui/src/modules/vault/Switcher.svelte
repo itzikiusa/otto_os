@@ -126,7 +126,7 @@
     text-align: start;
     background: none;
     border: none;
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     padding: 7px 10px;
     cursor: pointer;
     color: var(--text);

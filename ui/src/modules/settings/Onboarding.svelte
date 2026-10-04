@@ -107,7 +107,7 @@
           managed connections, and full git + pull-request review — backed by a local daemon
           that keeps everything running even when the app is closed.
         </p>
-        <button class="btn primary big" onclick={() => (step = 1)}>Get started</button>
+        <button class="btn primary" onclick={() => (step = 1)}>Get started</button>
       </div>
     {:else if step === 1}
       <div class="ob-body">
@@ -239,7 +239,7 @@
 
         <div class="ob-actions">
           <button class="btn" disabled={busy} onclick={() => (step = 3)}>Back</button>
-          <button class="btn primary big" disabled={busy} onclick={finish}>
+          <button class="btn primary" disabled={busy} onclick={finish}>
             {busy ? 'Setting up…' : 'Finish setup'}
           </button>
         </div>
@@ -259,7 +259,7 @@
   }
   .ob-card {
     width: 440px;
-    max-width: calc(100vw - 48px);
+    max-width: calc(100vw - 32px);
     padding: 22px 30px 28px;
   }
   .ob-progress {
@@ -281,8 +281,8 @@
     border-color: transparent;
   }
   .ob-mark {
-    font-size: 30px;
-    font-weight: 700;
+    font-size: var(--fs-hero);
+    font-weight: 600;
     letter-spacing: -0.02em;
     text-align: center;
     margin-bottom: 4px;
@@ -292,13 +292,13 @@
     color: transparent;
   }
   h1 {
-    font-size: 17px;
+    font-size: var(--fs-xl);
     margin: 0 0 4px;
     text-align: center;
   }
   .ob-body > p {
     margin: 0 0 18px;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     text-align: center;
     line-height: 1.55;
@@ -308,10 +308,6 @@
     justify-content: center;
     gap: 8px;
     margin-top: 18px;
-  }
-  .btn.big {
-    height: 30px;
-    padding: 0 18px;
   }
   .strength {
     display: flex;
@@ -345,7 +341,7 @@
     color: var(--danger);
   }
   .hint-line {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     text-align: center;
     margin: 10px 0 0;
@@ -389,10 +385,10 @@
     flex-shrink: 0;
     border-radius: 50%;
     background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .tool-status.ok {
     background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
+    color: var(--success);
   }
 </style>

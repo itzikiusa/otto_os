@@ -288,7 +288,7 @@
     color: var(--text-dim);
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .pill {
     display: inline-block;
@@ -300,11 +300,11 @@
     color: var(--text-dim);
   }
   .pill.ok {
-    color: var(--status-working);
+    color: var(--success);
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
   }
   .pill.warn {
-    color: var(--status-warn);
+    color: var(--warning);
     background: color-mix(in srgb, var(--status-warn) 16%, transparent);
   }
   .dt {

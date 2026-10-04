@@ -412,3 +412,51 @@ export function moduleLabel(routerModule: string): string {
   };
   return other[routerModule] ?? routerModule.replace(/-/g, ' ').replace(/^./, (c) => c.toUpperCase());
 }
+
+/** One ⌘K "Go to …" destination. `route` is passed to `router.openModule` for a
+ *  sidebar module (`viaModule`) or to `router.go` for a route that has no
+ *  sidebar row of its own. */
+export interface GoToEntry {
+  id: string;
+  title: string;
+  /** Secondary text: the sidebar section (or where the route lives). */
+  detail: string;
+  keywords: string;
+  route: string;
+  viaModule: boolean;
+}
+
+/** Routes the user can reach but that have no sidebar entry of their own. They
+ *  sit here, beside the registry, so ⌘K, the ⌥Space bar and the sidebar are all
+ *  derived from ONE file and cannot drift. */
+export const EXTRA_GOTO: readonly { id: string; label: string; route: string; detail: string; keywords: string }[] = [
+  { id: 'brokers', label: 'Message Brokers', route: 'brokers', detail: 'Infrastructure', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf' },
+  { id: 'canvas', label: 'Canvas', route: 'canvas', detail: 'Build · Design Hall whiteboard', keywords: 'canvas whiteboard diagram sketch uml sequence flowchart excalidraw mermaid d2' },
+  { id: 'walkthroughs', label: 'Help', route: 'walkthroughs', detail: 'Guides, shortcuts and walkthroughs', keywords: 'help guide guides readme docs shortcuts keys intro tour film video walkthroughs onboarding' },
+];
+
+/**
+ * Every "Go to …" destination for ⌘K: one per available sidebar module (built-ins
+ * + permitted plugins) plus the {@link EXTRA_GOTO} routes. Pass `availableModules(…)`.
+ * `core.go-<id>` ids are stable (they key palette frecency).
+ */
+export function goToEntries(mods: SidebarModule[]): GoToEntry[] {
+  const fromModules = mods.map((m): GoToEntry => ({
+    id: `core.go-${m.id}`,
+    title: `Go to ${m.label}`,
+    detail: groupLabel(m.group),
+    keywords: `module ${m.id.replace(/[-/]/g, ' ')} ${groupLabel(m.group)} ${m.keywords ?? ''}`,
+    route: m.id,
+    viaModule: true,
+  }));
+  const taken = new Set(mods.map((m) => m.id));
+  const extras = EXTRA_GOTO.filter((e) => !taken.has(e.id)).map((e): GoToEntry => ({
+    id: `core.go-${e.id}`,
+    title: e.id === 'walkthroughs' ? 'Open Help' : `Go to ${e.label}`,
+    detail: e.detail,
+    keywords: e.keywords,
+    route: e.route,
+    viaModule: false,
+  }));
+  return [...fromModules, ...extras];
+}

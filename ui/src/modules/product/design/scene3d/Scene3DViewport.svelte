@@ -1055,7 +1055,7 @@
     overflow: hidden;
     background: var(--term-bg);
     outline: none;
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     user-select: none;
   }
   .s3d-viewport:focus-visible {
@@ -1078,7 +1078,7 @@
     background: var(--surface);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     padding: 12px 14px;
     max-width: 360px;
     font-size: var(--fs-s);
@@ -1099,11 +1099,10 @@
   }
   .s3d-seg {
     display: inline-flex;
-    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     overflow: hidden;
-    backdrop-filter: blur(6px);
   }
   .s3d-seg button,
   .s3d-hbtn {
@@ -1119,14 +1118,13 @@
     border-inline-start: 1px solid var(--border);
   }
   .s3d-seg button.on {
-    background: var(--accent-solid, var(--accent));
+    background: var(--accent-solid);
     color: var(--accent-contrast);
   }
   .s3d-hbtn {
-    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
-    backdrop-filter: blur(6px);
+    border-radius: var(--radius-s);
   }
   .s3d-hbtn:hover,
   .s3d-seg button:hover:not(.on) {
@@ -1135,7 +1133,7 @@
   .s3d-seg button:focus-visible,
   .s3d-hbtn:focus-visible,
   .s3d-face:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .s3d-status {
@@ -1162,11 +1160,10 @@
   .s3d-pill {
     padding: 5px 10px;
     border-radius: var(--radius-m);
-    background: color-mix(in srgb, var(--surface) 90%, transparent);
+    background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text);
     font-variant-numeric: tabular-nums;
-    backdrop-filter: blur(6px);
   }
   .s3d-keys {
     margin-inline-start: auto;
@@ -1221,7 +1218,7 @@
   .s3d-face.left { transform: rotateY(-90deg) translateZ(28px); }
   .s3d-face.top { transform: rotateX(90deg) translateZ(28px); }
   .s3d-face.bottom { transform: rotateX(-90deg) translateZ(28px); }
-  @media (max-width: 720px) {
+  @media (max-width: 640px) {
     .s3d-keys {
       display: none;
     }

@@ -653,15 +653,43 @@
     }
   };
 
-  // Move the keyboard ring. Rows built later pick it up in `rowCells`.
+  // The grid's accessible active cell. Cells are plain DOM (grid-cells.ts), so
+  // the one focused cell is given an id + an `aria-label` carrying its column
+  // name and value, and the focusable grid frame points at it with
+  // `aria-activedescendant` — a screen reader hears "id: 42", not a bare "42".
+  const uid = $props.id();
+  const activeCellDomId = `${uid}-active-cell`;
+  let activeCellId = $state<string | undefined>(undefined);
+
+  // Move the keyboard ring. Rows built later pick it up in `rowCells`; the
+  // window is read so a rebuilt row/column re-applies the ring + the aria bits.
   $effect(() => {
     const r = focusIdx;
     const c = focusCell?.c;
     const el = scrollEl;
+    void windowRows;
+    void colStart;
+    void colEnd;
     if (!el) return;
-    for (const td of el.querySelectorAll('tbody td.kbd-focus')) td.classList.remove('kbd-focus');
-    if (r !== null && c !== undefined)
-      el.querySelector(`tbody td[data-r="${r}"][data-p="${c}"]`)?.classList.add('kbd-focus');
+    for (const td of el.querySelectorAll('tbody td.kbd-focus')) {
+      td.classList.remove('kbd-focus');
+      if (td.id === activeCellDomId) {
+        td.removeAttribute('id');
+        td.removeAttribute('aria-label');
+      }
+    }
+    activeCellId = undefined;
+    if (r === null || c === undefined) return;
+    const td = el.querySelector<HTMLTableCellElement>(`tbody td[data-r="${r}"][data-p="${c}"]`);
+    if (!td) return;
+    td.classList.add('kbd-focus');
+    if (mini) return;
+    const name = result.columns[cols[c]]?.name ?? '';
+    const value = (td.textContent ?? '').trim().slice(0, 200);
+    td.id = activeCellDomId;
+    td.setAttribute('aria-colindex', String(c + 2)); // column 1 is the row number
+    td.setAttribute('aria-label', name ? `${name}: ${value || 'empty'}` : value);
+    activeCellId = activeCellDomId;
   });
 
   function ensureRowVisible(r: number): void {
@@ -752,6 +780,7 @@
   onscroll={onScroll}
   tabindex={mini ? undefined : 0}
   role={mini ? undefined : 'group'}
+  aria-activedescendant={activeCellId}
   aria-label={mini
     ? undefined
     : 'Results grid — arrow keys move, Enter edits or expands, ⌘C copies the cell, Shift+F10 opens the row menu'}
@@ -762,6 +791,9 @@
     class:expanded={expandJson}
     class:mini
     class:hv={hvirt}
+    role={mini ? undefined : 'grid'}
+    aria-rowcount={mini ? undefined : liveRows.length + 1}
+    aria-colcount={mini ? undefined : result.columns.length + 1}
     style="--last:{result.columns.length}; --row-h:{ROW_H}px; --rn-w:calc({rnCh}ch + 30px)"
   >
     {#if hvirt}
@@ -773,8 +805,8 @@
       </colgroup>
     {/if}
     <thead>
-      <tr>
-        <th class="rownum">
+      <tr aria-rowindex={mini ? undefined : 1}>
+        <th class="rownum" aria-colindex={mini ? undefined : 1}>
           <!-- The checkbox slot is ALWAYS reserved (see the layout-stability note). -->
           <span class="sel-slot">
             {#if flow.editable}
@@ -804,6 +836,7 @@
             class:drop-before={dropAt === pos && dragFrom !== null && dragFrom > pos}
             class:drop-after={dropAt === pos && dragFrom !== null && dragFrom < pos}
             aria-sort={sortCol === ci ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+            aria-colindex={mini ? undefined : pos + 2}
             style="width:{widthFor(ci)}ch; max-width:{widthFor(ci)}ch;"
             oncontextmenu={(e) => onheadermenu(e, ci)}
             ondragover={(e) => onHeadDragOver(e, pos)}
@@ -892,10 +925,11 @@
           class:odd={idx % 2 === 1}
           class:selected={flow.selected.has(idx)}
           class:cursor={focusIdx === idx}
+          aria-rowindex={mini ? undefined : idx + 2}
           {@attach rowCells(row, idx)}
           {@attach rowWidths}
         >
-          <td class="rownum" data-find-skip>
+          <td class="rownum" data-find-skip aria-colindex={mini ? undefined : 1}>
             <span class="sel-slot">
               {#if flow.editable}
                 <input
@@ -960,12 +994,12 @@
     outline: none;
   }
   .grid-scroll:focus-visible {
-    outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    outline: 1px solid color-mix(in srgb, var(--accent-text) 55%, transparent);
     outline-offset: -1px;
   }
   /* Roving keyboard cell cursor (see onGridKeydown). */
   .grid tbody :global(td.kbd-focus) {
-    outline: 1.5px solid var(--accent);
+    outline: 1.5px solid var(--accent-text);
     outline-offset: -1.5px;
   }
   .grid {
@@ -1032,7 +1066,7 @@
     width: 100%;
     height: 100%;
     /* leave a sliver on the right for the resize handle */
-    padding: 3px 12px 3px 10px;
+    padding-block: 3px; padding-inline: 10px 12px;
     border: none;
     background: transparent;
     color: inherit;
@@ -1044,7 +1078,7 @@
     background: var(--hover);
   }
   .th-sort:focus-visible {
-    outline: 1.5px solid var(--accent);
+    outline: 1.5px solid var(--accent-text);
     outline-offset: -2px;
   }
   .th-inner {
@@ -1280,8 +1314,17 @@
     cursor: pointer;
     padding: 0;
   }
-  .grid tbody tr:hover .row-dup {
+  /* Hover is not the only way in: keyboard focus inside the row reveals it
+     too, and a no-hover pointer (touch) always shows it. */
+  .grid tbody tr:hover .row-dup,
+  .grid tbody tr:focus-within .row-dup,
+  .grid tbody tr.cursor .row-dup {
     display: flex;
+  }
+  @media (hover: none) {
+    .row-dup {
+      display: flex;
+    }
   }
   .row-dup:hover {
     background: color-mix(in srgb, var(--accent) 26%, var(--surface-2));
@@ -1347,8 +1390,17 @@
     cursor: pointer;
     box-shadow: -3px 0 5px var(--surface);
   }
-  .grid :global(td.cell:hover .cell-expand) {
+  .grid :global(td.cell:hover .cell-expand),
+  .grid :global(td.cell:focus-within .cell-expand),
+  .grid :global(td.cell.kbd-focus .cell-expand) {
     display: inline-flex;
+  }
+  /* No hover (touch): the affordance can't wait for a hover that never comes —
+     show it on the cell under the cursor / the cursor row. */
+  @media (hover: none) {
+    .grid tbody tr.cursor :global(td.cell .cell-expand) {
+      display: inline-flex;
+    }
   }
   .grid :global(.cell-expand:hover) {
     color: var(--accent-text);

@@ -259,7 +259,7 @@
   .vt-mime {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .vt-toggle {
     margin-inline-start: auto;

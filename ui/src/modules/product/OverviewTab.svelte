@@ -2160,8 +2160,8 @@
     min-width: 0;
   }
 
-  /* Responsive: collapse to single column below 900px */
-  @media (max-width: 900px) {
+  /* Responsive: collapse to a single column at tablet width and below */
+  @media (max-width: 1024px) {
     .two-col {
       grid-template-columns: 1fr;
     }
@@ -2179,7 +2179,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    padding: 2px 8px 2px 9px;
+    padding-block: 2px; padding-inline: 9px 8px;
     border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 500;
@@ -2254,7 +2254,7 @@
     gap: 10px;
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     padding: 5px 10px;
     cursor: pointer;
     text-align: start;
@@ -2263,7 +2263,7 @@
     transition: background 100ms;
   }
   .related-item:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .related-title {
     flex: 1;
@@ -2296,7 +2296,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    padding: 0 4px 0 0;
+    padding-block: 0; padding-inline: 0 4px;
     border: none;
     border-radius: 999px;
     background: transparent;
@@ -2362,7 +2362,7 @@
     }
   }
   .title-edit-btn:hover {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    background: var(--hover);
     color: var(--text);
   }
   .title-edit {
@@ -2495,71 +2495,8 @@
   .change-notes {
     font-style: italic;
   }
-  .md-body {
-    font-size: var(--fs-m);
-    line-height: 1.65;
-    color: var(--text);
-  }
-  /* Markdown element styling */
-  .md-body :global(h1),
-  .md-body :global(h2),
-  .md-body :global(h3),
-  .md-body :global(h4) {
-    margin: 1.2em 0 0.4em;
-    font-weight: 600;
-    line-height: 1.25;
-    color: var(--text);
-  }
-  .md-body :global(h1) { font-size: 1.35em; }
-  .md-body :global(h2) { font-size: 1.2em; }
-  .md-body :global(h3) { font-size: 1.05em; }
-  .md-body :global(p) {
-    margin: 0 0 0.75em;
-  }
-  .md-body :global(ul),
-  .md-body :global(ol) {
-    padding-inline-start: 1.5em;
-    margin: 0 0 0.75em;
-  }
-  .md-body :global(li) {
-    margin-bottom: 0.25em;
-  }
-  .md-body :global(code) {
-    font-family: var(--font-mono, monospace);
-    font-size: 0.88em;
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    padding: 1px 5px;
-    border-radius: var(--radius-s);
-  }
-  .md-body :global(pre) {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    padding: 12px 14px;
-    overflow-x: auto;
-    margin: 0 0 0.75em;
-  }
-  .md-body :global(pre code) {
-    background: none;
-    padding: 0;
-    font-size: 0.86em;
-  }
-  .md-body :global(blockquote) {
-    border-inline-start: 3px solid var(--border);
-    padding-inline-start: 12px;
-    color: var(--text-dim);
-    margin: 0 0 0.75em;
-    font-style: italic;
-  }
-  .md-body :global(a) {
-    color: var(--accent-text);
-    text-decoration: none;
-  }
-  .md-body :global(a:hover) {
-    text-decoration: underline;
-  }
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
 
   /* ── Jira section (right column) ──────────────────────────── */
@@ -2622,7 +2559,7 @@
     transition: background 100ms;
   }
   .jira-coll-trigger:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .coll-arrow {
     display: inline-flex;
@@ -2724,7 +2661,7 @@
     transition: background 100ms, color 100ms;
   }
   .change-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    background: var(--hover);
     color: var(--text);
   }
   .change-btn:disabled {
@@ -2814,7 +2751,7 @@
     }
   }
   .field-edit-btn:hover {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    background: var(--hover);
     color: var(--text);
   }
   .field-editor {
@@ -2895,7 +2832,7 @@
     transition: background 100ms, color 100ms, border-color 100ms;
   }
   .desc-edit-btn:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    background: var(--hover);
     color: var(--text);
     border-color: var(--text-dim);
   }
@@ -2914,7 +2851,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-s);
     line-height: 1.55;
   }
@@ -2953,7 +2890,7 @@
   .link-key {
     font-size: var(--fs-xs);
     color: var(--accent-text);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .chip-sm {
     font-size: var(--fs-xs);
@@ -2976,7 +2913,7 @@
     color: var(--accent-text);
   }
   .mono-sm {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
   }
 
@@ -3271,7 +3208,7 @@
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     padding: 8px 10px;
     outline: none;
     width: 100%;
@@ -3338,7 +3275,7 @@
     transition: background 80ms;
   }
   .transcript-toggle:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .transcript-title {
     flex: 1;
@@ -3380,7 +3317,7 @@
     line-height: 1.55;
     border-top: 1px solid var(--border);
     background: color-mix(in srgb, var(--text-dim) 3%, transparent);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     max-height: 320px;
     overflow-y: auto;
   }

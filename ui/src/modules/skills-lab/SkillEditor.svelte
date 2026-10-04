@@ -305,7 +305,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 6px 8px 2px 10px;
+    padding-block: 6px 2px; padding-inline: 10px 8px;
   }
   .files-head .section-title {
     margin: 0;

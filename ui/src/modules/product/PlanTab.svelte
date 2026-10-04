@@ -334,7 +334,6 @@
     return 'todo';
   }
 
-
   function taskCount(t: Task): string {
     const done = t.items.filter((i) => i.status === 'done').length;
     return `${done}/${t.items.length}`;
@@ -403,207 +402,209 @@
   <div class="muted">No story selected.</div>
 {:else}
   <div class="plan-tab">
-    {#if (loading || loadError) && !planVersion}
-      <LoadState what="the plan" loading={loading} error={loadError} empty onretry={() => void initialLoad()} />
-    {:else if !planVersion}
-      <!-- ── No plan yet: generate panel ─────────────────────────────────────── -->
-      <section class="pl-card gen-panel">
-        <!-- Provider multi-select (plan by one or many agents at once). -->
-        <div class="cfg-row">
-          <span class="field-label">
-            Planning agents
-            <span class="sel-count">{selectedProviders.length} selected</span>
-          </span>
-          <div class="pl-provider-group">
-            {#each availableProviders as p (p)}
-              <button
-                class="pill-toggle"
-                class:on={selectedProviders.includes(p)}
-                aria-pressed={selectedProviders.includes(p)}
-                disabled={generating || pollTimer !== null}
-                onclick={() => toggleProvider(p)}
-                title={p}
-              >
-                <ProviderIcon provider={p} size={12} />
-                {p}
-              </button>
-            {/each}
-          </div>
-        </div>
-
-        <!-- Summarizer (only meaningful with >1 planning agent). -->
-        {#if multiAgent}
+    <!-- A failed refresh of a shown plan keeps it with a stale bar (LoadState). -->
+    <LoadState what="the plan" {loading} error={loadError} empty={!planVersion} onretry={() => void initialLoad()}>
+      {#snippet emptyView()}
+        <!-- ── No plan yet: generate panel ─────────────────────────────────────── -->
+        <section class="pl-card gen-panel">
+          <!-- Provider multi-select (plan by one or many agents at once). -->
           <div class="cfg-row">
-            <label class="field-label" for="plan-summarizer-sel">Summarizer</label>
-            <select
-              id="plan-summarizer-sel"
-              class="input pl-sel"
-              bind:value={summarizerProvider}
-              disabled={generating || pollTimer !== null}
-            >
-              {#each availableProviders as p (p)}
-                <option value={p}>{p}</option>
-              {/each}
-            </select>
-            <span class="cfg-hint">consolidates the agents' plans into one</span>
-          </div>
-        {/if}
-
-        <!-- Autonomy toggle — DEFAULT ON (non-interactive). -->
-        <label class="autonomy-toggle">
-          <input type="checkbox" bind:checked={dontAsk} disabled={generating} />
-          <span class="autonomy-text">
-            Don't ask me questions — I'm not available; I'll review the plan at the end
-          </span>
-        </label>
-
-        <div class="gen-row">
-          <button
-            class="btn primary"
-            onclick={generate}
-            disabled={generating || pollTimer !== null || selectedProviders.length === 0}
-            title={selectedProviders.length === 0 ? 'Pick at least one provider' : undefined}
-          >
-            {#if generating}
-              Triggering…
-            {:else if pollTimer !== null}
-              Generating…
-            {:else if multiAgent}
-              Generate plan · {selectedProviders.length} agents
-            {:else}
-              Generate plan
-            {/if}
-          </button>
-          {#if pollTimer !== null}
-            <span class="polling-indicator">checking every 3s…</span>
-          {/if}
-          {#if !swarmLink && swarm.swarms.length > 1}
-            <select class="input pl-sel" bind:value={targetSwarmId} title="Which swarm implements this story" aria-label="Target swarm">
-              <option value="">First swarm</option>
-              {#each swarm.swarms as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
-            </select>
-          {/if}
-          <button
-            class="btn"
-            onclick={sendToSwarm}
-            disabled={sendingToSwarm}
-            title={swarmLink ? 'Open the linked swarm project' : 'Create a swarm project from this story (the swarm planner generates tasks)'}
-          >
-            <Icon name="zap" size={13} />
-            {#if sendingToSwarm}Sending…{:else if swarmLink}Open in Swarm{:else}Send to Swarm…{/if}
-          </button>
-        </div>
-      </section>
-
-      {#if planSessionIds.length > 0}
-        <div class="watching">
-          <span class="watching-dot"></span>
-          <span class="watching-text">
-            Watching {planSessionIds.length} planning agent{planSessionIds.length > 1 ? 's' : ''}
-            {planInteractive ? ' — answer any questions in their tiles' : ' (running unattended)'}
-          </span>
-          <button class="btn small" onclick={tilePlanSessions}>Show agents</button>
-        </div>
-      {/if}
-      {#if swarmLink}
-        <div class="muted">
-          Linked to swarm project <strong>{swarmLink.project_name}</strong>.
-        </div>
-      {/if}
-      {#if pollTimer === null && !swarmLink && planSessionIds.length === 0}
-        <div class="muted">No implementation plan yet. Generate one to break the story into trackable tasks, or send straight to a swarm.</div>
-      {/if}
-    {:else}
-      <!-- ── Plan exists: header + task tree ─────────────────────────────────── -->
-      <section class="pl-card plan-header">
-        <div class="ph-row">
-          <div class="ph-info">
-            <span class="ph-label">Implementation plan v{planVersion.version_no}</span>
-            <!-- Agent-written: attributed (the version row carries no provider,
-                 so the byline names Otto) and a draft the PO works through. -->
-            <AgentByline at={planVersion.created_at} testid="plan-byline" />
-          </div>
-          <div class="ph-progress">
-            <span class="prog-text">
-              {totals.done}/{totals.total} done{totals.inProgress > 0 ? `, ${totals.inProgress} in progress` : ''}
+            <span class="field-label">
+              Planning agents
+              <span class="sel-count">{selectedProviders.length} selected</span>
             </span>
-            <div class="prog-bar" aria-hidden="true">
-              <div
-                class="prog-fill"
-                style="width: {totals.total ? Math.round((totals.done / totals.total) * 100) : 0}%"
-              ></div>
+            <div class="pl-provider-group">
+              {#each availableProviders as p (p)}
+                <button
+                  class="pill-toggle"
+                  class:on={selectedProviders.includes(p)}
+                  aria-pressed={selectedProviders.includes(p)}
+                  disabled={generating || pollTimer !== null}
+                  onclick={() => toggleProvider(p)}
+                  title={p}
+                >
+                  <ProviderIcon provider={p} size={12} />
+                  {p}
+                </button>
+              {/each}
             </div>
           </div>
-          <div class="ph-actions">
-            {#if saving}<span class="saving">Saving…</span>{:else if savedTick}<span class="saved-tick">Saved</span>{/if}
-            {#if swarmLink}
-              <span class="chip pl-swarm-chip" title="Linked to swarm project “{swarmLink.project_name}”">
-                <Icon name="zap" size={10} /> <span class="pl-swarm-name">{swarmLink.project_name}</span>
-              </span>
+
+          <!-- Summarizer (only meaningful with >1 planning agent). -->
+          {#if multiAgent}
+            <div class="cfg-row">
+              <label class="field-label" for="plan-summarizer-sel">Summarizer</label>
+              <select
+                id="plan-summarizer-sel"
+                class="input pl-sel"
+                bind:value={summarizerProvider}
+                disabled={generating || pollTimer !== null}
+              >
+                {#each availableProviders as p (p)}
+                  <option value={p}>{p}</option>
+                {/each}
+              </select>
+              <span class="cfg-hint">consolidates the agents' plans into one</span>
+            </div>
+          {/if}
+
+          <!-- Autonomy toggle — DEFAULT ON (non-interactive). -->
+          <label class="autonomy-toggle">
+            <input type="checkbox" bind:checked={dontAsk} disabled={generating} />
+            <span class="autonomy-text">
+              Don't ask me questions — I'm not available; I'll review the plan at the end
+            </span>
+          </label>
+
+          <div class="gen-row">
+            <button
+              class="btn primary"
+              onclick={generate}
+              disabled={generating || pollTimer !== null || selectedProviders.length === 0}
+              title={selectedProviders.length === 0 ? 'Pick at least one provider' : undefined}
+            >
+              {#if generating}
+                Triggering…
+              {:else if pollTimer !== null}
+                Generating…
+              {:else if multiAgent}
+                Generate plan · {selectedProviders.length} agents
+              {:else}
+                Generate plan
+              {/if}
+            </button>
+            {#if pollTimer !== null}
+              <span class="polling-indicator">checking every 3s…</span>
             {/if}
-            <button class="btn small" onclick={refresh} disabled={generating}>Refresh</button>
-            <button class="btn small" aria-pressed={showRaw} onclick={() => (showRaw = !showRaw)}>
-              {showRaw ? 'Hide raw' : 'Raw'}
-            </button>
-            <button class="btn small" onclick={regenerate} disabled={generating || pollTimer !== null}>
-              {pollTimer !== null ? 'Generating…' : 'Regenerate…'}
-            </button>
             {#if !swarmLink && swarm.swarms.length > 1}
               <select class="input pl-sel" bind:value={targetSwarmId} title="Which swarm implements this story" aria-label="Target swarm">
                 <option value="">First swarm</option>
                 {#each swarm.swarms as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
               </select>
             {/if}
-            <!-- The plan's next step — hand it to a swarm — is THE primary. -->
             <button
-              class="btn small primary"
+              class="btn"
               onclick={sendToSwarm}
               disabled={sendingToSwarm}
-              title={swarmLink ? 'Open the linked swarm project' : 'Create a swarm project from this story'}
+              title={swarmLink ? 'Open the linked swarm project' : 'Create a swarm project from this story (the swarm planner generates tasks)'}
             >
-              <Icon name="zap" size={12} />
+              <Icon name="zap" size={13} />
               {#if sendingToSwarm}Sending…{:else if swarmLink}Open in Swarm{:else}Send to Swarm…{/if}
             </button>
           </div>
-        </div>
-      </section>
-
-      {#if tasks.length === 0}
-        <div class="muted">The plan has no recognizable tasks. View the raw markdown to inspect it.</div>
-      {/if}
-
-      <div class="tasks">
-        {#each tasks as task (task.lineIndex)}
-          <section class="pl-card task" class:done={task.status === 'done'}>
-            <header class="task-head">
-              <span class="task-status status-{task.status}">{statusLabel(task.status)}</span>
-              <h3 class="task-title">{task.title}</h3>
-              <span class="task-count">{taskCount(task)}</span>
-            </header>
-            <ul class="items">
-              {#each task.items as item (item.lineIndex)}
-                <li class="item status-{item.status}">
-                  <button
-                    class="checkbox status-{item.status}"
-                    title="Mark {statusLabel(NEXT[item.status])}"
-                    aria-label="Toggle: currently {statusLabel(item.status)}"
-                    onclick={() => cycleItem(item.lineIndex, item.status)}
-                    disabled={saving}
-                  >{#if item.status === 'done'}<Icon name="check" size={12} />{:else if item.status === 'in_progress'}<Icon name="dot" size={12} />{/if}</button>
-                  <span class="item-text">{item.text}</span>
-                </li>
-              {/each}
-            </ul>
-          </section>
-        {/each}
-      </div>
-
-      {#if showRaw}
-        <section class="pl-card raw">
-          <div class="md-body">{@html renderedRaw}</div>
         </section>
+
+        {#if planSessionIds.length > 0}
+          <div class="watching">
+            <span class="watching-dot"></span>
+            <span class="watching-text">
+              Watching {planSessionIds.length} planning agent{planSessionIds.length > 1 ? 's' : ''}
+              {planInteractive ? ' — answer any questions in their tiles' : ' (running unattended)'}
+            </span>
+            <button class="btn small" onclick={tilePlanSessions}>Show agents</button>
+          </div>
+        {/if}
+        {#if swarmLink}
+          <div class="muted">
+            Linked to swarm project <strong>{swarmLink.project_name}</strong>.
+          </div>
+        {/if}
+        {#if pollTimer === null && !swarmLink && planSessionIds.length === 0}
+          <div class="muted">No implementation plan yet. Generate one to break the story into trackable tasks, or send straight to a swarm.</div>
+        {/if}
+      {/snippet}
+      {#if planVersion}
+        <!-- ── Plan exists: header + task tree ─────────────────────────────────── -->
+        <section class="pl-card plan-header">
+          <div class="ph-row">
+            <div class="ph-info">
+              <span class="ph-label">Implementation plan v{planVersion.version_no}</span>
+              <!-- Agent-written: attributed (the version row carries no provider,
+                   so the byline names Otto) and a draft the PO works through. -->
+              <AgentByline at={planVersion.created_at} testid="plan-byline" />
+            </div>
+            <div class="ph-progress">
+              <span class="prog-text">
+                {totals.done}/{totals.total} done{totals.inProgress > 0 ? `, ${totals.inProgress} in progress` : ''}
+              </span>
+              <div class="prog-bar" aria-hidden="true">
+                <div
+                  class="prog-fill"
+                  style="width: {totals.total ? Math.round((totals.done / totals.total) * 100) : 0}%"
+                ></div>
+              </div>
+            </div>
+            <div class="ph-actions">
+              {#if saving}<span class="saving">Saving…</span>{:else if savedTick}<span class="saved-tick">Saved</span>{/if}
+              {#if swarmLink}
+                <span class="chip pl-swarm-chip" title="Linked to swarm project “{swarmLink.project_name}”">
+                  <Icon name="zap" size={10} /> <span class="pl-swarm-name">{swarmLink.project_name}</span>
+                </span>
+              {/if}
+              <button class="btn small" onclick={refresh} disabled={generating}>Refresh</button>
+              <button class="btn small" aria-pressed={showRaw} onclick={() => (showRaw = !showRaw)}>
+                {showRaw ? 'Hide raw' : 'Raw'}
+              </button>
+              <button class="btn small" onclick={regenerate} disabled={generating || pollTimer !== null}>
+                {pollTimer !== null ? 'Generating…' : 'Regenerate…'}
+              </button>
+              {#if !swarmLink && swarm.swarms.length > 1}
+                <select class="input pl-sel" bind:value={targetSwarmId} title="Which swarm implements this story" aria-label="Target swarm">
+                  <option value="">First swarm</option>
+                  {#each swarm.swarms as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
+                </select>
+              {/if}
+              <!-- The plan's next step — hand it to a swarm — is THE primary. -->
+              <button
+                class="btn small primary"
+                onclick={sendToSwarm}
+                disabled={sendingToSwarm}
+                title={swarmLink ? 'Open the linked swarm project' : 'Create a swarm project from this story'}
+              >
+                <Icon name="zap" size={12} />
+                {#if sendingToSwarm}Sending…{:else if swarmLink}Open in Swarm{:else}Send to Swarm…{/if}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {#if tasks.length === 0}
+          <div class="muted">The plan has no recognizable tasks. View the raw markdown to inspect it.</div>
+        {/if}
+
+        <div class="tasks">
+          {#each tasks as task (task.lineIndex)}
+            <section class="pl-card task" class:done={task.status === 'done'}>
+              <header class="task-head">
+                <span class="task-status status-{task.status}">{statusLabel(task.status)}</span>
+                <h3 class="task-title">{task.title}</h3>
+                <span class="task-count">{taskCount(task)}</span>
+              </header>
+              <ul class="items">
+                {#each task.items as item (item.lineIndex)}
+                  <li class="item status-{item.status}">
+                    <button
+                      class="checkbox status-{item.status}"
+                      title="Mark {statusLabel(NEXT[item.status])}"
+                      aria-label="Toggle: currently {statusLabel(item.status)}"
+                      onclick={() => cycleItem(item.lineIndex, item.status)}
+                      disabled={saving}
+                    >{#if item.status === 'done'}<Icon name="check" size={12} />{:else if item.status === 'in_progress'}<Icon name="dot" size={12} />{/if}</button>
+                    <span class="item-text">{item.text}</span>
+                  </li>
+                {/each}
+              </ul>
+            </section>
+          {/each}
+        </div>
+
+        {#if showRaw}
+          <section class="pl-card raw">
+            <div class="md-body">{@html renderedRaw}</div>
+          </section>
+        {/if}
       {/if}
-    {/if}
+    </LoadState>
   </div>
 {/if}
 
@@ -699,9 +700,9 @@
     border-radius: 50%;
     background: var(--info);
     flex-shrink: 0;
-    animation: watch-pulse 1.4s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
-  @keyframes watch-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  
   @media (prefers-reduced-motion: reduce) { .watching-dot { animation: none; } }
   .watching-text { font-size: var(--fs-s); color: var(--text); flex: 1; min-width: 0; }
   .pl-sel { width: auto; font-size: var(--fs-s); }
@@ -797,15 +798,4 @@
 
   /* Raw markdown */
   .raw { padding: 14px 16px; }
-  .md-body { font-size: var(--fs-m); line-height: 1.6; color: var(--text); }
-  .md-body :global(h3) { font-size: 1.05em; font-weight: 600; margin: 1em 0 0.4em; }
-  .md-body :global(ul) { padding-inline-start: 1.4em; margin: 0 0 0.6em; }
-  .md-body :global(li) { margin-bottom: 0.2em; }
-  .md-body :global(code) {
-    font-family: var(--font-mono, monospace);
-    font-size: 0.88em;
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    padding: 1px 5px;
-    border-radius: var(--radius-s);
-  }
 </style>

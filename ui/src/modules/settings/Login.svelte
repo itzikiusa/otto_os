@@ -62,29 +62,29 @@
   }
   .login-card {
     width: 320px;
+    max-width: calc(100vw - 32px);
     padding: 28px 26px 24px;
     display: flex;
     flex-direction: column;
   }
   .login-mark {
-    font-size: 24px;
-    font-weight: 700;
+    font-size: var(--fs-hero);
+    font-weight: 600;
     letter-spacing: -0.02em;
     text-align: center;
   }
   .login-sub {
     margin: 4px 0 20px;
     text-align: center;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
   }
   .login-error {
     margin-bottom: 10px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--danger);
   }
   .login-btn {
-    height: 30px;
     margin-top: 4px;
   }
 </style>

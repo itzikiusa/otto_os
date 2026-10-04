@@ -331,7 +331,7 @@
   .favorite-row > button:first-child { flex: 1; min-width: 0; }
   .shortcut-list .remove-favorite { width: 24px; flex: 0 0 24px; display: grid; place-items: center; color: var(--text-dim); }
   .shortcut-list button:hover, .shortcut-list button.current { background: var(--surface-2); }
-  @media (max-width: 520px) {
+  @media (max-width: 640px) {
     .pick-content { flex-direction: column; }
     .shortcuts { flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .shortcuts section { min-width: 0; }
@@ -401,7 +401,7 @@
   .folder-grid :global(.picker-rows) { height: 100%; }
   .entry-cell { flex: 1; min-width: 0; }
   .entry-cell .row { width: 100%; height: 32px; }
-  .folder-grid:focus-within [aria-selected="true"] { background: var(--surface); outline: 1px solid var(--accent); outline-offset: -1px; }
+  .folder-grid:focus-within [aria-selected="true"] { background: var(--surface); outline: 1px solid var(--accent-text); outline-offset: -1px; }
   .browser > .row { flex: none; height: 32px; }
   .row-wrap {
     height: 32px;
@@ -455,7 +455,7 @@
   .chip {
     font-size: var(--fs-xs);
     padding: 1px 5px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 18%, transparent);
     color: var(--accent-text);
     text-transform: uppercase;

@@ -201,7 +201,7 @@
   .badge {
     font-size: var(--fs-xs);
     padding: 1px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
   }
   .badge.breach {
     background: var(--danger-soft);

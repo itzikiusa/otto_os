@@ -82,7 +82,7 @@
     overflow: hidden;
   }
   .sticky.selected {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
   }
   .body {
     width: 100%;

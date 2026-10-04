@@ -1147,9 +1147,18 @@
     transition: opacity 100ms ease-out;
   }
   .wp-file:hover .wp-discard,
+  .wp-file:focus-within .wp-discard,
   .wp-file.selected .wp-discard,
-  .wp-folder:hover .wp-discard {
+  .wp-folder:hover .wp-discard,
+  .wp-folder:focus-within .wp-discard,
+  .wp-discard:focus-visible {
     opacity: 1;
+  }
+  /* No hover on touch: the action can't stay hidden behind it. */
+  @media (hover: none) {
+    .wp-discard {
+      opacity: 1;
+    }
   }
   .wp-discard:hover {
     color: var(--danger);
@@ -1319,15 +1328,11 @@
     border: 1.5px solid currentColor;
     border-top-color: transparent;
     border-radius: 50%;
-    animation: spin 0.7s linear infinite;
+    animation: otto-spin 0.7s linear infinite;
     vertical-align: middle;
     margin-inline-end: 4px;
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   .row {
     display: flex;
     align-items: center;
@@ -1418,7 +1423,7 @@
     gap: 6px;
     margin: 4px 10px 6px;
     padding: 6px 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     background: var(--warning-soft);
     color: var(--text);
     font-size: var(--fs-xs);

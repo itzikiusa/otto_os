@@ -390,7 +390,7 @@
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
   .trow:hover {
-    background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+    background: var(--hover);
   }
   .tname {
     display: flex;
@@ -525,7 +525,7 @@
     letter-spacing: 0.03em;
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 1px 6px;
   }
   .tag.bad {

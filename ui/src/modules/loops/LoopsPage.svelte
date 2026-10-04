@@ -150,7 +150,7 @@
     background: var(--hover);
   }
   .loop-card:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 2px;
   }
   .card-top {
@@ -191,7 +191,7 @@
   }
   .bar {
     height: 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     overflow: hidden;
   }

@@ -25,6 +25,7 @@
   //
   // ≤ 640 px the three columns collapse to a segmented single pane (Assets ·
   // Canvas · Inspector), like the Database Explorer's phone layout.
+  import { onTabKey } from '../../../lib/tabKeys';
   import { onDestroy, untrack } from 'svelte';
   import { product, toBase64 } from '../../../lib/stores/product.svelte';
   import { mockupAssist, type LiveUpdate } from '../../../lib/stores/mockup-assist.svelte';
@@ -682,21 +683,6 @@
     ctxMenu.show(e, items);
   }
 
-  function onPaneTabKey(event: KeyboardEvent): void {
-    const button = event.currentTarget as HTMLButtonElement;
-    const group = button.parentElement!;
-    const tabs = Array.from(group.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
-    const index = tabs.indexOf(button);
-    const direction = getComputedStyle(group).direction === 'rtl' ? -1 : 1;
-    const next = event.key === 'ArrowRight' ? (index + direction + tabs.length) % tabs.length
-      : event.key === 'ArrowLeft' ? (index - direction + tabs.length) % tabs.length
-      : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1;
-    if (next < 0) return;
-    event.preventDefault();
-    tabs[next].focus();
-    tabs[next].click();
-  }
-
   // ── Row actions ────────────────────────────────────────────────────────────
   function selectArtifact(id: string): void {
     selectedId = id;
@@ -813,9 +799,9 @@
 >
   <!-- Narrow available pane: preserve a useful stage with explicit pane navigation. -->
   <div class="arena-seg" role="tablist" aria-label="Design panes">
-    <button class="seg" class:active={mobilePane === 'assets'} role="tab" aria-selected={mobilePane === 'assets'} tabindex={mobilePane === 'assets' ? 0 : -1} onkeydown={onPaneTabKey} onclick={() => (mobilePane = 'assets')}>Assets</button>
-    <button class="seg" class:active={mobilePane === 'canvas'} role="tab" aria-selected={mobilePane === 'canvas'} tabindex={mobilePane === 'canvas' ? 0 : -1} onkeydown={onPaneTabKey} onclick={() => (mobilePane = 'canvas')}>Canvas</button>
-    <button class="seg" class:active={mobilePane === 'inspector'} role="tab" aria-selected={mobilePane === 'inspector'} tabindex={mobilePane === 'inspector' ? 0 : -1} onkeydown={onPaneTabKey} onclick={() => (mobilePane = 'inspector')}>Inspector</button>
+    <button class="seg" class:active={mobilePane === 'assets'} role="tab" aria-selected={mobilePane === 'assets'} tabindex={mobilePane === 'assets' ? 0 : -1} onkeydown={onTabKey} onclick={() => (mobilePane = 'assets')}>Assets</button>
+    <button class="seg" class:active={mobilePane === 'canvas'} role="tab" aria-selected={mobilePane === 'canvas'} tabindex={mobilePane === 'canvas' ? 0 : -1} onkeydown={onTabKey} onclick={() => (mobilePane = 'canvas')}>Canvas</button>
+    <button class="seg" class:active={mobilePane === 'inspector'} role="tab" aria-selected={mobilePane === 'inspector'} tabindex={mobilePane === 'inspector' ? 0 : -1} onkeydown={onTabKey} onclick={() => (mobilePane = 'inspector')}>Inspector</button>
   </div>
 
   <!-- ── ASSETS / HIERARCHY ─────────────────────────────────────────────── -->
@@ -823,8 +809,8 @@
     <div class="pane-head">
       {#if kind === 'scene3d' && sceneDoc}
         <div class="pane-switch" role="tablist" aria-label="Left pane">
-          <button class="ss" class:active={leftPane === 'assets'} role="tab" aria-selected={leftPane === 'assets'} onclick={() => (leftPane = 'assets')}>Assets</button>
-          <button class="ss" class:active={leftPane === 'hierarchy'} role="tab" aria-selected={leftPane === 'hierarchy'} onclick={() => (leftPane = 'hierarchy')}>Hierarchy</button>
+          <button class="ss" class:active={leftPane === 'assets'} role="tab" aria-selected={leftPane === 'assets'} tabindex={leftPane === 'assets' ? 0 : -1} onkeydown={onTabKey} onclick={() => (leftPane = 'assets')}>Assets</button>
+          <button class="ss" class:active={leftPane === 'hierarchy'} role="tab" aria-selected={leftPane === 'hierarchy'} tabindex={leftPane === 'hierarchy' ? 0 : -1} onkeydown={onTabKey} onclick={() => (leftPane = 'hierarchy')}>Hierarchy</button>
         </div>
       {:else}
         <span class="pane-title">Assets</span>
@@ -1329,7 +1315,7 @@
   }
   .agent-badge {
     background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
+    color: var(--success);
   }
   .owner-badge {
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);
@@ -1452,7 +1438,7 @@
     border-inline-start: 1px solid var(--border);
     background: var(--bg);
     color: var(--text);
-    font: 12px/1.5 var(--font-mono, monospace);
+    font: 12px/1.5 var(--font-mono);
     padding: 10px 12px;
     outline: none;
     tab-size: 2;
@@ -1642,7 +1628,7 @@
     border-top: 1px solid var(--border);
   }
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
 
   /* ── Phone: segmented single pane ─────────────────────────────────────── */

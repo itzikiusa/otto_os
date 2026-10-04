@@ -397,7 +397,7 @@
     text-transform: uppercase;
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 16%, transparent);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 0 5px;
   }
   .cactions {

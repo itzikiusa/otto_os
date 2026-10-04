@@ -6,6 +6,7 @@
   // The phone sheet sits on the Modal layer (above BottomNav) and registers
   // with ui.pushModal() so the native browser webview hides under it.
   import type { Snippet } from 'svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import { untrack } from 'svelte';
   import { dialogFocus } from '../../lib/dialogFocus';
   import Icon from '../../lib/components/Icon.svelte';
@@ -52,16 +53,6 @@
     onclose();
   }
 
-  function tabKey(e: KeyboardEvent, i: number): void {
-    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
-    e.preventDefault();
-    const button = e.currentTarget as HTMLButtonElement;
-    const rtl = getComputedStyle(button).direction === 'rtl';
-    const step = (e.key === 'ArrowRight' ? 1 : -1) * (rtl ? -1 : 1);
-    const j = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + step + tabs.length) % tabs.length;
-    ontab(tabs[j].id);
-    button.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[j]?.focus();
-  }
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -85,14 +76,14 @@
     <button class="icon-btn dr-close" onclick={onclose} aria-label="Close details" title="Close (Esc)"><Icon name="x" size={14} /></button>
   </header>
   <div class="dr-tabs" role="tablist" aria-label="Detail tabs">
-    {#each tabs as t, i (t.id)}
+    {#each tabs as t (t.id)}
       <button
         role="tab"
         aria-selected={tab === t.id}
         tabindex={tab === t.id ? 0 : -1}
         class:active={tab === t.id}
         onclick={() => ontab(t.id)}
-        onkeydown={(e) => tabKey(e, i)}
+        onkeydown={onTabKey}
       >{t.label}</button>
     {/each}
   </div>
@@ -127,7 +118,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 10px 6px 14px;
+    padding-block: 8px 6px; padding-inline: 14px 10px;
     border-bottom: 1px solid var(--border);
   }
   .dr-title {
@@ -171,15 +162,15 @@
     text-transform: lowercase;
   }
   .pill.ok {
-    color: var(--status-working);
+    color: var(--success);
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
   }
   .pill.warn {
-    color: var(--status-warn);
+    color: var(--warning);
     background: color-mix(in srgb, var(--status-warn) 16%, transparent);
   }
   .pill.bad {
-    color: var(--status-exited);
+    color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
   }
   .icon-btn {

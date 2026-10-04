@@ -9,6 +9,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import type { OttoRun } from '../../lib/api/types';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -22,13 +23,8 @@
 
   let busy = $state(false);
   let error = $state('');
-  let rejectNote = $state('');
-  let rejecting = $state(false);
-  let rejectEl: HTMLTextAreaElement | undefined = $state();
-  // Reject opens the reason box — put the caret in it.
-  $effect(() => {
-    if (rejecting) rejectEl?.focus();
-  });
+  /** Which gate decision is in flight (drives the Approving… / Denying… label). */
+  let deciding = $state<'approve' | 'deny' | null>(null);
 
   const events = $derived(runWithOtto.eventsByRun[run.id] ?? []);
 
@@ -47,20 +43,21 @@
     }
   });
 
-  async function approve(decision: 'approve' | 'reject'): Promise<void> {
+  // The wire still says `reject`; the UI says Deny (one queue vocabulary).
+  async function approve(decision: 'approve' | 'reject', note?: string | null): Promise<void> {
     error = '';
     busy = true;
+    deciding = decision === 'approve' ? 'approve' : 'deny';
     try {
       await runWithOtto.approve(run.id, {
         decision,
-        note: decision === 'reject' && rejectNote.trim() ? rejectNote.trim() : undefined,
+        note: decision === 'reject' && note?.trim() ? note.trim() : undefined,
       });
-      rejecting = false;
-      rejectNote = '';
     } catch (e) {
       error = e instanceof Error ? e.message : 'Decision failed';
     } finally {
       busy = false;
+      deciding = null;
     }
   }
 
@@ -208,27 +205,16 @@
       <h3 class="h">Awaiting your approval</h3>
       <p class="gate-note">
         Approve to draft the PR from <span class="mono">{run.branch || 'the run branch'}</span>. Nothing is pushed
-        until you open the PR. Reject ends the run and removes its worktree.
+        until you open the PR. Deny ends the run and removes its worktree.
       </p>
-      {#if rejecting}
-        <textarea
-          bind:this={rejectEl}
-          bind:value={rejectNote}
-          rows="2"
-          aria-label="Reason for rejecting (optional)"
-          placeholder="Optional reason for rejecting…"
-          onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); rejecting = false; rejectNote = ''; } }}
-        ></textarea>
-        <div class="actions">
-          <button class="btn danger" disabled={busy} onclick={() => approve('reject')}>Reject run</button>
-          <button class="btn" disabled={busy} onclick={() => { rejecting = false; rejectNote = ''; }}>Cancel</button>
-        </div>
-      {:else}
-        <div class="actions">
-          <button class="btn primary" disabled={busy} onclick={() => approve('approve')}>Approve</button>
-          <button class="btn danger" disabled={busy} onclick={() => (rejecting = true)}>Reject…</button>
-        </div>
-      {/if}
+      <ApprovalActions
+        busy={deciding}
+        disabled={busy}
+        denyTarget="this run"
+        denyTitle="Deny run"
+        onapprove={() => approve('approve')}
+        ondeny={(reason) => approve('reject', reason)}
+      />
     </section>
   {/if}
 
@@ -331,15 +317,6 @@
     border-radius: var(--radius-s); padding: 8px 10px; max-height: 16rem; overflow: auto; margin: 0;
   }
   .summary { font-size: var(--fs-m); line-height: 1.5; overflow-wrap: anywhere; }
-  textarea {
-    width: 100%; box-sizing: border-box; background: var(--bg); color: var(--text);
-    border: 1px solid var(--border); border-radius: var(--radius-s); padding: 6px 9px; font: inherit;
-  }
-  textarea:focus-visible {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
-  }
   .err {
     background: var(--danger-soft);
     color: var(--danger); padding: 6px 10px; overflow-wrap: anywhere;

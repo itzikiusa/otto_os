@@ -10,6 +10,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmOutward } from '../../lib/confirmOutward';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { scheduledTasks } from '../../lib/stores/scheduledTasks.svelte';
   import { scheduledTasksPort } from '../../lib/uiCommands/scheduled';
@@ -391,10 +392,13 @@
     // Outward-facing: every run posts its report off the Mac. Say where
     // before the first save that turns delivery on (or points it elsewhere).
     if (fDestType !== 'none' && JSON.stringify(buildDestination()) !== originalDest) {
-      const ok = await confirmer.ask(
-        `Each run's report will be sent to ${destWhere()}. Anyone who can read it there will see the report.`,
-        { title: 'Deliver reports outside Otto', confirmLabel: editId ? 'Save and deliver' : 'Create and deliver', danger: false },
-      );
+      const ok = await confirmOutward({
+        verb: editId ? 'Save and deliver' : 'Create and deliver',
+        title: 'Deliver reports outside Otto?',
+        where: destWhere(),
+        what: `The report of every run of “${fName.trim()}” on its schedule, starting with the next run.`,
+        who: destWho(fDestType),
+      });
       if (!ok) return;
     }
     const body: ScheduledTaskInput = {
@@ -446,6 +450,22 @@
     }
   }
 
+  /** Who can read a delivered report, by destination type. */
+  function destWho(type: string): string {
+    switch (type) {
+      case 'slack':
+        return 'Everyone in that Slack channel.';
+      case 'telegram':
+        return 'Everyone in that Telegram chat.';
+      case 'email':
+        return 'The recipients of that email, and anyone they forward it to.';
+      case 'webhook':
+        return 'Whatever service receives that URL.';
+      default:
+        return 'Anyone who can read it there.';
+    }
+  }
+
   /** Where a task's saved destination points, in the words destWhere() uses. */
   function savedDestWhere(t: ScheduledTask): string {
     const d = (t.destination ?? {}) as Record<string, unknown>;
@@ -469,10 +489,13 @@
     // right now — say where before it goes.
     const where = savedDestWhere(t);
     if (where) {
-      const ok = await confirmer.ask(
-        `“${t.name}” will run now and send its report to ${where}. Anyone who can read it there will see the report.`,
-        { title: 'Run and deliver now', confirmLabel: 'Run and deliver', danger: false },
-      );
+      const ok = await confirmOutward({
+        verb: 'Run and deliver',
+        title: 'Run and deliver now?',
+        where,
+        what: `The report of “${t.name}”, produced by a run that starts now.`,
+        who: destWho((t.destination as { type?: string } | null)?.type ?? ''),
+      });
       if (!ok) return;
     }
     runningIds = { ...runningIds, [t.id]: true };

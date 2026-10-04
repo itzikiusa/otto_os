@@ -445,7 +445,7 @@
   /* The slide-in plays each time a space is shown: a CSS animation restarts
      when its element leaves display:none (no remount needed). */
   .view:not([hidden]) {
-    animation: view-in 220ms ease-out;
+    animation: view-in var(--dur-enter) var(--ease-out);
   }
   @keyframes view-in {
     from {

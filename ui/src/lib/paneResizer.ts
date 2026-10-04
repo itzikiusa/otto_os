@@ -11,6 +11,35 @@
 //
 // `invert` is for a separator on the LEADING edge of the pane it sizes (the pane
 // grows when the divider moves toward the start, e.g. a right-hand rail).
+/** One shared tooltip for every side-by-side pane separator. */
+export const RESIZE_TITLE = 'Drag or use ←/→ to resize · double-click or Enter to reset';
+/** The same for a horizontal bar between stacked panes (↑/↓). */
+export const RESIZE_TITLE_VERTICAL = 'Drag or use ↑/↓ to resize · double-click or Enter to reset';
+/** `aria-valuetext` for a pane width. */
+export const pxWide = (v: number): string => `${Math.round(v)} pixels wide`;
+
+/** The list/index pane of a list–detail page: one default + one range, so the
+ *  modules agree (and each persists the user's width under its own key). */
+export const LIST_PANE = { default: 280, min: 220, max: 420 } as const;
+
+/** Persisted pane width: read `key` from localStorage, clamped to [min, max]. */
+export function loadPaneWidth(key: string, fallback: number, min: number, max: number): number {
+  try {
+    const v = Number(localStorage.getItem(key));
+    return Number.isFinite(v) && v >= min ? Math.min(max, v) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function savePaneWidth(key: string, width: number): void {
+  try {
+    localStorage.setItem(key, String(Math.round(width)));
+  } catch {
+    /* storage unavailable — the width just isn't remembered */
+  }
+}
+
 export interface PaneResizerOptions {
   value: number;
   min: number;

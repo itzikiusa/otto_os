@@ -494,12 +494,9 @@
     border: 1.5px solid currentColor;
     border-top-color: transparent;
     border-radius: 50%;
-    animation: spin 0.7s linear infinite;
+    animation: otto-spin 0.7s linear infinite;
     vertical-align: middle;
     margin-inline-end: 4px;
-  }
-  @keyframes spin {
-    to { transform: rotate(360deg); }
   }
 
   /* ── Mobile + tablet (≤1024px): stack the branch selectors so each gets full

@@ -80,7 +80,7 @@
   import { gcWindowKeys } from '../lib/win';
   import { openExternal, isExternalUrl } from '../lib/external';
   import { registry, type Command } from '../lib/commands.svelte';
-  import { activeNavId, availableModules, groupLabel, moduleLabel, resolveOrder, visibleOrder } from '../lib/sidebar';
+  import { activeNavId, availableModules, goToEntries, groupLabel, moduleLabel, resolveOrder, visibleOrder } from '../lib/sidebar';
   import { prefetchQueue, shouldPrefetch } from '../lib/prefetchPlan';
   import { api, baseUrl } from '../lib/api/client';
   $effect(() => {transcriptStore.setIdentity(JSON.stringify([baseUrl(),auth.me?.id ?? '']));});
@@ -581,11 +581,6 @@
       { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', shortcut: '⌘,', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
       { id: 'core.go-back', title: 'Go back', group: 'Navigate', shortcut: '⌘⇧←', keywords: 'previous page history return', run: () => router.back() },
       { id: 'core.go-forward', title: 'Go forward', group: 'Navigate', shortcut: '⌘⇧→', keywords: 'next page history', run: () => router.forward() },
-      { id: 'core.go-walkthroughs', title: 'Open Help', group: 'Navigate', keywords: 'help guide guides readme docs shortcuts keys intro tour film video walkthroughs onboarding', run: () => router.go('walkthroughs') },
-      { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', detail: 'Infrastructure', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
-      // Canvas lost its sidebar row to Design Hall (it is the Whiteboard studio)
-      // but stays a route of its own — keep it one ⌘K away.
-      { id: 'core.go-canvas', title: 'Go to Canvas', group: 'Navigate', detail: 'Build · Design Hall whiteboard', keywords: 'canvas whiteboard diagram sketch uml sequence flowchart excalidraw mermaid d2', run: () => router.go('canvas') },
       { id: 'core.toggle-rail', title: 'Toggle sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: 'Toggle right panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
       ...(isTauri ? [{ id: 'core.open-in-window', title: 'Open in new window', group: 'View', keywords: 'pop out popout detach separate native window', run: () => void openPopout(currentRoute(), moduleLabel(moduleName)).catch((e: unknown) => toasts.error('Could not open window', e instanceof Error ? e.message : String(e))) }] : []),
@@ -613,15 +608,17 @@
       .filter((p) => auth.canPlugin(p.slug, 'view'))
       .map((p) => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name }));
     const mods = availableModules((f) => auth.can(f, 'view'), pluginEntries);
+    // Modules + the routes without a sidebar row (Brokers, Canvas, Help) — one
+    // derivation shared with the floating bar (lib/sidebar.ts goToEntries).
     return registry.register(
       'nav',
-      mods.map((m) => ({
-        id: `core.go-${m.id}`,
-        title: `Go to ${m.label}`,
+      goToEntries(mods).map((e) => ({
+        id: e.id,
+        title: e.title,
         group: 'Navigate',
-        detail: groupLabel(m.group),
-        keywords: `module ${m.id.replace(/[-/]/g, ' ')} ${groupLabel(m.group)} ${m.keywords ?? ''}`,
-        run: () => router.openModule(m.id),
+        detail: e.detail,
+        keywords: e.keywords,
+        run: () => (e.viaModule ? router.openModule(e.route) : router.go(e.route)),
       })),
     );
   });
@@ -1539,7 +1536,7 @@
     cursor: pointer;
     font-size: var(--fs-s);
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     line-height: 1;
   }
   .provider-banner > :global(svg) {

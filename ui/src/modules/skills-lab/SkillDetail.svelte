@@ -15,6 +15,7 @@
   //   Edit     — the multi-file editor (SkillEditor)
   //   Evals / Usage — SkillActivity
   import { untrack } from 'svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import type { SkillFileEntry } from '../../lib/api/types';
   import { skillLabApi } from '../../lib/api/skillLab';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -240,18 +241,6 @@
     { id: 'evals', label: 'Evals' },
     { id: 'usage', label: 'Usage' },
   ];
-  let tablist = $state<HTMLElement | null>(null);
-  function onTabKey(e: KeyboardEvent): void {
-    const i = TABS.findIndex((t) => t.id === tab);
-    let n = -1;
-    if (e.key === 'ArrowRight') n = (i + 1) % TABS.length;
-    else if (e.key === 'ArrowLeft') n = (i - 1 + TABS.length) % TABS.length;
-    else if (e.key === 'Home') n = 0;
-    else if (e.key === 'End') n = TABS.length - 1;
-    if (n < 0) return;
-    e.preventDefault();
-    void goTab(TABS[n].id).then(() => (tablist?.querySelectorAll('[role="tab"]')[TABS.findIndex((x) => x.id === tab)] as HTMLElement | undefined)?.focus());
-  }
 
   let editorFile = $state('SKILL.md');
   function openFile(path: string): void {
@@ -327,7 +316,7 @@
         </ul>
       </div>
     {/if}
-    <div class="tabs" role="tablist" aria-label="Skill detail" tabindex="-1" bind:this={tablist} onkeydown={onTabKey}>
+    <div class="tabs" role="tablist" aria-label="Skill detail" tabindex="-1" onkeydown={onTabKey}>
       {#each TABS as t (t.id)}
         <button role="tab" id="st-{t.id}" aria-selected={tab === t.id} aria-controls="sp-{t.id}" tabindex={tab === t.id ? 0 : -1} class:active={tab === t.id} onclick={() => goTab(t.id)}>{t.label}</button>
       {/each}

@@ -9,9 +9,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
-  import StatusDot from '../../lib/components/StatusDot.svelte';
+  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { sessionState } from '../../lib/status';
   import { database } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -116,7 +115,7 @@
       </select>
     {/if}
     {#if database.assistBusy}
-      <span class="da-working"><StatusDot state={sessionState(null, 'working')} /> Working…</span>
+      <span class="da-working"><LiveWorkingDot label="Working…" /></span>
       <button
         class="da-act da-stop"
         onclick={() => database.stopAssist()}
@@ -251,7 +250,7 @@
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--text);
-    border-radius: 6px;
+    border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     padding: 2px 5px;
     cursor: pointer;
@@ -305,7 +304,7 @@
     color: var(--text-dim);
     cursor: pointer;
     padding: 4px;
-    border-radius: 6px;
+    border-radius: var(--radius-s);
   }
   .da-close:hover {
     background: color-mix(in srgb, var(--text) 8%, transparent);
@@ -387,7 +386,7 @@
     box-sizing: border-box;
     resize: none;
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: var(--radius-m);
     background: var(--surface-2);
     color: var(--text);
     font: inherit;

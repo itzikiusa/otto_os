@@ -172,13 +172,9 @@
     border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-top-color: var(--accent);
     border-radius: 50%;
-    animation: gp-spin 0.7s linear infinite;
+    animation: otto-spin 0.7s linear infinite;
   }
-  @keyframes gp-spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   .goals {
     display: flex;
     flex-direction: column;
@@ -290,13 +286,9 @@
     color: var(--danger);
   }
   .status.pulse {
-    animation: gp-pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.2s ease-in-out infinite;
   }
-  @keyframes gp-pulse {
-    50% {
-      opacity: 0.55;
-    }
-  }
+  
   @media (prefers-reduced-motion: reduce) {
     .status.pulse,
     .spinner-xs {

@@ -175,16 +175,12 @@
   {#snippet actions()}
     {#if loop}
       {#if loop.status === 'running'}
-        <button class="icon-btn" data-overflow="-1" data-icon="more" data-label="More actions" onclick={moreMenu}
-          aria-label="More actions" title="More actions" aria-haspopup="menu">
-          <Icon name="more" size={14} />
-        </button>
         <button class="btn small" data-icon="pause" disabled={acting} onclick={() => act(() => loops.pause(id), 'Couldn’t pause the goal loop')}><Icon name="pause" size={12} /> Pause</button>
-      {:else if loop.status === 'paused' || loop.status === 'blocked' || loop.status === 'exhausted'}
-        <button class="icon-btn" data-overflow="-1" data-icon="more" data-label="More actions" onclick={moreMenu}
+        <button class="icon-btn" data-overflow="-10" data-icon="more" data-label="More actions" onclick={moreMenu}
           aria-label="More actions" title="More actions" aria-haspopup="menu">
           <Icon name="more" size={14} />
         </button>
+      {:else if loop.status === 'paused' || loop.status === 'blocked' || loop.status === 'exhausted'}
         {#if budgetLeft}
           <button class="btn small" data-overflow="-1" data-icon="plus" disabled={acting} onclick={openExtend}
             title="Raise the iteration and runtime caps">Extend budget…</button>
@@ -195,6 +191,10 @@
           <button class="btn small primary" disabled={unanswered || acting} title={unanswered ? 'Answer the open decision below first' : 'Raise the caps, then continue iterating'}
             onclick={openExtend}><Icon name="play" size={12} /> Extend &amp; resume…</button>
         {/if}
+        <button class="icon-btn" data-overflow="-10" data-icon="more" data-label="More actions" onclick={moreMenu}
+          aria-label="More actions" title="More actions" aria-haspopup="menu">
+          <Icon name="more" size={14} />
+        </button>
       {:else if loop.status === 'draft'}
         <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete loop" onclick={del}
           aria-label="Delete goal loop" title="Delete goal loop"><Icon name="trash" size={14} /></button>
@@ -407,7 +407,7 @@
   .bar {
     flex: 1;
     height: 6px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--surface-2);
     overflow: hidden;
   }
@@ -460,7 +460,7 @@
   }
   .step.past .step-dot {
     border-color: var(--status-working);
-    color: var(--status-working);
+    color: var(--success);
   }
   .step.active .step-dot {
     background: var(--status-working);

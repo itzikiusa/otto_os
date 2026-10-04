@@ -59,13 +59,9 @@
     height: 6px;
     border-radius: 50%;
     background: currentColor;
-    animation: pill-pulse 1.4s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
-  @keyframes pill-pulse {
-    50% {
-      opacity: 0.35;
-    }
-  }
+  
   @media (prefers-reduced-motion: reduce) {
     .live {
       animation: none;
