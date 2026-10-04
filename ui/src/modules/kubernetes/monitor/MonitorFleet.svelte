@@ -557,12 +557,12 @@
   subtitle="Every monitored cluster in one dashboard — restarts & OOMs, memory, requests, latency — straight from ClickHouse. Filters, grouping and ordering stick."
 >
   {#snippet actions()}
-    <div class="seg" role="radiogroup" aria-label="Window" data-keep>
+    <div class="segmented win-seg" role="radiogroup" aria-label="Window" data-keep>
       {#each WINDOWS as w (w)}
-        <button class="seg-btn" class:on={window === w} role="radio" onkeydown={radioKey} aria-checked={window === w} tabindex={window === w ? 0 : -1} onclick={() => (window = w)}>{w}</button>
+        <button role="radio" onkeydown={radioKey} aria-checked={window === w} tabindex={window === w ? 0 : -1} onclick={() => (window = w)}>{w}</button>
       {/each}
     </div>
-    <button class="icon-btn" onclick={refresh} title="Refresh" aria-label="Refresh fleet"><Icon name="refresh" size={14} /></button>
+    <button class="icon-btn" data-icon="refresh" data-label="Refresh fleet" onclick={refresh} title="Refresh" aria-label="Refresh fleet"><Icon name="refresh" size={14} /></button>
   {/snippet}
 </PageHeader>
 <PageBody>
@@ -630,9 +630,9 @@
     {/if}
     <div class="toolbar">
       <span class="dim small">Series per</span>
-      <div class="seg" role="radiogroup" aria-label="Series by">
+      <div class="segmented" role="radiogroup" aria-label="Series by">
         {#each BYS as b (b)}
-          <button class="seg-btn" class:on={by === b} role="radio" onkeydown={radioKey} aria-checked={by === b} tabindex={by === b ? 0 : -1} onclick={() => (by = b)}>{b}</button>
+          <button role="radio" onkeydown={radioKey} aria-checked={by === b} tabindex={by === b ? 0 : -1} onclick={() => (by = b)}>{b}</button>
         {/each}
       </div>
       <span class="dim small">(restarts are always per class)</span>
@@ -654,9 +654,9 @@
   {:else if activeTab === 'table'}
     <div class="toolbar">
       <input class="input" placeholder="Quick filter…" bind:value={quick} aria-label="Quick filter" />
-      <div class="seg" role="radiogroup" aria-label="Group by">
-        <button class="seg-btn" class:on={group === 'workload'} role="radio" onkeydown={radioKey} aria-checked={group === 'workload'} tabindex={group === 'workload' ? 0 : -1} onclick={() => (group = 'workload')}>Workloads</button>
-        <button class="seg-btn" class:on={group === 'pod'} role="radio" onkeydown={radioKey} aria-checked={group === 'pod'} tabindex={group === 'pod' ? 0 : -1} onclick={() => (group = 'pod')}>Pods</button>
+      <div class="segmented" role="radiogroup" aria-label="Group by">
+        <button role="radio" onkeydown={radioKey} aria-checked={group === 'workload'} tabindex={group === 'workload' ? 0 : -1} onclick={() => (group = 'workload')}>Workloads</button>
+        <button role="radio" onkeydown={radioKey} aria-checked={group === 'pod'} tabindex={group === 'pod' ? 0 : -1} onclick={() => (group = 'pod')}>Pods</button>
       </div>
       <span class="spacer"></span>
       <span class="dim small" data-testid="k8s-fleet-table-count">{total.toLocaleString()} {group === 'pod' ? 'pods' : 'workloads'}</span>
@@ -849,25 +849,6 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-  }
-  .seg {
-    display: inline-flex;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    overflow: hidden;
-  }
-  .seg-btn {
-    background: none;
-    border: none;
-    padding: 3px 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .seg-btn.on {
-    background: var(--surface-2);
-    color: var(--text);
-    font-weight: 600;
   }
   .card {
     background: var(--surface);
@@ -1149,6 +1130,13 @@
   @media (max-width: 640px) {
     .charts {
       grid-template-columns: 1fr;
+    }
+  }
+  /* Phone: the window picker shares the header row with the title and the
+     overflow ⋯ — the shared segmented padding is a few px too wide at 375. */
+  @media (max-width: 640px) {
+    .win-seg > :global(button) {
+      padding-inline: 7px;
     }
   }
 </style>

@@ -62,6 +62,7 @@ import { forgetEditorState, forgetEditorStates, hydrateEditorHistory } from '../
 import { dropGridState, parkedEditCount, releaseGridResult } from '../../modules/database/grid-tab-state';
 import { estimateResultBytes, isReleased, releasedStub, resultBudget } from './db-result-budget';
 import { clipHistory } from './clipHistory.svelte';
+import { loadErrorText } from '../loadError';
 import { announceModule } from '../lazyModule';
 
 /** Connection kinds the explorer can browse (the DB engines). */
@@ -993,6 +994,10 @@ class DatabaseStore {
   // ── Dashboards / widgets ──────────────────────────────────────────────────
   dashboards: DbDashboard[] = $state([]);
   widgets: DbWidget[] = $state([]);
+  /** First/any dashboards load in flight, and the cause of the last failure
+   *  (inline in Dashboards.svelte with Retry — the previous list is kept). */
+  dashboardsLoading = $state(false);
+  dashboardsError: string | null = $state(null);
   selectedDashboardId: Id | null = $state(null);
 
   selectedDashboard: DbDashboard | null = $derived(
@@ -1316,6 +1321,7 @@ class DatabaseStore {
       this.activePane = null;
       this.dashboards = [];
       this.widgets = [];
+      this.dashboardsError = null;
       this.savedQueries = [];
       this.history = [];
     } else if (
@@ -4228,14 +4234,18 @@ class DatabaseStore {
   private async fetchDashboards(): Promise<void> {
     const base = this.wsBase();
     if (!base) return;
+    this.dashboardsLoading = true;
     try {
       this.dashboards = await api.get<DbDashboard[]>(`${base}/dashboards`);
       if (this.dashboards.length > 0 && !this.dashboards.some((d) => d.id === this.selectedDashboardId)) {
         this.selectedDashboardId = this.dashboards[0].id;
       }
+      this.dashboardsError = null;
       await this.loadWidgets();
     } catch (e) {
-      toasts.error('Could not load dashboards', errMsg(e));
+      this.dashboardsError = loadErrorText(e);
+    } finally {
+      this.dashboardsLoading = false;
     }
   }
 
@@ -4245,7 +4255,8 @@ class DatabaseStore {
     try {
       this.widgets = await api.get<DbWidget[]>(`${base}/widgets`);
     } catch (e) {
-      toasts.error('Could not load widgets', errMsg(e));
+      // Widgets belong to the dashboards view: surface it there, keep the old widgets.
+      this.dashboardsError = loadErrorText(e);
     }
   }
 

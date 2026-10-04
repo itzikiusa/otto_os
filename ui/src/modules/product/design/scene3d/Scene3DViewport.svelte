@@ -1099,11 +1099,10 @@
   }
   .s3d-seg {
     display: inline-flex;
-    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     overflow: hidden;
-    backdrop-filter: blur(6px);
   }
   .s3d-seg button,
   .s3d-hbtn {
@@ -1123,10 +1122,9 @@
     color: var(--accent-contrast);
   }
   .s3d-hbtn {
-    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    backdrop-filter: blur(6px);
   }
   .s3d-hbtn:hover,
   .s3d-seg button:hover:not(.on) {
@@ -1162,11 +1160,10 @@
   .s3d-pill {
     padding: 5px 10px;
     border-radius: var(--radius-m);
-    background: color-mix(in srgb, var(--surface) 90%, transparent);
+    background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text);
     font-variant-numeric: tabular-nums;
-    backdrop-filter: blur(6px);
   }
   .s3d-keys {
     margin-inline-start: auto;
@@ -1221,7 +1218,7 @@
   .s3d-face.left { transform: rotateY(-90deg) translateZ(28px); }
   .s3d-face.top { transform: rotateX(90deg) translateZ(28px); }
   .s3d-face.bottom { transform: rotateX(-90deg) translateZ(28px); }
-  @media (max-width: 720px) {
+  @media (max-width: 640px) {
     .s3d-keys {
       display: none;
     }

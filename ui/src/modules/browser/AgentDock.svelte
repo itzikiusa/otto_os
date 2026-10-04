@@ -17,6 +17,7 @@
   import { browser } from '../../lib/stores/browser.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { paneResizer, RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -116,8 +117,17 @@
   aria-label="Browser agent"
 >
   {#if open && sessionId && !viewport.isPhone}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="resize-handle" onmousedown={startResize} ondblclick={() => ui.setBrowserAgentH(280)} title="Drag to resize · double-click to reset"></div>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <div
+      class="resize-handle"
+      role="separator"
+      tabindex="0"
+      aria-label="Resize the browser agent"
+      onmousedown={startResize}
+      ondblclick={() => ui.setBrowserAgentH(280)}
+      title={RESIZE_TITLE_VERTICAL}
+      use:paneResizer={{ value: ui.browserAgentH, min: 160, max: 900, orientation: 'horizontal', invert: true, onChange: (h) => ui.setBrowserAgentH(h), onReset: () => ui.setBrowserAgentH(280), text: (v) => `${Math.round(v)} pixels tall` }}
+    ></div>
   {/if}
 
   <header class="head">

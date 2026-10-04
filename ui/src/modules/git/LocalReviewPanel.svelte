@@ -612,7 +612,7 @@
     height: 28px;
     background: var(--surface-2);
     border-radius: var(--radius-s);
-    animation: pulse 1.4s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   .lrp-cfg-note {
     font-size: var(--fs-xs);
@@ -636,7 +636,7 @@
     border: 2.5px solid var(--border);
     border-top-color: var(--accent);
     border-radius: 50%;
-    animation: spin 0.8s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
     flex-shrink: 0;
   }
   .spinner-xs {
@@ -646,12 +646,10 @@
     border: 1.5px solid currentColor;
     border-top-color: transparent;
     border-radius: 50%;
-    animation: spin 0.7s linear infinite;
+    animation: otto-spin 0.7s linear infinite;
     vertical-align: middle;
     margin-inline-end: 3px;
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
   /* Agent cards */
   .lrp-agents {

@@ -15,7 +15,10 @@
   import { mapLimit } from '../../lib/poll';
   import { liveQuery, type LiveEvent } from '../../lib/live';
   import { untrack } from 'svelte';
-  import { runStatus } from '../../lib/status';
+  import { runStatus, sessionState, sentenceCase, type SessionStateInfo } from '../../lib/status';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import StatusDot from '../../lib/components/StatusDot.svelte';
+  import { events } from '../../lib/events.svelte';
   import { reviewIds, reviewSessions, reviewAgentStatus } from './reviewAgents';
 
   interface Props {
@@ -192,6 +195,37 @@
     if (row) return reviewAgentStatus(row.review, row.agent);
     return ws.statusMap[sid] ?? sessOf(sid)?.status ?? 'idle';
   }
+  /** The one dot + word for a session row. Review agents report their own
+   *  vocabulary (pending / running / waiting / done / error / skipped, plus
+   *  cancelled / fallback) — mapped onto the shared session states so the raw
+   *  engine word never reaches the screen. */
+  function sState(sid: string): SessionStateInfo {
+    const stale = events.state !== 'connected';
+    const raw = sStatus(sid);
+    const row = reviewAgent(sid);
+    const base = { resumable: false, inactive: true };
+    if (!row) return sessionState(sessOf(sid), raw, ws.needsYou[sid] === true, { stale });
+    switch (raw) {
+      case 'running':
+        return sessionState(null, 'working', false, { stale });
+      case 'waiting':
+        return sessionState(null, 'idle', true, { stale });
+      case 'pending':
+        return { ...sessionState(null, 'idle', false, { stale }), label: 'Queued' };
+      case 'done':
+        return { ...base, key: 'ended', label: 'Done', tone: 'success', hint: 'Finished' };
+      case 'skipped':
+        return { ...base, key: 'ended', label: 'Skipped', tone: 'neutral', hint: 'Skipped' };
+      case 'cancelled':
+        return { ...base, key: 'ended', label: 'Cancelled', tone: 'neutral', hint: 'The review was cancelled' };
+      case 'fallback':
+        return { ...base, key: 'failed', label: 'Fallback', tone: 'warning', hint: 'The configured summarizer was unavailable — a deterministic fallback ran' };
+      case 'error':
+        return { ...base, key: 'failed', label: 'Failed', tone: 'danger', hint: 'The agent failed' };
+      default:
+        return { ...base, key: 'ended', label: sentenceCase(raw), tone: 'neutral' };
+    }
+  }
   function shortId(id: string): string {
     return id.length > 6 ? id.slice(-6) : id;
   }
@@ -211,9 +245,8 @@
           <!-- Step status in the shared run vocabulary (Succeeded / Failed /
                Queued…), like the Steps list and timeline — not the raw
                engine word ("success", "error", "pending"). -->
-          <span class="dot {runStatus(g.status).key}" aria-hidden="true"></span>
           <span class="grp-name" title={nodeName(g.id)}>{nodeName(g.id)}</span>
-          <span class="grp-status">{runStatus(g.status).label}</span>
+          <span class="grp-status"><StatusBadge status={runStatus(g.status)} variant="text" /></span>
           <span class="grow"></span>
           <span class="grp-count" title="{g.sessions.length} session(s)">{g.sessions.length}</span>
         </div>
@@ -221,10 +254,10 @@
           <div class="sess" data-sess={sid}>
             <button class="sess-h" onclick={() => toggle(sid)} aria-expanded={!!expanded[sid]} title={expanded[sid] ? 'Hide live terminal' : 'Show live terminal'}>
               <Icon name={expanded[sid] ? 'chevronDown' : 'chevronRight'} size={12} />
-              <span class="s-dot {sStatus(sid)}"></span>
+              <StatusDot state={sState(sid)} size={8} />
               <span class="s-title">{sTitle(sid)}</span>
               <span class="s-provider">{sProvider(sid)}</span>
-              <span class="s-status">{sStatus(sid)}{#if ['running', 'waiting'].includes(sStatus(sid))}{' ' + fmtSince(sessOf(sid)?.created_at)}{/if}</span>
+              <span class="s-status">{sState(sid).label}{#if ['working', 'running', 'needs-you'].includes(sState(sid).key)}{' ' + fmtSince(sessOf(sid)?.created_at)}{/if}</span>
               <span class="grow"></span>
               <code class="s-id" title={sid}>{shortId(sid)}</code>
             </button>
@@ -243,7 +276,7 @@
         {#each g.reviews as review (review.id)}
           {@const summarizer = review.agents.at(-1)}
           {#if summarizer && !summarizer.session_id}
-            <div class="sub" data-testid="summarizer-without-session">Summarizer · {summarizer.provider || 'claude'} — {reviewAgentStatus(review, summarizer)}{summarizer.fallback ? ' · Deterministic fallback' : ''}</div>
+            <div class="sub" data-testid="summarizer-without-session">Summarizer · {summarizer.provider || 'claude'} — {sentenceCase(reviewAgentStatus(review, summarizer))}{summarizer.fallback ? ' · Deterministic fallback' : ''}</div>
           {/if}
         {/each}
         <!-- Sub-agents / background tasks the step launched. Display only —
@@ -299,10 +332,11 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* The header is an uppercase eyebrow; the status word is not. */
   .grp-status {
-    text-transform: capitalize;
-    font-weight: 500;
+    text-transform: none;
     letter-spacing: 0;
+    font-weight: 500;
   }
   .grow {
     flex: 1;
@@ -353,7 +387,6 @@
     color: var(--text-dim);
   }
   .s-status {
-    text-transform: capitalize;
     font-size: var(--fs-xs);
   }
   .s-id {
@@ -382,37 +415,5 @@
     border-top: 1px solid var(--border);
     display: flex;
     min-height: 0;
-  }
-  .dot,
-  .s-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  .dot.succeeded,
-  .s-dot.running,
-  .s-dot.working {
-    background: var(--status-working);
-  }
-  /* A running STEP is info-blue (lib/status.ts), never the succeeded green. */
-  .dot.running {
-    background: var(--info);
-  }
-  .dot.waiting {
-    background: var(--status-warn);
-  }
-  .dot.failed,
-  .s-dot.exited,
-  .s-dot.error,
-  .s-dot.fallback {
-    background: var(--status-exited);
-  }
-  .dot.queued,
-  .dot.cancelled,
-  .dot.skipped,
-  .s-dot.idle,
-  .s-dot.reconnectable {
-    background: var(--text-dim);
   }
 </style>

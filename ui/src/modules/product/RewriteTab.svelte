@@ -122,9 +122,9 @@
   let loadError = $state<string | null>(null);
 
   async function initialLoad(): Promise<void> {
-    loadError = null;
     try {
       await product.loadVersions();
+      loadError = null;
       const suggested = latestSuggested();
       if (suggested) {
         await loadVersionBodies(suggested);
@@ -253,103 +253,102 @@
     </section>
 
     <!-- ── Suggested version display ────────────────────────────────────────── -->
-    {#if loadError && !suggestedVersion}
-      <LoadState what="the suggested rewrite" loading={loadingBodies} error={loadError} empty onretry={() => void initialLoad()} />
-    {:else if loadingBodies && !suggestedVersion}
-      <div class="muted">Loading the suggested rewrite…</div>
-    {:else if suggestedVersion}
-      <!-- Version metadata -->
-      <section class="rw-card version-meta">
-        <div class="vm-row">
-          <div class="vm-info">
-            <span class="vm-label">Suggested v{suggestedVersion.version_no}</span>
-            <!-- Agent-written draft: attributed, and only reaches the source
-                 when a person overwrites it below. -->
-            <AgentByline at={suggestedVersion.created_at} testid="rewrite-byline" />
-          </div>
-          {#if suggestedVersion.change_notes}
-            <div class="change-notes">
-              <span class="cn-label">Change notes:</span>
-              <span class="cn-body">{suggestedVersion.change_notes}</span>
+    <!-- A failed refresh keeps the shown rewrite with a stale bar (LoadState). -->
+    <LoadState what="the suggested rewrite" loading={loadingBodies} error={loadError} empty={!suggestedVersion} onretry={() => void initialLoad()}>
+      {#snippet emptyView()}
+        <div class="muted">No suggested version yet. Click "Generate suggested rewrite" above.</div>
+      {/snippet}
+      {#if suggestedVersion}
+        <!-- Version metadata -->
+        <section class="rw-card version-meta">
+          <div class="vm-row">
+            <div class="vm-info">
+              <span class="vm-label">Suggested v{suggestedVersion.version_no}</span>
+              <!-- Agent-written draft: attributed, and only reaches the source
+                   when a person overwrites it below. -->
+              <AgentByline at={suggestedVersion.created_at} testid="rewrite-byline" />
             </div>
-          {/if}
-        </div>
-      </section>
-
-      <!-- Diff view toggle -->
-      <div class="view-toggle-row">
-        <span class="field-label">View</span>
-        <div class="segmented" role="group" aria-label="Diff view">
-          <button class:active={diffView === 'split'} aria-pressed={diffView === 'split'} onclick={() => (diffView = 'split')}>Word diff</button>
-          <button class:active={diffView === 'source'} aria-pressed={diffView === 'source'} onclick={() => (diffView = 'source')}>Source only</button>
-          <button class:active={diffView === 'suggested'} aria-pressed={diffView === 'suggested'} onclick={() => (diffView = 'suggested')}>Suggested only</button>
-        </div>
-      </div>
-
-      <!-- Word-level diff using the shared DiffView component (T3) -->
-      {#if diffView === 'split'}
-        <div class="diff-wrap rw-card">
-          <div class="pane-header diff-pane-header">
-            <span class="pane-label source-label">Source{sourceVersion ? ` v${sourceVersion.version_no}` : ''}</span>
-            <span class="pane-label suggested-label">Suggested v{suggestedVersion.version_no}</span>
-          </div>
-          <DiffView
-            before={sourceVersion?.body_md ?? ''}
-            after={suggestedVersion?.body_md ?? ''}
-            mode="split"
-            contextLines={4}
-          />
-        </div>
-      {:else if diffView === 'source'}
-        <div class="single-pane rw-card">
-          <div class="pane-header">
-            <span class="pane-label source-label">Source</span>
-            {#if sourceVersion}
-              <span class="pane-meta">v{sourceVersion.version_no}</span>
+            {#if suggestedVersion.change_notes}
+              <div class="change-notes">
+                <span class="cn-label">Change notes:</span>
+                <span class="cn-body">{suggestedVersion.change_notes}</span>
+              </div>
             {/if}
           </div>
-          <div class="md-body">
-            {#if renderedSource}
-              {@html renderedSource}
-            {:else}
-              <span class="muted">No source content.</span>
-            {/if}
-          </div>
-        </div>
-      {:else}
-        <div class="single-pane rw-card">
-          <div class="pane-header">
-            <span class="pane-label suggested-label">Suggested</span>
-            <span class="pane-meta">v{suggestedVersion.version_no}</span>
-          </div>
-          <div class="md-body">
-            {#if renderedSuggested}
-              {@html renderedSuggested}
-            {:else}
-              <span class="muted">No suggested content.</span>
-            {/if}
-          </div>
-        </div>
-      {/if}
-
-      <!-- Publish sits AFTER the diff: review what changes first, then
-           overwrite. The button names the live target; publish() confirms. -->
-      {#if story && story.source_kind !== 'draft'}
-        <section class="rw-card rw-publish" data-testid="rw-publish">
-          <p class="rw-publish-text">
-            Publishing replaces the live {targetNoun} of <strong>{targetLabel}</strong> with suggested
-            v{suggestedVersion.version_no}, for everyone who can see it.
-            {#if sourceVersion}Otto keeps the current text as source v{sourceVersion.version_no}.{/if}
-          </p>
-          <button class="btn danger" onclick={publish} disabled={publishing} data-testid="rw-publish-btn">
-            {publishing ? 'Publishing…' : `Overwrite ${targetShort}…`}
-          </button>
         </section>
-      {/if}
 
-    {:else}
-      <div class="muted">No suggested version yet. Click "Generate suggested rewrite" above.</div>
-    {/if}
+        <!-- Diff view toggle -->
+        <div class="view-toggle-row">
+          <span class="field-label">View</span>
+          <div class="segmented" role="group" aria-label="Diff view">
+            <button class:active={diffView === 'split'} aria-pressed={diffView === 'split'} onclick={() => (diffView = 'split')}>Word diff</button>
+            <button class:active={diffView === 'source'} aria-pressed={diffView === 'source'} onclick={() => (diffView = 'source')}>Source only</button>
+            <button class:active={diffView === 'suggested'} aria-pressed={diffView === 'suggested'} onclick={() => (diffView = 'suggested')}>Suggested only</button>
+          </div>
+        </div>
+
+        <!-- Word-level diff using the shared DiffView component (T3) -->
+        {#if diffView === 'split'}
+          <div class="diff-wrap rw-card">
+            <div class="pane-header diff-pane-header">
+              <span class="pane-label source-label">Source{sourceVersion ? ` v${sourceVersion.version_no}` : ''}</span>
+              <span class="pane-label suggested-label">Suggested v{suggestedVersion.version_no}</span>
+            </div>
+            <DiffView
+              before={sourceVersion?.body_md ?? ''}
+              after={suggestedVersion?.body_md ?? ''}
+              mode="split"
+              contextLines={4}
+            />
+          </div>
+        {:else if diffView === 'source'}
+          <div class="single-pane rw-card">
+            <div class="pane-header">
+              <span class="pane-label source-label">Source</span>
+              {#if sourceVersion}
+                <span class="pane-meta">v{sourceVersion.version_no}</span>
+              {/if}
+            </div>
+            <div class="md-body">
+              {#if renderedSource}
+                {@html renderedSource}
+              {:else}
+                <span class="muted">No source content.</span>
+              {/if}
+            </div>
+          </div>
+        {:else}
+          <div class="single-pane rw-card">
+            <div class="pane-header">
+              <span class="pane-label suggested-label">Suggested</span>
+              <span class="pane-meta">v{suggestedVersion.version_no}</span>
+            </div>
+            <div class="md-body">
+              {#if renderedSuggested}
+                {@html renderedSuggested}
+              {:else}
+                <span class="muted">No suggested content.</span>
+              {/if}
+            </div>
+          </div>
+        {/if}
+
+        <!-- Publish sits AFTER the diff: review what changes first, then
+             overwrite. The button names the live target; publish() confirms. -->
+        {#if story && story.source_kind !== 'draft'}
+          <section class="rw-card rw-publish" data-testid="rw-publish">
+            <p class="rw-publish-text">
+              Publishing replaces the live {targetNoun} of <strong>{targetLabel}</strong> with suggested
+              v{suggestedVersion.version_no}, for everyone who can see it.
+              {#if sourceVersion}Otto keeps the current text as source v{sourceVersion.version_no}.{/if}
+            </p>
+            <button class="btn danger" onclick={publish} disabled={publishing} data-testid="rw-publish-btn">
+              {publishing ? 'Publishing…' : `Overwrite ${targetShort}…`}
+            </button>
+          </section>
+        {/if}
+      {/if}
+    </LoadState>
   </div>
 {/if}
 
@@ -528,69 +527,5 @@
   }
   .single-pane .md-body {
     padding: 14px 16px;
-  }
-
-  /* ── Markdown body ───────────────────────────────────────────── */
-  .md-body {
-    font-size: var(--fs-m);
-    line-height: 1.65;
-    color: var(--text);
-  }
-  .md-body :global(h1),
-  .md-body :global(h2),
-  .md-body :global(h3),
-  .md-body :global(h4) {
-    margin: 1.2em 0 0.4em;
-    font-weight: 600;
-    line-height: 1.25;
-    color: var(--text);
-  }
-  .md-body :global(h1) { font-size: 1.35em; }
-  .md-body :global(h2) { font-size: 1.2em; }
-  .md-body :global(h3) { font-size: 1.05em; }
-  .md-body :global(p) {
-    margin: 0 0 0.75em;
-  }
-  .md-body :global(ul),
-  .md-body :global(ol) {
-    padding-inline-start: 1.5em;
-    margin: 0 0 0.75em;
-  }
-  .md-body :global(li) {
-    margin-bottom: 0.25em;
-  }
-  .md-body :global(code) {
-    font-family: var(--font-mono);
-    font-size: 0.88em;
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    padding: 1px 5px;
-    border-radius: var(--radius-s);
-  }
-  .md-body :global(pre) {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    padding: 12px 14px;
-    overflow-x: auto;
-    margin: 0 0 0.75em;
-  }
-  .md-body :global(pre code) {
-    background: none;
-    padding: 0;
-    font-size: 0.86em;
-  }
-  .md-body :global(blockquote) {
-    border-inline-start: 3px solid var(--border);
-    padding-inline-start: 12px;
-    color: var(--text-dim);
-    margin: 0 0 0.75em;
-    font-style: italic;
-  }
-  .md-body :global(a) {
-    color: var(--accent-text);
-    text-decoration: none;
-  }
-  .md-body :global(a:hover) {
-    text-decoration: underline;
   }
 </style>

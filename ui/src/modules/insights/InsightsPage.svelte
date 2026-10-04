@@ -12,6 +12,9 @@
   // (deep link to one report — what "Open in new window" pops out, where the
   // list pane is hidden and only the report shows).
   import { insightsApi } from '../../lib/api/insights';
+  import { onTabKey } from '../../lib/tabKeys';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import type { InsightKind, InsightReport, InsightRunPeriod } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
@@ -52,19 +55,10 @@
   // Routing
   // ---------------------------------------------------------------------------
 
+  // The report list's width — drag / ←→ on the divider, remembered across visits.
+  let listW = $state(loadPaneWidth('insights.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
+
   const tab = $derived(router.parts[1] === 'health' ? 'health' : 'reports');
-  function onTabKey(e: KeyboardEvent): void {
-    const tabs = (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]');
-    const at = tab === 'reports' ? 0 : 1;
-    let next = -1;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') next = 1 - at;
-    else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = 1;
-    if (next < 0) return;
-    e.preventDefault();
-    router.go(next === 0 ? 'insights' : 'insights/health');
-    tabs[next]?.focus();
-  }
 
   /** `daily:20260923_20260923` when the route names one report. */
   const routeKey = $derived.by(() => {
@@ -643,7 +637,7 @@
       {:else}
         <div class="split" class:detail-only={detailOnly}>
           {#if !detailOnly}
-            <aside class="list-pane" class:hide-phone={viewport.isPhone && phoneDetail} aria-label="Reports">
+            <aside class="list-pane" class:hide-phone={viewport.isPhone && phoneDetail} aria-label="Reports" style="--list-pane-w:{listW}px">
               <div class="filters" role="group" aria-label="Filter by period">
                 {#each visibleKinds as k (k.id)}
                   <button class="filter-chip" class:active={filter === k.id} aria-pressed={filter === k.id} onclick={() => { filter = k.id; if (routeKey) router.replace('insights'); }}>
@@ -696,6 +690,9 @@
                 {/if}
               </div>
             </aside>
+            {#if !viewport.isPhone}
+              <PaneDivider bind:width={listW} storageKey="insights.listW" label="Resize the reports list" />
+            {/if}
           {/if}
           <section class="detail-pane" class:hide-phone={viewport.isPhone && !phoneDetail && !detailOnly}>
             {#if selected}
@@ -777,12 +774,11 @@
     display: flex;
   }
   .list-pane {
-    width: 320px;
+    width: var(--list-pane-w, 280px);
     flex: none;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    border-inline-end: 1px solid var(--border);
     background: var(--surface);
   }
   .detail-pane {
@@ -944,15 +940,9 @@
     font-size: var(--fs-s);
   }
 
-  @media (max-width: 1024px) {
-    .list-pane {
-      width: 280px;
-    }
-  }
   @media (max-width: 640px) {
     .list-pane {
       width: 100%;
-      border-inline-end: none;
     }
     .hide-phone {
       display: none;

@@ -125,7 +125,7 @@
     cursor: pointer;
   }
   .section-head:hover {
-    background: color-mix(in srgb, var(--text-dim) 9%, transparent);
+    background: var(--hover);
   }
   .section-body {
     min-width: 0;

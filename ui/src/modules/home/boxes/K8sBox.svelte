@@ -238,7 +238,7 @@
     font-size: var(--fs-s);
   }
   .row:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    background: var(--hover);
   }
   .cdot {
     width: 8px;

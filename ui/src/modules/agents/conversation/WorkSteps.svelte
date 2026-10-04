@@ -183,14 +183,10 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .spin {
-      animation: spin 0.9s linear infinite;
+      animation: otto-spin 0.9s linear infinite;
     }
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   /* ≤360px: the step count / duration yield to the summary. */
   @container (max-width: 360px) {
     .steps-meta {

@@ -5,6 +5,7 @@
   // post box on the right.
   import { tick, untrack } from 'svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
+  import AgentChip from '../../lib/components/AgentChip.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -324,7 +325,7 @@
               <div class="msg-body">
                 <div class="msg-head">
                   <strong>{authorName(m)}</strong>
-                  {#if agentMsg}<span class="chip agent-label">Agent</span>{/if}
+                  {#if agentMsg}<AgentChip />{/if}
                   <span class="meta"><RelTime iso={m.created_at} /></span>
                 </div>
                 <p class="msg-text">{m.text}</p>
@@ -405,7 +406,6 @@
   }
   .msg-body { min-width: 0; }
   .msg-head { display: flex; gap: 8px; align-items: center; font-size: var(--fs-s); color: var(--text); }
-  .agent-label { height: 18px; padding: 0 6px; }
   .msg-text { margin: 2px 0 0; font-size: var(--fs-m); color: var(--text); white-space: pre-wrap; word-break: break-word; }
   .meta { color: var(--text-dim); font-size: var(--fs-s); }
   .how { margin: 0; }

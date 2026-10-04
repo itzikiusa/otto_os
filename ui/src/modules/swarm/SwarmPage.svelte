@@ -1,5 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
+  import { onTabKey } from '../../lib/tabKeys';
+  import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
   import PathField from '../../lib/components/PathField.svelte';
   // Agent Swarm section: swarm list + the open swarm (org tree, run graph,
   // kanban, runs, board) with an inline session panel (reuses SessionView).
@@ -143,35 +145,6 @@
     railW = RAIL_W_DEFAULT;
     persistRailW();
   }
-  function onRailKey(e: KeyboardEvent): void {
-    const step = e.shiftKey ? 40 : 10;
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-      // Logical direction: in RTL the rail sits on the right, so → narrows it.
-      const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
-      const grow = (e.key === 'ArrowRight') !== rtl;
-      railW = Math.max(180, Math.min(400, railW + (grow ? step : -step)));
-      persistRailW();
-      e.preventDefault();
-    } else if (e.key === 'Enter' || e.key === 'Home') {
-      resetRailW();
-      e.preventDefault();
-    }
-  }
-  /** Keyboard resize for the view/session divider (same keys as the rail). */
-  function onSplitKey(e: KeyboardEvent): void {
-    const step = e.shiftKey ? 10 : 3;
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-      const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
-      const grow = (e.key === 'ArrowRight') !== rtl;
-      viewPct = Math.min(80, Math.max(20, viewPct + (grow ? step : -step)));
-      persistViewPct();
-      e.preventDefault();
-    } else if (e.key === 'Enter' || e.key === 'Home') {
-      viewPct = 55;
-      persistViewPct();
-      e.preventDefault();
-    }
-  }
   let editAgent = $state<SwarmAgent | null>(null);
   let editorOpen = $state(false);
   let showSettings = $state(false);
@@ -256,23 +229,6 @@
   const queued = $derived(swarm.runStats.queued);
   const running = $derived(swarm.runStats.running);
   const cap = $derived(detail?.config.max_parallel_sessions ?? 4);
-
-  // View switcher = a real tablist: ←/→ (and Home/End) move between views,
-  // with roving tabindex so Tab lands on the active one only.
-  function onTabKey(e: KeyboardEvent): void {
-    const i = VIEWS.findIndex((v) => v.id === view);
-    let next = -1;
-    const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
-    if (e.key === (rtl ? 'ArrowLeft' : 'ArrowRight') || e.key === 'ArrowDown') next = (i + 1) % VIEWS.length;
-    else if (e.key === (rtl ? 'ArrowRight' : 'ArrowLeft') || e.key === 'ArrowUp') next = (i - 1 + VIEWS.length) % VIEWS.length;
-    else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = VIEWS.length - 1;
-    if (next < 0) return;
-    e.preventDefault();
-    view = VIEWS[next].id;
-    const list = (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]');
-    list[next]?.focus();
-  }
 
   const VIEWS: { id: View; label: string; icon: IconName }[] = [
     { id: 'tree', label: 'Org', icon: 'user' },
@@ -638,14 +594,11 @@
       role="separator"
       tabindex="0"
       aria-orientation="vertical"
-      aria-valuemin={180}
-      aria-valuemax={400}
-      aria-valuenow={Math.round(railW)}
       aria-label="Resize the swarms list"
-      title="Drag or use ←/→ to resize · double-click or Enter to reset"
+      title={RESIZE_TITLE}
       ondblclick={resetRailW}
       onpointerdown={startRailResize}
-      onkeydown={onRailKey}
+      use:paneResizer={{ value: railW, min: 180, max: 400, step: 10, bigStep: 40, onChange: (w) => { railW = w; persistRailW(); }, onReset: resetRailW, text: pxWide }}
     ></div>
   {/if}
 
@@ -791,13 +744,11 @@
               role="separator"
               tabindex="0"
               aria-orientation="vertical"
-              aria-valuemin={20}
-              aria-valuemax={80}
-              aria-valuenow={Math.round(viewPct)}
               aria-label="Resize the session panel"
-              title="Drag or use ←/→ to resize · Enter to reset"
+              title={RESIZE_TITLE}
+              ondblclick={() => { viewPct = 55; persistViewPct(); }}
               onmousedown={startResize}
-              onkeydown={onSplitKey}
+              use:paneResizer={{ value: viewPct, min: 20, max: 80, step: 3, bigStep: 10, onChange: (v) => { viewPct = v; persistViewPct(); }, onReset: () => { viewPct = 55; persistViewPct(); }, text: (v) => `${Math.round(v)} percent` }}
             ></div>
           {/if}
           <div class="session-panel">

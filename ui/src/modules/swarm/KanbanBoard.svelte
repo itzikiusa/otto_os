@@ -696,13 +696,9 @@
     border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-top-color: var(--accent);
     border-radius: 50%;
-    animation: kb-spin 0.7s linear infinite;
+    animation: otto-spin 0.7s linear infinite;
   }
-  @keyframes kb-spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   .field {
     display: flex;
     flex-direction: column;
@@ -843,13 +839,9 @@
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: 999px;
     padding: 0 6px;
-    animation: kb-pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.2s ease-in-out infinite;
   }
-  @keyframes kb-pulse {
-    50% {
-      opacity: 0.5;
-    }
-  }
+  
   @media (prefers-reduced-motion: reduce) {
     .vchip,
     .spinner-xs {

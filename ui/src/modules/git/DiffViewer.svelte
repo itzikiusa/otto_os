@@ -1121,14 +1121,13 @@
     {@const stats = fileStat(file)}
     {@const cCount = commentCounts.get(file.path) ?? 0}
     {@const isViewed = viewed.has(file.path)}
+    <!-- The row is a plain box holding TWO controls side by side — the "viewed"
+         checkbox and a real button that jumps to the file — so nothing interactive
+         is nested inside a role=button. Enter / Space both activate the button. -->
     <div
       class="nav-file"
       class:nav-file-viewed={isViewed}
       style="padding-inline-start: {8 + depth * 12}px"
-      role="button"
-      tabindex="0"
-      onclick={() => void scrollToFile(file.path)}
-      onkeydown={(e) => e.key === 'Enter' && void scrollToFile(file.path)}
       title={file.path}
     >
       <span class="nav-viewed-cb">
@@ -1136,34 +1135,55 @@
           type="checkbox"
           checked={isViewed}
           title="Mark as viewed"
-          onclick={(e) => e.stopPropagation()}
           onchange={() => toggleViewed(file.path)}
           aria-label="Mark {file.path} as viewed"
         />
       </span>
-      <span class="nav-file-path">
-        <span class="nav-base">{baseName(file.path)}</span>
-      </span>
-      <span class="nav-file-stats">
-        <span class="add">+{stats.add}</span>
-        <span class="del">−{stats.del}</span>
-      </span>
-      {#if cCount > 0}
-        <span class="nav-comment-badge" title="{cCount} comment{cCount === 1 ? '' : 's'}">
-          💬{cCount}
+      <button class="nav-file-open" onclick={() => void scrollToFile(file.path)} aria-label="Go to {file.path}">
+        <span class="nav-file-path">
+          <span class="nav-base">{baseName(file.path)}</span>
         </span>
-      {/if}
+        <span class="nav-file-stats">
+          <span class="add">+{stats.add}</span>
+          <span class="del">−{stats.del}</span>
+        </span>
+        {#if cCount > 0}
+          <span class="nav-comment-badge" title="{cCount} comment{cCount === 1 ? '' : 's'}">
+            💬{cCount}
+          </span>
+        {/if}
+      </button>
     </div>
   {/snippet}
 
+  <!-- A line-number gutter. When it can act (comment on the line / select it for
+       staging) it is a real <button> with a spoken label; of a row's two gutters
+       only one is a tab stop (the other stays mouse-clickable) so a diff does not
+       double its tab order. A cell with no number is a plain, inert box. -->
+  {#snippet gut(side: 'old' | 'new', n: number | null, other: number | null, act: ((e: MouseEvent) => void) | null, kind: 'comment' | 'select')}
+    {#if act && n != null}
+      <button
+        type="button"
+        data-find-skip
+        class="gut {side}"
+        class:commentable={kind === 'comment'}
+        class:selectable={kind === 'select'}
+        tabindex={side === 'new' || other == null ? 0 : -1}
+        aria-label="{kind === 'comment' ? 'Comment on' : 'Select'} line {n}"
+        onclick={act}
+      >{n}</button>
+    {:else}
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <span data-find-skip class="gut {side}" class:commentable={!!act && kind === 'comment'} class:selectable={!!act && kind === 'select'} onclick={act ?? undefined}>{n ?? ''}</span>
+    {/if}
+  {/snippet}
+
   {#snippet navDirRow(sub: NavDir, depth: number)}
-    <div
+    <button
       class="nav-dir-row"
       style="padding-inline-start: {8 + depth * 12}px"
-      role="button"
-      tabindex="0"
+      aria-expanded={!navDirCollapsed[sub.path]}
       onclick={() => toggleNavDir(sub.path)}
-      onkeydown={(e) => e.key === 'Enter' && toggleNavDir(sub.path)}
       title={sub.path}
     >
       <span class="nav-dir-chevron">
@@ -1171,7 +1191,7 @@
       </span>
       <Icon name="folder" size={11} />
       <span class="nav-dir-label">{sub.label}</span>
-    </div>
+    </button>
   {/snippet}
 
   {#if showNav && prMode}
@@ -1347,28 +1367,15 @@
     {:else if r.kind === 'line'}
       {@const lang = langOf(r.file.path)}
       {@const pick = !!wip && r.line.origin !== 'context'}
+      {@const act = wip ? (pick ? (e: MouseEvent) => selectLine(e, r.file.path, r.hi, r.li, r.line) : null) : prMode && onAddComment ? () => gutterClick(r.file.path, r.line) : null}
       <div
         class="vrow dline {r.line.origin}"
         class:selected={isSelected(r.file.path, r.hi, r.li)}
         data-rk={r.key}
         use:measure={[r.key, i]}
       >
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <span
-          data-find-skip
-          class="gut old"
-          class:commentable={prMode}
-          class:selectable={pick}
-          onclick={(e) => (wip ? selectLine(e, r.file.path, r.hi, r.li, r.line) : gutterClick(r.file.path, r.line))}
-        >{r.line.old_line ?? ''}</span>
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <span
-          data-find-skip
-          class="gut new"
-          class:commentable={prMode}
-          class:selectable={pick}
-          onclick={(e) => (wip ? selectLine(e, r.file.path, r.hi, r.li, r.line) : gutterClick(r.file.path, r.line))}
-        >{r.line.new_line ?? ''}</span>
+        {@render gut('old', r.line.old_line, r.line.new_line, act, wip ? 'select' : 'comment')}
+        {@render gut('new', r.line.new_line, r.line.old_line, act, wip ? 'select' : 'comment')}
         <span class="sign" data-find-skip>{sign(r.line)}</span>
         <span class="code mono">{@render codeText(r.line.content, lang, r.key)}</span>
       </div>
@@ -1377,14 +1384,10 @@
       {@const L = r.sr.left}
       {@const R = r.sr.right}
       <div class="vrow split-vrow" data-rk={r.key} use:measure={[r.key, i]}>
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <span class="gut old" data-find-skip class:commentable={prMode} onclick={() => gutterClick(r.file.path, L)}
-          >{L?.old_line ?? ''}</span>
+        {@render gut('old', L?.old_line ?? null, null, prMode && onAddComment && L ? () => gutterClick(r.file.path, L) : null, 'comment')}
         <span class="code mono half {L ? (L.origin === 'del' ? 'del' : '') : 'void'}"
           >{#if L}{@render codeText(L.content, lang, r.key + ':L')}{/if}</span>
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <span class="gut new" data-find-skip class:commentable={prMode} onclick={() => gutterClick(r.file.path, R)}
-          >{R?.new_line ?? ''}</span>
+        {@render gut('new', R?.new_line ?? null, null, prMode && onAddComment && R ? () => gutterClick(r.file.path, R) : null, 'comment')}
         <span class="code mono half {R ? (R.origin === 'add' ? 'add' : '') : 'void'}"
           >{#if R}{@render codeText(R.content, lang, r.key + ':R')}{/if}</span>
       </div>
@@ -1484,9 +1487,9 @@
       {/if}
       {#if !isMobile}
         <!-- Side-by-side is desktop-only; ≤1024 always renders unified. -->
-        <div class="segmented">
-          <button class:active={mode === 'unified'} onclick={() => (mode = 'unified')}>Unified</button>
-          <button class:active={mode === 'split'} onclick={() => (mode = 'split')}>Side by side</button>
+        <div class="segmented" role="group" aria-label="Diff layout">
+          <button class:active={mode === 'unified'} aria-pressed={mode === 'unified'} onclick={() => (mode = 'unified')}>Unified</button>
+          <button class:active={mode === 'split'} aria-pressed={mode === 'split'} onclick={() => (mode = 'split')}>Side by side</button>
         </div>
       {/if}
     </div>
@@ -1641,6 +1644,12 @@
     align-items: center;
     gap: 4px;
     padding: 3px 8px;
+    inline-size: 100%;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    font-size: var(--fs-xs);
+    text-align: start;
     cursor: pointer;
     font-size: var(--fs-xs);
     color: var(--text-dim);
@@ -1695,6 +1704,23 @@
   }
   .nav-file.nav-file-viewed {
     opacity: 0.45;
+  }
+  /* The file-jump button fills the row beside the checkbox. */
+  .nav-file-open {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    block-size: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: var(--fs-xs);
+    text-align: start;
+    cursor: pointer;
   }
   .nav-viewed-cb {
     flex-shrink: 0;
@@ -1961,6 +1987,20 @@
     user-select: none;
     vertical-align: top;
     border-inline-end: 1px solid var(--border);
+  }
+  /* The actionable gutters are real buttons: reset the UA button chrome. */
+  button.gut {
+    appearance: none;
+    margin: 0;
+    background: none;
+    border-block: 0;
+    border-inline-start: 0;
+    line-height: inherit;
+    border-radius: 0;
+  }
+  button.gut:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
   }
   .gut.commentable,
   .gut.selectable {

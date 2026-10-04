@@ -248,7 +248,7 @@
     min-width: 0;
   }
   .vrow:hover {
-    background: color-mix(in srgb, var(--text-dim) 6%, transparent);
+    background: var(--hover);
   }
   .vrow.editable {
     cursor: text;
@@ -313,7 +313,7 @@
   }
   .vsum:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    background: var(--hover);
   }
   .vsum .dimmed {
     opacity: 0.55;

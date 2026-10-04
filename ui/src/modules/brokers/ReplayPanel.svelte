@@ -5,7 +5,7 @@
 
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmProd } from '../../lib/confirmProd';
   import type { BrokerCluster } from '../../lib/api/types';
   import type { ReplayResp, ReplaySelector } from './types';
 
@@ -71,10 +71,14 @@
       if (blockReason) toasts.error('Replay', blockReason);
       return;
     }
-    const ok = await confirmer.ask(
-      `Replay messages from "${sourceTopic}" → "${targetTopic}"${guarded ? ' (guarded cluster)' : ''}. This produces to the target topic.`,
-      { title: 'Confirm replay', confirmLabel: 'Replay', danger: guarded },
-    );
+    const ok = await confirmProd({
+      env: cluster.environment,
+      verb: 'Replay',
+      title: cluster.environment === 'prod' ? 'Replay on production?' : 'Replay messages?',
+      where: `${cluster.name} · ${sourceTopic.trim()} → ${targetTopic.trim()}${cluster.read_only ? ' (read-only cluster)' : ''}`,
+      what: 'Produces the selected messages to the target topic.',
+      danger: guarded,
+    });
     if (!ok) return;
 
     const body: Record<string, unknown> = {

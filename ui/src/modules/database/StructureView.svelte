@@ -1371,7 +1371,7 @@
     cursor: pointer;
   }
   .ib-x:hover {
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+    background: var(--hover);
   }
   .ib-row.custom .ib-ord {
     color: var(--success);

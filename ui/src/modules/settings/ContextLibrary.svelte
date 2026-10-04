@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import { sectionLabel } from './sections';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import SectionIntro from './SectionIntro.svelte';
@@ -157,20 +158,6 @@
     closeEditor();
     entries = [];
     tab = t;
-  }
-
-  function onTabKey(e: KeyboardEvent): void {
-    const i = TABS.indexOf(tab);
-    let next: Tab | null = null;
-    if (e.key === 'ArrowRight') next = TABS[(i + 1) % TABS.length];
-    else if (e.key === 'ArrowLeft') next = TABS[(i - 1 + TABS.length) % TABS.length];
-    else if (e.key === 'Home') next = TABS[0];
-    else if (e.key === 'End') next = TABS[TABS.length - 1];
-    if (!next) return;
-    e.preventDefault();
-    void switchTab(next).then(() => {
-      (document.getElementById(`lib-tab-${tab}`) as HTMLButtonElement | null)?.focus();
-    });
   }
 
   async function startNew(): Promise<void> {

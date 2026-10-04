@@ -6,6 +6,7 @@
   // tabs. On wide windows a rail shows what needs you, what's running and how
   // much of each subscription this week has used. Phone: push navigation.
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -90,22 +91,6 @@
 
   function showWork(): void {
     if (thread?.session_id) router.go(`agents/${thread.session_id}`);
-  }
-
-  // Tab list keyboard: ←/→, Home/End move between tabs.
-  function onTabKey(e: KeyboardEvent): void {
-    const at = TABS.findIndex((t) => t.id === tab);
-    const step = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? -1 : 1;
-    let next = -1;
-    if (e.key === 'ArrowRight') next = (at + step + TABS.length) % TABS.length;
-    else if (e.key === 'ArrowLeft') next = (at - step + TABS.length) % TABS.length;
-    else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = TABS.length - 1;
-    if (next < 0) return;
-    e.preventDefault();
-    const tablist = e.currentTarget as HTMLElement;
-    go(TABS[next].id);
-    tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
   }
 
   // ⌘K verbs.

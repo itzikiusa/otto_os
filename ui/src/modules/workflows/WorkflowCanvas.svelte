@@ -582,7 +582,7 @@
   }
   .dot.running {
     background: var(--info);
-    animation: pulse 1.6s ease-in-out infinite;
+    animation: otto-pulse 1.6s ease-in-out infinite;
   }
   .dot.success {
     background: var(--status-working);
@@ -596,11 +596,7 @@
   .dot.pending {
     background: color-mix(in srgb, var(--text-dim) 50%, transparent);
   }
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
-  }
+  
   @media (prefers-reduced-motion: reduce) {
     .dot.running {
       animation: none;

@@ -4,6 +4,7 @@
   // Each block owns its own loading / empty / error state so one failing
   // source never blanks the rest.
   import StatusDot from '../../lib/components/StatusDot.svelte';
+  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { assistant } from '../../lib/stores/assistant.svelte';
@@ -70,7 +71,7 @@
         {#each running as t (t.id)}
           <li>
             <button class="item" title={t.title} onclick={onopentasks}>
-              <StatusDot status="working" size={8} />
+              <LiveWorkingDot size={8} />
               <span class="t"><span class="name">{t.title}</span><span class="sub">{TASK_KIND[t.kind] ?? t.kind} · {threadTitle(t.thread_id)}</span></span>
             </button>
           </li>

@@ -83,6 +83,6 @@
   }
   .kf-clear:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 20%, transparent);
+    background: var(--hover);
   }
 </style>

@@ -628,13 +628,9 @@
     border-radius: 50%;
     border: 2px solid var(--border);
     border-top-color: var(--accent);
-    animation: spin 0.8s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   .err {
     margin: 0;
     font-size: var(--fs-s);

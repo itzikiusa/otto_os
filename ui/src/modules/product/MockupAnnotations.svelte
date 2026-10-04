@@ -8,6 +8,7 @@
   //     input (relevant when HTML interactivity is enabled).
   // Coordinates are relative, so pins survive resize. Pins render at
   //   left:{x_pct*100}% top:{y_pct*100}%.
+  import { tick } from 'svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -97,6 +98,7 @@
     const y = clamp((e.clientY - rect.top) / h);
     pending = { x_pct: x, y_pct: y };
     pendingBody = '';
+    viaButton = false;
   }
 
   async function savePending(): Promise<void> {
@@ -116,6 +118,10 @@
       notes = [...notes, created];
       pending = null;
       pendingBody = '';
+      if (viaButton) {
+        viaButton = false;
+        void tick().then(() => addBtn?.focus());
+      }
     } catch (e) {
       toasts.error('Could not add note', e instanceof Error ? e.message : String(e));
     } finally {
@@ -127,6 +133,133 @@
     pending = null;
     pendingBody = '';
   }
+
+  // ── Keyboard path: "Add annotation" + arrow-key pin placement ───────────────
+  // A pin can be started without a mouse: the button drops the pending pin at the
+  // centre of what is currently VISIBLE of the render box, the arrow keys on the
+  // pin nudge it (⇧ for a big step) in the same normalised coordinates a click
+  // produces, and the note saves through the same savePending() path.
+  let addBtn = $state<HTMLButtonElement | null>(null);
+  /** The pending pin was started from the keyboard button → give focus back to it. */
+  let viaButton = false;
+  const PIN_STEP = 0.01;
+  const PIN_STEP_BIG = 0.05;
+
+  /** The scroll container the overlay lives in (the render box's offset parent). */
+  function scroller(): HTMLElement | null {
+    return (box?.offsetParent as HTMLElement | null) ?? null;
+  }
+
+  function startAtCentre(): void {
+    if (mode !== 'annotate') mode = 'annotate';
+    const wrap = scroller();
+    const w = geom.width || 1;
+    const h = geom.height || 1;
+    // Centre of the visible part of the box (the box can be taller than the pane).
+    const cx = wrap ? wrap.scrollLeft + wrap.clientWidth / 2 - geom.left : w / 2;
+    const cy = wrap ? wrap.scrollTop + wrap.clientHeight / 2 - geom.top : h / 2;
+    pending = { x_pct: clamp(cx / w), y_pct: clamp(cy / h) };
+    pendingBody = '';
+    viaButton = true;
+  }
+
+  function onPinKey(e: KeyboardEvent): void {
+    if (!pending) return;
+    const step = e.shiftKey ? PIN_STEP_BIG : PIN_STEP;
+    let { x_pct, y_pct } = pending;
+    if (e.key === 'ArrowLeft') x_pct -= step;
+    else if (e.key === 'ArrowRight') x_pct += step;
+    else if (e.key === 'ArrowUp') y_pct -= step;
+    else if (e.key === 'ArrowDown') y_pct += step;
+    else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeEditor();
+      return;
+    } else return;
+    e.preventDefault();
+    pending = { x_pct: clamp(x_pct), y_pct: clamp(y_pct) };
+  }
+
+  /** Esc / Cancel: drop the pending pin; a keyboard-started one returns to Add. */
+  function closeEditor(): void {
+    const back = viaButton;
+    viaButton = false;
+    cancelPending();
+    if (back) void tick().then(() => addBtn?.focus());
+  }
+
+  // ── Editor placement ───────────────────────────────────────────────────────
+  // The editor is placed SEPARATELY from the pin: its measured size is clamped
+  // into the visible part of the scroll container (with an inset), its width and
+  // height are capped to the room available (it scrolls inside), and it opens
+  // above the pin only when it does not fit below.
+  let editorEl = $state<HTMLElement | null>(null);
+  let editorStyle = $state('');
+  const EDITOR_W = 220;
+  const EDITOR_GAP = 14;
+  const EDITOR_INSET = 8;
+  const EDITOR_MIN_H = 96;
+
+  function placeEditor(): void {
+    const wrap = scroller();
+    if (!pending || !editorEl || !wrap) return;
+    const minX = wrap.scrollLeft - geom.left + EDITOR_INSET;
+    const maxX = wrap.scrollLeft + wrap.clientWidth - geom.left - EDITOR_INSET;
+    const minY = wrap.scrollTop - geom.top + EDITOR_INSET;
+    const maxY = wrap.scrollTop + wrap.clientHeight - geom.top - EDITOR_INSET;
+    const pinX = pending.x_pct * geom.width;
+    const pinY = pending.y_pct * geom.height;
+    const width = Math.max(120, Math.min(EDITOR_W, maxX - minX));
+    // Natural (uncapped) height: the content height, plus the 1px borders.
+    const natural = editorEl.scrollHeight + 2;
+    const below = maxY - (pinY + EDITOR_GAP);
+    const above = pinY - EDITOR_GAP - minY;
+    let top: number;
+    let height: number;
+    if (natural <= below) {
+      height = natural;
+      top = pinY + EDITOR_GAP;
+    } else if (natural <= above) {
+      height = natural;
+      top = pinY - EDITOR_GAP - natural;
+    } else if (below >= above) {
+      height = Math.max(EDITOR_MIN_H, below);
+      top = pinY + EDITOR_GAP;
+    } else {
+      height = Math.max(EDITOR_MIN_H, above);
+      top = pinY - EDITOR_GAP - height;
+    }
+    height = Math.min(height, Math.max(EDITOR_MIN_H, maxY - minY));
+    // Final clamp into the visible region.
+    top = Math.max(minY, Math.min(top, maxY - height));
+    const left = Math.max(minX, Math.min(pinX - width / 2, maxX - width));
+    editorStyle = `left:${Math.round(left)}px; top:${Math.round(top)}px; width:${Math.round(width)}px; max-height:${Math.round(height)}px`;
+  }
+
+  $effect(() => {
+    // Re-place when the pin moves, the box resizes or the note grows.
+    void pending;
+    void geom;
+    void pendingBody;
+    if (!pending) {
+      editorStyle = '';
+      return;
+    }
+    if (!editorEl) return;
+    placeEditor();
+  });
+  $effect(() => {
+    if (!pending) return;
+    const wrap = scroller();
+    if (!wrap) return;
+    const again = (): void => placeEditor();
+    wrap.addEventListener('scroll', again, { passive: true });
+    window.addEventListener('resize', again);
+    return () => {
+      wrap.removeEventListener('scroll', again);
+      window.removeEventListener('resize', again);
+    };
+  });
 
   async function toggleResolved(n: MockupAnnotation): Promise<void> {
     try {
@@ -176,31 +309,45 @@
   {/each}
 
   {#if pending}
-    <div
+    <!-- Focusable so the pin can be placed with the arrow keys (⇧ = big step). -->
+    <button
+      type="button"
       class="pin pending"
       style="left:{pending.x_pct * 100}%; top:{pending.y_pct * 100}%"
+      aria-label="New annotation position. Arrow keys move it, Shift for larger steps; Escape cancels."
+      onkeydown={onPinKey}
+      onclick={(e) => e.stopPropagation()}
     >
       {notes.length + 1}
-    </div>
+    </button>
     <!-- Inline editor near the pin. Stop propagation so clicks inside it don't
          drop another pin. -->
     <div
       class="editor"
-      style="left:{pending.x_pct * 100}%; top:{pending.y_pct * 100}%"
+      class:unplaced={!editorStyle}
+      bind:this={editorEl}
+      style={editorStyle}
       role="dialog"
       tabindex="-1"
       aria-label="New annotation"
       onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => e.stopPropagation()}
+      onkeydown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeEditor();
+        }
+      }}
     >
       <textarea
         bind:value={pendingBody}
+        aria-label="Annotation note"
         placeholder="Add a note…"
         rows="3"
         use:focusOnMount
       ></textarea>
       <div class="editor-actions">
-        <button class="mini ghost" onclick={cancelPending}>Cancel</button>
+        <button class="mini ghost" onclick={closeEditor}>Cancel</button>
         <button class="mini primary" onclick={savePending} disabled={saving || !pendingBody.trim()}>
           {saving ? 'Saving…' : 'Add'}
         </button>
@@ -213,12 +360,11 @@
      against the viewer so it doesn't disturb the render box's geometry). -->
 <div class="side">
   <div class="side-head">
-    <div class="mode-toggle" role="tablist" aria-label="Annotation mode">
+    <div class="mode-toggle" role="group" aria-label="Annotation mode">
       <button
         class="mt"
         class:active={mode === 'annotate'}
-        role="tab"
-        aria-selected={mode === 'annotate'}
+        aria-pressed={mode === 'annotate'}
         onclick={() => (mode = 'annotate')}
       >
         <Icon name="pin" size={11} /> Annotate
@@ -226,13 +372,22 @@
       <button
         class="mt"
         class:active={mode === 'interact'}
-        role="tab"
-        aria-selected={mode === 'interact'}
+        aria-pressed={mode === 'interact'}
         onclick={() => { mode = 'interact'; cancelPending(); }}
       >
         <Icon name="eye" size={11} /> Interact
       </button>
     </div>
+    {#if mode === 'annotate'}
+      <button
+        class="mini add-note"
+        bind:this={addBtn}
+        onclick={startAtCentre}
+        title="Drop a pin in the middle of the visible mockup, then move it with the arrow keys (⇧ for bigger steps)"
+      >
+        <Icon name="plus" size={11} /> Add annotation
+      </button>
+    {/if}
   </div>
 
   <div class="note-list">
@@ -315,15 +470,34 @@
 
   .editor {
     position: absolute;
-    transform: translate(-50%, 14px);
     z-index: 6;
     width: 220px;
+    max-width: 100%;
+    box-sizing: border-box;
+    /* Capped to the room available (inline max-height): scroll inside. */
+    overflow: auto;
+    overscroll-behavior: contain;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
     padding: 8px;
     pointer-events: auto;
+  }
+  /* Until placeEditor() has measured it: keep it laid out (so it can take focus). */
+  .editor.unplaced {
+    opacity: 0;
+  }
+  .pin.pending:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
+  }
+  button.pin {
+    border: 0;
+    padding: 0;
+    font: inherit;
+    font-size: var(--fs-xs);
+    font-weight: 600;
   }
   .editor textarea {
     width: 100%;
@@ -382,6 +556,11 @@
   .mode-toggle {
     display: flex;
     gap: 2px;
+  }
+  .add-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
   .mt {
     display: inline-flex;

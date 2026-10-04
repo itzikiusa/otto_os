@@ -14,6 +14,7 @@
   // Image→3D / Refine in Blender — each lands as a reviewable `agent` version),
   // or a local export. Cloud 3D providers are opt-in and disabled without a
   // Keychain key; nothing is sent anywhere without an explicit click.
+  import { onTabKey } from '../../../lib/tabKeys';
   import type { Snippet } from 'svelte';
   import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
@@ -635,12 +636,12 @@
 
     <aside class="right" aria-label="Details">
       <div class="tabs" role="tablist" aria-label="Details panel">
-        <button role="tab" aria-selected={rightTab === 'inspector'} class:active={rightTab === 'inspector'} onclick={() => (rightTab = 'inspector')} data-testid="s3d-tab-inspector">Inspector</button>
-        <button role="tab" aria-selected={rightTab === 'otto'} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">Otto</button>
-        <button role="tab" aria-selected={rightTab === 'links'} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
+        <button role="tab" aria-selected={rightTab === 'inspector'} tabindex={rightTab === 'inspector' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'inspector'} onclick={() => (rightTab = 'inspector')} data-testid="s3d-tab-inspector">Inspector</button>
+        <button role="tab" aria-selected={rightTab === 'otto'} tabindex={rightTab === 'otto' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">Otto</button>
+        <button role="tab" aria-selected={rightTab === 'links'} tabindex={rightTab === 'links' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
           Links <span class="count">{linkCount}</span>
         </button>
-        <button role="tab" aria-selected={rightTab === 'references'} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">References</button>
+        <button role="tab" aria-selected={rightTab === 'references'} tabindex={rightTab === 'references' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">References</button>
       </div>
       <div class="panel" role="tabpanel">
         {#if rightTab === 'inspector'}

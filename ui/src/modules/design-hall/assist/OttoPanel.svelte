@@ -21,7 +21,9 @@
   import { untrack } from 'svelte';
   import Icon, { asIcon } from '../../../lib/components/Icon.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
+  import AgentChip from '../../../lib/components/AgentChip.svelte';
   import StatusDot from '../../../lib/components/StatusDot.svelte';
+  import LiveWorkingDot from '../../../lib/components/LiveWorkingDot.svelte';
   import ModelPicker from '../../../lib/components/ModelPicker.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
@@ -459,7 +461,7 @@
       {#if stale}
         <span class="warnc"><Icon name="warning" size={11} /> Reconnecting — live updates paused</span>
       {:else if running || runningRun}
-        <StatusDot status="working" /> {runningRun && !running ? 'Drawing variants' : running?.status === 'starting' ? 'Starting' : 'Working'} on
+        <LiveWorkingDot /> {runningRun && !running ? 'Drawing variants' : running?.status === 'starting' ? 'Starting' : 'Working'} on
         {head ? `v${head.seq}` : 'this design'}
       {:else}
         <StatusDot status="idle" /> {`Ready${storedProvider ? ` · resumes its ${storedProvider} session` : ''}`}
@@ -533,10 +535,10 @@
             <div class="msg agent">
               <div class="who">
                 <ProviderIcon provider={run.turns[0]?.provider || effectiveProvider} size={16} />
-                <strong>Otto</strong> <span class="chip agent-label">AGENT</span>
+                <strong>Otto</strong> <AgentChip />
                 <span class="grow"></span>
                 <span class="st">
-                  {#if run.status === 'running'}<StatusDot status="working" /> Drawing{:else if run.status === 'accepted'}Applied{:else}Ready — pick one{/if}
+                  {#if run.status === 'running'}<LiveWorkingDot label="Drawing" />{:else if run.status === 'accepted'}Applied{:else}Ready — pick one{/if}
                 </span>
               </div>
               <p class="body">
@@ -762,11 +764,6 @@
     font-weight: 600;
     background: var(--surface-3);
     color: var(--text-dim);
-  }
-  .agent-label {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    letter-spacing: 0.04em;
   }
   .st {
     display: inline-flex;

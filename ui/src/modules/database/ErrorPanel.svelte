@@ -93,7 +93,7 @@
     <span class="err-grow"></span>
     {#if onAskAi && !policy}
       <button class="btn small" onclick={onAskAi} title="Open the DB Assistant to investigate and fix this error">
-        <Icon name="zap" size={12} /> Ask AI to fix
+        <Icon name="zap" size={12} /> Ask Otto to fix
       </button>
     {/if}
   </div>

@@ -41,6 +41,7 @@
   $effect(() => {
     product.selectedId;
     loaded = false;
+    loadError = null;
     void doLoad('all');
     selectedSection = 'all';
   });
@@ -48,10 +49,10 @@
   /** A failed load — inline with Retry, never as "No events yet". */
   let loadError = $state<string | null>(null);
   async function doLoad(section: SectionFilter): Promise<void> {
-    loadError = null;
     try {
       await product.loadEvents(section === 'all' ? undefined : section);
       loaded = true;
+      loadError = null;
     } catch (e) {
       loadError = loadErrorText(e);
     }
@@ -120,37 +121,44 @@
     </div>
 
     <!-- Timeline -->
-    {#if (product.loadingEvents && !loaded) || (loadError && events.length === 0)}
-      <LoadState what="history" loading={product.loadingEvents} error={loadError} empty onretry={() => void doLoad(selectedSection)} />
-    {:else if events.length === 0}
-      <div class="muted">No events yet{selectedSection !== 'all' ? ` in ${sectionLabel(selectedSection)}` : ''}.</div>
-    {:else}
-      <div class="timeline">
-        {#each events as ev (ev.id)}
-          <div class="event-row">
-            <!-- Connector line -->
-            <div class="ev-line-col">
-              <div class="ev-dot"></div>
-              <div class="ev-connector"></div>
-            </div>
-
-            <!-- Content -->
-            <div class="ev-content">
-              <div class="ev-header">
-                <span class="chip hist-sec-chip">
-                  <Icon name={sectionIcon(ev.section)} size={12} />
-                  {sectionLabel(ev.section)}
-                </span>
-                <span class="ev-kind" title={ev.actor_id ? `${ev.kind} · by ${ev.actor_id}` : ev.kind}>{kindLabel(ev.kind)}</span>
-                <span class="spacer"></span>
-                <RelTime iso={ev.created_at} class="ev-time" />
+    <!-- Section/refresh failures keep the last events + a stale bar (LoadState). -->
+    <LoadState
+      what="history"
+      loading={product.loadingEvents && !loaded}
+      error={loadError}
+      empty={!loaded || events.length === 0}
+      onretry={() => void doLoad(selectedSection)}
+    >
+      {#snippet emptyView()}
+        <div class="muted">No events yet{selectedSection !== 'all' ? ` in ${sectionLabel(selectedSection)}` : ''}.</div>
+      {/snippet}
+        <div class="timeline">
+          {#each events as ev (ev.id)}
+            <div class="event-row">
+              <!-- Connector line -->
+              <div class="ev-line-col">
+                <div class="ev-dot"></div>
+                <div class="ev-connector"></div>
               </div>
-              <p class="ev-summary">{ev.summary}</p>
+
+              <!-- Content -->
+              <div class="ev-content">
+                <div class="ev-header">
+                  <span class="chip hist-sec-chip">
+                    <Icon name={sectionIcon(ev.section)} size={12} />
+                    {sectionLabel(ev.section)}
+                  </span>
+                  <span class="ev-kind" title={ev.actor_id ? `${ev.kind} · by ${ev.actor_id}` : ev.kind}>{kindLabel(ev.kind)}</span>
+                  <span class="spacer"></span>
+                  <RelTime iso={ev.created_at} class="ev-time" />
+                </div>
+                <p class="ev-summary">{ev.summary}</p>
+              </div>
             </div>
-          </div>
-        {/each}
-      </div>
-    {/if}
+          {/each}
+        </div>
+    
+    </LoadState>
   </div>
 {/if}
 

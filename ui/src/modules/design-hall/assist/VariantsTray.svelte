@@ -149,13 +149,9 @@
     height: 7px;
     border-radius: 50%;
     background: var(--status-working);
-    animation: pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.2s ease-in-out infinite;
   }
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
-  }
+  
   @media (prefers-reduced-motion: reduce) {
     .pulse {
       animation: none;

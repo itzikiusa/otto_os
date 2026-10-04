@@ -5,6 +5,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmProd } from '../../lib/confirmProd';
+  import { formatBytes } from '../../lib/metric-format';
   import { loadErrorText } from '../../lib/loadError';
   import { pollWhileVisible } from '../../lib/poll';
   import { adaptiveCadence } from '../../lib/pollBackoff';
@@ -462,10 +464,24 @@
     }
     pValueErr = null;
     if (guarded) {
-      const ok = await confirmer.ask(
-        `Produce to "${topic}" on guarded cluster "${cluster.name}"?`,
-        { title: 'Produce to guarded cluster', confirmLabel: 'Produce', danger: true },
-      );
+      // Key, value size and partition: what a produce actually sends.
+      const valueBytes = pTombstone
+        ? null
+        : pValueBase64
+          ? Math.floor((pValue.length * 3) / 4)
+          : new TextEncoder().encode(pValue).length;
+      const ok = await confirmProd({
+        env: cluster.environment,
+        verb: 'Produce',
+        title: cluster.environment === 'prod' ? 'Produce to production?' : 'Produce to guarded cluster?',
+        where: `Topic ${topic} · ${cluster.name}${cluster.read_only ? ' (read-only cluster)' : ''}`,
+        what: [
+          `Key: ${pKey || '(none)'}`,
+          `Value: ${valueBytes === null ? 'null (tombstone)' : formatBytes(valueBytes)}`,
+          `Partition: ${pPartition === '' ? 'chosen by the producer' : pPartition}`,
+        ].join(' · '),
+        danger: true,
+      });
       if (!ok) return;
     }
     const headers: MessageHeader[] = pHeaders.filter((h) => h.key.trim());

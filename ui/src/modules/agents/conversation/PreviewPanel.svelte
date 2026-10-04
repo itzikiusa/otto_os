@@ -12,6 +12,7 @@
   import PreviewBody, { forgetRead, type PreviewMode } from './PreviewBody.svelte';
   import { previewKind, previewKindForLang, requestKind, splitName } from './preview';
   import { relPath, resolvePath } from './format';
+  import { onTabKey } from '../../../lib/tabKeys';
   import { CONV_CTX, type ConvContext, type PreviewReq } from './context';
 
   interface Props {
@@ -83,12 +84,45 @@
       onclose();
     }
   }
+
+  // Narrow pane: the host lays the panel OVER the chat. Then the covered chat
+  // (and its composer) must not stay reachable by Tab / screen readers: mark it
+  // inert, move focus into the panel, and hand focus back when it closes.
+  let panelEl = $state<HTMLElement | null>(null);
+  let covering = $state(false);
+  $effect(() => {
+    const slot = panelEl?.parentElement;
+    const host = slot?.parentElement;
+    if (!slot || !host || typeof ResizeObserver === 'undefined') return;
+    const measure = (): void => {
+      const pos = getComputedStyle(slot).position;
+      covering = pos === 'absolute' || pos === 'fixed';
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(host);
+    return () => ro.disconnect();
+  });
+  $effect(() => {
+    if (!covering || !panelEl) return;
+    const slot = panelEl.parentElement;
+    const host = slot?.parentElement;
+    if (!slot || !host) return;
+    const covered = Array.from(host.children).filter((c): c is HTMLElement => c !== slot && c instanceof HTMLElement && !c.inert);
+    const returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    for (const el of covered) el.inert = true;
+    untrack(() => panelEl?.querySelector<HTMLElement>('button, [href], [tabindex]:not([tabindex="-1"])')?.focus());
+    return () => {
+      for (const el of covered) el.inert = false;
+      if (returnTo?.isConnected) returnTo.focus();
+    };
+  });
   const canFiles = $derived(!!path && !!ctx.sessionId && !ctx.readonly);
   const fullWidth = $derived(typeof window === 'undefined' ? 1100 : Math.max(480, Math.min(1400, window.innerWidth - 80)));
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<aside class="pv" aria-label="Preview: {title.base}" data-preview={req.kind} onkeydown={onKey}>
+<aside class="pv" bind:this={panelEl} aria-label="Preview: {title.base}" data-preview={req.kind} onkeydown={onKey}>
   <header class="pv-head">
     <span class="pv-icon" aria-hidden="true"><Icon name={req.kind === 'diff' ? 'split' : req.kind === 'code' ? 'format' : 'file'} size={13} /></span>
     <span class="pv-title" title={path ?? title.base}>
@@ -102,7 +136,7 @@
     {#if modes.length > 1}
       <div class="pv-seg" role="tablist" aria-label="View">
         {#each modes as m (m)}
-          <button role="tab" aria-selected={mode === m} class:on={mode === m} onclick={() => (mode = m)} data-mode={m}>{LABEL[m]}</button>
+          <button role="tab" aria-selected={mode === m} tabindex={mode === m ? 0 : -1} class:on={mode === m} onclick={() => (mode = m)} onkeydown={onTabKey} data-mode={m}>{LABEL[m]}</button>
         {/each}
       </div>
     {:else}
@@ -134,7 +168,7 @@
       {#if modes.length > 1}
         <div class="pv-seg" role="tablist" aria-label="View">
           {#each modes as m (m)}
-            <button role="tab" aria-selected={mode === m} class:on={mode === m} onclick={() => (mode = m)}>{LABEL[m]}</button>
+            <button role="tab" aria-selected={mode === m} tabindex={mode === m ? 0 : -1} class:on={mode === m} onclick={() => (mode = m)} onkeydown={onTabKey}>{LABEL[m]}</button>
           {/each}
         </div>
       {/if}

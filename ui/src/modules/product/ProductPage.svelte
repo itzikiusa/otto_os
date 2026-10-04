@@ -5,6 +5,7 @@
   // group tabs inline-start, the active group's sub-views as pills inline-end —
   // with the selected sub-view's content below.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -381,23 +382,6 @@
     if (!g.subs.some((s) => s.id === product.tab)) {
       product.tab = g.subs[0].id;
     }
-  }
-
-  /** Tablist keyboard (←/→, Home/End) for the view toggle and both story
-   *  tab strips: activate the neighbour, then move focus onto it. */
-  function onTabKey(e: KeyboardEvent): void {
-    const list = e.currentTarget as HTMLElement;
-    const tabs = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
-    const at = tabs.findIndex((t) => t.getAttribute('aria-selected') === 'true');
-    let next = -1;
-    if (e.key === 'ArrowRight') next = (at + 1) % tabs.length;
-    else if (e.key === 'ArrowLeft') next = (at - 1 + tabs.length) % tabs.length;
-    else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = tabs.length - 1;
-    if (next < 0 || !tabs.length) return;
-    e.preventDefault();
-    tabs[next].click();
-    queueMicrotask(() => list.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus());
   }
 
   function sourceIcon(kind: string): IconName {
@@ -1194,7 +1178,6 @@
     background: var(--surface-2);
     color: var(--text-dim);
   }
-
 
   /* ── Main area ───────────────────────────────────────────────── */
   .product-main {

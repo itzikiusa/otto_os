@@ -36,6 +36,9 @@
     'send-to-agent': 'Send to agent',
   };
 
+  /** The keys that run a hit's actions from the keyboard (shown on the selected hit). */
+  const HIT_ACTION_KEY: Record<HitAction, string> = { open: '⏎', 'copy-context': '⌥⏎', 'send-to-agent': '⇧⏎' };
+
   let mode: 'commands' | 'english' = $state('commands');
   let query = $state('');
   let englishText = $state('');
@@ -229,8 +232,12 @@
   });
 
   /** The default action for a hit on Enter: open it when it can be opened. */
-  function hitDefault(hit: SearchHit): void {
-    const a = hitActions(hit)[0];
+  function hitDefault(hit: SearchHit, e?: KeyboardEvent): void {
+    // ⏎ opens; ⌥⏎ copies the hit as context; ⇧⏎ sends it to an agent (the pills
+    // under a hit are the mouse shortcut for the same actions).
+    const acts = hitActions(hit);
+    const want: HitAction | null = e?.altKey ? 'copy-context' : e?.shiftKey ? 'send-to-agent' : null;
+    const a = want && acts.includes(want) ? want : acts[0];
     if (a) void hitAction(hit, a);
   }
 
@@ -290,7 +297,7 @@
       const item = filtered[selected];
       if (item) void run(item.cmd);
       else if (askRow && selected === filtered.length) askOtto();
-      else if (searchHits[selected - hitBase]) hitDefault(searchHits[selected - hitBase]);
+      else if (searchHits[selected - hitBase]) hitDefault(searchHits[selected - hitBase], e);
     } else if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -437,11 +444,11 @@
   >
     <div class="palette glass-raised" use:dialogFocus={() => { if (plan) plan = null; else close(); }} role="dialog" aria-modal="true" aria-label="Command palette">
       <div class="pal-mode-row">
-        <div class="segmented">
-          <button class:active={mode === 'commands'} onclick={() => mode !== 'commands' && toggleMode()}>
+        <div class="segmented" role="group" aria-label="Palette mode">
+          <button class:active={mode === 'commands'} aria-pressed={mode === 'commands'} onclick={() => mode !== 'commands' && toggleMode()}>
             Commands
           </button>
-          <button class:active={mode === 'english'} onclick={() => mode !== 'english' && toggleMode()}>
+          <button class:active={mode === 'english'} aria-pressed={mode === 'english'} onclick={() => mode !== 'english' && toggleMode()}>
             Plain English
           </button>
         </div>
@@ -531,11 +538,12 @@
                 <span class="grow"></span>
                 <span class="pal-group pal-hit-kind">{hit.kind.replace('_', ' ')}</span>
               </div>
-              <div class="pal-hit-actions">
+              <!-- The pills are a mouse shortcut only (an option holds no interactive
+                   children); the keyboard path is ⏎ / ⌥⏎ / ⇧⏎ on the selected hit. -->
+              <div class="pal-hit-actions" aria-hidden="true">
                 {#each hitActions(hit) as action (action)}
-                  <button class="pal-hit-btn" tabindex="-1" onclick={() => void hitAction(hit, action)}>
-                    {HIT_ACTION_LABEL[action]}
-                  </button>
+                  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                  <span class="pal-hit-btn" onclick={() => void hitAction(hit, action)}>{HIT_ACTION_LABEL[action]}{selected === hitBase + h ? ` ${HIT_ACTION_KEY[action]}` : ''}</span>
                 {/each}
               </div>
             </div>
@@ -666,6 +674,10 @@
     font-size: var(--fs-l);
     color: var(--text);
     outline: none;
+  }
+  /* The input has no ring of its own (it sits in a row): the row shows focus. */
+  .pal-input-row:focus-within {
+    box-shadow: inset 0 -2px 0 var(--accent-text);
   }
   .pal-list {
     overflow-y: auto;

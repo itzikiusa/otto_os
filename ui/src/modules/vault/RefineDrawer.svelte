@@ -222,6 +222,7 @@
     </select>
     <input
       bind:value={prompt}
+      aria-label="Refinement request"
       placeholder="Refine this note… (e.g. tighten the intro, add a troubleshooting section)"
       disabled={sending}
       onkeydown={(e) => {

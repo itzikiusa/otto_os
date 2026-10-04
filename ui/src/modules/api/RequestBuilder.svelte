@@ -5,6 +5,7 @@
   // and what they resolve to · Params / Headers / Body / Auth / Scripts / Docs
   // / Settings, each with a one-line explanation.
   import { openExternal } from '../../lib/external';
+  import { onTabKey } from '../../lib/tabKeys';
   import { baseUrl } from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -465,13 +466,6 @@
   $effect(() => {
     if (!tabs.some((t) => t.id === tab)) tab = tabs[0].id;
   });
-  function onTabKey(e: KeyboardEvent, i: number): void {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'Home' && e.key !== 'End') return;
-    e.preventDefault();
-    const j = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
-    tab = tabs[j].id;
-    (e.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLElement>('[role=tab]')[j]?.focus();
-  }
 
   // ── gRPC state ──────────────────────────────────────────────────────────────
   interface GrpcMethod { name: string; full: string; input_type: string; output_type: string; input_schema: string; client_streaming: boolean; server_streaming: boolean; }
@@ -846,9 +840,9 @@
   {#if isStreaming && scriptCount}<p class="tab-help">Scripts only run for HTTP requests; this streaming connection ignores them.</p>{/if}
 
   <div class="tabstrip" role="tablist" aria-label="Request parts">
-    {#each tabs as t, i (t.id)}
+    {#each tabs as t (t.id)}
       <button class="tab" class:active={tab === t.id} role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1}
-        onclick={() => (tab = t.id)} onkeydown={(e) => onTabKey(e, i)}>
+        onclick={() => (tab = t.id)} onkeydown={onTabKey}>
         {t.label}{#if t.count}<span class="count" aria-hidden="true">{t.count}</span>{/if}
       </button>
     {/each}

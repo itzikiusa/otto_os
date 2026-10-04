@@ -2,6 +2,7 @@
   // One personal agent: Overview / Activity / Autonomy / Schedules / Runs /
   // Chat / Memory / Context tabs.
   import RelTime from '../../lib/components/RelTime.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
@@ -65,21 +66,6 @@
   const tab = $derived<Tab>(TABS.some((t) => t.id === router.parts[2]) ? (router.parts[2] as Tab) : 'overview');
   function goTab(t: Tab): void {
     router.go(t === 'overview' ? `personal-agents/${agentId}` : `personal-agents/${agentId}/${t}`);
-  }
-  // Tab list keyboard: ←/→, Home/End move between tabs.
-  function onTabKey(e: KeyboardEvent): void {
-    const at = TABS.findIndex((t) => t.id === tab);
-    let next = -1;
-    const direction = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? -1 : 1;
-    if (e.key === 'ArrowRight') next = (at + direction + TABS.length) % TABS.length;
-    else if (e.key === 'ArrowLeft') next = (at - direction + TABS.length) % TABS.length;
-    else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = TABS.length - 1;
-    if (next < 0) return;
-    e.preventDefault();
-    const tablist = e.currentTarget as HTMLElement;
-    goTab(TABS[next].id);
-    tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
   }
   let editing = $state(false);
   let busy = $state(false);

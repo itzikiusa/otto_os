@@ -113,6 +113,9 @@
   const selectedNode = $derived(graph.nodes.find((n) => n.id === selectedId) ?? null);
   const selectedSummary = $derived(selectedId ? (runStates[selectedId] ?? null) : null);
   let inspectorBody = $state<NodeRunState | null>(null);
+  /** The step-output fetch failed → "Couldn't load the step output · Retry". */
+  let inspectorError = $state(false);
+  let inspectorRetry = $state(0);
   const selectedRun = $derived(inspectorBody ?? selectedSummary);
   // A RUNNING node's detail_version bumps per log line: refetch its body at
   // most ~1/s (first read of a newly selected node is immediate), and abort a
@@ -121,10 +124,12 @@
   let inspectorFor = '';
   $effect(() => {
     const id = run?.id, node = selectedSummary;
+    void inspectorRetry; // Retry re-runs this effect
     const target = id && node ? `${id}\0${node.node_id}` : '';
     if (target !== inspectorFor) {
       inspectorFor = target;
       inspectorBody = null;
+      inspectorError = false;
     }
     if (!id || !node?.detail_version) return;
     const expected = node.detail_version;
@@ -140,8 +145,14 @@
     const delay = untrack(() => inspectorBody) && node.status === 'running' ? 1000 : 0;
     const timer = setTimeout(() => {
       void sharedNodeBodies.fetch(id, node.node_id, (signal) => workflowNodeDetail(id, node.node_id, signal), ctl.signal).then(result => {
-        if (!ctl.signal.aborted && result.detail_version === expected) inspectorBody = result.body;
-      }).catch(() => {});
+        if (!ctl.signal.aborted && result.detail_version === expected) {
+          inspectorBody = result.body;
+          inspectorError = false;
+        }
+      }).catch(() => {
+        // The previous body (if any) stays; a failure is said, not swallowed.
+        if (!ctl.signal.aborted) inspectorError = true;
+      });
     }, delay);
     return () => { clearTimeout(timer); ctl.abort(); };
   });
@@ -3073,6 +3084,12 @@
                 </div>
               </div>
             {/if}
+            {#if inspectorError}
+              <div class="insp-load-err" role="alert">
+                Couldn’t load the step output ·
+                <button class="btn small ghost" onclick={() => { inspectorError = false; inspectorRetry++; }}>Retry</button>
+              </div>
+            {/if}
             {#if selectedRun?.error}
               <div class="err">{selectedRun.error}</div>
             {/if}
@@ -3794,14 +3811,14 @@
     position: absolute;
     top: 30px;
     inset-inline-end: 0;
-    z-index: 40;
+    z-index: var(--z-sticky);
     width: 230px;
-    max-height: 320px;
+    max-height: min(320px, calc(100% - 36px)); /* the pane, not the window */
     overflow-y: auto;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-l);
+    box-shadow: var(--glass-shadow);
     padding: 5px;
   }
   .pal-item {
@@ -4018,6 +4035,13 @@
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .insp-load-err {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-s);
+    color: var(--danger);
   }
   .err {
     color: var(--danger);
@@ -4353,7 +4377,7 @@
   }
   .dot.running {
     background: var(--info);
-    animation: wf-dot-pulse 1.6s ease-in-out infinite;
+    animation: otto-pulse 1.6s ease-in-out infinite;
   }
   .dot.waiting {
     background: var(--status-warn);
@@ -4363,11 +4387,7 @@
   .dot.skipped {
     background: var(--text-dim);
   }
-  @keyframes wf-dot-pulse {
-    50% {
-      opacity: 0.4;
-    }
-  }
+  
   @media (prefers-reduced-motion: reduce) {
     .dot.running {
       animation: none;
@@ -4380,13 +4400,9 @@
     border-inline-end-color: transparent;
     border-radius: 50%;
     display: inline-block;
-    animation: rot 0.7s linear infinite;
+    animation: otto-spin 0.7s linear infinite;
   }
-  @keyframes rot {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   /* Triggers panel: collapsible section below the canvas */
   .triggers-wrap {
     border-top: 1px solid var(--border);

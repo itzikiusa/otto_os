@@ -180,7 +180,7 @@
     cursor: default;
   }
   .icon-btn.spin :global(svg) {
-    animation: spin 0.9s linear infinite;
+    animation: otto-spin 0.9s linear infinite;
   }
   .auto {
     display: inline-flex;
@@ -191,11 +191,7 @@
     cursor: pointer;
     user-select: none;
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   @media (max-width: 640px) {
     .vt-filter {
       flex-basis: 100%;

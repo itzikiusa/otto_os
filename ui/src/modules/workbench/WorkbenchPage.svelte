@@ -843,12 +843,8 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .wb-skel span {
-      animation: wb-pulse 1.2s ease-in-out infinite;
+      animation: otto-pulse 1.2s ease-in-out infinite;
     }
   }
-  @keyframes wb-pulse {
-    50% {
-      opacity: 0.5;
-    }
-  }
+  
 </style>

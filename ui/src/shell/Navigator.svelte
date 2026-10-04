@@ -2,6 +2,7 @@
   // Expanded 240px navigator: modules in foldable macOS source-list sections
   // (Agents with its nested session lists in Work), workspaces section,
   // user/settings at the bottom.
+  import { navBadge } from '../lib/navBadge';
   import Icon from '../lib/components/Icon.svelte';
   import NotificationBell from './NotificationBell.svelte';
   import StatusDot from '../lib/components/StatusDot.svelte';
@@ -9,9 +10,10 @@
   import { router } from '../lib/router.svelte';
   import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
+  import { RAIL_MIN, RAIL_MAX } from '../lib/stores/ui.svelte';
+  import { paneResizer, pxWide, RESIZE_TITLE } from '../lib/paneResizer';
   import { startMouseDrag } from '../lib/dragCursor';
   import { ws, SCRATCH_WORKSPACE_ID } from '../lib/stores/workspace.svelte';
-  import { assistant } from '../lib/stores/assistant.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { activity } from '../lib/stores/activity.svelte';
@@ -722,12 +724,17 @@
 </script>
 
 <nav class="navigator sidebar-material" class:resizing aria-label="Navigator" style="width:{ui.railWidth}px">
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="rail-resize"
+    role="separator"
+    tabindex="0"
+    aria-label="Resize the navigator"
     onmousedown={startResize}
     ondblclick={() => ui.setRailWidth(240)}
-    title="Drag to resize · double-click to reset"
+    title={RESIZE_TITLE}
+    use:paneResizer={{ value: ui.railWidth, min: RAIL_MIN, max: RAIL_MAX, onChange: (w) => ui.setRailWidth(w), onReset: () => ui.setRailWidth(240), text: pxWide }}
   ></div>
   <div class="nav-head" class:tauri-pad={false}>
     <img class="nav-logo" src="/otto-mark-64.png" alt="" width="20" height="20" />
@@ -1070,11 +1077,9 @@
     <Icon name={m.icon} size={14} />
     <span class="grow">{m.label}</span>
     {@render sideMark(m.id)}
-    {#if m.id === 'workflows' && ws.activeWorkflowRuns.length > 0}
-      <span class="count-chip working" title="running workflows">{ws.activeWorkflowRuns.length}</span>
-    {/if}
-    {#if m.id === 'assistant' && assistant.needsYouCount > 0}
-      <span class="count-chip needs" title={`${assistant.needsYouCount} waiting on you`} data-testid="assistant-needs-badge">{assistant.needsYouCount}</span>
+    {#if navBadge(m.id)}
+      {@const b = navBadge(m.id)!}
+      <span class="sr-only">{b.spoken}</span><span class="count-chip {b.tone}" aria-hidden="true" title={b.title} data-testid={m.id === 'assistant' && b.tone === 'needs' ? 'assistant-needs-badge' : undefined}>{b.count}</span>
     {/if}
   </button>
 {/snippet}
@@ -2211,6 +2216,11 @@
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
     color: var(--text-dim);
   }
+  /* The input drops its own outline, so the field it sits in shows focus. */
+  .nav-search:focus-within {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -1px;
+  }
   .nav-search-input {
     flex: 1;
     min-width: 0;
@@ -2398,5 +2408,18 @@
   .user-sub {
     font-size: var(--fs-xs);
     color: var(--text-dim);
+  }
+  /* Touch: every navigation row and its disclosure twisty is a 40px target. */
+  @media (pointer: coarse), (max-width: 640px) {
+    .nav-item,
+    .nested-item,
+    .nested-row .nested-item {
+      height: auto;
+      min-block-size: 40px;
+    }
+    .twisty {
+      width: 40px;
+      height: 40px;
+    }
   }
 </style>

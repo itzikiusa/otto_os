@@ -8,6 +8,7 @@
   // daemon's /usage/* endpoints (otto-usage engine).
   import { onMount } from 'svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
+  import { onTabKey } from '../../lib/tabKeys';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -393,36 +394,9 @@
   >
     {#snippet tabs()}
       {#if usage.status?.available}
-        <div class="segmented" role="group" aria-label="Usage view">
-          <button aria-pressed={view === 'overview'} class:active={view === 'overview'} onclick={() => (view = 'overview')}>Overview</button>
-          <button aria-pressed={view === 'report'} class:active={view === 'report'} onclick={() => (view = 'report')} data-testid="usage-view-report">Report</button>
-        </div>
-        {#if admin}
-        <div
-          class="segmented"
-          role="group"
-          aria-label="Sessions to count"
-          title="Otto: only sessions run inside Otto. All: every Claude/Codex session on this Mac."
-        >
-          <button aria-pressed={usage.ottoOnly} class:active={usage.ottoOnly} onclick={() => usage.setOttoOnly(true)}>
-            Otto
-          </button>
-          <button aria-pressed={!usage.ottoOnly} class:active={!usage.ottoOnly} onclick={() => usage.setOttoOnly(false)}>
-            All
-          </button>
-        </div>
-        {/if}
-        <div class="segmented" role="group" aria-label="Time window">
-          {#each WINDOWS as w (w.days)}
-            <button
-              aria-pressed={usage.days === w.days}
-              class:active={usage.days === w.days}
-              title="Last {w.days} days"
-              onclick={() => usage.setDays(w.days)}
-            >
-              {w.label}
-            </button>
-          {/each}
+        <div class="segmented" role="tablist" aria-label="Usage view">
+          <button role="tab" aria-selected={view === 'overview'} tabindex={view === 'overview' ? 0 : -1} class:active={view === 'overview'} onclick={() => (view = 'overview')} onkeydown={onTabKey}>Overview</button>
+          <button role="tab" aria-selected={view === 'report'} tabindex={view === 'report' ? 0 : -1} class:active={view === 'report'} onclick={() => (view = 'report')} onkeydown={onTabKey} data-testid="usage-view-report">Report</button>
         </div>
       {/if}
     {/snippet}
@@ -438,18 +412,6 @@
           data-label="Refresh"
         >
           <Icon name="refresh" size={14} />
-        </button>
-        <button
-          class="btn small"
-          class:on={usage.autoRefresh}
-          aria-pressed={usage.autoRefresh}
-          onclick={() => usage.setAutoRefresh(!usage.autoRefresh)}
-          title={usage.autoRefresh ? 'Refreshing every 60 s — click to stop' : 'Refresh this page every 60 s'}
-          data-icon="clock"
-          data-label={usage.autoRefresh ? 'Stop auto-refresh' : 'Auto-refresh every 60 s'}
-        >
-          <Icon name="clock" size={12} />
-          {usage.autoRefresh ? 'Live' : 'Auto-refresh'}
         </button>
         <button
           class="btn small"
@@ -481,6 +443,46 @@
   </PageHeader>
 
   <PageBody width="full">
+    <!-- What the numbers cover: who, how far back, how fresh. In the page body,
+         not the header, so the header keeps to tabs + Refresh / Export / settings. -->
+    {#if usage.status?.available}
+      <div class="usage-bar" role="toolbar" aria-label="Usage scope">
+        {#if admin}
+          <div
+            class="segmented"
+            role="group"
+            aria-label="Sessions to count"
+            title="Otto: only sessions run inside Otto. All: every Claude/Codex session on this Mac."
+          >
+            <button aria-pressed={usage.ottoOnly} class:active={usage.ottoOnly} onclick={() => usage.setOttoOnly(true)}>Otto</button>
+            <button aria-pressed={!usage.ottoOnly} class:active={!usage.ottoOnly} onclick={() => usage.setOttoOnly(false)}>All</button>
+          </div>
+        {/if}
+        <div class="segmented" role="group" aria-label="Time window">
+          {#each WINDOWS as w (w.days)}
+            <button
+              aria-pressed={usage.days === w.days}
+              class:active={usage.days === w.days}
+              title="Last {w.days} days"
+              onclick={() => usage.setDays(w.days)}
+            >
+              {w.label}
+            </button>
+          {/each}
+        </div>
+        <button
+          class="btn small"
+          class:on={usage.autoRefresh}
+          aria-pressed={usage.autoRefresh}
+          onclick={() => usage.setAutoRefresh(!usage.autoRefresh)}
+          title={usage.autoRefresh ? 'Refreshing every 60 s — click to stop' : 'Refresh this page every 60 s'}
+        >
+          <Icon name="clock" size={12} />
+          {usage.autoRefresh ? 'Live' : 'Auto-refresh'}
+        </button>
+      </div>
+    {/if}
+
     <!-- Live budget banner (driven by the BudgetExceeded WS event).
          Dismissible; clears automatically on a "recovered" event. -->
     {#if budgetAlert}
@@ -1230,6 +1232,14 @@
 </div>
 
 <style>
+  /* Scope controls (who / how far back / how fresh) above the page's content. */
+  .usage-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-block-end: 12px;
+  }
   .usage {
     height: 100%;
     display: flex;

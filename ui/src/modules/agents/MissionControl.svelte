@@ -16,6 +16,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { reviewBus, workflowRunBus, budgetBus } from '../../lib/events.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { router } from '../../lib/router.svelte';
   import { winKey } from '../../lib/win';
@@ -162,8 +163,15 @@
 
   async function deleteView(id: string) {
     const owner = wsId;
+    const name = savedViews.find((sv) => sv.id === id)?.name;
+    const ok = await confirmer.ask(`Delete the saved view${name ? ` “${name}”` : ''}? Only the view is removed — no sessions are affected.`, {
+      title: 'Delete saved view?',
+      confirmLabel: 'Delete view',
+    });
+    if (!ok) return;
     try {
       await api.del(`/mission-views/${id}`);
+      toasts.success('View deleted', name);
       if (!alive || wsId !== owner) return;
       await load(false);
     } catch (e: unknown) {

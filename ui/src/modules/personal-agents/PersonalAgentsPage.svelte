@@ -4,6 +4,7 @@
   // (one agent's page). The first list GET seeds four disabled example agents
   // server-side — they render as normal cards, marked "Example".
   import RelTime from '../../lib/components/RelTime.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -121,15 +122,6 @@
     return a.model ? `${a.provider} · ${a.model}` : a.provider;
   }
 
-  // Tab list keyboard: ←/→ switch between Agents and Rooms.
-  function onTabKey(e: KeyboardEvent): void {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'Home' && e.key !== 'End') return;
-    e.preventDefault();
-    const toRooms = e.key === 'End' || ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && sub !== 'rooms');
-    const tablist = e.currentTarget as HTMLElement;
-    router.go(toRooms ? 'personal-agents/rooms' : 'personal-agents');
-    tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]')[toRooms ? 1 : 0]?.focus();
-  }
 </script>
 
 {#if agentId}

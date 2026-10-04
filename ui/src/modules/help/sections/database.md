@@ -39,7 +39,7 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 - **Run** runs the selection, or the statement under the cursor. **Run all** runs the whole buffer as a batch and shows one result per statement (Result 1…N). The batch stops at the first error and keeps the results so far.
 - Autocomplete and syntax highlighting per engine: SQL, Redis commands, or JavaScript-style MongoDB queries.
 - **Variables**: `:name`, `{name}` or `{{name}}` placeholders get a value and type (string, number, raw) per tab. Otto asks for any missing value when you run.
-- Toolbar: **Save**, **Explain** (a query-plan tree with warnings on costly steps; not for Redis), **Format**, **Ask AI**, **Ask in English**, **Active database**, **Limit** (100 to 50,000, or All; default 1,000), **Timeout** (MySQL), and **Mask** (the daemon redacts emails, tokens and keys before results leave it).
+- Toolbar: **Save**, **Explain** (a query-plan tree with warnings on costly steps; not for Redis), **Format**, **Ask Otto**, **Ask in English**, **Active database**, **Limit** (100 to 50,000, or All; default 1,000), **Timeout** (MySQL), and **Mask** (the daemon redacts emails, tokens and keys before results leave it).
 - A bare read without its own `LIMIT` gets the row cap added. When results are capped, a **‹ Prev · Next ›** pager appears. It shows an "unordered" hint when there is no `ORDER BY`.
 - **Stop** cancels on the server for MySQL, PostgreSQL, ClickHouse (HTTP transport) and MongoDB (needs the `inprog` and `killop` privileges). For Redis, Stop only drops the request on the client.
 - MongoDB accepts shell-style queries, JSON commands, a SQL subset (translated to find or aggregate), and full **mongosh scripts**. Scripts run through the real `mongosh` CLI, and Otto tells you before you run if it isn't installed.
@@ -50,7 +50,7 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 - **Search rows…**, a **Filter row** under each header, click-to-sort headers, and a **Row detail** side panel.
 - Right-click a cell for **Filter** / **Exclude** by value, **Query by value** or **Add to query** (rewrites the query's `WHERE` or MongoDB filter but doesn't run it), **Go to** a foreign-key target, copy or expand the value.
 - **Copy**: TSV, CSV, JSON or column names. **Export**: download CSV or JSON, **Export all rows…**, or **Import file…**.
-- The **⋯** menu has **Aggregate pipeline…** (MongoDB stage builder), **Compare two records…**, **Insert row from JSON…**, **Expand JSON cells**, **Send to running agent…** and **Examine with AI**.
+- The **⋯** menu has **Aggregate pipeline…** (MongoDB stage builder), **Compare two records…**, **Insert row from JSON…**, **Expand JSON cells**, **Send to running agent…** and **Examine with Otto**.
 - Select rows to **Copy as INSERT**, copy a `WHERE pk IN (…)` predicate, **Compare** exactly 2 records side by side, or delete them.
 - MongoDB has a filter bar above `find` results, and Redis has a key filter.
 
@@ -73,8 +73,8 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 - **Dashboards**: widgets (table, number, line, bar, area, pie) built from saved statements, with auto-refresh Off, 10s, 30s, 1m or 5m.
 
 **Agents**
-- **Ask AI** and **Ask in English** open the **DB Assistant** beside the editor. It's a live agent session that reads the database read-only. Pick the agent before the first question. Proposed queries appear with **Insert** and **Run**. **Summarize** downloads the investigation as Markdown.
-- **Examine with AI** (results) and **Explain with agent** (schema tree, Structure) hand the current context to an agent.
+- **Ask Otto** and **Ask in English** open the **DB Assistant** beside the editor. It's a live agent session that reads the database read-only. Pick the agent before the first question. Proposed queries appear with **Insert** and **Run**. **Summarize** downloads the investigation as Markdown.
+- **Examine with Otto** (results) and **Explain with agent** (schema tree, Structure) hand the current context to an agent.
 
 **Export and import**
 - **Export all rows…** streams the full, uncapped result to a folder on the Mac as CSV, TSV (with or without a header), JSON array or NDJSON.
@@ -113,7 +113,7 @@ These work while the Query view has focus. The ⌨ button in the query toolbar l
 
 - **Production and read-only guard.** On a prod or read-only connection, any statement Otto can't prove is a read counts as a write. Before it runs, you type the connection's name. Imports go through the same check. Confirmed writes are audited.
 - **Access.** Connections appear to anyone with the Connections or Database feature. Only the owner (root) creates, imports or configures connections. Running queries, exporting and running widgets need Editor or higher in the workspace. Per-connection access rules can limit which databases and operations each person gets. Open them from **Access** in a connection's menu.
-- **Ask AI** starts a coding agent, so it also needs agent access.
+- **Ask Otto** starts a coding agent, so it also needs agent access.
 - There are no multi-query transactions. Each run uses a pooled connection, so a `BEGIN … COMMIT` can't span two runs.
 - Redis has no Builder, Diagram, query plan or import. Stop on Redis doesn't cancel on the server.
 - Editing a key inside a SQL JSON column rewrites the whole column value. MongoDB edits only touch the fields you changed.

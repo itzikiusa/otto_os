@@ -7,7 +7,8 @@
   import { untrack } from 'svelte';
   import { pollWhileVisible } from '../../lib/poll';
   import Icon from '../../lib/components/Icon.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { isAbortError } from '../../lib/api/client';
   import { k8sApi } from '../../lib/api/k8s';
   import type { K8sRow } from '../../lib/api/types';
@@ -43,7 +44,7 @@
       error = '';
     } catch (e) {
       if (ac.signal.aborted || isAbortError(e)) return;
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
     } finally {
       if (abort === ac) loading = false;
     }
@@ -53,7 +54,11 @@
     void clusterId;
     void ns;
     void selector;
-    untrack(() => void load());
+    // A different cluster/namespace/selector must not show the previous one's pods.
+    untrack(() => {
+      pods = [];
+      void load();
+    });
     const t = pollWhileVisible(() => load(true), { ms: REFRESH_MS, immediate: false });
     return () => {
       t.stop();
@@ -86,36 +91,36 @@
     <span class="spacer"></span>
     <button class="icon-btn" onclick={() => void load(true)} title="Refresh" aria-label="Refresh pods"><Icon name="refresh" size={13} /></button>
   </div>
-  {#if error}
-    <div class="err">{error} <button class="btn small" onclick={() => void load()}>Retry</button></div>
-  {:else if loading && !pods.length}
-    <div class="pad"><Skeleton rows={4} height={22} /></div>
-  {:else if !pods.length}
-    <div class="dim pad">No pods match <code class="mono">{selector}</code>.</div>
-  {:else}
-    <div class="wp-head" class:metrics={hasMetrics}>
-      <span>Pod</span><span class="num">Ready</span><span>Status</span><span class="num" title="Restarts">↻</span>
-      {#if hasMetrics}<span class="num">CPU</span><span class="num">MEM</span>{/if}
-      <span class="num">Age</span><span></span>
-    </div>
-    {#each pods as p (p.name)}
-      <div class="wp-row {healthClass(p.health, p.status)}" class:metrics={hasMetrics} role="button" tabindex="0" onclick={() => onopenpod(p.name)} onkeydown={(e) => { if (e.key === 'Enter') onopenpod(p.name); }} title={p.name}>
-        <span class="mono ell">{p.name}</span>
-        <span class="num mono">{p.ready ?? ''}</span>
-        <span class="status-pill"><span class="hdot"></span><span class="ell">{p.status}</span></span>
-        <span class="num mono" class:warn={(p.restarts ?? 0) > 0}>{p.restarts ?? ''}</span>
-        {#if hasMetrics}
-          <span class="num mono">{p.cpu == null ? '' : formatMillicores(p.cpu)}</span>
-          <span class="num mono">{p.mem == null ? '' : formatBytes(p.mem)}</span>
-        {/if}
-        <span class="num mono">{formatAge(rowAge(p))}</span>
-        <span class="acts">
-          <button class="icon-btn" onclick={(e) => { e.stopPropagation(); onopenpod(p.name, 'logs'); }} title="Logs" aria-label="Logs of {p.name}"><Icon name="file" size={12} /></button>
-          {#if canEdit}<button class="icon-btn" onclick={(e) => { e.stopPropagation(); onopenpod(p.name, 'terminal'); }} title="Shell (exec)" aria-label="Shell into {p.name}"><Icon name="terminal" size={12} /></button>{/if}
-        </span>
+  <!-- A failed poll never replaces good data: with pods on screen it becomes the
+       stale bar; the full error shows only when there is nothing to show. -->
+  <LoadState what="pods" {loading} {error} empty={!pods.length} onretry={() => void load()} variant="panel">
+    {#snippet emptyView()}
+      <div class="dim pad">No pods match <code class="mono">{selector}</code>.</div>
+    {/snippet}
+      <div class="wp-head" class:metrics={hasMetrics}>
+        <span>Pod</span><span class="num">Ready</span><span>Status</span><span class="num" title="Restarts">↻</span>
+        {#if hasMetrics}<span class="num">CPU</span><span class="num">MEM</span>{/if}
+        <span class="num">Age</span><span></span>
       </div>
-    {/each}
-  {/if}
+      {#each pods as p (p.name)}
+        <div class="wp-row {healthClass(p.health, p.status)}" class:metrics={hasMetrics} role="button" tabindex="0" onclick={() => onopenpod(p.name)} onkeydown={(e) => { if (e.key === 'Enter') onopenpod(p.name); }} title={p.name}>
+          <span class="mono ell">{p.name}</span>
+          <span class="num mono">{p.ready ?? ''}</span>
+          <span class="status-pill"><span class="hdot"></span><span class="ell">{p.status}</span></span>
+          <span class="num mono" class:warn={(p.restarts ?? 0) > 0}>{p.restarts ?? ''}</span>
+          {#if hasMetrics}
+            <span class="num mono">{p.cpu == null ? '' : formatMillicores(p.cpu)}</span>
+            <span class="num mono">{p.mem == null ? '' : formatBytes(p.mem)}</span>
+          {/if}
+          <span class="num mono">{formatAge(rowAge(p))}</span>
+          <span class="acts">
+            <button class="icon-btn" onclick={(e) => { e.stopPropagation(); onopenpod(p.name, 'logs'); }} title="Logs" aria-label="Logs of {p.name}"><Icon name="file" size={12} /></button>
+            {#if canEdit}<button class="icon-btn" onclick={(e) => { e.stopPropagation(); onopenpod(p.name, 'terminal'); }} title="Shell (exec)" aria-label="Shell into {p.name}"><Icon name="terminal" size={12} /></button>{/if}
+          </span>
+        </div>
+      {/each}
+  
+  </LoadState>
 </div>
 
 <style>
@@ -233,11 +238,6 @@
   }
   .health-warn .hdot {
     background: var(--status-warn);
-  }
-  .err {
-    padding: 8px 12px;
-    color: var(--danger);
-    white-space: pre-wrap;
   }
   .dim {
     color: var(--text-dim);

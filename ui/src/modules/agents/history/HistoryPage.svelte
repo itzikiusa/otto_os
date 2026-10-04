@@ -9,6 +9,8 @@
   // through its session. "Resume in Otto" imports an on_disk transcript as a
   // reconnectable session and then rides the existing restart/resume path.
   import { untrack } from 'svelte';
+  import PaneDivider from '../../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../../lib/paneResizer';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../../lib/stores/workspace.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import { router } from '../../../lib/router.svelte';
@@ -37,6 +39,8 @@
   import type { Artifact, HistoryEntry, HistoryStatus } from '../../../lib/api/types';
 
   let scope = $state<'workspace' | 'scratch'>('workspace');
+  // The conversation list's width — drag / ←→ on the divider, remembered.
+  let listW = $state(loadPaneWidth('history.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   const wsId = $derived(scope === 'scratch' ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
   const canEdit = $derived(wsId === SCRATCH_WORKSPACE_ID || ws.myRole !== 'viewer');
   const sel = $derived(history.selected);
@@ -302,6 +306,8 @@
    *  page speaks once, from the right (loading / error + Retry / empty + CTA). */
   const hideList = $derived(history.entries.length === 0 && !serverFiltered && !history.hasMore);
   const isEmpty = $derived(hideList && !history.error && !history.loading);
+  /** The conversation the header names (only once it can actually be shown). */
+  const headSel = $derived(sel && wsId ? sel : null);
 
   function clearFilters(): void {
     const hadQuery = !!history.q.trim();
@@ -316,7 +322,29 @@
 </script>
 
 <div class="history-page">
-<PageHeader title="History" subtitle="Past Claude and Codex conversations: Otto sessions and transcripts on disk">
+<PageHeader
+  title={headSel ? entryTitle(headSel) : 'History'}
+  subtitle={headSel
+    ? `${headSel.repo_name ?? shortCwd(headSel.cwd)}${headSel.turns != null ? ` · ${headSel.turns} ${headSel.turns === 1 ? 'turn' : 'turns'}` : ''} · ${rel(headSel.last_active_at)}`
+    : 'Past Claude and Codex conversations: Otto sessions and transcripts on disk'}
+>
+  {#snippet leading()}
+    {#if headSel}
+      <button class="icon-btn back" onclick={clearSelection} title="Back to the list" aria-label="Back to the list">
+        <Icon name="chevronLeft" size={16} />
+      </button>
+    {/if}
+  {/snippet}
+  {#snippet badge()}
+    {#if headSel}
+      <span class="dmeta">
+        <span class="glyph {headSel.provider}"><ProviderIcon provider={headSel.provider} size={14} /></span>
+        <span class="cap">{headSel.provider}</span>
+        <span class="dot st-{headSel.status}" aria-hidden="true"></span>
+        <span>{STATUS_LABEL[headSel.status]}</span>
+      </span>
+    {/if}
+  {/snippet}
   {#snippet tabs()}
     {#if ws.currentId}
       <div class="segmented" role="group" aria-label="Which conversations">
@@ -328,6 +356,35 @@
     {/if}
   {/snippet}
   {#snippet actions()}
+    {#if headSel}
+      {@const cur = headSel}
+      {#if canEdit}
+        {@const resumable = cur.status === 'running' || cur.status === 'idle' || cur.resumable || cur.status === 'on_disk'}
+        <button
+          class="btn small primary"
+          onclick={() => void resume(cur)}
+          disabled={busy || !resumable}
+          title={resumable ? (cur.status === 'on_disk' ? 'Import this transcript as an Otto session and continue it' : 'Continue this conversation in Otto') : 'This conversation can’t be resumed (the CLI left no resumable state)'}
+          data-icon="play"
+          data-label={resumeLabel(cur)}
+          data-testid="history-resume"
+        >
+          <Icon name="play" size={12} /> {resumeLabel(cur)}
+        </button>
+      {/if}
+      <button class="btn small" data-overflow="-1" data-icon="folder" data-label="Open folder" onclick={() => void openFolder(cur)} title="Reveal {cur.cwd}">
+        <Icon name="folder" size={12} /> Open folder
+      </button>
+      <button class="btn small" data-overflow="-2" data-icon="copy" data-label="Copy transcript path" onclick={() => void copyText(cur.transcript_path, 'Transcript path copied')} title={cur.transcript_path}>
+        <Icon name="copy" size={12} /> Copy path
+      </button>
+      {#if canEdit && cur.session_id && cur.status !== 'on_disk'}
+        <button class="icon-btn" data-overflow="-3" data-icon="archive" data-label="Archive session" onclick={() => void archive(cur)} disabled={busy}
+          aria-label="Archive" title="Archive the session — restore it any time from the sidebar's Archived list">
+          <Icon name="archive" size={14} />
+        </button>
+      {/if}
+    {/if}
     <!-- The empty page's own CTA is "Rescan transcripts" — no second copy up here. -->
     {#if !isEmpty}
       <button
@@ -337,6 +394,7 @@
         title={rescanning ? 'Rescanning transcripts on disk…' : 'Rescan ~/.claude/projects and ~/.codex/sessions for new transcripts'}
         aria-label="Rescan transcripts"
         data-icon="refresh"
+        data-overflow="-5"
         data-testid="history-rescan"
       >
         <Icon name="refresh" size={12} /> {rescanning ? 'Rescanning…' : 'Rescan'}
@@ -347,7 +405,7 @@
 <div class="history" class:has-sel={!!sel} class:list-hidden={hideList} data-testid="history-page">
   <!-- ── Left: search, filters, grouped list ─────────────────────────────── -->
   {#if !hideList}
-  <aside class="hlist" aria-label="Conversations">
+  <aside class="hlist" aria-label="Conversations" style="--list-pane-w:{listW}px">
     <div class="toolbar">
       <div class="search-wrap">
         <Icon name="search" size={12} />
@@ -465,6 +523,7 @@
       {/if}
     </div>
   </aside>
+  <PaneDivider bind:width={listW} storageKey="history.listW" label="Resize the conversations list" max={LIST_PANE.max} />
   {/if}
 
   <!-- ── Right: read-only conversation + outputs ─────────────────────────── -->
@@ -519,53 +578,14 @@
       {#if history.loading}
         <LoadState variant="page" what="conversations" loading={true} empty={true} />
       {:else}
-        <EmptyState variant="page" icon="clock" title="Select a conversation" body="Pick one on the left to read it here; resume it to keep going." />
+        <EmptyState
+          variant="page"
+          icon="clock"
+          title="{history.entries.length}{history.hasMore ? '+' : ''} {history.entries.length === 1 ? 'conversation' : 'conversations'} in {history.groups.length} {history.groups.length === 1 ? 'folder' : 'folders'}"
+          body="Pick one on the left to read it here; resume it to keep going."
+        />
       {/if}
     {:else if wsId}
-      <header class="dhead">
-        <button class="icon-btn back" onclick={clearSelection} title="Back to the list" aria-label="Back to the list">
-          <Icon name="chevronLeft" size={16} />
-        </button>
-        <div class="dtitle-wrap">
-          <h2 class="dtitle" title={entryTitle(sel)}>{entryTitle(sel)}</h2>
-          <div class="dmeta">
-            <span class="glyph {sel.provider}"><ProviderIcon provider={sel.provider} size={14} /></span>
-            <span class="cap">{sel.provider}</span>
-            <span class="dot st-{sel.status}" aria-hidden="true"></span>
-            <span>{STATUS_LABEL[sel.status]}</span>
-            <span class="folder-name" title={sel.cwd}>· {sel.repo_name ?? shortCwd(sel.cwd)}</span>
-            {#if sel.turns != null}<span>· {sel.turns} {sel.turns === 1 ? 'turn' : 'turns'}</span>{/if}
-            <span title={new Date(sel.last_active_at).toLocaleString()}>· {rel(sel.last_active_at)}</span>
-          </div>
-        </div>
-        <div class="dactions">
-          {#if canEdit}
-            {@const resumable = sel.status === 'running' || sel.status === 'idle' || sel.resumable || sel.status === 'on_disk'}
-            <button
-              class="btn primary"
-              onclick={() => sel && void resume(sel)}
-              disabled={busy || !resumable}
-              title={resumable ? (sel.status === 'on_disk' ? 'Import this transcript as an Otto session and continue it' : 'Continue this conversation in Otto') : 'This conversation can’t be resumed (the CLI left no resumable state)'}
-              data-testid="history-resume"
-            >
-              <Icon name="play" size={12} /> {resumeLabel(sel)}
-            </button>
-          {/if}
-          <button class="btn" onclick={() => sel && void openFolder(sel)} title="Reveal {sel.cwd}">
-            <Icon name="folder" size={12} /> Open folder
-          </button>
-          <button class="btn" onclick={() => sel && void copyText(sel.transcript_path, 'Transcript path copied')} title={sel.transcript_path}>
-            <Icon name="copy" size={12} /> Copy path
-          </button>
-          {#if canEdit && sel.session_id && sel.status !== 'on_disk'}
-            <button class="icon-btn" onclick={() => sel && void archive(sel)} disabled={busy}
-              aria-label="Archive" title="Archive the session — restore it any time from the sidebar's Archived list">
-              <Icon name="archive" size={14} />
-            </button>
-          {/if}
-        </div>
-      </header>
-
       <div class="dconv" data-testid="history-conversation">
         {#key selKey}
           {#if sel.status === 'on_disk' || !sel.session_id}
@@ -655,12 +675,11 @@
 
   /* ── list ──────────────────────────────────────────────────────────────── */
   .hlist {
-    flex: 0 0 340px;
-    min-width: 260px;
+    flex: 0 0 var(--list-pane-w, 280px);
+    min-width: 220px;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    border-inline-end: 1px solid var(--border);
     background: var(--bg-sidebar);
   }
   .toolbar {
@@ -934,55 +953,23 @@
     flex-direction: column;
     min-height: 0;
   }
-  .dhead {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
   .back {
     display: none;
-  }
-  .dtitle-wrap {
-    flex: 1;
-    min-width: 0;
-  }
-  .dtitle {
-    margin: 0;
-    font-size: var(--fs-l);
-    font-weight: 600;
-    overflow-wrap: anywhere;
   }
   .dmeta {
     display: flex;
     align-items: center;
     gap: 5px;
-    margin-top: 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
-  .folder-name {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
   .dmeta .glyph {
     width: 14px;
     height: 14px;
     margin-top: 0;
-  }
-  .dactions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-    flex-wrap: wrap;
-    justify-content: flex-end;
   }
   .dconv {
     flex: 1;
@@ -1034,7 +1021,10 @@
   @media (max-width: 768px) {
     .hlist {
       flex: 1;
-      border-inline-end: none;
+    }
+    /* One pane at a time here — nothing to drag. */
+    .history :global(.pane-divider) {
+      display: none;
     }
     .history.has-sel .hlist {
       display: none;
@@ -1047,16 +1037,6 @@
     }
     .empty-line.narrow-only {
       display: flex;
-    }
-    .folder-name {
-      display: none;
-    }
-    .dhead {
-      flex-wrap: wrap;
-    }
-    .dactions {
-      justify-content: flex-start;
-      width: 100%;
     }
   }
 </style>

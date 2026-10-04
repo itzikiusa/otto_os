@@ -1715,12 +1715,7 @@
     border: 1.5px solid currentColor;
     border-top-color: transparent;
     border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
+    animation: otto-spin 0.7s linear infinite;
   }
 
   .err {
@@ -1825,7 +1820,7 @@
     flex: 1;
   }
   .run-row:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .run-row.selected {
     border-color: var(--accent);

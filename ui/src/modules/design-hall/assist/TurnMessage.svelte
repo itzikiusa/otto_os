@@ -10,7 +10,8 @@
   // one, so nothing an agent did is ever final without a person.
   import Icon, { asIcon } from '../../../lib/components/Icon.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
-  import StatusDot from '../../../lib/components/StatusDot.svelte';
+  import AgentChip from '../../../lib/components/AgentChip.svelte';
+  import LiveWorkingDot from '../../../lib/components/LiveWorkingDot.svelte';
   import { rel } from '../../../lib/stores/now.svelte';
   import type { DesignAssistTurn, DesignVersion } from '../../../lib/api/types';
   import type { Ask } from './asks.svelte';
@@ -95,11 +96,11 @@
     <div class="who">
       <ProviderIcon {provider} size={16} />
       <strong>Otto</strong>
-      <span class="chip agent-label">AGENT</span>
+      <AgentChip />
       <span class="when" title={new Date(turn.started_at).toLocaleString()}>{rel(turn.started_at)}</span>
       <span class="grow"></span>
       <span class="st tone-{st.tone}" data-testid="design-assist-status">
-        {#if st.working}<StatusDot status="working" />{/if}
+        {#if st.working}<LiveWorkingDot />{/if}
         {st.label}
       </span>
     </div>
@@ -258,11 +259,6 @@
   .msg.agent {
     border-inline-start: 2px solid var(--border-strong);
     padding-inline-start: 10px;
-  }
-  .agent-label {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    letter-spacing: 0.04em;
   }
   .st {
     display: inline-flex;

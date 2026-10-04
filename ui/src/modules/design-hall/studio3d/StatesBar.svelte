@@ -152,8 +152,7 @@
     padding-block: 5px; padding-inline: 12px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-l);
-    background: color-mix(in srgb, var(--surface) 92%, transparent);
-    backdrop-filter: blur(8px);
+    background: var(--surface);
     box-shadow: var(--shadow);
   }
   .k {

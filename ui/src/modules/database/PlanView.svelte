@@ -139,7 +139,7 @@
   }
   .plan-close:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+    background: var(--hover);
   }
   .plan-tree,
   .plan-raw {

@@ -592,7 +592,7 @@
     padding: 8px 10px;
   }
   .row:hover:not(.disabled) {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .row.disabled {
     cursor: not-allowed;

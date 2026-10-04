@@ -85,12 +85,34 @@
   // Two lines at rest (CSS min-height; one in a narrow tile), growing with the
   // text up to ~40% of the window; the textarea itself never scrolls sideways (wrap +
   // overflow-x hidden), so nothing overlays the placeholder.
+  // The cap is the smaller of 40% of the window and half of the PANE the composer
+  // sits in (a short tile or split pane), so the box never crowds out the chat;
+  // past it the textarea scrolls inside.
+  let paneH = $state(0);
   function autosize(): void {
     if (!ta) return;
     ta.style.height = 'auto';
-    const cap = Math.max(160, Math.floor(window.innerHeight * 0.4));
+    const byWindow = Math.floor(window.innerHeight * 0.4);
+    const byPane = paneH > 0 ? Math.floor(paneH * 0.5) : byWindow;
+    const cap = Math.max(48, Math.min(byWindow, byPane));
     ta.style.height = `${Math.min(cap, Math.max(ta.scrollHeight, 0))}px`;
   }
+  let composerEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    const pane = composerEl?.parentElement;
+    if (!pane || typeof ResizeObserver === 'undefined') return;
+    const measure = (): void => {
+      const h = pane.clientHeight;
+      if (Math.abs(h - paneH) > 1) {
+        paneH = h;
+        autosize();
+      }
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(pane);
+    return () => ro.disconnect();
+  });
   // A draft restored on mount / reopened session sizes the box too.
   $effect(() => {
     void text;
@@ -160,6 +182,18 @@
     const el = listEl?.children[cmdIdx] as HTMLElement | undefined;
     el?.scrollIntoView({ block: 'nearest' });
   });
+  // The popup opens ABOVE the box: cap its height to the room between the box and
+  // the top of the pane (or the window), so it never runs off the top edge.
+  let wrapEl = $state<HTMLDivElement | null>(null);
+  let popMax = $state(320);
+  $effect(() => {
+    void suggestions.length;
+    void paneH;
+    if (!cmdOpen || !wrapEl) return;
+    const paneTop = Math.max(0, composerEl?.parentElement?.getBoundingClientRect().top ?? 0);
+    const room = wrapEl.getBoundingClientRect().top - paneTop - 12;
+    popMax = Math.floor(Math.max(72, Math.min(320, window.innerHeight * 0.5, room)));
+  });
   function acceptCmd(c: SlashCommand): void {
     transcript.setDraft(ownerId, `/${c.name} `);
     cmdDismissed = true;
@@ -174,7 +208,8 @@
     const typed = text.replace(/\s+$/, '');
     const imgs = attachments.map((a) => `[Image: ${a.path}]`);
     const body = [typed, ...imgs].filter(Boolean).join('\n');
-    if (!body || !transcript.tryBeginSend(ownerId)) return;
+    // An upload still in flight would land in the NEXT draft: wait for it, send by hand.
+    if (!body || uploading > 0 || !transcript.tryBeginSend(ownerId)) return;
     try {
       const submittedImages = [...attachments];
       await submitPrompt(ownerId, body);
@@ -230,7 +265,11 @@
     }
   }
   const sendTitle = $derived(
-    busy ? `Send (⏎) — ${agentName} is busy, so it is queued and delivered when the current turn ends` : 'Send (⏎)',
+    uploading > 0
+      ? 'Uploading images… send is available when they finish'
+      : busy
+        ? `Send (⏎) — ${agentName} is busy, so it is queued and delivered when the current turn ends`
+        : 'Send (⏎)',
   );
 
   async function addImages(files: File[]): Promise<void> {
@@ -270,19 +309,19 @@
     void addImages(files);
   }
 
-  const canSend = $derived(!sending && (text.trim().length > 0 || attachments.length > 0));
+  const canSend = $derived(!sending && uploading === 0 && (text.trim().length > 0 || attachments.length > 0));
 </script>
 
-<div class="composer" data-status={status} ondragover={(e) => e.preventDefault()} ondrop={onDrop} role="group" aria-label="Message composer">
+<div class="composer" bind:this={composerEl} data-status={status} ondragover={(e) => e.preventDefault()} ondrop={onDrop} role="group" aria-label="Message composer">
   {#if exited}
     <div class="exited">
       <span class="dim">{st.key === 'suspended' ? `${st.hint}.` : 'This session has ended.'}</span>
       <button class="btn small primary" onclick={onresume}>Resume</button>
     </div>
   {:else}
-    <div class="box-wrap">
+    <div class="box-wrap" bind:this={wrapEl}>
       {#if cmdOpen}
-        <div class="cmd-pop" bind:this={listEl} role="listbox" aria-label="Slash commands" data-slash-pop>
+        <div class="cmd-pop" bind:this={listEl} style="--pop-max:{popMax}px" role="listbox" aria-label="Slash commands" data-slash-pop>
           {#each suggestions as c, i (c.name)}
             <!-- svelte-ignore a11y_click_events_have_key_events a11y_interactive_supports_focus -->
             <div
@@ -328,7 +367,8 @@
           {#if busy}
             <button class="btn small stop" onclick={() => void interrupt()} disabled={stopping} title="Interrupt {agentName} — sends Esc to its terminal"><Icon name="stop" size={11} /> Stop</button>
           {/if}
-          <button class="send" onclick={() => void send()} disabled={!canSend} title={sendTitle} aria-label="Send"><Icon name="send" size={14} /></button>
+          {#if uploading > 0}<span class="uploading" role="status">Uploading…</span>{/if}
+          <button class="send" onclick={() => void send()} disabled={!canSend} title={sendTitle} aria-label={uploading > 0 ? 'Send (uploading images)' : 'Send'}><Icon name="send" size={14} /></button>
         </div>
       </div>
       {#if attachments.length}
@@ -369,7 +409,12 @@
     /* The chat column's gutters, so the box lines up with the messages. */
     padding-block: 8px 6px;
     padding-inline: clamp(12px, 3.2cqi, 40px);
-    flex-shrink: 0;
+    /* May shrink with a short pane (the box scrolls inside) instead of pushing
+       the chat out; the textarea is capped by the pane height in autosize(). */
+    flex-shrink: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
     /* Shed the tool row's hints and the status line's secondary spans by the
        COMPOSER's width — it sits in a narrow tiled pane as readily as a
        full-window chat. Same numbers as the `@container` blocks below. */
@@ -383,6 +428,7 @@
     max-width: var(--chat-measure, none);
     margin-inline: auto;
     width: 100%;
+    min-height: 0;
   }
   .box {
     display: flex;
@@ -394,6 +440,7 @@
     padding-block: 8px 4px; padding-inline: 12px 6px;
     overflow: hidden;
     min-width: 0;
+    min-height: 0;
     box-shadow: var(--shadow-card);
   }
   .box:focus-within {
@@ -412,6 +459,7 @@
     line-height: 1.5;
     min-height: 40px;
     max-height: 40vh;
+    flex: 0 1 auto;
     padding-block: 2px; padding-inline: 0 6px;
     overflow-x: hidden;
     overflow-y: auto;
@@ -442,6 +490,11 @@
   }
   .stop {
     flex-shrink: 0;
+  }
+  .uploading {
+    flex-shrink: 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   /* Send: the composer's one filled control. */
   .send {
@@ -479,14 +532,14 @@
     inset-inline-start: 0;
     width: min(100%, 560px);
     max-width: 100%;
-    max-height: min(320px, 50vh);
+    max-height: var(--pop-max, min(320px, 50vh));
     overflow-y: auto;
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 1px solid var(--glass-border);
     border-radius: var(--radius-m);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    box-shadow: var(--glass-shadow);
     padding: 4px;
-    z-index: 5;
+    z-index: var(--z-popover);
   }
   .cmd-row {
     display: grid;

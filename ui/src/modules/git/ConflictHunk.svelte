@@ -473,7 +473,7 @@
     color: var(--text);
   }
   .pick-line:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    background: var(--hover);
   }
   .pick-line.picked.ours {
     background: color-mix(in srgb, var(--success) 18%, transparent);

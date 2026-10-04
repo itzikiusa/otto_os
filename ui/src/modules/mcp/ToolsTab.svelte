@@ -390,7 +390,7 @@
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
   .trow:hover {
-    background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+    background: var(--hover);
   }
   .tname {
     display: flex;

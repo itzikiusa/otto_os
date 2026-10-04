@@ -14,8 +14,7 @@
   import { router } from '../lib/router.svelte';
   import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
-  import { ws } from '../lib/stores/workspace.svelte';
-  import { assistant } from '../lib/stores/assistant.svelte';
+  import { navBadge } from '../lib/navBadge';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import {
@@ -54,6 +53,19 @@
   const primary = $derived(modules.slice(0, PRIMARY_COUNT));
   const overflow = $derived(modules.slice(PRIMARY_COUNT));
 
+  // Badges on spilled modules (a session waiting on you must not hide in More).
+  const moreBadge = $derived.by(() => {
+    let count = 0;
+    let needs = false;
+    for (const m of overflow) {
+      const b = navBadge(m.id);
+      if (!b) continue;
+      count += b.count;
+      needs ||= b.tone === 'needs';
+    }
+    return count > 0 ? { count, needs } : null;
+  });
+
   let moreOpen = $state(false);
 
   // The sheet is a modal dialog: register it as an open overlay (native webview
@@ -84,14 +96,12 @@
 
 <nav class="bottomnav" aria-label="Primary">
   {#each primary as m (m.id)}
-    <button class="bn-btn" class:active={current === m.id} aria-current={current === m.id ? 'page' : undefined} data-nav-id={m.id} aria-busy={navPending.id === m.id || undefined} onclick={() => go(m.id)}>
+    <button class="bn-btn" class:active={current === m.id} aria-current={current === m.id ? 'page' : undefined} data-nav-id={m.id} aria-busy={navPending.id === m.id || undefined} aria-label="{m.label}{navBadge(m.id)?.spoken ?? ''}" onclick={() => go(m.id)}>
       <span class="bn-icon">
         <Icon name={m.icon} size={20} />
-        {#if m.id === 'agents' && ws.workingCount > 0}
-          <span class="bn-badge">{ws.workingCount}</span>
-        {/if}
-        {#if m.id === 'assistant' && assistant.needsYouCount > 0}
-          <span class="bn-badge needs">{assistant.needsYouCount}</span>
+        {#if navBadge(m.id)}
+          {@const b = navBadge(m.id)!}
+          <span class="bn-badge" class:needs={b.tone === 'needs'} title={b.title}>{b.count}</span>
         {/if}
       </span>
       <span class="bn-label">{m.label}</span>
@@ -100,8 +110,11 @@
 
   <!-- Always present: besides the spilled modules it holds Commands (the
        phone's only palette entry off the Agents page) and Settings. -->
-  <button class="bn-btn" class:active={moreActive} aria-haspopup="dialog" aria-expanded={moreOpen} onclick={() => (moreOpen = true)}>
-    <span class="bn-icon"><Icon name="command" size={20} /></span>
+  <button class="bn-btn" class:active={moreActive} aria-haspopup="dialog" aria-expanded={moreOpen} aria-label={moreBadge ? `More, ${moreBadge.count} ${moreBadge.needs ? 'need you' : 'active'}` : 'More'} onclick={() => (moreOpen = true)}>
+    <span class="bn-icon">
+      <Icon name="more" size={20} />
+      {#if moreBadge}<span class="bn-badge" class:needs={moreBadge.needs}>{moreBadge.count}</span>{/if}
+    </span>
     <span class="bn-label">More</span>
   </button>
 </nav>
@@ -128,11 +141,25 @@
         <span>Commands</span>
       </button>
       {#each overflow as m (m.id)}
-        <button class="sheet-item" class:active={current === m.id} aria-current={current === m.id ? 'page' : undefined} data-nav-id={m.id} aria-busy={navPending.id === m.id || undefined} onclick={() => go(m.id)}>
+        {@const b = navBadge(m.id)}
+        <button class="sheet-item" class:active={current === m.id} aria-current={current === m.id ? 'page' : undefined} data-nav-id={m.id} aria-busy={navPending.id === m.id || undefined} aria-label="{m.label}{b?.spoken ?? ''}" onclick={() => go(m.id)}>
           <Icon name={m.icon} size={22} />
           <span>{m.label}</span>
+          {#if b}<span class="bn-badge sheet-badge" class:needs={b.tone === 'needs'} aria-hidden="true">{b.count}</span>{/if}
         </button>
       {/each}
+      <button
+        class="sheet-item"
+        class:active={router.module === 'walkthroughs'}
+        aria-current={router.module === 'walkthroughs' ? 'page' : undefined}
+        onclick={() => {
+          router.go('walkthroughs');
+          moreOpen = false;
+        }}
+      >
+        <Icon name="info" size={22} />
+        <span>Help</span>
+      </button>
       <button
         class="sheet-item"
         class:active={router.module === 'settings'}
@@ -215,6 +242,14 @@
     color: var(--warning);
   }
 
+  .sheet-badge {
+    top: 6px;
+    inset-inline-end: 8px;
+    background: color-mix(in srgb, var(--success) 24%, var(--surface));
+  }
+  .sheet-badge.needs {
+    background: color-mix(in srgb, var(--warning) 24%, var(--surface));
+  }
   .sheet-backdrop {
     position: fixed;
     inset: 0;
@@ -264,6 +299,7 @@
     -webkit-overflow-scrolling: touch;
   }
   .sheet-item {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;

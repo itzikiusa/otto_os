@@ -1241,7 +1241,7 @@
     if (items.length) items.push({ separator: true });
     items.push({ label: 'Send to running agent…', icon: 'send', action: sendToRunningAgent });
     // Same gate as the editor's Ask AI buttons: the DB Assistant runs an agent.
-    if (connectionId && canAssist) items.push({ label: 'Examine with AI', icon: 'sparkle', action: examineWithAi });
+    if (connectionId && canAssist) items.push({ label: 'Examine with Otto', icon: 'sparkle', action: examineWithAi });
     showMenu(e, items);
   }
 
@@ -1912,13 +1912,9 @@
     display: grid;
     place-items: center;
     color: var(--accent-text);
-    animation: rg-spin 0.9s linear infinite;
+    animation: otto-spin 0.9s linear infinite;
   }
-  @keyframes rg-spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   .rg-overlay-text {
     font-variant-numeric: tabular-nums;
   }
@@ -2305,7 +2301,7 @@
   }
   .gt-search-clear:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+    background: var(--hover);
   }
   .gt-edit-hint {
     display: inline-flex;

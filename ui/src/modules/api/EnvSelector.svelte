@@ -242,7 +242,7 @@
     text-align: start;
   }
   .env-pick:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .env-pick.active {
     background: color-mix(in srgb, var(--accent) 12%, transparent);

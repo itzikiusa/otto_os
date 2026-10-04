@@ -764,7 +764,7 @@
     }
   }
   .btab-close:hover {
-    background: color-mix(in srgb, var(--text-dim) 22%, transparent);
+    background: var(--hover);
     color: var(--text);
   }
   .btab-new {

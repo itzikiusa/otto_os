@@ -4,9 +4,11 @@
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus, sentenceCase } from '../../lib/status';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import RunInspector from './RunInspector.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import { formatCount } from '../../lib/metric-format';
   import { toasts } from '../../lib/toast.svelte';
@@ -25,6 +27,10 @@
   // Keep the open inspector in sync with live WS run updates (tokens land on the
   // terminal patch, after the inspector may already be open).
   const live = $derived(inspecting ? (swarm.runs.find((r) => r.id === inspecting!.id) ?? inspecting) : null);
+
+  // VirtualList assumes uniform rows, so the phone card row has a fixed height
+  // (see the ≤640px block below).
+  const ROW_H_PHONE = 104;
 
   const STATUSES: RunStatus[] = ['queued', 'running', 'waiting', 'done', 'error', 'stopped'];
 
@@ -58,6 +64,8 @@
     }
   }
 
+  const reload = () => swarm.detail && swarm.loadRuns({ swarm_id: swarm.detail.id });
+
   function tokenTitle(r: SwarmRun): string {
     return `${(r.tokens_input ?? 0).toLocaleString()} input · ${(r.tokens_output ?? 0).toLocaleString()} output tokens`;
   }
@@ -88,13 +96,16 @@
       {/each}
     </div>
     <span class="grow"></span>
-    <button class="icon-btn" onclick={() => swarm.detail && swarm.loadRuns({ swarm_id: swarm.detail.id })} aria-label="Refresh runs" title="Refresh runs">
+    <button class="icon-btn" onclick={reload} aria-label="Refresh runs" title="Refresh runs">
       <Icon name="refresh" size={14} />
     </button>
   </div>
 
-  {#if filtered.length === 0}
-    {#if filtering && swarm.runs.length > 0}
+  <LoadState what="runs" loading={swarm.runsLoading} error={swarm.runsError} empty={swarm.runs.length === 0} onretry={reload}>
+    {#snippet emptyView()}
+      <EmptyState icon="clock" title="No runs yet" body="Runs appear here as agents work tasks. Start one from the Board (Run now) or an agent's menu in Org." />
+    {/snippet}
+    {#if filtered.length === 0}
       <EmptyState
         icon="clock"
         title="No runs match these filters"
@@ -103,55 +114,53 @@
         onaction={() => { agentFilter = ''; projectFilter = ''; statusFilter = ''; }}
       />
     {:else}
-      <EmptyState icon="clock" title="No runs yet" body="Runs appear here as agents work tasks. Start one from the Board (Run now) or an agent's menu in Org." />
-    {/if}
-  {:else}
-    <div class="table">
-      <div class="thead">
-        <span class="c-agent">Agent</span>
-        <span class="c-kind">Work</span>
-        <span class="c-status">Status</span>
-        <span class="c-time">Started</span>
-        <span class="c-tok" title="Input / output tokens">Tokens in/out</span>
-        <span class="c-act"></span>
+      <div class="table">
+        <div class="thead">
+          <span class="c-agent">Agent</span>
+          <span class="c-kind">Work</span>
+          <span class="c-status">Status</span>
+          <span class="c-time">Started</span>
+          <span class="c-tok" title="Input / output tokens">Tokens in/out</span>
+          <span class="c-act"></span>
+        </div>
+        <VirtualList items={filtered} estimateHeight={viewport.isPhone ? ROW_H_PHONE : 37} class="vlist-runs">
+          {#snippet row(r: SwarmRun)}
+            {@const agent = swarm.agentById(r.agent_id)}
+            <!-- The Work cell is a real button stretched over the whole row (click
+                 anywhere to inspect); the row's own actions sit above it. -->
+            <div class="trow">
+              <span class="c-agent" title={agent ? `${agent.name}${agent.title ? ` — ${agent.title}` : ''}` : r.agent_id}>
+                <span class="agent-name">{agent?.name ?? r.agent_id.slice(0, 6)}</span>
+                {#if agent?.title}<span class="agent-title dim">{agent.title}</span>{/if}
+              </span>
+              <button class="c-kind dim run-open" title={r.summary ? `${sentenceCase(r.kind)} · ${r.summary}` : sentenceCase(r.kind)} onclick={() => (inspecting = r)}
+                aria-label="Inspect {agent?.name ?? 'agent'}'s {sentenceCase(r.kind).toLowerCase()} run">{sentenceCase(r.kind)}{r.summary ? ` · ${r.summary}` : ''}</button>
+              <span class="c-status"><StatusBadge status={runStatus(r.status)} /></span>
+              <span class="c-time dim">{rel(r.started_at ?? r.enqueued_at ?? '')}</span>
+              <span class="c-tok mono dim" title={r.tokens_input != null || r.tokens_output != null ? tokenTitle(r) : 'No usage recorded'}>
+                {r.tokens_input != null || r.tokens_output != null
+                  ? `${formatCount(r.tokens_input ?? 0)}/${formatCount(r.tokens_output ?? 0)}`
+                  : '—'}
+              </span>
+              <span class="c-act">
+                {#if r.session_id}
+                  <button class="icon-btn" title="Open this run's session beside the view" aria-label="Open session" onclick={() => (swarm.selectedSessionId = r.session_id!)}>
+                    <Icon name="terminal" size={14} />
+                  </button>
+                {/if}
+                {#if r.kind === 'recruit' && r.status === 'done' && r.result && onhire && !swarm.recruitHired.has(r.id)}
+                  <button class="btn small primary" title="Review & hire this proposed agent" onclick={() => onhire?.(r.result as unknown as RecruitedAgent, r.id)}>Hire</button>
+                {/if}
+                {#if active(r)}
+                  <button class="btn small danger" title="Stop this run; its session is closed" onclick={() => void stop(r)}>Stop…</button>
+                {/if}
+              </span>
+            </div>
+          {/snippet}
+        </VirtualList>
       </div>
-      <VirtualList items={filtered} estimateHeight={37} class="vlist-runs">
-        {#snippet row(r: SwarmRun)}
-          {@const agent = swarm.agentById(r.agent_id)}
-          <!-- The Work cell is a real button stretched over the whole row (click
-               anywhere to inspect); the row's own actions sit above it. -->
-          <div class="trow">
-            <span class="c-agent" title={agent ? `${agent.name}${agent.title ? ` — ${agent.title}` : ''}` : r.agent_id}>
-              <span class="agent-name">{agent?.name ?? r.agent_id.slice(0, 6)}</span>
-              {#if agent?.title}<span class="agent-title dim">{agent.title}</span>{/if}
-            </span>
-            <button class="c-kind dim run-open" title={r.summary ? `${sentenceCase(r.kind)} · ${r.summary}` : sentenceCase(r.kind)} onclick={() => (inspecting = r)}
-              aria-label="Inspect {agent?.name ?? 'agent'}'s {sentenceCase(r.kind).toLowerCase()} run">{sentenceCase(r.kind)}{r.summary ? ` · ${r.summary}` : ''}</button>
-            <span class="c-status"><StatusBadge status={runStatus(r.status)} /></span>
-            <span class="c-time dim">{rel(r.started_at ?? r.enqueued_at ?? '')}</span>
-            <span class="c-tok mono dim" title={r.tokens_input != null || r.tokens_output != null ? tokenTitle(r) : 'No usage recorded'}>
-              {r.tokens_input != null || r.tokens_output != null
-                ? `${formatCount(r.tokens_input ?? 0)}/${formatCount(r.tokens_output ?? 0)}`
-                : '—'}
-            </span>
-            <span class="c-act">
-              {#if r.session_id}
-                <button class="icon-btn" title="Open this run's session beside the view" aria-label="Open session" onclick={() => (swarm.selectedSessionId = r.session_id!)}>
-                  <Icon name="terminal" size={14} />
-                </button>
-              {/if}
-              {#if r.kind === 'recruit' && r.status === 'done' && r.result && onhire && !swarm.recruitHired.has(r.id)}
-                <button class="btn small primary" title="Review & hire this proposed agent" onclick={() => onhire?.(r.result as unknown as RecruitedAgent, r.id)}>Hire</button>
-              {/if}
-              {#if active(r)}
-                <button class="btn small danger" title="Stop this run; its session is closed" onclick={() => void stop(r)}>Stop…</button>
-              {/if}
-            </span>
-          </div>
-        {/snippet}
-      </VirtualList>
-    </div>
-  {/if}
+    {/if}
+  </LoadState>
 </div>
 
 {#if live}
@@ -263,5 +272,50 @@
     display: flex;
     gap: 4px;
     justify-content: flex-end;
+  }
+  /* Phone: the six columns can't fit — each run becomes a stacked card row
+     (agent + status on top, work, then time · tokens · actions). */
+  @media (max-width: 640px) {
+    .thead {
+      display: none;
+    }
+    .trow {
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas:
+        'agent status'
+        'kind kind'
+        'time tok'
+        'act act';
+      grid-template-rows: repeat(4, auto);
+      align-content: center;
+      row-gap: 4px;
+      padding: 6px 10px;
+      box-sizing: border-box;
+      block-size: 104px; /* = ROW_H_PHONE */
+      overflow: hidden;
+    }
+    .trow .c-agent {
+      grid-area: agent;
+    }
+    .trow .c-status {
+      grid-area: status;
+      justify-self: end;
+    }
+    .trow .c-kind {
+      grid-area: kind;
+    }
+    .trow .c-time {
+      grid-area: time;
+    }
+    .trow .c-tok {
+      grid-area: tok;
+      justify-self: end;
+    }
+    .trow .c-act {
+      grid-area: act;
+    }
+    .trow .c-act:empty {
+      display: none;
+    }
   }
 </style>

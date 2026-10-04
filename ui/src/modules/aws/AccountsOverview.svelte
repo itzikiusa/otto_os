@@ -334,13 +334,9 @@
     cursor: pointer;
   }
   .chip-refresh.spin :global(svg) {
-    animation: spin 0.9s linear infinite;
+    animation: otto-spin 0.9s linear infinite;
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   .login-row {
     display: flex;
     align-items: center;

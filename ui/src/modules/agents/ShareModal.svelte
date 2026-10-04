@@ -12,6 +12,7 @@
   import type { CreateShareReq, CreateShareResp, ShareInfo, EmailSenderResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmOutward } from '../../lib/confirmOutward';
   import { router } from '../../lib/router.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
 
@@ -104,18 +105,18 @@
       const windowLabel = (emailTo ? DURATION_OPTIONS : TTL_OPTIONS).find(
         (o) => o.secs === (emailTo ? durationSecs : ttlSecs),
       )?.label;
-      const who = emailTo ? emailTo : 'Anyone who has the link';
+      const expiry = windowLabel ? windowLabel.replace(' (max)', '') : 'the chosen time';
       const can = role === 'editor' ? 'type commands into this terminal' : 'watch this terminal (read-only)';
-      const ok = await confirmer.ask(
-        `${who} will be able to ${can}${windowLabel ? ` for ${windowLabel.replace(' (max)', '')}` : ''}.` +
-          (emailTo ? ` A 6-digit code will be emailed to ${emailTo}; they must enter it to attach.` : '') +
-          ' You can revoke the link at any time.',
-        {
-          title: role === 'editor' ? 'Create an editor link?' : 'Send the access code?',
-          confirmLabel: role === 'editor' ? 'Create editor link' : 'Send code',
-          danger: role === 'editor',
-        },
-      );
+      const ok = await confirmOutward({
+        verb: role === 'editor' ? 'Create editor link' : 'Send code',
+        title: role === 'editor' ? 'Create an editor link?' : 'Send the access code?',
+        where: emailTo
+          ? `A share link for this session; a 6-digit code is emailed to ${emailTo}`
+          : 'A new share link for this session (anyone with the URL can open it)',
+        what: `${role === 'editor' ? 'Editor' : 'Viewer'} access — they can ${can}. Expires after ${expiry}; you can revoke it at any time.`,
+        who: emailTo ? `${emailTo}, who must enter the code to attach.` : 'Anyone who gets the link.',
+        danger: role === 'editor',
+      });
       if (!ok) return;
     }
     generating = true;

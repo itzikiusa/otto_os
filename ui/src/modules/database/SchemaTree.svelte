@@ -790,13 +790,9 @@
   .spin {
     display: grid;
     place-items: center;
-    animation: spin 0.9s linear infinite;
+    animation: otto-spin 0.9s linear infinite;
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   .node-icon {
     display: grid;
     place-items: center;

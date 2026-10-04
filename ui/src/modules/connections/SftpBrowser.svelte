@@ -8,6 +8,8 @@
   import { sftp } from '../../lib/stores/sftp.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmProd, isProdEnv } from '../../lib/confirmProd';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
@@ -24,6 +26,9 @@
   const canWrite = $derived(resourceAccess.can('connection',conn.id,'sftp_write','connections','edit'));
   $effect(()=>{void resourceAccess.load('connection',conn.id);});
   const view = $derived(sftp.state(conn.id));
+  // A production host: every write confirms against PRODUCTION (confirmProd).
+  const isProd = $derived(isProdEnv(conn.environment));
+  const hostLabel = (): string => `${conn.name}${view.cwd ? ` · ${view.cwd}` : ''}`;
 
   // Picker overlays: download-dir picker (per remote file) and upload-file picker.
   let downloadFor: SftpEntry | null = $state(null);
@@ -182,6 +187,15 @@
 
   async function doUpload(localPath: string): Promise<void> {
     uploadOpen = false;
+    if (isProd) {
+      const ok = await confirmProd({
+        env: conn.environment,
+        verb: 'Upload',
+        where: `SFTP ${hostLabel()}`,
+        what: `${localPath} → ${view.cwd || '/'} (an existing file with the same name is overwritten)`,
+      });
+      if (!ok) return;
+    }
     try {
       await sftp.upload(conn.id, localPath);
       toasts.success('Uploaded', localPath);
@@ -212,6 +226,15 @@
       initial: e.name,
     });
     if (!next || next === e.name) return;
+    if (isProd) {
+      const ok = await confirmProd({
+        env: conn.environment,
+        verb: 'Rename',
+        where: `SFTP ${hostLabel()}`,
+        what: `“${e.name}” → “${next}”`,
+      });
+      if (!ok) return;
+    }
     const path = sftp.childPath(conn.id, e.name);
     try {
       await sftp.rename(conn.id, path, next);
@@ -223,10 +246,15 @@
 
   async function deleteEntry(e: SftpEntry): Promise<void> {
     const isDir = e.kind === 'dir';
-    const ok = await confirmer.ask(
-      `Delete ${isDir ? 'directory' : 'file'} “${e.name}”${isDir ? ' (must be empty)' : ''}?`,
-      { title: isDir ? 'Delete directory?' : 'Delete file?', confirmLabel: 'Delete' },
-    );
+    const ok = await confirmProd({
+      env: conn.environment,
+      verb: 'Delete',
+      title: isDir ? 'Delete directory?' : 'Delete file?',
+      where: `SFTP ${hostLabel()}`,
+      what: `${isDir ? 'Directory' : 'File'} “${e.name}”${isDir ? ' (must be empty)' : ''}. This can’t be undone.`,
+      typed: isProd ? e.name : undefined,
+      danger: true,
+    });
     if (!ok) return;
     const path = sftp.childPath(conn.id, e.name);
     try {
@@ -250,6 +278,12 @@
 
 <Modal title={`Files — ${conn.name}`} width={860} onclose={close}>
   <div class="sftp">
+    {#if isProd}
+      <div class="prod-banner" role="note">
+        <EnvBadge env={conn.environment} />
+        <span>Production host — uploads, renames and deletes ask you to confirm first.</span>
+      </div>
+    {/if}
     <!-- Toolbar: up / refresh / new folder / upload -->
     <div class="toolbar">
       <button
@@ -434,6 +468,16 @@
     flex-direction: column;
     gap: 8px;
     min-height: 420px;
+  }
+  .prod-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: var(--radius-m);
+    background: var(--danger-soft);
+    color: var(--danger);
+    font-size: var(--fs-s);
   }
   .toolbar {
     display: flex;

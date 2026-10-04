@@ -515,17 +515,9 @@
     background: color-mix(in srgb, var(--status-warn) 14%, transparent);
   }
   .task.nudge-pending .task-glyph {
-    animation: pulse 1.4s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.35;
-    }
-  }
+  
   .hint {
     margin-top: 4px;
   }

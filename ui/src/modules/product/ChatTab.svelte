@@ -209,7 +209,7 @@
     position: relative;
   }
   .chat-item:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .chat-item.active {
     background: color-mix(in srgb, var(--accent) 13%, transparent);
@@ -288,7 +288,7 @@
     opacity: 1;
   }
   .archive-btn:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    background: var(--hover);
     color: var(--text);
   }
 

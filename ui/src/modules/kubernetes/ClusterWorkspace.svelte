@@ -37,6 +37,7 @@
   import { formatAge, kindDef, visibleKinds } from './k8s-util';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import K8sViewSwitch from './K8sViewSwitch.svelte';
+  import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
   import { monitorPath } from './viewState';
 
   interface Props {
@@ -116,16 +117,6 @@
   function saveDrawerWidth(): void {
     try { localStorage.setItem(DRAWER_KEY, String(Math.round(drawerW))); } catch { /* ignore */ }
   }
-  function resizeKey(e: KeyboardEvent): void {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
-    e.preventDefault();
-    const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
-    const delta = (e.key === 'ArrowRight' ? 24 : -24) * (rtl ? 1 : -1);
-    drawerW = e.key === 'Home' ? 320 : e.key === 'End' ? maxDrawerW
-      : Math.max(320, Math.min(maxDrawerW, visibleDrawerW + delta));
-    saveDrawerWidth();
-  }
-
   function startResize(e: PointerEvent): void {
     e.preventDefault();
     resizing = true;
@@ -412,29 +403,22 @@
   {/snippet}
   {#snippet badge()}
     <EnvBadge env={cluster.environment} />
-    <K8sViewSwitch clusterId={cluster.id} view="resources" />
     {#if k8s.caps?.server_version}<span class="ver mono" title="Server version">{k8s.caps.server_version}</span>{/if}
   {/snippet}
+  {#snippet tabs()}
+    <K8sViewSwitch clusterId={cluster.id} view="resources" />
+  {/snippet}
   {#snippet actions()}
-    <span class="ns-keep" data-keep><NamespacePicker allowAll={can(readOperation(kind), '')} bind:this={nsPicker} value={k8s.namespace} namespaces={k8s.namespaces} error={k8s.namespacesError} disabled={clusterScoped} onchange={(ns) => k8s.setNamespace(ns)} /></span>
-
-    {#if !viewport.isPhone}
-    {@render filterBox()}
-    {/if}
-
-    <span class="meta dim" title={k8s.rowsLoadedAt ? new Date(k8s.rowsLoadedAt).toLocaleTimeString() : ''}>
-      {#if k8s.rowsLoading}loading…{:else if lastLoaded}{k8s.filteredRows.length}{k8s.filter ? `/${rowsForKey.length}` : ''} · {lastLoaded} ago{/if}
-    </span>
-    <button class="icon-btn" onclick={() => void k8s.loadResources()} title="Refresh (r)" aria-label="Refresh"><Icon name="refresh" size={14} /></button>
-    <button class="pill-toggle" class:on={k8s.autoRefresh} onclick={() => k8s.setAutoRefresh(!k8s.autoRefresh)} aria-pressed={k8s.autoRefresh} title="Auto-refresh every 10 s">
-      <Icon name="clock" size={12} /> Auto
-    </button>
+    <button class="icon-btn" onclick={() => void k8s.loadResources()} title="Refresh (r)" aria-label="Refresh" data-icon="refresh" data-label="Refresh"><Icon name="refresh" size={14} /></button>
     {#if canK9s}
-      <button class="btn small" onclick={() => void openK9s()} disabled={k9sOpening} title="Open k9s in a terminal" data-testid="k8s-k9s-btn">
+      <button class="btn small" onclick={() => void openK9s()} disabled={k9sOpening} title="Open k9s in a terminal" data-testid="k8s-k9s-btn" data-icon="terminal" data-label="Open k9s">
         <Icon name="terminal" size={12} /> k9s
       </button>
     {/if}
-    <button class="icon-btn" onclick={() => (hintsOpen = true)} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts"><Icon name="command" size={14} /></button>
+    <button class="pill-toggle" class:on={k8s.autoRefresh} data-overflow="-2" data-icon="clock" data-label={k8s.autoRefresh ? 'Stop auto-refresh' : 'Auto-refresh every 10 s'} onclick={() => k8s.setAutoRefresh(!k8s.autoRefresh)} aria-pressed={k8s.autoRefresh} title="Auto-refresh every 10 s">
+      <Icon name="clock" size={12} /> Auto
+    </button>
+    <button class="icon-btn" data-overflow="-3" data-icon="command" data-label="Keyboard shortcuts" onclick={() => (hintsOpen = true)} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts"><Icon name="command" size={14} /></button>
   {/snippet}
   </PageHeader>
 
@@ -475,6 +459,16 @@
       {/if}
 
       <div class="center">
+        <!-- Table toolbar: scope + filter + freshness belong to the table, not the page header. -->
+        <div class="tbl-bar" role="toolbar" aria-label="Resource table">
+          <span class="ns-keep"><NamespacePicker allowAll={can(readOperation(kind), '')} bind:this={nsPicker} value={k8s.namespace} namespaces={k8s.namespaces} error={k8s.namespacesError} disabled={clusterScoped} onchange={(ns) => k8s.setNamespace(ns)} /></span>
+          {#if !viewport.isPhone}
+            {@render filterBox()}
+          {/if}
+          <span class="meta dim" role="status" title={k8s.rowsLoadedAt ? new Date(k8s.rowsLoadedAt).toLocaleTimeString() : ''}>
+            {#if k8s.rowsLoading}loading…{:else if lastLoaded}{k8s.filteredRows.length}{k8s.filter ? `/${rowsForKey.length}` : ''} · {lastLoaded} ago{/if}
+          </span>
+        </div>
         <ResourceTable
           {kind}
           rows={k8s.filteredRows}
@@ -496,7 +490,18 @@
 
       {#if drawerOpen && sel}
         {#if !detailSheet}
-          <input class="splitter" type="range" min="320" max={Math.round(maxDrawerW)} value={Math.round(visibleDrawerW)} aria-orientation="vertical" aria-label="Resize details" aria-valuetext={`${Math.round(visibleDrawerW)} pixels`} title="Drag or use arrow keys to resize details" oninput={(e) => { drawerW = Number(e.currentTarget.value); saveDrawerWidth(); }} onkeydown={resizeKey} onpointerdown={startResize} />
+          <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End). -->
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+          <div
+            class="splitter"
+            role="separator"
+            tabindex="0"
+            aria-orientation="vertical"
+            aria-label="Resize details"
+            title={RESIZE_TITLE}
+            onpointerdown={startResize}
+            use:paneResizer={{ value: visibleDrawerW, min: 320, max: maxDrawerW, invert: true, onChange: (w) => { drawerW = w; saveDrawerWidth(); }, text: pxWide }}
+          ></div>
         {/if}
         <div class="drawer-host" class:sheet={detailSheet} style={detailSheet ? '' : `width:${visibleDrawerW}px`}>
           {#key `${cluster.id}/${kind}/${sel.ns}/${sel.name}`}
@@ -718,6 +723,18 @@
     flex: 1 1 auto;
     height: auto;
   }
+  .tbl-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .tbl-bar .filter {
+    flex: 0 1 280px;
+  }
   .center {
     flex: 1;
     min-width: 0;
@@ -742,18 +759,23 @@
     flex-shrink: 0;
     cursor: col-resize;
     background: var(--border);
-    display: grid;
-    place-items: center;
+    position: relative;
     touch-action: none;
+  }
+  .splitter:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
   }
   .splitter:hover,
   .resizing .splitter {
     background: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
-  .splitter::-webkit-slider-thumb {
-    appearance: none;
-    width: 2px;
-    height: 28px;
+  /* The grip. */
+  .splitter::after {
+    content: '';
+    position: absolute;
+    inset-block: calc(50% - 14px);
+    inset-inline: calc(50% - 1px);
     border-radius: 2px;
     background: var(--text-dim);
     opacity: 0.6;

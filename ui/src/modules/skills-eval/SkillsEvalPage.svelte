@@ -2,6 +2,8 @@
   // Skills Evaluator module: a left list of past runs + "New evaluation", and a
   // right pane showing either the start form or a selected run's live report.
   import { untrack } from 'svelte';
+  import { onTabKey } from '../../lib/tabKeys';
+  import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -82,19 +84,6 @@
   function setTab(t: Tab): void {
     if (t === tab) return;
     router.go(t === 'runs' ? 'skills-eval/evaluator' : `skills-eval/evaluator/${t}`);
-  }
-  let tabsEl = $state<HTMLElement | null>(null);
-  function onTabKey(e: KeyboardEvent): void {
-    const i = TABS.findIndex((t) => t.id === tab);
-    let n = -1;
-    if (e.key === 'ArrowRight') n = (i + 1) % TABS.length;
-    else if (e.key === 'ArrowLeft') n = (i - 1 + TABS.length) % TABS.length;
-    else if (e.key === 'Home') n = 0;
-    else if (e.key === 'End') n = TABS.length - 1;
-    if (n < 0) return;
-    e.preventDefault();
-    setTab(TABS[n].id);
-    queueMicrotask(() => (tabsEl?.querySelectorAll('[role="tab"]')[n] as HTMLElement | undefined)?.focus());
   }
 
   // Open a run from another tab (golden task run, matrix cell): switch to Runs,
@@ -302,26 +291,12 @@
     sideW = SIDE_W_DEFAULT;
     persistSideW();
   }
-  // Keyboard resize for the divider (←/→, ⇧ for a big step, Home/End).
-  function onResizeKey(e: KeyboardEvent): void {
-    const step = e.shiftKey ? 48 : 16;
-    let next = sideW;
-    if (e.key === 'ArrowLeft') next -= step;
-    else if (e.key === 'ArrowRight') next += step;
-    else if (e.key === 'Home') next = 220;
-    else if (e.key === 'End') next = 480;
-    else if (e.key === 'Enter') next = SIDE_W_DEFAULT;
-    else return;
-    e.preventDefault();
-    sideW = Math.max(220, Math.min(480, next));
-    persistSideW();
-  }
 </script>
 
 <div class="se-wrap">
   <div class="se-toolbar">
   {#if tab === 'runs'}<button class="btn small ghost list-toggle" aria-label={listHidden ? 'Show evaluations list' : 'Hide evaluations list'} title={listHidden ? 'Show evaluations list' : 'Hide evaluations list'} aria-expanded={!listHidden} aria-controls="evaluations-list" onclick={() => (listHidden = !listHidden)}><Icon name="sidebar" size={14} /></button>{/if}
-  <div class="se-tabs" role="tablist" aria-label="Evaluator view" data-testid="eval-tabs" tabindex="-1" bind:this={tabsEl} onkeydown={onTabKey}>
+  <div class="se-tabs" role="tablist" aria-label="Evaluator view" data-testid="eval-tabs" tabindex="-1" onkeydown={onTabKey}>
     {#each TABS as t (t.id)}
       <button class="se-tab" role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1} class:active={tab === t.id} onclick={() => setTab(t.id)} data-testid="tab-{t.id}">
         <Icon name={t.icon} size={12} /> {t.label}
@@ -415,14 +390,11 @@
     role="separator"
     tabindex="0"
     aria-orientation="vertical"
-    aria-valuenow={Math.round(sideW)}
-    aria-valuemin={220}
-    aria-valuemax={480}
     aria-label="Resize the evaluations list"
-    title="Drag or use ←/→ to resize · double-click to reset"
+    title={RESIZE_TITLE}
     ondblclick={resetSideW}
     onpointerdown={startSideResize}
-    onkeydown={onResizeKey}
+    use:paneResizer={{ value: sideW, min: 220, max: 480, onChange: (w) => { sideW = w; persistSideW(); }, onReset: resetSideW, text: pxWide }}
   ></div>
 
   <main class="se-main">

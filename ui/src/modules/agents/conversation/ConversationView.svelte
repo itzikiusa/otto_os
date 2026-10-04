@@ -1218,14 +1218,10 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .sk {
-      animation: sk-pulse 1.4s ease-in-out infinite;
+      animation: otto-pulse 1.4s ease-in-out infinite;
     }
   }
-  @keyframes sk-pulse {
-    50% {
-      opacity: 0.55;
-    }
-  }
+  
   .live-artifacts {
     display: flex;
     flex-wrap: wrap;

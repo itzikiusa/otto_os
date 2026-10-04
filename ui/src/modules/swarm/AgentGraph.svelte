@@ -3,7 +3,9 @@
   // radially around the coordinator by `reports_to`. Click a node → open that
   // agent's session; hover → its live sessions. A side rail shows a per-member
   // brief (completed / live) and the currently active tasks.
-  import { sentenceCase } from '../../lib/status';
+  import { sentenceCase, sessionState, type SessionStateInfo } from '../../lib/status';
+  import StatusDot from '../../lib/components/StatusDot.svelte';
+  import { events } from '../../lib/events.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -112,20 +114,30 @@
     return 'idle';
   }
 
-  function statusLine(a: SwarmAgent): string {
+  // One dot + label vocabulary (lib/status.ts `sessionState`): working is
+  // green, a run waiting on a person is "Needs you" (amber), everything else
+  // is calm. While the events socket is down a "working" claim reads as the
+  // stale "Reconnecting…" ring instead of a lie.
+  const stale = $derived(events.state !== 'connected');
+  function agentState(a: SwarmAgent): SessionStateInfo {
+    const opts = { stale };
     switch (activity(a.id)) {
       case 'working':
-        return 'working…';
+        return sessionState(null, 'working', false, opts);
       case 'waiting':
-        return 'waiting…';
+        return sessionState(null, 'idle', true, opts);
       case 'queued':
-        return 'queued…';
+        return { ...sessionState(null, 'idle', false, opts), label: 'Queued', hint: 'Queued — waiting for a free slot' };
       case 'open':
-        return 'session open';
+        return { ...sessionState(null, 'running', false, opts), label: 'Session open', hint: 'A session is open for this agent' };
       default:
-        return a.status === 'paused' ? 'paused' : 'idle';
+        return a.status === 'paused'
+          ? { ...sessionState(null, 'idle', false, opts), label: 'Paused', hint: 'Paused — picks up no new work' }
+          : sessionState(null, 'idle', false, opts);
     }
   }
+  const sessionDot = (id: string, raw: string): SessionStateInfo =>
+    sessionState(null, ws.statusMap[id] ?? raw, ws.needsYou[id] === true, { stale });
 
   function elapsed(agentId: string): string | null {
     const run = activeRun(agentId);
@@ -321,9 +333,9 @@
                   <span class="node-body">
                     <span class="node-top">
                       <span class="node-name">{a.name}</span>
-                      <span class="node-state st-{act}" role="img" aria-label={statusLine(a)} title={statusLine(a)}></span>
+                      <StatusDot state={agentState(a)} size={7} />
                     </span>
-                    <span class="node-status dim">{statusLine(a)}</span>
+                    <span class="node-status dim">{agentState(a).label}</span>
                     <span class="node-foot">
                       <span class="role">{a.specialization || a.title}</span>
                       {#if el}<span class="el"><Icon name="clock" size={12} /> {el}</span>{/if}
@@ -337,11 +349,10 @@
                   <div class="tooltip" onmouseenter={() => (hoverAgentId = a.id)}>
                     <div class="tip-head dim">Sessions ({sess.length})</div>
                     {#each sess as s (s.id)}
-                      {@const sst = ws.statusMap[s.id] ?? s.status}
                       <button class="tip-row" onclick={() => (swarm.selectedSessionId = s.id)}>
                         <Icon name="terminal" size={12} />
                         <span class="grow ellipsis">{s.title || s.provider}</span>
-                        <span class="node-state st-{sst === 'running' || sst === 'working' ? 'working' : 'idle'}"></span>
+                        <StatusDot state={sessionDot(s.id, s.status)} size={7} />
                       </button>
                     {/each}
                   </div>
@@ -514,24 +525,6 @@
     white-space: nowrap;
     flex: 1;
     min-width: 0;
-  }
-  .node-state {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    flex: none;
-    background: var(--text-dim);
-  }
-  .node-state.st-working {
-    background: var(--status-working);
-  }
-  /* Waiting on a person / approval: the attention tone. A queued run (no slot
-     yet) stays the neutral default dot — amber means "needs you" only. */
-  .node-state.st-waiting {
-    background: var(--status-warn);
-  }
-  .node-state.st-open {
-    background: var(--accent);
   }
   .node-status {
     font-size: var(--fs-xs);

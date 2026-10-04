@@ -631,7 +631,7 @@
   }
   .mx-dot.st-running {
     background: var(--info);
-    animation: pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.2s ease-in-out infinite;
   }
   .mx-dot.st-done {
     background: var(--status-working);
@@ -662,11 +662,7 @@
       animation: none;
     }
   }
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
-  }
+  
   .mx-main {
     flex: 1;
     min-width: 0;

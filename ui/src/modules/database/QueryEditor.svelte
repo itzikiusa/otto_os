@@ -1179,9 +1179,9 @@
       onclick={() => database.openAssist('ask')}
       disabled={!canQuery || !auth.can('agents','edit')}
       title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Ask the DB Assistant about this connection — it opens beside the editor'}
-      aria-label="Ask AI"
+      aria-label="Ask Otto"
     >
-      <Icon name="sparkle" size={12} /><span class="btn-label">Ask AI</span>
+      <Icon name="sparkle" size={12} /><span class="btn-label">Ask Otto</span>
     </button>
     <button
       class="btn small ghost"
@@ -1596,7 +1596,7 @@
     transition: background 0.12s, color 0.12s;
   }
   .qe-tab:hover {
-    background: color-mix(in srgb, var(--text-dim) 7%, transparent);
+    background: var(--hover);
     color: var(--text);
   }
   .qe-tab.active {
@@ -1645,20 +1645,12 @@
   }
   .qe-tab-dot.running {
     background: var(--accent);
-    animation: qe-pulse 1s ease-in-out infinite;
+    animation: otto-pulse 1s ease-in-out infinite;
   }
   .qe-tab-dot.error {
     background: var(--status-exited);
   }
-  @keyframes qe-pulse {
-    0%,
-    100% {
-      opacity: 0.35;
-    }
-    50% {
-      opacity: 1;
-    }
-  }
+  
   .qe-tab-close {
     display: inline-flex;
     align-items: center;

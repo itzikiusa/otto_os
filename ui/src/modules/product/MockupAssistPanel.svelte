@@ -270,7 +270,7 @@
     border-radius: var(--radius-s);
   }
   .ma-close:hover {
-    background: color-mix(in srgb, var(--text) 8%, transparent);
+    background: var(--hover);
   }
   .ma-body {
     flex: 1;
@@ -408,7 +408,7 @@
     cursor: default;
   }
 
-  @media (max-width: 760px) {
+  @media (max-width: 640px) {
     .ma-body {
       flex-direction: column;
     }

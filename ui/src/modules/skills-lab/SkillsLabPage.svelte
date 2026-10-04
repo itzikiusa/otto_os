@@ -7,6 +7,7 @@
   //   • Evaluator `#/skills-eval/evaluator` — the Skills Evaluator (Runs /
   //                                            Golden Tasks / Matrix), unchanged
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import SkillsBrowser from './SkillsBrowser.svelte';
@@ -28,20 +29,6 @@
     { id: 'review', label: 'Review' },
     { id: 'evaluator', label: 'Evaluator' },
   ];
-  function onTabKey(e: KeyboardEvent): void {
-    const i = TABS.findIndex((t) => t.id === tab);
-    let next = -1;
-    if (e.key === 'ArrowRight') next = (i + 1) % TABS.length;
-    else if (e.key === 'ArrowLeft') next = (i - 1 + TABS.length) % TABS.length;
-    else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = TABS.length - 1;
-    if (next < 0) return;
-    e.preventDefault();
-    const to = TABS[next].id;
-    go(to);
-    // The route changes on the next hashchange: move focus to the target tab now.
-    (document.querySelector(`[data-testid="tab-${to}"]`) as HTMLElement | null)?.focus();
-  }
 
   // Cross-tab intent: "Review this skill" from the Skills tab pre-fills the
   // Review form and switches tabs.

@@ -268,16 +268,12 @@
   }
   .health-progressing .hdot {
     background: var(--accent);
-    animation: pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.2s ease-in-out infinite;
   }
   .health-progressing .status-pill {
     color: var(--accent-text);
   }
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
-  }
+  
   @media (prefers-reduced-motion: reduce) {
     .health-progressing .hdot {
       animation: none;

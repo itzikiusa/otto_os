@@ -27,6 +27,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import DiffView from '../../lib/components/DiffView.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus, sentenceCase } from '../../lib/status';
   import { rel } from '../../lib/stores/now.svelte';
@@ -73,6 +75,7 @@
   });
   let running = $state(false);
   let busyEdit: string | null = $state(null);
+  let busyKind: 'approve' | 'deny' | null = $state(null);
 
   // Evolve-now state: the most recent per-session evolve result.
   let evolving = $state(false);
@@ -225,17 +228,16 @@
   async function act(edit: ImprovementEdit, action: 'approve' | 'reject'): Promise<void> {
     if (!wsId) return;
     busyEdit = edit.id;
+    busyKind = action === 'approve' ? 'approve' : 'deny';
     try {
       await improveApi[action](edit.id);
-      toasts.info(
-        action === 'approve' ? 'Edit approved & applied' : 'Edit rejected',
-        edit.target_ref,
-      );
+      toasts.success(action === 'approve' ? 'Edit approved and applied' : 'Edit denied', edit.target_ref);
       await load(wsId);
     } catch (e) {
-      toasts.error(`Couldn’t ${action} the edit`, e instanceof Error ? e.message : String(e));
+      toasts.error(`Couldn’t ${action === 'approve' ? 'approve' : 'deny'} the edit`, e instanceof Error ? e.message : String(e));
     } finally {
       busyEdit = null;
+      busyKind = null;
     }
   }
 
@@ -385,7 +387,7 @@
     {/if}
     <!-- Pending approvals — first, since they need you. -->
     {#if pending.length > 0}
-      <h2 class="section-title">Pending approvals <span class="count">{pending.length}</span></h2>
+      <h2 class="section-title">Pending approvals <span class="chip warn">{pending.length}</span></h2>
       <div class="edit-list">
         {#each pending as e (e.id)}
           <div class="edit-card card">
@@ -395,6 +397,7 @@
               <span class="chip">{sentenceCase(e.kind)}</span>
               <span class="chip" class:structural={e.risk === 'structural'}>{sentenceCase(e.risk)} risk</span>
             </div>
+            <div class="edit-by"><AgentByline name="Otto" at={e.created_at} /></div>
             {#if e.rationale}
               <div class="rationale">{e.rationale}</div>
             {/if}
@@ -410,14 +413,13 @@
                 contextLines={4}
               />
             </details>
-            <div class="actions">
-              <button class="btn small" disabled={busyEdit === e.id} onclick={() => act(e, 'reject')}>
-                Reject
-              </button>
-              <button class="btn small primary" disabled={busyEdit === e.id} onclick={() => act(e, 'approve')}>
-                Approve
-              </button>
-            </div>
+            <ApprovalActions
+              busy={busyEdit === e.id ? busyKind : null}
+              denyTarget="this edit"
+              askReason={false}
+              onapprove={() => act(e, 'approve')}
+              ondeny={() => act(e, 'reject')}
+            />
           </div>
         {/each}
       </div>
@@ -603,20 +605,10 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .actions {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
   .section-title {
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-  .count {
-    color: var(--warning);
   }
   .chip.structural {
     color: var(--danger);

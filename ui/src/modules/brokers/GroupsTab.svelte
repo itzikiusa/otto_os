@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
   import { untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { api, ApiError } from '../../lib/api/client';
@@ -79,16 +80,6 @@
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-  }
-  function resizeListKey(e: KeyboardEvent): void {
-    const forward = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
-    if (e.key === 'Home') listW = 220;
-    else if (e.key === 'End') listW = 520;
-    else if (e.key === 'Enter') listW = LIST_W_DEFAULT;
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') listW = Math.max(220, Math.min(520, listW + (e.key === forward ? 1 : -1) * (e.shiftKey ? 40 : 10)));
-    else return;
-    e.preventDefault();
-    persistListW();
   }
   function resetListW(): void {
     listW = LIST_W_DEFAULT;
@@ -378,14 +369,11 @@
     role="separator"
     aria-orientation="vertical"
     tabindex="0"
-    aria-valuemin="220"
-    aria-valuemax="520"
-    aria-valuenow={Math.round(listW)}
-    onkeydown={resizeListKey}
-    aria-label="Drag to resize the group list (double-click to reset)"
-    title="Drag to resize · double-click to reset"
+    aria-label="Resize the group list"
+    title={RESIZE_TITLE}
     ondblclick={resetListW}
     onpointerdown={startListResize}
+    use:paneResizer={{ value: listW, min: 220, max: 520, step: 10, bigStep: 40, onChange: (w) => { listW = w; persistListW(); }, onReset: resetListW, text: pxWide }}
   ></div>
 
   <div class="detail">

@@ -167,7 +167,7 @@
     border-inline-start: 2px solid transparent;
   }
   .srow:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .srow.sel {
     background: color-mix(in srgb, var(--accent) 14%, transparent);

@@ -621,13 +621,13 @@
     color: var(--accent-text);
     border-radius: 999px;
     padding: 1px 8px;
-    font-size: 0.85em;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .read :global(div.note-embed) {
     border: 1px solid var(--border);
     border-inline-start: 3px solid var(--accent);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     padding: 8px 12px;
     margin: 8px 0;
   }

@@ -222,7 +222,7 @@
     border-radius: var(--radius-s);
   }
   .close:hover {
-    background: color-mix(in srgb, var(--text) 8%, transparent);
+    background: var(--hover);
   }
   .hist-btn {
     display: inline-flex;
@@ -240,7 +240,7 @@
     margin-inline-start: 0;
   }
   .hist-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text) 8%, transparent);
+    background: var(--hover);
   }
   .hist-btn:disabled {
     opacity: 0.5;

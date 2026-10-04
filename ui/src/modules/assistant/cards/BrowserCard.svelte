@@ -211,7 +211,7 @@
     height: 8px;
     border-radius: 50%;
     background: var(--info);
-    animation: step-pulse 1.4s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   .mark-todo {
     width: 8px;
@@ -219,11 +219,7 @@
     border-radius: 50%;
     border: 1px solid var(--text-dim);
   }
-  @keyframes step-pulse {
-    50% {
-      opacity: 0.35;
-    }
-  }
+  
   @media (prefers-reduced-motion: reduce) {
     .mark-now {
       animation: none;

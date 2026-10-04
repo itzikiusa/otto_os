@@ -726,14 +726,14 @@
       {#if artifact}
         <!-- Compare lives on the version strip (where versions are picked) and
              in ⋯ / ⌘K — a second header copy was a duplicate CTA. -->
-        <button class="icon-btn" data-icon="more" data-label="More actions" onclick={moreMenu} aria-label="More actions" title="More actions" aria-haspopup="menu" data-testid="design-more">
-          <Icon name="more" size={14} />
-        </button>
         {#if !readonly}
           <button class="btn small primary" onclick={() => void save()} disabled={!dirty || saving} title="Save a new version (⌘S)" data-testid="design-save">
             {saving ? 'Saving…' : 'Save'}
           </button>
         {/if}
+        <button class="icon-btn" data-overflow="-10" data-icon="more" data-label="More actions" onclick={moreMenu} aria-label="More actions" title="More actions" aria-haspopup="menu" data-testid="design-more">
+          <Icon name="more" size={14} />
+        </button>
       {/if}
     {/snippet}
   </PageHeader>

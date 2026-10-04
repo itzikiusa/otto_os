@@ -1,12 +1,11 @@
 <script lang="ts">
   // Collapsed 44px icon rail (⌘1 expands to the Navigator).
+  import { navBadge } from '../lib/navBadge';
   import Icon from '../lib/components/Icon.svelte';
   import NotificationBell from './NotificationBell.svelte';
   import { router } from '../lib/router.svelte';
   import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
-  import { ws } from '../lib/stores/workspace.svelte';
-  import { assistant } from '../lib/stores/assistant.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { ctxMenu, type MenuItem } from '../lib/contextmenu.svelte';
@@ -105,15 +104,6 @@
       { label: 'Sign out', icon: 'logout', action: () => auth.logout() },
     ]);
   }
-
-  /** The badge, spoken: ", 2 waiting on you" / ", 3 working" (the badge
-   *  itself is only a title for pointer users). */
-  function railCount(id: string): string {
-    if (id === 'agents' && ws.needsYouCount > 0) return `, ${ws.needsYouCount} waiting on you`;
-    if (id === 'agents' && ws.workingCount > 0) return `, ${ws.workingCount} working`;
-    if (id === 'assistant' && assistant.needsYouCount > 0) return `, ${assistant.needsYouCount} waiting on you`;
-    return '';
-  }
 </script>
 
 <nav class="rail sidebar-material" aria-label="Modules">
@@ -142,7 +132,7 @@
           onclick={(e) => navClick(e, m.id, m.label)}
           oncontextmenu={(e) => moduleMenu(e, m.id, m.label)}
           title={`${m.label} · ${sec.group.label}${inSide ? ' · in the side pane' : sidePane.supported ? ` — ${SPLIT_HINT}` : ''}`}
-          aria-label={`${m.label}${inSide ? ' (in the side pane)' : ''}${railCount(m.id)}`}
+          aria-label={`${m.label}${inSide ? ' (in the side pane)' : ''}${navBadge(m.id)?.spoken ?? ''}`}
           data-testid={`rail-${m.id}`}
           data-nav-id={m.id}
           aria-busy={navPending.id === m.id || undefined}
@@ -150,13 +140,9 @@
           <Icon name={m.icon} />
           <!-- A session waiting on you outranks "working": the expanded sidebar
                shows it as the Needs-you pill, the rail as a warning badge. -->
-          {#if m.id === 'agents' && ws.needsYouCount > 0}
-            <span class="rail-badge needs" title={`${ws.needsYouCount} waiting on you`}>{ws.needsYouCount}</span>
-          {:else if m.id === 'agents' && ws.workingCount > 0}
-            <span class="rail-badge" title={`${ws.workingCount} working`}>{ws.workingCount}</span>
-          {/if}
-          {#if m.id === 'assistant' && assistant.needsYouCount > 0}
-            <span class="rail-badge needs" title={`${assistant.needsYouCount} waiting on you`}>{assistant.needsYouCount}</span>
+          {#if navBadge(m.id)}
+            {@const b = navBadge(m.id)!}
+            <span class="rail-badge" class:needs={b.tone === 'needs'} title={b.title}>{b.count}</span>
           {/if}
         </button>
       {/each}

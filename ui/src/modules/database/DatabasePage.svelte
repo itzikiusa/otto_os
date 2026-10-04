@@ -1698,7 +1698,6 @@
   {/if}
 {/snippet}
 
-
 {#if changesOpen && database.selectedConnId}<Modal title="Database changes" width={1040} onclose={() => changesOpen=false}><DatabaseChanges connectionId={database.selectedConnId} node={database.activeDb} /></Modal>{/if}
 
 {#if accessFor}<Modal title={`Access · ${accessFor.name}`} width={820} onclose={() => accessFor=null}><ResourceAccess kind="connection" resourceId={accessFor.id} /></Modal>{/if}
@@ -1935,7 +1934,7 @@
     text-align: start;
   }
   .conn-item:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    background: var(--hover);
   }
   .conn-row.open:not(.active) .conn-item {
     background: var(--hover);
@@ -1975,7 +1974,7 @@
     color: var(--text-dim);
   }
   .sec-head:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+    background: var(--hover);
   }
   .sec-head.plain {
     cursor: default;
@@ -2185,7 +2184,7 @@
   }
   .saved-row:hover,
   .hist-row:hover {
-    background: color-mix(in srgb, var(--text-dim) 9%, transparent);
+    background: var(--hover);
   }
   .row-del {
     opacity: 0;
@@ -2410,7 +2409,7 @@
     opacity: 1;
   }
   .conn-tab-close:hover {
-    background: color-mix(in srgb, var(--text-dim) 22%, transparent);
+    background: var(--hover);
     color: var(--text);
   }
   /* Workbench toolbar: the view switch (segmented) + connection status/actions. */
@@ -2557,13 +2556,9 @@
   .spin {
     display: grid;
     place-items: center;
-    animation: spin 0.9s linear infinite;
+    animation: otto-spin 0.9s linear infinite;
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+  
   /* Horizontal split holding the active view + (optionally) the DB Assistant. */
   .main-split {
     flex: 1;

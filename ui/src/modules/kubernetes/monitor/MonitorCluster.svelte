@@ -633,9 +633,9 @@
 </div>
 
 {#snippet windowPicker()}
-      <div class="seg" role="radiogroup" aria-label="Window">
+      <div class="segmented" role="radiogroup" aria-label="Window">
         {#each WINDOWS as w (w)}
-          <button class="seg-btn" class:on={window === w} role="radio" onkeydown={radioKey} aria-checked={window === w} tabindex={window === w ? 0 : -1} onclick={() => (window = w)}>{w}</button>
+          <button role="radio" onkeydown={radioKey} aria-checked={window === w} tabindex={window === w ? 0 : -1} onclick={() => (window = w)}>{w}</button>
         {/each}
       </div>
 {/snippet}
@@ -674,25 +674,6 @@
     width: 9px;
     height: 9px;
     border-radius: 50%;
-  }
-  .seg {
-    display: inline-flex;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    overflow: hidden;
-  }
-  .seg-btn {
-    background: none;
-    border: none;
-    padding: 3px 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .seg-btn.on {
-    background: var(--surface-2);
-    color: var(--text);
-    font-weight: 600;
   }
   .tabs {
     display: flex;

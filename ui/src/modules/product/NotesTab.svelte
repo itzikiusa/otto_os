@@ -15,9 +15,9 @@
   // A failed load shows inline with Retry — never as "No notes yet".
   let loadError = $state<string | null>(null);
   async function load(): Promise<void> {
-    loadError = null;
     try {
       await product.loadNotes();
+      loadError = null;
     } catch (e) {
       loadError = loadErrorText(e);
     }
@@ -127,75 +127,76 @@
     </div>
 
     <!-- ── Notes list ───────────────────────────────────────────────────────── -->
-    {#if (product.loadingNotes || loadError) && product.notes.length === 0}
-      <LoadState what="notes" loading={product.loadingNotes} error={loadError} empty onretry={() => void load()} />
-    {:else if product.notes.length === 0}
-      <div class="muted">No notes yet. Use Add note to capture a thought.</div>
-    {:else}
-      <div class="n-list">
-        {#each product.notes as n (n.id)}
-          <div class="n-card">
+    <!-- A failed refresh keeps the notes on screen with a stale bar (LoadState). -->
+    <LoadState what="notes" loading={product.loadingNotes} error={loadError} empty={product.notes.length === 0} onretry={() => void load()}>
+      {#snippet emptyView()}
+        <div class="muted">No notes yet. Use Add note to capture a thought.</div>
+      {/snippet}
+        <div class="n-list">
+          {#each product.notes as n (n.id)}
+            <div class="n-card">
 
-            <!-- Card header: section chip + meta + actions -->
-            <div class="n-header">
-              <div class="n-meta-row">
-                {#if n.section}
-                  <span class="section-chip">{n.section}</span>
-                {/if}
-                <span class="n-meta" title={n.author_id ? `Author id: ${n.author_id}` : undefined}>{fmtDate(n.created_at)}</span>
-              </div>
-              {#if editingId !== n.id}
-                <div class="n-actions">
-                  <button
-                    class="btn small ghost"
-                    onclick={() => startEdit(n)}
-                    disabled={savingId === n.id || deletingId === n.id}
-                    title="Edit"
-                  >Edit</button>
-                  <button
-                    class="btn small danger"
-                    onclick={() => deleteNote(n)}
-                    disabled={savingId === n.id || deletingId === n.id}
-                    title="Delete"
-                  >
-                    {deletingId === n.id ? 'Deleting…' : 'Delete'}
-                  </button>
+              <!-- Card header: section chip + meta + actions -->
+              <div class="n-header">
+                <div class="n-meta-row">
+                  {#if n.section}
+                    <span class="section-chip">{n.section}</span>
+                  {/if}
+                  <span class="n-meta" title={n.author_id ? `Author id: ${n.author_id}` : undefined}>{fmtDate(n.created_at)}</span>
                 </div>
+                {#if editingId !== n.id}
+                  <div class="n-actions">
+                    <button
+                      class="btn small ghost"
+                      onclick={() => startEdit(n)}
+                      disabled={savingId === n.id || deletingId === n.id}
+                      title="Edit"
+                    >Edit</button>
+                    <button
+                      class="btn small danger"
+                      onclick={() => deleteNote(n)}
+                      disabled={savingId === n.id || deletingId === n.id}
+                      title="Delete"
+                    >
+                      {deletingId === n.id ? 'Deleting…' : 'Delete'}
+                    </button>
+                  </div>
+                {/if}
+              </div>
+
+              <!-- Body or inline edit -->
+              {#if editingId === n.id}
+                <div class="edit-wrap">
+                  <textarea
+                    class="edit-text"
+                    bind:value={editBody}
+                    rows={4}
+                    placeholder="Note body (markdown)"
+                    disabled={savingId === n.id}
+                  ></textarea>
+                  <div class="edit-actions">
+                    <button
+                      class="btn small primary"
+                      onclick={() => saveEdit(n.id)}
+                      disabled={savingId === n.id || !editBody.trim()}
+                    >
+                      {savingId === n.id ? 'Saving…' : 'Save'}
+                    </button>
+                    <button
+                      class="btn small ghost"
+                      onclick={cancelEdit}
+                      disabled={savingId === n.id}
+                    >Cancel</button>
+                  </div>
+                </div>
+              {:else}
+                <div class="n-body md-body">{@html renderMarkdown(n.body)}</div>
               {/if}
             </div>
-
-            <!-- Body or inline edit -->
-            {#if editingId === n.id}
-              <div class="edit-wrap">
-                <textarea
-                  class="edit-text"
-                  bind:value={editBody}
-                  rows={4}
-                  placeholder="Note body (markdown)"
-                  disabled={savingId === n.id}
-                ></textarea>
-                <div class="edit-actions">
-                  <button
-                    class="btn small primary"
-                    onclick={() => saveEdit(n.id)}
-                    disabled={savingId === n.id || !editBody.trim()}
-                  >
-                    {savingId === n.id ? 'Saving…' : 'Save'}
-                  </button>
-                  <button
-                    class="btn small ghost"
-                    onclick={cancelEdit}
-                    disabled={savingId === n.id}
-                  >Cancel</button>
-                </div>
-              </div>
-            {:else}
-              <div class="n-body md-body">{@html renderMarkdown(n.body)}</div>
-            {/if}
-          </div>
-        {/each}
-      </div>
-    {/if}
+          {/each}
+        </div>
+    
+    </LoadState>
 
     <!-- ── Add note modal ────────────────────────────────────────────────────── -->
     {#if addOpen}
@@ -319,56 +320,6 @@
     gap: 4px;
     flex-shrink: 0;
   }
-
-  /* ── Note body (markdown rendered) ───────────────────────────────── */
-  .n-body.md-body {
-    font-size: var(--fs-m);
-    line-height: 1.65;
-    color: var(--text);
-  }
-  .n-body :global(h1),
-  .n-body :global(h2),
-  .n-body :global(h3),
-  .n-body :global(h4) {
-    margin: 0.9em 0 0.3em;
-    font-weight: 600;
-    color: var(--text);
-  }
-  .n-body :global(h1) { font-size: 1.25em; }
-  .n-body :global(h2) { font-size: 1.1em; }
-  .n-body :global(h3) { font-size: 1em; }
-  .n-body :global(p)  { margin: 0 0 0.6em; }
-  .n-body :global(ul),
-  .n-body :global(ol) {
-    padding-inline-start: 1.4em;
-    margin: 0 0 0.6em;
-  }
-  .n-body :global(li) { margin-bottom: 0.2em; }
-  .n-body :global(code) {
-    font-family: var(--font-mono);
-    font-size: 0.87em;
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    padding: 1px 5px;
-    border-radius: var(--radius-s);
-  }
-  .n-body :global(pre) {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    padding: 10px 12px;
-    overflow-x: auto;
-    margin: 0 0 0.6em;
-  }
-  .n-body :global(pre code) { background: none; padding: 0; }
-  .n-body :global(blockquote) {
-    border-inline-start: 3px solid var(--border);
-    padding-inline-start: 10px;
-    color: var(--text-dim);
-    margin: 0 0 0.6em;
-    font-style: italic;
-  }
-  .n-body :global(a) { color: var(--accent-text); text-decoration: none; }
-  .n-body :global(a:hover) { text-decoration: underline; }
 
   /* ── Inline edit ─────────────────────────────────────────────────── */
   .edit-wrap {

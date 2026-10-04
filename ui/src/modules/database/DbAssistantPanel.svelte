@@ -9,9 +9,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
-  import StatusDot from '../../lib/components/StatusDot.svelte';
+  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { sessionState } from '../../lib/status';
   import { database } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -116,7 +115,7 @@
       </select>
     {/if}
     {#if database.assistBusy}
-      <span class="da-working"><StatusDot state={sessionState(null, 'working')} /> Working…</span>
+      <span class="da-working"><LiveWorkingDot label="Working…" /></span>
       <button
         class="da-act da-stop"
         onclick={() => database.stopAssist()}
