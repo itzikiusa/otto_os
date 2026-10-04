@@ -1897,7 +1897,9 @@ async fn run_write(
 
 /// Execute a true multi-statement batch (>1 statement) on ONE shared session, in
 /// order — first result on top, the rest in `more_results`; stop + `errored`
-/// entry on the first failure (§2.2). No auto-LIMIT for batches.
+/// entry on the first failure (§2.2). Eligible SELECTs are server-bounded.
+/// Non-rewritable reads retain SQL/session semantics (SQLx drains a clipped
+/// result before the next statement); the pager remains single-statement only.
 async fn run_batch(
     pool: &sqlx::PgPool,
     spans: &[StatementSpan],
@@ -1921,14 +1923,21 @@ async fn run_batch(
         let stmt = span.text.as_str();
         let started = Instant::now();
         let outcome = if is_read_statement(stmt) {
-            exec_read_conn(&mut conn, stmt, max_rows, false, &mut budget)
-                .await
-                .map(|out| {
-                    // A later statement drains them anyway (same session); the
-                    // last one's are skipped by closing it.
-                    unread = out.unread;
-                    out.result
-                })
+            let limited = types::inject_row_limit(stmt, max_rows.saturating_add(1), None);
+            exec_read_conn(
+                &mut conn,
+                &limited.sql,
+                max_rows,
+                limited.limited,
+                &mut budget,
+            )
+            .await
+            .map(|out| {
+                // A later statement drains them anyway (same session); the
+                // last one's are skipped by closing it.
+                unread = out.unread;
+                out.result
+            })
         } else {
             exec_write_conn(&mut conn, stmt).await
         };
@@ -2652,19 +2661,12 @@ async fn governed_read(
     let mut unread = false;
     for span in spans {
         let started = Instant::now();
-        let sql = if single {
-            types::inject_row_limit(&span.text, max_rows.saturating_add(1), req.offset)
-        } else {
-            types::inject_row_limit(&span.text, usize::MAX, None)
-        };
-        let out = exec_read_conn(
-            &mut tx,
-            if single { &sql.sql } else { &span.text },
-            max_rows,
-            single && sql.limited,
-            &mut budget,
-        )
-        .await?;
+        let sql = types::inject_row_limit(
+            &span.text,
+            max_rows.saturating_add(1),
+            if single { req.offset } else { None },
+        );
+        let out = exec_read_conn(&mut tx, &sql.sql, max_rows, sql.limited, &mut budget).await?;
         unread |= out.unread;
         let mut result = out.result;
         result.stats.duration_ms = started.elapsed().as_millis() as u64;
