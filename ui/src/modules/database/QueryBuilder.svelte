@@ -32,6 +32,7 @@
   import { databaseAccessChild } from '../../lib/access-options';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { paneResizer } from '../../lib/paneResizer';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -149,6 +150,15 @@
     window.addEventListener('pointerup', onUp);
   }
 
+  function setCanvasH(h: number): void {
+    canvasH = h;
+    try {
+      localStorage.setItem(CANVAS_H_KEY, String(Math.round(h)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+
   // Resizable palette column (persisted; double-click resets).
   const PALETTE_W_DEFAULT = 208;
   let paletteW = $state(loadPaletteW());
@@ -184,6 +194,10 @@
   }
   function resetPaletteW(): void {
     paletteW = PALETTE_W_DEFAULT;
+    persistPaletteW();
+  }
+  function setPaletteW(w: number): void {
+    paletteW = w;
     persistPaletteW();
   }
 
@@ -844,15 +858,18 @@
       </div>
     </aside>
 
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="side-resizer"
       role="separator"
+      tabindex="0"
       aria-orientation="vertical"
-      aria-label="Drag to resize the table list (double-click to reset)"
-      title="Drag to resize · double-click to reset"
+      aria-label="Resize table list"
+      title="Drag or use ←/→ to resize · double-click or Enter to reset"
       ondblclick={resetPaletteW}
       onpointerdown={startPaletteResize}
+      use:paneResizer={{ value: paletteW, min: 160, max: 400, onChange: setPaletteW, onReset: resetPaletteW, text: (v) => `${Math.round(v)} pixels wide` }}
     ></div>
 
     <div class="main" bind:this={mainEl}>
@@ -975,8 +992,18 @@
         {/if}
       </div>
 
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="split" role="separator" aria-orientation="horizontal" aria-label="Drag to resize the canvas" title="Drag to resize" onpointerdown={startSplit}>
+      <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ↑/↓, Home/End). -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <div
+        class="split"
+        role="separator"
+        tabindex="0"
+        aria-orientation="horizontal"
+        aria-label="Resize canvas"
+        title="Drag or use ↑/↓ to resize"
+        onpointerdown={startSplit}
+        use:paneResizer={{ value: canvasH ?? canvasEl?.parentElement?.clientHeight ?? 300, min: 140, max: Math.max(160, (mainEl?.clientHeight ?? 700) - 200), orientation: 'horizontal', onChange: setCanvasH, text: (v) => `Canvas ${Math.round(v)} pixels tall` }}
+      >
         <span class="grip"></span>
       </div>
 
@@ -1282,7 +1309,9 @@
     z-index: 2;
     touch-action: none;
   }
-  .side-resizer:hover {
+  .side-resizer:hover,
+  .side-resizer:focus-visible {
+    outline: none;
     background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
 
@@ -1695,7 +1724,11 @@
     border-top: 1px solid var(--border);
     touch-action: none;
   }
-  .split:hover {
+  .split:focus-visible {
+    outline: none;
+  }
+  .split:hover,
+  .split:focus-visible {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .grip {

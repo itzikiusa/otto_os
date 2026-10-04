@@ -50,6 +50,7 @@
   } from './sql-util';
   import { api } from '../../lib/api/client';
   import type { MongoshInfo } from '../../lib/api/types';
+  import { paneResizer } from '../../lib/paneResizer';
 
   const tab = $derived(database.tab);
 
@@ -764,6 +765,10 @@
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
   }
+  function setEditorH(h: number): void {
+    editorH = h;
+    persistEditorH();
+  }
   // Double-click the grip to expand the editor to (nearly) full height, and again
   // to restore the prior height — a quick way to focus on a long query.
   function toggleExpand(): void {
@@ -987,8 +992,20 @@
     const onDown = (e: PointerEvent): void => {
       if (kbdWrapEl && !kbdWrapEl.contains(e.target as Node)) shortcutsOpen = false;
     };
+    // Esc closes it from anywhere (the editor's own Esc handler only sees keys
+    // typed in the editor) and hands focus back to the ⌨ button.
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      e.preventDefault();
+      shortcutsOpen = false;
+      kbdWrapEl?.querySelector<HTMLElement>('button')?.focus();
+    };
     window.addEventListener('pointerdown', onDown, true);
-    return () => window.removeEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey);
+    };
   });
   // Clamp the popover into the viewport (never off the right/left edge); the
   // CSS max-height + overflow cap the vertical side.
@@ -1200,10 +1217,12 @@
         title="Keyboard shortcuts"
         aria-label="Keyboard shortcuts"
         aria-expanded={shortcutsOpen}
+        aria-haspopup="dialog"
       ><Icon name="command" size={13} /></button>
       {#if shortcutsOpen}
-        <div class="qe-kbd-pop" role="menu" bind:this={kbdPopEl}>
-          <div class="qe-kbd-title">Keyboard shortcuts</div>
+        <!-- A reference card, not a menu (no actionable items): a non-modal dialog. -->
+        <div class="qe-kbd-pop" role="dialog" aria-labelledby="qe-kbd-title" bind:this={kbdPopEl}>
+          <h3 class="qe-kbd-title" id="qe-kbd-title">Keyboard shortcuts</h3>
           {#each SHORTCUTS as s (s.label)}
             <div class="qe-kbd-row">
               <span class="qe-kbd-label">{s.label}</span>
@@ -1453,16 +1472,19 @@
     />
   </div>
 
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ↑/↓, Home/End). -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="qe-splitter"
     class:resizing
     role="separator"
+    tabindex="0"
     aria-orientation="horizontal"
-    aria-label="Drag to resize editor and results"
-    title="Drag to resize · double-click to expand"
+    aria-label="Resize editor and results"
+    title="Drag or use ↑/↓ to resize · double-click or Enter to expand"
     onpointerdown={startResize}
     ondblclick={toggleExpand}
+    use:paneResizer={{ value: editorH, min: 100, max: maxEditorH(), orientation: 'horizontal', onChange: setEditorH, onReset: toggleExpand, text: (v) => `Editor ${Math.round(v)} pixels tall` }}
   ><span class="qe-grip"></span></div>
 
   {#if viewport.isPhone}
@@ -1833,7 +1855,7 @@
     position: absolute;
     top: calc(100% + 6px);
     inset-inline-start: 0;
-    z-index: 30;
+    z-index: var(--z-popover);
     min-width: 220px;
     /* Never off-screen: cap to the viewport and scroll inside (the JS clamp
        handles the horizontal side). */
@@ -1855,6 +1877,7 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
+    margin: 0;
     padding: 2px 4px 4px;
   }
   .qe-kbd-row {
@@ -2001,7 +2024,11 @@
     background: var(--border);
     transition: background 120ms ease-out;
   }
+  .qe-splitter:focus-visible {
+    outline: none;
+  }
   .qe-splitter:hover .qe-grip,
+  .qe-splitter:focus-visible .qe-grip,
   .qe-splitter.resizing .qe-grip {
     background: var(--accent);
   }

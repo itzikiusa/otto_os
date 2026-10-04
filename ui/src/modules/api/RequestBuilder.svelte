@@ -822,7 +822,7 @@
           <input type="file" accept=".proto" hidden onchange={(e) => onProtoFile(e.currentTarget as HTMLInputElement)} />
         </label>
         <button class="btn small" onclick={reflectGrpc} disabled={grpcReflecting} title="List services via server reflection (no .proto needed)">
-          <Icon name="refresh" size={12} />{grpcReflecting ? 'Loading…' : 'Load from server'}
+          <Icon name="refresh" size={12} />{grpcReflecting ? 'Loading methods…' : 'Load from server'}
         </button>
         {#if draft.proto?.trim()}
           <button class="btn small ghost" onclick={parseProto} disabled={grpcParsing}>{grpcParsing ? 'Reading…' : 'Re-read .proto'}</button>

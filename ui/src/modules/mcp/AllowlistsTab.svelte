@@ -94,17 +94,15 @@
 
   {#if servers.length === 0}
     <p class="muted pad">Add a server first — the allowlist scopes its tools.</p>
-  {:else if loadError && rows.length === 0}
-    <LoadState what="the allowlist" {loading} error={loadError} empty onretry={() => void load()} />
-  {:else if loading && rows.length === 0}
-    <p class="muted pad">Loading…</p>
-  {:else if rows.length === 0}
+  {:else}
+    <LoadState what="the allowlist" {loading} error={loadError} empty={rows.length === 0} onretry={() => void load()}>
+      {#snippet emptyView()}
     <div class="empty">
       <Icon name="eye" size={22} />
       <p>No allowlist entries. Without any, each server's default tool access applies.</p>
       <button class="btn primary" onclick={addRow}>Add an entry</button>
     </div>
-  {:else}
+      {/snippet}
     <div class="grid">
       <div class="thead">
         <span>Server</span>
@@ -130,6 +128,7 @@
         </div>
       {/each}
     </div>
+    </LoadState>
   {/if}
 </div>
 
@@ -184,7 +183,7 @@
     width: 100%;
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     color: var(--text);
     padding: 6px 8px;
     font-size: var(--fs-m);

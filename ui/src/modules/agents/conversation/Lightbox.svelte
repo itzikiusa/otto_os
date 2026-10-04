@@ -1,8 +1,10 @@
 <script lang="ts">
-  // Full-window image viewer for transcript images. Esc / click-outside closes.
+  // Full-window image viewer for transcript images. Esc / click-outside closes;
+  // dialogFocus traps Tab inside and returns focus to the thumbnail on close.
   import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { ui } from '../../../lib/stores/ui.svelte';
+  import { dialogFocus } from '../../../lib/dialogFocus';
   interface Props {
     src: string;
     alt: string;
@@ -17,24 +19,12 @@
     untrack(() => ui.pushModal());
     return () => untrack(() => ui.popModal());
   });
-
-  $effect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') {
-        e.stopPropagation();
-        onclose();
-      }
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  });
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="lb" role="dialog" tabindex="-1" aria-modal="true" aria-label={alt || 'Image'} onclick={onclose}>
+<div class="lb" role="dialog" aria-modal="true" aria-label={alt || 'Image'} use:dialogFocus={onclose}>
+  <div class="lb-backdrop" role="presentation" onclick={onclose}></div>
   <button class="lb-close icon-btn" aria-label="Close" title="Close (Esc)" onclick={onclose}><Icon name="x" size={16} /></button>
-  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-  <img {src} {alt} onclick={(e) => e.stopPropagation()} />
+  <img {src} {alt} />
 </div>
 
 <style>
@@ -47,15 +37,20 @@
     align-items: center;
     justify-content: center;
     padding: 24px;
+  }
+  /* The click-outside target: behind the image and the close button. */
+  .lb-backdrop {
+    position: absolute;
+    inset: 0;
     cursor: zoom-out;
   }
   .lb img {
+    position: relative;
     max-width: 100%;
     max-height: 100%;
     object-fit: contain;
     border-radius: var(--radius-m);
     box-shadow: var(--shadow);
-    cursor: default;
   }
   .lb-close {
     position: absolute;

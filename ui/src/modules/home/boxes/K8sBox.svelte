@@ -7,6 +7,7 @@
   import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import { k8s } from '../../../lib/stores/k8s.svelte';
   import { k8sApi } from '../../../lib/api/k8s';
@@ -119,6 +120,9 @@
     <Skeleton rows={3} />
   {:else if k8s.unavailable}
     <EmptyState icon="helm" title="Kubernetes console is off" body="Enable it in the daemon to see clusters here." />
+  {:else if k8s.clusters.length === 0 && k8s.clustersError}
+    <!-- A failed list must not read as "No clusters yet". -->
+    <LoadState what="clusters" variant="compact" error={k8s.clustersError} empty={true} onretry={() => void k8s.loadClusters()} />
   {:else if k8s.clusters.length === 0}
     <EmptyState icon="helm" title="No clusters yet" body="Add a kubeconfig context on the Kubernetes page.">
       <button class="btn small" onclick={() => router.go('kubernetes')}>Open Kubernetes</button>

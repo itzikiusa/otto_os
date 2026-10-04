@@ -103,7 +103,7 @@
       const s = await contextApi.getSkill(name);
       skillView = { name, body: s.body };
     } catch (e) {
-      toasts.error('Skill', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t open the skill', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -173,7 +173,11 @@
     return `Review round ${Math.max(r.review.current_iteration, 1)} of ${r.review.max_iterations}`;
   }
 
-  const displayState = (state: string): string => state.replaceAll('_', ' ');
+  /** `needs_review` → “Needs review”: raw enum values never reach the screen. */
+  const displayState = (state: string): string => {
+    const t = state.replaceAll('_', ' ');
+    return t.charAt(0).toUpperCase() + t.slice(1);
+  };
 
   function reviewIterationLimit(value: number): number {
     return Number.isFinite(value) ? Math.min(10, Math.max(1, Math.round(value))) : 3;
@@ -253,7 +257,7 @@
       void vault.refreshDocsRuns();
       startPoll();
     } catch (e) {
-      toasts.error('Docs agent', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t start the docs agent', e instanceof Error ? e.message : String(e));
     } finally {
       starting = false;
     }
@@ -271,7 +275,7 @@
       else await retryDocsAgent(r.id, target);
       startPoll();
     } catch (e) {
-      toasts.error('Retry', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t retry the run', e instanceof Error ? e.message : String(e));
     } finally {
       retrying = { ...retrying, [String(target)]: false };
     }
@@ -286,7 +290,7 @@
       await retryDocsReviewer(r.id, iteration, index);
       startPoll();
     } catch (e) {
-      toasts.error('Retry reviewer', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t retry the reviewer', e instanceof Error ? e.message : String(e));
     } finally {
       retrying = { ...retrying, [key]: false };
     }
@@ -301,7 +305,7 @@
       await retryDocsRevision(r.id, iteration);
       startPoll();
     } catch (e) {
-      toasts.error('Retry revision', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t retry the revision', e instanceof Error ? e.message : String(e));
     } finally {
       retrying = { ...retrying, [key]: false };
     }
@@ -316,7 +320,7 @@
       await cancelDocsRun(r.id);
       await poll();
     } catch (e) {
-      toasts.error('Cancel', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t cancel the run', e instanceof Error ? e.message : String(e));
     } finally {
       cancelling = false;
     }
@@ -345,7 +349,7 @@
         outcome === 'ok' ? 'Findings accepted as-is' : 'Findings marked as fixed',
       );
     } catch (e) {
-      toasts.error('Resolve', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t resolve the review', e instanceof Error ? e.message : String(e));
     } finally {
       resolving = false;
     }
@@ -362,7 +366,7 @@
       if (vault.docsRun?.id === r.id) vault.docsRun = null;
       vault.docsRuns = vault.docsRuns.filter((x) => x.id !== r.id);
     } catch (e) {
-      toasts.error('Delete run', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t delete the run', e instanceof Error ? e.message : String(e));
     } finally {
       deleting = null;
     }
@@ -374,7 +378,7 @@
     const round = r.review.rounds.at(-1);
     const findings = (round?.reviewers ?? []).flatMap((rv) => rv.findings);
     if (findings.length === 0) {
-      toasts.error('Fix findings', 'This run has no recorded findings');
+      toasts.error('Couldn’t fix the findings', 'This run has no recorded findings');
       return;
     }
     const lines = findings.map((f, i) => {
@@ -431,7 +435,7 @@
     try {
       await api.get(`/sessions/${sessionId}`);
     } catch {
-      toasts.error('Docs agent', 'This agent session no longer exists (cleaned up by retention).');
+      toasts.error('Couldn’t open the agent session', 'This agent session no longer exists (cleaned up by retention).');
       return;
     }
     next.add(sessionId);
@@ -511,12 +515,12 @@
         <span>Writer agents ({agents.length}/4)</span>
         {#each agents as agent, i (i)}
           <div class="agent-row">
-            <select bind:value={agent.provider}>
+            <select bind:value={agent.provider} aria-label={`Writer agent ${i + 1} provider`}>
               {#each providers as p (p)}
                 <option value={p}>{p}</option>
               {/each}
             </select>
-            <input class="model" bind:value={agent.model} placeholder="model (optional)" />
+            <input class="model" bind:value={agent.model} placeholder="model (optional)" aria-label={`Writer agent ${i + 1} model`} />
             <button
               class="icon-btn"
               title="Remove agent" aria-label="Remove agent"
@@ -625,7 +629,7 @@
           <span>Skills injected into this run — click to view</span>
           <div class="skill-chips">
             {#each runSkills as s (s)}
-              <button class="skill-chip" title="View {s}" onclick={() => void viewSkill(s)}>
+              <button class="skill-chip" title="Open {s}" onclick={() => void viewSkill(s)}>
                 <Icon name="function" size={11} />
                 {s}
               </button>
@@ -818,7 +822,7 @@
               and evidence below.
             </div>
           {:else if run.review.outcome}
-            <div class="review-outcome">Outcome: {run.review.outcome.replaceAll('_', ' ')}</div>
+            <div class="review-outcome">Outcome: {displayState(run.review.outcome)}</div>
           {/if}
 
           <div class="review-rounds">
@@ -1232,10 +1236,10 @@
     width: 14px;
     height: 14px;
     border-radius: 50%;
-    left: 2px;
+    inset-inline-start: 2px;
     top: 2px;
     background: var(--text-dim);
-    transition: transform 0.15s ease, background 0.15s ease;
+    transition: inset-inline-start 0.15s ease, background 0.15s ease;
   }
   .switch input:focus-visible + span {
     outline: 2px solid var(--accent);
@@ -1246,8 +1250,8 @@
     border-color: transparent;
   }
   .switch input:checked + span::after {
-    transform: translateX(14px);
-    background: white;
+    inset-inline-start: 16px;
+    background: var(--accent-contrast);
   }
   .review-settings {
     display: flex;
@@ -1288,7 +1292,7 @@
     border-radius: 50%;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: var(--accent-text);
-    font: 700 10.5px var(--font-mono, monospace);
+    font: 700 var(--fs-xs) var(--font-mono, monospace);
   }
   .reviewer-fields {
     flex: 1;
@@ -1335,7 +1339,7 @@
     cursor: pointer;
   }
   .icon-btn:hover:not(:disabled) {
-    color: var(--status-exited);
+    color: var(--danger);
     border-color: var(--danger);
   }
   .icon-btn:disabled {
@@ -1444,7 +1448,7 @@
   .agent-err {
     margin: 6px 0 0;
     font-size: var(--fs-xs);
-    color: var(--status-exited);
+    color: var(--danger);
     line-height: 1.4;
     word-break: break-word;
   }
@@ -1508,12 +1512,12 @@
     line-height: 1.45;
   }
   .review-outcome.clean {
-    color: var(--status-working);
+    color: var(--success);
     border-color: color-mix(in srgb, var(--success) 35%, transparent);
     background: color-mix(in srgb, var(--success) 6%, transparent);
   }
   .review-outcome.exhausted {
-    color: var(--status-warn);
+    color: var(--warning);
     border-color: color-mix(in srgb, var(--warning) 35%, transparent);
     background: color-mix(in srgb, var(--warning) 6%, transparent);
   }
@@ -1584,7 +1588,7 @@
     line-height: 1.4;
   }
   .clean-verdict {
-    color: var(--status-working);
+    color: var(--success);
     display: flex;
     align-items: center;
     gap: 4px;
@@ -1628,16 +1632,16 @@
   }
   .sev-blocking,
   .sev-major {
-    color: var(--status-exited);
+    color: var(--danger);
     background: var(--danger-soft);
   }
   .sev-minor {
-    color: var(--status-warn);
+    color: var(--warning);
     background: var(--warning-soft);
   }
   .finding-category {
     color: var(--text-dim);
-    font: 10px var(--font-mono, monospace);
+    font: var(--fs-xs) var(--font-mono, monospace);
   }
   .evidence-list,
   .changed-paths {
@@ -1653,7 +1657,7 @@
     padding: 2px 6px;
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
-    font: 10px var(--font-mono, monospace);
+    font: var(--fs-xs) var(--font-mono, monospace);
     overflow-wrap: anywhere;
   }
 
@@ -1688,21 +1692,21 @@
   }
   .st-done {
     background: var(--success-soft);
-    color: var(--status-working);
+    color: var(--success);
   }
   .st-done_with_findings,
   .st-exhausted {
     background: var(--warning-soft);
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .st-clean,
   .st-revised {
     background: var(--success-soft);
-    color: var(--status-working);
+    color: var(--success);
   }
   .st-error {
     background: var(--danger-soft);
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .spinner-xs {
     display: inline-block;
@@ -1720,7 +1724,7 @@
   }
 
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: var(--fs-s);
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     background: color-mix(in srgb, var(--danger) 8%, transparent);
@@ -1863,7 +1867,7 @@
     text-decoration: underline;
   }
 
-  @media (max-width: 680px) {
+  @media (max-width: 640px) {
     .inner {
       padding-inline: 14px;
     }

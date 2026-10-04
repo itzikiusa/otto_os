@@ -35,6 +35,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { ProductStory, TreeKind } from './types';
+  import { paneResizer } from '../../lib/paneResizer';
 
   let importOpen = $state(false);
   let draftCreating = $state(false);
@@ -520,6 +521,11 @@
     sideW = SIDE_W_DEFAULT;
     persistSideW();
   }
+  function setSideW(w: number): void {
+    sideW = w;
+    persistSideW();
+  }
+  const pxText = (v: number): string => `${Math.round(v)} pixels wide`;
 </script>
 
 {#snippet storyRow(s: ProductStory, node?: TreeNode, depth: number = 0)}
@@ -739,15 +745,18 @@
 
     {/if}
 
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="side-resizer"
       role="separator"
+      tabindex="0"
       aria-orientation="vertical"
-      aria-label="Drag to resize the sidebar (double-click to reset)"
-      title="Drag to resize · double-click to reset"
+      aria-label="Resize stories sidebar"
+      title="Drag or use ←/→ to resize · double-click or Enter to reset"
       ondblclick={resetSideW}
       onpointerdown={startSideResize}
+      use:paneResizer={{ value: sideW, min: 200, max: 480, onChange: setSideW, onReset: resetSideW, text: pxText }}
     ></div>
   </aside>
 
@@ -945,7 +954,9 @@
     z-index: 2;
     touch-action: none;
   }
-  .side-resizer:hover {
+  .side-resizer:hover,
+  .side-resizer:focus-visible {
+    outline: none;
     background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   /* Tree-role / draft markers are metadata, not selection: neutral. */

@@ -8,6 +8,10 @@
   // session is hidden from the Agents section (meta.source = 'db_assist').
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
+  import StatusDot from '../../lib/components/StatusDot.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { sessionState } from '../../lib/status';
   import { database } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -36,12 +40,12 @@
       placeholder: 'e.g. top 10 customers by total order value last month',
     },
     ask: {
-      title: 'Ask AI',
+      title: 'Ask Otto',
       hint: 'Ask anything about this database — its schema, the data, or how to write a query. The agent inspects the live DB read-only and answers in its shell.',
       placeholder: 'Ask about the schema or the data…',
     },
     investigate: {
-      title: 'Examine with AI',
+      title: 'Examine with Otto',
       hint: 'The agent is seeded with the current query and a sample of its result. Ask it to explain, dig in, or find an issue — it can sample more data read-only.',
       placeholder: 'What should the agent look into?',
     },
@@ -68,6 +72,19 @@
   // Once the session is live the empty state (provider picker + Ask box) gives way
   // to the real, interactive terminal — that IS the conversation surface from here.
   const started = $derived(database.assistSessionId !== null);
+
+  /** Closing discards the live session and its working files — confirm when
+   *  there is a conversation or a proposal that would be lost. */
+  async function close(): Promise<void> {
+    if (database.assistSessionId || database.assistProposedSql.trim()) {
+      const ok = await confirmer.ask(
+        'Closing ends the agent’s session and deletes its working files, including the proposed query. Copy anything you want to keep first.',
+        { title: 'Close the DB assistant?', confirmLabel: 'Close and discard', cancelLabel: 'Keep open', danger: true },
+      );
+      if (!ok) return;
+    }
+    await database.closeAssist();
+  }
 
   async function send(): Promise<void> {
     const p = draft.trim();
@@ -99,7 +116,7 @@
       </select>
     {/if}
     {#if database.assistBusy}
-      <span class="da-working">working…</span>
+      <span class="da-working"><StatusDot state={sessionState(null, 'working')} /> Working…</span>
       <button
         class="da-act da-stop"
         onclick={() => database.stopAssist()}
@@ -114,11 +131,11 @@
       disabled={database.assistBusy || !database.assistId}
       title="Write a summary of this investigation and download it as Markdown"
     >
-      <Icon name="arrowDown" size={13} /> Summarize
+      <Icon name="download" size={13} /> Summarize
     </button>
     <button
       class="da-close"
-      onclick={() => void database.closeAssist()}
+      onclick={() => void close()}
       aria-label="Close DB assistant"
       title="Close — discards the session and working files"
     >
@@ -177,18 +194,19 @@
     <div class="da-sql">
       <div class="da-sql-head">
         <span class="da-sql-label"><Icon name="db" size={12} /> Proposed query</span>
+        <AgentByline provider={database.assistProvider} label="Draft" />
         <span class="grow"></span>
         <button
           class="da-sql-btn"
-          onclick={() => database.insertAssistSql()}
+          onclick={() => void database.insertAssistSql()}
           title="Put this query into the active editor tab"
         >
-          <Icon name="send" size={12} /> Insert into editor
+          <Icon name="arrowDown" size={12} /> Insert into editor
         </button>
         <button
           class="da-sql-btn primary"
           onclick={() => void database.runAssistSql()}
-          title="Insert this query into the editor and run it"
+          title="Insert this query into the editor and run it read-only — a write asks you first"
         >
           <Icon name="play" size={12} /> Run
         </button>
@@ -240,6 +258,9 @@
     text-transform: capitalize;
   }
   .da-working {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     font-size: var(--fs-xs);
     color: var(--accent-text);
     font-weight: 600;
@@ -294,7 +315,7 @@
     min-height: 0;
     display: flex;
     position: relative;
-    background: #131318;
+    background: var(--term-bg);
   }
   .da-shell > :global(*) {
     flex: 1 1 auto;
@@ -303,14 +324,8 @@
   .da-empty {
     margin: auto;
     text-align: center;
-    /* The shell is force-dark in every app scheme (it hosts the force-dark agent
-       Terminal), so pin an on-dark token context here — native-dark values — and
-       use standard tokens below instead of hardcoded greys, so the empty state
-       always renders light-on-dark and tracks the design system. */
-    --surface-2: rgba(255, 255, 255, 0.08);
-    --border: rgba(255, 255, 255, 0.16);
-    --text: #f2f2f5;
-    --text-dim: #98989f;
+    /* Sits on --term-bg, which tracks the app scheme — the standard tokens
+       already read correctly on it (the live Terminal paints its own dark). */
     color: var(--text-dim);
     padding: 20px;
     display: flex;

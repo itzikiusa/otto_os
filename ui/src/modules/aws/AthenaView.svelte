@@ -501,7 +501,7 @@
           <thead><tr><th>State</th><th>Query</th><th class="hide-sm">Submitted</th><th class="num hide-sm">Scanned</th><th class="num hide-sm">Time</th></tr></thead>
           <tbody>
             {#each history as x (x.id)}
-              <tr class="trow" tabindex="0" onclick={() => openExecution(x)} onkeydown={(e) => { if (e.key === 'Enter') openExecution(x); }} oncontextmenu={(e) => ctxMenu.show(e, [
+              <tr class="trow" tabindex="0" onclick={() => openExecution(x)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openExecution(x); } }} oncontextmenu={(e) => ctxMenu.show(e, [
                 { label: 'Load into editor', icon: 'edit', action: () => { sql = x.query; } },
                 { label: 'Open result', icon: 'play', action: () => openExecution(x) },
                 { label: 'Copy SQL', icon: 'copy', action: () => void copy(x.query, 'SQL') },
@@ -792,10 +792,13 @@
   .trow {
     cursor: pointer;
   }
-  .trow:hover,
+  .trow:hover {
+    background: var(--surface-2);
+  }
   .trow:focus-visible {
     background: var(--surface-2);
     outline: none;
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
   .q {
     font-size: var(--fs-s);

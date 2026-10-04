@@ -295,7 +295,7 @@
     width: 100%;
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     color: var(--text);
     padding: 7px 9px;
     font-size: var(--fs-m);
@@ -324,7 +324,7 @@
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     padding: 8px 10px;
   }
   .tpl-notes a {
@@ -337,7 +337,7 @@
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     padding: 8px 10px;
   }
 </style>

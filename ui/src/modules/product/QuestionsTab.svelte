@@ -219,7 +219,7 @@
   }
 
   async function deleteQ(q: ProductQuestion): Promise<void> {
-    if (!(await confirmer.ask(`Delete question?\n\n"${q.text}"`, { title: 'Delete question', confirmLabel: 'Delete', danger: true }))) return;
+    if (!(await confirmer.ask(`Delete question?\n\n“${q.text}”`, { title: 'Delete question', confirmLabel: 'Delete', danger: true }))) return;
     deletingId = q.id;
     try {
       await product.deleteQuestion(q.id);
@@ -529,7 +529,7 @@
               <option value="scope">Scope</option>
               <option value="data">Data</option>
               <option value="ux">UX</option>
-              <option value="edge-case">Edge Case</option>
+              <option value="edge-case">Edge case</option>
               <option value="dependency">Dependency</option>
               <option value="other">Other</option>
             </select>

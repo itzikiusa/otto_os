@@ -49,15 +49,15 @@
 
   async function remove(c: K8sCluster): Promise<void> {
     const ok = await confirmer.ask(
-      `Delete cluster “${c.name}”? Otto only forgets the row${c.source === 'kubeconfig' ? ' (your kubeconfig file is untouched)' : ' and removes the kubeconfig Otto wrote for it'}; nothing in the cluster changes.`,
-      { title: 'Delete cluster', confirmLabel: 'Delete' },
+      `Remove cluster “${c.name}”? Otto only forgets the row${c.source === 'kubeconfig' ? ' (your kubeconfig file is untouched)' : ' and removes the kubeconfig Otto wrote for it'}; nothing in the cluster changes.`,
+      { title: 'Remove cluster', confirmLabel: 'Remove' },
     );
     if (!ok) return;
     try {
       await k8s.deleteCluster(c.id);
       toasts.success('Cluster removed', c.name);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t remove the cluster', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -75,7 +75,7 @@
         ? [
             { separator: true },
             { label: 'Edit…', icon: 'edit', action: () => { editing = c; wizardOpen = true; } },
-            { label: 'Delete…', icon: 'trash', danger: true, action: () => void remove(c) },
+            { label: 'Remove cluster…', icon: 'trash', danger: true, action: () => void remove(c) },
           ]
         : []),
     ]);

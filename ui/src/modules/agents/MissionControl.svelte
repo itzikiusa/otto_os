@@ -381,7 +381,7 @@
   <div class="mission-header">
     <!-- "Work Queue" — the name the tab bar gives this view; "Mission Control"
          is the separate sidebar module (the work graph). -->
-    <h2>Work Queue</h2>
+    <h2>Work queue</h2>
     <div class="header-actions">
       <button class="btn small" onclick={() => router.go('history')} title="Browse past conversations" data-testid="mission-history-btn">
         <Icon name="clock" size={12} /> History

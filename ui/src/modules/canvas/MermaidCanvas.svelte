@@ -7,7 +7,7 @@
 <script lang="ts">
   // The Mermaid canvas: a live preview of the scene's `.mermaid` SOURCE PLUS a full
   // editor. You edit the diagram three ways, all writing the SAME `canvas.mermaid`
-  // file: (1) the agent via "Ask AI", (2) directly in the Code panel (the Mermaid
+  // file: (1) the agent via "Ask Otto", (2) directly in the Code panel (the Mermaid
   // source, with live preview), (3) — nothing is converted to Excalidraw; this stays
   // Mermaid. Mermaid's own renderer draws the full rich spectrum (subgraphs, classDef
   // colours, every shape). Pan/zoom the preview.
@@ -274,7 +274,7 @@
         return;
       }
       if (canvas.currentId !== sceneId) {
-        toasts.success('Ask AI finished', 'The diagram was saved to the scene you asked from.');
+        toasts.success('Ask Otto finished', 'The diagram was saved to the scene you asked from.');
         return;
       }
       canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'mermaid', source: src }, sceneId);
@@ -283,7 +283,7 @@
       void canvas.refreshSession();
     } catch (e) {
       canvas.pushConvo('assistant', `Failed: ${e instanceof Error ? e.message : String(e)}`, sceneId);
-      toasts.error('Ask AI failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Ask Otto failed', e instanceof Error ? e.message : String(e));
     } finally {
       generating = false;
     }
@@ -373,7 +373,7 @@
           <div class="empty">
             <Icon name="branch" size={28} />
             <p class="lead">Mermaid diagram</p>
-            <p class="hint">Describe it in <strong>Ask AI</strong>, or open <strong>Code</strong> to
+            <p class="hint">Describe it in <strong>Ask Otto</strong>, or open <strong>Code</strong> to
               edit the Mermaid yourself — both write the same diagram and render here live.</p>
           </div>
         {/if}

@@ -260,7 +260,7 @@
     <div class="toggles">
       <label class="chk">
         <input type="checkbox" bind:checked={fBrowser} />
-        Browser use (attach the otto-browser MCP to runs and chat)
+        Browser use (give runs and chat the Otto browser tool)
       </label>
       <label class="chk"><input type="checkbox" bind:checked={fEnabled} /> Enabled — its schedules fire on their cadence</label>
     </div>

@@ -29,7 +29,7 @@
   const FALLBACK_LENSES: ProductLens[] = [
     { skill: 'po-story-overview',           label: 'PO Overview',          description: '', default_on: true },
     { skill: 'story-architecture-overview', label: 'Architecture',         description: '', default_on: true },
-    { skill: 'story-clarifying-questions',  label: 'Clarifying Questions', description: '', default_on: true },
+    { skill: 'story-clarifying-questions',  label: 'Clarifying questions', description: '', default_on: true },
   ];
 
   let lenses = $state<ProductLens[]>(FALLBACK_LENSES);

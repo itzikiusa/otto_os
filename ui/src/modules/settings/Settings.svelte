@@ -174,11 +174,49 @@
     ctxMenu.show(e, [{ label: `Open ${s.label}`, icon: 'gear', action: () => open(s) }]);
   }
 
+  /** Plain-words names for the feature grants (never the raw snake_case id). */
+  const FEATURE_LABEL: Record<string, string> = {
+    agents: 'Agents',
+    connections: 'Connections',
+    database: 'the Database Explorer',
+    git: 'Git',
+    issues: 'Issues',
+    product: 'Product',
+    swarm: 'Swarm',
+    api_client: 'the API client',
+    workflows: 'Workflows',
+    channels: 'Channels',
+    skill_eval: 'Skills evaluator',
+    skills: 'Skills',
+    insights: 'Insights',
+    usage: 'Usage',
+    self_improvement: 'Self-improvement',
+    context: 'the Context library',
+    settings: 'Settings',
+    users: 'Users',
+    canvas: 'Canvas',
+    design: 'Design Hall',
+    proof_pack: 'Proof packs',
+    mcp: 'the MCP control plane',
+    mission_control: 'Mission Control',
+    scheduled_tasks: 'Scheduled tasks',
+    run_with_otto: 'Run with Otto',
+    browser: 'the Browser',
+    aws: 'AWS',
+    aws_s3: 'AWS S3',
+    aws_sqs: 'AWS SQS',
+    aws_ec2: 'AWS EC2',
+    aws_athena: 'AWS Athena',
+    aws_eks: 'AWS EKS',
+    aws_rds: 'AWS RDS',
+    kubernetes: 'Kubernetes',
+  };
+
   function gateHint(s: SettingsSection): string {
     const g = s.gate;
     if (g === 'root') return 'Only the root account can open this section.';
     if (g == null) return '';
-    return `Ask a workspace admin for ${g.level} access to ${g.feature.replace(/_/g, ' ')}.`;
+    return `Ask a workspace admin for ${g.level} access to ${FEATURE_LABEL[g.feature] ?? g.feature.replace(/_/g, ' ')}.`;
   }
 </script>
 

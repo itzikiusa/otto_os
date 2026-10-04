@@ -5,6 +5,7 @@
   // source never blanks the rest.
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { assistant } from '../../lib/stores/assistant.svelte';
   import { formatCount } from '../../lib/metric-format';
   import { TASK_KIND, loadShare, providerName } from './model';
@@ -32,13 +33,15 @@
 <aside class="rail" aria-label="Needs you, running and subscriptions" data-testid="assistant-rail">
   <section>
     <h2 class="section-title">Needs you</h2>
-    {#if assistant.needsState === 'loading' && !needs.length}
-      <p class="dim">Loading…</p>
-    {:else if assistant.needsState === 'error'}
-      <p class="dim">Couldn’t load. <button class="link" onclick={() => void assistant.loadNeedsYou()}>Retry</button></p>
-    {:else if !needs.length}
-      <p class="dim">Nothing is waiting on you.</p>
-    {:else}
+    <LoadState
+      what="what needs you"
+      variant="compact"
+      loading={assistant.needsState === 'loading'}
+      error={assistant.needsState === 'error' ? 'The daemon didn’t answer.' : ''}
+      empty={!needs.length}
+      onretry={() => void assistant.loadNeedsYou()}
+    >
+      {#snippet emptyView()}<p class="dim">Nothing is waiting on you.</p>{/snippet}
       <ul>
         {#each needs as n (n.id)}
           <li>
@@ -49,18 +52,20 @@
           </li>
         {/each}
       </ul>
-    {/if}
+    </LoadState>
   </section>
 
   <section>
     <h2 class="section-title">Running</h2>
-    {#if assistant.tasks.state === 'loading' && !assistant.tasks.data.length}
-      <p class="dim">Loading…</p>
-    {:else if assistant.tasks.state === 'error'}
-      <p class="dim">Couldn’t load. <button class="link" onclick={() => void assistant.loadTasks()}>Retry</button></p>
-    {:else if !running.length}
-      <p class="dim">Nothing running.</p>
-    {:else}
+    <LoadState
+      what="running tasks"
+      variant="compact"
+      loading={assistant.tasks.state === 'loading'}
+      error={assistant.tasks.state === 'error' ? assistant.tasks.error || 'The daemon didn’t answer.' : ''}
+      empty={!running.length}
+      onretry={() => void assistant.loadTasks()}
+    >
+      {#snippet emptyView()}<p class="dim">Nothing running.</p>{/snippet}
       <ul>
         {#each running as t (t.id)}
           <li>
@@ -71,7 +76,7 @@
           </li>
         {/each}
       </ul>
-    {/if}
+    </LoadState>
   </section>
 
   <section>
@@ -83,7 +88,9 @@
       </p>
     {/each}
     {#if assistant.usageWeek.state === 'loading' && !share.length}
-      <p class="dim">Loading…</p>
+      <LoadState what="this week’s usage" variant="compact" loading={true} empty={true} />
+    {:else if assistant.usageWeek.state === 'error' && !share.length}
+      <LoadState what="this week’s usage" variant="compact" error={assistant.usageWeek.error || 'The daemon didn’t answer.'} empty={true} onretry={() => void assistant.loadUsageWeek()} />
     {:else if share.length}
       <div class="share" role="img" aria-label={share.map((s) => `${providerName(s.provider)} ${s.pct}%`).join(', ')}>
         {#each share as s (s.provider)}
@@ -172,14 +179,6 @@
     margin: 0;
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .link {
-    border: 0;
-    background: none;
-    padding: 0;
-    font: inherit;
-    color: var(--accent-text);
-    cursor: pointer;
   }
   .limit {
     margin: 0 0 8px;

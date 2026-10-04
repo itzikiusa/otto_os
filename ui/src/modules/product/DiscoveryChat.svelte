@@ -30,6 +30,8 @@
 
   // ── Local state ────────────────────────────────────────────────────────────
   let messages = $state<DiscoveryChatMessage[]>([]);
+  /** The chat's model alias, when it has one — shown in the agent byline. */
+  let chatModel = $state<string | null>(null);
   let messagesEl = $state<HTMLDivElement | null>(null);
 
   // Keep the newest turn in view (the optimistic user bubble bumps the count on
@@ -69,6 +71,7 @@
     try {
       const detail = await product.getDiscoveryChat(chatId);
       messages = detail.messages;
+      chatModel = detail.chat.model;
     } catch (e) {
       loadError = loadErrorText(e);
     } finally {
@@ -187,9 +190,9 @@
             <div class="bubble-header">
               {#if m.role === 'agent'}
                 <!-- Agent turn: attributed (patterns.md §2). -->
-                <AgentByline at={m.created_at} />
+                <AgentByline model={chatModel} at={m.created_at} />
               {:else}
-                <span class="bubble-role">PO</span>
+                <span class="bubble-role">You</span>
                 <RelTime iso={m.created_at} class="bubble-time" />
               {/if}
             </div>

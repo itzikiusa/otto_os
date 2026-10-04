@@ -16,6 +16,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { keyContext } from '../../lib/keys';
+  import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -415,8 +416,8 @@
     {:else}
       {#if isPhone}
         <div class="wb-seg" role="tablist" aria-label="Workbench view">
-          <button role="tab" aria-selected={mobilePane === 'files'} class:on={mobilePane === 'files'} onclick={() => (mobilePane = 'files')}>Files</button>
-          <button role="tab" aria-selected={mobilePane === 'editor'} class:on={mobilePane === 'editor'} onclick={() => (mobilePane = 'editor')}>Editor</button>
+          <button role="tab" aria-selected={mobilePane === 'files'} tabindex={mobilePane === 'files' ? 0 : -1} onkeydown={onTabKey} class:on={mobilePane === 'files'} onclick={() => (mobilePane = 'files')}>Files</button>
+          <button role="tab" aria-selected={mobilePane === 'editor'} tabindex={mobilePane === 'editor' ? 0 : -1} onkeydown={onTabKey} class:on={mobilePane === 'editor'} onclick={() => (mobilePane = 'editor')}>Editor</button>
         </div>
       {/if}
       <div

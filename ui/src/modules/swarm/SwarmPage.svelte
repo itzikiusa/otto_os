@@ -553,13 +553,12 @@
     {/snippet}
     {#snippet actions()}
       {#if detail}
-        <!-- Settings · Recruit · ⋯ · lifecycle. The destructive verbs (Abort all,
+        <!-- Settings · Recruit · lifecycle · ⋯. The destructive verbs (Abort all,
              Delete swarm) live in ⋯, one step away from the lifecycle action —
              the same shape as a goal loop's and a workflow's header. "New
              project" lives on the Board, where projects are shown. -->
         <button class="btn small" data-overflow="-1" data-icon="gear" onclick={() => (showSettings = true)} title="Standing goals, team skills & channel triggers" data-label="Settings"><Icon name="gear" size={12} /> Settings</button>
         <button class="btn small" data-icon="plus" title="Let the Recruiter propose an agent for you to review and hire" onclick={() => (showRecruit = true)}><Icon name="plus" size={12} /> Recruit</button>
-        <button class="icon-btn" data-keep aria-haspopup="menu" aria-label="More actions" title="More actions" onclick={swarmMenu}><Icon name="more" size={14} /></button>
         {#if detail.status === 'active'}
           <button class="btn small" data-keep title="Stop picking up new runs; running agents finish their current step" onclick={() => lifecycle('pause')}><Icon name="pause" size={12} /> Pause</button>
         {:else if detail.status === 'paused'}
@@ -574,6 +573,8 @@
         {:else}
           <button class="btn small primary" onclick={() => lifecycle('start')}><Icon name="play" size={12} /> Start</button>
         {/if}
+        <!-- Last, and first to collapse into the header's own ⋯. -->
+        <button class="icon-btn" data-overflow="-10" data-icon="more" data-label="More actions…" aria-haspopup="menu" aria-label="More actions" title="More actions" onclick={swarmMenu}><Icon name="more" size={14} /></button>
       {/if}
     {/snippet}
   </PageHeader>

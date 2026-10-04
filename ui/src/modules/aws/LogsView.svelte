@@ -16,6 +16,8 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { onTabKey } from '../../lib/tabKeys';
+  import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { pollWhileVisible, type Poller } from '../../lib/poll';
   import { adaptiveCadence, statusPollMs } from '../../lib/pollBackoff';
   import { TableWindow } from '../../lib/tableWindow.svelte';
@@ -84,7 +86,11 @@
       groups = more ? [...(groups ?? []), ...r.groups] : r.groups;
       groupsToken = r.next_token ?? null;
       groupsError = '';
-      if (!selected && groups.length && linkIsPrefix) selected = groups[0].name;
+      // Open on a group, never an empty "pick one" pane: the deep-linked prefix's
+      // first match, else the last one viewed, else the first.
+      if (!selected && groups.length) {
+        selected = linkIsPrefix ? groups[0].name : (initialSelection('aws.logs', groups, (g) => g.name) ?? groups[0].name);
+      }
     } catch (e) {
       if (seq !== groupSeq) return;
       groupsError = e instanceof Error ? e.message : String(e);
@@ -117,6 +123,7 @@
   function pickGroup(name: string): void {
     if (selected === name) return;
     selected = name;
+    rememberSelection('aws.logs', name);
     router.replace(logsRoute(account.id, name, region));
   }
 
@@ -465,8 +472,8 @@
     {/if}
   </label>
   <div class="seg" role="tablist" aria-label="Logs view">
-    <button role="tab" aria-selected={tab === 'events'} class:on={tab === 'events'} onclick={() => (tab = 'events')}>Events</button>
-    <button role="tab" aria-selected={tab === 'insights'} class:on={tab === 'insights'} onclick={() => (tab = 'insights')}>Insights</button>
+    <button role="tab" aria-selected={tab === 'events'} tabindex={tab === 'events' ? 0 : -1} onkeydown={onTabKey} class:on={tab === 'events'} onclick={() => (tab = 'events')}>Events</button>
+    <button role="tab" aria-selected={tab === 'insights'} tabindex={tab === 'insights' ? 0 : -1} onkeydown={onTabKey} class:on={tab === 'insights'} onclick={() => (tab = 'insights')}>Insights</button>
   </div>
 </ViewToolbar>
 
@@ -574,7 +581,7 @@
                 <tbody>
                   {#if win.top}<tr class="tw-spacer" aria-hidden="true"><td colspan="3" style="height:{win.top}px"></td></tr>{/if}
                   {#each events.slice(win.start, win.end) as e (e.id)}
-                    <tr class="trow" class:sel={detail?.id === e.id} tabindex="0" onclick={() => (detail = e)} onkeydown={(k) => { if (k.key === 'Enter') detail = e; }}>
+                    <tr class="trow" class:sel={detail?.id === e.id} tabindex="0" onclick={() => (detail = e)} onkeydown={(k) => { if (k.target === k.currentTarget && (k.key === 'Enter' || k.key === ' ')) { k.preventDefault(); detail = e; } }}>
                       <td class="mono dim ts">{fmtTs(e.timestamp)}</td>
                       <td class="mono dim hide-sm" title={e.stream}>{e.stream}</td>
                       <td class="mono msg" title={e.message}>{e.message}</td>
@@ -873,10 +880,13 @@
   .trow {
     cursor: pointer;
   }
-  .trow:hover,
+  .trow:hover {
+    background: var(--surface-2);
+  }
   .trow:focus-visible {
     background: var(--surface-2);
     outline: none;
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
   .trow.sel {
     background: var(--accent-soft);
@@ -985,7 +995,7 @@
     margin: 0 12px 6px;
     font-size: var(--fs-s);
   }
-  @media (max-width: 760px) {
+  @media (max-width: 640px) {
     .logs {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: minmax(120px, 30%) minmax(0, 1fr);

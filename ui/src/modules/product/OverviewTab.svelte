@@ -1144,7 +1144,7 @@
       <select class="field-input" bind:value={fieldDraft}>
         <option value="">Unassigned</option>
         {#if assignablesLoading}
-          <option disabled>Loading…</option>
+          <option disabled>Loading people…</option>
         {/if}
         {#each assignables as u (u.account_id)}
           <option value={u.account_id}>{u.display_name}</option>
@@ -1315,7 +1315,7 @@
           {/each}
         </select>
         {#if versionLoading}
-          <span class="ver-loading">Loading…</span>
+          <span class="ver-loading">Loading the version…</span>
         {/if}
       </div>
 
@@ -1473,7 +1473,7 @@
               <input
                 class="input"
                 bind:value={newTranscriptTitle}
-                placeholder="Title (optional)"
+                placeholder="e.g. Kickoff call, 12 Oct" aria-label="Transcript title (optional)"
                 spellcheck="false"
               />
               <textarea
@@ -1681,7 +1681,7 @@
                                   onclick={() => loadAttachmentUrl(att.id)}
                                   disabled={attachmentLoading[att.id]}
                                 >
-                                  {attachmentLoading[att.id] ? 'Loading…' : 'Load preview'}
+                                  {attachmentLoading[att.id] ? 'Loading preview…' : 'Load preview'}
                                 </button>
                               {/if}
                             </div>
@@ -1699,7 +1699,7 @@
                                   onclick={() => loadAttachmentUrl(att.id)}
                                   disabled={attachmentLoading[att.id]}
                                 >
-                                  {attachmentLoading[att.id] ? 'Loading…' : 'Preview PDF'}
+                                  {attachmentLoading[att.id] ? 'Loading preview…' : 'Preview PDF'}
                                 </button>
                               {/if}
                             </div>
@@ -1762,7 +1762,7 @@
                       aria-haspopup="menu"
                       data-testid="ov-transition-btn"
                     >
-                      {#if transitionWorking}Working…{:else if transitionsLoading}Loading…{:else}Transition <Icon name="chevronDown" size={10} />{/if}
+                      {#if transitionWorking}Working…{:else if transitionsLoading}Loading transitions…{:else}Transition <Icon name="chevronDown" size={10} />{/if}
                     </button>
                   </div>
                 </div>
@@ -1793,7 +1793,7 @@
                       aria-haspopup="menu"
                       data-testid="ov-assignee-btn"
                     >
-                      {#if assigneeWorking}Working…{:else if assignablesLoading}Loading…{:else}Change <Icon name="chevronDown" size={10} />{/if}
+                      {#if assigneeWorking}Working…{:else if assignablesLoading}Loading people…{:else}Change <Icon name="chevronDown" size={10} />{/if}
                     </button>
                   </div>
                 </div>
@@ -1947,7 +1947,7 @@
                     aria-expanded={!collapsed.links}
                   >
                     <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.links ? 'chevronRight' : 'chevronDown'} size={11} /></span>
-                    <span class="jira-section-label">Linked Issues</span>
+                    <span class="jira-section-label">Linked issues</span>
                     <span class="section-count">({issueFull.links.length})</span>
                   </button>
                   {#if !collapsed.links}
@@ -2351,8 +2351,15 @@
     transition: opacity 100ms, background 100ms, color 100ms;
   }
   .title-row:hover .title-edit-btn,
+  .title-row:focus-within .title-edit-btn,
   .title-edit-btn:focus-visible {
     opacity: 1;
+  }
+  /* Touch: no hover to reveal it, so it stays visible. */
+  @media (hover: none) {
+    .title-edit-btn {
+      opacity: 1;
+    }
   }
   .title-edit-btn:hover {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -2796,8 +2803,15 @@
     transition: opacity 100ms, background 100ms, color 100ms;
   }
   .detail-val-row:hover .field-edit-btn,
+  .detail-val-row:focus-within .field-edit-btn,
   .field-edit-btn:focus-visible {
     opacity: 1;
+  }
+  /* Touch: no hover to reveal it, so it stays visible. */
+  @media (hover: none) {
+    .field-edit-btn {
+      opacity: 1;
+    }
   }
   .field-edit-btn:hover {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);

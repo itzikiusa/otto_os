@@ -99,6 +99,25 @@
   // ── generate a new share link ────────────────────────────────────────────────
   async function generate(): Promise<void> {
     if (generating) return;
+    const emailTo = recipientEmail.trim();
+    if (role === 'editor' || emailTo) {
+      const windowLabel = (emailTo ? DURATION_OPTIONS : TTL_OPTIONS).find(
+        (o) => o.secs === (emailTo ? durationSecs : ttlSecs),
+      )?.label;
+      const who = emailTo ? emailTo : 'Anyone who has the link';
+      const can = role === 'editor' ? 'type commands into this terminal' : 'watch this terminal (read-only)';
+      const ok = await confirmer.ask(
+        `${who} will be able to ${can}${windowLabel ? ` for ${windowLabel.replace(' (max)', '')}` : ''}.` +
+          (emailTo ? ` A 6-digit code will be emailed to ${emailTo}; they must enter it to attach.` : '') +
+          ' You can revoke the link at any time.',
+        {
+          title: role === 'editor' ? 'Create an editor link?' : 'Send the access code?',
+          confirmLabel: role === 'editor' ? 'Create editor link' : 'Send code',
+          danger: role === 'editor',
+        },
+      );
+      if (!ok) return;
+    }
     generating = true;
     mintedUrl = null;
     mintedToken = null;
@@ -139,7 +158,7 @@
     if (!mintedUrl) return;
     try {
       await copyTextOrThrow(mintedUrl);
-      toasts.success('Copied!', 'Share link is in your clipboard.');
+      toasts.success('Link copied', 'The share link is in your clipboard.');
     } catch {
       toasts.error('Copy failed', 'Could not access clipboard.');
     }
@@ -321,7 +340,7 @@
     {/if}
 
     <button class="btn primary sm-generate" disabled={generating} onclick={generate}>
-      {generating ? 'Generating…' : 'Generate link'}
+      {generating ? 'Generating…' : role === 'editor' ? 'Create editor link' : 'Generate link'}
     </button>
 
     <!-- ── Minted link + QR ──────────────────────────────────────────── -->
@@ -369,7 +388,7 @@
 
     <div class="sm-shares-list">
       {#if sharesLoading}
-        <div class="sm-empty">Loading…</div>
+        <div class="sm-empty">Loading share links…</div>
       {:else if shares.length === 0}
         <div class="sm-empty">No active share links for this session.</div>
       {:else}
@@ -504,7 +523,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: monospace;
+    font-family: var(--font-mono);
   }
   .sm-copy {
     flex-shrink: 0;
@@ -614,7 +633,7 @@
     overflow: hidden;
   }
   .sm-share-prefix {
-    font-family: monospace;
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;

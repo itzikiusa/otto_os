@@ -96,6 +96,14 @@ export async function typedConfirm(
   return true;
 }
 
+/** Anything that changes cluster state — everything but the read-only status
+ *  check and a plain (soft) ArgoCD refresh. */
+function isMutating(def: ActionDef, params: Record<string, unknown>): boolean {
+  if (def.id === 'rollout_status') return false;
+  if (def.id === 'argocd_refresh') return params.hard === true;
+  return true;
+}
+
 /** Post an action (after its typed confirm when required) and toast the
  *  outcome. Resolves the response, or `null` when cancelled / failed. */
 export async function runAction(
@@ -129,13 +137,16 @@ export async function runAction(
     });
     if (!ok) return null;
     merged.confirm_name = row.name;
-  } else if (def.danger) {
+  } else if (def.danger || (cl?.environment === 'prod' && isMutating(def, merged))) {
     // Danger-flagged entries without a typed confirm (rollout abort, ArgoCD
     // terminate operation) were one click from the red menu item — ask once.
+    // On a PRODUCTION cluster every mutating action asks too (restart, promote,
+    // pause/resume, cronjob trigger/suspend, ArgoCD restart/hard refresh/sync),
+    // naming the action and where it lands.
     const ok = await confirmer.ask(`${what}?`, {
       title: verb,
       confirmLabel: verb,
-      danger: true,
+      danger: !!def.danger,
     });
     if (!ok) return null;
   }

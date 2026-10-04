@@ -54,7 +54,7 @@
       <p class="hint">Consented: {room.members?.filter(m => room.recap?.consented_member_ids.includes(m.id)).map(m => m.name).join(', ') || 'Waiting for everyone'}</p>
     {/if}
     {#if host}<div class="actions"><button class="btn small" onclick={() => panel = true}>Open recap</button>{#if room.recap.state === 'stopped'}<button class="btn small" onclick={openPrepare}>Prepare another recap…</button>{/if}</div>
-      {#if room.recap.state === 'capturing'}<p class="hint">Capturing {captureStatus.audioSources} microphone source(s) and sampling {captureStatus.screenSources} shared screen(s). Hidden or unavailable screens have reduced coverage.</p><button class="btn small" onclick={() => capture?.resumeAudio()}>Retry speech capture</button>{/if}
+      {#if room.recap.state === 'capturing'}<p class="hint">Capturing {captureStatus.audioSources} microphone {captureStatus.audioSources === 1 ? 'source' : 'sources'} and sampling {captureStatus.screenSources} shared {captureStatus.screenSources === 1 ? 'screen' : 'screens'}. Hidden or unavailable screens have reduced coverage.</p><button class="btn small" onclick={() => capture?.resumeAudio()}>Retry speech capture</button>{/if}
       {#if captureStatus.gaps.length}<details><summary>Capture coverage notes ({captureStatus.gaps.length})</summary><ul>{#each captureStatus.gaps as gap}<li>{gap}</li>{/each}</ul></details>{/if}
     {/if}
   {:else if host}<button class="btn small" onclick={openPrepare}>Prepare a full recap…</button><span class="hint">Capture starts only after everyone consents.</span>{/if}

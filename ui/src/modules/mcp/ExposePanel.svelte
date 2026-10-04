@@ -210,7 +210,7 @@
     gap: 10px;
     border: 1px solid var(--border);
     border-top: none;
-    border-radius: 0 0 var(--radius-m, 8px) var(--radius-m, 8px);
+    border-radius: 0 0 var(--radius-m) var(--radius-m);
     background: var(--surface);
     padding: 14px;
   }
@@ -224,7 +224,7 @@
   .snippet {
     position: relative;
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     background: var(--bg);
   }
   .snippet pre {
@@ -251,7 +251,7 @@
     font-size: var(--fs-s);
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     padding: 8px 10px;
     color: var(--text);
     word-break: break-all;
@@ -263,7 +263,7 @@
     width: 100%;
     padding: 9px 10px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
     cursor: pointer;
@@ -284,7 +284,7 @@
     align-items: flex-start;
     gap: 10px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     padding: 10px 12px;
     cursor: pointer;
   }
@@ -311,7 +311,7 @@
     padding: 2px 6px;
     margin-inline-start: 4px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);
   }

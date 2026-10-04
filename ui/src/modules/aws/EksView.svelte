@@ -150,7 +150,7 @@
       <thead><tr><th>Cluster</th>{#if allRegions}<th>Region</th>{/if}<th>Status</th><th>Version</th><th class="hide-sm">Endpoint</th><th class="hide-sm">Created</th><th class="act"></th></tr></thead>
       <tbody>
         {#each shown as c (`${c.region ?? ''}/${c.name}`)}
-          <tr class="trow" tabindex="0" onclick={() => void openDetail(c)} onkeydown={(e) => { if (e.key === 'Enter') void openDetail(c); }} oncontextmenu={(e) => menu(e, c)}>
+          <tr class="trow" tabindex="0" onclick={() => void openDetail(c)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); void openDetail(c); } }} oncontextmenu={(e) => menu(e, c)}>
             <td class="strong"><Icon name="helm" size={13} /> {c.name}</td>
             {#if allRegions}<td class="mono">{c.region ?? '—'}</td>{/if}
             <td><span class="pill" class:ok={c.status === 'ACTIVE'} class:warn={c.status !== 'ACTIVE'}>{c.status}</span></td>
@@ -273,10 +273,13 @@
   .trow {
     cursor: pointer;
   }
-  .trow:hover,
+  .trow:hover {
+    background: var(--surface-2);
+  }
   .trow:focus-visible {
     background: var(--surface-2);
     outline: none;
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
   .strong {
     font-weight: 500;

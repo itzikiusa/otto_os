@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { api, ApiError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -574,7 +575,7 @@
         </div>
       {/if}
     {:else}
-      <p class="muted pad">Select a consumer group to see members and lag.</p>
+      <EmptyState icon="people" title="Pick a consumer group" body={`${groups.length} ${groups.length === 1 ? 'group' : 'groups'} in this cluster. Select one to see its members and lag.`} />
     {/if}
   </div>
 </div>

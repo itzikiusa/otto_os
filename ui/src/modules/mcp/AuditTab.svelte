@@ -172,18 +172,15 @@
         </div>
       {/if}
     </div>
-    {#if loadError && rows.length === 0}
-      <LoadState what="the audit log" {loading} error={loadError} empty onretry={() => void load()} />
-    {:else if loading && rows.length === 0}
-      <p class="muted pad">Loading…</p>
-    {:else if rows.length === 0}
+    <LoadState what="the audit log" {loading} error={loadError} empty={rows.length === 0} onretry={() => void load()}>
+      {#snippet emptyView()}
       <div class="empty">
         <Icon name="note" size={22} />
         <p>
           No calls yet. Calls made by external MCP clients and by sessions through the gateway appear here.
         </p>
       </div>
-    {:else}
+      {/snippet}
       <div class="grid">
         <div class="thead">
           <span>Time</span>
@@ -223,7 +220,7 @@
           </button>
         </div>
       {/if}
-    {/if}
+    </LoadState>
   {/if}
 </div>
 
@@ -249,7 +246,7 @@
     display: inline-flex;
     padding: 2px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     background: var(--bg);
   }
   .views button {
@@ -298,7 +295,7 @@
   input {
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     color: var(--text);
     padding: 6px 8px;
     font-size: var(--fs-m);
@@ -382,12 +379,6 @@
     color: var(--danger);
     font-size: var(--fs-s);
   }
-  .muted {
-    color: var(--text-dim);
-  }
-  .pad {
-    padding: 16px;
-  }
   .empty {
     display: flex;
     flex-direction: column;
@@ -398,7 +389,7 @@
     padding: 36px 24px;
   }
 
-  @media (max-width: 760px) {
+  @media (max-width: 640px) {
     .thead {
       display: none;
     }

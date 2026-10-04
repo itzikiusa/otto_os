@@ -109,11 +109,11 @@
     if (!(await confirmer.ask('Stop this goal loop? A stopped loop can’t be resumed — use Pause to continue later.', { title: 'Stop goal loop', confirmLabel: 'Stop loop' }))) return;
     await act(() => loops.stop(id), 'Couldn’t stop the goal loop');
   }
-  /** ⋯ next to Resume: the destructive verbs stay one step away from the primary. */
+  /** ⋯ next to Pause/Resume: the destructive verbs stay one step away from the primary. */
   function moreMenu(e: MouseEvent): void {
     ctxMenu.show(e, [
       { label: 'Stop loop…', icon: 'square', danger: true, action: () => void stop() },
-      { label: 'Delete loop…', icon: 'trash', danger: true, action: () => void del() },
+      ...(loop?.status === 'running' ? [] : [{ label: 'Delete loop…', icon: 'trash' as const, danger: true, action: () => void del() }]),
     ]);
   }
   // ---- Extend budget (L1): an exhausted loop re-exhausts on a plain Resume,
@@ -175,7 +175,10 @@
   {#snippet actions()}
     {#if loop}
       {#if loop.status === 'running'}
-        <button class="btn small danger" data-overflow="-1" data-icon="square" disabled={acting} onclick={stop}>Stop…</button>
+        <button class="icon-btn" data-overflow="-1" data-icon="more" data-label="More actions" onclick={moreMenu}
+          aria-label="More actions" title="More actions" aria-haspopup="menu">
+          <Icon name="more" size={14} />
+        </button>
         <button class="btn small" data-icon="pause" disabled={acting} onclick={() => act(() => loops.pause(id), 'Couldn’t pause the goal loop')}><Icon name="pause" size={12} /> Pause</button>
       {:else if loop.status === 'paused' || loop.status === 'blocked' || loop.status === 'exhausted'}
         <button class="icon-btn" data-overflow="-1" data-icon="more" data-label="More actions" onclick={moreMenu}

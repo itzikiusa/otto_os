@@ -228,17 +228,14 @@
     </div>
   </div>
 
-  {#if loadError && policies.length === 0}
-    <LoadState what="policies" {loading} error={loadError} empty onretry={() => void load()} />
-  {:else if loading && policies.length === 0}
-    <p class="muted pad">Loading…</p>
-  {:else if policies.length === 0}
+  <LoadState what="policies" {loading} error={loadError} empty={policies.length === 0} onretry={() => void load()}>
+    {#snippet emptyView()}
     <div class="empty">
       <Icon name="split" size={22} />
       <p>No policy rules. Calls fall through to allowlists + per-tool permission.</p>
       <button class="btn primary" onclick={openNew}>Create a rule</button>
     </div>
-  {:else}
+    {/snippet}
     <div class="grid">
       <div class="thead">
         <span>Name</span>
@@ -267,7 +264,7 @@
         </div>
       {/each}
     </div>
-  {/if}
+  </LoadState>
 </div>
 
 {#if formOpen}
@@ -411,7 +408,7 @@
   textarea {
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     color: var(--text);
     padding: 6px 8px;
     font-size: var(--fs-m);
@@ -432,12 +429,6 @@
   }
   .btn.danger {
     color: var(--danger);
-  }
-  .muted {
-    color: var(--text-dim);
-  }
-  .pad {
-    padding: 16px;
   }
   .empty {
     display: flex;

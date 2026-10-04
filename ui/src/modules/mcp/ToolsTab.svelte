@@ -6,6 +6,7 @@
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Switch from '../../lib/components/Switch.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
@@ -228,28 +229,24 @@
           </span>
           <span class="cell"><McpPill kind="injection" value={t.injection_risk} small /></span>
           <span class="cell">
-            <button
-              class="switch"
-              class:on={t.enabled}
-              role="switch"
-              aria-checked={t.enabled}
-              disabled={busyTool[t.id] || !can('configure',t.name)}
-              onclick={() => void patchTool(t, { enabled: !t.enabled })}
-              aria-label={`Enable ${t.name}`}
+            <Switch
+              tone="success"
+              checked={t.enabled}
+              disabled={busyTool[t.id] || !can('configure', t.name)}
+              onchange={() => void patchTool(t, { enabled: !t.enabled })}
+              label={`Enable ${t.name}`}
               title={!can('configure', t.name) ? NO_CONFIGURE : t.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
-            ><span class="knob"></span></button>
+            />
           </span>
           <span class="cell">
-            <button
-              class="switch"
-              class:on={t.require_approval}
-              role="switch"
-              aria-checked={t.require_approval}
-              disabled={busyTool[t.id] || !can('configure',t.name)}
-              onclick={() => void patchTool(t, { require_approval: !t.require_approval })}
-              aria-label={`Require approval for ${t.name}`}
+            <Switch
+              tone="success"
+              checked={t.require_approval}
+              disabled={busyTool[t.id] || !can('configure', t.name)}
+              onchange={() => void patchTool(t, { require_approval: !t.require_approval })}
+              label={`Require approval for ${t.name}`}
               title={!can('configure', t.name) ? NO_CONFIGURE : t.require_approval ? 'Requires approval — click to allow without approval' : 'No approval required — click to require it'}
-            ><span class="knob"></span></button>
+            />
           </span>
           <span class="cell">
             <select
@@ -429,42 +426,15 @@
   textarea {
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     color: var(--text);
     padding: 5px 8px;
     font-size: var(--fs-m);
   }
-  .switch {
-    width: 30px;
-    height: 17px;
-    border-radius: 9px;
-    border: none;
-    background: color-mix(in srgb, var(--text-dim) 30%, transparent);
-    position: relative;
-    cursor: pointer;
-    padding: 0;
-    flex: none;
-  }
-  .switch.on {
-    background: var(--success);
-  }
-  .switch .knob {
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    background: #fff;
-    transition: left 120ms ease;
-  }
-  .switch.on .knob {
-    left: 15px;
-  }
   .tester {
     margin: 14px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     background: var(--surface);
   }
   .tools.embedded .tester {
@@ -534,7 +504,7 @@
   }
   .result {
     border: 1px solid var(--border);
-    border-radius: var(--radius-s, 6px);
+    border-radius: var(--radius-s);
     background: var(--bg);
     padding: 10px;
   }
@@ -601,7 +571,7 @@
     padding: 36px 24px;
   }
 
-  @media (max-width: 760px) {
+  @media (max-width: 640px) {
     .thead {
       display: none;
     }

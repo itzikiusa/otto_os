@@ -390,10 +390,13 @@
   .trow {
     cursor: pointer;
   }
-  .trow:hover,
+  .trow:hover {
+    background: var(--surface-2);
+  }
   .trow:focus-visible {
     background: var(--surface-2);
     outline: none;
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
   .strong {
     font-weight: 500;

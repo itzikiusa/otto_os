@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { loadErrorText } from '../../../lib/loadError';
   import { radioKey } from '../../../lib/radioKey';
   // Per-cluster Monitor view — the Monitor half of the cluster workspace
   // (Resources | Monitor switch). Tabs live in the URL
@@ -182,7 +183,7 @@
       restoreScroll();
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -286,7 +287,7 @@
       ]);
       if (request === seriesRequest) series = { mem, rps, err: null };
     } catch (e) {
-      if (request === seriesRequest && !ctrl.signal.aborted) seriesError = e instanceof Error ? e.message : String(e);
+      if (request === seriesRequest && !ctrl.signal.aborted) seriesError = loadErrorText(e);
     } finally {
       if (request === seriesRequest) seriesLoading = false;
     }
@@ -313,7 +314,7 @@
       restoreScroll();
     } catch (e) {
       if (request !== eventsRequest || ctrl.signal.aborted) return;
-      eventsError = e instanceof Error ? e.message : String(e);
+      eventsError = loadErrorText(e);
     } finally {
       if (request === eventsRequest) eventsLoading = false;
     }

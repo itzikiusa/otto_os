@@ -5,6 +5,7 @@
   // retention, and a "Test probes" dry run that shows what one pod parses to.
   // Client-side validation mirrors the daemon's limits so most mistakes never
   // round-trip.
+  import { loadErrorText } from '../../../lib/loadError';
   import { untrack } from 'svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
@@ -62,7 +63,7 @@
       nsText = r.config.namespaces.join(', ');
       loadError = '';
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -160,7 +161,7 @@
       }
       testResult = await k8sApi.monitorTest(cluster.id, { pod: testPod.trim() || undefined });
     } catch (e) {
-      testError = e instanceof Error ? e.message : String(e);
+      testError = loadErrorText(e);
     } finally {
       testBusy = false;
     }
@@ -611,7 +612,7 @@
     overflow: auto;
     color: var(--text-dim);
   }
-  @media (max-width: 760px) {
+  @media (max-width: 640px) {
     .grid3,
     .grid2,
     .grid-probe,
