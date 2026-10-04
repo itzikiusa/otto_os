@@ -302,7 +302,7 @@ impl SchemaRegistry {
         Ok(out)
     }
 
-    /// Fetch the version history for a subject (all registered versions, oldest first).
+    /// List version identifiers (oldest first); fetch selected bodies via detail.
     pub async fn subject_versions(&self, subject: &str) -> Result<Vec<SchemaVersion>> {
         // First get the list of version numbers from the registry.
         let url = format!("{}/subjects/{}/versions", self.base, urlenc(subject));
@@ -316,34 +316,15 @@ impl SchemaRegistry {
         }
         let version_nums: Vec<i32> = resp.json().await.map_err(up)?;
 
-        #[derive(serde::Deserialize)]
-        struct VersionResp {
-            version: i32,
-            id: i32,
-            schema: String,
-            #[serde(rename = "schemaType")]
-            schema_type: Option<String>,
-        }
-
-        let mut out = Vec::with_capacity(version_nums.len());
-        for v in version_nums {
-            let vu = format!("{}/subjects/{}/versions/{v}", self.base, urlenc(subject));
-            let Ok(r) = self.get(vu).send().await else {
-                continue;
-            };
-            if !r.status().is_success() {
-                continue;
-            }
-            if let Ok(vr) = r.json::<VersionResp>().await {
-                out.push(SchemaVersion {
-                    version: vr.version,
-                    id: vr.id,
-                    schema_type: vr.schema_type.unwrap_or_else(|| "AVRO".into()),
-                    schema: vr.schema,
-                });
-            }
-        }
-        Ok(out)
+        // Bodies are fetched only for the comparison's two selected versions.
+        // A history with 100 versions costs one registry request, not 101.
+        let mut version_nums = version_nums;
+        version_nums.sort_unstable();
+        version_nums.dedup();
+        Ok(version_nums
+            .into_iter()
+            .map(|version| SchemaVersion { version })
+            .collect())
     }
 
     /// Fetch one specific version of a subject. `version` may be a number string
@@ -486,6 +467,11 @@ mod tests {
                     h.fetch_add(1, Ordering::SeqCst);
                     let (status, body) = if req.starts_with("GET /schemas/ids/1 ") {
                         ("200 OK", r#"{"schema":"\"string\""}"#.to_string())
+                    } else if req.starts_with("GET /subjects/history/versions ") {
+                        (
+                            "200 OK",
+                            serde_json::to_string(&(1..=100).collect::<Vec<_>>()).unwrap(),
+                        )
                     } else {
                         ("404 Not Found", r#"{"error_code":40403}"#.to_string())
                     };
@@ -512,6 +498,16 @@ mod tests {
             negative: DashMap::new(),
             subjects_cache: std::sync::Mutex::new(None),
         }
+    }
+
+    #[tokio::test]
+    async fn version_history_lists_ids_without_fetching_schema_bodies() {
+        let (base, hits) = mock_registry().await;
+        let versions = registry(&base).subject_versions("history").await.unwrap();
+        assert_eq!(versions.len(), 100);
+        assert_eq!(versions[0].version, 1);
+        assert_eq!(versions[99].version, 100);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     /// N3: an unknown id is asked about once per `NEGATIVE_TTL`, not on every
