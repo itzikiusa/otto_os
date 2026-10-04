@@ -879,8 +879,27 @@ pub async fn refresh_session_costs(ctx: &ServerCtx, workspace_id: &Id) {
         .list_items(workspace_id, &filter)
         .await
         .unwrap_or_default();
-    for it in &items {
-        refresh_item_cost(ctx, workspace_id, it).await;
+    let ids = items
+        .iter()
+        .filter(|item| matches!(item.kind, WorkKind::Session | WorkKind::ExternalTrigger))
+        .map(|item| item.source_id.clone())
+        .collect::<Vec<_>>();
+    let Some(totals) = ctx.usage.session_totals_for_ids(&ids).await else {
+        return;
+    };
+    let costs = totals
+        .into_iter()
+        .map(|total| (total.session_id, total.cost_usd))
+        .collect::<std::collections::HashMap<_, _>>();
+    for item in &items {
+        if !matches!(item.kind, WorkKind::Session | WorkKind::ExternalTrigger) {
+            continue;
+        }
+        if let Some(cost) = costs.get(&item.source_id) {
+            if cost.is_finite() && *cost >= 0.0 && (*cost - item.cost_so_far).abs() > f64::EPSILON {
+                let _ = ctx.workgraph.set_cost(workspace_id, &item.id, *cost).await;
+            }
+        }
     }
 }
 

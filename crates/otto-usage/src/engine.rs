@@ -1134,6 +1134,35 @@ impl UsageEngine {
         rows.into_iter().find(|t| t.events > 0)
     }
 
+    /// Lifetime totals for a caller-scoped set of sessions. Missing IDs stay
+    /// absent (rather than manufacturing a zero), and no dashboard date/row
+    /// limit changes the meaning of a work item's accumulated cost.
+    pub async fn session_totals_for_ids(
+        &self,
+        session_ids: &[String],
+    ) -> Option<Vec<SessionTotals>> {
+        if session_ids.is_empty() {
+            return Some(Vec::new());
+        }
+        if session_ids.len() > 500 {
+            return None;
+        }
+        let ids = session_ids
+            .iter()
+            .map(|id| format!("'{}'", ch_string(id)))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.rows(&format!(
+            "SELECT session_id, any(workspace_id) AS workspace_id, any(provider) AS provider,
+                count() AS events, sum(input_tokens) AS input_tokens,
+                sum(output_tokens) AS output_tokens, sum(cache_read_tokens) AS cache_read_tokens,
+                sum(cache_write_tokens) AS cache_write_tokens,
+                sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                round(sum(cost_usd), 6) AS cost_usd
+             FROM usage_events WHERE session_id IN ({ids}) GROUP BY session_id"
+        )).await.ok()
+    }
+
     /// Full dashboard payload for the window. `otto_only` excludes externally
     /// recorded (non-Otto) sessions.
     ///
