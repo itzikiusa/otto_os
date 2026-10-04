@@ -1912,7 +1912,7 @@
     display: grid;
     place-items: center;
     color: var(--accent-text);
-    animation: otto-spin 0.9s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
   
   .rg-overlay-text {

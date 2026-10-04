@@ -185,7 +185,7 @@ html[data-theme='native'][data-scheme='light'] {
   --text: #1d1d1f;
   --text-dim: #636368;
   --term-bg: #fbfbfd;
-  --shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+  --shadow: var(--glass-shadow);
 }
 
 html[data-theme='native'][data-scheme='dark'] {
@@ -198,7 +198,7 @@ html[data-theme='native'][data-scheme='dark'] {
   --text: #f2f2f5;
   --text-dim: #acacb3;
   --term-bg: #131318;
-  --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  --shadow: var(--glass-shadow);
 }
 
 /* ---------- Pro Dark theme ---------- */
@@ -214,7 +214,7 @@ html[data-theme='pro-dark'][data-scheme='dark'] {
   --text: #e8e8ee;
   --text-dim: #9a9aa8;
   --term-bg: #0f0f14;
-  --shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
+  --shadow: var(--glass-shadow);
   --accent: #6c5ce7;
 }
 
@@ -230,7 +230,7 @@ html[data-theme='warm'][data-scheme='light'] {
   --text: #3d3a35;
   --text-dim: #605c56;
   --term-bg: #fbfaf7;
-  --shadow: 0 8px 30px rgba(60, 50, 30, 0.14);
+  --shadow: var(--glass-shadow);
   --accent: #0f9d58;
 }
 
@@ -244,7 +244,7 @@ html[data-theme='warm'][data-scheme='dark'] {
   --text: #e8e4da;
   --text-dim: #ada79b;
   --term-bg: #1a1916;
-  --shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  --shadow: var(--glass-shadow);
   --accent: #2bb673;
   /* White on this bright green is 2.61:1 — fill with the accent itself and
      put dark text on it instead (6.8:1). */

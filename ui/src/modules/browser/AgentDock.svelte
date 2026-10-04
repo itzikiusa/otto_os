@@ -8,6 +8,7 @@
   // page and marks as context. The bound session is an ordinary agent session
   // (it also appears in Agents), remembered per workspace.
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
@@ -69,7 +70,7 @@
       browser.setAgentSession(s.id);
       ui.setBrowserAgentOpen(true);
     } catch (e) {
-      toasts.error('Could not start agent', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start agent', e);
     } finally {
       creating = false;
     }

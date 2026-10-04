@@ -1,5 +1,6 @@
 <script lang="ts">
   import PathField from '../../lib/components/PathField.svelte';
+  import { toastError } from '../../lib/toastError';
   // One pane: a compact, width-adaptive session header (status + title first;
   // everything secondary in the details chip or the ⋯ menu) + terminal or chat.
   import Terminal from '../../lib/components/Terminal.svelte';
@@ -194,7 +195,7 @@
       ShareModal ??= (await import('./ShareModal.svelte')).default;
       shareOpen = true;
     } catch (e) {
-      toasts.error("Couldn't open sharing", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t open sharing', e);
     }
   }
   let roomOpen = $state(false);
@@ -383,7 +384,7 @@
       }
       dirsOpen = false;
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the session', e);
     } finally {
       dirsBusy = false;
     }
@@ -416,7 +417,7 @@
     try {
       await ws.renameSession(sessionId, next);
     } catch (e) {
-      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename the session', e);
     }
   }
 
@@ -433,7 +434,7 @@
       await ws.updateSessionMeta(sessionId, { keep_alive: !keepAlive });
       toasts.info(keepAlive ? 'Keep-alive disabled' : 'Keep-alive enabled', keepAlive ? 'Session may auto-suspend.' : 'Session will not be auto-suspended.');
     } catch (e) {
-      toasts.error('Keep-alive failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t change keep-alive', e);
     }
   }
 
@@ -441,7 +442,7 @@
     try {
       await ws.archiveSession(sessionId);
     } catch (e) {
-      toasts.error('Archive failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t archive the session', e);
     }
   }
 
@@ -455,7 +456,7 @@
       await ws.detachIssue(sessionId);
       toasts.info('Issue detached');
     } catch (e) {
-      toasts.error('Detach failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t detach the session', e);
     }
   }
 
@@ -1199,7 +1200,7 @@
     flex-shrink: 0;
     height: 18px;
     padding: 0 7px;
-    border-radius: 99px;
+    border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--warning);
@@ -1261,7 +1262,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     padding: 0 6px;
-    border-radius: 99px;
+    border-radius: 999px;
     cursor: pointer;
   }
   .crumb-text {
@@ -1283,7 +1284,7 @@
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     padding: 0 7px;
-    border-radius: 99px;
+    border-radius: 999px;
     white-space: nowrap;
   }
   /* The details chip: provider icon (+ name · idle countdown · folder on a

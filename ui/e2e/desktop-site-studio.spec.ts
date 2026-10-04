@@ -119,9 +119,9 @@ test('edit a section from the inspector and in place; toolbars stay on screen', 
 
   // Brand swatches come from the linked kit; a raw hex is flagged off-brand.
   await expect(inspector).toContainText('from Teal kit');
-  await inspector.getByLabel('Custom colour (hex)').fill('#123456');
-  await inspector.getByLabel('Custom colour (hex)').blur();
-  await expect(inspector).toContainText('Off-brand colour');
+  await inspector.getByLabel('Custom color (hex)').fill('#123456');
+  await inspector.getByLabel('Custom color (hex)').blur();
+  await expect(inspector).toContainText('Off-brand color');
 
   // Mobile breakpoint narrows the frame; Publish menu stays on screen.
   await page.getByTestId('site-bp-mobile').click();

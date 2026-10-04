@@ -2,6 +2,7 @@
   // ⌘T sheet: workspace (current / none), provider (from /meta.providers),
   // title, cwd.
   import Modal from '../../lib/components/Modal.svelte';
+  import { toastError } from '../../lib/toastError';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import AccountPicker from '../../lib/components/AccountPicker.svelte';
   import NetworkProfilePicker from '../connections/NetworkProfilePicker.svelte';
@@ -376,7 +377,7 @@
       }
       onclose();
     } catch (e) {
-      toasts.error('Could not create session', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create session', e);
     } finally {
       busy = false;
     }
@@ -812,7 +813,7 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 1px 6px;
-    border-radius: 99px;
+    border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     color: var(--accent-text);
   }

@@ -403,7 +403,7 @@
   .drop-cap {
     position: relative;
     padding: 2px 10px;
-    border-radius: 99px;
+    border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-contrast);

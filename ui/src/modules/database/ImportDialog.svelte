@@ -199,7 +199,7 @@
           spellcheck="false"
           placeholder="~/Downloads/data.csv"
         />
-        <button class="tb-btn" onclick={() => (pickingFile = true)} title="Browse the daemon host">
+        <button class="btn small" onclick={() => (pickingFile = true)} title="Browse the daemon host">
           <Icon name="folder" size={12} />Browse…
         </button>
       </div>
@@ -318,24 +318,6 @@
   }
   .imp-dir .imp-input {
     flex: 1;
-  }
-  .tb-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    height: 30px;
-    padding: 0 9px;
-    font-size: var(--fs-s);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .tb-btn:hover {
-    color: var(--text);
-    border-color: var(--accent);
   }
   .imp-dest {
     font-size: var(--fs-s);

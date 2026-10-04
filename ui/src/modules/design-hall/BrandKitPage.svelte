@@ -76,7 +76,7 @@
     <BrandEditor id={kitId} {kits} onnew={openNew} />
   {/key}
 {:else}
-  <PageHeader title="Brand Kit" subtitle="Colours, type and voice every studio uses" crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]} />
+  <PageHeader title="Brand Kit" subtitle="Colors, type and voice every studio uses" crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]} />
   <PageBody>
     {#if (library.loading && !library.loaded) || (library.loaded && kits.length > 0)}
       <Skeleton rows={2} height={200} />
@@ -90,7 +90,7 @@
         variant="page"
         icon="palette"
         title="No brand kit yet"
-        body="A brand kit holds your colours, type scale, spacing, logos and voice as one versioned document. Every studio reads its tokens by name, and a change shows which designs it reaches before you save."
+        body="A brand kit holds your colors, type scale, spacing, logos and voice as one versioned document. Every studio reads its tokens by name, and a change shows which designs it reaches before you save."
         actionLabel={canEdit ? 'Create brand kit' : undefined}
         actionIcon="plus"
         onaction={canEdit ? openNew : undefined}

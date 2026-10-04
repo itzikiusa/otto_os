@@ -5,6 +5,7 @@
   // blocks (Mermaid, Code, JSON, Image, Frame, Freehand). Each button shows its
   // single-key shortcut in the tooltip.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { SHAPE_VARIANTS, type Tool } from './tools';
 
   interface Props {
@@ -13,7 +14,6 @@
   }
   let { activeTool, onpick }: Props = $props();
 
-  let shapeMenu = $state(false);
 
   interface ToolBtn {
     tool: Tool;
@@ -36,6 +36,19 @@
   ];
 
   const isShapeActive = $derived(activeTool.startsWith('shape:'));
+
+  // The shape variants open in the shared ctxMenu: it clamps into the viewport,
+  // closes on Esc / outside click, and returns focus to the Shape button.
+  function openShapeMenu(e: MouseEvent): void {
+    ctxMenu.showAt(
+      e.currentTarget as HTMLElement,
+      SHAPE_VARIANTS.map((v) => ({
+        label: v.label,
+        checked: activeTool === `shape:${v.variant}`,
+        action: () => onpick(`shape:${v.variant}`),
+      })),
+    );
+  }
 </script>
 
 <div class="rail">
@@ -52,33 +65,16 @@
   {/each}
 
   <!-- Shape: a button that opens a variant menu -->
-  <div class="shape-wrap">
-    <button
-      class="tool"
-      class:active={isShapeActive}
-      title="Shape (R)"
-      aria-label="Shape"
-      onclick={() => (shapeMenu = !shapeMenu)}
-    >
-      <Icon name="square" />
-    </button>
-    {#if shapeMenu}
-      <div class="shape-menu" role="menu">
-        {#each SHAPE_VARIANTS as v (v.variant)}
-          <button
-            role="menuitem"
-            class:active={activeTool === `shape:${v.variant}`}
-            onclick={() => {
-              onpick(`shape:${v.variant}`);
-              shapeMenu = false;
-            }}
-          >
-            {v.label}
-          </button>
-        {/each}
-      </div>
-    {/if}
-  </div>
+  <button
+    class="tool"
+    class:active={isShapeActive}
+    title="Shape (R)"
+    aria-label="Shape"
+    aria-haspopup="menu"
+    onclick={openShapeMenu}
+  >
+    <Icon name="square" />
+  </button>
 
   <button
     class="tool"
@@ -142,37 +138,5 @@
     height: 1px;
     background: var(--border);
     margin: 5px 0;
-  }
-  .shape-wrap {
-    position: relative;
-  }
-  .shape-menu {
-    position: absolute;
-    left: 38px;
-    top: 0;
-    display: flex;
-    flex-direction: column;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
-    padding: 4px;
-    z-index: 10;
-    min-width: 130px;
-  }
-  .shape-menu button {
-    text-align: start;
-    padding: 6px 8px;
-    border: none;
-    background: none;
-    color: var(--text);
-    border-radius: var(--radius-s);
-    font-size: var(--fs-m);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .shape-menu button:hover,
-  .shape-menu button.active {
-    background: var(--surface-2);
   }
 </style>

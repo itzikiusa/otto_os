@@ -38,7 +38,7 @@
 
 <script lang="ts">
   // One widget on the Home desktop: a quiet header (kind icon + title; the
-  // refresh / zoom / menu controls surface on hover or focus), the kind's live
+  // refresh / zoom / menu controls surface on hover or focus), the kind’s live
   // body, and — in the grid — a drag grip for reordering plus a corner handle
   // for resizing in grid units. The same component renders the zoomed
   // (full-page) widget, minus the grid affordances. Widgets are opaque content
@@ -50,6 +50,8 @@
   import { home, COLS, GAP_PX, MIN_H, MAX_H, MIN_W, ROW_PX, type HomeBox } from './home.svelte';
   import { kindDef } from './kinds';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   interface Props {
     box: HomeBox;
@@ -61,7 +63,7 @@
     /** Drag-reorder plumbing (grid only). */
     ondragbox?: (id: string) => void;
     ondropon?: (id: string) => void;
-    /** False while the box's space is not the one on screen (every space
+    /** False while the box’s space is not the one on screen (every space
      *  stays mounted): the body pauses its poller and keeps its data. */
     active?: boolean;
   }
@@ -70,16 +72,16 @@
   const def = $derived(kindDef(box.kind));
   const Body = $derived(bodies.get(box.kind) ?? null);
   const hasLoader = $derived(box.kind in BODY_LOADERS);
-  let loadFailed = $state(false);
+  let loadFailed = $state<string | null>(null);
   let loadAttempt = $state(0);
   $effect(() => {
     const kind = box.kind;
     void loadAttempt;
     if (bodies.has(kind)) return;
     let live = true;
-    loadFailed = false;
-    loadBody(kind).catch(() => {
-      if (live) loadFailed = true;
+    loadFailed = null;
+    loadBody(kind).catch((e) => {
+      if (live) loadFailed = loadErrorText(e);
     });
     return () => {
       live = false;
@@ -88,12 +90,12 @@
   function retryLoad(): void {
     loadAttempt += 1;
   }
-  // Bumped by the header's refresh button; each box body re-fetches on change.
+  // Bumped by the header’s refresh button; each box body re-fetches on change.
   let tick = $state(0);
 
   // ── Resize (grid units) ──────────────────────────────────────────────────
   // Pointer-capture drag on the corner handle. The column width is measured
-  // from the tile's own box (cols = current span) so no grid metrics need to
+  // from the tile’s own box (cols = current span) so no grid metrics need to
   // be threaded down; rows are the fixed ROW_PX unit.
   let el = $state<HTMLElement | null>(null);
   let resizing = $state(false);
@@ -220,10 +222,7 @@
     {#if Body}
       <Body {box} {viewId} {zoomed} {tick} {active} />
     {:else if loadFailed}
-      <div class="hb-fail" role="alert">
-        <span>Couldn't load this widget.</span>
-        <button class="btn small" onclick={retryLoad}>Retry</button>
-      </div>
+      <LoadState what="this widget" variant="compact" error={loadFailed} empty={true} onretry={retryLoad} />
     {:else if hasLoader}
       <Skeleton rows={3} />
     {/if}
@@ -336,15 +335,6 @@
   .hb-body > :global(*) {
     flex: 1;
     min-height: 0;
-  }
-  .hb-fail {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
   }
   .resize {
     position: absolute;

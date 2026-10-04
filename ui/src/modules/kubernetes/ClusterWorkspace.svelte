@@ -24,6 +24,7 @@
   import type { K8sCluster, K8sResourceKind, K8sRow } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import NamespacePicker from './NamespacePicker.svelte';
@@ -422,6 +423,7 @@
   {/snippet}
   </PageHeader>
 
+  <PageBody fill padded={false}>
   {#if k8s.k9sSessionId}
     <div class="k9s">
       <div class="k9s-bar">
@@ -527,6 +529,7 @@
       {/if}
     </div>
   {/if}
+  </PageBody>
 </div>
 
 {#if scaleFor}

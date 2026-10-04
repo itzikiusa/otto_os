@@ -125,7 +125,7 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .spin {
-      animation: otto-spin 0.9s linear infinite;
+      animation: otto-spin 0.8s linear infinite;
     }
   }
   

@@ -3,6 +3,7 @@
   // canvas. One agent turn → blocks inserted near the existing content. Stays
   // open after a run so you can refine/regenerate; Esc or the ✕ closes it.
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { AssistMode } from './types';
@@ -53,7 +54,7 @@
         toasts.info('Nothing to add', res.note || 'The agent did not return a diagram.');
       }
     } catch (e) {
-      toasts.error('Ask Otto failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t ask Otto', e);
     } finally {
       busy = false;
     }

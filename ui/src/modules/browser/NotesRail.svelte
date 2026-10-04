@@ -7,8 +7,8 @@
   // WS event, which the store applies in place — no polling here.
 
   import type { BrowserAnnotation } from '../../lib/api/types';
+  import { toastError } from '../../lib/toastError';
   import { browser } from '../../lib/stores/browser.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import SendToSession from './SendToSession.svelte';
 
@@ -27,7 +27,7 @@
       await browser.updateAnnotationComment(id, editText);
       editingId = null;
     } catch (e) {
-      toasts.error('Failed to update note', e instanceof Error ? e.message : undefined);
+      toastError('Couldn’t update note', e);
     }
   }
 
@@ -39,7 +39,7 @@
     try {
       await browser.deleteAnnotation(id);
     } catch (e) {
-      toasts.error('Failed to delete mark', e instanceof Error ? e.message : undefined);
+      toastError('Couldn’t delete mark', e);
     }
   }
 </script>

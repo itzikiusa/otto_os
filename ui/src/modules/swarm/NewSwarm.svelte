@@ -1,6 +1,7 @@
 <script lang="ts">
   // Create a swarm — from a preset (5 templates) or blank.
   import Modal from '../../lib/components/Modal.svelte';
+  import { toastError } from '../../lib/toastError';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { toasts } from '../../lib/toast.svelte';
 
@@ -25,7 +26,7 @@
       toasts.success('Swarm created');
       onclose();
     } catch (e) {
-      toasts.error("Couldn't create the swarm", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the swarm', e);
     } finally {
       busy = false;
     }

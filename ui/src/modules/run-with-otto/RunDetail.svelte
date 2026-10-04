@@ -62,7 +62,7 @@
   }
 
   async function cancel(): Promise<void> {
-    if (!(await confirmer.ask('Cancel this run? The agent stops and the run can’t be resumed — you would launch a new one.', { title: 'Stop this run?', confirmLabel: 'Stop run', cancelLabel: 'Keep running' }))) return;
+    if (!(await confirmer.ask('Stop this run? The agent stops and the run can’t be resumed — you would launch a new one.', { title: 'Stop this run?', confirmLabel: 'Stop run', cancelLabel: 'Keep running' }))) return;
     error = '';
     busy = true;
     try {
@@ -115,7 +115,7 @@
       <!-- Stop stays reachable at the top while the run is live (patterns.md §1),
            never beside a primary. -->
       {#if !isTerminal(run.status)}
-        <button class="btn small danger" disabled={busy} onclick={cancel}>Stop run…</button>
+        <button class="btn small danger" disabled={busy} onclick={cancel}><Icon name="stop" size={12} /> Stop run…</button>
       {/if}
       <button class="icon-btn" onclick={onClose} aria-label="Close run detail" title="Close run detail">
         <Icon name="x" size={14} />
@@ -203,6 +203,13 @@
   {#if run.status === 'awaiting_approval'}
     <section class="block gate">
       <h3 class="h">Awaiting your approval</h3>
+      <!-- Who produced it and what you are approving: agent, branch, proof and findings. -->
+      <p class="gate-who"><AgentByline provider={run.provider} model={run.model} at={run.updated_at} label="Run output" /></p>
+      <p class="gate-what">
+        <span class="mono">{run.branch || 'the run branch'}</span>
+        · {run.findings_total} {run.findings_total === 1 ? 'finding' : 'findings'}{run.findings_blocking > 0 ? ` (${run.findings_blocking} blocking)` : ''}
+        · {run.proof_status ? `proof ${run.proof_status}` : 'no proof pack yet'}{run.result_summary ? ` · ${run.result_summary}` : ''}
+      </p>
       <p class="gate-note">
         Approve to draft the PR from <span class="mono">{run.branch || 'the run branch'}</span>. Nothing is pushed
         until you open the PR. Deny ends the run and removes its worktree.
@@ -307,6 +314,7 @@
     padding: 10px 12px;
     background: var(--warning-soft);
   }
+  .gate-who, .gate-what { margin: 0; font-size: var(--fs-s); color: var(--text-dim); line-height: 1.45; overflow-wrap: anywhere; }
   .gate-note { margin: 0; font-size: var(--fs-s); color: var(--text); line-height: 1.45; }
   .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .hint { font-size: var(--fs-s); }

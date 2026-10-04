@@ -257,6 +257,7 @@ test('a saved edit finishing after navigation cannot close the next PR editor', 
   await page.getByTitle('Edit the title and description on GitHub').click();
   await page.locator('.prd-title-input').fill('New PR one title');
   await page.getByRole('button', { name: 'Save to GitHub', exact: true }).click();
+  await page.getByRole('dialog', { name: /^Update PR #/ }).getByRole('button', { name: 'Update PR', exact: true }).click();
   await expect.poll(() => !!saving).toBe(true);
   await page.evaluate(id => { location.hash = `#/git/${id}/pr/2`; }, repoId);
   await page.getByRole('button', { name: 'Discard', exact: true }).click();
@@ -335,6 +336,7 @@ test('PR title and description cannot accept edits while their save is pending',
   await page.getByTitle('Edit the title and description on GitHub').click();
   await page.locator('.prd-title-input').fill('Save this title');
   await page.getByRole('button', { name: 'Save to GitHub', exact: true }).click();
+  await page.getByRole('dialog', { name: /^Update PR #/ }).getByRole('button', { name: 'Update PR', exact: true }).click();
   await expect.poll(() => !!saving).toBe(true);
   await expect(page.getByRole('textbox', { name: 'Pull request title', exact: true })).toBeDisabled();
   await expect(page.getByRole('textbox', { name: 'Pull request description' })).toBeDisabled();

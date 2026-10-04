@@ -7,11 +7,11 @@
   // caller wires the actual API call.
   import type { Snippet } from 'svelte';
   import DenySheet from './DenySheet.svelte';
-  import RelTime from './RelTime.svelte';
+  import ApprovalOutcome from './ApprovalOutcome.svelte';
 
   interface Decided {
-    /** `approved` or anything else (rendered as Denied). */
-    outcome: 'approved' | 'denied';
+    /** `approved`, `expired`, or anything else (rendered as Denied). */
+    outcome: 'approved' | 'denied' | 'expired';
     by?: string | null;
     at?: string | number | null;
     /** The reason / note recorded with the decision. */
@@ -29,6 +29,9 @@
     disabledReason?: string;
     /** Primary verb; defaults to "Approve". */
     approveLabel?: string;
+    /** Busy label for the primary; defaults to "Approving…". Name the verb
+     *  when approveLabel is not "Approve" ("Sending…"). */
+    approveBusyLabel?: string;
     /** What a denial stops, for the sheet hint ("the PR draft", "this edit"). */
     denyTarget?: string;
     denyTitle?: string;
@@ -50,6 +53,7 @@
     disabled = false,
     disabledReason,
     approveLabel = 'Approve',
+    approveBusyLabel = 'Approving…',
     denyTarget,
     denyTitle = 'Deny request',
     askReason = true,
@@ -69,11 +73,7 @@
 </script>
 
 {#if decided}
-  <div class="decided" data-testid={testid}>
-    <span>{decided.outcome === 'approved' ? 'Approved' : 'Denied'}{decided.by ? ` by ${decided.by}` : ''}</span>
-    {#if decided.at != null && decided.at !== ''}<span aria-hidden="true">·</span><RelTime iso={decided.at} />{/if}
-    {#if decided.note}<span aria-hidden="true">·</span><span class="note">“{decided.note}”</span>{/if}
-  </div>
+  <ApprovalOutcome outcome={decided.outcome} by={decided.by} at={decided.at} note={decided.note} {testid} />
 {:else}
   <div class="actions" data-testid={testid}>
     {@render extra?.()}
@@ -90,7 +90,7 @@
       disabled={off}
       title={disabled ? disabledReason : undefined}
       onclick={() => void onapprove()}
-    >{busy === 'approve' ? 'Approving…' : approveLabel}</button>
+    >{busy === 'approve' ? approveBusyLabel : approveLabel}</button>
   </div>
 {/if}
 
@@ -111,16 +111,5 @@
     align-items: center;
     justify-content: flex-end;
     gap: 8px;
-  }
-  .decided {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 4px 6px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  .note {
-    overflow-wrap: anywhere;
   }
 </style>

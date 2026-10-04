@@ -206,6 +206,7 @@ test('request changes composer locks pending content and can retry a failed send
   const panel = page.locator('.prd-request-changes');
   await panel.getByLabel('What needs to change').fill('Please cover the retry failure');
   await panel.getByRole('button', { name: 'Request changes', exact: true }).click();
+  await page.getByRole('dialog', { name: /^Request changes on PR #1/ }).getByRole('button', { name: 'Request changes', exact: true }).click();
   await expect.poll(() => !!pending).toBe(true);
   await expect(panel.getByLabel('What needs to change')).toBeDisabled();
   await expect(panel.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled();
@@ -214,6 +215,7 @@ test('request changes composer locks pending content and can retry a failed send
   await expect(panel.getByLabel('What needs to change')).toHaveValue('Please cover the retry failure');
   pending = undefined;
   await panel.getByRole('button', { name: 'Request changes', exact: true }).click();
+  await page.getByRole('dialog', { name: /^Request changes on PR #1/ }).getByRole('button', { name: 'Request changes', exact: true }).click();
   await expect.poll(() => !!pending).toBe(true);
   expect(pending!.request().postDataJSON().body).toBe('Please cover the retry failure');
   await pending!.fulfill({json: {}});

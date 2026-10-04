@@ -180,14 +180,14 @@
   </div>
   <p class="hint-line">Right-to-left mirrors the layout for RTL languages (Hebrew, Arabic).</p>
 
-  <div class="section-title">Accent colour</div>
+  <div class="section-title">Accent color</div>
   <div class="row">
     <input
       type="color"
       class="accent-input"
       value={ui.accent || (/^#[0-9a-f]{6}$/i.test(accentNow) ? accentNow : '#0a84ff')}
       oninput={(e) => ui.setAccent(e.currentTarget.value)}
-      aria-label="Accent colour"
+      aria-label="Accent color"
     />
     <span class="accent-val">{ui.accent ? ui.accent.toUpperCase() : 'Theme default'}</span>
     {#if ui.accent}
@@ -254,8 +254,8 @@
     Hebrew &amp; other right-to-left text renders crisply via the bundled Cousine font in every
     option. Change applies to open terminals instantly.
   </p>
-  <!-- Same store setters as the session header's terminal controls, so the
-       two can't drift; also the only way back when those controls are hidden. -->
+  <!-- Same store setters as the session header’s terminal controls, so the
+       two can’t drift; also the only way back when those controls are hidden. -->
   <div class="row term-size-row" role="group" aria-label="Terminal font size">
     <span class="term-size-label">Font size</span>
     <button class="sb-btn" onclick={() => ui.termZoomOut()} disabled={ui.termFontSize <= 8} title="Smaller (⌘− in a terminal)" aria-label="Terminal font smaller"><Icon name="minus" size={12} /></button>
@@ -287,7 +287,7 @@
       checked={ui.rtlBidi}
       onchange={(v) => ui.setRtlBidi(v)}
     >
-      Lays out Hebrew right-to-left with English embedded left-to-right, using the browser's bidi
+      Lays out Hebrew right-to-left with English embedded left-to-right, using the browser’s bidi
       engine (it switches the terminal off the GPU renderer). Text is reflowed for reading, so the
       monospace grid no longer lines up exactly: good for chat-style output, imperfect for TUI
       tables or box art. Toggling reloads open terminals.
@@ -324,7 +324,7 @@
   <p class="hint-line">
     Closing a tab (×, ⌘W, sidebar ×) ends the session — the same as Archive or Delete from its
     menu. Choose what happens, or be asked each time. A remembered choice applies without asking —
-    "Always delete" also skips the confirm on a session's Delete command. Closing or deleting
+    "Always delete" also skips the confirm on a session’s Delete command. Closing or deleting
     several sessions at once still asks once, naming the count.
   </p>
   <div class="radio-col" role="radiogroup" aria-label="When closing a session tab">
@@ -338,7 +338,7 @@
     </label>
     <label class="switch-row">
       <input type="radio" name="close-tab-pref" checked={ui.closeTabPref === 'delete'} onchange={() => ui.setCloseTabPref('delete')} />
-      <span>Always delete — stop it and remove its history for good (can't be undone)</span>
+      <span>Always delete — stop it and remove its history for good (can’t be undone)</span>
     </label>
   </div>
 
@@ -347,7 +347,7 @@
     Open wide results in the Vertical view (one record per block) instead of the grid. Set per
     engine: on for MongoDB, whose documents are nested; off for the SQL engines, where a wide
     table is what the grid is for. MongoDB results open in Vertical anyway until you pick Grid
-    or JSON on one of the connection's tabs — this threshold then still sends wide ones back to
+    or JSON on one of the connection’s tabs — this threshold then still sends wide ones back to
     Vertical.
   </p>
   <div class="av-table" role="group" aria-label="Auto-Vertical by engine" data-testid="db-auto-vertical">
@@ -381,7 +381,7 @@
             onchange={(e) => {
               // Leaving the box: show what was actually saved (a cleared box,
               // 0, a decimal or a value past 500 would otherwise keep showing
-              // a number that isn't in effect).
+              // a number that isn’t in effect).
               e.currentTarget.value = String(ui.dbAutoVertical[eng.id] || '');
             }}
             aria-label="{eng.label}: column threshold"
@@ -404,7 +404,7 @@
   />
   <SettingToggle
     label="Keep open connections alive"
-    hint="Pings each open, connected database every 4 minutes so its pool and SSH tunnel don't close from inactivity, and a dropped one shows red before your next query."
+    hint="Pings each open, connected database every 4 minutes so its pool and SSH tunnel don’t close from inactivity, and a dropped one shows red before your next query."
     checked={database.keepAlive}
     onchange={(on) => database.setKeepAlive(on)}
     testid="db-keep-alive"

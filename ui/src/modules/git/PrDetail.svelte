@@ -204,6 +204,14 @@
 
   async function requestChanges(): Promise<void> {
     if (busy !== '') return;
+    const ok = await confirmOutward({
+      verb: 'Request changes',
+      title: `Request changes on PR #${number}?`,
+      where: `${repoLabel} · PR #${number}${pr ? ` “${pr.title}”` : ''}`,
+      what: requestChangesBody.trim() || 'A “changes requested” review with no message.',
+      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR's reviewers are notified.`,
+    });
+    if (!ok || disposed || busy !== '') return;
     busy = 'request-changes';
     try {
       invalidatePr(repoId, number);
@@ -240,6 +248,14 @@
 
   async function saveEdit(): Promise<void> {
     if (busy !== '') return;
+    const ok = await confirmOutward({
+      verb: 'Update PR',
+      title: `Update PR #${number} on ${providerName}?`,
+      where: `${repoLabel} · PR #${number}`,
+      what: `Title: ${editTitle.trim() || '(empty)'}${editDesc !== pr?.description_md ? '\nThe description is replaced with your text.' : ''}`,
+      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR's reviewers see the change.`,
+    });
+    if (!ok || disposed || busy !== '') return;
     busy = 'edit';
     try {
       invalidatePr(repoId, number);
@@ -515,7 +531,7 @@
         {#if editMode}
           <textarea class="input" rows="8" bind:value={editDesc} aria-label="Pull request description" disabled={busy === 'edit'}></textarea>
           <div class="row prd-compose-foot">
-            <span class="hint dim">Updates the pull request on {providerName}; everyone on it sees the change.</span>
+            <span class="hint dim">Updates PR #{number} on {repoLabel} ({providerName}) · visible to the author and reviewers</span>
             <button class="btn small" disabled={busy === 'edit'} onclick={() => (editMode = false)}>Cancel</button>
             <button class="btn small primary" disabled={busy === 'edit' || editTitle.trim() === ''} onclick={saveEdit}>
               {busy === 'edit' ? 'Saving…' : 'Save to ' + providerName}
@@ -612,7 +628,7 @@
               placeholder="The retry loop needs a cap before this can merge."
             ></textarea>
             <div class="row prd-compose-foot">
-              <span class="hint dim">Posted to {repoLabel} PR #{number} under your account; {pr.author || 'the author'} and the reviewers are notified.</span>
+              <span class="hint dim">Posts to PR #{number} on {repoLabel} · visible to the author and reviewers</span>
               <button class="btn small ghost" disabled={busy === 'request-changes'} onclick={() => (showRequestChanges = false)}>Cancel</button>
               <button
                 class="btn small warn"
@@ -630,6 +646,7 @@
         <div class="section-title">
           Conversation ({generalComments.length})
         </div>
+        <p class="hint dim prd-posts-to">Replies and comments post to PR #{number} on {repoLabel} · visible to the author and reviewers</p>
         {#each generalComments as c (c.id)}
           <div class="card" style="padding: 4px 14px 8px; margin-bottom: 8px">
             <CommentThread comment={c} onreply={(parentId, body) => postComment(body, undefined, undefined, parentId)} onresolve={resolveThread} />
@@ -641,7 +658,7 @@
         <div class="new-comment card">
           <textarea class="input" rows="3" bind:value={newComment} disabled={busy === 'comment'} aria-label="New comment" placeholder="Leave a comment…" onfocus={scrollIntoViewOnFocus}></textarea>
           <div class="row prd-compose-foot">
-            <span class="hint dim">Posted to {repoLabel} PR #{number} under your account; everyone on the pull request sees it.</span>
+            <span class="hint dim">Posts to PR #{number} on {repoLabel} · visible to the author and reviewers</span>
             <button
               class="btn small"
               disabled={busy === 'comment' || newComment.trim() === ''}
@@ -910,6 +927,10 @@
   /* Request Changes inline panel */
   /* Composer footers: the "who sees it" hint on the leading side, actions at
      the trailing end. */
+  .prd-posts-to {
+    margin: 0 0 8px;
+    font-size: var(--fs-s);
+  }
   .prd-compose-foot {
     justify-content: flex-end;
     align-items: center;

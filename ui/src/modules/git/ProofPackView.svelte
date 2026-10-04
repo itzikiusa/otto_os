@@ -4,6 +4,9 @@
   // rules generated from this review), and offers Export which persists a markdown
   // snapshot (POST .../proof-pack/export) and lets the user copy it.
   import { getProofPack, exportProofPack } from '../../lib/api/client';
+  import { toastError } from '../../lib/toastError';
+  import { severityLabel, sentenceCase } from '../../lib/labels';
+  import { loadErrorText } from '../../lib/loadError';
   import type { ReviewProofPack, Finding, FindingEvent } from '../../lib/api/types';
   import Modal from '../../lib/components/Modal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -32,7 +35,7 @@
     try {
       pack = await getProofPack(rid);
     } catch (e) {
-      loadErr = e instanceof Error ? e.message : String(e);
+      loadErr = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -46,7 +49,7 @@
       exportedMd = res.markdown;
       toasts.success('Proof Pack exported', 'A markdown snapshot was saved.');
     } catch (e) {
-      toasts.error('Could not export Proof Pack', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t export Proof Pack', e);
     } finally {
       exporting = false;
     }
@@ -111,8 +114,8 @@
           {@const f = entry.finding}
           <div class="pp-finding card">
             <div class="pp-finding-head">
-              <span class="chip sev2-{f.severity}">{f.severity}</span>
-              <span class="chip status-{f.status}">{f.status.replace('_', ' ')}</span>
+              <span class="chip sev2-{f.severity}">{severityLabel(f.severity)}</span>
+              <span class="chip status-{f.status}">{sentenceCase(f.status)}</span>
               <span class="pp-title">{f.title || f.body.split('\n')[0]}</span>
             </div>
             {#if loc(f)}<div class="pp-loc mono">{loc(f)}</div>{/if}
@@ -131,7 +134,7 @@
               <ul class="pp-timeline">
                 {#each entry.events as ev (ev.id)}
                   <li class="pp-event">
-                    <span class="pp-event-kind">{ev.kind.replace(/_/g, ' ')}</span>
+                    <span class="pp-event-kind">{sentenceCase(ev.kind)}</span>
                     <span class="pp-event-meta dim">{ev.actor}{transitionLabel(ev)}</span>
                   </li>
                 {/each}

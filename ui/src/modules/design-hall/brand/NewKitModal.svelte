@@ -3,8 +3,8 @@
   // contrast-checked otto-brand/1 document). Creates the kit as a draft in the
   // current workspace — nothing leaves the Mac.
   import Modal from '../../../lib/components/Modal.svelte';
+  import { toastError } from '../../../lib/toastError';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { toasts } from '../../../lib/toast.svelte';
   import { createArtifact } from '../../../lib/api/design';
   import { STARTER_KITS, type StarterKit } from './starters';
   import { brandPalette, serializeBrandDoc } from './tokens';
@@ -37,7 +37,7 @@
       });
       oncreated(res.artifact.id);
     } catch (e) {
-      toasts.error('Couldn’t create the brand kit', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the brand kit', e);
     } finally {
       busy = false;
     }

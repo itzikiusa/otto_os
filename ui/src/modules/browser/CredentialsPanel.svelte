@@ -376,48 +376,6 @@
     gap: 0.2rem;
     flex-shrink: 0;
   }
-  .icon-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    border-radius: var(--radius-s);
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .icon-btn:hover:not(:disabled) {
-    background: var(--surface-2);
-    color: var(--text);
-  }
-  .icon-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .btn {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text);
-    font-size: var(--fs-s);
-    padding: 0.3rem 0.65rem;
-    cursor: pointer;
-  }
-  .btn.small {
-    padding: 0.2rem 0.5rem;
-    font-size: var(--fs-xs);
-  }
-  .btn.primary {
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-    border-color: var(--accent-solid);
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
   .form {
     display: flex;
     flex-direction: column;

@@ -6,6 +6,7 @@
   // Secret env/header values are write-only: they go to the macOS Keychain and
   // are never returned — responses only carry their key names + has_secret.
   import { auth } from '../../lib/stores/auth.svelte';
+  import { toastError } from '../../lib/toastError';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
@@ -124,7 +125,7 @@
       onsaved();
       onclose();
     } catch (e) {
-      toasts.error('Could not add server', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t add server', e);
     } finally {
       saving = false;
     }

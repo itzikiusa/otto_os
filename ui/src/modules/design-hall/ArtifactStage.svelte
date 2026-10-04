@@ -35,6 +35,9 @@
     source: string | null;
     /** Object URL of the shown version's bytes (binaries). */
     blobUrl?: string | null;
+    /** The design has no version yet: a binary has nothing to load, so say so
+     *  instead of "Loading…" forever. */
+    noVersion?: boolean;
     readonly?: boolean;
     /** Show the source editor beside the preview (text formats). */
     showSource?: boolean;
@@ -49,6 +52,7 @@
     artifact,
     source,
     blobUrl = null,
+    noVersion = false,
     readonly = false,
     showSource = false,
     device = 'none',
@@ -232,7 +236,7 @@
     {:else if kind === 'html' || inner.kind === 'html'}
       {#if compact || device === 'none'}
         <!-- Fit: render at a 1280px desktop viewport and scale it into the pane,
-             so a page reads as a page (not reflowed to the pane's width). -->
+             so a page reads as a page (not reflowed to the pane’s width). -->
         <div class="fit" bind:clientWidth={fitW} bind:clientHeight={fitH}>
           <iframe
             class="doc scaled"
@@ -327,7 +331,7 @@
     {:else if kind === 'json'}
       <p class="msg">This studio’s editor isn’t built yet (planned). The document is stored and versioned; view it as source.</p>
     {:else if (kind === 'image' || kind === 'model' || kind === 'pdf') && !blobUrl}
-      <p class="msg">Loading…</p>
+      <p class="msg" role="status">{noVersion ? 'No preview yet — this design has no saved version.' : `Loading ${kind === 'pdf' ? 'the PDF' : kind === 'model' ? 'the 3D model' : 'the image'}…`}</p>
     {:else}
       <p class="msg">Design Hall can’t preview {artifact.format} files yet.</p>
     {/if}

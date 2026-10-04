@@ -5,6 +5,8 @@
   // the sheet says where it goes and what is written before the button.
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { api } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -32,7 +34,7 @@
       repos = await api.get<Repo[]>(`/workspaces/${ws.currentId}/repos`);
       if (repos.length && !repoId) repoId = repos[0].id;
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -54,13 +56,8 @@
 </script>
 
 <Modal title="Sync collections with Git" width={500} {onclose}>
-  {#if loading}
-    <p class="dim" role="status">Loading repositories…</p>
-  {:else if loadError}
-    <div class="err" role="alert">
-      <Icon name="warning" size={14} /><span>Couldn’t load this workspace’s repositories. {loadError}</span>
-      <button class="btn small" onclick={load}>Retry</button>
-    </div>
+  {#if loading || loadError}
+    <LoadState what="this workspace’s repositories" {loading} error={loadError} empty={true} onretry={load} />
   {:else if repos.length === 0}
     <p class="dim">No git repositories are connected to this workspace. Add one on the Git page, then come back.</p>
   {:else}
@@ -99,16 +96,6 @@
   .dim {
     margin: 0;
     color: var(--text-dim);
-  }
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text);
-  }
-  .err :global(svg) {
-    color: var(--danger);
-    flex-shrink: 0;
   }
   .summary {
     margin: 4px 0 0;

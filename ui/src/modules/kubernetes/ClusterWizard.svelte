@@ -427,7 +427,7 @@
     color: var(--text-dim);
     cursor: pointer;
     text-transform: capitalize;
-    transition: all 130ms ease-out;
+    transition: background 130ms ease-out, border-color 130ms ease-out, color 130ms ease-out;
   }
   .env-chip.selected {
     background: color-mix(in srgb, var(--accent) 15%, transparent);

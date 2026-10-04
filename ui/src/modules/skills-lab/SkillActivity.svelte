@@ -9,6 +9,7 @@
   //           workspace (reviews, evaluations, golden tasks). Otto doesn't
   //           record when an agent invokes a skill mid-session, and says so.
   import type { GoldenTask, SkillEvalSummary, SkillReview } from '../../lib/api/types';
+  import { loadErrorText } from '../../lib/loadError';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import { skillReviewApi } from '../../lib/api/skillReview';
   import { rel } from '../../lib/stores/now.svelte';
@@ -51,7 +52,7 @@
     } catch (e) {
       if (my !== evalsSeq) return;
       evals = [];
-      evalsError = e instanceof Error ? e.message : String(e);
+      evalsError = loadErrorText(e);
     }
   }
   $effect(() => {
@@ -77,7 +78,7 @@
     // Any failed source is an error, not a zero: "Not evaluated yet" over a
     // failed load would be a lie.
     const failed = [r, g].find((x) => x.status === 'rejected') as PromiseRejectedResult | undefined;
-    if (failed) wsError = failed.reason instanceof Error ? failed.reason.message : String(failed.reason);
+    if (failed) wsError = loadErrorText(failed.reason);
   }
   const error = $derived(evalsError ?? wsError);
   $effect(() => {

@@ -1,9 +1,9 @@
 <script lang="ts">
   // The approval queue — dangerous tool calls and `otto.ask_human_approval`
   // requests waiting on a human. Shows the redacted args (never the full/secret
-  // values; the server binds the hash of the FULL args). Approve/Deny with an
-  // optional note. The requester cannot approve their own DIRECT request
-  // (enforced server-side) — but a request raised by their own agent session /
+  // values; the server binds the hash of the FULL args). Approve/Deny with the
+  // card's one optional note (Deny does not ask a second time). The requester
+  // cannot approve their own DIRECT request (enforced server-side) — but a request raised by their own agent session /
   // MCP client on their behalf is exactly what they're meant to decide, since
   // every Otto session authorizes as its owner (mirrors
   // `AGENT_REQUESTER_KINDS` in crates/otto-state/src/mcp_control.rs). Polls
@@ -14,7 +14,9 @@
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
+  import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
@@ -194,10 +196,15 @@
                 <button class="link" type="button" onclick={() => openSession(sid)} title="Open the requesting session" data-testid="mcp-approval-session">
                   {sessionTitle(sid) ?? `${sid.slice(0, 8)}…`}
                 </button>
-                · {requesterLabel(a)}
+                ·
+                {#if requesterMayDecide(a)}<AgentByline name={requesterLabel(a)} />{:else}{requesterLabel(a)}{/if}
               </span>
             {:else if a.requested_by}
-              <span class="by">requested by {requesterLabel(a)}{a.requested_by_kind ? ` (${a.requested_by_kind})` : ''}</span>
+              <span class="by">
+                requested by
+                {#if requesterMayDecide(a)}<AgentByline name={requesterLabel(a)} />{:else}{requesterLabel(a)}{/if}
+                {a.requested_by_kind ? ` (${a.requested_by_kind})` : ''}
+              </span>
             {/if}
             {#if a.expires_at}<span class="by" title={new Date(a.expires_at).toLocaleString()}>expires {rel(a.expires_at)}</span>{/if}
           </div>
@@ -219,6 +226,7 @@
                 disabled={!canDecide(a)}
                 disabledReason={decideBlockedReason(a)}
                 denyTarget="this {a.kind === 'human_ask' ? 'request' : 'tool call'}"
+                askReason={false}
                 onapprove={() => decide(a, true)}
                 ondeny={(reason) => decide(a, false, reason)}
               >
@@ -239,11 +247,11 @@
             </div>
           {:else if a.status === 'approved' || a.status === 'denied'}
             <div class="decided">
-              <ApprovalActions
-                onapprove={() => {}}
-                ondeny={() => {}}
-                decided={{ outcome: a.status, by: a.decided_by, at: a.decided_at, note: a.decision_note }}
-              />
+              <ApprovalOutcome outcome={a.status} by={a.decided_by} at={a.decided_at} note={a.decision_note} />
+            </div>
+          {:else if a.status === 'expired'}
+            <div class="decided">
+              <ApprovalOutcome outcome="expired" at={a.expires_at ?? a.decided_at} note={a.decision_note} />
             </div>
           {:else}
             <div class="decided">

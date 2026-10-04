@@ -4,6 +4,7 @@
   // note / time), a "Snapshot" button to freeze the current state, and a
   // .md / .html download for each frozen report.
   import Icon from './Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import ProofStatusChip from './ProofStatusChip.svelte';
   import { createSnapshot, getSnapshot } from '../api/proof';
   import { downloadText } from './exporters';
@@ -29,7 +30,7 @@
       await onchange();
       toasts.success('Snapshot created', 'An immutable, hashed copy was frozen.');
     } catch (e) {
-      toasts.error('Snapshot failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t take the snapshot', e);
     } finally {
       busy = false;
     }
@@ -45,7 +46,7 @@
         format === 'md' ? 'text/markdown' : 'text/html',
       );
     } catch (e) {
-      toasts.error('Download failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t download the snapshot', e);
     }
   }
 

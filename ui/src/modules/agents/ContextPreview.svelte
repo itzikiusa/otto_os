@@ -8,13 +8,13 @@
   //   • enforced — hooks / settings the runtime imposes regardless.
   // See docs/contracts/api.md (POST /workspaces/{id}/context/preview).
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import { onDestroy } from 'svelte';
   import { contextApi } from '../../lib/api/context';
   import type {
     ContextPreviewProvider,
     ContextPreviewReq,
   } from '../../lib/api/types';
-  import { toasts } from '../../lib/toast.svelte';
 
   interface Props {
     /** Workspace to preview. */
@@ -44,7 +44,7 @@
       result = resp.providers.find((p) => p.provider === selectedProvider) ?? resp.providers[0] ?? null;
       openFile = null;
     } catch (e) {
-      if (request === generation && requestKey === key) toasts.error('Preview failed', e instanceof Error ? e.message : String(e));
+      if (request === generation && requestKey === key) toastError('Couldn’t preview the context', e);
     } finally {
       if (request === generation && requestKey === key) loading = false;
     }
@@ -229,7 +229,7 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 1px 6px;
-    border-radius: 99px;
+    border-radius: 999px;
     flex-shrink: 0;
   }
   .badge.advisory {
@@ -267,7 +267,7 @@
   .chip {
     font-size: var(--fs-xs);
     padding: 1px 7px;
-    border-radius: 99px;
+    border-radius: 999px;
     background: var(--surface-2);
     border: 1px solid var(--border);
   }

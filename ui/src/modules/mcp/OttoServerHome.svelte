@@ -2,6 +2,7 @@
   // Otto's built-in MCP server is the control plane's home: session attachment,
   // the outward catalog, what sessions see, and external-client setup.
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -99,7 +100,7 @@
       status = { ...next, token: null };
       return true;
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update the setting', e);
       return false;
     } finally {
       saving = false;
@@ -200,7 +201,7 @@
       await afterRuleChange();
     } catch (e) {
       input.checked = !!rule;
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update the setting', e);
     } finally {
       saving = false;
     }
@@ -221,7 +222,7 @@
       await afterRuleChange();
     } catch (e) {
       input.checked = !!rule;
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update the setting', e);
     } finally {
       saving = false;
     }

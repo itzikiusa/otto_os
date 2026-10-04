@@ -1,7 +1,9 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { onTabKey } from '../../lib/tabKeys';
-  import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
+  import { paneResizer, RESIZE_TITLE, LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import PathField from '../../lib/components/PathField.svelte';
   // Agent Swarm section: swarm list + the open swarm (org tree, run graph,
   // kanban, runs, board) with an inline session panel (reuses SessionView).
@@ -107,44 +109,11 @@
     });
   }
 
-  // --- Resizable swarms rail (drag the divider) -----------------------------
-  // Same idea as the Database page's sidebar resizer: drag to taste, width
-  // persists, double-click resets. On a phone the rail is a full-width
-  // accordion band, so the width binding is skipped and the divider hidden.
-  const RAIL_W_DEFAULT = 220;
-  let railW = $state(loadRailW());
-  function loadRailW(): number {
-    if (typeof localStorage === 'undefined') return RAIL_W_DEFAULT;
-    const v = Number(localStorage.getItem('swarm.railW'));
-    return Number.isFinite(v) && v >= 180 ? Math.min(400, v) : RAIL_W_DEFAULT;
-  }
-  function persistRailW(): void {
-    try {
-      localStorage.setItem('swarm.railW', String(Math.round(railW)));
-    } catch {
-      /* storage unavailable — non-fatal */
-    }
-  }
-  function startRailResize(e: PointerEvent): void {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = railW;
-    const onMove = (ev: PointerEvent): void => {
-      // The rail is pinned to the LEFT edge, so dragging RIGHT widens it.
-      railW = Math.max(180, Math.min(400, startW + (ev.clientX - startX)));
-    };
-    const onUp = (): void => {
-      persistRailW();
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-  function resetRailW(): void {
-    railW = RAIL_W_DEFAULT;
-    persistRailW();
-  }
+  // --- Resizable swarms rail (PaneDivider) ------------------------------------
+  // Drag to taste, width persists under swarm.railW, double-click resets. On a
+  // phone/tablet the rail is a full-width accordion band, so the width binding
+  // is skipped and the divider hidden.
+  let railW = $state(loadPaneWidth('swarm.railW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let editAgent = $state<SwarmAgent | null>(null);
   let editorOpen = $state(false);
   let showSettings = $state(false);
@@ -535,6 +504,7 @@
     {/snippet}
   </PageHeader>
 
+  <PageBody fill padded={false}>
   <div class="swarm-split">
   <!-- Swarms rail — a plain sidebar on desktop; a collapsible accordion
        section on phone and tablet (tap the header to toggle the list). -->
@@ -586,20 +556,7 @@
   {/if}
 
   {#if !viewport.isMobile && showRail}
-    <!-- A focusable separator is a widget in ARIA (←/→ resize, Enter resets);
-         Svelte's lint doesn't know that — same exemption as agents/SplitNode. -->
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-    <div
-      class="side-resizer"
-      role="separator"
-      tabindex="0"
-      aria-orientation="vertical"
-      aria-label="Resize the swarms list"
-      title={RESIZE_TITLE}
-      ondblclick={resetRailW}
-      onpointerdown={startRailResize}
-      use:paneResizer={{ value: railW, min: 180, max: 400, step: 10, bigStep: 40, onChange: (w) => { railW = w; persistRailW(); }, onReset: resetRailW, text: pxWide }}
-    ></div>
+    <PaneDivider bind:width={railW} storageKey="swarm.railW" label="Resize the swarms list" />
   {/if}
 
   <!-- Main -->
@@ -767,6 +724,7 @@
     {/if}
   </section>
   </div>
+  </PageBody>
 </div>
 
 {#if showNew}
@@ -849,31 +807,13 @@
   .rail {
     /* Default width; on tablet/desktop an inline `width:{railW}px`
        (drag-resizable, persisted) takes over. */
-    width: 220px;
+    width: var(--list-pane-w, 280px);
     flex: none;
     border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
   }
-  /* Draggable divider between the swarms rail and the main area. Sits flush
-     against the rail's inline-end border; a hit-area wider than its visible
-     line makes it easy to grab. */
-  .side-resizer {
-    flex: none;
-    width: 5px;
-    margin-inline-start: -3px;
-    cursor: col-resize;
-    background: transparent;
-    position: relative;
-    z-index: 2;
-    touch-action: none;
-  }
-  .side-resizer:hover,
-  .side-resizer:focus-visible {
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
-  }
-  .side-resizer:focus-visible,
   .resizer:focus-visible {
     outline: 2px solid var(--accent-text);
     outline-offset: -1px;

@@ -268,7 +268,7 @@
   }
   .health-progressing .hdot {
     background: var(--accent);
-    animation: otto-pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   .health-progressing .status-pill {
     color: var(--accent-text);

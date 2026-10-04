@@ -149,7 +149,7 @@
     height: 7px;
     border-radius: 50%;
     background: var(--status-working);
-    animation: otto-pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   
   @media (prefers-reduced-motion: reduce) {

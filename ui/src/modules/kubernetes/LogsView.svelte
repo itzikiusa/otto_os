@@ -272,12 +272,12 @@
 <div class="logs">
   <div class="logs-bar">
     {#if multi}
-      <select class="input sm" bind:value={podFilter} aria-label="Pod" title="Show one pod's lines">
+      <select class="input sm" bind:value={podFilter} aria-label="Pod" title="Show one pod’s lines">
         <option value="">all pods{pods.length ? ` (${pods.length})` : ''}</option>
         {#each pods as p (p)}<option value={p}>{p}</option>{/each}
       </select>
       {#if podFilter && onopenpod}
-        <button class="btn small" onclick={() => onopenpod?.(podFilter)} title="Open this pod's details"><Icon name="chevronRight" size={12} /> Open pod</button>
+        <button class="btn small" onclick={() => onopenpod?.(podFilter)} title="Open this pod’s details"><Icon name="chevronRight" size={12} /> Open pod</button>
       {/if}
     {/if}
     {#if containers.length > 1 || (multi && containers.length)}
@@ -410,7 +410,8 @@
     border: none;
     border-radius: var(--radius-s);
     background: hsl(var(--h) 50% 50% / 0.22);
-    color: hsl(var(--h) 70% 72%);
+    /* Mixed toward the scheme's text colour so the tag reads in light AND dark. */
+    color: color-mix(in srgb, hsl(var(--h) 70% 55%) 45%, var(--text));
     font: inherit;
     font-size: var(--fs-xs);
     line-height: 16px;

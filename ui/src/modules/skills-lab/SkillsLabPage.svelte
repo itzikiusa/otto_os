@@ -14,6 +14,7 @@
   import SkillReviewPanel from './SkillReviewPanel.svelte';
   import SkillsEvalPage from '../skills-eval/SkillsEvalPage.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
   type Tab = 'skills' | 'review' | 'evaluator';
@@ -65,13 +66,16 @@
   let canCreate = $state(true);
   let phoneDetail = $state(false);
   let listCollapsed = $state(false);
+  // The Evaluator only has a runs list on its Runs view.
+  let evalListable = $state(true);
 </script>
 
 <div class="skills-lab">
   <PageHeader title="Skills Lab" subtitle={tab === 'skills' ? 'Every skill your agents can load, in one place' : undefined}>
     {#snippet leading()}
-      {#if tab === 'skills' && !viewport.isPhone}
-        <button class="icon-btn" onclick={() => (listCollapsed = !listCollapsed)} aria-label={listCollapsed ? 'Show skills list' : 'Hide skills list'} title={listCollapsed ? 'Show skills list' : 'Hide skills list'} aria-expanded={!listCollapsed} aria-controls="skills-list-pane"><Icon name="sidebar" size={16} /></button>
+      {#if ((tab === 'skills') || (tab === 'evaluator' && evalListable)) && !viewport.isPhone}
+        {@const what = tab === 'skills' ? 'skills' : 'evaluations'}
+        <button class="icon-btn" onclick={() => (listCollapsed = !listCollapsed)} aria-label={listCollapsed ? `Show ${what} list` : `Hide ${what} list`} title={listCollapsed ? `Show ${what} list` : `Hide ${what} list`} aria-expanded={!listCollapsed} aria-controls={tab === 'skills' ? 'skills-list-pane' : 'evaluations-list'}><Icon name="sidebar" size={16} /></button>
       {/if}
       {#if tab === 'skills' && phoneDetail}
         <button class="icon-btn" onclick={() => browser?.back()} aria-label="Back to skills" title="Back to skills"><Icon name="chevronLeft" size={16} /></button>
@@ -103,15 +107,17 @@
     {/snippet}
   </PageHeader>
 
+  <PageBody fill padded={false}>
   <div class="lab-body">
     {#if tab === 'skills'}
       <SkillsBrowser {listCollapsed} bind:this={browser} onreview={reviewSkill} onevaluate={evaluateSkill} onopenrun={openRun} onempty={(empty) => (canCreate = !empty)} onphonedetail={(o) => (phoneDetail = o)} onopenreview={openReview} />
     {:else if tab === 'review'}
       <SkillReviewPanel {wsId} initialTarget={reviewTarget} onconsumed={() => (reviewTarget = null)} initialReview={reviewOpen} onreviewconsumed={() => (reviewOpen = null)} />
     {:else}
-      <SkillsEvalPage initialSkill={evalTarget} onconsumed={() => (evalTarget = null)} initialRun={runTarget} onrunconsumed={() => (runTarget = null)} />
+      <SkillsEvalPage initialSkill={evalTarget} onconsumed={() => (evalTarget = null)} initialRun={runTarget} onrunconsumed={() => (runTarget = null)} {listCollapsed} onlistable={(v) => (evalListable = v)} />
     {/if}
   </div>
+  </PageBody>
 </div>
 
 <style>

@@ -320,6 +320,6 @@ test('MCP catalog error retries and failed exposure update preserves saved state
   const before = await toggle.isChecked();
   // A failed write may revert before WebKit's setChecked postcondition runs.
   await toggle.click();
-  await expect(page.getByText('Update failed', { exact: true })).toBeVisible();
+  await expect(page.getByText('Couldn’t update the setting', { exact: true })).toBeVisible();
   expect(await toggle.isChecked()).toBe(before);
 });

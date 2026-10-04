@@ -6,6 +6,7 @@
   // budgetBus, ws.needsYou changes) — minimal new polling (30 s fallback).
 
   import { onMount, onDestroy } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import { api } from '../../lib/api/client';
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
@@ -366,7 +367,7 @@
       closeSubtask();
       if (wsId) void activity.loadSummary(wsId);
     } catch (e) {
-      toasts.error('Could not add sub-task', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t add sub-task', e);
     } finally {
       subtaskBusy = false;
     }

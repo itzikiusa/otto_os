@@ -4,6 +4,7 @@
   // irreversible tool needs the second explicit toggle; a category never
   // covers one. Every auto-approved call is still audited, naming the rule.
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import Modal from '../../lib/components/Modal.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -97,7 +98,7 @@
       await onsaved();
       onclose();
     } catch (e) {
-      toasts.error('Could not create the rule', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the rule', e);
     } finally {
       saving = false;
     }

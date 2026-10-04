@@ -1,5 +1,7 @@
 <script lang="ts">
   import {onDestroy} from 'svelte';
+  import {recapStateLabel} from '../../lib/labels';
+  import {plural} from '../../lib/plural';
   import type {RoomSnapshot, RoomAction} from '../../lib/api/room-types';
   import type {RecapCapabilities, RecapDetail} from '../../lib/api/room-recap-types';
   import type {RoomRecapAudioSource} from './room-media';
@@ -38,8 +40,8 @@
 </script>
 <section class="recap-banner" aria-label="Room recap">
   {#if room.recap}
-    <div class="status"><strong role="status">Recap {room.recap.state.replaceAll('_', ' ')}</strong><span>Saved locally by the host · speech, room activity and sampled screens</span></div>
-    {#if room.recap.state === 'finalizing'}<p role="status">Finishing {room.recap.pending_jobs} accepted media jobs. No new content is being captured.</p><p class="hint">This can take up to three minutes. Withdrawing consent cancels unfinished work immediately.</p>{/if}
+    <div class="status"><strong role="status">Recap {recapStateLabel(room.recap.state).toLowerCase()}</strong><span>Saved locally by the host · speech, room activity and sampled screens</span></div>
+    {#if room.recap.state === 'finalizing'}<p role="status">Finishing {plural(room.recap.pending_jobs, 'accepted media job')}. No new content is being captured.</p><p class="hint">This can take up to three minutes. Withdrawing consent cancels unfinished work immediately.</p>{/if}
     {#if room.recap.reason}<p>{room.recap.reason}</p>{/if}
     {#if room.recap.state !== 'stopped'}
       <p>The host keeps a local transcript and images of shared screens. Sampling may miss changes between frames. You can withdraw consent to pause capture for everyone.</p>

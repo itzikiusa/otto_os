@@ -4,6 +4,7 @@
   // overwritten — see apiClient.placeDraft). Row actions live in one ⋯ /
   // right-click menu per row instead of four always-visible icons.
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import MethodTag, { methodWord } from './MethodTag.svelte';
@@ -247,7 +248,7 @@
       URL.revokeObjectURL(url);
       toasts.success('Exported as OpenAPI', a.download);
     } catch (e) {
-      toasts.error('Couldn’t export the collection', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t export the collection', e);
     }
   }
 

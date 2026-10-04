@@ -156,10 +156,10 @@
         <span class="rlabel">CI</span>
         <span class="rvalue">
           {#if checksLoading}
-            <span class="dim">Loading…</span>
+            <span class="dim">Loading checks…</span>
           {:else if checksError || checks === null}
             <span class="warn">Unavailable</span>
-            <button class="linkbtn" onclick={() => probeTick++}>Retry</button>
+            <button class="btn small" onclick={() => probeTick++}>Retry</button>
           {:else if checks.checks.length === 0}
             <span class="dim">No checks reported</span>
           {:else}
@@ -188,10 +188,10 @@
       <div class="row-item">
         <span class="rlabel">Approvals</span>
         <span class="rvalue">
-          {#if readinessLoading}<span class="dim">Loading…</span>
+          {#if readinessLoading}<span class="dim">Loading approvals…</span>
           {:else if readinessError || readiness === null}
             <span class="warn">Unavailable</span>
-            <button class="linkbtn" onclick={() => probeTick++}>Retry</button>
+            <button class="btn small" onclick={() => probeTick++}>Retry</button>
           {:else}{readiness.approvals}{/if}
         </span>
       </div>
@@ -208,7 +208,7 @@
       <div class="row-item">
         <span class="rlabel">Open blockers</span>
         <span class="rvalue">
-          {#if readinessLoading}<span class="dim">Loading…</span>
+          {#if readinessLoading}<span class="dim">Loading blockers…</span>
           {:else if readiness?.review}
             <span class:bad={blockers > 0}>{blockers}</span>
             <span class="dim">of {readiness.review.unresolved_total} unresolved</span>

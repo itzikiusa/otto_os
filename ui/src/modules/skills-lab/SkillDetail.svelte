@@ -7,7 +7,7 @@
   //
   //   header   — name, description, category, the copies it has (Library ·
   //              Claude · Codex · Bundled) as a value picker, drift notes with
-  //              "Compare with …", and the skill's actions (Review, Evaluate,
+  //              "Compare with …", and the skill’s actions (Review, Evaluate,
   //              Install/Update, Copy to library, Delete in ⋯)
   //   Overview — SKILL.md frontmatter as a metadata card (description,
   //              triggers, allowed tools, version…) + its files, then the body
@@ -15,6 +15,8 @@
   //   Edit     — the multi-file editor (SkillEditor)
   //   Evals / Usage — SkillActivity
   import { untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   import { onTabKey } from '../../lib/tabKeys';
   import type { SkillFileEntry } from '../../lib/api/types';
   import { skillLabApi } from '../../lib/api/skillLab';
@@ -37,7 +39,7 @@
     wsId: string;
     /** Library SKILL.md bodies are in the list payload; others are fetched. */
     libraryBody: string | undefined;
-    /** Fetched provider bodies (shared cache with the list's drift check). */
+    /** Fetched provider bodies (shared cache with the list’s drift check). */
     bodyOf: (source: VariantSource) => string | undefined;
     onsource: (s: VariantSource) => void;
     ontab: (t: DetailTab) => void;
@@ -83,7 +85,7 @@
   const isBundled = $derived(variant.source === 'bundled');
   const hasLibrary = $derived(group.variants.some((v) => v.source === 'library'));
 
-  // ---- Load the selected copy's SKILL.md + file list ----------------------
+  // ---- Load the selected copy’s SKILL.md + file list ----------------------
   let body = $state<string>('');
   let files = $state<SkillFileEntry[]>([]);
   let loading = $state(true);
@@ -113,7 +115,7 @@
         onbody(src, p.body);
       }
     } catch (e) {
-      if (generation === loadGeneration) loadError = e instanceof Error ? e.message : String(e);
+      if (generation === loadGeneration) loadError = loadErrorText(e);
     } finally {
       if (generation === loadGeneration) loading = false;
     }
@@ -133,7 +135,7 @@
 
   // ---- Compare against the reference copy ----------------------------------
   let comparing = $state<VariantSource | null>(null);
-  // A copy that can't be read ends the "Loading both copies…" wait with a
+  // A copy that can’t be read ends the "Loading both copies…" wait with a
   // reason instead of leaving it up forever.
   let compareError = $state<string | null>(null);
   $effect(() => {
@@ -153,7 +155,7 @@
         const p = await skillLabApi.getProvider(s, group.name);
         onbody(s, p.body);
       } catch (e) {
-        compareError = `Couldn't read the ${sourceLabel(s)} copy: ${e instanceof Error ? e.message : String(e)}`;
+        compareError = `Couldn’t read the ${sourceLabel(s)} copy: ${loadErrorText(e)}`;
       }
     }
     if (comparing && group.reference !== 'library' && bodyOf(group.reference) == null) {
@@ -161,19 +163,19 @@
         const p = await skillLabApi.getProvider(group.reference, group.name);
         onbody(group.reference, p.body);
       } catch (e) {
-        compareError = `Couldn't read the ${sourceLabel(group.reference)} copy: ${e instanceof Error ? e.message : String(e)}`;
+        compareError = `Couldn’t read the ${sourceLabel(group.reference)} copy: ${loadErrorText(e)}`;
       }
     }
   }
   let bundledBody = $state<string | null>(null);
   $effect(() => {
     if (comparing === 'bundled' && bundledBody == null) {
-      // On failure don't fake an empty body (that renders as "everything was
-      // deleted"); say the bundled copy couldn't be read.
+      // On failure don’t fake an empty body (that renders as "everything was
+      // deleted"); say the bundled copy couldn’t be read.
       void skillLabApi
         .getBundled(group.name)
         .then((b) => (bundledBody = b.body))
-        .catch((e) => (compareError = `Couldn't read the bundled copy: ${e instanceof Error ? e.message : String(e)}`));
+        .catch((e) => (compareError = `Couldn’t read the bundled copy: ${loadErrorText(e)}`));
     }
   });
   $effect(() => {
@@ -195,7 +197,7 @@
       toasts.success(updating ? 'Library copy updated' : 'Installed to library', updating ? 'The previous copy was backed up.' : 'You can edit it now.');
       onchanged({ name: group.name, source: 'library' });
     } catch (e) {
-      toasts.error(`Couldn't install ${group.name}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t install ${group.name}`, e);
     } finally {
       busy = false;
     }
@@ -209,7 +211,7 @@
       toasts.success('Copied to library', `Only SKILL.md was copied from the ${sourceLabel(variant.source)} copy.`);
       onchanged({ name: group.name, source: 'library' });
     } catch (e) {
-      toasts.error(`Couldn't copy ${group.name} to the library`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t copy ${group.name} to the library`, e);
     } finally {
       busy = false;
     }
@@ -221,7 +223,7 @@
       toasts.success('Skill deleted', group.name);
       ondeleted();
     } catch (e) {
-      toasts.error(`Couldn't delete ${group.name}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t delete ${group.name}`, e);
     }
   }
   function more(e: MouseEvent): void {
@@ -343,7 +345,7 @@
     {#if loadError && (tab === 'overview' || tab === 'edit')}
       <div class="inline-error" role="alert">
         <Icon name="warning" size={14} />
-        <div><strong>Couldn't open the {sourceLabel(variant.source)} copy of {group.name}.</strong> <span class="dim">{loadError}</span></div>
+        <div><strong>Couldn’t open the {sourceLabel(variant.source)} copy of {group.name}.</strong> <span class="dim">{loadError}</span></div>
         <button class="btn small" onclick={() => load(group.name, variant.source)}>Retry</button>
       </div>
     {:else if tab === 'overview'}

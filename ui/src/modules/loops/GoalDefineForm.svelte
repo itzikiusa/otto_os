@@ -1,9 +1,9 @@
 <script lang="ts">
   import { ui } from '../../lib/stores/ui.svelte';
+  import { toastError } from '../../lib/toastError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { loops } from '../../lib/stores/loops.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -65,7 +65,7 @@
       perPhaseMinutes = Math.max(1, Math.round(d.suggested_limits.per_phase_timeout_secs / 60));
       feedback = '';
     } catch (e) {
-      toasts.error('Couldn’t draft the goal', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t draft the goal', e);
     } finally {
       defining = false;
     }
@@ -132,7 +132,7 @@
       });
       oncreated(loop.id);
     } catch (e) {
-      toasts.error('Couldn’t launch the goal loop', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t launch the goal loop', e);
     } finally {
       launching = false;
     }

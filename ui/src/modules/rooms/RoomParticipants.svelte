@@ -24,7 +24,7 @@
         {#if member.admission === 'pending'}
           <button class="btn small" {disabled} onclick={() => send({type: 'admit', member_id: member.id, role: 'viewer'})}>Admit view only</button>
           {#if member.role === 'editor'}<button class="btn small" {disabled} onclick={() => send({type: 'admit', member_id: member.id, role: 'editor'})}>Admit can control</button>{/if}
-          <button class="btn small danger" {disabled} onclick={() => send({type: 'reject', member_id: member.id})}>Decline</button>
+          <button class="btn small" {disabled} onclick={() => send({type: 'reject', member_id: member.id})}>Decline</button>
         {:else}
           <label>Access <select {disabled} value={member.role} onchange={(event) => send({type: 'role', member_id: member.id, role: event.currentTarget.value === 'editor' ? 'editor' : 'viewer'})}><option value="viewer">View only</option><option value="editor">Can control</option></select></label>
           {#if member.control_requested}<button class="btn small" {disabled} onclick={() => grant(member)}>Give control…</button>{/if}

@@ -2,6 +2,7 @@
   // Add-workspace sheet: name + project directory. The backend expands `~`
   // and creates the directory if missing, then makes the creator its admin.
   import Modal from '../../lib/components/Modal.svelte';
+  import { toastError } from '../../lib/toastError';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
@@ -37,7 +38,7 @@
       router.go('agents');
       toasts.success('Workspace created', w.name);
     } catch (e) {
-      toasts.error('Could not create workspace', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create workspace', e);
     } finally {
       busy = false;
     }

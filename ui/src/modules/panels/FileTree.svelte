@@ -2,11 +2,11 @@
   // FileTree: lazy browsable file tree + read-only syntax-highlighted viewer
   // for the right-panel Files tab.
   import { onDestroy } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { openFile as openFileSignal } from '../../lib/stores/openfile.svelte';
   import { api } from '../../lib/api/client';
-  import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
@@ -136,7 +136,7 @@
           node.loaded = true;
         } catch (e) {
           if (generation !== rootGeneration) return;
-          toasts.error(`Couldn't open ${node.entry.name}`, e instanceof Error ? e.message : String(e));
+          toastError(`Couldn’t open ${node.entry.name}`, e);
           node.open = false;
         } finally {
           node.loading = false;

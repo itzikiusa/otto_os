@@ -5,6 +5,7 @@
   // full view (Modal). The host (ConversationView) owns placement: beside the
   // chat when the pane is wide, over it when narrow. Esc closes.
   import { getContext, untrack } from 'svelte';
+  import { toastError } from '../../../lib/toastError';
   import Icon from '../../../lib/components/Icon.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
   import { openFile } from '../../../lib/stores/openfile.svelte';
@@ -75,7 +76,7 @@
       await navigator.clipboard.writeText(path);
       toasts.info('Path copied', path);
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy to the clipboard', e);
     }
   }
   function onKey(e: KeyboardEvent): void {

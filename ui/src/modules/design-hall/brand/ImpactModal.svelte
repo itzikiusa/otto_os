@@ -7,7 +7,7 @@
   import type { BrandConsumer, BrandImpactResp, BrandTokenChange } from '../../../lib/api/types';
   import Modal from '../../../lib/components/Modal.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import Skeleton from '../../../lib/components/Skeleton.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import StudioBadge from '../StudioBadge.svelte';
   import { openArtifact } from '../nav';
   import { studioInfo } from '../model';
@@ -42,10 +42,8 @@
 
 <Modal title="Impact of your changes" width={640} {onclose}>
   <div class="imp" data-testid="brand-impact-modal">
-    {#if loading && !impact}
-      <Skeleton rows={4} height={28} />
-    {:else if error && !impact}
-      <p class="err" role="alert"><Icon name="warning" size={14} /> Couldn’t preview the impact. <span class="dim">{error}</span> <button class="btn small" onclick={onretry}>Retry</button></p>
+    {#if (loading || error) && !impact}
+      <LoadState what="the impact preview" rows={4} {loading} {error} empty={true} {onretry} />
     {:else if impact}
       <p class="lead">
         {#if impact.changes.length === 0}
@@ -271,8 +269,7 @@
     color: var(--warning);
     font-size: var(--fs-s);
   }
-  .note,
-  .err {
+  .note {
     margin: 0;
     display: flex;
     gap: 6px;
@@ -284,14 +281,6 @@
     color: var(--info);
     flex: none;
     margin-block-start: 2px;
-  }
-  .err {
-    color: var(--text);
-    align-items: center;
-    flex-wrap: wrap;
-  }
-  .err > :global(svg) {
-    color: var(--danger);
   }
   @media (max-width: 640px) {
     .aff {

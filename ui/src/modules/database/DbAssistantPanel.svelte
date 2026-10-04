@@ -116,16 +116,18 @@
     {/if}
     {#if database.assistBusy}
       <span class="da-working"><LiveWorkingDot label="Working…" /></span>
+      <!-- Stop of a query/turn: neutral and immediate (patterns §7) — the
+           session stays live, nothing is discarded. -->
       <button
-        class="da-act da-stop"
+        class="btn small da-stop"
         onclick={() => database.stopAssist()}
         title="Stop waiting on this turn — releases the input (a started session stays live)"
       >
-        <Icon name="x" size={12} /> Stop
+        <Icon name="stop" size={12} /> Stop
       </button>
     {/if}
     <button
-      class="da-act"
+      class="btn small da-summarize"
       onclick={() => void database.summarizeAssist()}
       disabled={database.assistBusy || !database.assistId}
       title="Write a summary of this investigation and download it as Markdown"
@@ -133,7 +135,7 @@
       <Icon name="download" size={13} /> Summarize
     </button>
     <button
-      class="da-close"
+      class="icon-btn"
       onclick={() => void close()}
       aria-label="Close DB assistant"
       title="Close — discards the session and working files"
@@ -174,7 +176,7 @@
             rows="3"
             disabled={database.assistBusy}
           ></textarea>
-          <button class="da-send" onclick={send} disabled={database.assistBusy || !draft.trim()}>
+          <button class="btn primary da-send" onclick={send} disabled={database.assistBusy || !draft.trim()}>
             {#if database.assistBusy}Starting…{:else}<Icon name="arrowUp" size={15} /> Ask{/if}
           </button>
         </div>
@@ -196,14 +198,24 @@
         <AgentByline provider={database.assistProvider} label="Draft" />
         <span class="grow"></span>
         <button
-          class="da-sql-btn"
+          class="btn small ghost"
+          onclick={() => {
+            database.assistProposedSql = '';
+            database.assistNote = '';
+          }}
+          title="Drop this proposed query (nothing is changed in your editor)"
+        >
+          Discard
+        </button>
+        <button
+          class="btn small"
           onclick={() => void database.insertAssistSql()}
           title="Put this query into the active editor tab"
         >
           <Icon name="arrowDown" size={12} /> Insert into editor
         </button>
         <button
-          class="da-sql-btn primary"
+          class="btn small primary"
           onclick={() => void database.runAssistSql()}
           title="Insert this query into the editor and run it read-only — a write asks you first"
         >
@@ -264,50 +276,13 @@
     color: var(--accent-text);
     font-weight: 600;
   }
-  .da-act {
+  /* Summarize is pushed to the far end; Stop sits beside "working…". */
+  .da-summarize {
     margin-inline-start: auto;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    border-radius: var(--radius-s);
-    font-size: var(--fs-s);
-    padding: 3px 8px;
-    cursor: pointer;
-  }
-  .da-act:hover:not(:disabled) {
-    border-color: var(--accent);
-  }
-  .da-act:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  /* Stop sits beside "working…", not pushed to the far end like Summarize. */
-  .da-act.da-stop {
-    margin-inline-start: 0;
-    color: var(--danger);
-    border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
-  }
-  .da-act.da-stop:hover {
-    border-color: var(--danger);
   }
   .da-empty .sub.warn {
     color: var(--warning);
     opacity: 1;
-  }
-  .da-close {
-    display: inline-flex;
-    border: none;
-    background: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 4px;
-    border-radius: var(--radius-s);
-  }
-  .da-close:hover {
-    background: color-mix(in srgb, var(--text) 8%, transparent);
   }
   .da-shell {
     flex: 1 1 auto;
@@ -398,23 +373,7 @@
     border-color: var(--accent);
   }
   .da-send {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
     align-self: center;
-    border: none;
-    border-radius: 999px;
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-    font-size: var(--fs-m);
-    font-weight: 600;
-    padding: 6px 16px;
-    cursor: pointer;
-  }
-  .da-send:disabled {
-    opacity: 0.45;
-    cursor: default;
   }
   /* Proposed-SQL block (read-only) with Insert / Run. */
   .da-sql {
@@ -443,26 +402,6 @@
   }
   .grow {
     flex: 1;
-  }
-  .da-sql-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--text);
-    border-radius: var(--radius-s);
-    font-size: var(--fs-s);
-    padding: 3px 9px;
-    cursor: pointer;
-  }
-  .da-sql-btn:hover {
-    border-color: var(--accent);
-  }
-  .da-sql-btn.primary {
-    background: var(--accent-solid);
-    border-color: var(--accent-solid);
-    color: var(--accent-contrast);
   }
   .da-sql-text {
     margin: 0;

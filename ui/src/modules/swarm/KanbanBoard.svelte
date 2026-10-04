@@ -3,6 +3,8 @@
   // reassign, run now, delete via a card menu. Add task + Plan-from-goal.
   // Cards support HTML5 drag-and-drop to change status columns.
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
+  import { plural } from '../../lib/plural';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import StoryLinkCard from './StoryLinkCard.svelte';
@@ -92,7 +94,7 @@
     in_review: 'In review',
     blocked: 'Blocked',
     done: 'Done',
-    cancelled: 'Cancelled',
+    cancelled: 'Canceled',
     verifying: 'Verifying',
   };
 
@@ -252,7 +254,7 @@
       editingGoal = false;
       toasts.success('Goal saved');
     } catch (e) {
-      toasts.error("Couldn't save the goal", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the goal', e);
     } finally {
       savingGoal = false;
     }
@@ -282,7 +284,7 @@
       if (isAbortError(e)) {
         toasts.info('Plan stopped', 'The planner may still finish in the background.');
       } else {
-        toasts.error("Couldn't plan tasks from the goal", e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t plan tasks from the goal', e);
       }
     } finally {
       planning = false;
@@ -336,7 +338,7 @@
       await swarm.runTask(t);
       toasts.success('Task queued');
     } catch (e) {
-      toasts.error("Couldn't queue the task", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t queue the task', e);
     }
   }
 
@@ -412,7 +414,7 @@
     try {
       await swarm.updateTask(t, { status: col });
     } catch (err) {
-      toasts.error("Couldn't move the task", err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t move the task', err);
     }
   }
 </script>
@@ -520,7 +522,7 @@
         >
           <div class="col-head">
             <span>{COLUMN_LABEL[col]}</span>
-            <span class="count" aria-label="{colTasks.length} tasks">{colTasks.length}</span>
+            <span class="count" aria-label={plural(colTasks.length, 'task')}>{colTasks.length}</span>
           </div>
           <div class="col-body">
             {#each visibleIn(col) as t (t.id)}
@@ -696,7 +698,7 @@
     border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-top-color: var(--accent);
     border-radius: 50%;
-    animation: otto-spin 0.7s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
   
   .field {
@@ -839,7 +841,7 @@
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: 999px;
     padding: 0 6px;
-    animation: otto-pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   
   @media (prefers-reduced-motion: reduce) {

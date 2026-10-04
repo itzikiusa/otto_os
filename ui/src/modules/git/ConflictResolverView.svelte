@@ -4,6 +4,7 @@
   // Footer: Abort merge (confirm) and Complete merge (enabled once every file
   // is resolved). Leaving the view (abort/complete) is reported via `onleave`.
   import type { GitOpInProgress, MergeConflictStatus } from '../../lib/api/types';
+  import { toastError } from '../../lib/toastError';
   import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -161,7 +162,7 @@
       toasts.info(`${label[0].toUpperCase()}${label.slice(1)} aborted`);
       onleave();
     } catch (e) {
-      toasts.error(`Couldn’t abort the ${label}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t abort the ${label}`, e);
     } finally {
       busy = '';
     }
@@ -197,7 +198,7 @@
       }
     } catch (e) {
       await reconcile();
-      toasts.error(`Couldn’t complete the ${opName ?? 'merge'}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t complete the ${opName ?? 'merge'}`, e);
     } finally {
       busy = '';
     }

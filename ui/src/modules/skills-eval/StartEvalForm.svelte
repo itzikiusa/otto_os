@@ -4,6 +4,7 @@
   // add validation dimensions (each fanned across one or more agent CLIs), and
   // pick the improver agent. Prefilled from the saved defaults (/settings/skill-eval).
   import { auth } from '../../lib/stores/auth.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import type {
@@ -105,7 +106,7 @@
       if (want >= 0) sourceSel = want;
       else if (sources.length > 0) sourceSel = 0;
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loaded = true;
     }
@@ -215,7 +216,7 @@
     <div class="load-err" role="alert">
       <Icon name="warning" size={14} />
       <div class="grow">
-        <strong>Couldn't load the evaluator defaults.</strong>
+        <strong>Couldn’t load the evaluator defaults.</strong>
         <span class="dim">The skill list and saved validations are missing until they load. {loadError}</span>
       </div>
       <button class="btn small" type="button" onclick={() => void load()}>Retry</button>
@@ -257,7 +258,7 @@
         id="se-task"
         class="input"
         rows="3"
-        placeholder="e.g. Add a new endpoint that returns a player's bonus balance history"
+        placeholder="e.g. Add a new endpoint that returns a player’s bonus balance history"
         bind:value={task}
       ></textarea>
     </div>
@@ -352,8 +353,8 @@
           <label class="field-label" for="se-base">Base git ref</label>
           <input id="se-base" class="input" placeholder="HEAD" bind:value={baseRef} />
           <p class="hint">
-            Each iteration's worktree is created from this ref of the workspace's git repo. If the
-            workspace root isn't a git repo, Otto uses a scratch repo at <span class="mono">~/Otto/SkillsEvaluator</span>
+            Each iteration’s worktree is created from this ref of the workspace’s git repo. If the
+            workspace root isn’t a git repo, Otto uses a scratch repo at <span class="mono">~/Otto/SkillsEvaluator</span>
             (created automatically).
           </p>
         </div>

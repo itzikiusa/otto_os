@@ -79,7 +79,7 @@
   {/if}
 {:else if loading && empty}
   <div class="ls-loading" class:page={variant === 'page'} role="status" aria-label="Loading {what}" style="min-block-size:{reserve}px">
-    {#if showSkeleton}<Skeleton announce={false} rows={skelRows} height={skelHeight} />{/if}
+    {#if showSkeleton}<Skeleton announce={false} grace={false} rows={skelRows} height={skelHeight} />{/if}
   </div>
 {:else if empty}
   {#if emptyView}{@render emptyView()}{/if}

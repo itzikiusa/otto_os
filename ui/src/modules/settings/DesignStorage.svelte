@@ -14,12 +14,14 @@
   import { toasts } from '../../lib/toast.svelte';
   import { formatBytes } from '../../lib/metric-format';
   import SettingToggle from './SettingToggle.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { toastError } from '../../lib/toastError';
 
   let report = $state<DesignStorageReport | null>(null);
   let loading = $state(true);
   let loadError = $state('');
   let saving = $state(false);
-  const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
   async function load() {
     loading = true;
@@ -27,7 +29,7 @@
     try {
       report = await api.get<DesignStorageReport>('/design/admin/storage');
     } catch (e) {
-      loadError = `Couldn’t read Design Hall storage. ${msg(e)}`;
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -56,7 +58,7 @@
       report = await api.put<DesignStorageReport>('/design/admin/auto-tidy', { enabled: on } satisfies DesignAutoTidyReq);
       toasts.success(on ? 'Design auto-tidy is on' : 'Design auto-tidy is off');
     } catch (e) {
-      toasts.error('Couldn’t change auto-tidy', msg(e));
+      toastError('Couldn’t change auto-tidy', e);
     } finally {
       saving = false;
     }
@@ -67,12 +69,9 @@
   <h2 class="card-title">Design Hall storage</h2>
   <p>Every save of a design keeps a full copy, so Design Hall storage only grows. Auto-tidy can thin out old autosaves for
     you. It’s off unless you turn it on.</p>
-  {#if loading && !report}
-    <p class="dim" role="status">Measuring Design Hall storage…</p>
-  {:else if loadError}
-    <p class="error" role="alert">{loadError}</p>
-    <div class="controls"><button class="btn" onclick={load}>Retry</button></div>
-  {:else if report}
+  {#if !report}
+    <LoadState what="Design Hall storage" {loading} error={loadError} empty={true} onretry={load} />
+  {:else}
     <dl class="facts">
       <div><dt>On disk</dt><dd data-testid="design-storage-bytes">{formatBytes(report.blob_bytes)}</dd></div>
       <div><dt>Versions</dt><dd>{report.version_count.toLocaleString()}</dd></div>
@@ -120,6 +119,4 @@
   .facts { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 10px 0 8px; font-size: var(--fs-s); }
   .facts dt { color: var(--text-dim); }
   .facts dd { margin: 2px 0 0; font-weight: 500; font-variant-numeric: tabular-nums; }
-  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
-  .error { margin: 10px 0 0; color: var(--danger); overflow-wrap: anywhere; }
 </style>

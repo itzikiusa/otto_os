@@ -334,7 +334,7 @@
     cursor: pointer;
   }
   .chip-refresh.spin :global(svg) {
-    animation: otto-spin 0.9s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
   
   .login-row {

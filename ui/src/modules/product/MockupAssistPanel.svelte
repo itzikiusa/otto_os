@@ -10,10 +10,10 @@
   // The format chips cover every DesignFormat (§2.2); they lock once the
   // artifact exists (a refine resumes the existing session and format).
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import Terminal from '../../lib/components/Terminal.svelte';
   import MockupLivePreview from './MockupLivePreview.svelte';
   import { mockupAssist } from '../../lib/stores/mockup-assist.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import type { DesignFormat, ProductAttachment } from './types';
   import { DESIGN_FORMATS } from './types';
   import { FORMATS } from './design/format';
@@ -81,7 +81,7 @@
       const att = await mockupAssist.ask(p, provider);
       oncommit?.(att);
     } catch (e) {
-      toasts.error('Design agent failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t run the design agent', e);
     }
   }
   function onKey(e: KeyboardEvent): void {

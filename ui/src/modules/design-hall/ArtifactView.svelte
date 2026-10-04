@@ -25,6 +25,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { popoutItems } from '../../lib/popoutMenu';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -172,7 +173,7 @@
       if (e instanceof ApiError && e.status === 404) phase = 'gone';
       else {
         phase = 'error';
-        loadError = e instanceof Error ? e.message : String(e);
+        loadError = loadErrorText(e);
       }
     }
   }
@@ -203,7 +204,7 @@
       versionsError = null;
       selected = selected.filter((s) => v.some((x) => x.id === s));
     } catch (e) {
-      if (my === versionsSeq) versionsError = e instanceof Error ? e.message : String(e);
+      if (my === versionsSeq) versionsError = loadErrorText(e);
     } finally {
       if (my === versionsSeq) versionsLoading = false;
     }
@@ -242,7 +243,7 @@
       links = l;
       linksError = null;
     } catch (e) {
-      if (my === linksSeq) linksError = e instanceof Error ? e.message : String(e);
+      if (my === linksSeq) linksError = loadErrorText(e);
     } finally {
       if (my === linksSeq) linksLoading = false;
     }
@@ -829,6 +830,7 @@
                 {artifact}
                 {source}
                 {blobUrl}
+                noVersion={!head}
                 {readonly}
                 {showSource}
                 {device}

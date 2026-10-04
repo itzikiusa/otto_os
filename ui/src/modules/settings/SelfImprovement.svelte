@@ -1,5 +1,6 @@
 <script lang="ts">
   import { pollWhileVisible } from '../../lib/poll';
+  import { toastError } from '../../lib/toastError';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -197,7 +198,7 @@
       adopt(wsId, await improveApi.putConfig(wsId, body));
       toasts.success('Self-improvement settings saved', cfg.enabled ? 'Enabled' : 'Disabled');
     } catch (e) {
-      toasts.error('Couldn’t save self-improvement settings', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save self-improvement settings', e);
     } finally {
       saving = false;
     }
@@ -215,7 +216,7 @@
       toasts.info('Self-reflection run started', 'Reviewing recent sessions…');
       await load(wsId);
     } catch (e) {
-      toasts.error('Couldn’t start a run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start a run', e);
     } finally {
       running = false;
     }
@@ -234,7 +235,7 @@
       toasts.success(action === 'approve' ? 'Edit approved and applied' : 'Edit denied', edit.target_ref);
       await load(wsId);
     } catch (e) {
-      toasts.error(`Couldn’t ${action === 'approve' ? 'approve' : 'deny'} the edit`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t ${action === 'approve' ? 'approve' : 'deny'} the edit`, e);
     } finally {
       busyEdit = null;
       busyKind = null;
@@ -286,7 +287,7 @@
             // Refresh runs + pending so the page is up-to-date.
             if (wsId) await load(wsId);
           } else if (run.status === 'failed') {
-            toasts.error('Evolve failed', run.error ?? 'Unknown error');
+            toasts.error('Couldn’t evolve the session', run.error ?? 'The run failed without saying why.');
           } else {
             // skipped
             evolveResult = [];
@@ -298,7 +299,7 @@
         toasts.info('Evolve running', 'The pass is taking longer than expected — check Recent runs.');
       }
     } catch (e) {
-      toasts.error('Couldn’t evolve the session', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t evolve the session', e);
     } finally {
       evolving = false;
     }

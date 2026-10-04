@@ -36,7 +36,9 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { ProductStory, TreeKind } from './types';
-  import { paneResizer } from '../../lib/paneResizer';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
 
   let importOpen = $state(false);
   let draftCreating = $state(false);
@@ -503,45 +505,7 @@
   // ── Sidebar width (drag-resizable, persisted) ─────────────────────────────
   // Mirrors the DatabasePage sidebar idiom: the chosen width survives reloads.
   // Applied via a CSS var so the phone accordion (full-width bands) still wins.
-  const SIDE_W_DEFAULT = 260;
-  let sideW = $state(loadSideW());
-  function loadSideW(): number {
-    if (typeof localStorage === 'undefined') return SIDE_W_DEFAULT;
-    const v = Number(localStorage.getItem('product.sideW'));
-    return Number.isFinite(v) && v >= 200 ? v : SIDE_W_DEFAULT;
-  }
-  function persistSideW(): void {
-    try {
-      localStorage.setItem('product.sideW', String(Math.round(sideW)));
-    } catch {
-      /* storage unavailable — non-fatal */
-    }
-  }
-  function startSideResize(e: PointerEvent): void {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = sideW;
-    const onMove = (ev: PointerEvent): void => {
-      // The sidebar is pinned to the LEFT edge, so dragging RIGHT widens it.
-      sideW = Math.max(200, Math.min(480, startW + (ev.clientX - startX)));
-    };
-    const onUp = (): void => {
-      persistSideW();
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-  function resetSideW(): void {
-    sideW = SIDE_W_DEFAULT;
-    persistSideW();
-  }
-  function setSideW(w: number): void {
-    sideW = w;
-    persistSideW();
-  }
-  const pxText = (v: number): string => `${Math.round(v)} pixels wide`;
+  let sideW = $state(loadPaneWidth('product.sideW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
 </script>
 
 {#snippet storyRow(s: ProductStory, node?: TreeNode, depth: number = 0)}
@@ -660,7 +624,7 @@
         </button>
       {/if}
       <button
-        class="btn"
+        class="btn primary"
         onclick={newMenu}
         title="New: a blank draft (Discovery) or an epic that groups stories/docs in folders"
         disabled={draftCreating}
@@ -670,13 +634,14 @@
       </button>
       <!-- The ONE import affordance (the empty state owns it while the list is empty). -->
       {#if !noStories}
-        <button class="btn primary" onclick={() => (importOpen = true)} title="Import an existing Jira issue / Confluence page">
-          <Icon name="plus" size={12} /> Import
+        <button class="btn" onclick={() => (importOpen = true)} title="Import an existing Jira issue / Confluence page">
+          <Icon name="download" size={12} /> Import
         </button>
       {/if}
     {/if}
   {/snippet}
 </PageHeader>
+<PageBody fill padded={false}>
 <div class="product-page" class:no-stories={noStories} class:learn-view={product.view === 'learnings'} class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'} style={`--product-side-w:${sideW}px`}>
   <!-- ── Mobile accordion header for the list panel (phone only) ───────── -->
   <button
@@ -760,21 +725,10 @@
       </div>
 
     {/if}
-
-    <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-    <div
-      class="side-resizer"
-      role="separator"
-      tabindex="0"
-      aria-orientation="vertical"
-      aria-label="Resize stories sidebar"
-      title="Drag or use ←/→ to resize · double-click or Enter to reset"
-      ondblclick={resetSideW}
-      onpointerdown={startSideResize}
-      use:paneResizer={{ value: sideW, min: 200, max: 480, onChange: setSideW, onReset: resetSideW, text: pxText }}
-    ></div>
   </aside>
+  {#if product.view === 'stories' && !noStories}
+    <PaneDivider bind:width={sideW} storageKey="product.sideW" label="Resize stories sidebar" />
+  {/if}
 
   <!-- ── Mobile accordion header for the content panel (phone only) ────── -->
   <button
@@ -916,6 +870,7 @@
     </div>
   </div>
 </div>
+</PageBody>
 </div>
 
 {#if importOpen}
@@ -949,31 +904,13 @@
   .product-side {
     /* Default width; an inline `--product-side-w` (drag-resizable, persisted)
        overrides it. The phone accordion below falls back to full width. */
-    width: var(--product-side-w, 260px);
+    width: var(--product-side-w, 280px);
     flex-shrink: 0;
     border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
-    position: relative; /* anchors the drag handle on the inline-end edge */
-  }
-  /* Draggable divider between the sidebar and the main area. Straddles the
-     sidebar's inline-end border; a hit-area wider than the border line makes
-     it easy to grab. */
-  .side-resizer {
-    position: absolute;
-    inset-block: 0;
-    inset-inline-end: -3px;
-    width: 6px;
-    cursor: col-resize;
-    background: transparent;
-    z-index: 2;
-    touch-action: none;
-  }
-  .side-resizer:hover,
-  .side-resizer:focus-visible {
-    outline: none;
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    position: relative;
   }
   /* Tree-role / draft markers are metadata, not selection: neutral. */
   .draft-badge {
@@ -1453,10 +1390,6 @@
       overflow: hidden;
       flex: 0 0 0;
       height: 0;
-    }
-    /* Full-width accordion band — nothing to drag. */
-    .side-resizer {
-      display: none;
     }
     .product-main {
       min-height: 0;

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { CLUSTER_VIEWS, clusterViewKey, type ClusterView } from './types';
+  import { toastError } from '../../lib/toastError';
   // Embeddable Kafka cluster viewer: the header + per-cluster tab strip
   // (Overview / Topics / Consumer Groups / Schema Registry / Replay / Lag Alerts)
   // that the standalone Message Brokers page renders, factored out so the unified
@@ -63,7 +64,7 @@
       if (r.ok) toasts.success('Connected', `${r.message} · ${r.latency_ms}ms`);
       else toasts.error('Connection failed', r.message);
     } catch (e) {
-      toasts.error('Test failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t test the connection', e);
     } finally {
       testing = false;
     }

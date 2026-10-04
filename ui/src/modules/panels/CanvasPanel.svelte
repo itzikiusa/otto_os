@@ -7,12 +7,13 @@
   // canvasRefsBus (attach/detach) and canvasDocBus (an open scene's source
   // changing while an agent edits it).
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   import { ui } from '../../lib/stores/ui.svelte';
   import { router } from '../../lib/router.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasRefsBus, canvasDocBus } from '../../lib/events.svelte';
   import { api } from '../../lib/api/client';
-  import { toasts } from '../../lib/toast.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -50,7 +51,7 @@
       const rows = await api.get<CanvasSceneSummary[]>(`/sessions/${sid}/canvas-refs`);
       if (seq === loadSeq) refs = rows;
     } catch (e) {
-      if (seq === loadSeq) loadError = e instanceof Error ? e.message : String(e);
+      if (seq === loadSeq) loadError = loadErrorText(e);
     } finally {
       if (seq === loadSeq) loading = false;
     }
@@ -147,7 +148,7 @@
       await api.del(`/sessions/${sid}/canvas-refs/${sceneId}`);
       refs = refs.filter((r) => r.id !== sceneId);
     } catch (e) {
-      toasts.error('Detach failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t detach the canvas', e);
     }
   }
 
@@ -196,7 +197,7 @@
       attachQuery = '';
       await load();
     } catch (e) {
-      toasts.error('Attach failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t attach the canvas', e);
     }
   }
 
@@ -215,7 +216,7 @@
       openInCanvas(created.id);
       await load();
     } catch (e) {
-      toasts.error('Could not create canvas', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create canvas', e);
     } finally {
       creating = false;
     }
@@ -576,7 +577,8 @@
     box-sizing: border-box;
   }
   .attach-search:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .candidates {
     list-style: none;

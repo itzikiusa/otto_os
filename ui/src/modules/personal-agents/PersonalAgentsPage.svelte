@@ -132,7 +132,7 @@
   <div class="pa-page">
   <PageHeader
     title="Personal Agents"
-    subtitle="Named agents with their own persona, schedules and memory — they talk to each other only in rooms you can read."
+    subtitle="Named agents with their own persona, schedules and memory"
   >
     {#snippet tabs()}
       <div class="segmented" role="tablist" aria-label="Personal agents view" tabindex="-1" onkeydown={onTabKey}>
@@ -170,7 +170,7 @@
           <EmptyState
             icon="user"
             title="No personal agents yet"
-            body="A personal agent is a named persona on a pinned provider and model, with its own schedules, memory and delivery. Start blank or from a template."
+            body="A personal agent is a named persona on a pinned provider and model, with its own schedules, memory and delivery. Agents talk to each other only in rooms you can read. Start blank or from a template."
             actionLabel="New agent"
             actionIcon="plus"
             variant="page"

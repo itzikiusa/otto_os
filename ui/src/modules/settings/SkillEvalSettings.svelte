@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import SectionIntro from './SectionIntro.svelte';
@@ -104,7 +105,7 @@
       savedKey = formKey(cfg);
       toasts.success('Skills evaluator defaults saved', 'New runs start from these.');
     } catch (e) {
-      toasts.error('Couldn’t save the evaluator defaults', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the evaluator defaults', e);
     } finally {
       saving = false;
     }

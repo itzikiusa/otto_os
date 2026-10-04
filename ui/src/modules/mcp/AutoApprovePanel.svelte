@@ -5,6 +5,7 @@
   // call is still audited ("Auto approved", naming the rule). Irreversible
   // tools need a per-tool rule plus a second confirmation.
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -77,7 +78,7 @@
       onchange();
     } catch (e) {
       input.checked = rule.enabled;
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update the rule', e);
     } finally {
       busy = null;
     }
@@ -99,7 +100,7 @@
       await load();
       onchange();
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete the rule', e);
     } finally {
       busy = null;
     }

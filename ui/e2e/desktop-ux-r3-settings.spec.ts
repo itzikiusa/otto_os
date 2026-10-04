@@ -115,7 +115,7 @@ test('MCP external discovery fails honestly and recovers using safe fixtures', a
  await page.route('**/api/v1/mcp/servers/synthetic-server/discover', r => fail ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Discovery fixture failed' } }) : r.fulfill({ json: [] }));
  await page.goto('/#/mcp/servers');
  await page.getByRole('button', { name: 'Discover', exact: true }).click();
- await expect(page.getByText('Discovery failed', { exact: true })).toBeVisible();
+ await expect(page.getByText('Couldn’t discover tools', { exact: true })).toBeVisible();
  await expect(page.getByRole('button', { name: 'Discover', exact: true })).toBeEnabled();
  fail = false; await page.getByRole('button', { name: 'Discover', exact: true }).click();
  await expect(page.getByText('Discovered tools', { exact: true })).toBeVisible();

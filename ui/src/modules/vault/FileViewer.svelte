@@ -271,7 +271,7 @@
 
   <div class="body">
     {#if vault.fileLoading}
-      <div class="notice">Loading…</div>
+      <div class="notice" role="status">Loading file…</div>
     {:else if vault.fileError}
       <div class="notice err">{vault.fileError}</div>
     {:else if isImage && vault.fileBlobUrl}

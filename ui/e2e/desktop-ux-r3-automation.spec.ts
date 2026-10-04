@@ -203,7 +203,8 @@ test('proof waiver: reason is required, denied approval preserves it, retry reco
   await page.route(`**/api/v1/proof-packs/${pack.id}/waive`, route => fail
     ? route.fulfill({ status: 403, json: { code: 'forbidden', message: 'Approval access temporarily unavailable' } }) : route.continue());
   await page.goto('/#/proof');
-  await page.getByRole('button', { name: 'Waive', exact: true }).click();
+  await page.getByRole('button', { name: 'More actions', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Waive/ }).click();
   const dialog = page.getByRole('dialog', { name: 'Waive proof gate' });
   await expect(dialog).toContainText('records you as the approver');
   await dialog.getByLabel('Reason', { exact: true }).fill('Short');

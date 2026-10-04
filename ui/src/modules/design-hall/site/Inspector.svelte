@@ -468,10 +468,10 @@
           {#each GRADIENTS as g (g)}
             <button class="sw grad" data-g={g} class:on={section.style?.background === `gradient:${g}`} style:--sw-a={g === 'ink' ? theme.night : g === 'soft' ? theme.surfaceAlt : theme.primary} style:--sw-b={g === 'soft' ? theme.primary : theme.accent} onclick={() => setBg(`gradient:${g}`)} disabled={readonly} aria-label={`Gradient ${g}`} title={`Gradient · ${g}`}></button>
           {/each}
-          <input class="input hex" placeholder="# hex" bind:value={hexDraft} disabled={readonly} aria-label="Custom colour (hex)" onchange={commitHex} />
+          <input class="input hex" placeholder="# hex" bind:value={hexDraft} disabled={readonly} aria-label="Custom color (hex)" onchange={commitHex} />
         </div>
         {#if bg?.offBrand}
-          <p class="warnchip" role="status"><Icon name="warning" size={12} /> Off-brand colour — not in {kitLabel ?? 'the palette'}.
+          <p class="warnchip" role="status"><Icon name="warning" size={12} /> Off-brand color — not in {kitLabel ?? 'the palette'}.
             {#if nearest && !readonly}<button class="linkbtn" onclick={() => setBg(nearest!.value)}>Use {nearest.label}</button>{/if}
           </p>
         {:else if bg?.unknownToken}

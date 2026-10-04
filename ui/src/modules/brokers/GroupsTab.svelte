@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { api, ApiError } from '../../lib/api/client';
@@ -47,44 +48,9 @@
   let dryRunLoading = $state(false);
   let dryRunResult = $state<DryRunResp | null>(null);
 
-  // Resizable group list: drag the divider between the list and the detail;
-  // the chosen width survives reloads. Mirrors the Database page's sidebar
-  // resizer. (On phones the list stacks full-width — the media query wins and
-  // the divider is hidden.)
-  const LIST_W_DEFAULT = 300;
-  let listW = $state(loadListW());
-  function loadListW(): number {
-    if (typeof localStorage === 'undefined') return LIST_W_DEFAULT;
-    const v = Number(localStorage.getItem('brokers.groupsListW'));
-    return Number.isFinite(v) && v >= 220 ? Math.min(520, v) : LIST_W_DEFAULT;
-  }
-  function persistListW(): void {
-    try {
-      localStorage.setItem('brokers.groupsListW', String(Math.round(listW)));
-    } catch {
-      /* storage unavailable — non-fatal */
-    }
-  }
-  function startListResize(e: PointerEvent): void {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = listW;
-    const direction = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? -1 : 1;
-    const onMove = (ev: PointerEvent): void => {
-      listW = Math.max(220, Math.min(520, startW + direction * (ev.clientX - startX)));
-    };
-    const onUp = (): void => {
-      persistListW();
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-  function resetListW(): void {
-    listW = LIST_W_DEFAULT;
-    persistListW();
-  }
+  // Resizable group list (PaneDivider): the width survives reloads. On phones /
+  // a narrow container the list stacks full-width and the divider is hidden.
+  let listW = $state(loadPaneWidth('brokers.groupsListW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
 
   $effect(() => {
     void cluster.id;
@@ -361,20 +327,8 @@
     {/if}
   </div>
 
-  <!-- A focusable ARIA separator is the APG window-splitter control. Svelte
-       classifies separator as static even with its required value/keyboard API. -->
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-  <div
-    class="side-resizer"
-    role="separator"
-    aria-orientation="vertical"
-    tabindex="0"
-    aria-label="Resize the group list"
-    title={RESIZE_TITLE}
-    ondblclick={resetListW}
-    onpointerdown={startListResize}
-    use:paneResizer={{ value: listW, min: 220, max: 520, step: 10, bigStep: 40, onChange: (w) => { listW = w; persistListW(); }, onReset: resetListW, text: pxWide }}
-  ></div>
+  <!-- display:contents wrapper so the stacked (narrow-container) layout can hide the divider. -->
+  <div class="divider-slot"><PaneDivider bind:width={listW} storageKey="brokers.groupsListW" label="Resize the group list" /></div>
 
   <div class="detail">
     {#if detailLoading}
@@ -581,29 +535,16 @@
     min-height: 0;
   }
   .list {
-    /* Default width; drag-resizable via the .side-resizer (persisted). The
+    /* Default width; drag-resizable via the PaneDivider (persisted). The
        narrow-container query below overrides back to a full-width band. */
-    width: var(--groups-list-w, 300px);
+    width: var(--groups-list-w, 280px);
     max-width: 45%;
     border-inline-end: 1px solid var(--border);
     overflow: auto;
     flex: none;
   }
-  /* Draggable divider between the group list and the detail. Sits flush
-     against the list's inline-end border; a hit-area wider than its visible
-     line makes it easy to grab. */
-  .side-resizer {
-    flex: none;
-    width: 5px;
-    margin-inline-start: -3px;
-    cursor: col-resize;
-    background: transparent;
-    position: relative;
-    z-index: 2;
-    touch-action: none;
-  }
-  .side-resizer:hover {
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  .divider-slot {
+    display: contents;
   }
   .grow-row {
     width: 100%;
@@ -877,7 +818,7 @@
       border-bottom: 1px solid var(--border);
     }
     /* Stacked layout — nothing to drag sideways. */
-    .side-resizer {
+    .divider-slot {
       display: none;
     }
     .detail {

@@ -12,6 +12,7 @@
   // (deep link to one report — what "Open in new window" pops out, where the
   // list pane is hidden and only the report shows).
   import { insightsApi } from '../../lib/api/insights';
+  import { toastError } from '../../lib/toastError';
   import { onTabKey } from '../../lib/tabKeys';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
@@ -86,7 +87,7 @@
         `${bundle.redaction_hits} secret value${bundle.redaction_hits !== 1 ? 's' : ''} redacted.`,
       );
     } catch (e) {
-      toasts.error("Couldn't download the support bundle", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t download the support bundle', e);
     } finally {
       bundleLoading = false;
     }
@@ -362,7 +363,7 @@
       const text = await insightsApi.readText(r.html_path);
       downloadText(text, r.html_path.split('/').at(-1) ?? `${fileStem(r)}.html`, 'text/html');
     } catch (e) {
-      toasts.error("Couldn't download the report", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t download the report', e);
     }
   }
 
@@ -384,7 +385,7 @@
       window.open(url, '_blank', 'noopener');
       // Not revoked: the new tab needs the URL; it's released when the tab closes.
     } catch (e) {
-      toasts.error("Couldn't open the report window", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t open the report window', e);
     }
   }
 
@@ -455,7 +456,7 @@
         toasts.success('Insights run started', 'The report appears here when it is ready.');
       }
     } catch (e) {
-      toasts.error("Couldn't start the insights run", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start the insights run', e);
     } finally {
       running = false;
     }

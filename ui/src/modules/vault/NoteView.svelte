@@ -190,7 +190,7 @@
   }
 
   // Page previews on inline wikilinks (delegated; same popover as the
-  // structured panel's chips). Leaving the link, scrolling or switching
+  // structured panel’s chips). Leaving the link, scrolling or switching
   // notes closes it.
   function onReadOver(e: Event): void {
     const a = (e.target as HTMLElement).closest?.('a.internal-link[data-path]');
@@ -292,7 +292,7 @@
         const render =
           kind === 'd2'
             ? renderD2(id, src, { dark: ui.resolvedScheme === 'dark', isStale: () => !el.isConnected })
-            : renderMermaid(id, src, { isStale: () => !el.isConnected });
+            : renderMermaid(id, src, { dark: ui.resolvedScheme === 'dark', isStale: () => !el.isConnected });
         void render.then(({ svg, error }) => {
           if (!el.isConnected) return;
           if (svg) {
@@ -468,8 +468,8 @@
 
     {#if refineShown && vault.notePath}
       <!-- Keyed by path (NOT by note content): reloading the same note after
-           the agent's edit keeps the drawer + terminal mounted; opening a
-           different note resets the drawer to that note's refine session. -->
+           the agent’s edit keeps the drawer + terminal mounted; opening a
+           different note resets the drawer to that note’s refine session. -->
       {#key vault.notePath}
         <RefineDrawer path={vault.notePath} />
       {/key}
@@ -680,9 +680,6 @@
   .read :global(div.diagram-block.diagram-ok) {
     display: flex;
     justify-content: center;
-    /* Mermaid's `neutral` theme assumes a light surface — keep the figure
-       readable in dark mode too (reads as an embedded light figure). */
-    background: #fdfdfd;
   }
   .read :global(div.diagram-block svg) {
     max-width: 100%;

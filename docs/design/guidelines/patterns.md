@@ -164,10 +164,32 @@ size / embed summary, then Cancel · Publish.
 - a pending count in `--warning` wherever the queue is surfaced
 - per item: **who asked** (agent identity), **what** (the tool or action and
   its arguments or diff), **why** (the agent's stated reason), and **when**
-- **Approve** (the primary action) and **Deny** (asks for an optional reason)
-  on each item. Batch approval is allowed only for identical, low-risk items.
+- **Approve** (the primary action) and **Deny…** (opens the `DenySheet` for an
+  optional reason) on each item — render both with `ApprovalActions` and, once
+  decided, the outcome line with `ApprovalOutcome` ("Approved by Dana · 3m
+  ago"). Busy labels name the action ("Approving…", "Denying…"). No red button
+  beside the primary: Deny is a neutral `.btn`. Where the endpoint has nowhere
+  to record a reason, pass `askReason={false}` so Deny fires immediately
+  without the ellipsis. Batch approval is allowed only for identical, low-risk
+  items.
 - decisions are recorded and visible in an audit list: approved, denied,
   expired, and by whom
+
+**Vocabulary.** The verb pair depends on what is being decided, and is not
+mixed across kinds:
+
+| Kind | Verbs | Notes |
+|---|---|---|
+| **Gates** (approval queues: MCP, workflow `human_approval`, Run with Otto, finding gates, browser actions) | **Approve** / **Deny…** | `ApprovalActions` |
+| **Agent proposals** (rules, memories, drafts, suggested edits) | **Accept** / **Keep** … **Reject** / **Discard** | Applying is explicit ([§2](#2-agent-authored-content)) |
+| **Join requests** (a participant asking into a room) | **Admit** / **Decline** | Neutral, not danger: declining is a normal answer, not a destructive act |
+
+**Two documented exceptions to "outward means confirm".** A plain `git push`
+of the *current branch* is not confirmed (it is the everyday save-to-remote; a
+force-push and PR creation are confirmed). Vault *refine* applies the agent's
+edit **in place** and offers **Undo refine** (a `.btn small`) instead of a
+pre-apply confirm; "Stop and start over…" confirms only when an edit is in
+flight.
 
 Never auto-approve silently. A "remember my choice" option is explicit
 (`confirmer.choose(…, { checkboxLabel })`), scoped (per repo, per tool) and
@@ -227,6 +249,11 @@ inherits the same environment marking and confirmation.
 | **Discard** | Throws away unsaved or unapplied changes | If more than a trivial edit would be lost |
 | **Stop** / **Cancel** | Ends running work / dismisses a dialog or pending operation | Stop: if it loses work in progress |
 
+- **Stop** is one verb with one icon (`stop`). It is neutral and immediate
+  when it only ends a query or a turn (nothing is discarded: DB assistant,
+  verification, a request). It is red, ends in "…" and confirms **only when an
+  agent session or worktree is discarded** (Swarm runs, Run with Otto, a
+  workflow run). The confirm button repeats the verb ("Stop run").
 - The request can sit in a menu (`danger: true` row) or be a `.btn.danger`.
   The **commit** happens in the confirm dialog, whose red filled button repeats
   the verb ("Delete").

@@ -3,7 +3,8 @@
   // right pane showing either the start form or a selected run's live report.
   import { untrack } from 'svelte';
   import { onTabKey } from '../../lib/tabKeys';
-  import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -33,8 +34,13 @@
     /** "Open run" hand-off (a skill's Evals tab): select this run. */
     initialRun?: string | null;
     onrunconsumed?: () => void;
+    /** The runs list is hidden — the ONE list toggle lives in the Skills Lab
+     *  header (it hands its state down). */
+    listCollapsed?: boolean;
+    /** Tells the host whether this view has a runs list to toggle. */
+    onlistable?: (listable: boolean) => void;
   }
-  let { initialSkill = null, onconsumed, initialRun = null, onrunconsumed }: Props = $props();
+  let { initialSkill = null, onconsumed, initialRun = null, onrunconsumed, listCollapsed = false, onlistable }: Props = $props();
   // The skill the start form should pre-select (kept until the form is left).
   let formSkill = $state<{ name: string; source: string } | null>(null);
   $effect(() => {
@@ -72,7 +78,8 @@
   let mode: Mode = $state('form');
   let selectedId: string | null = $state(null);
   let starting = $state(false);
-  let listHidden = $state(false);
+  const listHidden = $derived(listCollapsed);
+  $effect(() => onlistable?.(tab === 'runs'));
   // The view is part of the route (`#/skills-eval/evaluator[/golden|/matrix]`)
   // so back/forward and deep links land on it.
   const TABS: { id: Tab; label: string; icon: 'zap' | 'target' | 'grid' }[] = [
@@ -250,61 +257,21 @@
     }
   }
 
-  // Resizable run list: drag the divider between the list and the report to
-  // resize it; the chosen width survives reloads. Mirrors the Database page's
-  // sidebar resizer (double-click resets).
-  const SIDE_W_DEFAULT = 280;
-  let sideW = $state(loadSideW());
-  function loadSideW(): number {
-    let v = NaN;
-    try {
-      v = Number(localStorage.getItem('skillsEval.sideW'));
-    } catch {
-      /* storage unavailable — use the default */
-    }
-    return Number.isFinite(v) && v >= 220 ? Math.min(480, v) : SIDE_W_DEFAULT;
-  }
-  function persistSideW(): void {
-    try {
-      localStorage.setItem('skillsEval.sideW', String(Math.round(sideW)));
-    } catch {
-      /* storage unavailable — non-fatal */
-    }
-  }
-  function startSideResize(e: PointerEvent): void {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = sideW;
-    const onMove = (ev: PointerEvent): void => {
-      // The list is pinned to the LEFT edge, so dragging RIGHT widens it.
-      sideW = Math.max(220, Math.min(480, startW + (ev.clientX - startX)));
-    };
-    const onUp = (): void => {
-      persistSideW();
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-  function resetSideW(): void {
-    sideW = SIDE_W_DEFAULT;
-    persistSideW();
-  }
+  // Resizable run list (PaneDivider): the width survives reloads.
+  let sideW = $state(loadPaneWidth('skillsEval.sideW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
 </script>
 
 <div class="se-wrap">
-  <div class="se-toolbar">
-  {#if tab === 'runs'}<button class="btn small ghost list-toggle" aria-label={listHidden ? 'Show evaluations list' : 'Hide evaluations list'} title={listHidden ? 'Show evaluations list' : 'Hide evaluations list'} aria-expanded={!listHidden} aria-controls="evaluations-list" onclick={() => (listHidden = !listHidden)}><Icon name="sidebar" size={14} /></button>{/if}
-  <div class="se-tabs" role="tablist" aria-label="Evaluator view" data-testid="eval-tabs" tabindex="-1" onkeydown={onTabKey}>
-    {#each TABS as t (t.id)}
-      <button class="se-tab" role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1} class:active={tab === t.id} onclick={() => setTab(t.id)} data-testid="tab-{t.id}">
-        <Icon name={t.icon} size={12} /> {t.label}
-      </button>
-    {/each}
+  <div class="se-subhead">
+    <div class="segmented" role="tablist" aria-label="Evaluator view" data-testid="eval-tabs" tabindex="-1" onkeydown={onTabKey}>
+      {#each TABS as t (t.id)}
+        <button role="tab" aria-selected={tab === t.id} aria-controls="eval-panel" tabindex={tab === t.id ? 0 : -1} class:active={tab === t.id} onclick={() => setTab(t.id)} data-testid="tab-{t.id}">
+          <Icon name={t.icon} size={12} /> {t.label}
+        </button>
+      {/each}
+    </div>
   </div>
-  </div>
-  <div class="se-content">
+  <div class="se-content" id="eval-panel" role="tabpanel">
     {#if tab === 'golden'}
       <GoldenTasksView onopenrun={openRun} />
     {:else if tab === 'matrix'}
@@ -384,18 +351,7 @@
     </div>
   </aside>
 
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-  <div
-    class="side-resizer"
-    role="separator"
-    tabindex="0"
-    aria-orientation="vertical"
-    aria-label="Resize the evaluations list"
-    title={RESIZE_TITLE}
-    ondblclick={resetSideW}
-    onpointerdown={startSideResize}
-    use:paneResizer={{ value: sideW, min: 220, max: 480, onChange: (w) => { sideW = w; persistSideW(); }, onReset: resetSideW, text: pxWide }}
-  ></div>
+  {#if !listHidden}<PaneDivider bind:width={sideW} storageKey="skillsEval.sideW" label="Resize the evaluations list" />{/if}
 
   <main class="se-main">
     {#if !ws.currentId}
@@ -432,43 +388,13 @@
 </div>
 
 <style>
-  .se-toolbar { display: flex; align-items: center; border-bottom: 1px solid var(--border); }
-  .list-toggle { margin-inline-start: 8px; flex-shrink: 0; }
-  .se-page.list-hidden .se-side, .se-page.list-hidden .side-resizer { display: none; }
+  .se-subhead { display: flex; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .se-page.list-hidden .se-side { display: none; }
   .se-wrap {
     display: flex;
     flex-direction: column;
     height: 100%;
     min-height: 0;
-  }
-  /* Same underline tabs as a skill's detail pane (Overview · Edit · …). */
-  .se-tabs {
-    display: flex;
-    gap: 2px;
-    padding: 0 16px;
-    flex-shrink: 0;
-  }
-  .se-tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 32px;
-    margin-bottom: -1px;
-    border: none;
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    font-weight: 500;
-    padding: 0 12px;
-    cursor: pointer;
-  }
-  .se-tab:hover {
-    color: var(--text);
-  }
-  .se-tab.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
   }
   .se-content {
     flex: 1;
@@ -490,26 +416,6 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
-  }
-  /* Draggable divider between the run list and the report. Sits flush against
-     the list's inline-end border; a hit-area wider than its visible line makes
-     it easy to grab. */
-  .side-resizer {
-    flex-shrink: 0;
-    width: 5px;
-    margin-inline-start: -3px;
-    cursor: col-resize;
-    background: transparent;
-    position: relative;
-    z-index: 2;
-    touch-action: none;
-  }
-  .side-resizer:focus-visible {
-    outline: none;
-    background: color-mix(in srgb, var(--accent) 70%, transparent);
-  }
-  .side-resizer:hover {
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .se-side-head {
     display: flex;
@@ -644,16 +550,13 @@
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
     }
-    .side-resizer {
-      display: none;
-    }
     .se-main {
       flex: 1;
       min-height: 0;
     }
-    .se-tabs {
+    .se-subhead {
       overflow-x: auto;
-      padding: 0 8px;
+      padding: 8px;
     }
   }
   @media (prefers-reduced-motion: reduce) {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Daemon settings (root): network listener toggle + port, log path display.
@@ -171,7 +172,7 @@
       }
       toasts.success('Daemon settings saved', notes.join(' · '));
     } catch (e) {
-      toasts.error('Couldn’t save daemon settings', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save daemon settings', e);
     } finally {
       saving = false;
     }

@@ -9,6 +9,9 @@
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { toastError } from '../../lib/toastError';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus, sentenceCase } from '../../lib/status';
   import { rel } from '../../lib/stores/now.svelte';
@@ -67,7 +70,7 @@
       // Open on the newest matrix rather than an empty "pick one" pane.
       if (!showForm && selectedId === null && matrices.length > 0) void selectMatrix(matrices[0].id);
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -84,7 +87,7 @@
       if (selectedId === id) selected = m;
       syncListEntry(m);
     } catch (e) {
-      if (selectedId === id) detailError = e instanceof Error ? e.message : String(e);
+      if (selectedId === id) detailError = loadErrorText(e);
     } finally {
       if (selectedId === id) detailLoading = false;
     }
@@ -139,7 +142,7 @@
       selected = m;
       syncListEntry(m);
     } catch (e) {
-      toasts.error("Couldn't stop the matrix", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t stop the matrix', e);
     }
   }
 
@@ -212,7 +215,7 @@
       await selectMatrix(m.id);
       toasts.success('Matrix created', 'Cells score the working tree in the background.');
     } catch (e) {
-      toasts.error("Couldn't create the matrix", e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the matrix', e);
     } finally {
       creating = false;
     }
@@ -280,7 +283,7 @@
   <aside class="mx-side">
     <div class="mx-side-head">
       <span class="mx-side-title">Matrices</span>
-      <!-- Not .primary: the form's "Create matrix" / the empty state's CTA is the view's primary. -->
+      <!-- Not .primary: the form’s "Create matrix" / the empty state’s CTA is the view’s primary. -->
       <button class="btn small" data-testid="matrix-new-btn" onclick={openForm} aria-pressed={showForm}>
         <Icon name="plus" size={12} /> New matrix
       </button>
@@ -288,13 +291,8 @@
     <div class="mx-list">
       {#if !ws.currentId}
         <div class="mx-muted">No workspace selected.</div>
-      {:else if loading && matrices.length === 0}
-        <div class="mx-muted" role="status">Loading matrices…</div>
-      {:else if loadError && matrices.length === 0}
-        <div class="mx-muted mx-err" role="alert">
-          <span><Icon name="warning" size={12} /> <strong>Couldn't load matrices.</strong> <span class="mx-err-detail">{loadError}</span></span>
-          <button class="btn small" onclick={() => ws.currentId && loadList(ws.currentId)} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>
-        </div>
+      {:else if (loading || loadError) && matrices.length === 0}
+        <LoadState what="matrices" {loading} error={loadError} empty={true} variant="compact" onretry={() => ws.currentId && loadList(ws.currentId)} />
       {:else if matrices.length === 0}
         <div class="mx-muted">No matrices yet.</div>
       {:else}
@@ -328,7 +326,7 @@
         <h2>New matrix</h2>
         <p class="lede">
           A provider × skill × prompt grid — each cell is a scored run. Matrices currently score the
-          workspace's working tree (score only; no improvement iterations).
+          workspace’s working tree (score only; no improvement iterations).
         </p>
 
         <section class="card block">
@@ -404,7 +402,7 @@
     {:else if selectedId && detailError}
       <div class="mx-detail-err" role="alert">
         <Icon name="warning" size={22} />
-        <strong>Couldn't load this matrix</strong>
+        <strong>Couldn’t load this matrix</strong>
         <p>{detailError}</p>
         <button class="btn small" onclick={() => selectedId && selectMatrix(selectedId)} disabled={detailLoading}><Icon name="refresh" size={12} /> {detailLoading ? 'Retrying…' : 'Retry'}</button>
       </div>
@@ -539,21 +537,9 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
   }
-  .mx-err {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
-    color: var(--text);
-    overflow-wrap: anywhere;
-  }
-  .mx-err :global(svg),
   .mx-detail-err > :global(svg) {
     color: var(--danger);
     vertical-align: -1px;
-  }
-  .mx-err-detail {
-    color: var(--text-dim);
   }
   .mx-pad {
     padding: 30px;
@@ -631,7 +617,7 @@
   }
   .mx-dot.st-running {
     background: var(--info);
-    animation: otto-pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   .mx-dot.st-done {
     background: var(--status-working);

@@ -4,6 +4,7 @@
   // auth (the daemon drives the system `sftp` binary). Opened from the
   // Connections page; no terminal session required.
   import type { Connection, SftpEntry, SftpTransfer } from '../../lib/api/types';
+  import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { sftp } from '../../lib/stores/sftp.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -95,7 +96,7 @@
             await sftp.loadTransfers(id);
           } catch (error) {
             poller?.stop();
-            toasts.error('Could not refresh transfers', error instanceof Error ? error.message : String(error));
+            toastError('Couldn’t refresh transfers', error);
           }
         },
         { get ms() { return live() ? 1500 : 15_000; }, floorMs: 1000 },
@@ -117,7 +118,7 @@
 
   // Transfer status enum → words (the raw value read "timed_out").
   const TRANSFER_STATUS: Record<SftpTransfer['status'], string> = {
-    running: 'Running', finalizing: 'Finalizing', completed: 'Completed', cancelled: 'Cancelled',
+    running: 'Running', finalizing: 'Finalizing', completed: 'Completed', cancelled: 'Canceled',
     failed: 'Failed', timed_out: 'Timed out', outcome_unknown: 'Outcome unknown',
   };
   const WRITE_DENIED = "You don't have write access to this connection's files";
@@ -163,7 +164,7 @@
       const resp = await sftp.readText(conn.id, path);
       viewing = { name: e.name, text: resp.text, truncated: resp.truncated };
     } catch (err) {
-      toasts.error('Read failed', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t read the file', err);
     } finally {
       busy = { ...busy, [e.name]: false };
     }
@@ -179,7 +180,7 @@
       const r = await sftp.download(conn.id, path, localDir);
       toasts.success('Downloaded', `${e.name} → ${r.local_path} (${humanSize(r.bytes)})`);
     } catch (err) {
-      toasts.error('Download failed', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t download the file', err);
     } finally {
       busy = { ...busy, [e.name]: false };
     }
@@ -201,7 +202,7 @@
       toasts.success('Uploaded', localPath);
       await sftp.refresh(conn.id);
     } catch (err) {
-      toasts.error('Upload failed', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t upload the file', err);
     }
   }
 
@@ -215,7 +216,7 @@
       await sftp.mkdir(conn.id, name);
       await sftp.refresh(conn.id);
     } catch (err) {
-      toasts.error('Create failed', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t create the item', err);
     }
   }
 
@@ -240,7 +241,7 @@
       await sftp.rename(conn.id, path, next);
       await sftp.refresh(conn.id);
     } catch (err) {
-      toasts.error('Rename failed', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t rename the item', err);
     }
   }
 
@@ -261,7 +262,7 @@
       await sftp.remove(conn.id, path, isDir);
       await sftp.refresh(conn.id);
     } catch (err) {
-      toasts.error('Delete failed', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t delete the item', err);
     }
   }
 
@@ -327,7 +328,7 @@
             <span>{TRANSFER_STATUS[transfer.status] ?? transfer.status} · {humanSize(transfer.bytes)}{transfer.total_bytes !== null ? ` / ${humanSize(transfer.total_bytes)}` : ''} · {transfer.elapsed_secs}s</span>
             {#if transfer.status === 'running'}
               <progress max={transfer.total_bytes ?? undefined} value={transfer.total_bytes ? transfer.bytes : undefined} aria-label="Transferred bytes"></progress>
-              <button class="btn small" onclick={() => void sftp.cancelTransfer(conn.id, transfer.id).catch(e => toasts.error('Cancel failed', e instanceof Error ? e.message : String(e)))}>Cancel</button>
+              <button class="btn small" onclick={() => void sftp.cancelTransfer(conn.id, transfer.id).catch(e => toastError('Couldn’t cancel', e))}>Cancel</button>
             {/if}
             {#if transfer.error}<span class="err">{transfer.error}</span>{/if}
           </div>
@@ -501,7 +502,8 @@
   }
   .sftp-search:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .sftp-search::placeholder {
     color: var(--text-dim);

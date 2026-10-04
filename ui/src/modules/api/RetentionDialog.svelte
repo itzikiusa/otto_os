@@ -3,6 +3,7 @@
   // and/or drop requests older than D days, and the newest N runs per
   // automation. 0 = no limit. Saving applies the limits right away.
   import Modal from '../../lib/components/Modal.svelte';
+  import { toastError } from '../../lib/toastError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -39,7 +40,7 @@
       if (applied) toasts.success('Retention saved', r || d || k ? 'Applied now, and after every request or run.' : 'Everything is kept.');
       onclose();
     } catch (e) {
-      toasts.error('Couldn’t save history retention', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save history retention', e);
     } finally {
       busy = false;
     }

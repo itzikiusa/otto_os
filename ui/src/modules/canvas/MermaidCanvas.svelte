@@ -12,6 +12,7 @@
   // Mermaid. Mermaid's own renderer draws the full rich spectrum (subgraphs, classDef
   // colours, every shape). Pan/zoom the preview.
   import { PAN_LABEL, panDelta } from './panKeys';
+  import { toastError } from '../../lib/toastError';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
@@ -66,7 +67,7 @@
       await canvas.persistDoc(sceneId, doc, saveContext);
     } catch (e) {
       if (canvas.currentId === sceneId)
-        toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t save the canvas', e);
     }
   }
   let codeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -94,7 +95,7 @@
     const doc: CanvasDoc = { type: 'otto-canvas', version: 1, format: 'mermaid' as CanvasFormat, source: pendingCode };
     pendingCode = null;
     void canvas.persistDoc(sceneId, doc, saveContext).catch((e: unknown) =>
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e)),
+      toastError('Couldn’t save the canvas', e),
     );
   }
 
@@ -294,7 +295,7 @@
       void canvas.refreshSession();
     } catch (e) {
       canvas.pushConvo('assistant', `Failed: ${e instanceof Error ? e.message : String(e)}`, sceneId);
-      toasts.error('Ask Otto failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t ask Otto', e);
     } finally {
       generating = false;
     }

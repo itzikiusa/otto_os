@@ -2,12 +2,16 @@
   // Reusable run detail: every step of a WorkflowRun with its status, duration,
   // logs, error, and rendered "work product" (agent reply / JSON).
   import {untrack, onDestroy} from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import {RunBodyCache, mergeCheckpointPage, fmtStepMs, sharedNodeBodies} from './runProgress';
   import {api} from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { plural } from '../../lib/plural';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { proof } from '../../lib/stores/proof.svelte';
@@ -165,7 +169,7 @@
       onRunUpdated?.(nr); // flips the run back to running; WS keeps it live
       toasts.info(includeDownstream ? 'Re-running from step…' : 'Step retrying…', nodeName(ns.node_id));
     } catch (e) {
-      toasts.error('Couldn’t retry the step', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t retry the step', e);
     } finally {
       retryingId = null;
     }
@@ -227,7 +231,7 @@
       const current=checkpoint ? (run.summary ? loadedCheckpoints : run.checkpoints)?.find(c=>c.node_id===summary.node_id) : run.nodes.find(n=>n.node_id===summary.node_id);
       if (current?.detail_version !== result.detail_version) {onRefresh?.();return;}
       bodies.put(id,key,result.detail_version,result.body); attempted.delete(attempt); bodyTick++;
-    } catch(e) {if(run.id===id) bodyErrors[key]=e instanceof Error?e.message:String(e);}
+    } catch(e) {if(run.id===id) bodyErrors[key]=loadErrorText(e);}
     finally {if(run.id===id) bodyLoading[key]=false;}
   }
   async function loadCheckpointPage(index=checkpointPageIndex):Promise<void> {
@@ -246,7 +250,7 @@
       checkpointPages[index]={cursor,page:{...page,items:merged.items}}; checkpointPageIndex=index;
       loadedCheckpoints=merged.known;
       if(page.checkpoint_rev < (run.checkpoint_rev??0)) checkpointRefreshQueued=true;
-    } catch(e) {if(run.id===id && checkpointRequest===request) checkpointError=e instanceof Error?e.message:String(e);}
+    } catch(e) {if(run.id===id && checkpointRequest===request) checkpointError=loadErrorText(e);}
     finally {
       if(run.id===id && checkpointRequest===request) {checkpointLoading=false;if(checkpointRefreshQueued && checkpointOpen){checkpointRefreshQueued=false;queueCheckpointRefresh();}}
     }
@@ -305,15 +309,13 @@
   <details class="checkpoint-list" open={checkpointOpen} ontoggle={(event)=>checkpointOpen=event.currentTarget.open}>
     <summary>Loop checkpoints · {run.checkpoint_done ?? run.checkpoints?.filter(c=>c.status==='success').length ?? 0}/{run.checkpoint_count ?? run.checkpoints?.length ?? 0} complete</summary>
     {#if checkpointOpen}
-      {#if checkpointError}<p class="err">{checkpointError} <button onclick={()=>void loadCheckpointPage()}>Retry</button></p>{/if}
-      {#if checkpointLoading}<p>Loading checkpoints…</p>{/if}
+      {#if checkpointError || checkpointLoading}<LoadState what="checkpoints" variant="compact" loading={checkpointLoading} error={checkpointError} empty={true} onretry={()=>void loadCheckpointPage()} />{/if}
       {#each checkpointRows.filter(c=>c.iteration>0) as summary (summary.node_id)}
         {@const checkpoint=displayedCheckpoint(summary)}
         <details open={checkpointExpanded[summary.node_id]??false} ontoggle={(event)=>checkpointExpanded[summary.node_id]=event.currentTarget.open}>
-          <summary>{summary.name} · iteration {summary.iteration} · {runStatus(summary.status).label} · {summary.attempts} attempt(s)</summary>
+          <summary>{summary.name} · iteration {summary.iteration} · {runStatus(summary.status).label} · {plural(summary.attempts,'attempt')}</summary>
           {#if checkpointExpanded[summary.node_id]}
-            {#if bodyLoading[`c:${summary.node_id}`]}<p>Loading details…</p>{/if}
-            {#if bodyErrors[`c:${summary.node_id}`]}<p class="err">{bodyErrors[`c:${summary.node_id}`]} <button onclick={()=>void loadBody(summary,true,true)}>Retry</button></p>{/if}
+            {#if bodyLoading[`c:${summary.node_id}`] || bodyErrors[`c:${summary.node_id}`]}<LoadState what="step details" variant="compact" loading={bodyLoading[`c:${summary.node_id}`]} error={bodyErrors[`c:${summary.node_id}`]} empty={true} onretry={()=>void loadBody(summary,true,true)} />{/if}
             {#if checkpoint.error}<p class="err">{checkpoint.error}</p>{/if}
             {#if checkpoint.logs.length}<pre>{checkpoint.logs.join('\n')}</pre>{/if}
             {#if !summary.detail_version || checkpoint!==summary}<pre>{JSON.stringify(checkpoint.output??checkpoint.input,null,2)}</pre>{/if}
@@ -379,8 +381,7 @@
       </summary>
       {#if isOpen(summary)}
       <div class="body">
-        {#if bodyLoading[`n:${summary.node_id}`]}<p>Loading details…</p>{/if}
-        {#if bodyErrors[`n:${summary.node_id}`]}<p class="err">{bodyErrors[`n:${summary.node_id}`]} <button onclick={()=>void loadBody(summary,false,true)}>Retry</button></p>{/if}
+        {#if bodyLoading[`n:${summary.node_id}`] || bodyErrors[`n:${summary.node_id}`]}<LoadState what="step details" variant="compact" loading={bodyLoading[`n:${summary.node_id}`]} error={bodyErrors[`n:${summary.node_id}`]} empty={true} onretry={()=>void loadBody(summary,false,true)} />{/if}
         {#if ns.error}
           <div class="err">{ns.error}</div>
         {/if}
@@ -390,7 +391,7 @@
             {#if canRetry(ns)}
               <button
                 class="link-btn"
-                title="Re-run ONLY this errored step, keeping this run's files/worktree"
+                title="Re-run ONLY this errored step, keeping this run’s files/worktree"
                 disabled={retryingId === ns.node_id}
                 onclick={() => void retryStep(ns)}
               >
@@ -400,7 +401,7 @@
             {#if canRerunFrom(ns)}
               <button
                 class="link-btn"
-                title="Re-run this step AND everything after it, keeping this run's files/worktree (unlike the canvas Run-from-here, which starts a fresh run with a clean worktree)"
+                title="Re-run this step AND everything after it, keeping this run’s files/worktree (unlike the canvas Run-from-here, which starts a fresh run with a clean worktree)"
                 disabled={retryingId === ns.node_id}
                 onclick={() => void retryStep(ns, true)}
               >
@@ -456,8 +457,7 @@
   {@const z = displayedNode(run.nodes.find(n=>n.node_id===zoomed?.node_id)??zoomed)}
   <Modal title={`Step · ${nodeName(z.node_id)}`} width={920} onclose={() => (zoomed = null)}>
     <div class="zoom">
-      {#if bodyLoading[`n:${z.node_id}`]}<p>Loading details…</p>{/if}
-      {#if bodyErrors[`n:${z.node_id}`]}<p class="err">{bodyErrors[`n:${z.node_id}`]} <button onclick={()=>void loadBody(zoomed!,false,true)}>Retry</button></p>{/if}
+      {#if bodyLoading[`n:${z.node_id}`] || bodyErrors[`n:${z.node_id}`]}<LoadState what="step details" variant="compact" loading={bodyLoading[`n:${z.node_id}`]} error={bodyErrors[`n:${z.node_id}`]} empty={true} onretry={()=>void loadBody(zoomed!,false,true)} />{/if}
       {#if z.error}<div class="err">{z.error}</div>{/if}
       {#if z.logs?.length}
         <div class="zh"><span>Logs</span></div>
@@ -504,14 +504,14 @@
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 1px 7px;
-    border-radius: 99px;
+    border-radius: 999px;
   }
   .chip {
     font-size: var(--fs-xs);
     color: var(--warning);
     background: var(--warning-soft);
     padding: 1px 7px;
-    border-radius: 99px;
+    border-radius: 999px;
   }
   /* Sub-agent chip: neutral, not the warn colour the retry chip uses. */
   .chip.subagents {

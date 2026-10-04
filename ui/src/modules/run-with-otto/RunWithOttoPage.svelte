@@ -80,7 +80,7 @@
 <div class="rwo-page">
 <PageHeader
   title="Run with Otto"
-  subtitle="Turn a Jira story, GitHub issue or PR, finding or failing test into a reviewed PR draft"
+  subtitle="From a story, issue, finding or failing test to a PR draft"
 />
 <PageBody>
 <div class="rwo">

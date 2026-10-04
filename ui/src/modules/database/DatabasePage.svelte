@@ -5,7 +5,9 @@
   import { tick } from 'svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import { paneResizer } from '../../lib/paneResizer';
+  import { paneResizer, loadPaneWidth } from '../../lib/paneResizer';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { envTone } from '../../lib/status';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -834,48 +836,9 @@
   // names ("DB MySQL - Platform Aggregates Prod") get the horizontal room they need;
   // the chosen width survives reloads. Mirrors the assist-pane idiom above. (On
   // phones the sidebar is a full-width band — the width binding is skipped there.)
-  const SIDE_W_DEFAULT = 300;
-  let sideW = $state(loadSideW());
-  function loadSideW(): number {
-    if (typeof localStorage === 'undefined') return SIDE_W_DEFAULT;
-    const v = Number(localStorage.getItem('db.sideW'));
-    return Number.isFinite(v) && v >= 220 ? v : SIDE_W_DEFAULT;
-  }
-  function persistSideW(): void {
-    try {
-      localStorage.setItem('db.sideW', String(Math.round(sideW)));
-    } catch {
-      /* storage unavailable — non-fatal */
-    }
-  }
+  let sideW = $state(loadPaneWidth('db.sideW', 300, 220, 640));
   // Leave room for the editor/results area; cap so the sidebar can't eat the page.
   const sideMaxW = (): number => Math.min(640, Math.max(360, (typeof window !== 'undefined' ? window.innerWidth : 1280) - 420));
-  function setSideW(w: number): void {
-    sideW = w;
-    persistSideW();
-  }
-  function startSideResize(e: PointerEvent): void {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = sideW;
-    const maxW = sideMaxW();
-    const onMove = (ev: PointerEvent): void => {
-      // The sidebar is pinned to the LEFT edge, so dragging RIGHT widens it.
-      sideW = Math.max(220, Math.min(maxW, startW + (ev.clientX - startX)));
-    };
-    const onUp = (): void => {
-      persistSideW();
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-  function resetSideW(): void {
-    sideW = SIDE_W_DEFAULT;
-    persistSideW();
-  }
-
   // Open connections as top-level tabs (Workbench-style), resolved to their
   // Connection records for name + engine glyph.
   const openConns = $derived(
@@ -889,6 +852,18 @@
   const hasAnyTab = $derived(
     openConns.length > 0 || brokers.openClusters.length > 0 || database.sshTabs.length > 0,
   );
+  // No auto-open on arrival: opening a connection connects to the server (it
+  // may be prod), so the empty main pane shows the collection summary instead.
+  // "6 connections · 2 prod · 1 Kafka cluster" — what the empty main pane says.
+  const hubSummary = $derived.by(() => {
+    const dbs = database.connections.length + database.otherConnections.length;
+    const prod = [...database.connections, ...database.otherConnections].filter((c) => c.environment === 'prod').length;
+    const k = brokers.clusters.length;
+    const parts = [`${dbs} connection${dbs === 1 ? '' : 's'}`];
+    if (prod > 0) parts.push(`${prod} prod`);
+    if (k > 0) parts.push(`${k} Kafka cluster${k === 1 ? '' : 's'}`);
+    return `${parts.join(' · ')}.`;
+  });
   // An empty workbench (fresh start, after a restore that found nothing, or the
   // last tab closed) always surfaces the picker — a schema/saved/history side
   // tab with no connection behind it is a dead end.
@@ -983,6 +958,7 @@
     {/if}
   {/snippet}
 </PageHeader>
+<PageBody fill padded={false}>
 <div class="db-page">
   {#if !viewport.isPhone && database.sidebarCollapsed && !hubEmpty}
     <!-- Collapsed rail: never zero-width — an invisible sidebar is unrecoverable. -->
@@ -1089,19 +1065,7 @@
   </aside>
 
   {#if !viewport.isPhone && !database.sidebarCollapsed && !hubEmpty}
-    <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-    <div
-      class="side-resizer"
-      role="separator"
-      tabindex="0"
-      aria-orientation="vertical"
-      aria-label="Resize connections sidebar"
-      title="Drag or use ←/→ to resize · double-click or Enter to reset"
-      ondblclick={resetSideW}
-      onpointerdown={startSideResize}
-      use:paneResizer={{ value: sideW, min: 220, max: sideMaxW(), onChange: setSideW, onReset: resetSideW, text: pxText }}
-    ></div>
+    <PaneDivider bind:width={sideW} storageKey="db.sideW" label="Resize connections sidebar" min={220} max={sideMaxW()} defaultWidth={300} />
   {/if}
 
   <div class="db-main" class:danger-rail={database.isProd} class:guard-rail={database.isGuarded && !database.isProd}>
@@ -1139,7 +1103,7 @@
           variant={viewport.isPhone ? 'panel' : 'page'}
           icon="db"
           title="Open a connection"
-          body={`Choose a connection, Kafka cluster or SSH host ${viewport.isPhone ? 'above' : 'on the left'} to open it here.`}
+          body={`${hubSummary} Choose one ${viewport.isPhone ? 'above' : 'on the left'} to open it here.`}
           actionLabel={database.sidebarCollapsed || database.sideTab !== 'connections' ? 'Show connections' : undefined}
           onaction={showConnections}
         />
@@ -1330,7 +1294,7 @@
         <EmptyState
           icon="db"
           title="Pick a connection"
-          body="Choose a connection on the left to open it here."
+          body={`${hubSummary} Choose one on the left to open it here.`}
           actionLabel="Show connections"
           onaction={showConnections}
         />
@@ -1338,6 +1302,7 @@
     {/if}
   </div>
 </div>
+</PageBody>
 </div>
 
 {#snippet sectionNode(node: TreeNode, depth: number)}
@@ -2556,7 +2521,7 @@
   .spin {
     display: grid;
     place-items: center;
-    animation: otto-spin 0.9s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
   
   /* Horizontal split holding the active view + (optionally) the DB Assistant. */
@@ -2655,21 +2620,6 @@
     color: var(--text-dim);
   }
 
-  .side-resizer {
-    flex: none;
-    width: 5px;
-    margin-inline-start: -3px;
-    cursor: col-resize;
-    background: transparent;
-    position: relative;
-    z-index: 2;
-    touch-action: none;
-  }
-  .side-resizer:hover,
-  .side-resizer:focus-visible {
-    outline: none;
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
-  }
   /* The DB Assistant pane — fixed (resizable) width, pinned to the right edge. */
   .assist-pane {
     flex: none;

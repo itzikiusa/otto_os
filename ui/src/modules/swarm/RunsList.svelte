@@ -152,7 +152,7 @@
                   <button class="btn small primary" title="Review & hire this proposed agent" onclick={() => onhire?.(r.result as unknown as RecruitedAgent, r.id)}>Hire</button>
                 {/if}
                 {#if active(r)}
-                  <button class="btn small danger" title="Stop this run; its session is closed" onclick={() => void stop(r)}>Stop…</button>
+                  <button class="btn small danger" title="Stop this run; its session is closed" onclick={() => void stop(r)}><Icon name="stop" size={12} /> Stop…</button>
                 {/if}
               </span>
             </div>

@@ -1,10 +1,10 @@
 <script lang="ts">
   // Workspace allowlists and policy-as-code stay close to the server registry,
   // but behind a side drawer so the common server/tool flow remains compact.
-  import { untrack } from 'svelte';
+  // The slide-over itself (scrim, Esc/outside close, focus trap, modal
+  // registration) is the shared shell/Drawer.
   import Icon from '../../lib/components/Icon.svelte';
-  import { ui } from '../../lib/stores/ui.svelte';
-  import { dialogFocus } from '../../lib/dialogFocus';
+  import Drawer from '../../shell/Drawer.svelte';
   import type { McpServerDetail } from '../../lib/api/types';
   import AllowlistsTab from './AllowlistsTab.svelte';
   import PoliciesTab from './PoliciesTab.svelte';
@@ -19,94 +19,49 @@
   let allowlistsOpen = $state(true);
   let policiesOpen = $state(false);
 
+  // The parent mounts this only while it is wanted; the Drawer closes itself
+  // (✕, Esc, scrim) by flipping `open`, which unmounts us via onClose.
+  let open = $state(true);
   $effect(() => {
-    untrack(() => ui.pushModal());
-    return () => untrack(() => ui.popModal());
+    if (!open) onClose();
   });
 </script>
 
-<div class="backdrop" role="presentation" onclick={onClose}></div>
-<div
-  class="drawer"
-  role="dialog"
-  aria-modal="true"
-  aria-label="Rules"
-  use:dialogFocus={onClose}
-  data-testid="mcp-rules-drawer"
->
-  <header class="drawer-head">
-    <h2>Rules</h2>
-    <button class="icon-btn" onclick={onClose} aria-label="Close rules" title="Close (Esc)">
-      <Icon name="x" size={14} />
-    </button>
-  </header>
+<Drawer bind:open side="right" title="Rules" width="min(720px, 100%)">
+  <div class="rules" data-testid="mcp-rules-drawer">
+    <section class="rule-section">
+      <button
+        class="section-head"
+        type="button"
+        aria-expanded={allowlistsOpen}
+        onclick={() => (allowlistsOpen = !allowlistsOpen)}
+      >
+        <Icon name={allowlistsOpen ? 'chevronDown' : 'chevronRight'} size={13} />
+        <span>Allowlists</span>
+      </button>
+      {#if allowlistsOpen}
+        <div class="section-body"><AllowlistsTab {wsId} {servers} /></div>
+      {/if}
+    </section>
 
-  <section class="rule-section">
-    <button
-      class="section-head"
-      type="button"
-      aria-expanded={allowlistsOpen}
-      onclick={() => (allowlistsOpen = !allowlistsOpen)}
-    >
-      <Icon name={allowlistsOpen ? 'chevronDown' : 'chevronRight'} size={13} />
-      <span>Allowlists</span>
-    </button>
-    {#if allowlistsOpen}
-      <div class="section-body"><AllowlistsTab {wsId} {servers} /></div>
-    {/if}
-  </section>
-
-  <section class="rule-section">
-    <button
-      class="section-head"
-      type="button"
-      aria-expanded={policiesOpen}
-      onclick={() => (policiesOpen = !policiesOpen)}
-    >
-      <Icon name={policiesOpen ? 'chevronDown' : 'chevronRight'} size={13} />
-      <span>Policies</span>
-    </button>
-    {#if policiesOpen}
-      <div class="section-body"><PoliciesTab {wsId} {servers} /></div>
-    {/if}
-  </section>
-</div>
+    <section class="rule-section">
+      <button
+        class="section-head"
+        type="button"
+        aria-expanded={policiesOpen}
+        onclick={() => (policiesOpen = !policiesOpen)}
+      >
+        <Icon name={policiesOpen ? 'chevronDown' : 'chevronRight'} size={13} />
+        <span>Policies</span>
+      </button>
+      {#if policiesOpen}
+        <div class="section-body"><PoliciesTab {wsId} {servers} /></div>
+      {/if}
+    </section>
+  </div>
+</Drawer>
 
 <style>
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: var(--z-modal);
-    background: var(--scrim);
-    animation: fade-in 140ms ease-out;
-  }
-  .drawer {
-    position: fixed;
-    inset-block: 0; inset-inline: auto 0;
-    z-index: calc(var(--z-modal) + 1);
-    width: min(720px, 100%);
-    overflow-y: auto;
-    background: var(--surface);
-    border-inline-start: 1px solid var(--border);
-    box-shadow: var(--shadow);
-    animation: drawer-in 160ms ease-out;
-  }
-  .drawer-head {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 14px 16px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-  }
-  h2 {
-    margin: 0;
-    font-size: var(--fs-l);
-    font-weight: 600;
-  }
   .rule-section {
     border-bottom: 1px solid var(--border);
   }
@@ -129,11 +84,5 @@
   }
   .section-body {
     min-width: 0;
-  }
-  @keyframes fade-in {
-    from { opacity: 0; }
-  }
-  @keyframes drawer-in {
-    from { transform: translateX(16px); opacity: 0; }
   }
 </style>

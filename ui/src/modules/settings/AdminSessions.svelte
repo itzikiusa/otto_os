@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   import SectionIntro from './SectionIntro.svelte';
@@ -95,7 +96,7 @@
       toasts.success('Session terminated', title);
       await load();
     } catch (e) {
-      toasts.error(`Couldn’t terminate “${title}”`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t terminate “${title}”`, e);
     }
   }
 
@@ -110,7 +111,7 @@
       toasts.success('Session deleted', title);
       await load();
     } catch (e) {
-      toasts.error(`Couldn’t delete “${title}”`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t delete “${title}”`, e);
     }
   }
 

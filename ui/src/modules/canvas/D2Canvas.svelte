@@ -14,6 +14,7 @@
   // via "Ask Otto", (2) directly in the Code panel, (3) — nothing is converted to
   // Mermaid/Excalidraw; this stays D2. Pan/zoom the preview.
   import { PAN_LABEL, panDelta } from './panKeys';
+  import { toastError } from '../../lib/toastError';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
@@ -74,7 +75,7 @@
       await canvas.persistDoc(sceneId, doc, saveContext);
     } catch (e) {
       if (canvas.currentId === sceneId)
-        toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t save the canvas', e);
     }
   }
   let codeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -102,7 +103,7 @@
     const doc: CanvasDoc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: pendingCode, sketch };
     pendingCode = null;
     void canvas.persistDoc(sceneId, doc, saveContext).catch((e: unknown) =>
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e)),
+      toastError('Couldn’t save the canvas', e),
     );
   }
   function toggleSketch(): void {
@@ -291,7 +292,7 @@
       void canvas.refreshSession();
     } catch (e) {
       canvas.pushConvo('assistant', `Failed: ${e instanceof Error ? e.message : String(e)}`, sceneId);
-      toasts.error('Ask Otto failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t ask Otto', e);
     } finally {
       generating = false;
     }

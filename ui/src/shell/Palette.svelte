@@ -6,6 +6,7 @@
   // is ≥ 2 chars and a workspace is active; cross-module hits appear as a
   // second "Results" section below commands.
   import { dialogFocus } from '../lib/dialogFocus';
+  import { toastError } from '../lib/toastError';
   import { api, isAbortError } from '../lib/api/client';
   import type { Action, SearchHit } from '../lib/api/types';
   import { untrack } from 'svelte';
@@ -140,7 +141,7 @@
     } else if (await copyText(hitContext(hit))) {
       toasts.success('Copied', hit.title);
     } else {
-      toasts.error('Copy failed', 'The clipboard is not available here.');
+      toasts.error('Couldn’t copy to the clipboard', 'The clipboard is not available here.');
     }
   }
 
@@ -284,7 +285,7 @@
     try {
       await cmd.run();
     } catch (e) {
-      toasts.error('Command failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t run the command', e);
     }
   }
 
@@ -349,7 +350,7 @@
       });
       await applyOutcome(out, before);
     } catch (e) {
-      toasts.error('Orchestrate failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t build the plan', e);
     } finally {
       busy = false;
     }
@@ -433,7 +434,7 @@
     try {
       await applyOutcome(await runPlan(ws.currentId, plan), before);
     } catch (e) {
-      toasts.error('Execution failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t run the plan', e);
     } finally {
       busy = false;
     }

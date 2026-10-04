@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import { api, baseUrl } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
@@ -111,7 +112,7 @@
     } catch (e) {
       // One-way `checked` — put the box back to what the daemon still has.
       input.checked = netEnabled;
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update the setting', e);
     } finally {
       netBusy = false;
     }

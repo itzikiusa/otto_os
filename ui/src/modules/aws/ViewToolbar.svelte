@@ -164,23 +164,8 @@
     font-size: var(--fs-m);
     outline: none;
   }
-  .icon-btn {
-    display: grid;
-    place-items: center;
-    width: 28px;
-    height: 28px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .icon-btn:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
   .icon-btn.spin :global(svg) {
-    animation: otto-spin 0.9s linear infinite;
+    animation: otto-spin 0.8s linear infinite;
   }
   .auto {
     display: inline-flex;

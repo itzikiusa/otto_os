@@ -4,6 +4,7 @@
   // tool with JSON arguments through the full invoke pipeline (optionally
   // dry-run) and see the decision + preview / content / pending-approval id.
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import { toastError } from '../../lib/toastError';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Switch from '../../lib/components/Switch.svelte';
@@ -85,7 +86,7 @@
       const updated = await mcpCpApi.cpPatchTool(t.id, patch);
       replaceTool(updated);
     } catch (e) {
-      toasts.error('Could not update tool', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update tool', e);
     } finally {
       const n = { ...busyTool };
       delete n[t.id];
@@ -102,7 +103,7 @@
       toasts.success('Discovered tools', `${tools.length} found`);
       ondiscovered?.();
     } catch (e) {
-      toasts.error('Discovery failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t discover tools', e);
     } finally {
       loading = false;
     }
@@ -154,7 +155,7 @@
         workspace_id: wsId,
       });
     } catch (e) {
-      toasts.error('Invoke failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t invoke the tool', e);
     } finally {
       running = false;
     }

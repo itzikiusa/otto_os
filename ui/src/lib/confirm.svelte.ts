@@ -25,7 +25,7 @@ export function isDestructiveVerb(label: string): boolean {
 
 class ConfirmStore {
   open = $state(false);
-  title = $state('Confirm');
+  title = $state('');
   message = $state('');
   confirmLabel = $state('Delete');
   /** The dismiss button's label — override when "Cancel" would sit next to a
@@ -52,7 +52,7 @@ class ConfirmStore {
     this.isPrompt = false;
     this.choices = null;
     this.message = message;
-    this.title = opts?.title ?? 'Confirm';
+    this.title = opts?.title ?? opts?.confirmLabel ?? 'Delete';
     this.confirmLabel = opts?.confirmLabel ?? 'Delete';
     this.cancelLabel = opts?.cancelLabel ?? 'Cancel';
     this.danger = opts?.danger ?? isDestructiveVerb(this.confirmLabel);
@@ -108,7 +108,7 @@ class ConfirmStore {
     this.supersede();
     this.isPrompt = false;
     this.message = message;
-    this.title = opts.title ?? 'Confirm';
+    this.title = opts.title ?? 'Choose an option';
     this.cancelLabel = 'Cancel';
     this.choices = opts.options;
     this.checkboxLabel = opts.checkboxLabel ?? '';

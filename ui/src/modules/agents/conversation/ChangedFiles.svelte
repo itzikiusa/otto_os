@@ -184,7 +184,7 @@
     font-size: var(--fs-xs);
     color: var(--success);
     border: 1px solid color-mix(in srgb, var(--success) 40%, transparent);
-    border-radius: 99px;
+    border-radius: 999px;
     padding: 0 6px;
   }
   .cf-prev {
