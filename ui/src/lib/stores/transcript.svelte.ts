@@ -73,6 +73,19 @@ const DELTA_CAP_BYTES = 64 * 1024;
 export const TURN_CAP = 600;
 export const TURN_KEEP = 500;
 
+/** Byte budget complements the turn count for tool-heavy conversations. */
+const TURN_BYTES_CAP = 8 * 1024 * 1024;
+const TURN_BYTES_KEEP = 6 * 1024 * 1024;
+const turnCharges = new WeakMap<Turn, number>();
+function turnCharge(turn: Turn): number {
+  let charge = turnCharges.get(turn);
+  if (charge === undefined) {
+    charge = JSON.stringify(turn).length * 2;
+    turnCharges.set(turn, charge);
+  }
+  return charge;
+}
+
 /** One lazily fetched subagent body (`?sub=<agent_id>`). */
 export interface SubagentBody {
   turns: Turn[];
@@ -97,9 +110,20 @@ export function trimTurnHead(
   cap = TURN_CAP,
   keep = TURN_KEEP,
 ): { turns: Turn[]; cursor: string; dropped: number } | null {
-  if (turns.length <= cap) return null;
-  // Cut as close to `keep` as a known bound allows, but never below half of it.
-  for (let j = turns.length - keep; j <= turns.length - Math.ceil(keep / 2); j++) {
+  const bytes = turns.reduce((total, turn) => total + turnCharge(turn), 0);
+  const byteOverflow = bytes > TURN_BYTES_CAP;
+  if (turns.length <= cap && !byteOverflow) return null;
+  let start = Math.max(1, turns.length - keep);
+  if (byteOverflow) {
+    let retained = bytes;
+    for (let i = 0; i < turns.length - 1; i++) {
+      retained -= turnCharge(turns[i]);
+      if (retained <= TURN_BYTES_KEEP) { start = Math.max(start, i + 1); break; }
+    }
+  }
+  // A byte-heavy window may need fewer turns. Always retain its newest turn.
+  const end = byteOverflow ? turns.length - 1 : turns.length - Math.ceil(keep / 2);
+  for (let j = start; j <= end; j++) {
     const cursor = bounds.get(turns[j].id);
     if (cursor === undefined) continue;
     for (let i = 0; i < j; i++) bounds.delete(turns[i].id);
@@ -211,18 +235,22 @@ export class Conversation {
       const t = await fetchTranscript(this.src, {limit: PAGE_TURNS}, ac.signal);
       if (ac.signal.aborted || !this.isActive()) return false;
       this.retain(t);
-      if (replace || this.transcript == null || this.transcript.unavailable_reason) {
+      const overlaps = t.turns.some(turn => this.turns.some(old => old.id === turn.id));
+      // A disconnected interval can exceed one page. Keep a single continuous
+      // window so its cursor always reaches every preceding turn on disk.
+      if (replace || this.transcript == null || this.transcript.unavailable_reason || !overlaps) {
         this.turns = t.turns;
-        this.transcript = t;
+        this.transcript = {...t, turns: []};
         this.headBounds.clear();
         this.holdCap = false;
       } else {
         const ids = new Set(t.turns.map(turn => turn.id));
         this.turns = [...this.turns.filter(turn => !ids.has(turn.id)), ...t.turns];
-        this.transcript = {...t, cursor: this.transcript.cursor, has_earlier: this.transcript.has_earlier};
+        this.transcript = {...t, turns: [], cursor: this.transcript.cursor, has_earlier: this.transcript.has_earlier};
       }
       // A page's cursor is the exact first record of its oldest turn.
       if (t.turns.length) this.headBounds.set(t.turns[0].id, t.cursor);
+      if (!this.holdCap) this.followLive();
       this.tailCursor = null;
       this.tailTick++;
       return true;
@@ -244,17 +272,28 @@ export class Conversation {
     this.loadingEarlier = true;
     try {
       const page = await fetchTranscript(this.src, { before: t.cursor, limit: PAGE_TURNS }, this.reads.signal);
-      if (epoch !== this.readEpoch || !this.isActive()) return;
+      if (epoch !== this.readEpoch || !this.isActive() || this.transcript?.cursor !== t.cursor) return;
       this.retain(page);
       const known = new Set(this.turns.map((x) => x.id));
       this.turns = [...page.turns.filter((x) => !known.has(x.id)), ...this.turns];
-      this.transcript = { ...t, cursor: page.cursor, has_earlier: page.has_earlier };
+      this.transcript = { ...this.transcript!, cursor: page.cursor, has_earlier: page.has_earlier };
       if (page.turns.length) this.headBounds.set(page.turns[0].id, page.cursor);
       this.holdCap = true;
     } catch (e) {
       if (epoch === this.readEpoch && this.isActive()) this.error = e instanceof Error ? e.message : String(e);
     } finally {
       if (epoch === this.readEpoch) this.loadingEarlier = false;
+    }
+  }
+
+  /** Release historical pages when the reader explicitly returns to live. */
+  followLive(): void {
+    this.holdCap = false;
+    const trimmed = trimTurnHead(this.turns, this.headBounds);
+    if (trimmed && this.transcript) {
+      this.turns = trimmed.turns;
+      this.transcript = {...this.transcript, turns: [], cursor: trimmed.cursor, has_earlier: true};
+      this.headDropped += trimmed.dropped;
     }
   }
 

@@ -543,6 +543,94 @@ impl<'a> Fold<'a> {
         self.stats.duration_ms = Some(self.stats.duration_ms.unwrap_or(0).saturating_add(ms));
     }
 
+    /// Clone only the selected finalized turns. Indexes and the all-history
+    /// artifact registry stay in the mutable folder. One oversized newest turn
+    /// is retained, matching the existing page contract.
+    pub fn window(
+        &self,
+        record_count: usize,
+        before: Option<usize>,
+        limit: usize,
+        byte_limit: usize,
+    ) -> Folded {
+        if self.turns.is_empty() {
+            return self.clone().finish(record_count);
+        }
+        let end = self
+            .turns
+            .partition_point(|t| before.is_none_or(|b| t.first < b));
+        let start = end.saturating_sub(limit.max(1));
+        let mut turns = Vec::new();
+        let mut bytes = 0usize;
+        for index in (start..end).rev() {
+            let mut item = self.turns[index].clone();
+            if Some(index) == self.last_turn() {
+                item.turn.system.extend(self.pending_notes.iter().cloned());
+                item.turn
+                    .blocks
+                    .extend(self.pending_blocks.iter().cloned().map(cap_block));
+            }
+            for (r, block) in self.subagent_placements(|turn| turn == index) {
+                let at = (r.block + 1).min(item.turn.blocks.len());
+                item.turn.blocks.insert(at, block);
+            }
+            bytes = bytes.saturating_add(
+                serde_json::to_vec(&item.turn)
+                    .map(|v| v.len())
+                    .unwrap_or(usize::MAX),
+            );
+            if !turns.is_empty() && bytes > byte_limit {
+                break;
+            }
+            turns.push(item);
+        }
+        turns.reverse();
+        // Finalize cumulative statistics using a tiny metadata-only fold.
+        let mut meta = Fold::new(
+            self.provider,
+            FoldOpts {
+                price: self.opts.price,
+                ..FoldOpts::default()
+            },
+        );
+        meta.stats = self.stats.clone();
+        meta.input_tokens = self.input_tokens;
+        meta.output_tokens = self.output_tokens;
+        meta.cache_read = self.cache_read;
+        meta.cache_write = self.cache_write;
+        meta.usage_seen = self.usage_seen;
+        meta.cost_usd = self.cost_usd;
+        meta.cost_fallback = self.cost_fallback;
+        meta.session_id = self.session_id.clone();
+        meta.title = self.title.clone();
+        meta.cwd = self.cwd.clone();
+        meta.model = self.model.clone();
+        meta.first_prompt = self.first_prompt.clone();
+        meta.first_ts = self.first_ts.clone();
+        meta.last_ts = self.last_ts.clone();
+        let mut out = meta.finish(record_count);
+        out.turns = turns;
+        out
+    }
+
+    pub fn page(
+        &self,
+        record_count: usize,
+        before: Option<usize>,
+        limit: usize,
+        subagents: Vec<SubagentMeta>,
+    ) -> Transcript {
+        let window = self.window(record_count, before, limit, PAGE_BYTES_BUDGET);
+        let mut page = window.page(before, limit, subagents);
+        if let Some(first) = window.turns.first() {
+            page.has_earlier = self
+                .turns
+                .first()
+                .is_some_and(|oldest| oldest.first < first.first);
+        }
+        page
+    }
+
     /// A [`Folded`] view of the fold so far without consuming it (live tails
     /// snapshot after every delta). Clones the turns; still far cheaper than
     /// re-parsing the file.
@@ -586,6 +674,11 @@ impl<'a> Fold<'a> {
             }
         }
         out.into_values().collect()
+    }
+
+    pub fn tool_block(&self, tool_id: &str) -> Option<Block> {
+        let r = self.tool_calls.get(tool_id)?;
+        self.turns.get(r.turn)?.turn.blocks.get(r.block).cloned()
     }
 
     /// Every artifact registered so far (the live tail diffs these by id).

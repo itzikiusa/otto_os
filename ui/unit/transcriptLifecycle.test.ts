@@ -111,3 +111,42 @@ test('subagent bodies are replaced whole (raw state), never mutated in place',as
   assert.deepEqual([c.subagents.one.turns[0].id,c.subagents.two.turns[0].id],['one-turn','two-turn']);
   close();
 });
+
+for (const hasEarlier of [false, true]) test(`disjoint reconnect retains a reachable earlier cursor (old earlier=${hasEarlier})`, async () => {
+  const turns = (first: number, last: number) => Array.from({length: last - first + 1}, (_, i) => ({id: String(first + i), blocks: [], role: 'user'}));
+  let fresh = false;
+  const h = setup(async url => url.includes('before=71')
+    ? {...page(), turns: turns(11, 70), cursor: '11', has_earlier: true}
+    : {...page(), turns: fresh ? turns(71, 130) : turns(1, 60), cursor: fresh ? '71' : '1', has_earlier: fresh || hasEarlier});
+  const close = h.acquire('a'); await settle(); fresh = true; h.resync(); await settle();
+  const c = h.store.peek('a');
+  assert.equal(c.transcript.has_earlier, true);
+  assert.equal(c.transcript.cursor, '71');
+  await c.loadEarlier();
+  for (let i = 61; i <= 70; i++) assert.ok(c.turns.some((t: any) => t.id === String(i)), `missing turn ${i}`);
+  close();
+});
+
+test('returning to live following releases paged history and keeps its recovery cursor', async () => {
+  const h = setup(async url => ({...page(), has_earlier: true, cursor: url.includes('before=') ? '0' : '60', turns: [{id: url.includes('before=') ? 'old' : 'tail', blocks: [], role: 'user'}]}));
+  const close = h.acquire('a'); await settle(); const c = h.store.peek('a');
+  await c.loadEarlier();
+  for (let i = 1; i <= 650; i++) c.applyDelta(String(60 + i), [{id: `new${i}`, blocks: [], role: 'user'}]);
+  assert.ok(c.turns.some((t: any) => t.id === 'old'), 'historical reader keeps the anchor');
+  c.followLive();
+  assert.ok(c.turns.length <= 600);
+  assert.equal(c.transcript.has_earlier, true);
+  assert.ok(Number(c.transcript.cursor) > 0);
+  for (let i = 651; i <= 1300; i++) c.applyDelta(String(60 + i), [{id: `new${i}`, blocks: [], role: 'user'}]);
+  assert.ok(c.turns.length <= 600, 'future deltas remain bounded'); close();
+});
+
+test('live following bounds payload bytes as well as turn count', async () => {
+  const h = setup(); const close = h.acquire('a'); await settle(); const c = h.store.peek('a');
+  // Each frame fits the existing 64 KiB transport guard, but the retained
+  // window would otherwise reach ~25 MiB well before its 600-turn limit.
+  for (let i = 0; i < 500; i++) c.applyDelta(String(i + 1), [{id: `heavy${i}`, role: 'user', blocks: [{kind: 'text', md: 'x'.repeat(50000)}]}]);
+  assert.ok(JSON.stringify(c.turns).length <= 8 * 1024 * 1024);
+  assert.equal(c.transcript.has_earlier, true);
+  close();
+});

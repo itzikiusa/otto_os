@@ -92,6 +92,19 @@ impl<'a> ClaudeFolder<'a> {
         self.st.f.opts.subagents = subagents;
     }
 
+    pub fn bounded_snapshot(&self, limit: usize, byte_limit: usize) -> Folded {
+        self.st.f.window(self.count, None, limit, byte_limit)
+    }
+
+    pub fn page(
+        &self,
+        before: Option<usize>,
+        limit: usize,
+        subagents: Vec<crate::model::SubagentMeta>,
+    ) -> crate::model::Transcript {
+        self.st.f.page(self.count, before, limit, subagents)
+    }
+
     pub fn snapshot(&self) -> Folded {
         self.st.f.snapshot(self.count)
     }
@@ -100,6 +113,10 @@ impl<'a> ClaudeFolder<'a> {
     /// (token totals only feed `stats`, never a turn).
     pub fn turns_since(&self, since: usize) -> Vec<Turn> {
         self.st.f.turns_since(since)
+    }
+
+    pub fn tool_block(&self, tool_id: &str) -> Option<crate::model::Block> {
+        self.st.f.tool_block(tool_id)
     }
 
     pub fn artifacts(&self) -> &[Artifact] {

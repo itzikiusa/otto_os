@@ -22,14 +22,14 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use otto_core::domain::Session;
 use otto_core::event::Event;
 use otto_core::Id;
-use otto_transcript::{Artifact, Folded, Folder, Provider, SubagentMeta, SubagentScanner, Tailer};
+use otto_transcript::{Artifact, Folded, Folder, Provider, SubagentScanner, Tailer, Transcript};
 
 use crate::offload::blocking;
 use crate::state::ServerCtx;
@@ -60,19 +60,66 @@ struct TailState {
     folder: Folder<'static>,
     tailer: Tailer,
     subagents: SubagentScanner,
-    /// Full snapshot for `GET …/transcript`, built on demand and dropped
-    /// whenever the fold moves — or [`SNAP_KEEP`] after it was last served.
-    snap: Option<Arc<Folded>>,
-    /// When `snap` was last served.
-    snap_at: Option<std::time::Instant>,
+    budget: TailBudget,
+    retired: bool,
+    sidecar_charge: usize,
 }
 
-/// A snapshot is a full clone of the fold. It used to live until the fold
-/// next moved, so a chat open on an IDLE agent held the fold twice for as
-/// long as it stayed open (tens of MB per big transcript, × up to MAX_TAILS;
-/// r3-05-05). It now serves a burst of page reads (open, "Load earlier", a
-/// resync) and is released at the next poll step past this age.
-const SNAP_KEEP: Duration = Duration::from_secs(10);
+const TAIL_INPUT_CAP: usize = 8 * 1024 * 1024;
+const TAIL_RECORD_CAP: usize = 16_384;
+const TAIL_BYTES_CAP: usize = 32 * 1024 * 1024;
+const TOTAL_TAIL_BYTES: usize = 128 * 1024 * 1024;
+/// Oversized transcripts keep a metadata watcher; coalesce invalidations so
+/// a fast producer cannot force a whole-file offline fold every 700 ms.
+const FALLBACK_REFRESH: Duration = Duration::from_secs(15);
+static RETAINED_CHARGE: AtomicUsize = AtomicUsize::new(0);
+
+/// Conservative source/record charge, reserved BEFORE adding to the fold.
+/// This is bounded accounting, not a claim about allocator RSS.
+#[derive(Default)]
+struct TailBudget {
+    bytes: usize,
+}
+impl TailBudget {
+    fn reserve(&mut self, bytes: usize) -> std::io::Result<()> {
+        if bytes > TAIL_BYTES_CAP {
+            return Err(budget_error());
+        }
+        if bytes <= self.bytes {
+            return Ok(());
+        }
+        let extra = bytes - self.bytes;
+        reserve_total(&RETAINED_CHARGE, extra)?;
+        self.bytes = bytes;
+        Ok(())
+    }
+}
+impl Drop for TailBudget {
+    fn drop(&mut self) {
+        RETAINED_CHARGE.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+fn reserve_total(total: &AtomicUsize, extra: usize) -> std::io::Result<()> {
+    total
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current
+                .checked_add(extra)
+                .filter(|n| *n <= TOTAL_TAIL_BYTES)
+        })
+        .map(|_| ())
+        .map_err(|_| budget_error())
+}
+fn budget_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::OutOfMemory,
+        "transcript live fold budget exceeded",
+    )
+}
+fn fold_charge(bytes: usize, records: usize) -> usize {
+    bytes
+        .saturating_mul(4)
+        .saturating_add(records.saturating_mul(2048))
+}
 
 /// What a running tail shares with the read route: the file it folds and its
 /// state (`None` until the initial fold lands).
@@ -192,8 +239,10 @@ pub async fn live_page(
     session_id: &Id,
     provider: Provider,
     path: &Path,
-) -> Option<(Arc<Folded>, Vec<SubagentMeta>)> {
-    page_of(live_of(session_id, provider, path)?).await
+    before: Option<usize>,
+    limit: usize,
+) -> Option<Transcript> {
+    page_of(live_of(session_id, provider, path)?, before, limit).await
 }
 
 /// How long a read waits for a just-armed tail's initial fold before it
@@ -208,11 +257,13 @@ pub async fn live_page_settled(
     session_id: &Id,
     provider: Provider,
     path: &Path,
-) -> Option<(Arc<Folded>, Vec<SubagentMeta>)> {
+    before: Option<usize>,
+    limit: usize,
+) -> Option<Transcript> {
     let live = live_of(session_id, provider, path)?;
     let mut settled = live.settled.subscribe();
     let _ = tokio::time::timeout(SETTLE_WAIT, settled.wait_for(|s| *s)).await;
-    page_of(live).await
+    page_of(live, before, limit).await
 }
 
 /// The running tail of `session_id` when it folds exactly `path`.
@@ -222,20 +273,39 @@ fn live_of(session_id: &Id, provider: Provider, path: &Path) -> Option<Arc<Live>
     (e.live.provider == provider && e.live.path == path).then(|| e.live.clone())
 }
 
-async fn page_of(live: Arc<Live>) -> Option<(Arc<Folded>, Vec<SubagentMeta>)> {
+async fn page_of(live: Arc<Live>, before: Option<usize>, limit: usize) -> Option<Transcript> {
     blocking(move || {
         let mut guard = live.lock();
         let st = guard.as_mut()?;
-        if live.provider == Provider::Claude && st.subagents.refresh(&live.path) {
-            st.folder.set_subagents(st.subagents.tree().to_vec());
-            st.snap = None;
+        if refresh_subagents(live.provider, &live.path, st).is_err() {
+            *guard = None;
+            return None;
         }
-        let snap = st
-            .snap
-            .get_or_insert_with(|| Arc::new(st.folder.snapshot()))
-            .clone();
-        st.snap_at = Some(std::time::Instant::now());
-        Some((snap, st.subagents.tree().to_vec()))
+        Some(st.folder.page(
+            before,
+            limit,
+            if before.is_none() {
+                st.subagents.tree().to_vec()
+            } else {
+                vec![]
+            },
+        ))
+    })
+    .await
+}
+
+/// Tool expansion copies just its containing block, never the whole fold.
+pub async fn live_tool(
+    session_id: &Id,
+    provider: Provider,
+    path: &Path,
+    tool_id: String,
+) -> Option<Option<otto_transcript::Block>> {
+    let live = live_of(session_id, provider, path)?;
+    blocking(move || {
+        let guard = live.lock();
+        let st = guard.as_ref()?;
+        Some(st.folder.tool_block(&tool_id))
     })
     .await
 }
@@ -260,8 +330,24 @@ fn refold_with(
     path: &Path,
     opts: otto_transcript::FoldOpts<'static>,
 ) -> std::io::Result<TailState> {
+    let file = std::fs::File::open(path)?;
+    if file.metadata()?.len() > TAIL_INPUT_CAP as u64 {
+        return Err(budget_error());
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?.read_to_end(&mut bytes)?;
+    file.take(TAIL_INPUT_CAP as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    let records = bytes.iter().filter(|b| **b == b'\n').count();
+    if bytes.len() > TAIL_INPUT_CAP || records > TAIL_RECORD_CAP {
+        return Err(budget_error());
+    }
+    let mut budget = TailBudget::default();
+    let sidecar_charge = if provider == Provider::Claude {
+        otto_transcript::subagent_charge(path)?
+    } else {
+        0
+    };
+    budget.reserve(fold_charge(bytes.len(), records).saturating_add(sidecar_charge))?;
     let mut folder = Folder::new(provider, opts);
     let mut subagents = SubagentScanner::new();
     if provider == Provider::Claude {
@@ -278,9 +364,26 @@ fn refold_with(
         folder,
         tailer,
         subagents,
-        snap: None,
-        snap_at: None,
+        budget,
+        retired: false,
+        sidecar_charge,
     })
+}
+
+/// Reserve sidecar payload alongside turns before the scanner clones metadata.
+fn refresh_subagents(provider: Provider, path: &Path, st: &mut TailState) -> std::io::Result<()> {
+    if provider != Provider::Claude || !st.subagents.needs_refresh(path) {
+        return Ok(());
+    }
+    let charge = otto_transcript::subagent_charge(path)?;
+    st.budget.reserve(
+        fold_charge(st.tailer.offset as usize, st.folder.record_count()).saturating_add(charge),
+    )?;
+    st.sidecar_charge = charge;
+    if st.subagents.refresh(path) {
+        st.folder.set_subagents(st.subagents.tree().to_vec());
+    }
+    Ok(())
 }
 
 /// Serialized size of `turns`; `usize::MAX` if they do not serialize.
@@ -380,12 +483,43 @@ fn step(
     st: &mut TailState,
     known_artifacts: &mut HashSet<String>,
 ) -> Option<Step> {
-    if st.snap_at.is_some_and(|t| t.elapsed() >= SNAP_KEEP) {
-        st.snap = None;
-        st.snap_at = None;
+    let source_len = match std::fs::metadata(&live.path) {
+        Ok(meta) => meta.len(),
+        Err(_) => return None,
+    };
+    // Reserve the incoming source footprint before Tailer allocates/parses
+    // the burst. Its prefix read leaves growth after this stat for next time.
+    if source_len > TAIL_INPUT_CAP as u64
+        || st
+            .budget
+            .reserve(
+                fold_charge(source_len as usize, st.folder.record_count())
+                    .saturating_add(st.sidecar_charge),
+            )
+            .is_err()
+    {
+        st.retired = true;
+        return Some(Step {
+            turns: vec![],
+            cursor: st.folder.record_count().to_string(),
+            oversize: true,
+            new_artifacts: vec![],
+        });
     }
-    let delta = match st.tailer.poll() {
+    let delta = match st.tailer.poll_up_to(
+        source_len,
+        TAIL_RECORD_CAP.saturating_sub(st.folder.record_count()),
+    ) {
         Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::OutOfMemory => {
+            st.retired = true;
+            return Some(Step {
+                turns: vec![],
+                cursor: st.folder.record_count().to_string(),
+                oversize: true,
+                new_artifacts: vec![],
+            });
+        }
         Err(e) => {
             tracing::debug!(session = %sid, "transcript tail: poll failed: {e}");
             return None;
@@ -393,6 +527,25 @@ fn step(
     };
     if delta.records.is_empty() && !delta.restarted {
         return None;
+    }
+    if st
+        .budget
+        .reserve(
+            fold_charge(
+                st.tailer.offset as usize,
+                st.folder.record_count().saturating_add(delta.records.len()),
+            )
+            .saturating_add(st.sidecar_charge),
+        )
+        .is_err()
+    {
+        st.retired = true;
+        return Some(Step {
+            turns: vec![],
+            cursor: st.folder.record_count().to_string(),
+            oversize: true,
+            new_artifacts: vec![],
+        });
     }
     let prev_count = if delta.restarted {
         0
@@ -405,15 +558,24 @@ fn step(
             Ok(fresh) => fresh,
             Err(e) => {
                 tracing::debug!(session = %sid, "transcript tail: refold failed: {e}");
-                return None;
+                st.retired = true;
+                return Some(Step {
+                    turns: vec![],
+                    cursor: st.folder.record_count().to_string(),
+                    oversize: true,
+                    new_artifacts: vec![],
+                });
             }
         };
-    } else if live.provider == Provider::Claude && st.subagents.refresh(&live.path) {
-        // Sidecars for freshly spawned subagents appear between polls; the
-        // scanner only re-reads the ones that are new or changed.
-        st.folder.set_subagents(st.subagents.tree().to_vec());
+    } else if refresh_subagents(live.provider, &live.path, st).is_err() {
+        st.retired = true;
+        return Some(Step {
+            turns: vec![],
+            cursor: st.folder.record_count().to_string(),
+            oversize: true,
+            new_artifacts: vec![],
+        });
     }
-    st.snap = None;
     let mut turns: Vec<serde_json::Value> = st
         .folder
         .turns_since(prev_count)
@@ -441,11 +603,40 @@ fn step(
     })
 }
 
+/// Poll a degraded tail at a bounded rate. File replacement at equal length
+/// still invalidates through mtime; repeated unchanged polls emit nothing.
+fn fallback_step(
+    path: &Path,
+    previous: &mut Option<(u64, Option<std::time::SystemTime>)>,
+    last: &mut Instant,
+    now: Instant,
+) -> Option<Step> {
+    if now.duration_since(*last) < FALLBACK_REFRESH {
+        return None;
+    }
+    *last = now;
+    let stamp = std::fs::metadata(path)
+        .ok()
+        .map(|m| (m.len(), m.modified().ok()));
+    let changed = stamp != *previous;
+    *previous = stamp;
+    changed.then(|| Step {
+        turns: vec![],
+        cursor: stamp.map(|s| s.0).unwrap_or(0).to_string(),
+        oversize: true,
+        new_artifacts: vec![],
+    })
+}
+
 async fn run(ctx: ServerCtx, session: Session, live: Arc<Live>) {
     let sid = session.id.clone();
     let wid = session.workspace_id.clone();
     let (cx, lv) = (ctx.clone(), live.clone());
+    let permit = crate::transcript_cache::fold_workers()
+        .acquire_owned()
+        .await;
     let known: Option<HashSet<String>> = blocking(move || {
+        let _permit = permit;
         let st = refold(&cx, lv.provider, &lv.path).ok()?;
         let known = st.folder.artifacts().iter().map(|a| a.id.clone()).collect();
         *lv.lock() = Some(st);
@@ -455,10 +646,9 @@ async fn run(ctx: ServerCtx, session: Session, live: Arc<Live>) {
     // Landed or failed, the reads waiting on it may go (a failure falls back
     // to the fold cache).
     live.settled.send_replace(true);
-    let Some(mut known_artifacts) = known else {
-        tracing::debug!(session = %sid, "transcript tail: initial fold failed");
-        return;
-    };
+    let mut known_artifacts = known.unwrap_or_default();
+    let mut fallback_stamp = None;
+    let mut fallback_at = Instant::now();
     let mut exited_since: Option<Instant> = None;
     let mut last_live: Option<ScreenParts> = None;
     let mut last_branch_at = Instant::now() - BRANCH_EVERY;
@@ -512,16 +702,33 @@ async fn run(ctx: ServerCtx, session: Session, live: Arc<Live>) {
         // the state lock the read route shares.
         let (cx, lv, id) = (ctx.clone(), live.clone(), sid.clone());
         let mut known = std::mem::take(&mut known_artifacts);
-        let (out, known) = blocking(move || {
+        let (out, known, stamp, stamp_at) = blocking(move || {
             let mut guard = lv.lock();
-            let out = guard.as_mut().and_then(|st| {
+            if guard.is_none() {
+                known.clear();
+            }
+            let out = if let Some(st) = guard.as_mut() {
                 let opts = || crate::routes::transcript::fold_opts(&cx, lv.provider, &lv.path);
-                step(&opts, &id, &lv, st, &mut known)
-            });
-            (out, known)
+                let out = step(&opts, &id, &lv, st, &mut known);
+                if st.retired {
+                    *guard = None;
+                    known.clear();
+                }
+                out
+            } else {
+                fallback_step(
+                    &lv.path,
+                    &mut fallback_stamp,
+                    &mut fallback_at,
+                    Instant::now(),
+                )
+            };
+            (out, known, fallback_stamp, fallback_at)
         })
         .await;
         known_artifacts = known;
+        fallback_stamp = stamp;
+        fallback_at = stamp_at;
         let Some(out) = out else {
             continue;
         };
@@ -853,35 +1060,126 @@ mod tests {
     /// partial line carried, the delta cursor contiguous, sub-agent sidecars
     /// attached — without re-reading the file.
     #[test]
-    fn an_idle_tail_releases_its_served_snapshot() {
+    fn oversized_initial_fold_is_rejected_before_reading_its_body() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.jsonl");
+        let path = dir.path().join("oversized.jsonl");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(TAIL_INPUT_CAP as u64 + 1)
+            .unwrap();
+        assert!(
+            matches!(refold_with(Provider::Claude, &path, Default::default()), Err(e) if e.kind() == std::io::ErrorKind::OutOfMemory)
+        );
+    }
+
+    #[test]
+    fn oversized_fallback_coalesces_changes_and_ignores_unchanged_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fallback.jsonl");
+        std::fs::write(&path, b"{}\n").unwrap();
+        let mut previous = None;
+        let start = Instant::now();
+        let mut last = start;
+        assert!(fallback_step(
+            &path,
+            &mut previous,
+            &mut last,
+            start + FALLBACK_REFRESH / 2
+        )
+        .is_none());
+        assert!(
+            fallback_step(&path, &mut previous, &mut last, start + FALLBACK_REFRESH)
+                .unwrap()
+                .oversize
+        );
+        std::fs::write(&path, b"{}\n{}\n").unwrap();
+        assert!(fallback_step(
+            &path,
+            &mut previous,
+            &mut last,
+            start + FALLBACK_REFRESH + Duration::from_secs(1)
+        )
+        .is_none());
+        assert_eq!(
+            fallback_step(
+                &path,
+                &mut previous,
+                &mut last,
+                start + FALLBACK_REFRESH * 2
+            )
+            .unwrap()
+            .cursor,
+            "6"
+        );
+        assert!(fallback_step(
+            &path,
+            &mut previous,
+            &mut last,
+            start + FALLBACK_REFRESH * 3
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn aggregate_admission_rejects_without_leaking_charge() {
+        let total = AtomicUsize::new(0);
+        for _ in 0..4 {
+            reserve_total(&total, TAIL_BYTES_CAP).unwrap();
+        }
+        assert_eq!(total.load(Ordering::Acquire), TOTAL_TAIL_BYTES);
+        assert!(reserve_total(&total, 1).is_err());
+        assert!(reserve_total(&total, usize::MAX).is_err());
+        assert_eq!(total.load(Ordering::Acquire), TOTAL_TAIL_BYTES);
+        total.fetch_sub(TAIL_BYTES_CAP, Ordering::AcqRel);
+        reserve_total(&total, TAIL_BYTES_CAP).unwrap();
+    }
+
+    #[test]
+    fn growing_past_live_budget_retires_to_an_explicit_refetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("growing.jsonl");
         std::fs::write(
             &path,
-            "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n",
+            b"{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n",
         )
         .unwrap();
+        let mut st = refold_with(Provider::Claude, &path, Default::default()).unwrap();
         let live = Live {
             provider: Provider::Claude,
             path: path.clone(),
             state: Mutex::new(None),
-            settled: tokio::sync::watch::Sender::new(false),
+            settled: tokio::sync::watch::Sender::new(true),
         };
-        let mut st = refold_with(Provider::Claude, &path, Default::default()).unwrap();
-        let mut known = HashSet::new();
-        let opts = || otto_transcript::FoldOpts::default();
-        // Served just now: an idle poll keeps it (a burst of page reads).
-        st.snap = Some(Arc::new(st.folder.snapshot()));
-        st.snap_at = Some(Instant::now());
-        assert!(step(&opts, &"t".into(), &live, &mut st, &mut known).is_none());
-        assert!(st.snap.is_some());
-        // Past SNAP_KEEP with nothing new on disk: the clone is released.
-        st.snap_at = Instant::now().checked_sub(SNAP_KEEP + Duration::from_secs(1));
-        assert!(step(&opts, &"t".into(), &live, &mut st, &mut known).is_none());
-        assert!(
-            st.snap.is_none(),
-            "an idle agent's chat no longer holds the fold twice"
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(TAIL_INPUT_CAP as u64 + 1)
+            .unwrap();
+        let out = step(
+            &|| Default::default(),
+            &"budget-test".into(),
+            &live,
+            &mut st,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(st.retired);
+        assert!(out.oversize && out.turns.is_empty());
+        assert_eq!(
+            st.folder.record_count(),
+            1,
+            "oversized bytes were never folded"
         );
+    }
+
+    #[test]
+    fn per_tail_charge_limit_is_checked_before_global_reservation() {
+        let mut budget = TailBudget::default();
+        assert!(budget.reserve(TAIL_BYTES_CAP + 1).is_err());
+        assert_eq!(budget.bytes, 0);
+        budget.reserve(1024).unwrap();
+        assert_eq!(budget.bytes, 1024);
     }
 
     #[test]
@@ -1132,7 +1430,9 @@ mod tests {
         let id: Id = "tail-test-settle".into();
         let live = pending_tail(&id, &path);
         // Before the fold lands, a plain `live_page` has nothing to serve.
-        assert!(live_page(&id, Provider::Claude, &path).await.is_none());
+        assert!(live_page(&id, Provider::Claude, &path, None, 60)
+            .await
+            .is_none());
         let (lv, p) = (live.clone(), path.clone());
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1140,13 +1440,13 @@ mod tests {
             *lv.lock() = Some(st);
             lv.settled.send_replace(true);
         });
-        let (folded, _) = live_page_settled(&id, Provider::Claude, &path)
+        let folded = live_page_settled(&id, Provider::Claude, &path, None, 60)
             .await
             .expect("served from the tail once its fold settled");
         assert_eq!(folded.turns.len(), 1);
         // Another file of the same session is not this tail's to serve.
         let other = dir.path().join("other.jsonl");
-        assert!(live_page_settled(&id, Provider::Claude, &other)
+        assert!(live_page_settled(&id, Provider::Claude, &other, None, 60)
             .await
             .is_none());
         lock().remove(&id);
@@ -1160,7 +1460,7 @@ mod tests {
         let live = pending_tail(&id, &path);
         live.settled.send_replace(true);
         let started = Instant::now();
-        assert!(live_page_settled(&id, Provider::Claude, &path)
+        assert!(live_page_settled(&id, Provider::Claude, &path, None, 60)
             .await
             .is_none());
         assert!(

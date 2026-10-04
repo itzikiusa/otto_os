@@ -8,6 +8,7 @@
 //! subagent file `sessionId` is the PARENT's id — `agentId` is the key.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -31,6 +32,54 @@ pub fn subagent_path(transcript_path: &Path, agent_id: &str) -> Option<PathBuf> 
         return None;
     }
     Some(subagents_dir(transcript_path)?.join(format!("agent-{agent_id}.jsonl")))
+}
+
+/// Sidecar metadata is independently bounded: many tiny files still consume
+/// map/tree entries, and one unbounded description must not bypass fold limits.
+pub const SUBAGENT_CHARGE_CAP: usize = 8 * 1024 * 1024;
+const META_BYTES_CAP: usize = 1024 * 1024;
+fn metadata_budget_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::OutOfMemory,
+        "transcript resource limit: subagent metadata exceeds its budget",
+    )
+}
+
+/// Check the source bytes/count before any sidecars are parsed. The factor
+/// covers scanner cache + sorted tree + folder options and JSON field overhead.
+pub fn subagent_charge(transcript_path: &Path) -> std::io::Result<usize> {
+    let Some(dir) = subagents_dir(transcript_path) else {
+        return Ok(0);
+    };
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut charge = 0usize;
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_str().and_then(meta_id).is_none() {
+            continue;
+        }
+        let bytes = entry.metadata()?.len();
+        if bytes > META_BYTES_CAP as u64 {
+            return Err(metadata_budget_error());
+        }
+        charge = charge
+            .saturating_add(bytes as usize * 8)
+            .saturating_add(2048);
+        if charge > SUBAGENT_CHARGE_CAP {
+            return Err(metadata_budget_error());
+        }
+    }
+    Ok(charge)
+}
+
+/// The interactive reader checks sidecar limits before building its tree.
+pub fn read_subagents_limited(transcript_path: &Path) -> std::io::Result<Vec<SubagentMeta>> {
+    subagent_charge(transcript_path)?;
+    Ok(read_subagents(transcript_path))
 }
 
 /// Read every `*.meta.json` sidecar. Missing dir → empty. Sorted by depth then
@@ -65,7 +114,15 @@ fn meta_id(name: &str) -> Option<&str> {
 
 /// Read + parse one sidecar; `None` when unreadable or not (yet) valid JSON.
 fn read_meta(path: &Path, id: &str) -> Option<SubagentMeta> {
-    let raw = std::fs::read_to_string(path).ok()?;
+    let mut raw = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(META_BYTES_CAP as u64 + 1)
+        .read_to_string(&mut raw)
+        .ok()?;
+    if raw.len() > META_BYTES_CAP {
+        return None;
+    }
     let v = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
     Some(SubagentMeta {
         agent_id: string_of(&v, "agentId").unwrap_or_else(|| id.to_string()),
@@ -117,6 +174,19 @@ impl SubagentScanner {
     /// The tree as of the last [`refresh`](Self::refresh).
     pub fn tree(&self) -> &[SubagentMeta] {
         &self.tree
+    }
+
+    /// Whether a refresh would inspect sidecars. Lets bounded live callers
+    /// reserve their metadata charge before the scanner allocates it.
+    pub fn needs_refresh(&self, transcript_path: &Path) -> bool {
+        let mtime = subagents_dir(transcript_path)
+            .and_then(|dir| std::fs::metadata(dir).ok())
+            .and_then(|m| m.modified().ok());
+        self.last_walk
+            .is_none_or(|t| t.elapsed() >= Self::RESTAT_EVERY)
+            || self.incomplete
+            || mtime.is_none()
+            || mtime != self.dir_mtime
     }
 
     /// Bring the tree up to date for the transcript at `transcript_path`.
@@ -186,6 +256,22 @@ impl SubagentScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn huge_sidecar_is_rejected_before_parsing() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let dir = subagents_dir(&path).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::File::create(dir.join("agent-large.meta.json"))
+            .unwrap()
+            .set_len(META_BYTES_CAP as u64 + 1)
+            .unwrap();
+        assert_eq!(
+            read_subagents_limited(&path).unwrap_err().kind(),
+            std::io::ErrorKind::OutOfMemory
+        );
+    }
 
     #[test]
     fn reads_sidecars_into_a_flat_tree() {

@@ -55,13 +55,37 @@ impl Tailer {
     /// Read whatever appeared since the last poll. A missing file is not an
     /// error — it yields an empty delta (the CLI may not have created it yet).
     pub fn poll(&mut self) -> std::io::Result<TailDelta> {
+        self.poll_limited(usize::MAX, usize::MAX)
+    }
+
+    /// A bounded live read; reject a burst before collecting its parsed JSON.
+    pub fn poll_limited(
+        &mut self,
+        max_bytes: usize,
+        max_records: usize,
+    ) -> std::io::Result<TailDelta> {
+        self.poll_prefix(max_bytes, max_records, None)
+    }
+
+    /// Consume only an already-admitted source prefix. Concurrent appends wait
+    /// for the next poll instead of bypassing the caller's reservation.
+    pub fn poll_up_to(&mut self, end: u64, max_records: usize) -> std::io::Result<TailDelta> {
+        self.poll_prefix(end as usize, max_records, Some(end))
+    }
+
+    fn poll_prefix(
+        &mut self,
+        max_bytes: usize,
+        max_records: usize,
+        end: Option<u64>,
+    ) -> std::io::Result<TailDelta> {
         let mut out = TailDelta::default();
         let mut f = match std::fs::File::open(&self.path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
             Err(e) => return Err(e),
         };
-        let len = f.metadata()?.len();
+        let len = f.metadata()?.len().min(end.unwrap_or(u64::MAX));
         if len < self.offset {
             // Replaced or truncated: restart from the top.
             self.offset = 0;
@@ -72,8 +96,22 @@ impl Tailer {
             return Ok(out);
         }
         f.seek(SeekFrom::Start(self.offset))?;
-        let mut fresh = Vec::with_capacity((len - self.offset) as usize);
-        f.read_to_end(&mut fresh)?;
+        let remaining = max_bytes.saturating_sub(self.partial_line.len());
+        if len - self.offset > remaining as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                "transcript tail byte budget",
+            ));
+        }
+        let mut fresh = Vec::new();
+        f.take((len - self.offset).min(remaining.saturating_add(1) as u64))
+            .read_to_end(&mut fresh)?;
+        if fresh.len() > remaining || fresh.iter().filter(|b| **b == b'\n').count() > max_records {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                "transcript tail record budget",
+            ));
+        }
         // The offset tracks every byte READ; the partial line is carried in
         // memory, not re-read.
         self.offset += fresh.len() as u64;
@@ -105,6 +143,37 @@ impl Tailer {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn admitted_prefix_defers_concurrent_append_without_skipping_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, b"{}\n{}\n").unwrap();
+        let mut tail = Tailer::new(&path);
+        assert_eq!(tail.poll_up_to(3, 10).unwrap().records.len(), 1);
+        assert_eq!(tail.offset, 3);
+        assert_eq!(tail.poll_up_to(6, 10).unwrap().records.len(), 1);
+        assert_eq!(tail.offset, 6);
+    }
+
+    #[test]
+    fn bounded_poll_rejects_before_advancing_its_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, b"{}\n{}\n").unwrap();
+        let mut tail = Tailer::new(&path);
+        assert_eq!(
+            tail.poll_limited(3, 10).unwrap_err().kind(),
+            std::io::ErrorKind::OutOfMemory
+        );
+        assert_eq!(tail.offset, 0);
+        assert_eq!(
+            tail.poll_limited(10, 1).unwrap_err().kind(),
+            std::io::ErrorKind::OutOfMemory
+        );
+        assert_eq!(tail.offset, 0);
+        assert_eq!(tail.poll_limited(10, 2).unwrap().records.len(), 2);
+    }
 
     #[test]
     fn tail_reads_complete_lines_and_carries_partials() {

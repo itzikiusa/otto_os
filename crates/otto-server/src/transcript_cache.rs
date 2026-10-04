@@ -16,6 +16,13 @@ use otto_core::{Error, Result};
 use otto_transcript::{Folded, Provider, SubagentMeta};
 use tokio::sync::{watch, Semaphore};
 
+/// Shared admission for initial live folds and offline cache folds. A live
+/// view can no longer start an independent pool of whole-file parsers.
+pub(crate) fn fold_workers() -> Arc<Semaphore> {
+    static WORKERS: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+    WORKERS.get_or_init(|| Arc::new(Semaphore::new(2))).clone()
+}
+
 const MAX_ENTRIES: usize = 32;
 const MAX_BYTES: usize = 128 * 1024 * 1024;
 const MAX_ENTRY_BYTES: usize = 32 * 1024 * 1024;
@@ -226,7 +233,7 @@ impl Default for TranscriptCache {
         Self {
             inner: Arc::new(Inner {
                 entries: Mutex::new(HashMap::new()),
-                permits: Arc::new(Semaphore::new(2)),
+                permits: fold_workers(),
                 janitor: std::sync::OnceLock::new(),
             }),
         }

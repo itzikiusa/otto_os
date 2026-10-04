@@ -171,7 +171,10 @@
   });
   function loadLater(): void {
     const next = manualStart + STEP;
-    if (next + MAX_MOUNTED >= conv.turns.length) followTail = true;
+    if (next + MAX_MOUNTED >= conv.turns.length) {
+      conv.followLive();
+      followTail = true;
+    }
     else manualStart = next;
   }
   const status = $derived<SessionStatus>(
@@ -574,7 +577,10 @@
     }
     atBottom = gap < 48;
     farUp = gap > el.clientHeight;
-    if (atBottom) unseen = 0;
+    if (atBottom) {
+      unseen = 0;
+      if (!hasLater) conv.followLive();
+    }
     // Infinite "Load earlier" when the reader reaches the top (not while the
     // first mount is still only the newest few turns).
     if (mountAll && el.scrollTop < 40 && t?.has_earlier && !conv.loadingEarlier) void loadEarlier();
@@ -627,6 +633,7 @@
     if (el) el.scrollTop = el.scrollHeight - beforeH + beforeTop; // anchor
   }
   function scrollToBottomAll(): void {
+    conv.followLive();
     followTail = true;
     void tick().then(scrollToBottom);
   }

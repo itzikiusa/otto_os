@@ -316,3 +316,129 @@ fn incremental_turns_since_matches_the_snapshot_delta() {
         }
     }
 }
+
+#[test]
+fn bounded_pages_match_finalized_snapshot_for_every_fixture_prefix() {
+    use otto_transcript::{read_records, Folder};
+    for (provider, sub) in [
+        (Provider::Claude, "claude"),
+        (Provider::Codex, "codex-new"),
+        (Provider::Codex, "codex-old"),
+    ] {
+        for path in fixtures(sub) {
+            let records = read_records(&path).unwrap();
+            let mut folder = Folder::new(provider, FoldOpts::default());
+            let agents = if provider == Provider::Claude {
+                read_subagents(&path)
+            } else {
+                vec![]
+            };
+            folder.set_subagents(agents.clone());
+            for (i, record) in records.iter().enumerate() {
+                if folder.push(record) {
+                    folder = Folder::new(provider, FoldOpts::default());
+                    folder.set_subagents(agents.clone());
+                    folder.seed(&records[..=i]);
+                }
+                let full = folder.snapshot();
+                for turn in &full.turns {
+                    for block in &turn.turn.blocks {
+                        if let Block::ToolCall { id, .. } = block {
+                            // The retained provider index serves tool expansion directly.
+                            assert!(
+                                folder.tool_block(id).is_some(),
+                                "{} missing tool {id}",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+                for before in [None, Some(i / 2), Some(i)] {
+                    for limit in [1, 3, 60] {
+                        assert_eq!(
+                            serde_json::to_value(folder.page(before, limit, agents.clone()))
+                                .unwrap(),
+                            serde_json::to_value(full.page(before, limit, agents.clone())).unwrap(),
+                            "{} record {i}, before {before:?}, limit {limit}",
+                            path.display()
+                        );
+                    }
+                }
+                let bounded = folder.bounded_snapshot(3, usize::MAX);
+                assert_eq!(
+                    serde_json::to_value(bounded.turns.iter().map(|t| &t.turn).collect::<Vec<_>>())
+                        .unwrap(),
+                    serde_json::to_value(
+                        full.turns
+                            .iter()
+                            .skip(full.turns.len().saturating_sub(3))
+                            .map(|t| &t.turn)
+                            .collect::<Vec<_>>()
+                    )
+                    .unwrap()
+                );
+                assert_eq!(bounded.stats, full.stats);
+            }
+        }
+    }
+}
+
+#[test]
+fn streaming_fold_matches_complete_provider_fixtures() {
+    for (provider, sub) in [
+        (Provider::Claude, "claude"),
+        (Provider::Codex, "codex-new"),
+        (Provider::Codex, "codex-old"),
+    ] {
+        for path in fixtures(sub) {
+            let opts = FoldOpts {
+                subagents: read_subagents(&path),
+                ..Default::default()
+            };
+            let full = fold_file(provider, &path, opts.clone()).unwrap();
+            let streamed =
+                otto_transcript::fold_file_limited(provider, &path, opts, Default::default())
+                    .unwrap();
+            assert_eq!(
+                serde_json::to_value(full.page(None, usize::MAX, vec![])).unwrap(),
+                serde_json::to_value(streamed.page(None, usize::MAX, vec![])).unwrap(),
+                "{}",
+                path.display()
+            );
+            assert_eq!(full.record_count, streamed.record_count);
+            assert_eq!(
+                serde_json::to_value(full.artifacts).unwrap(),
+                serde_json::to_value(streamed.artifacts).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn limited_fold_rejects_input_record_and_charge_limits_without_touching_source() {
+    use otto_transcript::{fold_file_limited, FoldReadLimits};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.jsonl");
+    let content = b"{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n";
+    std::fs::write(&path, content).unwrap();
+    for limits in [
+        FoldReadLimits {
+            input_bytes: 1,
+            ..Default::default()
+        },
+        FoldReadLimits {
+            record_bytes: 1,
+            ..Default::default()
+        },
+        FoldReadLimits {
+            charge_bytes: 1,
+            ..Default::default()
+        },
+    ] {
+        let err =
+            fold_file_limited(Provider::Claude, &path, Default::default(), limits).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::OutOfMemory);
+        assert!(err.to_string().contains("transcript resource limit"));
+        assert_eq!(std::fs::read(&path).unwrap(), content);
+    }
+}

@@ -120,6 +120,36 @@ impl<'a> CodexFolder<'a> {
         st
     }
 
+    fn apply_pending_tokens(&self, stats: &mut crate::model::Stats) {
+        if let Some((model, input, output, cached)) = &self.st.last_tokens {
+            stats.input_tokens = Some(stats.input_tokens.unwrap_or(0).saturating_add(*input));
+            stats.output_tokens = Some(stats.output_tokens.unwrap_or(0).saturating_add(*output));
+            if let Some(price) = self.st.f.opts.price {
+                stats.cost_usd = Some(
+                    self.st.f.cost_usd
+                        + price(model, input.saturating_sub(*cached), *output, *cached, 0),
+                );
+            }
+        }
+    }
+
+    pub fn bounded_snapshot(&self, limit: usize, byte_limit: usize) -> Folded {
+        let mut out = self.st.f.window(self.count, None, limit, byte_limit);
+        self.apply_pending_tokens(&mut out.stats);
+        out
+    }
+
+    pub fn page(
+        &self,
+        before: Option<usize>,
+        limit: usize,
+        subagents: Vec<crate::model::SubagentMeta>,
+    ) -> crate::model::Transcript {
+        let mut out = self.st.f.page(self.count, before, limit, subagents);
+        self.apply_pending_tokens(&mut out.stats);
+        out
+    }
+
     pub fn snapshot(&self) -> Folded {
         Self::with_tokens(self.st.clone()).f.finish(self.count)
     }
@@ -128,6 +158,10 @@ impl<'a> CodexFolder<'a> {
     /// (token totals only feed `stats`, never a turn).
     pub fn turns_since(&self, since: usize) -> Vec<Turn> {
         self.st.f.turns_since(since)
+    }
+
+    pub fn tool_block(&self, tool_id: &str) -> Option<crate::model::Block> {
+        self.st.f.tool_block(tool_id)
     }
 
     pub fn artifacts(&self) -> &[Artifact] {
