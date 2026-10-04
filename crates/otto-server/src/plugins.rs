@@ -104,6 +104,8 @@ pub struct PluginManager {
     /// Base URL the sidecar uses to call back (`…/api/v1/plugin-host`).
     host_api_base: String,
     running: Mutex<HashMap<String, RunningPlugin>>,
+    /// Serialize management transitions, including copying replacement files.
+    lifecycle: tokio::sync::Mutex<()>,
     http: reqwest::Client,
 }
 
@@ -120,6 +122,7 @@ impl PluginManager {
             data_dir,
             host_api_base,
             running: Mutex::new(HashMap::new()),
+            lifecycle: tokio::sync::Mutex::new(()),
             http: proxy_client(PROXY_CONNECT_TIMEOUT, PROXY_TIMEOUT),
         }
     }
@@ -132,8 +135,17 @@ impl PluginManager {
         &self.plugins_home
     }
 
+    /// Caller holds the management lifecycle lock. Reinstallation always
+    /// ends disabled, including a previously enabled installation.
+    async fn replace(&self, record: NewPlugin) -> otto_core::Result<PluginRecord> {
+        self.repo.set_enabled(&record.slug, false).await?;
+        self.stop(&record.slug).await;
+        self.repo.upsert(record).await
+    }
+
     /// Spawn every enabled plugin (best-effort; logs per-plugin failures).
     pub async fn start_enabled(&self) {
+        let _guard = self.lifecycle.lock().await;
         let enabled = match self.repo.list_enabled().await {
             Ok(v) => v,
             Err(e) => {
@@ -426,6 +438,7 @@ async fn install(
     Json(req): Json<InstallReq>,
 ) -> ApiResult<Json<PluginRecord>> {
     require_root(&user)?;
+    let _guard = ctx.plugins.lifecycle.lock().await;
     let home = ctx.plugins.plugins_home().to_path_buf();
     std::fs::create_dir_all(&home).ok();
 
@@ -486,6 +499,14 @@ async fn install(
     } else {
         let srcp = PathBuf::from(src);
         let m = load_manifest(&srcp).map_err(|e| ApiError(Error::Invalid(e)))?;
+        // Disable credentials and stop the old process before replacing files
+        // it may still execute. A failed copy leaves an honestly disabled row.
+        ctx.plugins
+            .repo()
+            .set_enabled(&m.slug, false)
+            .await
+            .map_err(ApiError)?;
+        ctx.plugins.stop(&m.slug).await;
         let dest = home.join(&m.slug);
         if srcp.canonicalize().ok() != dest.canonicalize().ok() {
             let (from, to) = (srcp.clone(), dest.clone());
@@ -499,8 +520,7 @@ async fn install(
     let m = load_manifest(&dir).map_err(|e| ApiError(Error::Invalid(e)))?;
     let rec = ctx
         .plugins
-        .repo()
-        .upsert(NewPlugin {
+        .replace(NewPlugin {
             slug: m.slug.clone(),
             name: m.name,
             icon: m.icon,
@@ -532,6 +552,7 @@ async fn enable(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<PluginRecord>> {
     require_root(&user)?;
+    let _guard = ctx.plugins.lifecycle.lock().await;
     let rec = ctx
         .plugins
         .repo()
@@ -563,6 +584,7 @@ async fn disable(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     require_root(&user)?;
+    let _guard = ctx.plugins.lifecycle.lock().await;
     ctx.plugins
         .repo()
         .set_enabled(&slug, false)
@@ -579,6 +601,7 @@ async fn remove(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     require_root(&user)?;
+    let _guard = ctx.plugins.lifecycle.lock().await;
     ctx.plugins.stop(&slug).await;
     ctx.plugins.repo().delete(&slug).await.map_err(ApiError)?;
     ctx.audit(otto_state::NewAuditEntry {
@@ -930,6 +953,61 @@ pub(crate) fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod proxy_timeout_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn replacing_enabled_plugin_stops_old_process_and_disables_rotated_token() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let repo = PluginsRepo::new(pool);
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = PluginManager::new(
+            repo.clone(),
+            tmp.path().join("plugins"),
+            tmp.path().into(),
+            "http://127.0.0.1:1".into(),
+        );
+        let record = |token: &str, exec: &str| NewPlugin {
+            slug: "fixture".into(),
+            name: "Fixture".into(),
+            icon: "box".into(),
+            version: "1".into(),
+            description: String::new(),
+            source: tmp.path().to_string_lossy().into(),
+            exec: vec![exec.into()],
+            ui_dir: None,
+            health: "/health".into(),
+            token: token.into(),
+        };
+        repo.upsert(record("old", "/bin/sh")).await.unwrap();
+        repo.set_enabled("fixture", true).await.unwrap();
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        manager
+            .running
+            .lock()
+            .unwrap()
+            .insert("fixture".into(), RunningPlugin { port: 1, child });
+        let _guard = manager.lifecycle.lock().await;
+        let updated = manager
+            .replace(record("new", "/missing/new-executable"))
+            .await
+            .unwrap();
+        assert!(!updated.enabled);
+        assert_eq!(updated.exec, ["/missing/new-executable"]);
+        assert!(manager.port_of("fixture").is_none());
+        assert!(repo.find_enabled_by_token("old").await.unwrap().is_none());
+        assert!(repo.find_enabled_by_token("new").await.unwrap().is_none());
+    }
 
     /// A sidecar that accepts and then never answers (the SI-08 hang).
     async fn hung_listener() -> (u16, tokio::task::JoinHandle<()>) {

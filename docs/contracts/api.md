@@ -2453,7 +2453,7 @@ Plugins are external sidecar processes installed at runtime under `~/otto-plugin
 | ANY `/plugins/{slug}` · ANY `/plugins/{slug}/{*rest}` | plugin `<slug>` grant (GET=view, else=edit); root bypass | Reverse-proxied to the sidecar. Gated by the dedicated plugin branch in the feature guard. |
 | GET `/plugins/{slug}/ui` · GET `/plugins/{slug}/ui/{*path}` | public static | Iframe assets served from the plugin's `ui` dir (root-mounted). |
 | GET `/plugin-admin` | root | Installed-plugin list (full records, no token). |
-| POST `/plugin-admin/install` | root | `{source}` = local path or git URL → installs into the plugins home (disabled). |
+| POST `/plugin-admin/install` | root | `{source}` = local path or git URL → installs into the plugins home (disabled). Reinstall is serialized with enable/disable/remove: disables old credentials and stops the sidecar before replacing local files, then installs the new executable metadata/token disabled. A failed replacement remains disabled. Explicitly enable to start the replacement. |
 | POST `/plugin-admin/{slug}/enable` · POST `/plugin-admin/{slug}/disable` | root | Spawn / stop the sidecar. |
 | DELETE `/plugin-admin/{slug}` | root | Stop + unregister (plugin files are kept). |
 

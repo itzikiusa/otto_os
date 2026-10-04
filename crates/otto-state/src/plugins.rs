@@ -88,7 +88,7 @@ impl PluginsRepo {
              ON CONFLICT(slug) DO UPDATE SET
                name=excluded.name, icon=excluded.icon, version=excluded.version,
                description=excluded.description, source=excluded.source, exec_json=excluded.exec_json,
-               ui_dir=excluded.ui_dir, health=excluded.health, token=excluded.token",
+               ui_dir=excluded.ui_dir, health=excluded.health, token=excluded.token, enabled=0",
         )
         .bind(&p.slug).bind(&p.name).bind(&p.icon).bind(&p.version).bind(&p.description)
         .bind(&p.source).bind(&exec_json).bind(&p.ui_dir).bind(&p.health).bind(&p.token).bind(&now)
