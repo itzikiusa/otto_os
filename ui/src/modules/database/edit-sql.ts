@@ -105,25 +105,37 @@ export function scopeDatabase(node: string | null | undefined): string | null {
 }
 
 /** Parse a simple SELECT … FROM <table>. Returns {db, table} or null. */
-export function parseSimpleSelect(sql: string): { db: string | null; table: string } | null {
+export function parseSimpleSelect(sql: string, engine: DbEngine | null = null): { db: string | null; table: string } | null {
   const s = sql.trim().replace(/;\s*$/, '');
-  // A multi-statement batch can't be attributed to ONE table: the FROM matched
-  // below would be statement 1's even while result set 2+ is shown, so edits
-  // would target the wrong table. Mirrors the store's splitStatement rejection.
-  if (/;\s*\S/.test(s)) return null;
-  if (!/^select\b/i.test(s)) return null;
-  // Reject anything that makes a row non-1:1 with a base-table row.
-  if (/\bjoin\b|\bgroup\s+by\b|\bunion\b|\bdistinct\b|\bhaving\b/i.test(s)) return null;
-  // Reject aggregates in the projection (between SELECT and FROM).
-  const proj = s.slice(0, s.search(/\bfrom\b/i));
-  if (/\b(count|sum|avg|min|max|group_concat|array_agg)\s*\(/i.test(proj)) return null;
-  // Capture the first table after FROM: optional `db`.`table` with backticks.
-  const m = s.match(
-    /\bfrom\s+`?([\w$]+)`?(?:\s*\.\s*`?([\w$]+)`?)?/i,
-  );
-  if (!m) return null;
-  if (m[2]) return { db: m[1], table: m[2] };
-  return { db: null, table: m[1] };
+  // This is a deliberately small grammar, not a general SQL parser. Editing
+  // requires a proven base-column name for BOTH SET and the primary-key WHERE.
+  // Aliases, expressions, comments and table modifiers remain read-only.
+  if (/;|--|\/\*|\bjoin\b|\bgroup\s+by\b|\bunion\b|\bdistinct\b|\bhaving\b/i.test(s)) return null;
+  const ident = engine === 'postgres'
+    ? '(?:[A-Za-z_$][\\w$]*|"[\\w$]+")'
+    : '(?:[A-Za-z_$][\\w$]*|`[\\w$]+`|"[\\w$]+")';
+  const match = s.match(new RegExp(`^select\\s+(.+?)\\s+from\\s+(${ident})(?:\\s*\\.\\s*(${ident}))?(?=\\s|$)([\\s\\S]*)$`, 'i'));
+  if (!match) return null;
+  const unquote = (v: string) => engine === 'postgres' && !v.startsWith('"')
+    ? v.toLowerCase()
+    : v.replace(/^[`"]|[`"]$/g, '');
+  const projection = match[1].trim();
+  // MySQL's default mode treats "id" as a string literal, whose result
+  // column is also named id. Only PostgreSQL proves identifier semantics.
+  if (engine !== 'postgres' && projection.includes('"')) return null;
+  if (projection !== '*') {
+    const names = projection.split(',').map((part) => part.trim());
+    const direct = new RegExp(`^${ident}$`);
+    if (!names.every((name) => direct.test(name))) return null;
+    if (new Set(names.map((name) => unquote(name).toLowerCase())).size !== names.length) return null;
+  }
+  // Consume the complete FROM source. A second table, alias, subquery, FINAL,
+  // SAMPLE, etc. cannot sneak past a match of only the first table token.
+  const tail = match[4].trim();
+  if (tail && !/^(?:where\s+|order\s+by\s+|limit\s+|offset\s+)/i.test(tail)) return null;
+  return match[3]
+    ? { db: unquote(match[2]), table: unquote(match[3]) }
+    : { db: null, table: unquote(match[2]) };
 }
 
 /** Display form of a stored value for a diff line. */
@@ -136,12 +148,12 @@ function draftShown(raw: string): string {
 }
 
 export const sqlAdapter: EditAdapter = {
-  target(statement) {
-    const parsed = parseSimpleSelect(statement);
-    if (!parsed) {
+  target(statement, columnNames = [], ctx = { engine:null, activeDb:null }) {
+    const parsed = parseSimpleSelect(statement, ctx.engine);
+    if (!parsed || new Set(columnNames.map((name) => name.toLowerCase())).size !== columnNames.length) {
       return {
         target: null,
-        reason: 'Editing needs a single-table SELECT (no JOIN, GROUP BY, DISTINCT, UNION or aggregates).',
+        reason: 'Editing needs a single-table SELECT of unique, direct columns or * (no aliases or expressions).',
       };
     }
     // `db` stays null when the SQL omits it — EditFlow defaults it from the
@@ -149,10 +161,11 @@ export const sqlAdapter: EditAdapter = {
     return { target: { db: parsed.db, table: parsed.table, pkCols: [] }, reason: null };
   },
 
-  /** ONE statement per pending row — every parked column in a single SET
-   * (ClickHouse uses `ALTER TABLE … UPDATE`, a mutation). Multiple rows become
-   * a multi-statement batch (each driver splits and runs them in order). */
+  /** ONE statement per pending row — every parked column in a single SET.
+   * Multiple rows become a batch (each driver runs statements in order).
+   * ClickHouse is excluded because its keys do not enforce uniqueness. */
   buildUpdate(rows, ctx) {
+    if (ctx.engine === 'clickhouse') return null; // Sorting keys do not enforce row uniqueness.
     const stmts: string[] = [];
     const diff: DiffLine[] = [];
     for (const { rowIdx, patch } of rows) {
@@ -163,11 +176,7 @@ export const sqlAdapter: EditAdapter = {
           `${ctx.qid(ctx.columns[ci].name)} = ${sqlLiteral(ctx.engine, value, isNumericCell(ctx.liveRows[rowIdx][ci], ctx.columns[ci].type_hint))}`)
         .join(', ');
       const where = whereByPk(ctx, rowIdx);
-      stmts.push(
-        ctx.engine === 'clickhouse'
-          ? `ALTER TABLE ${tableRef(ctx)} UPDATE ${sets} WHERE ${where};`
-          : `UPDATE ${tableRef(ctx)} SET ${sets} WHERE ${where};`,
-      );
+      stmts.push(`UPDATE ${tableRef(ctx)} SET ${sets} WHERE ${where};`);
       for (const [ci, value] of entries) {
         diff.push({
           row: rowIdx,
@@ -180,7 +189,7 @@ export const sqlAdapter: EditAdapter = {
     }
     if (stmts.length === 0) return null;
     return {
-      title: ctx.engine === 'clickhouse' ? 'Review ALTER … UPDATE (mutation)' : 'Review UPDATE',
+      title: 'Review UPDATE',
       sql: stmts.join('\n'),
       diff,
     };
@@ -188,6 +197,7 @@ export const sqlAdapter: EditAdapter = {
 
   /** Build a DELETE targeting the given rows (by liveRows index). */
   buildDelete(idxs, ctx) {
+    if (ctx.engine === 'clickhouse') return null; // Sorting keys do not enforce row uniqueness.
     if (idxs.length === 0) return null;
     const n = idxs.length;
     const noun = `${n} row${n === 1 ? '' : 's'}`;
@@ -201,13 +211,9 @@ export const sqlAdapter: EditAdapter = {
       // Composite key: OR a per-row AND of every key column.
       where = idxs.map((i) => `(${whereByPk(ctx, i)})`).join(' OR ');
     }
-    const sql =
-      ctx.engine === 'clickhouse'
-        ? `ALTER TABLE ${tableRef(ctx)} DELETE WHERE ${where};`
-        : `DELETE FROM ${tableRef(ctx)} WHERE ${where};`;
+    const sql = `DELETE FROM ${tableRef(ctx)} WHERE ${where};`;
     return {
-      title:
-        ctx.engine === 'clickhouse' ? `Review ALTER … DELETE (${noun})` : `Review DELETE (${noun})`,
+      title: `Review DELETE (${noun})`,
       sql,
     };
   },
@@ -260,6 +266,7 @@ export const sqlAdapter: EditAdapter = {
   /** Whole-document save: SET only the columns whose value actually changed.
    *  Null when nothing changed (the caller just closes the editor). */
   buildReplace(rowIdx, doc, ctx) {
+    if (ctx.engine === 'clickhouse') return null; // Sorting keys do not enforce row uniqueness.
     const sets: string[] = [];
     const diff: DiffLine[] = [];
     ctx.columns.forEach((c, i) => {
@@ -273,12 +280,9 @@ export const sqlAdapter: EditAdapter = {
     });
     if (sets.length === 0) return null;
     const where = whereByPk(ctx, rowIdx);
-    const sql =
-      ctx.engine === 'clickhouse'
-        ? `ALTER TABLE ${tableRef(ctx)} UPDATE ${sets.join(', ')} WHERE ${where};`
-        : `UPDATE ${tableRef(ctx)} SET ${sets.join(', ')} WHERE ${where};`;
+    const sql = `UPDATE ${tableRef(ctx)} SET ${sets.join(', ')} WHERE ${where};`;
     return {
-      title: ctx.engine === 'clickhouse' ? 'Review ALTER … UPDATE (mutation)' : 'Review UPDATE',
+      title: 'Review UPDATE',
       sql,
       diff,
     };

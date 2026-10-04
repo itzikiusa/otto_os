@@ -1456,7 +1456,7 @@ parses (and which read fine as plain text in history rows and MCP results):
 - **Builder & Diagram** require `joins` (SQL engines). Redis has no Diagram; Mongo's
   Diagram shows cards but no edges.
 - **Inline editing** needs an unambiguously addressable row (single-table SELECT
-  with PK / single-collection find with `_id`). **Redis editing** covers the
+  with an enforced PK and direct, unique, unaliased columns / single-collection find with `_id`). ClickHouse sorting keys do not enforce uniqueness, so row edits/deletes are disabled; Copy as INSERT remains available. **Redis editing** covers the
   result of one `GET` / `HGETALL` / `HGET` / `LRANGE` / `SMEMBERS` / `ZRANGE`
   only (set members: delete, not edit; a hash field / zset member name edit is a
   rename — `HDEL`+`HSET` / `ZREM`+`ZADD`); everything else Redis returns stays
