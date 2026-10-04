@@ -29,7 +29,7 @@
 
   async function load(): Promise<boolean> {
     try {
-      reports = await insightsApi.listReports();
+      reports = await insightsApi.latestReports();
       error = '';
       return true;
     } catch (e) {

@@ -300,61 +300,175 @@ pub struct ReportView {
     pub created_at: String,
 }
 
-/// List every stored report under `<insights>/<kind>/`, newest first.
-///
-/// One report per period = one `summary-*.md` / `report-*.html` / `metrics-*.json`
-/// triple keyed by `(kind, start, end)`. We enumerate the three subdirs and
-/// build a view per discovered period, preferring the HTML mtime for `created_at`.
-#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
+/// A bounded list hydrates only the requested page, after sorting filenames.
+/// Status polling never enumerates the archive.
+#[derive(Debug, Default, Deserialize)]
+pub struct ReportsQuery {
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub summaries: bool,
+    #[serde(default)]
+    pub latest: bool,
+}
+
 pub fn list_reports(dir: &Path) -> Vec<ReportView> {
-    let mut out: Vec<ReportView> = Vec::new();
+    report_page(
+        dir,
+        &ReportsQuery {
+            summaries: true,
+            ..Default::default()
+        },
+    )
+}
+
+#[allow(clippy::disallowed_methods)] // synchronous archive work runs on the blocking pool
+fn report_page(dir: &Path, q: &ReportsQuery) -> Vec<ReportView> {
+    let mut periods = std::collections::BTreeSet::new();
     for kind in Kind::ALL {
-        let kind_dir = dir.join(kind.word());
-        let Ok(entries) = std::fs::read_dir(&kind_dir) else {
+        let Ok(entries) = std::fs::read_dir(dir.join(kind.word())) else {
             continue;
         };
-        // Collect distinct (start,end) periods from any artifact file present.
-        let mut periods: std::collections::BTreeSet<(String, String)> = Default::default();
         for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some((start, end)) = parse_period_from_filename(&name, kind.word()) {
-                periods.insert((start, end));
+            if let Some((start, end)) =
+                parse_period_from_filename(&entry.file_name().to_string_lossy(), kind.word())
+            {
+                periods.insert((end, start, kind.word()));
             }
         }
-        for (start_ymd, end_ymd) in periods {
-            let stem = format!("{}-{}_{}", kind.word(), start_ymd, end_ymd);
-            let html = kind_dir.join(format!("report-{stem}.html"));
-            let summary_md = kind_dir.join(format!("summary-{stem}.md"));
-            let metrics = kind_dir.join(format!("metrics-{stem}.json"));
-
-            let html_path = html.exists().then(|| html.to_string_lossy().into_owned());
-            let summary = std::fs::read_to_string(&summary_md)
-                .map(|s| truncate_lines(&s, 80))
-                .unwrap_or_default();
-            // created_at = mtime of the freshest existing artifact.
-            let created_at = [&html, &summary_md, &metrics]
-                .iter()
-                .filter_map(|p| std::fs::metadata(p).ok().and_then(|m| m.modified().ok()))
-                .max()
-                .map(fmt_systime)
-                .unwrap_or_default();
-
-            out.push(ReportView {
-                kind: kind.word().to_string(),
-                period_start: dashed(&start_ymd),
-                period_end: dashed(&end_ymd),
-                html_path,
-                summary,
-                created_at,
-            });
-        }
     }
-    // Newest first by period end, then start.
-    out.sort_by(|a, b| {
-        (b.period_end.as_str(), b.period_start.as_str())
-            .cmp(&(a.period_end.as_str(), a.period_start.as_str()))
+    let mut seen = std::collections::HashSet::new();
+    periods
+        .into_iter()
+        .rev()
+        .filter(|(_, _, kind)| !q.latest || seen.insert(*kind))
+        .skip(if q.latest { 0 } else { q.offset.unwrap_or(0) })
+        .take(if q.latest {
+            3
+        } else {
+            q.limit.unwrap_or(200).clamp(1, 200)
+        })
+        .filter_map(|(end, start, kind)| {
+            report_status(dir, &format!("{kind}:{start}_{end}"), q.summaries)
+                .ok()?
+                .report
+        })
+        .collect()
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReportStatus {
+    pub report: Option<ReportView>,
+    /// Only the HTML artifact determines completion; summary may land first.
+    pub html_revision: Option<String>,
+}
+
+/// Three metadata reads and at most one bounded summary read, independent of
+/// archive size. The strict key parser prevents directory traversal.
+fn report_status(dir: &Path, key: &str, summary: bool) -> Result<ReportStatus, otto_core::Error> {
+    let (kind, range) = key
+        .split_once(':')
+        .ok_or_else(|| otto_core::Error::Invalid("invalid report key".into()))?;
+    let kind = Kind::from_period(kind)
+        .ok_or_else(|| otto_core::Error::Invalid("invalid report kind".into()))?;
+    let filename = format!("report-{}-{range}.html", kind.word());
+    let (start, end) = parse_period_from_filename(&filename, kind.word())
+        .ok_or_else(|| otto_core::Error::Invalid("invalid report period".into()))?;
+    let stem = format!("{}-{start}_{end}", kind.word());
+    let base = dir.join(kind.word());
+    let html = base.join(format!("report-{stem}.html"));
+    let summary_path = base.join(format!("summary-{stem}.md"));
+    let metrics = base.join(format!("metrics-{stem}.json"));
+    let meta: Vec<_> = [&html, &summary_path, &metrics]
+        .into_iter()
+        .map(|p| report_metadata(p).filter(|m| m.is_file()))
+        .collect();
+    let revision = |m: &std::fs::Metadata| {
+        format!(
+            "{}:{}",
+            m.len(),
+            m.modified().ok().map(fmt_systime).unwrap_or_default()
+        )
+    };
+    let html_revision = meta[0].as_ref().map(revision);
+    if meta.iter().all(Option::is_none) {
+        return Ok(ReportStatus {
+            report: None,
+            html_revision,
+        });
+    }
+    let created_at = meta
+        .iter()
+        .filter_map(|m| m.as_ref()?.modified().ok())
+        .max()
+        .map(fmt_systime)
+        .unwrap_or_default();
+    let text = if summary {
+        summary_preview(&summary_path, meta[1].as_ref().map(revision))
+    } else {
+        String::new()
+    };
+    Ok(ReportStatus {
+        report: Some(ReportView {
+            kind: kind.word().into(),
+            period_start: dashed(&start),
+            period_end: dashed(&end),
+            html_path: meta[0]
+                .as_ref()
+                .map(|_| html.to_string_lossy().into_owned()),
+            summary: text,
+            created_at,
+        }),
+        html_revision,
+    })
+}
+
+#[cfg(test)]
+thread_local! { static REPORT_IO: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) }; }
+
+#[allow(clippy::disallowed_methods)] // called only by blocking report readers
+fn report_metadata(path: &Path) -> Option<std::fs::Metadata> {
+    #[cfg(test)]
+    REPORT_IO.with(|c| {
+        let (stats, reads) = c.get();
+        c.set((stats + 1, reads));
     });
-    out
+    std::fs::metadata(path).ok()
+}
+
+#[allow(clippy::disallowed_methods)] // bounded synchronous read on the blocking pool
+fn summary_preview(path: &Path, revision: Option<String>) -> String {
+    use std::io::Read;
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    type Entry = (PathBuf, Option<String>, String);
+    static CACHE: OnceLock<StdMutex<std::collections::VecDeque<Entry>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(i) = cache
+        .iter()
+        .position(|(p, r, _)| p == path && r == &revision)
+    {
+        let entry = cache.remove(i).unwrap();
+        let text = entry.2.clone();
+        cache.push_back(entry);
+        return text;
+    }
+    let mut bytes = Vec::new();
+    #[cfg(test)]
+    REPORT_IO.with(|c| {
+        let (stats, reads) = c.get();
+        c.set((stats, reads + 1));
+    });
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(64 * 1024).read_to_end(&mut bytes);
+    }
+    let text = truncate_lines(&String::from_utf8_lossy(&bytes), 80);
+    cache.retain(|(p, _, _)| p != path);
+    cache.push_back((path.to_owned(), revision, text.clone()));
+    while cache.len() > 64 {
+        cache.pop_front();
+    }
+    text
 }
 
 /// Parse `(startYMD, endYMD)` out of an insights artifact filename of the form
@@ -638,6 +752,7 @@ pub struct RunResp {
     /// Requested collector period, resolved in the daemon's local timezone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_key: Option<String>,
+    pub report_revision: Option<String>,
     /// Set when `started == false` to explain why (e.g. skill not installed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -650,6 +765,7 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/insights/config", get(get_config).put(put_config))
         .route("/insights/reports", get(get_reports))
         .route("/insights/report", get(get_report))
+        .route("/insights/report-status", get(get_report_status))
         .route("/insights/run", post(post_run))
 }
 
@@ -686,11 +802,14 @@ async fn put_config(
     Ok(Json(cfg))
 }
 
-async fn get_reports(State(ctx): State<ServerCtx>) -> ApiResult<Json<Vec<ReportView>>> {
+async fn get_reports(
+    State(ctx): State<ServerCtx>,
+    Query(q): Query<ReportsQuery>,
+) -> ApiResult<Json<Vec<ReportView>>> {
     let dir = insights_dir(&ctx);
     // ~300 reads + ~900 stats of synchronous std::fs: off the async runtime
     // (the Insights page polls this every 3 s during a run — backlog B6 / SE-17).
-    let reports = tokio::task::spawn_blocking(move || list_reports(&dir))
+    let reports = tokio::task::spawn_blocking(move || report_page(&dir, &q))
         .await
         .map_err(|e| {
             ApiError(otto_core::Error::Internal(format!(
@@ -698,6 +817,24 @@ async fn get_reports(State(ctx): State<ServerCtx>) -> ApiResult<Json<Vec<ReportV
             )))
         })?;
     Ok(Json(reports))
+}
+
+#[derive(Deserialize)]
+struct StatusQuery {
+    key: String,
+    #[serde(default)]
+    summary: bool,
+}
+
+async fn get_report_status(
+    State(ctx): State<ServerCtx>,
+    Query(q): Query<StatusQuery>,
+) -> ApiResult<Json<ReportStatus>> {
+    let dir = insights_dir(&ctx);
+    let status = crate::offload::blocking(move || report_status(&dir, &q.key, q.summary))
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(status))
 }
 
 /// Query for serving a single report's HTML (`?path=<absolute html_path>`).
@@ -753,17 +890,26 @@ async fn post_run(
         ))
     })?;
 
+    let dir = insights_dir(&ctx);
+    let key = period_key(kind, start, end);
+    let report_revision = crate::offload::blocking(move || report_status(&dir, &key, false))
+        .await
+        .map_err(ApiError)?
+        .html_revision;
+
     match run_insights(&ctx, kind, offset, as_of, RunMode::Manual).await {
         Ok(Some(id)) => Ok(Json(RunResp {
             started: true,
             run_id: Some(id.to_string()),
             report_key: Some(period_key(kind, start, end)),
+            report_revision,
             reason: None,
         })),
         Ok(None) => Ok(Json(RunResp {
             started: false,
             run_id: None,
             report_key: None,
+            report_revision: None,
             reason: Some(format!(
                 "the '{INSIGHTS_SKILL}' skill is not installed, or no workspace is available to host the run"
             )),
@@ -921,6 +1067,112 @@ impl InsightsScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_io_is_constant_for_300_and_1000_reports_and_requires_new_html() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daily = tmp.path().join("daily");
+        std::fs::create_dir(&daily).unwrap();
+        let first = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+        for i in 0..1000 {
+            let day = first
+                .checked_add_days(Days::new(i))
+                .unwrap()
+                .format("%Y%m%d")
+                .to_string();
+            for (prefix, ext) in [("report", "html"), ("summary", "md"), ("metrics", "json")] {
+                std::fs::write(
+                    daily.join(format!("{prefix}-daily-{day}_{day}.{ext}")),
+                    "one",
+                )
+                .unwrap();
+            }
+            if i == 299 || i == 999 {
+                REPORT_IO.with(|c| c.set((0, 0)));
+                for _ in 0..10 {
+                    report_status(tmp.path(), "daily:20200101_20200101", false).unwrap();
+                }
+                assert_eq!(REPORT_IO.with(|c| c.get()), (30, 0));
+            }
+        }
+        let key = "daily:20200101_20200101";
+        let before = report_status(tmp.path(), key, false).unwrap().html_revision;
+        std::fs::write(
+            daily.join("summary-daily-20200101_20200101.md"),
+            "new summary first",
+        )
+        .unwrap();
+        assert_eq!(
+            report_status(tmp.path(), key, true).unwrap().html_revision,
+            before
+        );
+        std::fs::write(
+            daily.join("report-daily-20200101_20200101.html"),
+            "new html completed",
+        )
+        .unwrap();
+        assert_ne!(
+            report_status(tmp.path(), key, false).unwrap().html_revision,
+            before
+        );
+        REPORT_IO.with(|c| c.set((0, 0)));
+        let page = report_page(
+            tmp.path(),
+            &ReportsQuery {
+                limit: Some(20),
+                ..Default::default()
+            },
+        );
+        assert_eq!(page.len(), 20);
+        assert!(page.iter().all(|r| r.summary.is_empty()));
+        assert_eq!(REPORT_IO.with(|c| c.get()), (60, 0));
+        REPORT_IO.with(|c| c.set((0, 0)));
+        assert_eq!(
+            report_page(
+                tmp.path(),
+                &ReportsQuery {
+                    latest: true,
+                    summaries: true,
+                    ..Default::default()
+                }
+            )
+            .len(),
+            1
+        );
+        assert_eq!(REPORT_IO.with(|c| c.get()).0, 3);
+    }
+
+    #[test]
+    fn previews_are_bounded_cached_and_refresh_after_external_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daily = tmp.path().join("daily");
+        std::fs::create_dir(&daily).unwrap();
+        let path = daily.join("summary-daily-20200101_20200101.md");
+        std::fs::write(&path, "x".repeat(1024 * 1024)).unwrap();
+        let key = "daily:20200101_20200101";
+        REPORT_IO.with(|c| c.set((0, 0)));
+        assert!(
+            report_status(tmp.path(), key, true)
+                .unwrap()
+                .report
+                .unwrap()
+                .summary
+                .len()
+                <= 65536
+        );
+        report_status(tmp.path(), key, true).unwrap();
+        assert_eq!(REPORT_IO.with(|c| c.get()), (6, 1));
+        std::fs::write(path, "external change").unwrap();
+        assert_eq!(
+            report_status(tmp.path(), key, true)
+                .unwrap()
+                .report
+                .unwrap()
+                .summary,
+            "external change"
+        );
+        assert!(report_status(tmp.path(), "daily:../../outside", false).is_err());
+    }
     use chrono::TimeZone;
 
     fn at(y: i32, m: u32, d: u32) -> DateTime<Utc> {

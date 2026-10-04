@@ -2641,11 +2641,12 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /insights/config | root | — | insights scheduler config (daily/weekly/monthly) |
+| GET /insights/config | Insights:View | — | insights scheduler config (daily/weekly/monthly) |
 | PUT /insights/config | root | InsightsConfig | config |
-| GET /insights/reports | root | — | generated report list |
-| GET /insights/report | root | — | one report's HTML |
-| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, reason? }` — `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed) |
+| GET /insights/reports | Insights:View | `?offset=0&limit=200&summaries=false&latest=false` | Newest-first `ReportView[]`; limit 1–200, default 200. Metadata-only by default (`summary:""`); `summaries=true` includes a preview capped at 80 lines / 64 KiB. `latest=true` returns at most one newest report per cadence (three total), ignoring offset. Only selected-page artifacts are hydrated; archive filenames are still enumerated. |
+| GET /insights/report | Insights:View | — | one report's HTML |
+| GET /insights/report-status | Insights:View | `?key=daily:YYYYMMDD_YYYYMMDD&summary=false` (also weekly/monthly) | `{report:ReportView|null, html_revision:string|null}`. Exactly three artifact metadata checks, independent of archive size; optional bounded summary preview. Missing report is null. Bad key is 400. HTML revision changes when HTML length/mtime changes; a new summary alone does not mean completion. |
+| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, report_revision, reason? }` — `report_revision` is the HTML revision captured before starting (null if absent), for bounded completion polling; `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed) |
 
 ## LSP (language server bridge)
 

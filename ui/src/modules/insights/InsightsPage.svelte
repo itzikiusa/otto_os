@@ -99,6 +99,9 @@
   let reports: InsightReport[] = $state([]);
   let loading = $state(true);
   let loadError: string | null = $state(null);
+  let hasMoreReports = $state(false);
+  let archiveOffset = 0;
+  let loadingMore = $state(false);
   /** `index.json` (series + action ledger) — best-effort, may stay empty. */
   let index: InsightsIndex = $state({ series: [], ledger: new Map() });
   /** Full summary markdown per report key (the list carries an 80-line excerpt). */
@@ -121,12 +124,34 @@
     loadError = null;
     try {
       reports = await insightsApi.listReports();
+      archiveOffset = reports.length;
+      hasMoreReports = reports.length === 200;
+      if (routeKey && !reports.some((r) => keyOf(r) === routeKey)) {
+        const linked = await insightsApi.reportStatus(routeKey);
+        if (linked.report) reports = [...reports, linked.report];
+      }
       void loadIndex();
     } catch (e) {
       loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
+  }
+
+  async function loadOlderReports(): Promise<void> {
+    if (loadingMore) return;
+    if (shownRows.length < filtered.length) { listShown = shownRows.length + LIST_PAGE; return; }
+    loadingMore = true;
+    try {
+      const page = await insightsApi.listReports(archiveOffset);
+      if (disposed) return;
+      archiveOffset += page.length;
+      hasMoreReports = page.length === 200;
+      const ids = new Set(reports.map(keyOf));
+      reports = [...reports, ...page.filter((r) => !ids.has(keyOf(r)))];
+      listShown += LIST_PAGE;
+    } catch (e) { toasts.error('Couldn’t load older reports', loadErrorText(e)); }
+    finally { loadingMore = false; }
   }
 
   let indexRequest = 0;
@@ -220,14 +245,13 @@
   // Fetch the full summary for the open report (the list has an excerpt).
   $effect(() => {
     const r = selected;
-    if (!r?.html_path) return;
+    if (!r) return;
     const k = keyOf(r);
     if (fullMd[k] != null) return;
-    const path = siblingPath(r.html_path, 'summary');
-    if (!path) return;
     let current = true;
-    void insightsApi
-      .readText(path)
+    const path = r.html_path ? siblingPath(r.html_path, 'summary') : null;
+    const summary = path ? insightsApi.readText(path) : insightsApi.reportStatus(k, true).then(({ report }) => report?.summary ?? '');
+    void summary
       .then((text) => {
         if (current && text.trim()) fullMd = { ...fullMd, [k]: text };
       })
@@ -397,7 +421,7 @@
   let runFailReason: string | null = $state(null);
   let pollRunId: string | null = $state(null);
   let pollReportKey: string | null = null;
-  let reportBeforeRun: string | undefined;
+  let reportBeforeRun: string | null | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   // 3 s × 100 ≈ 5 min: the banner promises "a few minutes", and the old 20
   // checks (one minute) dropped the banner silently while the agent was still
@@ -413,7 +437,6 @@
     pollCount = 0;
     const period = p as InsightRunPeriod;
     const offset = Number(o) || 1;
-    const before = new Map(reports.map((r) => [keyOf(r), JSON.stringify(r)]));
     const fallbackKey = localReportKey(period, offset);
     try {
       const resp = await insightsApi.run({ period, offset });
@@ -425,7 +448,7 @@
       if (resp.run_id) {
         pollRunId = resp.run_id;
         pollReportKey = resp.report_key ?? fallbackKey;
-        reportBeforeRun = before.get(pollReportKey);
+        reportBeforeRun = resp.report_revision;
         schedulePoll();
       } else {
         setTimeout(() => void load(), 2500);
@@ -438,7 +461,6 @@
     }
   }
 
-  let lastReportsSig = '';
   function schedulePoll(): void {
     if (disposed) return;
     if (pollCount >= POLL_MAX || !pollRunId) {
@@ -456,22 +478,20 @@
         return;
       }
       pollCount += 1;
+      let ready: InsightReport | null = null;
       try {
-        const next = await insightsApi.listReports();
+        if (!pollReportKey) return;
+        const status = await insightsApi.reportStatus(pollReportKey);
         if (disposed) return;
-        // Assign only a changed list: an identical tick used to re-parse and
-        // re-render every row and the open report (backlog B6 / SE-17).
-        const sig = JSON.stringify(next);
-        if (sig !== lastReportsSig) {
-          lastReportsSig = sig;
-          reports = next;
-        }
+        if (status.report?.html_path && status.html_revision && status.html_revision !== reportBeforeRun) ready = status.report;
       } catch {
         /* keep polling; the next tick retries */
       }
-      const ready = reports.find((r) => keyOf(r) === pollReportKey && reportBeforeRun !== JSON.stringify(r));
       if (ready) {
         pollRunId = null;
+        await load();
+        if (disposed) return;
+        if (!reports.some((r) => keyOf(r) === keyOf(ready!))) reports = [...reports, ready];
         fullMd = {};
         filter = 'all';
         select(ready);
@@ -658,7 +678,7 @@
                     </div>
                     {#if p?.headline}
                       <div class="row-headline">{p.headline}</div>
-                    {:else if !r.summary.trim()}
+                    {:else if !r.summary.trim() && !r.html_path}
                       <div class="row-headline dim">No summary yet — the run may still be writing it.</div>
                     {/if}
                     {#if rowStats(r).length > 0}
@@ -683,9 +703,9 @@
                 {:else}
                   <p class="dim list-empty">No {filter === 'adhoc' ? 'ad-hoc' : filter} reports. <button class="btn small ghost" onclick={() => (filter = 'all')}>Show all</button></p>
                 {/each}
-                {#if filtered.length > shownRows.length}
-                  <button class="btn small ghost more-reports" onclick={() => (listShown = shownRows.length + LIST_PAGE)}>
-                    Show {Math.min(LIST_PAGE, filtered.length - shownRows.length)} older reports ({filtered.length - shownRows.length} more)
+                {#if filtered.length > shownRows.length || hasMoreReports}
+                  <button class="btn small ghost more-reports" onclick={loadOlderReports} disabled={loadingMore}>
+                    {loadingMore ? 'Loading…' : 'Show older reports'}
                   </button>
                 {/if}
               </div>

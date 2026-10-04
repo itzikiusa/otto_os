@@ -6497,8 +6497,8 @@ export interface InsightReport {
   /** ISO end of the period the report covers. */
   period_end: string;
   /** On-disk path to the rendered HTML report. */
-  html_path: string;
-  /** A ≤10-sentence plain-text summary of the report. */
+  html_path: string | null;
+  /** Optional preview (80 lines / 64 KiB); empty for metadata-only pages. */
   summary: string;
   /** ISO timestamp the report was created. */
   created_at: string;
@@ -6517,10 +6517,17 @@ export interface RunInsightsResp {
   started: boolean;
   /** Requested daemon-local collector period, e.g. daily:20260924_20260924. */
   report_key?: string | null;
+  /** HTML revision before the run; a changed summary alone is not completion. */
+  report_revision?: string | null;
   /** Session id of the spawned insights run (when started === true). */
   run_id?: string | null;
   /** Human-readable explanation when started === false (e.g. skill not installed). */
   reason?: string | null;
+}
+
+export interface InsightReportStatus {
+  report: InsightReport | null;
+  html_revision: string | null;
 }
 
 // ---------------------------------------------------------------------------

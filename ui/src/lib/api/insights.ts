@@ -9,6 +9,7 @@ import type {
   InsightsConfig,
   RunInsightsReq,
   RunInsightsResp,
+  InsightReportStatus,
 } from './types';
 
 export const insightsApi = {
@@ -18,7 +19,9 @@ export const insightsApi = {
     api.put<InsightsConfig>('/insights/config', body),
 
   /** All generated reports, newest first. */
-  listReports: () => api.get<InsightReport[]>('/insights/reports'),
+  listReports: (offset = 0, summaries = false) => api.get<InsightReport[]>(offset === 0 && !summaries ? '/insights/reports' : `/insights/reports?offset=${offset}&limit=200&summaries=${summaries}`),
+  latestReports: () => api.get<InsightReport[]>('/insights/reports?latest=true&summaries=true'),
+  reportStatus: (key: string, summary = false) => api.get<InsightReportStatus>(`/insights/report-status?key=${encodeURIComponent(key)}&summary=${summary}`),
 
   /** Start an ad-hoc run for a period; the report appears in the list shortly. */
   run: (body: RunInsightsReq) =>
