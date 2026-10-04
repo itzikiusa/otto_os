@@ -69,6 +69,7 @@
   let collapsedFolders = $state<Record<string, boolean>>({});
 
   async function createEpic(): Promise<void> {
+    if (!(await product.mayLeaveDraft())) return;
     draftCreating = true;
     try {
       await product.createEpic();
@@ -97,6 +98,7 @@
     ]);
   }
   async function addChild(epic: ProductStory, kind: TreeKind): Promise<void> {
+    if (!(await product.mayLeaveDraft())) return;
     const title = await confirmer.promptText(`Title of the new ${kind} under "${epic.title}":`, {
       title: kind === 'doc' ? 'Add doc' : 'Add story', confirmLabel: 'Create', placeholder: 'e.g. Tier ladder screens',
     });
@@ -222,6 +224,7 @@
   let mobileSection = $state<'list' | 'content'>(product.selectedId ? 'content' : 'list');
 
   async function createDraft(): Promise<void> {
+    if (!(await product.mayLeaveDraft())) return;
     draftCreating = true;
     try {
       await product.createDraft();
@@ -379,7 +382,7 @@
    *  group's first sub (otherwise keep the current sub so re-clicking is a no-op). */
   function selectGroup(g: Group): void {
     if (!g.subs.some((s) => s.id === product.tab)) {
-      product.tab = g.subs[0].id;
+      void product.changeTab(g.subs[0].id);
     }
   }
 
@@ -408,8 +411,9 @@
     }
   }
 
-  function selectStory(s: ProductStory): void {
-    void openStory(s.id);
+  async function selectStory(s: ProductStory): Promise<void> {
+    await openStory(s.id);
+    if (product.selectedId !== s.id) return;
     rememberSelection('product', s.id);
     // Reset to overview whenever a new story is selected.
     product.tab = 'overview';
@@ -625,14 +629,14 @@
         role="tab"
         aria-selected={product.view === 'stories'}
         tabindex={product.view === 'stories' ? 0 : -1}
-        onclick={() => (product.view = 'stories')}
+        onclick={() => void product.changeView('stories')}
       >Stories</button>
       <button
         class:active={product.view === 'learnings'}
         role="tab"
         aria-selected={product.view === 'learnings'}
         tabindex={product.view === 'learnings' ? 0 : -1}
-        onclick={() => (product.view = 'learnings')}
+        onclick={() => void product.changeView('learnings')}
       >Learnings</button>
     </div>
   {/snippet}
@@ -816,7 +820,7 @@
                 role="tab"
                 aria-selected={product.tab === s.id}
                 tabindex={product.tab === s.id ? 0 : -1}
-                onclick={() => (product.tab = s.id)}
+                onclick={() => void product.changeTab(s.id)}
               >{s.label}</button>
             {/each}
           </div>
