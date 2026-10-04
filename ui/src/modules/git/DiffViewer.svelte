@@ -56,6 +56,7 @@
   import { ListWindow } from './list-window.svelte';
   import { DeferredHighlighter } from './diff-highlight.svelte';
   import { SvelteSet } from 'svelte/reactivity';
+  import { paneResizer } from '../../lib/paneResizer';
 
   interface Props {
     diff: DiffResp;
@@ -1229,14 +1230,18 @@
           </div>
         </div>
         <!-- Drag the trailing edge to resize (desktop); double-click resets. -->
+        <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="nav-resize-handle"
           role="separator"
+          tabindex="0"
           aria-label="Resize file sidebar"
           aria-orientation="vertical"
-          title="Drag to resize · double-click to reset"
+          title="Drag or use ←/→ to resize · double-click or Enter to reset"
           onmousedown={startNavResize}
           ondblclick={() => setNavW(240)}
+          use:paneResizer={{ value: navW, min: 180, max: 520, onChange: setNavW, onReset: () => setNavW(240), text: (v) => `${Math.round(v)} pixels wide` }}
         ></div>
       {/if}
     </aside>
@@ -1667,7 +1672,9 @@
     z-index: 2;
   }
   .nav-resize-handle:hover,
+  .nav-resize-handle:focus-visible,
   .nav-resizing .nav-resize-handle {
+    outline: none;
     background: color-mix(in srgb, var(--accent) 35%, transparent);
   }
   .nav-file {
@@ -2036,7 +2043,7 @@
   }
 
   /* Responsive: collapse nav to a thin rail on small screens */
-  @media (max-width: 700px) {
+  @media (max-width: 640px) {
     .diff-nav {
       width: 32px;
       min-width: 32px;

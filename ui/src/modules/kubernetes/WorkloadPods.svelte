@@ -172,7 +172,7 @@
     background: var(--surface-2);
   }
   .num {
-    text-align: right;
+    text-align: end;
   }
   .ell {
     overflow: hidden;

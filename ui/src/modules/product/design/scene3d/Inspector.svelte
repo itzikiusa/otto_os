@@ -512,7 +512,7 @@
     transform: rotate(-90deg);
   }
   .s3d-ph-meta {
-    margin-left: auto;
+    margin-inline-start: auto;
     font-weight: 400;
     text-transform: none;
     letter-spacing: 0;

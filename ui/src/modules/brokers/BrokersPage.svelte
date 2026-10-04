@@ -21,6 +21,8 @@
   import SchemaTab from './SchemaTab.svelte';
   import ReplayPanel from './ReplayPanel.svelte';
   import LagAlertsPanel from './LagAlertsPanel.svelte';
+  import { paneResizer } from '../../lib/paneResizer';
+  import { onTabKey } from '../../lib/tabKeys';
 
   type Tab = ClusterView;
   let tab = $state<Tab>('overview');
@@ -79,6 +81,11 @@
     sideW = SIDE_W_DEFAULT;
     persistSideW();
   }
+  function setSideW(w: number): void {
+    sideW = w;
+    persistSideW();
+  }
+  const pxText = (v: number): string => `${Math.round(v)} pixels wide`;
 
   $effect(() => {
     const id = ws.currentId;
@@ -430,15 +437,18 @@
     </div>
   </aside>
 
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="side-resizer"
     role="separator"
+    tabindex="0"
     aria-orientation="vertical"
-    aria-label="Drag to resize the cluster list (double-click to reset)"
-    title="Drag to resize · double-click to reset"
+    aria-label="Resize cluster list"
+    title="Drag or use ←/→ to resize · double-click or Enter to reset"
     ondblclick={resetSideW}
     onpointerdown={startSideResize}
+    use:paneResizer={{ value: sideW, min: 180, max: 420, onChange: setSideW, onReset: resetSideW, text: pxText }}
   ></div>
   {/if}
 
@@ -446,18 +456,22 @@
     {#if brokers.openClusters.length > 0}
       <div class="tabstrip" role="tablist" aria-label="Open clusters">
         {#each brokers.openClusters as c (c.id)}
-          <div
-            class="ctab"
-            class:on={brokers.selectedId === c.id}
-            role="tab"
-            aria-selected={brokers.selectedId === c.id}
-            tabindex="0"
-            title={c.name}
-            onclick={() => brokers.select(c.id)}
-            onkeydown={(e) => e.key === 'Enter' && brokers.select(c.id)}
-          >
-            <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
-            <span class="ctab-name">{c.name}</span>
+          <!-- The tab and its close are TWO real buttons, so the close control
+               isn't nested inside an interactive role=tab. ←/→ move between
+               the open clusters (roving tabindex). -->
+          <div class="ctab" class:on={brokers.selectedId === c.id} role="presentation">
+            <button
+              class="ctab-main"
+              role="tab"
+              aria-selected={brokers.selectedId === c.id}
+              tabindex={brokers.selectedId === c.id ? 0 : -1}
+              title={c.name}
+              onclick={() => brokers.select(c.id)}
+              onkeydown={onTabKey}
+            >
+              <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
+              <span class="ctab-name">{c.name}</span>
+            </button>
             <button
               class="ctab-x"
               aria-label="Close {c.name}"
@@ -516,7 +530,7 @@
           variant="page"
           icon="box"
           title="Pick a cluster"
-          body="Open a cluster from the list to browse its topics, consumer groups and schemas."
+          body={`${brokers.clusters.length} ${brokers.clusters.length === 1 ? 'cluster' : 'clusters'} in this workspace. Open one from the list to browse its topics, consumer groups and schemas.`}
         />
       {/if}
     {/if}
@@ -643,7 +657,9 @@
     z-index: 2;
     touch-action: none;
   }
-  .side-resizer:hover {
+  .side-resizer:hover,
+  .side-resizer:focus-visible {
+    outline: none;
     background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .aside-head {
@@ -804,7 +820,6 @@
     align-items: center;
     gap: 7px;
     padding: 0 10px;
-    cursor: pointer;
     border-inline-end: 1px solid var(--border);
     font-size: var(--fs-m);
     color: var(--text-dim);
@@ -818,6 +833,18 @@
     color: var(--text);
     background: var(--bg);
     border-top-color: var(--accent);
+  }
+  .ctab-main {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    align-self: stretch;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
   }
   .ctab-name {
     max-width: 180px;

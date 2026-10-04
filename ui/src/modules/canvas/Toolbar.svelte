@@ -1,6 +1,6 @@
 <script lang="ts">
   // Canvas top bar: scene title (inline edit), an autosave indicator, undo/redo,
-  // and the hero actions — Ask AI (accent), Present, Export JSON, Zoom-fit. The
+  // and the hero actions — Ask Otto (accent), Present, Export JSON, Zoom-fit. The
   // left vertical tool rail is a sibling (ToolRail); this is only the top strip.
   import Icon from '../../lib/components/Icon.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
@@ -90,8 +90,8 @@
       <Icon name="play" /> Present
     </button>
     {#if !readonly}
-      <button class="btn accent" title="Generate with AI (⌘↵)" onclick={onaskai}>
-        <Icon name="zap" /> Ask AI
+      <button class="btn accent" title="Ask Otto (⌘↵)" onclick={onaskai}>
+        <Icon name="zap" /> Ask Otto
       </button>
     {/if}
   </div>

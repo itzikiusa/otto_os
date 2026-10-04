@@ -350,7 +350,12 @@
           </thead>
           <tbody>
             {#each visible as t (t.name)}
-              <tr onclick={() => (selected = t.name)}>
+              <tr
+                tabindex="0"
+                aria-label={`Open topic ${t.name}`}
+                onclick={() => (selected = t.name)}
+                onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); selected = t.name; } }}
+              >
                 <td class="tname" class:internal={t.internal} title={t.internal ? `${t.name} (internal)` : undefined}>{t.name}</td>
                 <td class="num">{t.partitions}</td>
                 <td class="num">{t.replication_factor}</td>
@@ -559,6 +564,10 @@
   }
   table.grid tbody tr {
     cursor: pointer;
+  }
+  table.grid tbody tr:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
   table.grid tbody tr:hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);

@@ -20,6 +20,7 @@
   //            library": sections of other sites, with provenance. Click a tile
   //            to insert after the selection, or drag it onto the canvas.
   import Icon from '../../../lib/components/Icon.svelte';
+  import { onTabKey } from '../../../lib/tabKeys';
   import type { IconName } from '../../../lib/components/Icon.svelte';
   import { FAMILIES, itemDef, searchBlocks, sectionLabel, type SectionDef } from './engine/catalog';
   import { renderSection, str } from './engine/render';
@@ -155,13 +156,13 @@
 
 <div class="panel">
   <div class="tabs segmented" role="tablist" aria-label="Site panels">
-    <button role="tab" aria-selected={tab === 'pages'} class:active={tab === 'pages'} onclick={() => (tab = 'pages')} data-testid="site-tab-pages">
+    <button role="tab" aria-selected={tab === 'pages'} tabindex={tab === 'pages' ? 0 : -1} onkeydown={onTabKey} class:active={tab === 'pages'} onclick={() => (tab = 'pages')} data-testid="site-tab-pages">
       <Icon name="file" size={12} /> Pages
     </button>
-    <button role="tab" aria-selected={tab === 'layers'} class:active={tab === 'layers'} onclick={() => (tab = 'layers')} data-testid="site-tab-layers">
+    <button role="tab" aria-selected={tab === 'layers'} tabindex={tab === 'layers' ? 0 : -1} onkeydown={onTabKey} class:active={tab === 'layers'} onclick={() => (tab = 'layers')} data-testid="site-tab-layers">
       <Icon name="layers" size={12} /> Layers
     </button>
-    <button role="tab" aria-selected={tab === 'blocks'} class:active={tab === 'blocks'} onclick={() => (tab = 'blocks')} data-testid="site-tab-blocks">
+    <button role="tab" aria-selected={tab === 'blocks'} tabindex={tab === 'blocks' ? 0 : -1} onkeydown={onTabKey} class:active={tab === 'blocks'} onclick={() => (tab = 'blocks')} data-testid="site-tab-blocks">
       <Icon name="grid" size={12} /> Blocks
     </button>
   </div>

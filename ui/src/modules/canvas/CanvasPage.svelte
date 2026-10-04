@@ -248,7 +248,7 @@
                 <!-- Open the Assistant (Ask-AI lives in the conversation panel). -->
                 <div class="ai-bar">
                   <button class="ai-fab" onclick={() => (showConvo = true)} title="Open the assistant: describe a change and the agent redraws the scene">
-                    <Icon name="sparkle" size={14} /> Ask AI
+                    <Icon name="sparkle" size={14} /> Ask Otto
                   </button>
                 </div>
               {/if}

@@ -170,7 +170,7 @@
   .inspector {
     width: 220px;
     flex: 0 0 220px;
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
     background: var(--surface);
     padding: 10px;
     overflow-y: auto;

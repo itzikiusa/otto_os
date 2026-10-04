@@ -195,7 +195,7 @@
     font-size: var(--fs-s);
     line-height: 1.55;
     min-width: 0;
-    text-align: left;
+    text-align: start;
   }
   .leaf {
     /* Long scalars wrap rather than force the pane to scroll sideways. */
@@ -227,7 +227,7 @@
   }
   .sep {
     color: var(--text-dim);
-    margin-left: -3px;
+    margin-inline-start: -3px;
   }
   .sum {
     color: var(--text-dim);
@@ -240,9 +240,9 @@
   }
   /* Indent guide: children hang off a hairline so deep nesting stays readable. */
   .kids {
-    margin-left: 5px;
-    padding-left: 9px;
-    border-left: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
+    margin-inline-start: 5px;
+    padding-inline-start: 9px;
+    border-inline-start: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
   }
   .more {
     display: inline-flex;
@@ -260,7 +260,7 @@
     color: var(--text);
   }
   .more.inline {
-    margin-left: 4px;
+    margin-inline-start: 4px;
   }
   .json-str {
     color: var(--success);

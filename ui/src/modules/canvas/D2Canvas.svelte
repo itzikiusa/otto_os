@@ -11,7 +11,7 @@
   // only real differences are the renderer (renderD2, WASM/lazy-loaded) and a
   // Sketch-mode pill whose state rides along in the doc as `sketch`. You edit
   // the diagram three ways, all writing the SAME `canvas.d2` file: (1) the agent
-  // via "Ask AI", (2) directly in the Code panel, (3) — nothing is converted to
+  // via "Ask Otto", (2) directly in the Code panel, (3) — nothing is converted to
   // Mermaid/Excalidraw; this stays D2. Pan/zoom the preview.
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
@@ -271,7 +271,7 @@
         return;
       }
       if (canvas.currentId !== sceneId) {
-        toasts.success('Ask AI finished', 'The diagram was saved to the scene you asked from.');
+        toasts.success('Ask Otto finished', 'The diagram was saved to the scene you asked from.');
         return;
       }
       canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'd2', source: src, sketch }, sceneId);
@@ -280,7 +280,7 @@
       void canvas.refreshSession();
     } catch (e) {
       canvas.pushConvo('assistant', `Failed: ${e instanceof Error ? e.message : String(e)}`, sceneId);
-      toasts.error('Ask AI failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Ask Otto failed', e instanceof Error ? e.message : String(e));
     } finally {
       generating = false;
     }
@@ -376,7 +376,7 @@
           <div class="empty">
             <Icon name="layers" size={28} />
             <p class="lead">D2 diagram</p>
-            <p class="hint">Describe it in <strong>Ask AI</strong>, or open <strong>Code</strong> to
+            <p class="hint">Describe it in <strong>Ask Otto</strong>, or open <strong>Code</strong> to
               edit the D2 yourself — both write the same diagram and render here live.</p>
           </div>
         {/if}

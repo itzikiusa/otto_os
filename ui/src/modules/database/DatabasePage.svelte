@@ -5,6 +5,7 @@
   import { tick } from 'svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { paneResizer } from '../../lib/paneResizer';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { envTone } from '../../lib/status';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -804,11 +805,17 @@
       /* storage unavailable — non-fatal */
     }
   }
+  const assistMaxW = (): number => Math.max(320, (typeof window !== 'undefined' ? window.innerWidth : 1280) - 360);
+  const pxText = (v: number): string => `${Math.round(v)} pixels wide`;
+  function setAssistW(w: number): void {
+    assistW = w;
+    persistAssistW();
+  }
   function startAssistResize(e: PointerEvent): void {
     e.preventDefault();
     const startX = e.clientX;
     const startW = assistW;
-    const maxW = Math.max(320, (typeof window !== 'undefined' ? window.innerWidth : 1280) - 360);
+    const maxW = assistMaxW();
     const onMove = (ev: PointerEvent): void => {
       // The panel is pinned to the right edge, so dragging LEFT widens it.
       assistW = Math.max(300, Math.min(maxW, startW + (startX - ev.clientX)));
@@ -841,12 +848,17 @@
       /* storage unavailable — non-fatal */
     }
   }
+  // Leave room for the editor/results area; cap so the sidebar can't eat the page.
+  const sideMaxW = (): number => Math.min(640, Math.max(360, (typeof window !== 'undefined' ? window.innerWidth : 1280) - 420));
+  function setSideW(w: number): void {
+    sideW = w;
+    persistSideW();
+  }
   function startSideResize(e: PointerEvent): void {
     e.preventDefault();
     const startX = e.clientX;
     const startW = sideW;
-    // Leave room for the editor/results area; cap so the sidebar can't eat the page.
-    const maxW = Math.min(640, Math.max(360, (typeof window !== 'undefined' ? window.innerWidth : 1280) - 420));
+    const maxW = sideMaxW();
     const onMove = (ev: PointerEvent): void => {
       // The sidebar is pinned to the LEFT edge, so dragging RIGHT widens it.
       sideW = Math.max(220, Math.min(maxW, startW + (ev.clientX - startX)));
@@ -1077,15 +1089,18 @@
   </aside>
 
   {#if !viewport.isPhone && !database.sidebarCollapsed && !hubEmpty}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="side-resizer"
       role="separator"
+      tabindex="0"
       aria-orientation="vertical"
-      aria-label="Drag to resize the connections sidebar (double-click to reset)"
-      title="Drag to resize · double-click to reset"
+      aria-label="Resize connections sidebar"
+      title="Drag or use ←/→ to resize · double-click or Enter to reset"
       ondblclick={resetSideW}
       onpointerdown={startSideResize}
+      use:paneResizer={{ value: sideW, min: 220, max: sideMaxW(), onChange: setSideW, onReset: resetSideW, text: pxText }}
     ></div>
   {/if}
 
@@ -1294,14 +1309,17 @@
           {/key}
         </div>
         {#if database.assistOpen}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End). -->
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
           <div
             class="assist-divider"
             role="separator"
+            tabindex="0"
             aria-orientation="vertical"
-            aria-label="Drag to resize the assistant"
-            title="Drag to resize the assistant"
+            aria-label="Resize assistant"
+            title="Drag or use ←/→ to resize the assistant"
             onpointerdown={startAssistResize}
+            use:paneResizer={{ value: assistW, min: 300, max: assistMaxW(), invert: true, onChange: setAssistW, text: pxText }}
           ></div>
           <aside class="assist-pane" style="width:{assistW}px">
             <LazyMount lazy={AssistantLazy} what="the assistant" variant="panel" />
@@ -2584,7 +2602,11 @@
     position: relative;
     touch-action: none;
   }
-  .assist-divider:hover {
+  .assist-divider:focus-visible {
+    outline: none;
+  }
+  .assist-divider:hover,
+  .assist-divider:focus-visible {
     background: var(--accent);
   }
   /* Draggable divider between the connections sidebar and the main area. Sits flush
@@ -2598,7 +2620,7 @@
     align-items: center;
     gap: 8px;
     padding: 6px 0;
-    border-right: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border-inline-end: 1px solid var(--border, rgba(255, 255, 255, 0.1));
     background: var(--surface);
   }
   .rail-btn {
@@ -2648,7 +2670,9 @@
     z-index: 2;
     touch-action: none;
   }
-  .side-resizer:hover {
+  .side-resizer:hover,
+  .side-resizer:focus-visible {
+    outline: none;
     background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   /* The DB Assistant pane — fixed (resizable) width, pinned to the right edge. */

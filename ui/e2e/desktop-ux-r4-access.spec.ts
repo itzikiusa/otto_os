@@ -11,10 +11,10 @@ async function setup(page:Page) {
   await page.route('**/api/v1/auth/me',r=>r.fulfill({json:{user,real_user:user}}));
   await page.route('**/api/v1/auth/capabilities',r=>r.fulfill({json:{capabilities:{}}}));
   await page.route('**/api/v1/workspaces/*/sessions',r=>r.fulfill({json:[]}));
-  await page.goto('/#/home');await page.getByRole('button',{name:'Get Started'}).click();
+  await page.goto('/#/home');await page.getByRole('button',{name:'Get started'}).click();
   await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Continue',exact:true}).click();
 }
-async function finishSteps(page:Page) {await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Finish Setup'}).click();}
+async function finishSteps(page:Page) {await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Finish setup'}).click();}
 
 test('first account Back then Skip honors the skipped workspace after failure',async({page})=>{
   let roots=0;let writes=0;
@@ -35,7 +35,7 @@ test('first account recovers a lost root response with entered credentials',asyn
   await setup(page);await page.getByRole('button',{name:'Skip',exact:true}).click();await finishSteps(page);
   // An ambiguous failure can recover immediately; if it remains visible, Retry
   // must recover the existing account instead of trapping users in a 409 loop.
-  if(await page.getByRole('alert').isVisible())await page.getByRole('button',{name:'Finish Setup'}).click();
+  if(await page.getByRole('alert').isVisible())await page.getByRole('button',{name:'Finish setup'}).click();
   await expect(page.locator('.shell')).toBeVisible();expect(logins).toBe(1);expect(roots).toBeLessThanOrEqual(2);
 });
 
@@ -82,7 +82,7 @@ test('a capped sheet updates its keyboard scrolling stop after delayed intrinsic
 test('first-account steps announce their heading and associate password validation',async({page})=>{
   await page.addInitScript(()=>localStorage.removeItem('otto_token'));
   await page.route('**/api/v1/meta',r=>r.fulfill({json:{needs_onboarding:true,tools:[],version:'fixture'}}));
-  await page.goto('/#/home');await page.getByRole('button',{name:'Get Started'}).focus();await page.keyboard.press('Enter');
+  await page.goto('/#/home');await page.getByRole('button',{name:'Get started'}).focus();await page.keyboard.press('Enter');
   await expect(page.getByRole('heading',{name:'Set the root password'})).toBeFocused();
   await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Mismatch');
   await expect(page.getByLabel('Confirm password')).toHaveAttribute('aria-invalid','true');

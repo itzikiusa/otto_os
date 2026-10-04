@@ -481,7 +481,7 @@
     border-bottom: 1px solid var(--border);
     background: transparent;
     color: var(--text);
-    text-align: left;
+    text-align: start;
     cursor: pointer;
   }
   .prof:hover,

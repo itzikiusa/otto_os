@@ -97,7 +97,7 @@
 
   async function deleteNote(n: ProductNote): Promise<void> {
     const preview = n.body.length > 80 ? n.body.slice(0, 80) + '…' : n.body;
-    if (!(await confirmer.ask(`Delete this note?\n\n"${preview}"`, { title: 'Delete note', confirmLabel: 'Delete', danger: true }))) return;
+    if (!(await confirmer.ask(`Delete this note?\n\n“${preview}”`, { title: 'Delete note', confirmLabel: 'Delete', danger: true }))) return;
     deletingId = n.id;
     try {
       await product.deleteNote(n.id);

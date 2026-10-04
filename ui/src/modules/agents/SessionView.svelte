@@ -720,7 +720,7 @@
         : [
             { separator: true } as MenuItem,
             { label: 'Archive', icon: 'archive', action: () => void archive() } as MenuItem,
-            { label: 'Delete', icon: 'trash', danger: true, action: () => void del() } as MenuItem,
+            { label: 'Delete…', icon: 'trash', danger: true, action: () => void del() } as MenuItem,
           ]),
     ];
   }

@@ -44,7 +44,7 @@ test('Canvas accepts large saves and restores a previous version', async ({ page
   await page.addInitScript(id => localStorage.setItem('otto_workspace', id), workspace);
   await openPage(page, 'canvas');
   await page.locator('.scene-list .row', { hasText: 'Versioned canvas' }).getByRole('button').first().click();
-  await page.getByRole('button', { name: /Ask AI/ }).click();
+  await page.locator('.ai-fab').click();
   await page.getByRole('button', { name: 'Restore previous version' }).click();
   await page.getByRole('button', { name: /Manual edit · / }).click();
   await expect(page.getByText('Canvas restored')).toBeVisible();

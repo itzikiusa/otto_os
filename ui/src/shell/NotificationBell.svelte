@@ -386,7 +386,7 @@
               </div>
             {:else if !notifications.loaded}
               <div class="panel-empty" aria-busy="true">
-                <span class="nb-spinner" aria-hidden="true"></span>
+                <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
                 <p>Loading notifications…</p>
               </div>
             {:else if notifications.rows.length === 0}
@@ -511,7 +511,7 @@
     background: var(--accent-solid);
     color: var(--accent-contrast);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     line-height: 16px;
     text-align: center;
     box-shadow: 0 0 0 1.5px var(--bg);
@@ -631,23 +631,6 @@
   }
   .nb-error p {
     color: var(--text);
-  }
-  .nb-spinner {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
-  }
-  @media (prefers-reduced-motion: no-preference) {
-    .nb-spinner {
-      animation: nb-spin 0.8s linear infinite;
-    }
-  }
-  @keyframes nb-spin {
-    to {
-      transform: rotate(360deg);
-    }
   }
 
   .nb-section {

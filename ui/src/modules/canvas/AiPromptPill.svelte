@@ -41,7 +41,7 @@
       const res = await canvas.assist(p, mode);
       // Never insert into a scene other than the one the prompt was typed on.
       if (canvas.currentId !== sceneId) {
-        toasts.info('Ask AI finished', 'You switched scenes, so nothing was inserted.');
+        toasts.info('Ask Otto finished', 'You switched scenes, so nothing was inserted.');
         return;
       }
       const { x, y } = insertOrigin();
@@ -53,7 +53,7 @@
         toasts.info('Nothing to add', res.note || 'The agent did not return a diagram.');
       }
     } catch (e) {
-      toasts.error('Ask AI failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Ask Otto failed', e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
     }

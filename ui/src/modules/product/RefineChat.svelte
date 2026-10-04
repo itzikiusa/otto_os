@@ -22,6 +22,8 @@
 
   // ── Local state ────────────────────────────────────────────────────────────
   let messages = $state<RefinementMessage[]>([]);
+  /** The thread's model alias, when it has one — shown in the agent byline. */
+  let threadModel = $state<string | null>(null);
   let loadError = $state<string | null>(null);
   let loading = $state(false);
 
@@ -41,6 +43,7 @@
     try {
       const detail = await product.getRefinementThread(threadId);
       messages = detail.messages;
+      threadModel = detail.thread.model;
     } catch (e) {
       loadError = loadErrorText(e);
     } finally {
@@ -128,9 +131,9 @@
             <div class="bubble-header">
               {#if m.role === 'agent'}
                 <!-- Agent turn: attributed (patterns.md §2). -->
-                <AgentByline at={m.created_at} />
+                <AgentByline model={threadModel} at={m.created_at} />
               {:else}
-                <span class="bubble-role">PO</span>
+                <span class="bubble-role">You</span>
                 <RelTime iso={m.created_at} class="bubble-time" />
               {/if}
             </div>

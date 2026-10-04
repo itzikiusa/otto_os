@@ -105,7 +105,7 @@
         {#if document.content}<Markdown md={document.content} />{:else}<p class="hint">No {label.toLowerCase()} yet.</p>{/if}
         <div class="actions">
           {#if editable}<button type="button" class="btn" onclick={() => (editing = true)}>Edit {label.toLowerCase()}</button>{/if}
-          <button type="button" class="btn" onclick={load}>Reload</button>
+          <button type="button" class="btn" onclick={load}>Refresh</button>
         </div>
       {/if}
     {:else}<button type="button" class="btn" onclick={load}>Retry</button>{/if}

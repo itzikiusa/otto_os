@@ -4,6 +4,7 @@
   // picks the label column; `mapping.y[]` pick the numeric series.
   import ResultsGrid from './ResultsGrid.svelte';
   import type { DbViz, DbWidgetMapping, QueryResult } from '../../lib/api/types';
+  import { CHART_COLORS } from '../../lib/components/chartPalette';
   import { bucketBars, decimateMinMax, topSlices } from './chart-sample';
 
   interface Props {
@@ -13,8 +14,8 @@
   }
   let { result, viz, mapping = {} }: Props = $props();
 
-  // A palette derived from the accent + complementary hues for multi-series.
-  const COLORS = ['var(--accent)', '#28c840', '#d2691e', '#bf5af2', '#0e8a8a', '#ff5f57', '#febc2e'];
+  // Categorical series colours: the shared scheme-aware --cat-* palette.
+  const COLORS = CHART_COLORS;
 
   function colIndex(name: string | undefined): number {
     if (!result || !name) return -1;

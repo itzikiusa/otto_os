@@ -4,6 +4,7 @@
   // from Markdown through the shared allowlist sanitizer, plus run history
   // and a "Run now". Offers to create the agent from the template when the
   // workspace has none.
+  import { loadErrorText } from '../../../lib/loadError';
   import { onDestroy, untrack } from 'svelte';
   import { marked } from 'marked';
   import { router } from '../../../lib/router.svelte';
@@ -16,6 +17,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import AgentEditSheet from '../../personal-agents/AgentEditSheet.svelte';
   import { K8S_WATCHDOG_MARK } from '../../personal-agents/templates';
   import { fmtAgo, verdictOf } from './monitor-util';
@@ -68,7 +70,7 @@
         await openRun(runs.find((r) => r.report_path) ?? runs[0] ?? null);
       }
     } catch (e) {
-      if (version === loadVersion) error = e instanceof Error ? e.message : String(e);
+      if (version === loadVersion) error = loadErrorText(e);
     } finally {
       if (version === loadVersion) loading = false;
     }
@@ -86,7 +88,7 @@
       const next = await authedText(personalAgentsApi.reportPath(run.id));
       if (version === reportVersion) report = next;
     } catch (e) {
-      if (version === reportVersion) reportError = e instanceof Error ? e.message : String(e);
+      if (version === reportVersion) reportError = loadErrorText(e);
     } finally {
       if (version === reportVersion) reportLoading = false;
     }
@@ -136,7 +138,7 @@
   {#if loading && !agent}
     <Skeleton rows={4} height={40} />
   {:else if error}
-    <div class="error">{error} <button class="btn small" onclick={() => void load()}>Retry</button></div>
+    <LoadState what="the watchdog" variant="compact" {error} empty={true} onretry={() => void load()} />
   {:else if !ws.currentId}
     <EmptyState icon="shield" title="Pick a workspace" body="Personal agents belong to a workspace; select one to see the watchdog's reports." />
   {:else if !agent}
@@ -370,7 +372,7 @@
     .runs { max-height: 180px; }
     .report { max-height: none; }
   }
-  @media (max-width: 760px) {
+  @media (max-width: 640px) {
     .body {
       grid-template-columns: 1fr;
     }

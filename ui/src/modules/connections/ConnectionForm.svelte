@@ -1049,7 +1049,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    margin-right: auto;
+    margin-inline-end: auto;
   }
   .test-result :global(svg) {
     vertical-align: -2px;

@@ -611,7 +611,7 @@
     position: sticky;
     top: 0;
     background: var(--surface);
-    text-align: left;
+    text-align: start;
     font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -632,7 +632,7 @@
     word-break: break-word;
   }
   .num {
-    text-align: right;
+    text-align: end;
   }
   .nowrap {
     white-space: nowrap;

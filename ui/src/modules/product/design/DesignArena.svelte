@@ -665,9 +665,9 @@
       { label: 'Open', icon: 'eye', action: () => selectArtifact(r.att.id) },
       { label: 'Rename…', icon: 'edit', action: () => void rename(r.att) },
     ];
-    if (isTextKind(k)) items.push({ label: 'Refine with AI', icon: 'zap', action: () => void refine(r.att) });
+    if (isTextKind(k)) items.push({ label: 'Refine with Otto', icon: 'zap', action: () => void refine(r.att) });
     items.push({ separator: true });
-    items.push({ label: 'Delete', icon: 'trash', danger: true, action: () => void remove(r.att) });
+    items.push({ label: 'Delete…', icon: 'trash', danger: true, action: () => void remove(r.att) });
     ctxMenu.show(e, items);
   }
   function moreMenu(e: MouseEvent): void {
@@ -899,7 +899,7 @@
                   {#if r.att.source === 'agent'}<span class="agent-badge">agent</span>{/if}
                 </button>
                 {#if r.att.source === 'agent'}
-                  <button class="refine-btn" onclick={() => refine(r.att)} title="Refine with AI" aria-label="Refine with AI">
+                  <button class="refine-btn" onclick={() => refine(r.att)} title="Refine with Otto" aria-label="Refine with Otto">
                     <Icon name="zap" size={12} />
                   </button>
                 {/if}
@@ -1098,7 +1098,7 @@
         {#if !assistDocked && isText}
           <section class="insp-sec">
             <button class="btn small" onclick={() => att && refine(att)}>
-              <Icon name="zap" size={12} /> Refine with AI
+              <Icon name="zap" size={12} /> Refine with Otto
             </button>
           </section>
         {/if}

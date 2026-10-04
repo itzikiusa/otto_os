@@ -9,6 +9,8 @@
   import type { BranchInfo, Collaborator, DraftPrResp, Id, PrSummary } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { loadErrorText } from '../../lib/loadError';
 
@@ -40,6 +42,8 @@
    *  session, so it shows up in Agents the moment it spawns and can be opened
    *  in another window/tab and watched while this dialog stays put. */
   let draftSessionId = $state<Id | null>(null);
+  /** When the agent's draft landed — drives the byline next to the fields. */
+  let draftedAt = $state<number | null>(null);
   /** Seconds since the draft started — the whole point is that a long turn
    *  should never look indistinguishable from a wedged one. */
   let draftElapsed = $state(0);
@@ -164,8 +168,22 @@
     const tick = setInterval(() => (draftElapsed += 1), 1000);
     try {
       const d = await api.post<DraftPrResp>(`/repos/${repoId}/pr/draft`, { base: target });
+      // Never overwrite what the person already typed without asking.
+      if (title.trim() || description.trim()) {
+        const ok = await confirmer.ask(
+          'The agent’s draft will replace the title and description you have typed.',
+          { title: 'Replace your title and description?', confirmLabel: 'Replace', cancelLabel: 'Keep mine', danger: false },
+        );
+        if (!ok) {
+          if (d.source_branch) source = d.source_branch;
+          draftSessionId = d.session_id ?? null;
+          draftedAt = null;
+          return;
+        }
+      }
       title = d.title;
       description = d.description;
+      draftedAt = Date.now();
       if (d.source_branch) source = d.source_branch;
       draftSessionId = d.session_id ?? null;
       toasts.info('Draft ready', 'Review and edit before creating.');
@@ -285,7 +303,8 @@
         {draftElapsed}s · drafting from your branch diff{liveDraftId ? '' : '…'}
       </span>
     {:else if draftSessionId}
-      <span class="dim draft-hint">Drafted — review and edit before creating.</span>
+      {#if draftedAt}<AgentByline label="Draft" at={draftedAt} />{/if}
+      <span class="dim draft-hint">Review and edit before creating.</span>
     {:else}
       <span class="dim draft-hint">Generates the title + description from your branch diff vs {target || 'target'}.</span>
     {/if}

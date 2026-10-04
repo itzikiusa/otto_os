@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -827,7 +828,7 @@
             </table>
           {/if}
         {:else}
-          <p class="muted pad">Select a message to inspect its key, value, and headers.</p>
+          <EmptyState icon="note" title="Pick a message" body={`${messages.length} ${messages.length === 1 ? 'message' : 'messages'} loaded. Select one to inspect its key, value and headers.`} />
         {/if}
       </div>
     </div>

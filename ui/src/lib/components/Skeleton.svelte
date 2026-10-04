@@ -2,11 +2,16 @@
   interface Props {
     rows?: number;
     height?: number;
+    /** Noun for the screen-reader text: "Loading {label}". */
+    label?: string;
+    /** false when a parent (LoadState) already owns the status announcement. */
+    announce?: boolean;
   }
-  let { rows = 3, height = 36 }: Props = $props();
+  let { rows = 3, height = 36, label = '', announce = true }: Props = $props();
 </script>
 
-<div class="skeleton-list" aria-busy="true">
+<div class="skeleton-list" aria-busy="true" role={announce ? 'status' : undefined}>
+  {#if announce}<span class="sr-only">Loading{label ? ` ${label}` : ''}</span>{/if}
   {#each Array(rows) as _, i (i)}
     <div class="skeleton-row" style="height:{height}px; animation-delay:{i * 90}ms"></div>
   {/each}

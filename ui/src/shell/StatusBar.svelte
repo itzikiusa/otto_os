@@ -36,6 +36,11 @@
       <span class="working-dot" class:on={ws.workingCount > 0} class:stale={!live} aria-hidden="true"></span>
       {ws.workingCount} working
     </button>
+    <!-- Persistent live region: the needs-you count appears/changes silently
+         otherwise. Only that count is announced (the working count churns). -->
+    <span class="sr-only" role="status" aria-live="polite">
+      {ws.needsYouCount > 0 ? `${ws.needsYouCount} ${ws.needsYouCount === 1 ? 'session needs' : 'sessions need'} you` : ''}
+    </span>
     {#if ws.needsYouCount > 0}
       <button
         class="sb-item sb-btn needs-you"
@@ -43,7 +48,7 @@
         title="Show only the sessions waiting on you"
         data-testid="statusbar-needs-you"
       >
-        · {ws.needsYouCount} need{ws.needsYouCount === 1 ? 's' : ''} you
+        · {ws.needsYouCount} {ws.needsYouCount === 1 ? 'needs' : 'need'} you
       </button>
     {/if}
     {#if live}
@@ -138,7 +143,7 @@
   }
   .working-dot.on {
     background: var(--status-working);
-    animation: pulse 1.6s ease-in-out infinite;
+    animation: otto-pulse 1.6s ease-in-out infinite;
   }
   /* Stale: last known count, not live — hollow ring, no pulse. */
   .working-dot.on.stale {
@@ -166,14 +171,5 @@
   }
   .conn-dot.connecting {
     background: var(--status-warn);
-  }
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.4;
-    }
   }
 </style>

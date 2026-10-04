@@ -14,6 +14,7 @@
   // description, the user comments, and all comments are sent to the active agent.
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { openExternal as openExternalUrl } from '../../lib/external';
   import { nativeBrowser, nativeBrowserAvailable } from '../../lib/nativeBrowser';
@@ -444,17 +445,14 @@
   <div class="tabstrip-row">
     <div class="tabstrip" role="tablist" aria-label="Browser tabs" bind:this={stripEl}>
       {#each tabs as t (t.id)}
+        <!-- The tab and its close are TWO real buttons (no control nested in a
+             role=tab); ←/→/Home/End move between tabs (roving tabindex). -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="btab"
           class:active={t.id === activeId}
-          role="tab"
-          tabindex="0"
+          role="presentation"
           data-tab-id={t.id}
-          aria-selected={t.id === activeId}
-          title={t.url || 'New tab'}
-          onclick={() => setActiveTab(t.id)}
-          onkeydown={(e) => e.key === 'Enter' && setActiveTab(t.id)}
           onauxclick={(e) => {
             if (e.button === 1) {
               e.preventDefault();
@@ -462,11 +460,21 @@
             }
           }}
         >
-          <span class="btab-title">{t.title}</span>
+          <button
+            class="btab-main"
+            role="tab"
+            aria-selected={t.id === activeId}
+            tabindex={t.id === activeId ? 0 : -1}
+            title={t.url || 'New tab'}
+            onclick={() => setActiveTab(t.id)}
+            onkeydown={onTabKey}
+          >
+            <span class="btab-title">{t.title}</span>
+          </button>
           <button
             class="btab-close"
             title="Close tab"
-            aria-label="Close tab"
+            aria-label="Close {t.title || 'tab'}"
             onclick={(e) => {
               e.stopPropagation();
               closeTab(t.id);
@@ -582,10 +590,10 @@
           autofocus
         ></textarea>
         <div class="popover-actions">
-          <button class="btn-ghost" onclick={() => (popover = { ...popover, open: false })}>
+          <button class="btn" onclick={() => (popover = { ...popover, open: false })}>
             Cancel
           </button>
-          <button class="btn-accent" disabled={!popoverComment.trim()} onclick={addAnnotation}>
+          <button class="btn primary" disabled={!popoverComment.trim()} onclick={addAnnotation}>
             Add
           </button>
         </div>
@@ -596,11 +604,11 @@
     {#if annotations.length > 0}
       <div class="annot-badge">
         <span class="annot-count">{annotations.length} marked</span>
-        <button class="btn-accent btn-small" onclick={sendToAgent}>
+        <button class="btn primary small" onclick={sendToAgent}>
           Send {annotations.length} to agent
         </button>
         <button
-          class="btn-ghost btn-small"
+          class="btn small"
           title="Clear all annotations"
           onclick={() => (annotations = [])}
         >
@@ -694,7 +702,8 @@
     gap: 6px;
     max-width: 160px;
     height: 26px;
-    padding: 0 4px 0 10px;
+    padding-block: 0;
+    padding-inline: 10px 4px;
     border: 1px solid transparent;
     border-bottom: none;
     border-radius: var(--radius-s) var(--radius-s) 0 0;
@@ -712,6 +721,19 @@
     border-color: var(--border);
     color: var(--text);
   }
+  .btab-main {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    align-self: stretch;
+    min-width: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
   .btab-title {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -719,8 +741,8 @@
   .btab-close {
     display: grid;
     place-items: center;
-    width: 16px;
-    height: 16px;
+    width: 24px;
+    height: 24px;
     flex-shrink: 0;
     border: none;
     border-radius: 3px;
@@ -734,6 +756,12 @@
   .btab:focus-within .btab-close,
   .btab.active .btab-close {
     opacity: 1;
+  }
+  /* Touch has no hover: the close control must always be visible. */
+  @media (hover: none) {
+    .btab-close {
+      opacity: 1;
+    }
   }
   .btab-close:hover {
     background: color-mix(in srgb, var(--text-dim) 22%, transparent);
@@ -909,12 +937,12 @@
   /* ── Comment popover ───────────────────────────────────────────────────── */
   .popover {
     position: absolute;
-    z-index: 200;
+    z-index: var(--z-sticky);
     width: 300px;
     background: var(--surface);
-    border: 1px solid var(--accent);
-    border-radius: var(--radius-s, 6px);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    box-shadow: var(--glass-shadow);
     padding: 10px;
     display: flex;
     flex-direction: column;
@@ -950,51 +978,18 @@
     position: absolute;
     bottom: 34px; /* just above frame-foot */
     inset-inline-end: 10px;
-    z-index: 150;
+    z-index: var(--z-sticky);
     display: flex;
     align-items: center;
     gap: 6px;
     background: var(--surface);
-    border: 1px solid var(--accent);
-    border-radius: var(--radius-s, 6px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
     padding: 5px 8px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--glass-shadow);
   }
   .annot-count {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-
-  /* ── Generic button helpers ────────────────────────────────────────────── */
-  .btn-accent {
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-    border: none;
-    border-radius: var(--radius-s, 4px);
-    cursor: pointer;
-    font-size: var(--fs-s);
-    padding: 5px 10px;
-    font-weight: 600;
-  }
-  .btn-accent:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-  .btn-ghost {
-    background: transparent;
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
-    cursor: pointer;
-    font-size: var(--fs-s);
-    padding: 5px 10px;
-  }
-  .btn-ghost:hover {
-    color: var(--text);
-    border-color: var(--text-dim);
-  }
-  .btn-small {
-    font-size: var(--fs-xs);
-    padding: 3px 8px;
   }
 </style>

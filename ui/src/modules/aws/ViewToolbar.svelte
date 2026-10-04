@@ -142,7 +142,7 @@
     flex: 1 1 160px;
     min-width: 120px;
     max-width: 320px;
-    margin-left: auto;
+    margin-inline-start: auto;
     padding: 0 8px;
     height: 28px;
     border: 1px solid var(--border);
@@ -200,7 +200,7 @@
     .vt-filter {
       flex-basis: 100%;
       max-width: none;
-      margin-left: 0;
+      margin-inline-start: 0;
       order: 10;
     }
   }

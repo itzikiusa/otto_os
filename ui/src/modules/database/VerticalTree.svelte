@@ -296,7 +296,7 @@
     color: var(--status-warn);
     font-style: normal;
     font-size: var(--fs-xs);
-    margin-left: 6px;
+    margin-inline-start: 6px;
   }
   .vsum {
     display: inline-flex;
@@ -324,8 +324,8 @@
   }
   /* Indent guide: nested rows hang off a hairline so depth stays readable. */
   .vnest {
-    margin-left: 14px;
-    border-left: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
+    margin-inline-start: 14px;
+    border-inline-start: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
   }
   .vmore {
     display: inline-flex;

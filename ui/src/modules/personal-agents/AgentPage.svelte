@@ -354,7 +354,7 @@
         <ProviderIcon provider={agent.provider} size={12} />{agent.provider}{agent.model ? ` · ${agent.model}` : ''}
       </span>
       {#if !agent.enabled}<span class="chip" title="Schedules don’t fire while paused. Run now and chat still work.">Paused</span>{/if}
-      {#if agent.browser}<span class="chip" title="The otto-browser MCP is attached to runs and chat">Browser</span>{/if}
+      {#if agent.browser}<span class="chip" title="Runs and chat can use the Otto browser tool">Browser</span>{/if}
       {#if autonomy?.primary}<span class="chip pa-accent" title="Your primary assistant — routes specialist work to your other agents"><Icon name="star" size={11} /> Your agent</span>{/if}
       {#if autonomy?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={11} /> Proactive</span>{/if}
     {/if}

@@ -107,7 +107,7 @@
           managed connections, and full git + pull-request review — backed by a local daemon
           that keeps everything running even when the app is closed.
         </p>
-        <button class="btn primary big" onclick={() => (step = 1)}>Get Started</button>
+        <button class="btn primary big" onclick={() => (step = 1)}>Get started</button>
       </div>
     {:else if step === 1}
       <div class="ob-body">
@@ -129,7 +129,7 @@
               ></div>
             </div>
             <span id="ob-strength" class="hint">
-              {password.length < 10 ? `min 10 chars (${password.length}/10)` : strengthLabel}
+              {password.length < 10 ? `At least 10 characters (${password.length}/10)` : strengthLabel}
             </span>
           </div>
         </div>
@@ -240,7 +240,7 @@
         <div class="ob-actions">
           <button class="btn" disabled={busy} onclick={() => (step = 3)}>Back</button>
           <button class="btn primary big" disabled={busy} onclick={finish}>
-            {busy ? 'Setting up…' : 'Finish Setup'}
+            {busy ? 'Setting up…' : 'Finish setup'}
           </button>
         </div>
       </div>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Drawer "Terminal" tab: opens a `kubectl exec -it` PTY session for the pod
+  // Drawer "Terminal" tab: opens a `kubectl exec -it` terminal session for the pod
   // (`POST …/exec`, Edit) and renders it inline with `<Terminal preferDom>`
   // (agent-TUI renderer; shells in a pod redraw prompts constantly). The
   // session is killed when the view unmounts — it lives only in this drawer.
@@ -10,6 +10,10 @@
   import { k8sApi } from '../../lib/api/k8s';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import { k8s } from '../../lib/stores/k8s.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
+  import { clusterLabel } from './k8s-util';
   import type { K8sContainer, SessionStatus } from '../../lib/api/types';
 
   interface Props {
@@ -31,6 +35,8 @@
   let error = $state('');
 
   const running = $derived(containers.filter((c) => !c.init));
+  const cluster = $derived(k8s.clusters.find((c) => c.id === clusterId) ?? null);
+  const isProd = $derived(cluster?.environment === 'prod');
 
   async function open(): Promise<void> {
     if (!canExec || opening) return;
@@ -38,6 +44,14 @@
     if (!wsId) {
       error = 'Select a workspace first — the exec session is attached to it.';
       return;
+    }
+    // A shell in a production pod can change anything in it — ask first.
+    if (isProd) {
+      const ok = await confirmer.ask(
+        `Open a shell in pod “${pod}” in ${ns} on ${cluster ? clusterLabel(cluster) : 'this cluster'} (PRODUCTION)? Anything you type runs inside the live container.`,
+        { title: 'Open a production shell', confirmLabel: 'Open shell', danger: true },
+      );
+      if (!ok) return;
     }
     opening = true;
     error = '';
@@ -64,7 +78,7 @@
     try {
       await api.del(`/sessions/${id}`);
     } catch {
-      /* best-effort — the PTY is torn down when the daemon notices anyway */
+      /* best-effort — the terminal session is torn down when the daemon notices anyway */
     }
   }
 
@@ -83,6 +97,7 @@
   {:else if sessionId}
     <div class="exec-bar">
       <span class="mono">{pod}{container ? ` · ${container}` : ''}</span>
+      {#if cluster}<EnvBadge env={cluster.environment} />{/if}
       <span class="dim">{status ?? ''}</span>
       <span class="spacer"></span>
       <button class="btn small" onclick={() => void close()}>Close shell</button>
@@ -94,7 +109,7 @@
     </div>
   {:else}
     <div class="launch">
-      <p class="dim">Runs <span class="mono">kubectl exec -it {pod} -- sh</span> (bash when the image has it) as a PTY session inside Otto.</p>
+      <p class="dim">Runs <span class="mono">kubectl exec -it {pod} -- sh</span> (bash when the image has it) as a terminal session inside Otto.{#if cluster} Cluster: <EnvBadge env={cluster.environment} />{/if}</p>
       {#if running.length > 1}
         <label class="field">
           <span class="lbl">Container</span>

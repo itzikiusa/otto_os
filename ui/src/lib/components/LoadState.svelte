@@ -60,8 +60,8 @@
     </div>
   {/if}
 {:else if loading && empty}
-  <div class="ls-loading" class:page={variant === 'page'} aria-label="Loading {what}">
-    <Skeleton rows={variant === 'compact' ? 2 : rows} height={variant === 'compact' ? 24 : 36} />
+  <div class="ls-loading" class:page={variant === 'page'} role="status" aria-label="Loading {what}">
+    <Skeleton announce={false} rows={variant === 'compact' ? 2 : rows} height={variant === 'compact' ? 24 : 36} />
   </div>
 {:else if empty}
   {#if emptyView}{@render emptyView()}{/if}
@@ -95,12 +95,12 @@
     width: 56px;
     height: 56px;
     border-radius: var(--radius-l);
-    background: var(--warning-soft);
+    background: var(--danger-soft);
     border: 1px solid var(--border);
     display: grid;
     place-items: center;
     margin-bottom: 4px;
-    color: var(--warning);
+    color: var(--danger);
   }
   h3 {
     margin: 0;
@@ -140,7 +140,7 @@
     color: var(--text-dim);
   }
   .ls-compact-text {
-    color: var(--warning);
+    color: var(--danger);
     overflow-wrap: anywhere;
   }
   .ls-compact .ls-detail {

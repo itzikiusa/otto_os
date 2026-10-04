@@ -13,6 +13,7 @@
   import { onDestroy, untrack } from 'svelte';
   import { stashGridState, takeGridState, type GridTabState } from './grid-tab-state';
   import Icon from '../../lib/components/Icon.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { isReleased, releasedRows, resultBudget } from '../../lib/stores/db-result-budget';
   import { findInPage } from '../../lib/findinpage.svelte';
@@ -1368,6 +1369,8 @@
         class:err={rs.errored}
         role="tab"
         aria-selected={resultIdx === i}
+        tabindex={resultIdx === i ? 0 : -1}
+        onkeydown={onTabKey}
         title={rs.statement ?? `Result ${i + 1}`}
         onclick={() => (resultIdx = i)}
       >
@@ -1457,10 +1460,10 @@
           {/if}
         </div>
         <div class="view-seg" title={modeReason}>
-          <div class="view-tabs" role="tablist" aria-label="Result view">
-            <button class="vs" class:on={mode === 'grid'} role="tab" aria-selected={mode === 'grid'} onclick={() => pickView('grid')} title="Columnar grid">Grid</button>
-            <button class="vs" class:on={mode === 'vertical'} role="tab" aria-selected={mode === 'vertical'} onclick={() => pickView('vertical')} title="One record per block (field: value)">Vertical</button>
-            <button class="vs" class:on={mode === 'json'} role="tab" aria-selected={mode === 'json'} onclick={() => pickView('json')} title="One JSON object per row">JSON</button>
+          <div class="view-tabs" role="group" aria-label="Result view">
+            <button class="vs" class:on={mode === 'grid'} aria-pressed={mode === 'grid'} onclick={() => pickView('grid')} title="Columnar grid">Grid</button>
+            <button class="vs" class:on={mode === 'vertical'} aria-pressed={mode === 'vertical'} onclick={() => pickView('vertical')} title="One record per block (field: value)">Vertical</button>
+            <button class="vs" class:on={mode === 'json'} aria-pressed={mode === 'json'} onclick={() => pickView('json')} title="One JSON object per row">JSON</button>
           </div>
           {#if showAutoChip}
             <!-- Not a fourth tab: clears THIS tab's pick only (the connection memory stays). -->
@@ -1489,10 +1492,10 @@
         <button class="icon-btn" onclick={() => findInPage.show()} aria-label="Find in results" title="Find (⌘F)">
           <Icon name="search" size={13} />
         </button>
-        <button class="tb-btn" onclick={copyMenu} title="Copy the result{exportScope}" aria-haspopup="menu">
+        <button class="btn small" onclick={copyMenu} title="Copy the result{exportScope}" aria-haspopup="menu">
           <Icon name="copy" size={11} /><span class="tb-label">Copy</span><Icon name="chevronDown" size={10} />
         </button>
-        <button class="tb-btn" class:accent={result?.truncated} onclick={exportMenu} title="Download, export all rows, or import a file" aria-haspopup="menu">
+        <button class="btn small" class:export-nudge={result?.truncated} onclick={exportMenu} title="Download, export all rows, or import a file" aria-haspopup="menu">
           <Icon name="download" size={11} /><span class="tb-label">Export</span><Icon name="chevronDown" size={10} />
         </button>
         <button class="icon-btn" onclick={moreMenu} aria-label="More result actions" title="More — pipeline, compare, insert, expand JSON, send to agent, examine with AI" aria-haspopup="menu">
@@ -1883,8 +1886,8 @@
     inset: 0;
     display: grid;
     place-items: center;
-    background: color-mix(in srgb, var(--bg) 55%, transparent);
-    backdrop-filter: blur(1px);
+    /* Opaque-ish scrim, no blur: a table under a dimmer stays crisp (tables are never frosted). */
+    background: color-mix(in srgb, var(--bg) 70%, transparent);
     z-index: 5;
   }
   /* Inline variant for the no-result branches — same card, no dimmer. */
@@ -1892,7 +1895,6 @@
     position: static;
     inset: auto;
     background: none;
-    backdrop-filter: none;
   }
   .rg-overlay-card {
     display: inline-flex;
@@ -2365,28 +2367,8 @@
     opacity: 1;
     color: var(--accent-text);
   }
-  .tb-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 26px;
-    box-sizing: border-box;
-    padding: 0 9px;
-    border-radius: var(--radius-s);
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--text);
-    font-size: var(--fs-s);
-    cursor: pointer;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .tb-btn:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent-text);
-  }
   /* Nudge the user toward the full export when the shown result is capped. */
-  .tb-btn.accent {
+  .export-nudge {
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
     color: var(--accent-text);
   }
@@ -2560,10 +2542,6 @@
   }
   .grow {
     flex: 1;
-  }
-  .tb-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 
   /* ───────────────── Phone (≤640px) ─────────────────

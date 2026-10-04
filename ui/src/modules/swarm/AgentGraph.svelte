@@ -95,7 +95,7 @@
     return swarm.agentRunStats(agentId).active;
   }
 
-  type Activity = 'working' | 'waiting' | 'open' | 'idle';
+  type Activity = 'working' | 'waiting' | 'queued' | 'open' | 'idle';
   function activity(agentId: string): Activity {
     const run = activeRun(agentId);
     const sess = agentSessions(agentId);
@@ -104,7 +104,10 @@
       return st === 'running' || st === 'working';
     });
     if (run?.status === 'running' || liveSess) return 'working';
-    if (run?.status === 'waiting' || run?.status === 'queued') return 'waiting';
+    // Amber is for "needs you" only: a run waiting on a person/approval. A
+    // queued run (no slot yet) is just neutral.
+    if (run?.status === 'waiting') return 'waiting';
+    if (run?.status === 'queued') return 'queued';
     if (sess.length > 0) return 'open';
     return 'idle';
   }
@@ -114,9 +117,9 @@
       case 'working':
         return 'working…';
       case 'waiting':
-        // `waiting` folds a queued run (no slot yet) and a run that is waiting
-        // on a person/approval — name which one instead of calling both queued.
-        return activeRun(a.id)?.status === 'waiting' ? 'waiting…' : 'queued…';
+        return 'waiting…';
+      case 'queued':
+        return 'queued…';
       case 'open':
         return 'session open';
       default:
@@ -522,7 +525,8 @@
   .node-state.st-working {
     background: var(--status-working);
   }
-  /* Waiting on a queue slot / a person: the attention tone, not idle grey. */
+  /* Waiting on a person / approval: the attention tone. A queued run (no slot
+     yet) stays the neutral default dot — amber means "needs you" only. */
   .node-state.st-waiting {
     background: var(--status-warn);
   }

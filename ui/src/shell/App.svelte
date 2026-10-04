@@ -578,7 +578,9 @@
       { id: 'core.new-workspace', title: 'Add workspace…', group: 'Workspaces', keywords: 'create new project folder directory', run: () => (ui.newWorkspaceOpen = true) },
       { id: 'core.update-clis', title: 'Update all CLIs', group: 'Tools', shortcut: '⌘U / ⌘⇧U', keywords: 'upgrade claude codex agy cli version', run: () => void updateAllCLIs() },
       { id: 'core.snip', title: 'Take a screenshot (snip)', group: 'Tools', shortcut: '⌘⇧S', keywords: 'snip screenshot capture screen region annotate clipboard grab shot', run: () => void startSnip() },
-      { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
+      { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', shortcut: '⌘,', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
+      { id: 'core.go-back', title: 'Go back', group: 'Navigate', shortcut: '⌘⇧←', keywords: 'previous page history return', run: () => router.back() },
+      { id: 'core.go-forward', title: 'Go forward', group: 'Navigate', shortcut: '⌘⇧→', keywords: 'next page history', run: () => router.forward() },
       { id: 'core.go-walkthroughs', title: 'Open Help', group: 'Navigate', keywords: 'help guide guides readme docs shortcuts keys intro tour film video walkthroughs onboarding', run: () => router.go('walkthroughs') },
       { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', detail: 'Infrastructure', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
       // Canvas lost its sidebar row to Design Hall (it is the Whiteboard studio)
@@ -587,6 +589,9 @@
       { id: 'core.toggle-rail', title: 'Toggle sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: 'Toggle right panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
       ...(isTauri ? [{ id: 'core.open-in-window', title: 'Open in new window', group: 'View', keywords: 'pop out popout detach separate native window', run: () => void openPopout(currentRoute(), moduleLabel(moduleName)).catch((e: unknown) => toasts.error('Could not open window', e instanceof Error ? e.message : String(e))) }] : []),
+      { id: 'core.scheme-auto', title: 'Scheme: Auto (follow system)', group: 'Appearance', keywords: 'color scheme light dark system automatic mode', run: () => ui.setScheme('auto') },
+      { id: 'core.scheme-light', title: 'Scheme: Light', group: 'Appearance', keywords: 'color scheme mode day', run: () => ui.setScheme('light') },
+      { id: 'core.scheme-dark', title: 'Scheme: Dark', group: 'Appearance', keywords: 'color scheme mode night', run: () => ui.setScheme('dark') },
       { id: 'core.theme-native', title: 'Theme: Native', group: 'Appearance', run: () => ui.setTheme('native') },
       { id: 'core.theme-pro-dark', title: 'Theme: Pro Dark', group: 'Appearance', run: () => ui.setTheme('pro-dark') },
       { id: 'core.theme-warm', title: 'Theme: Warm', group: 'Appearance', run: () => ui.setTheme('warm') },
@@ -706,14 +711,14 @@
     if (!active) return registry.register('focused-session', []);
     const isAgent = active.kind === 'agent';
     const cmds = [
-      { id: 'focus.restart', title: 'Restart focused session', group: 'Session', keywords: 'reload reboot relaunch active current', run: () => void ws.requestRestart(active.id) },
-      { id: 'focus.archive', title: 'Archive focused session', group: 'Session', keywords: 'close hide stash active current', run: () => void ws.archiveSession(active.id) },
-      { id: 'focus.rename', title: 'Rename focused session…', group: 'Session', keywords: 'title name active current', run: () => void renameActiveSession() },
+      { id: 'focus.restart', title: 'Restart focused session', group: 'Sessions', keywords: 'reload reboot relaunch active current', run: () => void ws.requestRestart(active.id) },
+      { id: 'focus.archive', title: 'Archive focused session', group: 'Sessions', keywords: 'close hide stash active current', run: () => void ws.archiveSession(active.id) },
+      { id: 'focus.rename', title: 'Rename focused session…', group: 'Sessions', keywords: 'title name active current', run: () => void renameActiveSession() },
       ...(isAgent
-        ? [{ id: 'focus.handover', title: 'Hand over focused session…', group: 'Session', keywords: 'handoff transfer pass context active current', run: () => openSessionAction('handover') }]
+        ? [{ id: 'focus.handover', title: 'Hand over focused session…', group: 'Sessions', keywords: 'handoff transfer pass context active current', run: () => openSessionAction('handover') }]
         : []),
-      { id: 'focus.attach-issue', title: 'Attach Jira issue to focused session…', group: 'Session', keywords: 'jira ticket link story active current', run: () => openSessionAction('attach-issue') },
-      { id: 'focus.attach-product', title: 'Attach product story to focused session…', group: 'Session', keywords: 'product story link context active current', run: () => openSessionAction('attach-product') },
+      { id: 'focus.attach-issue', title: 'Attach Jira issue to focused session…', group: 'Sessions', keywords: 'jira ticket link story active current', run: () => openSessionAction('attach-issue') },
+      { id: 'focus.attach-product', title: 'Attach product story to focused session…', group: 'Sessions', keywords: 'product story link context active current', run: () => openSessionAction('attach-product') },
     ];
     return registry.register('focused-session', cmds);
   });

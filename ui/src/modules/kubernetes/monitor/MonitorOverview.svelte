@@ -3,6 +3,7 @@
   // restarts by class, memory vs limits, rps / error %, version drift, and the
   // collector status line with the exact metrics-server RBAC message when it
   // is denied). Refreshes on WS `k8s_monitor_cycle` and on a window change.
+  import { loadErrorText } from '../../../lib/loadError';
   import { untrack } from 'svelte';
   import { radioKey } from '../../../lib/radioKey';
   import { router } from '../../../lib/router.svelte';
@@ -42,7 +43,7 @@
       error = '';
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -371,7 +372,7 @@
     width: 8px;
     height: 8px;
     border-radius: 2px;
-    margin-right: 4px;
+    margin-inline-end: 4px;
     vertical-align: middle;
   }
   .drift {

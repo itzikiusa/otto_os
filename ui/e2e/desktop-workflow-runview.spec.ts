@@ -68,7 +68,8 @@ async function waitRun(runId: string, deadlineMs = 90_000): Promise<{ status: st
 async function openCompletedRun(page: Page, wfId: string): Promise<void> {
   await page.goto('/#/workflows');
   await page.getByTestId(`wf-row-${wfId}`).locator('.row-main').click();
-  await page.getByRole('button', { name: 'Runs' }).click();
+  await page.getByRole('button', { name: 'More actions', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Runs', exact: true }).click();
   await page.getByTestId('run-item').first().click();
   await expect(page.locator('.timeline')).toBeVisible({ timeout: 15_000 });
 }

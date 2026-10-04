@@ -57,7 +57,7 @@
         ? [
             { label: 'Edit…', icon: 'edit', action: () => onedit(a) },
             { separator: true },
-            { label: 'Delete', icon: 'trash', danger: true, action: () => ondelete(a) },
+            { label: 'Delete…', icon: 'trash', danger: true, action: () => ondelete(a) },
           ]
         : []),
     ]);

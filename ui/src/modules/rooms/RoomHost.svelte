@@ -4,6 +4,7 @@
   import { isTauri } from '../../lib/desktop';
   import { rememberRoom, forgetRoom } from './room-access';
   import RoomPage from './RoomPage.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte';
   import ContextMenu from '../../lib/components/ContextMenu.svelte';
 
@@ -30,8 +31,7 @@
   <RoomPage {roomId} />
 {:else}
   <div class="room-loading">
-    {#if error}<p role="alert">{error}</p><button class="btn" onclick={load}>Retry</button>
-    {:else if loading}<p role="status">Opening room…</p>{/if}
+    <LoadState what="this room" variant="page" {loading} {error} empty={true} onretry={load} />
   </div>
 {/if}
 <ConfirmDialog />
@@ -39,5 +39,4 @@
 
 <style>
   .room-loading { display: grid; place-content: center; justify-items: center; gap: 12px; height: 100%; padding: 24px; }
-  [role='alert'] { color: var(--danger); }
 </style>

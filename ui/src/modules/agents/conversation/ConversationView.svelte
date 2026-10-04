@@ -819,7 +819,7 @@
       {#if t.has_earlier && winStart === 0}
         <div class="earlier">
           <button class="btn small ghost" disabled={conv.loadingEarlier} onclick={() => void loadEarlier()}>
-            {conv.loadingEarlier ? 'Loading…' : 'Load earlier messages'}
+            {conv.loadingEarlier ? 'Loading earlier messages…' : 'Load earlier messages'}
           </button>
         </div>
       {/if}
@@ -919,9 +919,11 @@
        it); the composer box matches. Prose alone keeps a reading measure. */
     --chat-measure: 1440px;
     --prose-measure: 104ch;
-    /* Two speakers: you = blue (accent), the agent = green. */
+    /* Two speakers: you = blue (accent), the agent = NEUTRAL (patterns §2:
+       agent identity is never a status colour — running is not success green).
+       `--agent` is the neutral tint source; the agent's rule is --border-strong. */
     --you: var(--accent);
-    --agent: var(--status-working);
+    --agent: var(--text-dim);
     /* Code surfaces + an editor-like token palette built from the theme's own
        tones (text-safe, both schemes; tokens.css has no hex for code). */
     --code-bg: color-mix(in srgb, var(--surface-2) 70%, var(--bg));

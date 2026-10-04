@@ -446,7 +446,35 @@
     }
   }
 
+  /** Where a task's saved destination points, in the words destWhere() uses. */
+  function savedDestWhere(t: ScheduledTask): string {
+    const d = (t.destination ?? {}) as Record<string, unknown>;
+    const chat = typeof d.chat_id === 'string' ? d.chat_id.trim() : '';
+    switch (d.type as string) {
+      case 'slack':
+        return chat ? `the Slack channel ${chat}` : 'the Slack integration’s default channel';
+      case 'telegram':
+        return chat ? `the Telegram chat ${chat}` : 'the Telegram integration’s default chat';
+      case 'email':
+        return typeof d.to === 'string' && d.to ? d.to : 'an email address';
+      case 'webhook':
+        return typeof d.url === 'string' && d.url ? d.url : 'a webhook';
+      default:
+        return '';
+    }
+  }
+
   async function runNow(t: ScheduledTask): Promise<void> {
+    // Outward-facing: a run with a delivery destination posts its report
+    // right now — say where before it goes.
+    const where = savedDestWhere(t);
+    if (where) {
+      const ok = await confirmer.ask(
+        `“${t.name}” will run now and send its report to ${where}. Anyone who can read it there will see the report.`,
+        { title: 'Run and deliver now', confirmLabel: 'Run and deliver', danger: false },
+      );
+      if (!ok) return;
+    }
     runningIds = { ...runningIds, [t.id]: true };
     try {
       await scheduledTasks.runNow(t.id);

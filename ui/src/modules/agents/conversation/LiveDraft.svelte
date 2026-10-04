@@ -53,7 +53,7 @@
     flex-direction: column;
     gap: 2px;
     min-width: 0;
-    border-inline-start: 2px dashed color-mix(in srgb, var(--agent, var(--border-strong)) 60%, transparent);
+    border-inline-start: 2px dashed var(--border-strong);
     background: color-mix(in srgb, var(--agent, transparent) 4%, transparent);
     padding-block: 8px;
     padding-inline: 18px 16px;

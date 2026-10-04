@@ -166,10 +166,20 @@
   <div class="rail-bottom">
     <button
       class="rail-btn"
+      class:active={router.module === 'walkthroughs'}
+      aria-current={router.module === 'walkthroughs' ? 'page' : undefined}
+      onclick={() => router.go('walkthroughs')}
+      title="Help"
+      aria-label="Help"
+    >
+      <Icon name="info" />
+    </button>
+    <button
+      class="rail-btn"
       class:active={router.module === 'settings'}
       aria-current={router.module === 'settings' ? 'page' : undefined}
       onclick={() => router.go('settings/appearance')}
-      title="Settings"
+      title="Settings (⌘,)"
       aria-label="Settings"
     >
       <Icon name="gear" />
@@ -290,7 +300,7 @@
     background: color-mix(in srgb, var(--success) 24%, var(--bg-sidebar));
     color: var(--success);
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     line-height: 1;
     display: grid;
     place-items: center;

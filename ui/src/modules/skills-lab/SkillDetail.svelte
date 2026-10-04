@@ -187,7 +187,7 @@
   async function install(): Promise<void> {
     const b = group.variants.find((v) => v.source === 'bundled');
     const updating = hasLibrary;
-    if (updating && !(await confirmer.ask(`Replace the library copy of ${group.name} with bundled v${b?.bundledVersion}? Your current copy is backed up first.`, { title: 'Update from bundled', confirmLabel: 'Update', danger: false }))) return;
+    if (updating && !(await confirmer.ask(`Replace the library copy of ${group.name} with bundled v${b?.bundledVersion}? Your current copy is backed up first.`, { title: 'Replace from bundled', confirmLabel: 'Replace', danger: false }))) return;
     busy = true;
     try {
       await skillLabApi.install(group.name);
@@ -762,7 +762,7 @@
   }
   .skill-md :global(ul),
   .skill-md :global(ol) {
-    padding-left: 0;
+    padding-inline-start: 0;
     padding-inline-start: 22px;
   }
   .inline-error {

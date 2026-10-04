@@ -1019,6 +1019,7 @@
       class:active={router.module === 'settings'}
       aria-current={router.module === 'settings' ? 'page' : undefined}
       onclick={() => router.go('settings/appearance')}
+      title="Settings (⌘,)"
     >
       <Icon name="gear" size={14} />
       <span class="grow">Settings</span>
@@ -2180,7 +2181,7 @@
   .arch-tools .row-action {
     display: inline-flex; align-items: center; gap: 4px; width: auto; height: 22px;
     padding: 0 7px; flex-shrink: 0; opacity: 1;
-    border: 1px solid var(--border); border-radius: var(--radius-s, 4px); white-space: nowrap;
+    border: 1px solid var(--border); border-radius: var(--radius-s); white-space: nowrap;
   }
   .arch-tools .row-action:disabled { opacity: 0.4; cursor: default; }
   .arch-tools .row-action.danger:not(:disabled) { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
@@ -2329,7 +2330,7 @@
     padding: 0 4px;
     border-radius: 999px;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     display: grid;
     place-items: center;
     /* The Navigator's count-chip language (tint + semantic text), same as
@@ -2348,7 +2349,7 @@
     padding: 0 4px;
     border-radius: 999px;
     font-size: var(--fs-xs);
-    font-weight: 700;
+    font-weight: 600;
     display: grid;
     place-items: center;
   }

@@ -120,8 +120,8 @@
     height: 11px;
     flex-shrink: 0;
     border-radius: 50%;
-    border: 2px solid color-mix(in srgb, var(--agent, var(--accent)) 25%, transparent);
-    border-top-color: var(--agent, var(--accent));
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--text-dim);
   }
   @media (prefers-reduced-motion: no-preference) {
     .spin {

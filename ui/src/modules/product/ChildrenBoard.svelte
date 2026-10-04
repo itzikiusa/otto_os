@@ -54,7 +54,7 @@
     {/if}
   </div>
   {#if children.length === 0}
-    <p class="cb-empty">No children yet. Swarm agents file their drafts here (<code>otto-product --folder Design</code>), or use <strong>Add child</strong>.</p>
+    <p class="cb-empty">No children yet. Swarm agents file their drafts here, or use <strong>Add child</strong>.</p>
   {:else}
     <div class="cb-columns">
       {#each folders as f (f.name)}
@@ -119,10 +119,6 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;
-  }
-  .cb-empty code {
-    font-family: var(--font-mono, monospace);
-    font-size: var(--fs-xs);
   }
   .cb-columns {
     display: grid;

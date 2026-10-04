@@ -296,7 +296,7 @@
     top: 0;
     z-index: 1;
     background: var(--surface);
-    text-align: left;
+    text-align: start;
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
@@ -315,11 +315,11 @@
     max-width: 260px;
   }
   .tbl .num {
-    text-align: right;
+    text-align: end;
   }
   .tbl .act {
     width: 32px;
-    text-align: right;
+    text-align: end;
   }
   .trow {
     cursor: pointer;
@@ -364,7 +364,7 @@
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
   }
   .tag {
-    margin-left: 6px;
+    margin-inline-start: 6px;
     font-size: var(--fs-xs);
     font-weight: 700;
     padding: 0 5px;

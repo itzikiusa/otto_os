@@ -405,7 +405,7 @@
   }
   .podtag {
     display: inline-block;
-    margin-right: 8px;
+    margin-inline-end: 8px;
     padding: 0 6px;
     border: none;
     border-radius: 3px;

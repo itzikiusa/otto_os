@@ -19,6 +19,8 @@
   import type { VaultGraphPayload, VaultSwitchHit } from '../../lib/api/types';
   import { vault } from './vault.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { ui } from '../../lib/stores/ui.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import type { GraphWorkerIn, GraphWorkerOut } from './graph.worker';
@@ -628,9 +630,12 @@
   /** Set right before `ingest` of a refetch of the SAME vault + query. */
   let carryNext = false;
   let lastQueryKey = '';
+  /** Bumped by the error state's Retry — the load effect below re-runs. */
+  let retryTick = $state(0);
   $effect(() => {
     const v = vault.current;
     void gen; // content/link changes only
+    void retryTick;
     const wsId = vault.wsId;
     const path = local ? vault.notePath : null;
     const q: VaultGraphQuery = {
@@ -669,7 +674,7 @@
         ingest(p);
       })
       .catch((e: unknown) => {
-        if (seq === reqSeq) errorMsg = e instanceof Error ? e.message : String(e);
+        if (seq === reqSeq) errorMsg = loadErrorText(e);
       })
       .finally(() => {
         if (seq === reqSeq) loading = false;
@@ -1286,10 +1291,13 @@
 
   {#if !vault.current}
     <div class="empty">No vault selected</div>
+  {:else if !loading && nodeCount === 0 && errorMsg}
+    <div class="empty empty-error">
+      <LoadState what="the graph" variant="compact" error={errorMsg} empty={true} onretry={() => retryTick++} />
+    </div>
   {:else if !loading && nodeCount === 0}
     <div class="empty">
-      {#if errorMsg}Graph failed: {errorMsg}
-      {:else if local && !vault.notePath}Open a note to see its local graph
+      {#if local && !vault.notePath}Open a note to see its local graph
       {:else if hasFocus && rawNodeCount > 0}
         <span>
           Nothing matches this focus — {rawNodeCount.toLocaleString()} nodes filtered out.
@@ -1340,7 +1348,7 @@
     </button>
     {#if panelOpen}
       <div class="panel-body">
-        <input class="filter" type="text" placeholder="Filter titles…" bind:value={filter} />
+        <input class="filter" type="text" placeholder="Filter titles…" aria-label="Filter titles" bind:value={filter} />
 
         <div class="sec">
           Focus
@@ -1374,6 +1382,7 @@
             class="filter"
             type="text"
             placeholder="Anchor on a note…"
+            aria-label="Anchor on a note"
             bind:value={anchorQuery}
           />
           {#if anchorHits.length}
@@ -1396,7 +1405,7 @@
             {/if}
           </div>
           {#if serviceFacets.length > 8}
-            <input class="filter" type="text" placeholder="Find service…" bind:value={svcQuery} />
+            <input class="filter" type="text" placeholder="Find service…" aria-label="Find service" bind:value={svcQuery} />
           {/if}
           <div class="facets">
             {#each svcShown as f (f.label)}
@@ -1445,7 +1454,7 @@
             {/if}
           </div>
           {#if tagFacets.length > 8}
-            <input class="filter" type="text" placeholder="Find tag…" bind:value={tagQuery} />
+            <input class="filter" type="text" placeholder="Find tag…" aria-label="Find tag" bind:value={tagQuery} />
           {/if}
           <div class="facets">
             {#each tagShown as f (f.label)}
@@ -1593,25 +1602,30 @@
     padding: 20px;
     text-align: center;
   }
+  /* The error card's Retry must stay clickable (the overlay is otherwise inert). */
+  .empty-error {
+    pointer-events: auto;
+  }
   .empty button {
     pointer-events: auto; /* the overlay is inert; its escape hatch must not be */
-    margin-left: 6px;
+    margin-inline-start: 6px;
   }
 
   .statusbar {
     position: absolute;
-    left: 10px;
+    inset-inline-start: 10px;
     bottom: 10px;
     display: flex;
     align-items: center;
     gap: 8px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--surface) 82%, transparent);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    background: var(--glass-tint-raised);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-m);
     padding: 4px 8px;
-    backdrop-filter: blur(8px);
+    backdrop-filter: var(--glass-blur-raised);
+    -webkit-backdrop-filter: var(--glass-blur-raised);
   }
   .chip {
     padding: 1px 6px;
@@ -1642,14 +1656,15 @@
   .panel {
     position: absolute;
     top: 8px;
-    right: 8px;
+    inset-inline-end: 8px;
     /* Width comes from the store (drag-resizable); this is the fallback. */
     width: 210px;
-    background: color-mix(in srgb, var(--surface) 92%, transparent);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
-    box-shadow: var(--shadow);
-    backdrop-filter: blur(10px);
+    background: var(--glass-tint-raised);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-m);
+    box-shadow: var(--glass-shadow);
+    backdrop-filter: var(--glass-blur-raised);
+    -webkit-backdrop-filter: var(--glass-blur-raised);
     font-size: var(--fs-xs);
     color: var(--text);
     /* Never taller than the view — the body scrolls (floating-UI rule). */
@@ -1776,7 +1791,7 @@
     max-height: 340px;
     overflow-y: auto;
     overscroll-behavior: contain; /* don't chain a list's scroll into the panel */
-    padding-right: 2px;
+    padding-inline-end: 2px;
   }
   .fl {
     flex: 1;
@@ -1843,7 +1858,7 @@
     background: none;
     color: var(--text);
     font-size: var(--fs-xs);
-    text-align: left;
+    text-align: start;
     cursor: pointer;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1885,7 +1900,7 @@
   }
   .val {
     flex: 0 0 30px;
-    text-align: right;
+    text-align: end;
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
@@ -1907,7 +1922,7 @@
     z-index: 2;
   }
   .tmeta {
-    margin-left: 6px;
+    margin-inline-start: 6px;
     color: var(--text-dim);
   }
 </style>

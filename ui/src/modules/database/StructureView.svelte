@@ -1388,7 +1388,7 @@
   }
   /* Mongo fields table */
   .nested-tag {
-    margin-left: 6px;
+    margin-inline-start: 6px;
     padding: 0 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);

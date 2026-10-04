@@ -9,6 +9,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
   import type { OttoRun } from '../../lib/api/types';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { humanize, isTerminal, runStatusInfo, sourceLabel } from './runStatus';
@@ -64,7 +65,7 @@
   }
 
   async function cancel(): Promise<void> {
-    if (!(await confirmer.ask('Cancel this run? The agent stops and the run can’t be resumed — you would launch a new one.', { title: 'Cancel run', confirmLabel: 'Cancel run', cancelLabel: 'Keep running' }))) return;
+    if (!(await confirmer.ask('Cancel this run? The agent stops and the run can’t be resumed — you would launch a new one.', { title: 'Stop this run?', confirmLabel: 'Stop run', cancelLabel: 'Keep running' }))) return;
     error = '';
     busy = true;
     try {
@@ -117,7 +118,7 @@
       <!-- Stop stays reachable at the top while the run is live (patterns.md §1),
            never beside a primary. -->
       {#if !isTerminal(run.status)}
-        <button class="btn small danger" disabled={busy} onclick={cancel}>Cancel run</button>
+        <button class="btn small danger" disabled={busy} onclick={cancel}>Stop run…</button>
       {/if}
       <button class="icon-btn" onclick={onClose} aria-label="Close run detail" title="Close run detail">
         <Icon name="x" size={14} />
@@ -235,6 +236,7 @@
   {#if prDraft}
     <section class="block pr">
       <h3 class="h">PR draft</h3>
+      <AgentByline provider={run.provider} model={run.model} />
       <div class="pr-title">{prDraft.title || 'Untitled PR'}</div>
       {#if prDraft.source || prDraft.target}
         <div class="muted mono">{prDraft.source || run.branch}{prDraft.target ? ` → ${prDraft.target}` : ''}</div>

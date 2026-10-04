@@ -61,13 +61,13 @@ in audits.
   | Widget | Keys |
   |---|---|
   | `role="tablist"` | ←/→ (and Home/End) move between tabs; Tab moves into the panel |
-  | `role="menu"` | ↑/↓ move, Enter activates, Esc closes. `ContextMenu` does not have arrow keys yet (**TBD**); don't copy that gap. |
+  | `role="menu"` | ↑/↓ (and Home/End) move, Enter/Space activate, a letter jumps to an item, Esc closes. `ContextMenu` implements all of this; use `ctxMenu` rather than a hand-rolled menu. |
   | Lists and trees | ↑/↓ move, Enter opens, ←/→ collapse and expand |
   | Grids | Arrow keys between cells, Enter to edit, Esc to cancel |
 
 - `Esc` closes the top-most layer only. Global shortcuts don't fire while an
-  overlay is open. `ui.overlayOpen` covers `Modal`, the palette and the
-  new-session sheets, so register overlays properly.
+  overlay is open. `ui.overlayOpen` covers `Modal`, `Drawer`, the palette and
+  the new-session sheets, so register overlays properly (`ui.pushModal()`).
 - Everything reachable by pointer is reachable by keyboard, and every major
   verb is in ⌘K ([patterns.md §9](./patterns.md#9-keyboard-first)).
 
@@ -106,9 +106,11 @@ in audits.
 ## 5. Motion and transparency
 
 - Respect `prefers-reduced-motion: reduce`. Pulses, shimmers and sheet
-  animations stop or become instant. There is no global override yet (**TBD**),
-  so ship the `@media` block with the animation
-  ([foundations.md §8](./foundations.md#8-motion)).
+  animations stop or become instant. `app.css` has a global override that
+  collapses every animation and transition, so a plain animation is covered.
+  Add your own `@media` block only when the state needs a different treatment
+  (a busy spinner becomes a static dotted ring; the shared `.spinner` already
+  does this), see [foundations.md §8](./foundations.md#8-motion).
 - Respect `prefers-reduced-transparency` on translucent chrome where the engine
   supports it. The opaque fallback must look right on its own
   ([foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop)).

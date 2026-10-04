@@ -59,6 +59,8 @@ Rules:
 | `--separator` | The quieter hairline between chrome and content: the `PageHeader` bottom edge, the sidebar's inline-end edge, the status bar's top edge, a Modal footer, stat dividers in Home widgets |
 | `--border-strong` | Emphasised borders: focused/selected cards, drag targets, the agent-content rule (see patterns.md) |
 | `--hover` | Hover wash on rows and ghost controls (7% of `--text`, works on any surface) |
+| `--scrim` | The dimmed backdrop behind a `Modal`, `Drawer` or the phone "More" sheet (per scheme) |
+| `--scrim-soft` | A lighter backdrop for the command palette, which should keep the page legible |
 
 **Text**
 
@@ -464,7 +466,8 @@ Motion confirms an action or shows live state. It is never decoration.
 |---|---|---|
 | Hover and press feedback | 120–140 ms `ease-out` | `.btn` (130 ms), `.icon-btn`, `.segmented`, `.pill-toggle` |
 | Enter/leave of a floating layer | 140–160 ms `ease-out`, fade plus ≤ 8 px translate, scale ≥ 0.985 | `Modal` backdrop fade and sheet-in |
-| Live state (continuous) | 1.4–1.6 s ease-in-out loop | `StatusDot` working pulse, `Skeleton` shimmer |
+| Live state (continuous) | 1.4–1.6 s ease-in-out loop | `StatusDot` working pulse (`otto-pulse`), `Skeleton` shimmer |
+| Busy ring | 0.8 s linear spin | the shared `.spinner` (`otto-spin`) |
 
 Rules:
 
@@ -487,6 +490,12 @@ Rules:
 
   Examples in the tree: `shell/Drawer.svelte`,
   `run-with-otto/RunStageRail.svelte`.
+- **Shared primitives.** `app.css` owns `@keyframes otto-spin` and
+  `otto-pulse` plus a `.spinner` utility (size via `--spinner-size`). Use them
+  instead of a new `@keyframes`. `otto-pulse` ends on its fully-lit frame, so
+  the global reduced-motion override leaves a live dot "on". Under reduced
+  motion `.spinner` becomes a static dotted ring, so "busy" is still shown
+  without rotation.
 
 ---
 

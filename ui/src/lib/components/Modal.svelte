@@ -1,6 +1,7 @@
 <script lang="ts">
   // Sheet-style modal: centered card, dimmed backdrop, Esc / backdrop click to
-  // close.
+  // close. `dismissable={false}` (a busy form mid-submit) blocks Esc, the
+  // backdrop and the header ✕ — the caller closes it when the work settles.
   import type { Snippet } from 'svelte';
   import { untrack } from 'svelte';
   import { ui } from '../stores/ui.svelte';
@@ -13,8 +14,15 @@
     onclose: () => void;
     children: Snippet;
     footer?: Snippet;
+    /** false blocks Esc / backdrop / ✕ close while the form is busy. */
+    dismissable?: boolean;
   }
-  let { title, width = 460, onclose, children, footer }: Props = $props();
+  let { title, width = 460, onclose, children, footer, dismissable = true }: Props = $props();
+
+  // A drag that starts inside the sheet (selecting text) and ends on the
+  // backdrop fires `click` on the backdrop — only a press that BEGAN on the
+  // backdrop may close.
+  let downOnBackdrop = false;
 
   let sheetEl = $state<HTMLElement | null>(null);
   // Text-only confirmations need a keyboard stop for their scrolling body.
@@ -102,7 +110,7 @@
     if (sheets[sheets.length - 1] !== sheetEl) return;
     if (e.key === 'Escape') {
       e.stopPropagation();
-      onclose();
+      if (dismissable) onclose();
     } else if (e.key === 'Tab') {
       // Trap Tab inside the sheet: wrap at the ends, and pull focus back in if
       // it somehow escaped (e.g. a click on the backdrop).
@@ -132,8 +140,13 @@
 <div
   class="backdrop"
   role="presentation"
+  onpointerdown={(e) => {
+    downOnBackdrop = e.target === e.currentTarget;
+  }}
   onclick={(e) => {
-    if (e.target === e.currentTarget) onclose();
+    const closes = downOnBackdrop && e.target === e.currentTarget;
+    downOnBackdrop = false;
+    if (closes && dismissable) onclose();
   }}
 >
   <div
@@ -146,7 +159,7 @@
   >
     <header>
       <h2>{title}</h2>
-      <button class="icon-btn" onclick={onclose} aria-label="Close" title="Close (Esc)">
+      <button class="icon-btn" onclick={onclose} disabled={!dismissable} aria-label="Close" title="Close (Esc)">
         <Icon name="x" size={14} />
       </button>
     </header>
@@ -162,7 +175,7 @@
     position: fixed;
     inset: 0;
     z-index: var(--z-modal);
-    background: rgba(0, 0, 0, 0.35);
+    background: var(--scrim);
     display: grid;
     place-items: center;
     animation: fade-in 140ms ease-out;

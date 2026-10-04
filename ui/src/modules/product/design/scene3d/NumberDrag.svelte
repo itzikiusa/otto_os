@@ -151,7 +151,7 @@
     cursor: ew-resize;
     user-select: none;
     touch-action: none;
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     height: 100%;
     display: inline-flex;
     align-items: center;

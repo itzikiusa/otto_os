@@ -825,7 +825,7 @@
     top: 0;
     z-index: 1;
     background: var(--surface);
-    text-align: left;
+    text-align: start;
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
@@ -844,11 +844,11 @@
     max-width: 420px;
   }
   .tbl .num {
-    text-align: right;
+    text-align: end;
   }
   .tbl .act {
     width: 60px;
-    text-align: right;
+    text-align: end;
   }
   .trow {
     cursor: pointer;
@@ -867,7 +867,7 @@
   }
   .name :global(svg) {
     vertical-align: -2px;
-    margin-right: 6px;
+    margin-inline-end: 6px;
   }
   .dim {
     color: var(--text-dim);
@@ -916,7 +916,7 @@
     grid-template-columns: minmax(0, 1fr) minmax(280px, 42%);
   }
   .drawer {
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
     background: var(--surface);
     min-height: 0;
     overflow: auto;

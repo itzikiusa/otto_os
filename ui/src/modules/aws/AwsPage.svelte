@@ -341,7 +341,7 @@
     width: 160px;
   }
   .rail-col {
-    border-right: 1px solid var(--border);
+    border-inline-end: 1px solid var(--border);
     background: var(--bg-sidebar);
     min-height: 0;
     overflow: hidden;
@@ -349,7 +349,7 @@
     flex-direction: column;
   }
   .aws.mobile .rail-col {
-    border-right: 0;
+    border-inline-end: 0;
     background: transparent;
     overflow: auto;
   }

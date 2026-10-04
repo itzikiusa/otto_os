@@ -794,7 +794,7 @@
                   <article class="turn" data-tone={t.tone}>
                     {#if t.q}<p class="q">{t.q}</p>{/if}
                     {#if t.tone === 'pending' && t.a === ''}
-                      <p class="a thinking"><span class="spin" aria-hidden="true"></span>Working on it…</p>
+                      <p class="a thinking"><span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>Working on it…</p>
                     {:else}
                       <p class="a">
                         {#if t.tone === 'error' || t.tone === 'warn'}
@@ -1430,14 +1430,6 @@
     color: var(--text-dim);
     align-items: center;
   }
-  .spin {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    border: 2px solid var(--border-strong);
-    border-block-start-color: var(--accent);
-    animation: fb-spin 800ms linear infinite;
-  }
   .detail {
     margin: 0;
     font-size: var(--fs-s);
@@ -1540,17 +1532,9 @@
     flex: 1;
   }
 
-  @keyframes fb-spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
   @media (prefers-reduced-motion: reduce) {
     .surface {
       transition: none;
-    }
-    .spin {
-      animation: none;
     }
   }
 </style>

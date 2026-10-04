@@ -14,6 +14,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import type { McpServerDetail } from '../../lib/api/types';
+  import Switch from '../../lib/components/Switch.svelte';
   import McpPill from './McpPill.svelte';
   import RulesDrawer from './RulesDrawer.svelte';
   import ServerForm from './ServerForm.svelte';
@@ -203,18 +204,13 @@
           <span class="cell num" data-label="Tools">{s.tools_count}</span>
           <span class="cell" data-label="Injection"><McpPill kind="injection" value={s.injection_risk} small /></span>
           <span class="cell" data-label="Enabled">
-            <button
-              class="switch"
-              class:on={s.enabled}
-              role="switch"
-              aria-checked={s.enabled}
-              disabled={busy[s.id] === 'toggle' || !can(s.id,'configure')}
-              onclick={() => void toggleEnabled(s)}
-              aria-label={`Enable ${s.name}`}
+            <Switch
+              checked={s.enabled}
+              disabled={busy[s.id] === 'toggle' || !can(s.id, 'configure')}
+              onchange={() => void toggleEnabled(s)}
+              label={`Enable ${s.name}`}
               title={!can(s.id, 'configure') ? NO_CONFIGURE : s.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
-            >
-              <span class="knob"></span>
-            </button>
+            />
           </span>
           <span class="cell actions">
             <button class="btn small" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? 'Fetch the tool list from this server' : NO_CONFIGURE} onclick={() => void discover(s)}>
@@ -302,7 +298,7 @@
     background: var(--hover);
   }
   .num {
-    text-align: right;
+    text-align: end;
   }
   .name {
     display: flex;
@@ -370,37 +366,6 @@
     margin: 4px -14px -8px;
     border-top: 1px solid var(--border);
     background: var(--bg);
-  }
-  .switch {
-    width: 30px;
-    height: 17px;
-    border-radius: 9px;
-    border: none;
-    background: color-mix(in srgb, var(--text-dim) 30%, transparent);
-    position: relative;
-    cursor: pointer;
-    padding: 0;
-    flex: none;
-  }
-  .switch.on {
-    background: var(--accent-solid);
-  }
-  .switch:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-  .switch .knob {
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    background: var(--accent-contrast);
-    transition: left 120ms ease;
-  }
-  .switch.on .knob {
-    left: 15px;
   }
   .mono {
     font-family: var(--font-mono);

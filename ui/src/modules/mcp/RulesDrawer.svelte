@@ -4,6 +4,7 @@
   import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { dialogFocus } from '../../lib/dialogFocus';
   import type { McpServerDetail } from '../../lib/api/types';
   import AllowlistsTab from './AllowlistsTab.svelte';
   import PoliciesTab from './PoliciesTab.svelte';
@@ -22,16 +23,7 @@
     untrack(() => ui.pushModal());
     return () => untrack(() => ui.popModal());
   });
-
-  function onKeydown(e: KeyboardEvent): void {
-    if (e.key !== 'Escape') return;
-    if (document.querySelectorAll('[role="dialog"]').length > 1) return;
-    e.stopPropagation();
-    onClose();
-  }
 </script>
-
-<svelte:window onkeydown={onKeydown} />
 
 <div class="backdrop" role="presentation" onclick={onClose}></div>
 <div
@@ -39,6 +31,7 @@
   role="dialog"
   aria-modal="true"
   aria-label="Rules"
+  use:dialogFocus={onClose}
   data-testid="mcp-rules-drawer"
 >
   <header class="drawer-head">
@@ -83,17 +76,15 @@
   .backdrop {
     position: fixed;
     inset: 0;
-    z-index: 220;
-    background: rgba(0, 0, 0, 0.35);
+    z-index: var(--z-modal);
+    background: var(--scrim);
     animation: fade-in 140ms ease-out;
   }
   .drawer {
     position: fixed;
     inset: 0 0 0 auto;
-    z-index: 221;
-    width: min(720px, 100vw);
-    max-width: 100vw;
-    max-height: 100vh;
+    z-index: calc(var(--z-modal) + 1);
+    width: min(720px, 100%);
     overflow-y: auto;
     background: var(--surface);
     border-inline-start: 1px solid var(--border);

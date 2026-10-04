@@ -1144,19 +1144,42 @@ class DatabaseStore {
     return false;
   }
 
-  /** Insert the agent's proposed SQL into the active query tab. */
-  insertAssistSql(): void {
-    if (!this.assistProposedSql.trim()) return;
+  /** Insert the agent's proposed SQL into the active query tab. Replaces the
+   *  editor's text, so a non-empty, different buffer asks first — the person's
+   *  own SQL is never overwritten silently. Resolves false when kept. */
+  async insertAssistSql(): Promise<boolean> {
+    const sql = this.assistProposedSql;
+    if (!sql.trim()) return false;
+    const current = this.tab?.statement ?? '';
+    if (current.trim() && current.trim() !== sql.trim()) {
+      const ok = await confirmer.ask(
+        'The agent’s query will replace what is in the editor now. Your current text is not saved anywhere else.',
+        { title: 'Replace the current query?', confirmLabel: 'Replace', cancelLabel: 'Keep mine', danger: false },
+      );
+      if (!ok) return false;
+    }
     this.mainTab = 'query';
-    this.setStatement(this.assistProposedSql);
+    this.setStatement(sql);
+    return true;
   }
 
-  /** Insert the agent's proposed SQL and run it via the normal run path. */
+  /** Insert the agent's proposed SQL and run it via the normal run path. The
+   *  run is READ-ONLY: a write the agent proposed is refused by the server and
+   *  only goes ahead after an attributed confirm (guarded connections take the
+   *  typed confirm) — agent SQL can never silently write. */
   async runAssistSql(): Promise<void> {
-    if (!this.assistProposedSql.trim()) return;
-    this.mainTab = 'query';
-    this.setStatement(this.assistProposedSql);
-    await this.runQuery();
+    if (!(await this.insertAssistSql())) return;
+    const who = this.assistProvider || 'Agent';
+    await this.runQuery(undefined, undefined, {
+      readOnly: true,
+      agentLabel: `${who} · DB assistant`,
+      confirmWrite: () =>
+        confirmer.ask(`${who} proposed a query that writes to this database. Run it anyway?`, {
+          title: 'Allow this write?',
+          confirmLabel: 'Run write',
+          danger: true,
+        }),
+    });
   }
 
   /** Summarize the investigation → download the returned markdown. */

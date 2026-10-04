@@ -146,7 +146,7 @@
   .rd-table th {
     position: sticky;
     top: 0;
-    text-align: left;
+    text-align: start;
     padding: 5px 8px;
     font-size: var(--fs-xs);
     font-weight: 600;

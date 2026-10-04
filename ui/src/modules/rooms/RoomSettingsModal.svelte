@@ -1,16 +1,18 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { api } from '../../lib/api/client';
   import type { RoomSettings, RoomSettingsUpdate } from '../../lib/api/room-types';
   let {onclose}: {onclose: () => void} = $props();
-  let loading = $state(true), busy = $state(false), error = $state('');
+  let loading = $state(true), busy = $state(false), error = $state(''), loaded = $state(false), loadError = $state('');
   let origin = $state(''), stun = $state(''), turn = $state(''), secret = $state(''), configured = $state(false), relayOnly = $state(false), clearSecret = $state(false);
   onMount(() => { void load(); });
   async function load() {
-    loading = true; error = '';
-    try { const settings = await api.get<RoomSettings>('/room-settings'); origin = settings.public_origin; stun = settings.stun_urls.join('\n'); turn = settings.turn_urls.join('\n'); configured = settings.turn_secret_configured; relayOnly = settings.relay_only; }
-    catch (e) { error = e instanceof Error ? e.message : 'Could not load room settings.'; }
+    loading = true; error = ''; loadError = '';
+    try { const settings = await api.get<RoomSettings>('/room-settings'); origin = settings.public_origin; stun = settings.stun_urls.join('\n'); turn = settings.turn_urls.join('\n'); configured = settings.turn_secret_configured; relayOnly = settings.relay_only; loaded = true; }
+    catch (e) { loadError = loadErrorText(e); }
     finally { loading = false; }
   }
   async function save() {
@@ -24,7 +26,10 @@
   }
 </script>
 <Modal title="Room connection settings" width={580} {onclose}>
-  {#if loading}<p role="status">Loading room settings…</p>{:else}
+  {#if !loaded}
+    <!-- Never show the form until the saved values arrived: an empty form's Save would overwrite STUN/TURN with blanks. -->
+    <LoadState what="room settings" variant="compact" {loading} error={loadError} empty={true} onretry={load} />
+  {:else}
     <p>To invite people on other computers, configure an HTTPS address that reaches this Otto daemon. An address beginning with localhost or 127.0.0.1 only works on this computer.</p>
     <div class="fields">
       <label>Public HTTPS origin <input type="url" bind:value={origin} placeholder="https://otto.example.com" /></label>
@@ -36,8 +41,8 @@
     </div>
     <p>TURN helps voice and screen sharing cross different networks. The shared secret stays in the host’s Keychain; guests receive short-lived credentials.</p>
   {/if}
-  {#if error}<p role="alert">{error}</p><button class="btn" onclick={load} disabled={busy}>Reload settings</button>{/if}
-  {#snippet footer()}<button class="btn" onclick={onclose} disabled={busy}>Cancel</button><button class="btn primary" disabled={loading || busy || !origin.trim()} onclick={save}>{busy ? 'Saving…' : 'Save settings'}</button>{/snippet}
+  {#if error}<p role="alert">{error}</p>{/if}
+  {#snippet footer()}<button class="btn" onclick={onclose} disabled={busy}>Cancel</button><button class="btn primary" disabled={!loaded || loading || busy || !origin.trim()} onclick={save}>{busy ? 'Saving…' : 'Save settings'}</button>{/snippet}
 </Modal>
 <style>
   p { line-height: 1.5; color: var(--text-dim); } .fields, label { display: grid; gap: 8px; } .fields { gap: 16px; } input, textarea { width: 100%; } textarea { resize: vertical; } .check { display: flex; align-items: center; gap: 8px; } .check input { width: auto; } [role='alert'] { color: var(--danger); }

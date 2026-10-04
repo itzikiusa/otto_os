@@ -4,7 +4,7 @@
   import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Runtime custom-plugins management (root). Install from a local path or git
-  // URL, enable/disable (spawns/stops the sidecar), remove. Access for non-root
+  // URL, enable/disable (starts/stops the helper process), remove. Access for non-root
   // users is granted per-plugin in Settings → Users.
   import { onMount } from 'svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -63,7 +63,7 @@
     try {
       await api.post('/plugin-admin/install', { source: src });
       source = '';
-      toasts.success('Plugin installed', 'Enable it to start its sidecar.');
+      toasts.success('Plugin installed', 'Enable it to start its helper process.');
       await load();
       await plugins.load();
     } catch (e) {
@@ -89,7 +89,7 @@
   async function remove(p: PluginRecord): Promise<void> {
     if (
       !(await confirmer.ask(
-        `Remove the plugin “${p.name}”? Its sidecar stops and it leaves every user's sidebar. Its files under ~/otto-plugins are kept, so you can install it again.`,
+        `Remove the plugin “${p.name}”? Its helper process stops and it leaves every user's sidebar. Its files under ~/otto-plugins are kept, so you can install it again.`,
         { title: 'Remove plugin', confirmLabel: 'Remove' },
       ))
     )
@@ -114,7 +114,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('plugins')} subtitle="Sidecar processes installed at runtime, no rebuild" />
+  <PageHeader title={sectionLabel('plugins')} subtitle="Helper processes installed at runtime, no rebuild" />
   <PageBody width="readable">
   <SectionIntro>
     Install from a local folder or a git URL, then enable it to run. A plugin runs as its own process on this Mac —
