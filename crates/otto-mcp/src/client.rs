@@ -627,6 +627,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chunked_http_and_sse_stop_at_cap_before_the_stream_ends() {
+        use tokio::io::AsyncWriteExt;
+        for content_type in ["application/json", "text/event-stream"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let producer = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                socket.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\n\r\n"
+                ).as_bytes()).await.unwrap();
+                // Intentionally never send the terminating HTTP chunk. The
+                // reader must reject over-budget bytes before waiting for EOF.
+                let chunk = [b'x'; 8192];
+                loop {
+                    if socket.write_all(b"2000\r\n").await.is_err()
+                        || socket.write_all(&chunk).await.is_err()
+                        || socket.write_all(b"\r\n").await.is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            let result = tokio::time::timeout(Duration::from_secs(3), async {
+                let response = reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .unwrap()
+                    .get(format!("http://{address}/stream"))
+                    .send()
+                    .await
+                    .unwrap();
+                parse_http_message(response).await
+            })
+            .await;
+            producer.abort();
+            let _ = producer.await;
+            assert!(result
+                .expect("size cap must precede EOF")
+                .unwrap_err()
+                .contains("size cap"));
+        }
+    }
+
+    #[tokio::test]
     async fn concurrent_burst_keeps_two_server_processes() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("spawns");
