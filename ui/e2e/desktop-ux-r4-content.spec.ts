@@ -65,7 +65,7 @@ for (const [theme, scheme, width, rtl] of [
     await ctx.dispose(); await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: `/tmp/otto-ux-r4-content-d2-preview-${theme}-${scheme}-${testInfo.project.name}.png` });
     const ai = (await page.locator('.ai-bar').boundingBox())!, zoom = (await page.locator('.zoombar').boundingBox())!;
-    expect(ai.x + ai.width <= zoom.x || zoom.x + zoom.width <= ai.x || ai.y + ai.height <= zoom.y || zoom.y + zoom.height <= ai.y, 'Ask AI must not obscure diagram controls').toBe(true);
+    expect(ai.x + ai.width <= zoom.x || zoom.x + zoom.width <= ai.x || ai.y + ai.height <= zoom.y || zoom.y + zoom.height <= ai.y, 'Ask Otto must not obscure diagram controls').toBe(true);
 
   });
   test(`Design Hall responsive editing ${theme} ${scheme}`, async ({ page }, testInfo) => {

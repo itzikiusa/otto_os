@@ -63,7 +63,7 @@ test('workflow summary polls leave closed bodies unloaded and expansion fetches 
   });
   await page.goto('/#/workflows');
   await page.getByTestId(`wf-row-${workflow.id}`).locator('.row-main').click();
-  await page.getByRole('button',{name:'Runs',exact:true}).click();await page.getByTestId('run-item').first().click();
+  await page.getByRole('button',{name:'More actions',exact:true}).click();await page.getByRole('menuitem',{name:'Runs',exact:true}).click();await page.getByTestId('run-item').first().click();
   await expect(page.locator('.run-detail details.step')).toBeVisible();
   // With the event socket up the conditional progress re-read is the run
   // view's 15 s safety net (WorkflowsPage liveQuery safetyMs), not a 2.5 s poll.

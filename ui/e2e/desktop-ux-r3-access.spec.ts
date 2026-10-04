@@ -91,11 +91,11 @@ test('first account keeps failed workspace setup recoverable without recreating 
   await page.route('**/api/v1/onboarding/root',r=>{roots++;return r.fulfill({json:{token:'fixture-root',user}});});
   await page.route('**/api/v1/auth/capabilities',r=>r.fulfill({json:{capabilities:{}}}));
   await page.route('**/api/v1/workspaces',r=>r.request().method()==='POST'?(++workspaces===1?r.fulfill({status:503,json:{code:'upstream',message:'Workspace unavailable; retry setup'}}):r.fulfill({json:{id:'fixture-ws',name:'Fixture',root_path:'/tmp/fixture'}})):r.fulfill({json:[]}));
-  await page.goto('/#/home');await page.getByRole('button',{name:'Get Started'}).click();await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await page.goto('/#/home');await page.getByRole('button',{name:'Get started'}).click();await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Continue',exact:true}).click();
   await page.getByLabel('Name',{exact:true}).fill('Fixture');await page.getByLabel('Directory',{exact:true}).fill('/tmp/fixture');await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Continue',exact:true}).click();
-  await page.getByRole('button',{name:'Finish Setup'}).click();await expect(page.getByText('Workspace unavailable; retry setup')).toBeVisible();
+  await page.getByRole('button',{name:'Finish setup'}).click();await expect(page.getByText('Workspace unavailable; retry setup')).toBeVisible();
   await page.screenshot({path:info.outputPath('first-account-error.png')});
-  await page.getByRole('button',{name:'Finish Setup'}).click();await expect(page.locator('.shell')).toBeVisible();expect(roots).toBe(1);expect(workspaces).toBe(2);
+  await page.getByRole('button',{name:'Finish setup'}).click();await expect(page.locator('.shell')).toBeVisible();expect(roots).toBe(1);expect(workspaces).toBe(2);
 });
 
 for(const v of [{theme:'native',scheme:'light',width:375,height:667},{theme:'native',scheme:'dark',width:1000,height:600},{theme:'warm',scheme:'light',width:375,height:480},{theme:'warm',scheme:'dark',width:834,height:768},{theme:'pro-dark',scheme:'dark',width:1024,height:768}]) test(`guest OTP recovery ${v.theme}-${v.scheme}`,async({page},info)=>{
@@ -121,7 +121,7 @@ for(const v of [{theme:'native',scheme:'light',width:375,height:667},{theme:'nat
 test('first account long tool versions stay readable on short phone',async({page},info)=>{
   await guest(page);await page.setViewportSize({width:375,height:400});await page.addInitScript(()=>localStorage.setItem('otto_direction','rtl'));
   await page.route('**/api/v1/meta',r=>r.fulfill({json:{...meta,needs_onboarding:true,tools:['claude','codex','clickhouse'].map(name=>({name,found:true,version:`${name}-long-synthetic-build-20260925-with-complete-version-information`}))}}));
-  await page.goto('/#/home');await page.getByRole('button',{name:'Get Started'}).click();
+  await page.goto('/#/home');await page.getByRole('button',{name:'Get started'}).click();
   await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Skip',exact:true}).click();await page.getByRole('button',{name:'Continue',exact:true}).click();
   await page.screenshot({path:info.outputPath('first-account-tools.png')});
   expect(await page.locator('.ob-wrap').evaluate(el=>el.scrollWidth-el.clientWidth)).toBeLessThanOrEqual(1);
