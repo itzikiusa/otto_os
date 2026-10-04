@@ -61,7 +61,8 @@ test('Insights phone report deep link opens detail and Back reveals list', async
 test('Insights regenerated period completes without increasing report count', async ({ page }) => {
   let replaced = false;
   await page.route('**/api/v1/insights/reports', r => r.fulfill({ json: [{ ...report, ...(replaced ? { summary: '# Daily review\n\nReplacement headline.', created_at: '2026-09-25T09:00:00Z' } : {}) }] }));
-  await page.route('**/api/v1/insights/run', r => { replaced = true; return r.fulfill({ json: { started: true, run_id: 'synthetic-run', report_key: 'daily:20260924_20260924' } }); });
+  await page.route('**/api/v1/insights/report-status?*', r => r.fulfill({ json: { report: { ...report, summary: new URL(r.request().url()).searchParams.get('summary') === 'true' ? (replaced ? '# Daily review\n\nReplacement headline.' : report.summary) : '', html_path: replaced ? '/tmp/synthetic-report.html' : null }, html_revision: replaced ? 'new' : 'old' } }));
+  await page.route('**/api/v1/insights/run', r => { replaced = true; return r.fulfill({ json: { started: true, run_id: 'synthetic-run', report_revision: 'old', report_key: 'daily:20260924_20260924' } }); });
   await page.goto('/#/insights');
   await page.getByRole('button', { name: 'Run now', exact: true }).click();
   await expect(page.getByText('Insights report ready', { exact: true })).toBeVisible({ timeout: 10_000 });
@@ -102,7 +103,7 @@ test('History date filter replaces an excluded open conversation', async ({ page
   await page.goto('/#/history');
   await page.getByTestId('history-row').filter({ hasText: 'Older conversation' }).click();
   await page.getByRole('combobox', { name: 'Date', exact: true }).selectOption('today');
-  await expect(page.locator('.dtitle')).toHaveText('Current conversation');
+  await expect(page.getByRole('heading', { name: 'Current conversation', level: 1, exact: true })).toBeVisible();
 });
 
 test('Usage budget failed save preserves draft and delayed save preserves newer edits', async ({ page }) => {

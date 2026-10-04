@@ -163,7 +163,7 @@ test('Assistant incremental turns remain readable and running task cancellation 
   await expect(task.getByRole('button', { name: 'Stop', exact: true })).toBeEnabled();
   await task.getByRole('button', { name: 'Stop', exact: true }).click();
   await page.getByRole('dialog', { name: 'Stop task' }).getByRole('button', { name: 'Stop', exact: true }).click();
-  await expect(task).toContainText('Cancelled');
+  await expect(task).toContainText('Canceled');
   expect(state.calls.some(c => c.path.endsWith('/task-hotels/cancel'))).toBe(true);
   await task.scrollIntoViewIfNeeded();
   await page.screenshot({ path: info.outputPath('assistant-cancelled.png') });
@@ -192,8 +192,9 @@ test('History changing scope ignores a delayed first page', async ({ page }) => 
 
 test('Insights report timeout releases generation and retry detects the new result', async ({ page }) => {
   let polls = 0, ready = false;
-  await page.route('**/api/v1/insights/reports', r => { polls++; return r.fulfill({ json: [{ ...report, ...(ready ? { summary: '# Ready after retry', created_at: '2026-09-26T09:00:00Z' } : {}) }] }); });
-  await page.route('**/api/v1/insights/run', r => r.fulfill({ json: { started: true, run_id: 'synthetic-run', report_key: 'daily:20260924_20260924' } }));
+  await page.route('**/api/v1/insights/reports', r => { return r.fulfill({ json: [{ ...report, ...(ready ? { summary: '# Ready after retry', created_at: '2026-09-26T09:00:00Z' } : {}) }] }); });
+  await page.route('**/api/v1/insights/report-status?*', r => { polls++; return r.fulfill({ json: { report: { ...report, summary: new URL(r.request().url()).searchParams.get('summary') === 'true' ? (ready ? '# Ready after retry' : report.summary) : '', html_path: ready ? '/tmp/synthetic-report.html' : null }, html_revision: ready ? 'new' : 'old' } }); });
+  await page.route('**/api/v1/insights/run', r => r.fulfill({ json: { started: true, run_id: 'synthetic-run', report_revision: 'old', report_key: 'daily:20260924_20260924' } }));
   await page.goto('/#/insights');
   await expect(page.getByTestId('insight-report')).toContainText('Original report');
   await page.clock.install();
