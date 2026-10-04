@@ -382,7 +382,7 @@ async function startBrowser(wsId) {
       localStorage.setItem('otto_base', base);
       localStorage.setItem('otto_workspace', ws);
     },
-    [TOKEN, UI, wsId],
+    [TOKEN, new URL(API).origin, wsId],
   );
   await context.addInitScript(PAGE_PROBE);
   const page = await context.newPage();
