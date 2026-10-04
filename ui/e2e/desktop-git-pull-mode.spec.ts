@@ -92,12 +92,12 @@ test('the Pull button names the repo’s mode, and ff-only refuses a diverged br
   await openRepo(page);
 
   // `pull.rebase=true` → the split button's main label says so.
-  const pullBtn = page.locator('.toolbar .split .tbtn').first();
+  const pullBtn = page.locator('.ph-actions .split .tbtn').first();
   await expect(pullBtn).toContainText('Pull (rebase)', { timeout: 20_000 });
 
   // The ▾ menu overrides the mode for a single pull: ff-only on a DIVERGED
   // branch is a 409 with an actionable line, and it must not start a merge.
-  await page.locator('.toolbar .split .caret').click();
+  await page.locator('.ph-actions .split .caret').click();
   const menu = page.locator('.ctx-menu');
   await expect(menu).toBeVisible();
   await menu.getByRole('menuitem', { name: 'Pull (fast-forward only)' }).click();

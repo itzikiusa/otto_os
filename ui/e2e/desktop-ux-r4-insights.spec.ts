@@ -116,7 +116,7 @@ test('History long paged transcript supports keyboard search across mounted wind
   await page.getByTestId('history-row').click();
   const conv = page.getByTestId('history-conversation');
   await expect(conv).toContainText('Checkpoint 359:');
-  const earlier = conv.getByRole('button', { name: 'Load earlier', exact: true });
+  const earlier = conv.getByRole('button', { name: 'Load earlier messages', exact: true });
   // Keyboard focus scrolls the earlier button into view, triggering the
   // conversation's documented automatic pagination at the top.
   await earlier.focus();

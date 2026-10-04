@@ -91,6 +91,7 @@ function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}
       '../../modules/database/error-normalize': { normalizeDbError: (_e: unknown, msg: string) => ({ title: msg }) },
       './clipHistory.svelte': { clipHistory: { setGuard: noop } },
       '../lazyModule': { announceModule: noop },
+      '../loadError': { loadErrorText: (e: unknown) => (e instanceof Error ? e.message : String(e)) },
     },
     { localStorage, crypto: globalThis.crypto, performance: globalThis.performance, sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop } },
   );

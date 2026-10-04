@@ -162,7 +162,7 @@ test('Copy / Export / More menus stay inside the viewport', async ({ page }) => 
   await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
   await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({ timeout: 15_000 });
   for (const name of ['Copy', 'Export']) {
-    await page.locator('.grid-toolbar .tb-btn', { hasText: name }).click();
+    await page.locator('.grid-toolbar .btn', { hasText: name }).click();
     const menu = page.locator('.ctx-menu');
     await expect(menu).toBeVisible();
     const b = await box(menu);
