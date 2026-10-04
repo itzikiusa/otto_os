@@ -2534,7 +2534,9 @@ impl LocalGit {
             return Ok(CheckoutOutcome::default());
         };
         let sel = self.resolve_stash_selector(&sha).await?;
-        let (ok, out, err, code) = self.run_raw_retry_lock(&["stash", "pop", &sel]).await?;
+        let (ok, out, err, code) = self
+            .run_raw_retry_lock(&["stash", "pop", "--index", &sel])
+            .await?;
         if ok {
             return Ok(CheckoutOutcome {
                 stashed: true,
@@ -2555,7 +2557,7 @@ impl LocalGit {
             e => e.to_string(),
         };
         Err(Error::Conflict(format!(
-            "switched to {branch}, but restoring your stashed changes failed: {line} — run `git stash pop`"
+            "switched to {branch}, but restoring your stashed changes failed: {line} — your stash is retained; run `git stash pop --index`"
         )))
     }
 
@@ -3469,12 +3471,14 @@ impl LocalGit {
         Ok(sha)
     }
 
-    /// `git stash pop` of the entry whose commit is `sha`. A CONFLICTING pop
+    /// `git stash pop --index` of the auto-stash whose commit is `sha`. A CONFLICTING pop
     /// is Ok (the stash is applied with markers and git KEEPS the entry), as
     /// in [`Self::stash_pop`].
     pub(crate) async fn pop_stash_sha(&self, sha: &str) -> Result<String> {
         let sel = self.resolve_stash_selector(sha).await?;
-        let (ok, out, err, code) = self.run_raw_retry_lock(&["stash", "pop", &sel]).await?;
+        let (ok, out, err, code) = self
+            .run_raw_retry_lock(&["stash", "pop", "--index", &sel])
+            .await?;
         if ok || out.contains("CONFLICT") {
             return Ok(out.trim().to_string());
         }
@@ -6572,6 +6576,49 @@ mod tests {
             std::fs::read_to_string(dir.join("shared.txt")).unwrap(),
             "line1\nDIRTY\nline3\n"
         );
+    }
+
+    #[tokio::test]
+    async fn checkout_autostash_index_conflict_retains_staged_recovery() {
+        let (_tmp, dir) = diverged_fixture();
+        sh_git(&dir, &["checkout", "-q", "develop"]);
+        write(&dir, "shared.txt", "line1\nDEVELOP\nline3\n");
+        sh_git(&dir, &["commit", "-am", "develop changes staged line"]);
+        sh_git(&dir, &["checkout", "-q", "main"]);
+        write(&dir, "shared.txt", "line1\nSTAGED\nline3\n");
+        sh_git(&dir, &["add", "shared.txt"]);
+        let git = LocalGit::new(&dir);
+        let result = git.checkout_autostash("develop", false).await;
+        match result {
+            Err(Error::Conflict(message)) => assert!(message.contains("git stash pop --index")),
+            Ok(outcome) => assert!(outcome.pop_conflicted),
+            other => panic!("expected retained-stash recovery: {other:?}"),
+        }
+        assert_eq!(git.stash_list().await.unwrap().len(), 1);
+        assert!(git
+            .run_read(&["show", "stash@{0}^2:shared.txt"])
+            .await
+            .unwrap()
+            .contains("STAGED"));
+    }
+
+    #[tokio::test]
+    async fn checkout_autostash_preserves_index_on_success_and_rollback() {
+        for branch in ["same-head", "missing-branch"] {
+            let (_tmp, dir) = diverged_fixture();
+            sh_git(&dir, &["branch", "same-head"]);
+            write(&dir, "shared.txt", "line1\nSTAGED\nline3\n");
+            sh_git(&dir, &["add", "shared.txt"]);
+            write(&dir, "shared.txt", "line1\nUNSTAGED\nline3\n");
+            let git = LocalGit::new(&dir);
+            let cached = git.run_read(&["diff", "--cached"]).await.unwrap();
+            let working = git.run_read(&["diff"]).await.unwrap();
+            let result = git.checkout_autostash(branch, false).await;
+            assert_eq!(result.is_ok(), branch == "same-head");
+            assert_eq!(git.run_read(&["diff", "--cached"]).await.unwrap(), cached);
+            assert_eq!(git.run_read(&["diff"]).await.unwrap(), working);
+            assert!(git.stash_list().await.unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
