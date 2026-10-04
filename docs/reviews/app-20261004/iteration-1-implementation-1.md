@@ -72,3 +72,45 @@ OTTO_E2E_SLOT=review04 OTTO_E2E_PORT=7814 OTTO_E2E_PW_PORT=5314 OTTO_E2E_SWEEP_O
 ```
 
 Final source-readiness checks: `rustfmt --edition 2021` completed successfully on the assigned changed Rust files; `git diff --check` passed for the assigned Rust/contract paths. These are formatting checks, not compilation or execution evidence. The ring allocation test now prints exact successful allocation volume with `--nocapture` for root's before/after record.
+
+
+## Final terminal-link fixture investigation
+
+Read Claude's failed `e2e8.log` / `e2e9.log` and the retained Playwright trace archives under `/private/tmp/claude-501/-Users-itziklavon-claude-ade/fb25ab39-e879-46a9-ba8b-0aae6789df56/scratchpad/`. All four failing link cases recorded `mouseMove` and `mouseClick` at **x=0, y=0**:
+
+| Run / case | Trace input call IDs (move / click) |
+|---|---|
+| pw8 relative reference + OSC8 | `call@866` / `call@870` |
+| pw9 wrapped path + HTTP URL | `call@276` / `call@280` |
+| pw9 Codex cyan CRLF, wide | `call@132` / `call@136` |
+| pw9 Claude bold cursor continuation | `call@105` / `call@109` |
+
+These traces prove the recorded failures did not click their requested terminal text. They do not establish a production link-parser defect. The global fixture setup explicitly forces the DOM renderer through `otto.term.renderer=dom`; `.xterm-rows` is intentional here. xterm's DOM renderer replaces row children on repaint, while the old helper checked visibility before separately obtaining/evaluating a handle. A detached text range between those operations is a plausible cause of its zero rectangle, but the existing traces do not record `isConnected` to prove that exact interval.
+
+Changed only `clickText` in `ui/e2e/desktop-terminal-links.spec.ts`: poll for the requested substring's connected text range with finite, positive dimensions and a center inside the viewport before moving/clicking. Retained the original 80ms hover interval after geometry polling to keep the repair scoped; that delay is not the geometry-readiness condition. The helper performs one click and retains the existing product assertions, including negative link cases. Production Terminal and link parsing are unchanged. No builds, servers or tests were run by this role; root owns the focused browser rerun after load measurements:
+
+```sh
+cd ui
+OTTO_E2E_SLOT=review04 OTTO_E2E_PORT=7814 OTTO_E2E_PW_PORT=5314 OTTO_E2E_SWEEP_ORPHANS=0 npx playwright test --project=desktop-browser e2e/desktop-terminal-links.spec.ts --workers=1
+```
+
+Source follow-up: xterm Linkifier handles mousemove → provideLinks → currentLink synchronously for the two installed providers (native OSC8 and Otto text links); neither provider defers its callback through a timer, Promise or animation frame. Mouse-down captures the current link and mouse-up checks that same target. Renderer viewport changes can invalidate/recompute hover independently. No mandatory 80ms linkifier delay was established from this source, but the original delay is preserved to avoid changing hover timing in the geometry-only repair.
+
+
+### Follow-up: external URL assertion observed the obsolete opening mechanism
+
+Root's geometry-repair repeat run reported 27 passing / 3 failing cases (`/tmp/otto-review-terminal-repeat.log`). All three failures were the wrapped-path/HTTP test's final URL assertion; its wrapped file assertion now passed. All three retained traces under `/tmp/otto-review-terminal-repeat/desktop-terminal-links-wra-01a7d-URL-clicks-use-full-targets-desktop-browser*` show a new BrowserContext page with the originating page's `openerPageId` immediately after the HTTP-link click.
+
+Production `Terminal.activateLink` calls `openExternal`; its web path in `ui/src/lib/external.ts` uses `window.open(href, '_blank', 'noopener,noreferrer')`. The old test listened only for an anchor click to populate a body attribute, so it could not observe that successful opening route. Replaced only that fixture observer/assertion: context-route `https://example.invalid/**` to a local response, register a popup listener before clicking, and assert the actual popup URL equals `https://example.invalid/report?q=yes`, then close it. The exact path and query assertion remain; no production URL routing changed. Central rerun is pending, and this role ran no browser/build/test.
+
+
+### Post-main History scroll fixture startup ownership
+
+Root's combined browser suite passed 97 cases; the only failure was `desktop-history-pagination.spec.ts` expecting one initial request. The failure received `[null, null, null, "120"]` rather than `[null, "120"]`. Trace `/tmp/otto-review-merged-browser/desktop-history-pagination-100b0-fter-initial-layout-settles-desktop-browser/trace.zip` records the scratch transcript read at monotonic time 92201.428, workspace-restored reads at 92205.739 and 92232.560, then the real wheel at 93605.210 and `before=120` read at 93658.339. No HMR reload appears in that trace. The wildcard fixture supplies the same row across startup scopes; merged History automatic selection can read it before workspace restoration settles.
+
+Updated only the browser test: after its existing initial settle, require a nonempty set of initial requests whose cursors are all null, then capture that startup count. The two actual wheel actions must produce exactly `["120"]` followed by `["120", "60"]` after that baseline. Duplicate pages and renewed null-cursor reads during scrolling still fail. The oldest-turn and absent-earlier-button assertions remain. This change does not replace scrolling with button activation or change production pagination. Root's three-repeat combined History/Terminal rerun is pending; this role ran no tests/builds/servers.
+
+
+### Central closing execution
+
+Root's merged History + terminal suite passed all 33 invocations (11 cases repeated three times) in 28.5 seconds. Both real scroll cursors and the exact external popup URL are verified; no production changes were required for these fixture repairs. Log: `/tmp/otto-review-paging-links-repeat.log`.
