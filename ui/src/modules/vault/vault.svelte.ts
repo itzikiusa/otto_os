@@ -115,6 +115,8 @@ class VaultStore {
   /** 409 conflict from autosave — the banner offers Reload / Overwrite. */
   conflict = $state(false);
   backlinks = $state<VaultBacklink[]>([]);
+  /** Visible rows and their hydrated windows share the same refresh lifetime. */
+  visibleBacklinks = $state(100);
   private backlinksGeneration = 0;
   loadingBacklinkContexts = $state(false);
 
@@ -799,7 +801,10 @@ class VaultStore {
     } catch {
       next = [];
     }
-    if (this.current?.id === id && this.notePath === path && generation === this.backlinksGeneration) this.backlinks = next;
+    if (this.current?.id === id && this.notePath === path && generation === this.backlinksGeneration) {
+      this.backlinks = next;
+      this.visibleBacklinks = 100;
+    }
   }
 
   async loadBacklinkContexts(offset: number): Promise<boolean> {
@@ -812,6 +817,7 @@ class VaultStore {
       if (!current()) return false;
       const snippets = new Map(rows.slice(offset, offset + 100).map(row => [row.path + '\n' + row.kind, row.context]));
       this.backlinks = this.backlinks.map(row => ({ ...row, context: snippets.get(row.path + '\n' + row.kind) ?? row.context }));
+      this.visibleBacklinks = Math.max(this.visibleBacklinks, offset + 100);
       return true;
     } catch (e) {
       if (current()) toasts.error('Couldn’t load backlink contexts', String(e));

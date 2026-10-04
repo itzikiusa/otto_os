@@ -12,19 +12,14 @@
   // V7: a hub note can have thousands of backlinks / outgoing links; mount a
   // page per list and grow on demand (reset when another note opens).
   const LIST_PAGE = 100;
-  let shownBacklinks = $state(LIST_PAGE);
   let shownOutgoing = $state(LIST_PAGE);
   $effect(() => {
     void vault.notePath;
-    shownBacklinks = LIST_PAGE;
     shownOutgoing = LIST_PAGE;
   });
 
   async function showMoreBacklinks(): Promise<void> {
-    const path = vault.notePath, id = vault.current?.id;
-    if (await vault.loadBacklinkContexts(shownBacklinks)) {
-      if (vault.notePath === path && vault.current?.id === id) shownBacklinks += LIST_PAGE;
-    }
+    await vault.loadBacklinkContexts(vault.visibleBacklinks);
   }
 
   const props = $derived.by(() => {
@@ -58,14 +53,14 @@
       {#if vault.backlinks.length === 0}
         <div class="none">No linked mentions</div>
       {:else}
-        {#each vault.backlinks.slice(0, shownBacklinks) as bl (bl.path + bl.kind)}
+        {#each vault.backlinks.slice(0, vault.visibleBacklinks) as bl (bl.path + bl.kind)}
           <button class="item" title={bl.path} onclick={() => void vault.open(bl.path)}>
             <div class="t">{bl.title}</div>
             {#if bl.context}<div class="ctx">{bl.context}</div>{/if}
           </button>
         {/each}
-        {#if vault.backlinks.length > shownBacklinks}
-          <button class="more" disabled={vault.loadingBacklinkContexts} onclick={() => void showMoreBacklinks()}>Show more ({vault.backlinks.length - shownBacklinks} hidden)</button>
+        {#if vault.backlinks.length > vault.visibleBacklinks}
+          <button class="more" disabled={vault.loadingBacklinkContexts} onclick={() => void showMoreBacklinks()}>Show more ({vault.backlinks.length - vault.visibleBacklinks} hidden)</button>
         {/if}
       {/if}
     {/if}

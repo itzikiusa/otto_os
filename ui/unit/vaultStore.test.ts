@@ -33,6 +33,33 @@ function setup(overrides: Record<string, unknown> = {}) {
   return v;
 }
 
+test('backlink refresh resets the visible window and allows rehydrating edited sources', async () => {
+  let revision = 'first';
+  const offsets: number[] = [];
+  const v = setup({vaultStatus: async () => ({generation:revision,scan_state:'idle',last_scan_at:revision,notes:1,links:226,attachments:0}),
+    vaultBacklinks: async (_ws: string, _id: number, _path: string, offset = 0) => {
+    offsets.push(offset);
+    return Array.from({length:226}, (_, i) => ({path:`source-${i}.md`, kind:'wiki', title:`Source ${i}`,
+      context:i >= offset && i < offset + 100 ? `${revision}-${i}` : ''}));
+  }});
+  await v.reloadBacklinks();
+  await v.loadBacklinkContexts(100); await v.loadBacklinkContexts(200);
+  assert.equal(v.visibleBacklinks, 300);
+  assert.equal(v.backlinks[225].context, 'first-225');
+  v.dirty = false;
+  v.status = {generation:revision,scan_state:'idle',last_scan_at:revision,notes:1,links:226,attachments:0};
+  revision = 'edited';
+  await v.refreshStatus();
+  // The external-generation path intentionally schedules the backlink reload.
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(v.visibleBacklinks, 100, 'refresh must not leave unhydrated rows expanded');
+  assert.equal(v.backlinks[0].context, 'edited-0');
+  assert.equal(v.backlinks[125].context, '', 'do not retain snippets from obsolete source hashes');
+  await v.loadBacklinkContexts(v.visibleBacklinks);
+  assert.equal(v.visibleBacklinks, 200); assert.equal(v.backlinks[125].context, 'edited-125');
+  assert.deepEqual(offsets, [0,100,200,0,100]);
+});
+
 test('failed save retains draft, conflict and current tab on navigation', async () => {
   const v = setup({writeVaultNote: async () => {throw new ApiError('conflict: note changed on disk (hash x)');}});
   await v.open('b.md');
