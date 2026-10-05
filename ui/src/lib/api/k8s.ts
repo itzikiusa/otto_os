@@ -143,9 +143,9 @@ export const k8sApi = {
     api.get<K8sMonitorOverviewRow[]>(`/k8s/monitor/overview${qs({ window })}`, signal),
   monitorWorkloads: (id: string, window: string, ns?: string, signal?: AbortSignal) =>
     api.get<K8sMonitorWorkloadsResp>(`/k8s/clusters/${enc(id)}/monitor/workloads${qs({ window, ns: ns || undefined })}`, signal),
-  monitorSeries: (id: string, p: { metric: string; workload?: string; pod?: string; window: string; step?: number }, signal?: AbortSignal) =>
+  monitorSeries: (id: string, p: { metric: string; workload?: string; pod?: string; ns?: string; window: string; step?: number }, signal?: AbortSignal) =>
     api.get<K8sMonitorSeries>(`/k8s/clusters/${enc(id)}/monitor/series${qs(p)}`, signal),
-  monitorEvents: (id: string, p: { window: string; class?: string; workload?: string; limit?: number }, signal?: AbortSignal) =>
+  monitorEvents: (id: string, p: { window: string; class?: string; workload?: string; ns?: string; limit?: number }, signal?: AbortSignal) =>
     api.get<K8sMonitorEvent[]>(`/k8s/clusters/${enc(id)}/monitor/events${qs(p)}`, signal),
   monitorHealth: (id: string, window = '1h') =>
     api.get<K8sHealthDigest>(`/k8s/clusters/${enc(id)}/monitor/health${qs({ window })}`),

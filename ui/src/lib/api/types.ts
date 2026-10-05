@@ -8947,6 +8947,9 @@ export interface AthenaQueryReq {
   database?: string;
   workgroup?: string;
   output_location?: string;
+  /** Required on a prod account for any statement that is not a plain read
+   *  (DDL/DML) — set only after the person confirms; else 400 `confirm_required`. */
+  confirm?: boolean;
 }
 
 export type AthenaQueryState = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
@@ -9762,6 +9765,9 @@ export type K8sMonitorHealth = 'healthy' | 'degraded' | 'incident' | 'off' | 'un
 
 export interface K8sMonitorOverviewRow {
   cluster: { id: Id; name: string; environment: Environment; color?: string | null };
+  /** The caller can discover this cluster but lacks cluster-wide `metrics`:
+   *  figures are zeroed (namespace-scoped users never see other namespaces). */
+  restricted?: boolean;
   enabled: boolean;
   interval_secs: number;
   status: K8sMonitorStatus | null;

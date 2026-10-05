@@ -772,9 +772,10 @@ async fn import_kubeconfig_requires_root_and_creates_cluster_row() {
     assert_eq!(row.1, "prod-eu-otto");
     assert_eq!(row.2.as_deref(), Some(id.as_str()));
     assert!(row.3.contains("\"eks_cluster\":\"prod-eu\""));
-    assert!(calls_log().lines().any(|l| l
-        .contains("ARGS=eks update-kubeconfig --name prod-eu --kubeconfig")
-        && l.contains("--alias prod-eu-otto")));
+    assert!(calls_log().lines().any(|l| {
+        l.contains("ARGS=eks update-kubeconfig --name prod-eu --kubeconfig")
+            && l.contains("--alias prod-eu-otto")
+    }));
 
     // Audit row written.
     let n: (i64,) =
@@ -977,7 +978,9 @@ async fn cloudwatch_metrics_single_call_cached_and_service_gated() {
 
 /// A peek is a `receive-message`: it never hides messages (visibility timeout
 /// pinned to 0 whatever the body asks) but bumps their receive count, so it is
-/// gated like Send — the old View-level `sqs_receive` grant is not enough.
+/// gated at Edit tier on its own `sqs_receive` operation (S6-12) — a View-tier
+/// user holding `sqs_receive` is refused, and `sqs_send` (publishing) is
+/// neither needed nor sufficient.
 #[tokio::test]
 async fn sqs_peek_needs_edit_and_pins_visibility_timeout_to_zero() {
     let ctx = TestCtx::new().await;
@@ -1013,7 +1016,22 @@ async fn sqs_peek_needs_edit_and_pins_visibility_timeout_to_zero() {
         "a refused peek must not reach the CLI"
     );
 
-    allow_account(&ctx, &root, &viewer, &id, "sqs_send").await;
+    // `sqs_send` does not stand in for `sqs_receive`, even at Edit tier.
+    let sender = seed_user(&ctx.pool, "sqs-sender", false).await;
+    grant(&ctx.pool, &sender, "aws", "view").await;
+    grant(&ctx.pool, &sender, "aws_sqs", "edit").await;
+    allow_account(&ctx, &root, &sender, &id, "discover").await;
+    allow_account(&ctx, &root, &sender, &id, "sqs_view").await;
+    allow_account(&ctx, &root, &sender, &id, "sqs_send").await;
+    let (st, e, _) = call(&ctx, &sender, "POST", &uri, Some(body.clone())).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{e}");
+
+    // Edit tier + the `sqs_receive` grant peeks — no publish right needed.
+    sqlx::query("UPDATE user_feature_grants SET capability = 'edit' WHERE user_id = ? AND feature = 'aws_sqs'")
+        .bind(&viewer.id)
+        .execute(&ctx.pool)
+        .await
+        .expect("raise grant");
     let (st, r, _) = call(&ctx, &viewer, "POST", &uri, Some(body)).await;
     assert_eq!(st, StatusCode::OK, "{r}");
     assert_eq!(r["messages"][0]["message_id"], "m-1");

@@ -354,6 +354,21 @@ fn is_private_lan_host(host: &str) -> bool {
 
 pub mod state_archive;
 
+/// Private-process entry point used by `ottod apiclient-script`: runs ONE
+/// API-client pre/post script from stdin and exits (S6-04 — a runaway or OOM
+/// script costs this child, never the daemon). Never starts a server.
+pub fn run_api_script_helper() -> bool {
+    otto_apiclient::scripts::child_main()
+}
+
+/// argv[1] that dispatches `ottod` to [`run_api_script_helper`].
+pub const API_SCRIPT_HELPER_ARG: &str = otto_apiclient::scripts::CHILD_ARG;
+
+/// Register the daemon binary as the out-of-process API-client script host.
+pub fn register_api_script_host(exe: std::path::PathBuf) {
+    otto_apiclient::scripts::set_script_host(exe);
+}
+
 /// Private-process entry point used by `ottod room-ocr`; never starts a server.
 pub fn run_room_ocr_helper() -> bool {
     rooms::recap_engines::run_ocr_stdio()

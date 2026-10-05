@@ -46,6 +46,18 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         };
     }
+    // `ottod apiclient-script`: one API-client pre/post script, out of
+    // process so a runaway / OOM script never takes the daemon down.
+    if std::env::args().nth(1).as_deref() == Some(otto_server::API_SCRIPT_HELPER_ARG) {
+        return if otto_server::run_api_script_helper() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        otto_server::register_api_script_host(exe);
+    }
     augment_path();
 
     // Subcommand dispatch. `ottod mcp-tools` runs the first-party read-only MCP

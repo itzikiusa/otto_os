@@ -24,8 +24,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use axum::extract::{Query, State};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use chrono::Duration;
+use otto_core::auth::AuthUser;
+use otto_core::domain::User;
 use otto_core::Error;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -72,6 +74,53 @@ pub struct FleetFilter {
     pub namespace: Option<String>,
     pub workload: Option<String>,
     pub pod: Option<String>,
+    /// The caller's readable `(cluster, namespaces)` set (S6-05): `None` =
+    /// unrestricted; `Some(list)` = only these clusters, each whole
+    /// (`None`) or limited to the listed namespaces. Never parsed from the
+    /// query string — set by the handler from the caller's grants.
+    pub scope: Option<FleetScope>,
+}
+
+/// `(cluster_id, None = every namespace | Some(namespaces))`, sorted.
+pub type FleetScope = Vec<(String, Option<Vec<String>>)>;
+
+/// `AND (cluster_id = 'a' OR (cluster_id = 'b' AND namespace IN (…)))`;
+/// an empty scope matches nothing.
+pub fn scope_sql(scope: &FleetScope) -> String {
+    if scope.is_empty() {
+        return " AND 0".to_string();
+    }
+    let parts: Vec<String> = scope
+        .iter()
+        .map(|(c, ns)| match ns {
+            None => format!("cluster_id = {}", sql_str(c)),
+            Some(list) if list.is_empty() => "0".to_string(),
+            Some(list) => format!(
+                "(cluster_id = {} AND namespace IN ({}))",
+                sql_str(c),
+                list.iter()
+                    .map(|n| sql_str(n))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        })
+        .collect();
+    format!(" AND ({})", parts.join(" OR "))
+}
+
+/// Does the scope let the caller see `(cluster, namespace)`?
+pub fn scope_allows(scope: Option<&FleetScope>, cluster: &str, namespace: &str) -> bool {
+    match scope {
+        None => true,
+        Some(list) => list.iter().any(|(c, ns)| {
+            c == cluster && ns.as_ref().is_none_or(|l| l.iter().any(|n| n == namespace))
+        }),
+    }
+}
+
+/// Does the scope show the cluster at all?
+fn scope_has_cluster(scope: Option<&FleetScope>, cluster: &str) -> bool {
+    scope.is_none_or(|list| list.iter().any(|(c, _)| c == cluster))
 }
 
 impl FleetFilter {
@@ -106,6 +155,7 @@ impl FleetFilter {
             namespace: opt("ns", ns)?,
             workload: opt("workload", workload)?,
             pod: opt("pod", pod)?,
+            scope: None,
         })
     }
 
@@ -130,6 +180,9 @@ impl FleetFilter {
         }
         if let Some(p) = &self.pod {
             s.push_str(&format!(" AND pod = {}", sql_str(p)));
+        }
+        if let Some(scope) = &self.scope {
+            s.push_str(&scope_sql(scope));
         }
         s
     }
@@ -611,6 +664,11 @@ pub struct FleetQuery {
     pub step: Option<u32>,
     // events
     pub class: Option<String>,
+    /// The caller's grant scope (S6-05) — filled in by the handler, never
+    /// from the query string. Part of `{q:?}`, so every cache key carries it
+    /// and one user's answer is never served to another with less access.
+    #[serde(skip)]
+    pub scope: Option<FleetScope>,
 }
 
 fn f64_of(v: &Value, k: &str) -> f64 {
@@ -664,6 +722,38 @@ async fn cluster_names<S: K8sCtx>(ctx: &S) -> HashMap<String, Value> {
     m
 }
 
+/// Resolve the caller's fleet scope (S6-05): root reads everything; anyone
+/// else sees only clusters they can discover, each whole when `metrics` is
+/// granted cluster-wide, else limited to the namespaces granted `metrics`.
+async fn scoped<S: K8sCtx>(ctx: &S, user: &User, mut q: FleetQuery) -> ApiResult<FleetQuery> {
+    q.scope = None;
+    if user.is_root && !user.disabled {
+        return Ok(q);
+    }
+    let mut scope: FleetScope = Vec::new();
+    for c in Clusters::new(ctx).list().await? {
+        match super::http::metrics_scope(&ctx.pool(), user, &c.id).await? {
+            Some(super::http::NsScope::All) => scope.push((c.id.to_string(), None)),
+            Some(super::http::NsScope::Only(set)) if !set.is_empty() => {
+                scope.push((c.id.to_string(), Some(set.into_iter().collect())))
+            }
+            _ => {}
+        }
+    }
+    scope.sort();
+    q.scope = Some(scope);
+    Ok(q)
+}
+
+/// Registry names limited to the clusters the scope shows.
+fn visible_names(
+    mut names: HashMap<String, Value>,
+    scope: Option<&FleetScope>,
+) -> HashMap<String, Value> {
+    names.retain(|id, _| scope_has_cluster(scope, id));
+    names
+}
+
 /// A short fingerprint of the cluster registry (ids, names, colours).
 fn registry_stamp(names: &HashMap<String, Value>) -> String {
     let mut ids: Vec<String> = names.iter().map(|(id, v)| format!("{id}={v}")).collect();
@@ -688,22 +778,25 @@ fn parse_common(
         .clone()
         .unwrap_or_else(|| default_window.to_string());
     let window = queries::parse_window(&label)?;
-    let f = FleetFilter::parse(
+    let mut f = FleetFilter::parse(
         q.cluster.as_deref(),
         q.ns.as_deref(),
         q.workload.as_deref(),
         q.pod.as_deref(),
     )?;
+    f.scope = q.scope.clone();
     Ok((label, window, f))
 }
 
 /// `GET /k8s/monitor/fleet/filters?window=&cluster=&ns=&workload=`.
 async fn filters<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<FleetQuery>,
 ) -> ApiResult<Json<Value>> {
+    let q = scoped(&ctx, &user, q).await?;
     // Cluster names / colours decorate the rows: a registry change is a new key.
-    let names = cluster_names(&ctx).await;
+    let names = visible_names(cluster_names(&ctx).await, q.scope.as_ref());
     let key = format!("fleet:filters:{q:?}:{}", registry_stamp(&names));
     cached(key, || filters_body(ctx, q, names)).await
 }
@@ -722,6 +815,10 @@ async fn filters_body<S: K8sCtx>(
     for r in &rows {
         let c = str_of(r, "cluster_id").to_string();
         let n = str_of(r, "namespace").to_string();
+        // `filters_sql` is cross-cluster by design; the scope applies here.
+        if !scope_allows(f.scope.as_ref(), &c, &n) {
+            continue;
+        }
         let w = str_of(r, "workload").to_string();
         *clusters.entry(c.clone()).or_default() += f64_of(r, "n") as u64;
         namespaces.insert((c.clone(), n.clone()));
@@ -811,10 +908,12 @@ const TABLE_SORT_KEYS: [&str; 16] = [
 /// `GET /k8s/monitor/fleet/table?window=&cluster=&ns=&workload=&pod=&group=&sort=&dir=&limit=&offset=`.
 async fn table<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<FleetQuery>,
 ) -> ApiResult<Json<Value>> {
+    let q = scoped(&ctx, &user, q).await?;
     // Cluster names / colours decorate the rows: a registry change is a new key.
-    let names = cluster_names(&ctx).await;
+    let names = visible_names(cluster_names(&ctx).await, q.scope.as_ref());
     let key = format!("fleet:table:{q:?}:{}", registry_stamp(&names));
     cached(key, || table_body(ctx, q, names)).await
 }
@@ -1004,10 +1103,12 @@ async fn table_body<S: K8sCtx>(
 /// `GET /k8s/monitor/fleet/series?metric=&by=&window=&step=&cluster=&ns=&workload=&pod=`.
 async fn series<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<FleetQuery>,
 ) -> ApiResult<Json<Value>> {
+    let q = scoped(&ctx, &user, q).await?;
     // Cluster names / colours decorate the rows: a registry change is a new key.
-    let names = cluster_names(&ctx).await;
+    let names = visible_names(cluster_names(&ctx).await, q.scope.as_ref());
     let key = format!("fleet:series:{q:?}:{}", registry_stamp(&names));
     cached(key, || series_body(ctx, q, names)).await
 }
@@ -1021,8 +1122,10 @@ const SERIES_BATCH_MAX: usize = 8;
 /// same cache key + single-flight as `/series?metric=`.
 async fn series_batch<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<FleetQuery>,
 ) -> ApiResult<Json<Value>> {
+    let q = scoped(&ctx, &user, q).await?;
     let mut list: Vec<String> = Vec::new();
     for m in q.metrics.as_deref().unwrap_or("").split(',').map(str::trim) {
         if !m.is_empty() && !list.iter().any(|x| x == m) {
@@ -1038,7 +1141,7 @@ async fn series_batch<S: K8sCtx>(
     for m in &list {
         SeriesMetric::parse(m)?;
     }
-    let names = cluster_names(&ctx).await;
+    let names = visible_names(cluster_names(&ctx).await, q.scope.as_ref());
     let stamp = registry_stamp(&names);
     let futs = list.into_iter().map(|m| {
         let mut one = q.clone();
@@ -1124,10 +1227,12 @@ async fn series_body<S: K8sCtx>(
 /// `GET /k8s/monitor/fleet/events?window=&class=&sort=&dir=&limit=&offset=&cluster=&ns=&workload=&pod=`.
 async fn events<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<FleetQuery>,
 ) -> ApiResult<Json<Value>> {
+    let q = scoped(&ctx, &user, q).await?;
     // Cluster names / colours decorate the rows: a registry change is a new key.
-    let names = cluster_names(&ctx).await;
+    let names = visible_names(cluster_names(&ctx).await, q.scope.as_ref());
     let key = format!("fleet:events:{q:?}:{}", registry_stamp(&names));
     cached(key, || events_body(ctx, q, names)).await
 }
@@ -1172,8 +1277,10 @@ async fn events_body<S: K8sCtx>(
 /// `GET /k8s/monitor/fleet/requests?window=&cluster=&ns=&workload=&pod=`.
 async fn requests<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<FleetQuery>,
 ) -> ApiResult<Json<Value>> {
+    let q = scoped(&ctx, &user, q).await?;
     requests_body(ctx, q).await
 }
 
@@ -1186,7 +1293,10 @@ async fn requests_body<S: K8sCtx>(ctx: S, q: FleetQuery) -> ApiResult<Json<Value
     let mut enabled_on: Vec<Value> = Vec::new();
     let mut disabled_on: Vec<Value> = Vec::new();
     if let Ok(list) = Clusters::new(&ctx).list().await {
-        for c in list {
+        for c in list
+            .into_iter()
+            .filter(|c| scope_has_cluster(q.scope.as_ref(), c.id.as_str()))
+        {
             let on = repo
                 .get_config(c.id.as_str())
                 .await
@@ -1206,7 +1316,7 @@ async fn requests_body<S: K8sCtx>(ctx: S, q: FleetQuery) -> ApiResult<Json<Value
     // follow a config change at once.
     let key = format!(
         "fleet:requests-rows:{q:?}:{}",
-        registry_stamp(&cluster_names(&ctx).await)
+        registry_stamp(&visible_names(cluster_names(&ctx).await, q.scope.as_ref()))
     );
     let Json(raw) = cached(key, || async {
         Ok(Json(Value::Array(
@@ -1266,6 +1376,48 @@ mod tests {
         assert!(FleetFilter::parse(None, None, None, Some("p'1")).is_err());
         let empty = FleetFilter::parse(Some(" , "), None, None, None).unwrap();
         assert_eq!(empty.sql(), "");
+    }
+
+    #[test]
+    fn scope_limits_every_fleet_query_to_granted_clusters_and_namespaces() {
+        // S6-05: a user granted only `namespace:shop` on c1 and all of c2.
+        let scope: FleetScope = vec![
+            ("c1".into(), Some(vec!["shop".into()])),
+            ("c2".into(), None),
+        ];
+        let mut x = FleetFilter::parse(None, None, None, None).unwrap();
+        x.scope = Some(scope.clone());
+        let s = x.sql();
+        assert_eq!(
+            s,
+            " AND ((cluster_id = 'c1' AND namespace IN ('shop')) OR cluster_id = 'c2')"
+        );
+        let w = Duration::hours(1);
+        for sql in [
+            memory_sql(&x, w, Group::Workload),
+            restarts_sql(&x, w, Group::Pod),
+            rates_sql(&x, w, Group::Workload),
+            latency_buckets_sql(&x, w, Group::Pod),
+            latency_avg_sql(&x, w, Group::Workload),
+            requests_sql(&x, w),
+            pods_sql(&x, w, 10),
+            series_sql(&x, w, SeriesMetric::Restarts, SeriesBy::Cluster, 60),
+            wide_series_sql(&x, w, SeriesMetric::Mem, SeriesBy::Namespace, 60),
+        ] {
+            assert!(sql.contains("namespace IN ('shop')"), "{sql}");
+        }
+        assert!(scope_allows(Some(&scope), "c1", "shop"));
+        assert!(!scope_allows(Some(&scope), "c1", "payments"));
+        assert!(scope_allows(Some(&scope), "c2", "anything"));
+        assert!(!scope_allows(Some(&scope), "c3", "shop"));
+        assert!(scope_allows(None, "c3", "shop"));
+        assert_eq!(scope_sql(&Vec::new()), " AND 0", "no grants ⇒ no rows");
+        // The scope is part of the cache key (`{q:?}`), never of the query
+        // string.
+        let mut q = FleetQuery::default();
+        let open = format!("{q:?}");
+        q.scope = Some(scope);
+        assert_ne!(open, format!("{q:?}"));
     }
 
     #[test]

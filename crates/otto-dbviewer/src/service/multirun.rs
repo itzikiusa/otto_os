@@ -684,7 +684,7 @@ impl DbViewerService {
                     None => {
                         return Err(Error::Conflict(format!(
                             "{MAX_JOBS} multi-runs are already running — wait for one to finish"
-                        )))
+                        )));
                     }
                 }
             }

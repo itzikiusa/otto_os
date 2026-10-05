@@ -2395,3 +2395,193 @@ async fn delegated_cluster_admin_cannot_attach_repoint_or_read_hidden_configurat
     assert_eq!(st, StatusCode::NOT_FOUND);
     assert!(ctx.recorder.last.lock().unwrap().is_none());
 }
+
+/// Seed a non-root Kubernetes:View user and add `rules` (operations,
+/// children) for them to cluster `id`'s policy.
+async fn limited_user(
+    ctx: &TestCtx,
+    owner: &User,
+    id: &str,
+    rules: Vec<(Vec<&str>, Option<Vec<&str>>)>,
+) -> User {
+    use otto_core::access::{AccessActor, AccessRule, ResourceKind, RuleEffect, SubjectKind};
+    let mut user = owner.clone();
+    user.id = otto_core::new_id();
+    user.is_root = false;
+    sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, disabled, created_at) VALUES (?, ?, 'x', 'limited', 0, 0, ?)")
+        .bind(&user.id).bind(format!("limited-{}", user.id)).bind(Utc::now().to_rfc3339()).execute(&ctx.pool).await.unwrap();
+    sqlx::query("INSERT INTO user_feature_grants (user_id, feature, capability) VALUES (?, 'kubernetes', 'view')")
+        .bind(&user.id).execute(&ctx.pool).await.unwrap();
+    if rules.is_empty() {
+        return user;
+    }
+    let repo = otto_state::resource_access::ResourceAccessRepo::new(ctx.pool.clone());
+    let id: otto_core::Id = id.into();
+    let mut policy = repo
+        .get_policy(ResourceKind::K8sCluster, &id)
+        .await
+        .unwrap();
+    for (ops, children) in rules {
+        policy.rules.push(AccessRule {
+            id: otto_core::new_id(),
+            subject_kind: SubjectKind::User,
+            subject_id: user.id.clone(),
+            effect: RuleEffect::Allow,
+            operations: ops.iter().map(|s| s.to_string()).collect(),
+            children: children.map(|c| c.iter().map(|s| s.to_string()).collect()),
+            credential_connection_id: None,
+            grantable_operations: vec![],
+        });
+    }
+    let actor = AccessActor {
+        real_user_id: owner.id.clone(),
+        effective_user_id: None,
+    };
+    repo.put_policy(&policy, policy.revision, &actor)
+        .await
+        .unwrap();
+    user
+}
+
+/// S6-01 deny matrix: every `/k8s/clusters/{id}/monitor*` route authorizes
+/// the operation itself — the server's policy table lowers the feature tier
+/// to View for Enforced clusters and trusts the handler.
+#[tokio::test]
+async fn monitor_routes_enforce_cluster_grants() {
+    let (ctx, owner) = TestCtx::new().await;
+    let cluster = create_cluster(&ctx, &owner).await;
+    let id = cluster["id"].as_str().unwrap().to_string();
+    let scoped = limited_user(
+        &ctx,
+        &owner,
+        &id,
+        vec![
+            (vec!["discover"], None),
+            (vec!["metrics"], Some(vec!["namespace:shop"])),
+        ],
+    )
+    .await;
+    let outsider = limited_user(&ctx, &owner, &id, vec![]).await;
+    let writes: [(&str, String, Option<serde_json::Value>); 3] = [
+        (
+            "PUT",
+            format!("/k8s/clusters/{id}/monitor"),
+            Some(monitor_cfg(false, 60)),
+        ),
+        (
+            "POST",
+            format!("/k8s/clusters/{id}/monitor/test"),
+            Some(serde_json::json!({"ns": "payments"})),
+        ),
+        ("POST", format!("/k8s/clusters/{id}/monitor/run"), None),
+    ];
+    for (m, uri, body) in &writes {
+        let (st, _, text) = call(&ctx, &scoped, m, uri, body.clone()).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{m} {uri}: {text}");
+        let (st, _, _) = call(&ctx, &outsider, m, uri, body.clone()).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "outsider {m} {uri}");
+    }
+    let reads_denied = [
+        "/monitor/workloads?ns=payments",
+        "/monitor/series?metric=http_requests_total&ns=payments",
+        "/monitor/events?ns=payments",
+        "/monitor/health",
+    ];
+    for suffix in reads_denied {
+        let uri = format!("/k8s/clusters/{id}{suffix}");
+        let (st, _, text) = call(&ctx, &scoped, "GET", &uri, None).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{suffix}: {text}");
+    }
+    for suffix in [
+        "/monitor",
+        "/monitor/workloads?ns=shop",
+        "/monitor/series?metric=http_requests_total&ns=shop",
+        "/monitor/events",
+        "/monitor/events?ns=shop",
+    ] {
+        let uri = format!("/k8s/clusters/{id}{suffix}");
+        let (st, _, text) = call(&ctx, &scoped, "GET", &uri, None).await;
+        assert_eq!(st, StatusCode::OK, "{suffix}: {text}");
+        let (st, _, _) = call(&ctx, &outsider, "GET", &uri, None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "outsider {suffix}");
+    }
+    // A flag-shaped namespace never reaches kubectl.
+    let (st, _, _) = call(
+        &ctx,
+        &owner,
+        "POST",
+        &format!("/k8s/clusters/{id}/monitor/test"),
+        Some(serde_json::json!({"ns": "--kubeconfig=/tmp/x"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    // The owner keeps every route.
+    let (st, _, text) = call(
+        &ctx,
+        &owner,
+        "PUT",
+        &format!("/k8s/clusters/{id}/monitor"),
+        Some(monitor_cfg(false, 60)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+}
+
+/// S6-05: fleet + overview answer per caller — no cluster names, namespaces
+/// or figures beyond the caller's `metrics` grant, and no shared cache entry.
+#[tokio::test]
+async fn fleet_and_overview_are_filtered_to_the_callers_grants() {
+    let (ctx, owner) = TestCtx::new().await;
+    let cluster = create_cluster(&ctx, &owner).await;
+    let id = cluster["id"].as_str().unwrap().to_string();
+    let scoped = limited_user(
+        &ctx,
+        &owner,
+        &id,
+        vec![
+            (vec!["discover"], None),
+            (vec!["metrics"], Some(vec!["namespace:shop"])),
+        ],
+    )
+    .await;
+    let outsider = limited_user(&ctx, &owner, &id, vec![]).await;
+    ctx.sink.canned.lock().unwrap().push((
+        "UNION ALL".into(),
+        vec![
+            serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "n": 3}),
+            serde_json::json!({"cluster_id": id, "namespace": "payments", "workload": "ledger", "n": 3}),
+            serde_json::json!({"cluster_id": "elsewhere", "namespace": "a", "workload": "b", "n": 3}),
+        ],
+    ));
+    let (st, all, text) = call(&ctx, &owner, "GET", "/k8s/monitor/fleet/filters", None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(all["namespaces"].as_array().unwrap().len(), 3);
+    let (st, mine, text) = call(&ctx, &scoped, "GET", "/k8s/monitor/fleet/filters", None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(
+        mine["namespaces"],
+        serde_json::json!([{"cluster_id": id, "namespace": "shop"}]),
+        "{mine}"
+    );
+    let clusters: Vec<&str> = mine["clusters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(clusters, vec![id.as_str()]);
+    let (st, none, _) = call(&ctx, &outsider, "GET", "/k8s/monitor/fleet/filters", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(none["namespaces"], serde_json::json!([]));
+    assert_eq!(none["clusters"], serde_json::json!([]));
+
+    let (st, rows, text) = call(&ctx, &scoped, "GET", "/k8s/monitor/overview", None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["restricted"], true);
+    assert_eq!(rows[0]["pods"]["total"], 0);
+    let (st, rows, _) = call(&ctx, &outsider, "GET", "/k8s/monitor/overview", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(rows, serde_json::json!([]));
+}

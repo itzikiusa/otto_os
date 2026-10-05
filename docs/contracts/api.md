@@ -2333,8 +2333,8 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result. The whole call is bounded at 60 s (unary: `DEADLINE_EXCEEDED` result); a server stream stops at 60 s, 1000 messages or 5 MiB of JSON and returns what arrived with `truncated: true` |
 | POST /workspaces/{wid}/api-client/grpc/reflect | ws editor | GrpcReflectReq | server reflection listing |
 | POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token. Same 409 `needs_confirm=new_host` when a `$secret` marker's saved `token_url` host differs from the requested one; `confirm_new_host:true` (person only). 30 s budget, redirects are NOT followed (a 307/308 would resend the client secret), the body read is capped at 256 KiB, and an error without `error`/`error_description` quotes at most 300 chars of the body. Honours the workspace `allow_local` opt-in like `execute` |
-| GET /workspaces/{wid}/api-client/cookies | ws editor | — | THIS workspace's cookie jar (jars are per-workspace, never shared; values are live credentials — editor-gated) |
-| DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear THIS workspace's jar |
+| GET /workspaces/{wid}/api-client/cookies | ws editor | — | the CALLER's cookie jar in this workspace (jars are per (workspace, user) — never shared across workspaces or users; automation runs use their actor's jar; values are live credentials — editor-gated) |
+| DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear the caller's jar in this workspace |
 | GET /workspaces/{wid}/api-client/automations | ws viewer | — | `Automation[]` |
 | POST /workspaces/{wid}/api-client/automations | ws editor | CreateAutomationReq | Automation |
 | PATCH /workspaces/{wid}/api-client/automations/{id} | ws editor | UpdateAutomationReq | Automation |
@@ -5081,7 +5081,7 @@ the cache.
 |---|---|---|---|
 | GET /aws/accounts/{id}/sqs/queues | AwsSqs:View | `?prefix=&region=` | `{ queues: { url, name, fifo }[] }` |
 | GET /aws/accounts/{id}/sqs/queues/attributes | AwsSqs:View | `?url=&region=` | `{ attributes: Record<string,string>, approx_messages, approx_not_visible, approx_delayed, dlq_target_arn? }` (`get-queue-attributes --attribute-names All`; `dlq_target_arn` parsed from `RedrivePolicy`) |
-| POST /aws/accounts/{id}/sqs/queues/peek | AwsSqs:Edit (`sqs_send`) | `{ url, max?: 1..10, visibility_timeout?: ignored }` (`?region=`) | `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` — `receive-message --visibility-timeout 0 --wait-time-seconds 1` (the timeout is always 0), so peeking does not hide messages; it DOES increment each message's receive count (a queue with a redrive policy can dead-letter after enough peeks), hence Edit |
+| POST /aws/accounts/{id}/sqs/queues/peek | AwsSqs:Edit (`sqs_receive`) | `{ url, max?: 1..10, visibility_timeout?: ignored }` (`?region=`) | `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` — `receive-message --visibility-timeout 0 --wait-time-seconds 1` (the timeout is always 0), so peeking does not hide messages; it DOES increment each message's receive count (a queue with a redrive policy can dead-letter after enough peeks), hence Edit |
 | POST /aws/accounts/{id}/sqs/queues/send | AwsSqs:Edit | `{ url, body, delay_seconds?, group_id?, dedup_id?, message_attributes? }` | `{ message_id }` — audited `aws.sqs.send` |
 | POST /aws/accounts/{id}/sqs/queues/delete-message | AwsSqs:Edit | `{ url, receipt_handle }` | 204 — audited `aws.sqs.delete_message` |
 | POST /aws/accounts/{id}/sqs/queues/purge | AwsSqs:Edit | `{ url, confirm_name }` (must equal the queue name) | 204 — audited `aws.sqs.purge` |
@@ -5108,7 +5108,7 @@ public_ip, launch_time, platform, vpc_id, subnet_id, tags: Record<string,string>
 | GET /aws/accounts/{id}/athena/databases | AwsAthena:View | `?catalog=AwsDataCatalog&region=` | `{ databases: string[] }` |
 | GET /aws/accounts/{id}/athena/tables | AwsAthena:View | `?database=&catalog=&region=` | `{ tables: { name, type, columns: { name, type }[] }[] }` (`list-table-metadata`; partition keys appended to `columns`) |
 | GET /aws/accounts/{id}/athena/history | AwsAthena:View | `?workgroup=&max=&region=` (`max` ≤ 50) | `{ executions: { id, query, state, submitted_at, completed_at?, data_scanned_bytes?, execution_ms? }[] }` |
-| POST /aws/accounts/{id}/athena/query | AwsAthena:Edit | `{ sql, database?, workgroup?, output_location? }` (`?region=`) | `{ query_execution_id }` — 400 with a hint when neither the workgroup nor the request carries an output location; audited `aws.athena.execute` (SQL clipped to 2000 chars) |
+| POST /aws/accounts/{id}/athena/query | AwsAthena:Edit | `{ sql, database?, workgroup?, output_location?, confirm? }` (`?region=`) | `{ query_execution_id }` — 400 with a hint when neither the workgroup nor the request carries an output location; on a `prod` account a statement that is not a plain read (leading keyword other than `SELECT`/`WITH`/`SHOW`/`DESCRIBE`/`DESC`/`VALUES`/`TABLE`/non-`ANALYZE` `EXPLAIN` — i.e. DDL, DML, CTAS, `MSCK`, `UNLOAD`) is refused with 400 `confirm_required: …` unless `confirm: true` (the UI sets it only after the person confirms; the MCP tool never forwards it); audited `aws.athena.execute` (SQL clipped to 2000 chars) |
 | GET /aws/accounts/{id}/athena/query/{qid} | AwsAthena:View | `?token=&max=&region=` (`max` ≤ 1000) | `AthenaQueryStatus { state: QUEUED\|RUNNING\|SUCCEEDED\|FAILED\|CANCELLED, reason?, stats: { data_scanned_bytes, execution_ms }, result?: QueryResult, next_token? }` — `result` only when `SUCCEEDED`, in the DB Explorer `QueryResult` shape (`columns: { name, type_hint }[]`, `rows: unknown[][]`, `stats: { duration_ms, row_count, bytes_read }`, `truncated`); the header row is dropped on the first page |
 | POST /aws/accounts/{id}/athena/query/{qid}/cancel | AwsAthena:View | `?region=` | 204 (`stop-query-execution`) |
 
@@ -5320,7 +5320,19 @@ WS `k8s_monitor_cycle`. Guide: `docs/features/kubernetes-monitoring.md`.
 
 Auth: `/k8s/monitor/overview` is `kubernetes:View`; `/k8s/clusters/{id}/monitor*`
 is View on GET, Edit on PUT/POST. Enabling requires the usage engine
-(ClickHouse) to be available ⇒ `409 conflict` otherwise.
+(ClickHouse) to be available ⇒ `409 conflict` otherwise. On top of the feature
+tier every per-cluster route checks the cluster's resource grant itself (an
+Enforced cluster lowers the feature gate to View on that assumption):
+`GET …/monitor` needs `discover`; `PUT …/monitor`, `POST …/monitor/test` and
+`POST …/monitor/run` need `configure` (+ the legacy Admin tier); `workloads`,
+`series`, `events` need `metrics` for the namespace asked for (`?ns=`; without
+it, cluster-wide `metrics`); `health` needs cluster-wide `metrics`. No grant ⇒
+404, a narrower grant ⇒ 403, a malformed `ns`/`pod` ⇒ 400. The overview and
+the fleet routes are scoped to the caller's grants: clusters the caller cannot
+`discover` are omitted, a cluster without cluster-wide `metrics` appears as
+`{ …, restricted: true }` with zeroed figures, and fleet queries only see
+(cluster, namespace) pairs the caller holds `metrics` on (the fleet cache key
+includes that scope).
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -5330,9 +5342,9 @@ is View on GET, Edit on PUT/POST. Enabling requires the usage engine
 | POST /k8s/clusters/{id}/monitor/run | Edit | — | `MonitorStatus` — runs one cycle inline (schema ensured first) |
 | GET /k8s/monitor/overview?window=24h | View | — | `OverviewRow[]`, one per registered cluster (disabled clusters carry `enabled:false`, `health:"off"`) |
 | GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, namespaces: string[] /* all, unfiltered */, workloads: WorkloadRow[] }` |
-| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates; `step_secs` is rounded up to whole minutes / 5 minutes / hours (≥ 60 s for windows ≥ 24 min, whole hours for windows ≥ 24 h) so the chart reads a rollup |
-| GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
-| GET /k8s/clusters/{id}/monitor/health?window=1h | View + per-cluster `discover` grant | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
+| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&ns=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates; `step_secs` is rounded up to whole minutes / 5 minutes / hours (≥ 60 s for windows ≥ 24 min, whole hours for windows ≥ 24 h) so the chart reads a rollup |
+| GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&ns=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
+| GET /k8s/clusters/{id}/monitor/health?window=1h | View + cluster-wide `metrics` grant | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
 
 `window` accepts `<n>m|h|d` (max `90d`). `metric`, `workload`, `pod`, `ns`
 and `class` must match `^[A-Za-z0-9_.:/-]{1,128}$` (400 otherwise).

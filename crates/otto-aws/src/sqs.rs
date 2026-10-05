@@ -260,8 +260,9 @@ pub async fn attributes(
 
 /// The resource operation `/peek` checks: a receive bumps each message's
 /// receive count (on a queue with a redrive policy, enough peeks dead-letter
-/// it), so it needs the same Edit-level grant as Send.
-pub const PEEK_OPERATION: &str = "sqs_send";
+/// it), so its own `sqs_receive` operation is Edit-tier — but it is NOT
+/// `sqs_send`: granting peek must not also grant publishing (S6-12).
+pub const PEEK_OPERATION: &str = "sqs_receive";
 
 /// `receive-message` argv for a peek. The visibility timeout is ALWAYS 0 —
 /// whatever the request carries — so a peek never hides messages from the
