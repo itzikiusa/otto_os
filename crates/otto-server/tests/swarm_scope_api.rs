@@ -168,14 +168,16 @@ async fn call(
 #[tokio::test]
 async fn lifecycle_routes_refuse_a_foreign_swarm() {
     let w = world().await;
+    let before = w.ctx.swarm_repo.get_swarm(&w.swarm_b).await.unwrap().status;
     for action in ["abort", "pause", "resume", "start", "agent-stop"] {
         let uri = format!("/workspaces/{}/swarm/swarms/{}/{action}", w.ws_a, w.swarm_b);
         let (st, _) = call(&w.app, &w.alice, Method::POST, &uri, json!({})).await;
         assert_eq!(st, StatusCode::NOT_FOUND, "{action} on B's swarm via A");
     }
     let b = w.ctx.swarm_repo.get_swarm(&w.swarm_b).await.unwrap();
+    // A new swarm starts `paused`; none of the refused calls changed it.
+    assert_eq!(b.status, before, "B's swarm status untouched");
     assert_ne!(b.status, "aborted", "B's swarm was not aborted");
-    assert_ne!(b.status, "paused");
 
     let own = format!("/workspaces/{}/swarm/swarms/{}/pause", w.ws_a, w.swarm_a);
     let (st, body) = call(&w.app, &w.alice, Method::POST, &own, json!({})).await;
