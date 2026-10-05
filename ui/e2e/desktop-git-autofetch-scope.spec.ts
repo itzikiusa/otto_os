@@ -93,7 +93,7 @@ test('a delayed Git tab bootstrap cannot start automatic fetch after leaving', a
     await navigate(page, '#/agents');
     await expect(page.locator('.gitpage')).not.toBeVisible();
     release();
-    await page.waitForTimeout(1_000);
+    await page.waitForTimeout(1_000); // ui-guards: allow — absence: no fetch after leaving Git
     expect(fetches).toBe(0);
   } finally { release(); }
 });
