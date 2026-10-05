@@ -502,7 +502,8 @@ export interface CreateTriggerReq {
 }
 
 /** PATCH /swarm/triggers/{id} — every field optional (partial update). */
-export type UpdateTriggerReq = Partial<CreateTriggerReq>;
+/** PATCH /swarm/triggers/{tid} — `repo_path: null` clears the repo. */
+export type UpdateTriggerReq = Partial<Omit<CreateTriggerReq, 'repo_path'>> & { repo_path?: string | null };
 
 /** Why a ready task isn't starting (12-mcp W1) — `waiting[task_id]` on
  *  `GET /swarm/swarms/{sid}/utilization`, rebuilt by every coordinator tick. */

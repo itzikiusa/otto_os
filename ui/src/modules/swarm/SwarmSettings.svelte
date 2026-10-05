@@ -153,7 +153,15 @@
         reply: triggerForm.reply,
         enabled: triggerForm.enabled,
       };
-      if (triggerEditId) await swarm.updateTrigger(triggerEditId, body);
+      // An edit must CLEAR what the user emptied: '' for the text filters
+      // and `null` for the repo path (an omitted key leaves it unchanged).
+      if (triggerEditId)
+        await swarm.updateTrigger(triggerEditId, {
+          ...body,
+          match_chat: triggerForm.match_chat?.trim() ?? '',
+          keyword: triggerForm.keyword?.trim() ?? '',
+          repo_path: triggerForm.repo_path?.trim() || null,
+        });
       else await swarm.createTrigger(detail.id, body);
       toasts.success(triggerEditId ? 'Trigger updated' : 'Trigger added');
       triggerForm = null;
