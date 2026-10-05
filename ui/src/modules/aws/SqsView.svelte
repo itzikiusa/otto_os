@@ -215,20 +215,43 @@
   async function send(): Promise<void> {
     if (!selected || !sendBody.trim() || !validDelay || sending) return;
     const queue = selected;
+    // The region the confirm names is the region the send goes to.
+    const region = rq;
+    const message_attributes: Record<string, { DataType: string; StringValue: string }> = {};
+    for (const a of sendAttrs) if (a.k.trim()) message_attributes[a.k.trim()] = { DataType: 'String', StringValue: a.v };
+    const attrNames = Object.keys(message_attributes);
+    // Outward write: live consumers act on what lands in the queue — say
+    // where it goes and what is sent before it leaves (typed-free; prod gets
+    // the PRODUCTION line + danger styling).
     sending = true;
+    const ok = await confirmProd({
+      env: account.environment,
+      verb: 'Send message',
+      where: queueWhere(queue.name),
+      what: [
+        sendBody.trim(),
+        attrNames.length ? `Attributes: ${attrNames.join(', ')}` : '',
+        sendDelay ? `Delay: ${sendDelay}s` : '',
+        queue.fifo && sendGroup ? `Group: ${sendGroup}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · '),
+    });
+    if (!ok || selected?.url !== queue.url) {
+      sending = false;
+      return;
+    }
     try {
-      const message_attributes: Record<string, { DataType: string; StringValue: string }> = {};
-      for (const a of sendAttrs) if (a.k.trim()) message_attributes[a.k.trim()] = { DataType: 'String', StringValue: a.v };
       const r = await awsApi.sqsSend(account.id, {
         url: queue.url,
         body: sendBody,
         delay_seconds: sendDelay || undefined,
         group_id: queue.fifo ? sendGroup || undefined : undefined,
         dedup_id: queue.fifo ? sendDedup || undefined : undefined,
-        message_attributes: Object.keys(message_attributes).length ? message_attributes : undefined,
-      }, rq || undefined);
+        message_attributes: attrNames.length ? message_attributes : undefined,
+      }, region || undefined);
       toasts.success('Message sent', r.message_id);
-      void aws.loadSqsAttrs(account.id, queue.url, rq);
+      void aws.loadSqsAttrs(account.id, queue.url, region);
     } catch (e) {
       toastError('Couldn’t send', e);
     } finally {

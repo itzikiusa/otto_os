@@ -8920,6 +8920,10 @@ export interface AthenaQueryReq {
   database?: string;
   workgroup?: string;
   output_location?: string;
+  /** Set once the user confirmed a non-read statement (DDL/DML, see
+   *  `modules/aws/athena-sql.ts`); the daemon refuses an unconfirmed write on a
+   *  production account. */
+  confirm?: boolean;
 }
 
 export type AthenaQueryState = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';

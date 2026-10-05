@@ -24,6 +24,8 @@
   import RegionPicker from './RegionPicker.svelte';
   import { athenaCostUsd, fmtAgo, fmtBytes, fmtMs, awsErrorText, serviceTabKey } from './util';
   import { statusPollMs } from '../../lib/pollBackoff';
+  import { confirmProd, isProdEnv } from '../../lib/confirmProd';
+  import { athenaIsRead, athenaLeadKeyword } from './athena-sql';
   import type {
     AthenaExecution,
     AthenaQueryState,
@@ -224,6 +226,24 @@
     if (!canRun || running) return;
     const text = (editorSel.text.trim() || sql).trim();
     if (!text) return;
+    // DDL / DML (DROP, INSERT, CTAS, ALTER, MSCK…) runs through the same call
+    // as a SELECT: confirm where and what first — typed on a prod account —
+    // and tell the daemon it was confirmed (it refuses an unconfirmed write
+    // on prod).
+    const write = !athenaIsRead(text);
+    if (write) {
+      const prod = isProdEnv(account.environment);
+      const ok = await confirmProd({
+        env: account.environment,
+        verb: `Run ${athenaLeadKeyword(text) || 'statement'}`,
+        title: prod ? 'Run a write on production?' : 'Run a write statement?',
+        where: `Athena · ${account.name} · ${rq || account.region}${workgroup ? ` · workgroup ${workgroup}` : ''}${database ? ` · ${database}` : ''}`,
+        what: text,
+        typed: prod ? account.name : undefined,
+        danger: true,
+      });
+      if (!ok || running) return;
+    }
     const seq = ++executionGeneration;
     submitting = true;
     resultError = null;
@@ -239,6 +259,7 @@
         sql: text,
         database: database || undefined,
         workgroup: workgroup || undefined,
+        ...(write ? { confirm: true } : {}),
       }, started || undefined);
       if (seq !== executionGeneration) return;
       qRegion = started;
