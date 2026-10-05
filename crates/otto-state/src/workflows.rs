@@ -463,6 +463,41 @@ impl WorkflowsRepo {
         Ok(run)
     }
 
+    /// Admit a run only while the workflow has no live (`pending`/`running`)
+    /// run — the check and the insert share one `BEGIN IMMEDIATE` write
+    /// transaction, so two admitters (a workflow-kind scheduled task, an event
+    /// trigger, the schedule-trigger claim) can never both pass the check and
+    /// stack concurrent runs. `Ok(None)` = a run is already in flight.
+    pub async fn admit_run_if_idle(
+        &self,
+        workflow_id: &Id,
+        workspace_id: &Id,
+        input: &serde_json::Value,
+        created_by: Option<&Id>,
+    ) -> Result<Option<WorkflowRun>> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin idle workflow admission"))?;
+        let busy: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM workflow_runs
+             WHERE workflow_id = ? AND status IN ('pending','running') LIMIT 1",
+        )
+        .bind(workflow_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(dberr("idle admission check"))?;
+        if busy.is_some() {
+            return Ok(None);
+        }
+        let run = Self::insert_run(&mut tx, workflow_id, workspace_id, input, created_by).await?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit idle workflow admission"))?;
+        Ok(Some(run))
+    }
+
     /// Shared transactional insertion for ordinary run admission and atomic
     /// trigger claims. The caller commits its own surrounding transaction.
     pub(crate) async fn insert_run(
@@ -2454,5 +2489,57 @@ mod tests {
         }
         // Idempotent.
         assert!(repo.prune_runs(3, 30).await.unwrap().is_empty());
+    }
+
+    /// Finding 6: concurrent admitters (a workflow-kind scheduled task racing
+    /// an event trigger) get exactly ONE run; the check-then-insert is one
+    /// write transaction. A finished run frees the slot again.
+    #[tokio::test]
+    async fn admit_run_if_idle_admits_exactly_one_concurrent_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("wf.db"))
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(10));
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        let repo = WorkflowsRepo::new(pool.into());
+        let wf = repo
+            .create(
+                &"ws".into(),
+                "WF",
+                "description",
+                "",
+                &WorkflowGraph::default(),
+                &"u".into(),
+            )
+            .await
+            .unwrap();
+        let input = serde_json::json!({});
+        let admits = futures_util::future::join_all(
+            (0..6).map(|_| repo.admit_run_if_idle(&wf.id, &wf.workspace_id, &input, None)),
+        )
+        .await;
+        let admitted: Vec<_> = admits.into_iter().map(|r| r.unwrap()).flatten().collect();
+        assert_eq!(admitted.len(), 1, "exactly one concurrent admission");
+        assert!(repo.has_active_run(&wf.id).await.unwrap());
+        assert!(repo
+            .admit_run_if_idle(&wf.id, &wf.workspace_id, &input, None)
+            .await
+            .unwrap()
+            .is_none());
+        repo.update_run(&admitted[0].id, RunStatus::Success, &[], None, true)
+            .await
+            .unwrap();
+        assert!(repo
+            .admit_run_if_idle(&wf.id, &wf.workspace_id, &input, None)
+            .await
+            .unwrap()
+            .is_some());
     }
 }

@@ -1246,16 +1246,21 @@ pub fn spawn_run(
             {
                 tracing::error!(%run_id, "persisting run scope failed: {e}");
                 let nodes = prior_nodes.as_deref().unwrap_or(&[]);
-                let rev = WorkflowsRepo::new(ctx.pool.clone())
-                    .update_run(
+                // Conditional: a user Cancel that landed first stays canceled
+                // (no error overwrite, no misleading "error" event).
+                let Ok(Some(rev)) = WorkflowsRepo::new(ctx.pool.clone())
+                    .update_run_if(
                         &run_id,
+                        &[RunStatus::Pending, RunStatus::Running],
                         RunStatus::Error,
                         nodes,
                         Some(&format!("cannot persist execution scope: {e}")),
                         true,
                     )
                     .await
-                    .unwrap_or(0);
+                else {
+                    return;
+                };
                 // Announce it: open run views otherwise kept showing "queued".
                 emit_run_updated(
                     &ctx,
@@ -1306,16 +1311,21 @@ pub fn spawn_run(
                 match pinned_repo.definition_for_run(&r).await {
                     Ok(definition) => definition,
                     Err(error) => {
-                        let rev = pinned_repo
-                            .update_run(
+                        // Conditional: never overwrite a cancel that landed
+                        // after the Pending read above.
+                        let Ok(Some(rev)) = pinned_repo
+                            .update_run_if(
                                 &run_id,
+                                &[RunStatus::Pending, RunStatus::Running],
                                 RunStatus::Error,
                                 &r.nodes,
                                 Some(&error.to_string()),
                                 true,
                             )
                             .await
-                            .unwrap_or(0);
+                        else {
+                            return;
+                        };
                         emit_run_updated(
                             &ctx,
                             &workflow.workspace_id,
@@ -1746,10 +1756,21 @@ pub async fn run_workflow(
     {
         Ok(o) => o,
         Err(e) => {
-            let rev = repo
-                .update_run(&run_id, RunStatus::Error, &[], Some(&e), true)
+            // Conditional: an invalid graph must not turn a user's cancel
+            // into an error (nor announce one).
+            let Ok(Some(rev)) = repo
+                .update_run_if(
+                    &run_id,
+                    &[RunStatus::Pending, RunStatus::Running],
+                    RunStatus::Error,
+                    &[],
+                    Some(&e),
+                    true,
+                )
                 .await
-                .unwrap_or(0);
+            else {
+                return;
+            };
             emit_run_updated(
                 &ctx,
                 &workflow.workspace_id,

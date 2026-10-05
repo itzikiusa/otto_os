@@ -416,7 +416,8 @@ async fn complete_run(
             };
 
             let derr_for_notice = derr.clone();
-            repo.finish_run(
+            record_finish(
+                repo,
                 &run_id,
                 FinishRun {
                     status: "ok".into(),
@@ -434,7 +435,7 @@ async fn complete_run(
                     ..Default::default()
                 },
             )
-            .await?;
+            .await;
             if trigger == "schedule" {
                 let _ = settle_schedule(repo, task, "ok", now).await;
             } else {
@@ -473,12 +474,12 @@ async fn complete_run(
                 }
                 None => (None, None, String::new()),
             };
-            let _ = repo
-                .finish_run(
-                    &run_id,
-                    failure_finish(fail, msg, summary, report_path, report_rel_opt),
-                )
-                .await;
+            record_finish(
+                repo,
+                &run_id,
+                failure_finish(fail, msg, summary, report_path, report_rel_opt),
+            )
+            .await;
             if trigger == "schedule" {
                 let _ = settle_schedule(repo, task, status, Utc::now()).await;
             } else {
@@ -494,6 +495,37 @@ async fn complete_run(
             }
             Ok(run_id)
         }
+    }
+}
+
+/// Settle a run row, never leaving it `running`. A failed `finish_run` used to
+/// `?` out of [`complete_run`] before `settle_schedule`: the row stayed
+/// `running`, so every later Run now / tick saw the task busy until a daemon
+/// restart reaped it. Retry the full write briefly, then fall back to a
+/// minimal `error` row (smaller write, nothing derived to fail); the caller
+/// settles the schedule cursor either way.
+async fn record_finish(repo: &otto_state::ScheduledTasksRepo, run_id: &str, f: FinishRun) {
+    let mut last_err = None;
+    for attempt in 0..3u64 {
+        match repo.finish_run(run_id, f.clone()).await {
+            Ok(()) => return,
+            Err(e) => {
+                warn!(run = %run_id, "scheduled task: finish_run attempt {} failed: {e}", attempt + 1);
+                last_err = Some(e);
+                tokio::time::sleep(Duration::from_millis(200 * (attempt + 1))).await;
+            }
+        }
+    }
+    let minimal = FinishRun {
+        status: "error".into(),
+        error: Some(format!(
+            "The run finished but its result couldn’t be saved: {}",
+            last_err.map(|e| e.to_string()).unwrap_or_default()
+        )),
+        ..Default::default()
+    };
+    if let Err(e) = repo.finish_run(run_id, minimal).await {
+        warn!(run = %run_id, "scheduled task: minimal finish_run failed too: {e}");
     }
 }
 
@@ -1065,18 +1097,20 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask, sched_run_id: &
     // in-flight guard, so a 40-minute workflow on a 15-minute cadence used to
     // get a second — then third — concurrent run, each with its own worktrees
     // and agents.
-    if repo.has_active_run(&workflow.id).await? {
+    // The check and the insert are one write transaction (`admit_run_if_idle`):
+    // a separate has_active_run → create_run let a trigger admit between them.
+    let ws = ctx.workspaces.get(&task.workspace_id).await?;
+    let input = json!({ "trigger": "scheduled_task", "task_id": task.id, "task_name": task.name });
+    let Some(run) = repo
+        .admit_run_if_idle(&workflow.id, &workflow.workspace_id, &input, None)
+        .await?
+    else {
         return Err(Error::Conflict(format!(
             "skipped: a run of workflow \"{}\" is still in progress",
             workflow.name
         ))
         .into());
-    }
-    let ws = ctx.workspaces.get(&task.workspace_id).await?;
-    let input = json!({ "trigger": "scheduled_task", "task_id": task.id, "task_name": task.name });
-    let run = repo
-        .create_run(&workflow.id, &workflow.workspace_id, &input, None)
-        .await?;
+    };
     let run_id = run.id.clone();
     // Linked at once: the run row can open it while it runs, and a Stop
     // cancels it.

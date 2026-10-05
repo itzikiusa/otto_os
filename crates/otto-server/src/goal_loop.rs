@@ -188,9 +188,14 @@ pub async fn start_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
     Ok(())
 }
 
-/// Pause a running loop: bank the current active window so the time budget can't
-/// be refunded, then flag the controller to idle.
+/// Pause a running loop: one conditional write flips it to Paused and banks the
+/// active window (see `GoalLoopsRepo::pause_running`), then the controller is
+/// flagged to idle. A loop the controller already finished/blocked is left as
+/// is — pausing must never overwrite a terminal or Blocked status.
 pub async fn pause_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
+    if !ctx.goal_loops_repo.pause_running(loop_id).await? {
+        return Ok(());
+    }
     let loop_ = ctx.goal_loops_repo.get(loop_id).await?;
     if let Some(h) = ctx.goal_loops.lock().unwrap().get(loop_id) {
         h.paused.store(true, Ordering::Relaxed);
@@ -198,26 +203,6 @@ pub async fn pause_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
         ring_flags();
     }
     cleanup_executor_sessions(ctx, &loop_.workspace_id, loop_id).await;
-    if let Some(started) = loop_.run_started_at {
-        let secs = (Utc::now() - started).num_seconds().max(0) as u64;
-        ctx.goal_loops_repo.add_elapsed(loop_id, secs).await?;
-    }
-    ctx.goal_loops_repo
-        .set_run_started_at(loop_id, None)
-        .await?;
-    ctx.goal_loops_repo
-        .update_runtime(
-            loop_id,
-            GoalLoopStatus::Paused,
-            loop_.phase,
-            loop_.current_iteration,
-            loop_.progress_pct,
-        )
-        .await?;
-    if let Some(h) = ctx.goal_loops.lock().unwrap().get(&loop_id.to_string()) {
-        h.paused.store(true, Ordering::Relaxed);
-        ring_flags();
-    }
     emit(
         ctx,
         &loop_.workspace_id,
@@ -878,7 +863,7 @@ async fn set_phase(ctx: &ServerCtx, ws: &Id, loop_: &GoalLoop, phase: GoalLoopPh
     }
 }
 
-/// Bank the final active window, mark the loop terminal, preserve working files
+/// Mark the loop terminal (the repo write banks the open active window), preserve working files
 /// and release any lingering managed sessions.
 async fn finalize(
     ctx: &ServerCtx,
@@ -891,10 +876,6 @@ async fn finalize(
         Ok(l) => l,
         Err(_) => return,
     };
-    if let Some(started) = loop_.run_started_at {
-        let secs = (Utc::now() - started).num_seconds().max(0) as u64;
-        let _ = ctx.goal_loops_repo.add_elapsed(loop_id, secs).await;
-    }
     let _ = ctx
         .goal_loops_repo
         .finalize(loop_id, status, summary, error)
@@ -913,17 +894,13 @@ async fn finalize(
     );
 }
 
-/// Block the loop (awaiting user) without treating it as terminal-finished: bank
-/// the window, clear the anchor, set status Blocked. Resume re-spawns a controller.
+/// Block the loop (awaiting user) without treating it as terminal-finished: the
+/// repo write banks the window (only if still anchored), clears it, sets Blocked. Resume re-spawns a controller.
 async fn block(ctx: &ServerCtx, loop_id: &Id, summary: &str) {
     let loop_ = match ctx.goal_loops_repo.get(loop_id).await {
         Ok(l) => l,
         Err(_) => return,
     };
-    if let Some(started) = loop_.run_started_at {
-        let secs = (Utc::now() - started).num_seconds().max(0) as u64;
-        let _ = ctx.goal_loops_repo.add_elapsed(loop_id, secs).await;
-    }
     let _ = ctx
         .goal_loops_repo
         .finalize(loop_id, GoalLoopStatus::Blocked, Some(summary), None)

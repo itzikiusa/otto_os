@@ -5,8 +5,9 @@
 //! claims a per-task **in-flight guard FIRST**; if a task is already running it is
 //! skipped **without advancing the cursor**, so the occurrence is retried rather
 //! than lost. The engine advances the `last_run_at` cursor only on run completion.
-//! On startup we **reap** any `running` rows left by a previous daemon life
-//! (the in-flight guard is in-memory and resets empty across restarts). The
+//! On startup the daemon awaits [`reap_interrupted`] (before serving) to reap
+//! any `running` rows left by a previous daemon life (the in-flight guard is
+//! in-memory and resets empty across restarts). The
 //! guard set is the engine's process-wide [`in_flight`] set, shared with the
 //! manual "Run now" path, so a due occurrence never starts on top of a manual
 //! run that is still going.
@@ -31,12 +32,20 @@ pub fn start(ctx: ServerCtx) -> CancelSignal {
     cancel
 }
 
-async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
+/// Startup reap: mark every run a previous daemon life left `running` as
+/// interrupted (the in-flight guard is in-memory and resets across restarts).
+/// The daemon AWAITS this before serving the router and before [`start`] — run
+/// inside the spawned supervisor it raced the first manual "Run now" and could
+/// mark that brand-new run interrupted.
+pub async fn reap_interrupted(ctx: &ServerCtx) {
     match ctx.scheduled_tasks.reap_running().await {
         Ok(n) if n > 0 => info!("scheduled tasks: reaped {n} interrupted run(s) on startup"),
         Ok(_) => {}
         Err(e) => warn!("scheduled tasks: startup reap failed: {e}"),
     }
+}
+
+async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
     loop {
         if cancel.is_cancelled() {
             return;

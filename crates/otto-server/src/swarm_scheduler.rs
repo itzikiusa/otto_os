@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Datelike, TimeZone, Utc};
-use otto_state::{AgentPatch, NewRun, RunPatch, TaskPatch};
+use chrono::{DateTime, Utc};
+use otto_state::{NewRun, RunPatch, TaskPatch};
 use serde_json::{json, Value};
 
 use crate::cancel_signal::CancelSignal;
@@ -55,7 +55,7 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         {
             continue;
         }
-        if !is_due(&sched, now) {
+        if !is_due(&sched, Some(agent.created_at), now) {
             continue;
         }
         let _operation = crate::swarm_runtime::operation_guard(&agent.swarm_id).await;
@@ -88,9 +88,11 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
             continue;
         }
 
+        // Reservation + cursor advance commit together, guarded on the stored
+        // schedule still being the one judged due (see reserve_scheduled_run).
         match ctx
             .swarm_repo
-            .reserve_run(
+            .reserve_scheduled_run(
                 NewRun {
                     swarm_id: swarm.id.clone(),
                     workspace_id: swarm.workspace_id.clone(),
@@ -100,27 +102,13 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
                     kind: "scheduled".into(),
                     trigger: "scheduled".into(),
                 },
-                false,
+                &sched,
+                &now.to_rfc3339(),
             )
             .await
         {
-            Ok(run) => {
-                // Advance only after reservation succeeds. A losing schedule stays due.
-                let mut sched2 = sched.clone();
-                if let Some(obj) = sched2.as_object_mut() {
-                    obj.insert("last_run".into(), json!(now.to_rfc3339()));
-                }
-                let _ = ctx
-                    .swarm_repo
-                    .update_agent(
-                        &agent.id,
-                        AgentPatch {
-                            schedule: Some(Some(sched2)),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-
+            Ok(None) => {}
+            Ok(Some(run)) => {
                 swarm_run::emit_run(ctx, &run.id).await;
                 let ctx2 = ctx.clone();
                 tokio::spawn(async move {
@@ -360,82 +348,98 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
     Ok(())
 }
 
-fn parse_hhmm(v: Option<&Value>) -> (u32, u32) {
+fn parse_ts(v: Option<&Value>) -> Option<DateTime<Utc>> {
     v.and_then(Value::as_str)
-        .and_then(|s| {
-            let mut it = s.split(':');
-            let h = it.next()?.parse::<u32>().ok()?;
-            let m = it.next().unwrap_or("0").parse::<u32>().ok()?;
-            Some((h.min(23), m.min(59)))
-        })
-        .unwrap_or((9, 0))
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&Utc))
 }
 
-/// Is a scheduled agent due to fire? Times are interpreted in UTC.
-pub fn is_due(sched: &Value, now: DateTime<Utc>) -> bool {
-    let last = sched
-        .get("last_run")
-        .and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.with_timezone(&Utc));
-    match sched
-        .get("cadence")
-        .and_then(Value::as_str)
-        .unwrap_or("interval")
+/// Is a scheduled agent due to fire? Delegates to the shared
+/// [`crate::cadence`] engine (Scheduled Tasks / workflow triggers), so agent
+/// schedules get the same semantics: `at` in the schedule's IANA `timezone`
+/// (UTC when absent — every pre-existing agent behaves as before), `cron`, and
+/// an arm floor — the cursor is `max(last_run, armed_at)`, where `armed_at` is
+/// stamped server-side when the schedule is created, resumed, or re-timed
+/// (`otto_state::merge_agent_schedule`). Without it a new `daily 09:00` saved
+/// at 15:00 fired at once. `created` anchors a never-run cron's first fire.
+pub fn is_due(sched: &Value, created: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    let mut spec = sched.clone();
+    // Swarm schedules historically defaulted a missing weekday to Tuesday (1).
+    if spec.get("cadence").and_then(Value::as_str) == Some("weekly")
+        && spec.get("weekday").is_none()
     {
-        "interval" => {
-            let every = sched
-                .get("every_min")
-                .and_then(Value::as_i64)
-                .unwrap_or(60)
-                .max(1);
-            match last {
-                Some(l) => (now - l).num_minutes() >= every,
-                None => true,
-            }
+        if let Some(o) = spec.as_object_mut() {
+            o.insert("weekday".into(), json!(1));
         }
-        "daily" => {
-            let (h, m) = parse_hhmm(sched.get("at"));
-            let target = Utc
-                .with_ymd_and_hms(now.year(), now.month(), now.day(), h, m, 0)
-                .single();
-            match target {
-                Some(t) => now >= t && last.is_none_or(|l| l < t),
-                None => false,
-            }
-        }
-        "weekly" => {
-            let wd = sched.get("weekday").and_then(Value::as_i64).unwrap_or(1) as u32;
-            if now.weekday().num_days_from_monday() != wd {
-                return false;
-            }
-            let (h, m) = parse_hhmm(sched.get("at"));
-            let target = Utc
-                .with_ymd_and_hms(now.year(), now.month(), now.day(), h, m, 0)
-                .single();
-            match target {
-                Some(t) => now >= t && last.is_none_or(|l| l < t),
-                None => false,
-            }
-        }
-        _ => false,
     }
+    let last = crate::cadence::effective_cursor(
+        &spec,
+        parse_ts(spec.get("last_run")),
+        parse_ts(spec.get("armed_at")),
+    );
+    let tz = crate::cadence::task_tz(spec.get("timezone").and_then(Value::as_str).unwrap_or(""));
+    crate::cadence::is_due_since(&spec, last, created, now, tz)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn interval_due_when_never_run() {
         let s = json!({"cadence": "interval", "every_min": 30, "enabled": true});
-        assert!(is_due(&s, Utc::now()));
+        assert!(is_due(&s, None, Utc::now()));
     }
 
     #[test]
     fn interval_not_due_within_window() {
         let now = Utc::now();
         let s = json!({"cadence":"interval","every_min":60,"last_run": (now).to_rfc3339()});
-        assert!(!is_due(&s, now));
+        assert!(!is_due(&s, None, now));
+    }
+
+    #[test]
+    fn daily_armed_after_today_slot_waits_for_tomorrow() {
+        // Saved at 15:00 UTC with `at: 09:00`: the arm instant is past today's
+        // slot, so it must not fire until tomorrow (the old UTC-only check
+        // fired at once because there was no cursor).
+        let now = Utc.with_ymd_and_hms(2026, 10, 5, 15, 0, 30).unwrap();
+        let armed = Utc.with_ymd_and_hms(2026, 10, 5, 15, 0, 0).unwrap();
+        let s = json!({"cadence":"daily","at":"09:00","enabled":true,
+                       "armed_at": armed.to_rfc3339()});
+        assert!(!is_due(&s, None, now));
+        let tomorrow = Utc.with_ymd_and_hms(2026, 10, 6, 9, 0, 30).unwrap();
+        assert!(is_due(&s, None, tomorrow));
+    }
+
+    #[test]
+    fn daily_respects_schedule_timezone() {
+        // 09:00 in Jerusalem (UTC+3 in October) is 06:00 UTC.
+        let s = json!({"cadence":"daily","at":"09:00","timezone":"Asia/Jerusalem","enabled":true});
+        let before = Utc.with_ymd_and_hms(2026, 10, 5, 5, 59, 0).unwrap();
+        let after = Utc.with_ymd_and_hms(2026, 10, 5, 6, 0, 30).unwrap();
+        assert!(!is_due(&s, None, before));
+        assert!(is_due(&s, None, after));
+    }
+
+    #[test]
+    fn edited_schedule_keeps_cursor_so_it_does_not_refire() {
+        // Regression (finding 2): an agent edit rebuilt the schedule without
+        // `last_run`, so the very next tick fired a duplicate run.
+        let fired = Utc.with_ymd_and_hms(2026, 10, 5, 9, 0, 10).unwrap();
+        let stored = json!({"cadence":"daily","at":"09:00","enabled":true,
+                            "directive":"old","last_run": fired.to_rfc3339(),
+                            "armed_at": "2026-10-01T00:00:00+00:00"});
+        let edited = json!({"cadence":"daily","at":"09:00","enabled":true,"directive":"new"});
+        let merged =
+            otto_state::merge_agent_schedule(Some(&stored), edited, "2026-10-05T10:00:00+00:00");
+        assert_eq!(merged["last_run"], stored["last_run"]);
+        assert_eq!(
+            merged["armed_at"], stored["armed_at"],
+            "directive edit must not re-arm"
+        );
+        let next_tick = Utc.with_ymd_and_hms(2026, 10, 5, 10, 1, 0).unwrap();
+        assert!(!is_due(&merged, None, next_tick));
     }
 }

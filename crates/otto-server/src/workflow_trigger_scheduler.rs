@@ -387,11 +387,19 @@ pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> 
                 copy_result_destinations(&trigger.spec, &mut input_map);
                 let input = Value::Object(input_map);
 
+                // Re-checked atomically with the insert: the early check above
+                // only spares the input build; a scheduled task or schedule
+                // trigger may admit a run in between.
                 let run = match workflows_repo
-                    .create_run(&wf.id, &wf.workspace_id, &input, None)
+                    .admit_run_if_idle(&wf.id, &wf.workspace_id, &input, None)
                     .await
                 {
-                    Ok(r) => r,
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        info!(workflow_id = %wf.id, event_kind = kind_str,
+                              "workflow event-trigger listener: run already active — skipping");
+                        continue;
+                    }
                     Err(e) => {
                         warn!(
                             workflow_id = %wf.id,
