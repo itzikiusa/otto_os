@@ -1492,8 +1492,10 @@ mod fts_map_tests {
         );
     }
 
-    /// An index built before the map: `ensure_fts` builds the map once and
-    /// keeps only the newest row per memory.
+    /// An index built before the map: `ensure_fts_map` builds the map once
+    /// and keeps only the newest row per memory. (Driven directly: the
+    /// `ensure_fts` reconcile that follows would also prune these rows, since
+    /// no `memories` row `m` exists — asserted last.)
     #[tokio::test]
     async fn legacy_index_gets_its_map_built_and_deduplicated() {
         let r = MemoriesRepo::new(crate::db::test_pool().await);
@@ -1513,9 +1515,18 @@ mod fts_map_tests {
             .await
             .unwrap();
         }
-        assert!(r.ensure_fts().await.unwrap());
+        r.ensure_fts_map().await.unwrap();
         assert_eq!(rows(&r).await, vec![("m".to_string(), "new".to_string())]);
         r.fts_index("m", "ws", "T", "newer").await.unwrap();
         assert_eq!(rows(&r).await, vec![("m".to_string(), "newer".to_string())]);
+        // The index mirrors `memories`: a row for a memory that no longer
+        // exists is an orphan the startup reconcile removes (map row too).
+        assert!(r.ensure_fts().await.unwrap());
+        assert_eq!(rows(&r).await, vec![]);
+        let mapped: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories_fts_ids")
+            .fetch_one(&r.pool)
+            .await
+            .unwrap();
+        assert_eq!(mapped, 0);
     }
 }
