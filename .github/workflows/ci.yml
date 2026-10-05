@@ -232,22 +232,13 @@ jobs:
       - name: Bundle-size budget
         run: node scripts/bundle-budget.mjs
 
-  # A SMALL, fast subset of the Playwright perf gates on WebKit — the engine
-  # closest to the app's WKWebView — against an isolated debug daemon
-  # (ui/e2e/global-setup.ts: temp data dir, own port, file secret store).
-  # Chosen for stability: bounded-DOM counts (git sidebar, file viewer,
-  # insights, Kafka/K8s lists, a 100k-row grid) plus the grid's scroll/paint
-  # timings, the terminal flood/^C and park-redraw budgets, and the daemon's
-  # terminal emulator budgets (otto-pty, gated by OTTO_PERF), which run with
-  # OTTO_PERF_BUDGET_SCALE=3 (budgets were measured on a Mac; counts are never scaled). The full perf set runs locally with
-  # `npx playwright test --project=desktop-webkit` (docs/testing/ci-performance.md).
-  # Advisory until it has a green history: this is the first job to run the
-  # daemon + Playwright WebKit on the Linux runner.
-  perf-gates:
-    name: Perf gates (WebKit subset, advisory)
+  # Build the debug test daemon ONCE and hand it to every job that drives a
+  # real ottod (e2e-functional shards, perf-gates, daemon-budget) as an
+  # artifact — each of those used to compile the whole workspace itself.
+  build-ottod:
+    name: Build test daemon (ottod, debug)
     runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -268,6 +259,113 @@ jobs:
 
       - name: Build the test daemon
         run: cargo build -p ottod
+
+      - name: Upload the test daemon
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ottod-debug
+          path: target/debug/ottod
+          retention-days: 3
+          if-no-files-found: error
+
+  # BLOCKING functional E2E: every desktop-* spec on the desktop-browser
+  # project (Chromium, 1280×800 3-pane shell) plus the mobile specs at iPhone
+  # portrait (WebKit), sharded across 4 runners. Isolated throwaway daemon per
+  # shard (ui/e2e/global-setup.ts: temp data dir, own port, file secret store,
+  # fake agent CLIs). Perf specs are skipped here (OTTO_E2E_FUNCTIONAL_ONLY) —
+  # they run in perf-gates. Retries are 0 and any `flaky` count fails the
+  # shard. The other mobile/tablet projects run nightly (e2e-nightly.yml).
+  e2e-functional:
+    name: E2E functional (shard ${{ matrix.shard }}/4)
+    needs: build-ottod
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Download the test daemon
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: ottod-debug
+          path: target/debug
+
+      # Artifacts drop the executable bit.
+      - name: Make the test daemon executable
+        run: chmod +x target/debug/ottod
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.10.0
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: npm ci
+        working-directory: ui
+        run: npm ci
+
+      # desktop-browser = Chromium; iphone-portrait = WebKit (device default).
+      - name: Install Playwright browsers
+        working-directory: ui
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: E2E (desktop-browser + iphone-portrait)
+        working-directory: ui
+        env:
+          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_E2E_FUNCTIONAL_ONLY: '1'
+        run: >-
+          npx playwright test
+          --project=desktop-browser --project=iphone-portrait
+          --shard=${{ matrix.shard }}/4 --retries=0
+
+      - name: Fail on flaky tests
+        if: success() || failure()
+        working-directory: ui
+        run: node scripts/e2e-flaky-check.mjs
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: e2e-functional-report-${{ matrix.shard }}
+          path: |
+            ui/e2e/.report-0
+            ui/test-results
+          retention-days: 7
+
+  # A SMALL, fast subset of the Playwright perf gates on WebKit — the engine
+  # closest to the app's WKWebView — against an isolated debug daemon
+  # (ui/e2e/global-setup.ts: temp data dir, own port, file secret store).
+  # Chosen for stability: bounded-DOM counts (git sidebar, file viewer,
+  # insights, Kafka/K8s lists, a 100k-row grid) plus the grid's scroll/paint
+  # timings, the terminal flood/^C and park-redraw budgets, and the daemon's
+  # terminal emulator budgets (otto-pty, gated by OTTO_PERF), which run with
+  # OTTO_PERF_BUDGET_SCALE=3 (budgets were measured on a Mac; counts are never scaled). The full perf set runs locally with
+  # `npx playwright test --project=desktop-webkit` (docs/testing/ci-performance.md).
+  # Advisory until it has a green history: this is the first job to run the
+  # daemon + Playwright WebKit on the Linux runner.
+  perf-gates:
+    name: Perf gates (WebKit subset, advisory)
+    needs: build-ottod
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Download the test daemon
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: ottod-debug
+          path: target/debug
+
+      - name: Make the test daemon executable
+        run: chmod +x target/debug/ottod
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
@@ -314,6 +412,11 @@ jobs:
           npx playwright test --project=desktop-webkit --workers=1
           e2e/desktop-db-scale-perf.spec.ts --grep @ci
 
+      - name: Fail on flaky tests
+        if: success() || failure()
+        working-directory: ui
+        run: node scripts/e2e-flaky-check.mjs
+
       - name: Upload the Playwright report
         if: failure()
         uses: actions/upload-artifact@v7.0.1
@@ -330,28 +433,20 @@ jobs:
   # summary only. macOS + ClickHouse: .github/workflows/perf-nightly.yml.
   daemon-budget:
     name: Daemon perf budget
+    needs: build-ottod
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+      - name: Download the test daemon
+        uses: actions/download-artifact@v7.0.0
         with:
-          shared-key: perf-gates
-          save-if: false
+          name: ottod-debug
+          path: target/debug
 
-      - name: Install librdkafka build deps
-        run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
-          sudo apt-get install -y cmake libcurl4-openssl-dev
-
-      - name: Build the test daemon
-        run: cargo build -p ottod
+      - name: Make the test daemon executable
+        run: chmod +x target/debug/ottod
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
@@ -411,3 +506,33 @@ jobs:
         # caching_sha2_password auth (not used at runtime by our SQLite-only
         # state). Ignore until sqlx-mysql swaps its RSA backend.
         run: cargo audit --ignore RUSTSEC-2023-0071
+
+  # Duplicate-version report (deny.toml: multiple-versions = "warn"). Advisory:
+  # it surfaces crates compiled twice at different semver majors so they can be
+  # aligned; licenses/advisories are not gated here (see the audit job).
+  deny:
+    name: cargo deny (duplicates, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: cargo deny check bans
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          command: check bans
+
+  # Bug-fix commits that touch the UI should carry a test (ui/unit or ui/e2e).
+  # Non-blocking: prints a ::warning:: per offending commit in the PR range.
+  fix-has-test:
+    name: UI fix carries a test (advisory)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check 🐛 fix( commits touching ui/src
+        run: scripts/check-fix-has-test.sh "origin/${{ github.base_ref }}" "${{ github.event.pull_request.head.sha }}"
