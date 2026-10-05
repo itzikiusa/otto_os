@@ -2628,6 +2628,12 @@ mod tests {
             .unwrap();
         repo.delete(&wf.id).await.unwrap();
         assert!(repo.get(&wf.id).await.is_err());
+        // The test pool runs without foreign keys; do the cascade by hand.
+        sqlx::query("DELETE FROM workflow_runs WHERE id=?")
+            .bind(&run.id)
+            .execute(&pool)
+            .await
+            .unwrap();
         assert!(
             repo.is_canceled(&run.id).await,
             "a run whose row is gone must read as canceled"
