@@ -1391,6 +1391,5 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
 /// `local_write` / `outward` one still counts as mutating so a read-only token
 /// scope refuses it.
 pub fn tool_is_mutating(bare: &str) -> bool {
-    DANGEROUS.contains(&bare)
-        || ui_commands::by_tool(bare).is_some_and(|c| c.risk.mutating())
+    DANGEROUS.contains(&bare) || ui_commands::by_tool(bare).is_some_and(|c| c.risk.mutating())
 }
