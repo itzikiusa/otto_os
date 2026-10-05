@@ -19,7 +19,7 @@
 //! "(cached)" log line. The cache is upserted on every successful node execution
 //! so subsequent re-runs can skip unchanged steps.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -970,8 +970,7 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                 // Tell the chat thread that started it — its last message was
                 // otherwise "▶ … started" forever.
                 if let Ok((wf, _)) = &loaded {
-                    deliver_run_result(ctx, wf, &nodes, RunStatus::Error, None, &run.input, None)
-                        .await;
+                    spawn_recovery_delivery(ctx, wf, &nodes, RunStatus::Error, &run.input);
                 }
                 settled += 1;
             }
@@ -996,13 +995,32 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                     false,
                 );
                 if let Ok((wf, _)) = &loaded {
-                    deliver_run_result(ctx, wf, &nodes, status, None, &run.input, None).await;
+                    spawn_recovery_delivery(ctx, wf, &nodes, status, &run.input);
                 }
                 settled += 1;
             }
         }
     }
     (resumed, settled)
+}
+
+/// Report a run settled by boot recovery back to its chat/webhook origin in
+/// the BACKGROUND. Recovery runs before the listener serves; delivering inline
+/// (a Keychain read + Slack/Telegram/webhook HTTP per run, serially) kept the
+/// daemon and UI unreachable for as long as a post-reboot network flap or a
+/// slow webhook lasted, multiplied by the interrupted runs (S3-06). Only the
+/// DB writes stay on the boot path.
+fn spawn_recovery_delivery(
+    ctx: &ServerCtx,
+    wf: &Workflow,
+    nodes: &[NodeRunState],
+    status: RunStatus,
+    input: &Value,
+) {
+    let (ctx, wf, nodes, input) = (ctx.clone(), wf.clone(), nodes.to_vec(), input.clone());
+    tokio::spawn(async move {
+        deliver_run_result(&ctx, &wf, &nodes, status, None, &input, None).await;
+    });
 }
 
 /// If the resume entry is an `agent_prompt` whose handoff `.md` exists in the
@@ -1447,6 +1465,97 @@ pub fn driver_alive(run_id: &Id) -> bool {
         .unwrap_or_else(|e| e.into_inner())
         .get(run_id)
         .is_some_and(|n| *n > 0)
+}
+
+/// A run's TERMINAL CAS write, retried briefly: a transient failure (a busy
+/// or locked DB) used to be logged and ignored — the row stayed
+/// `pending`/`running` with no driver, and one-at-a-time admission refused
+/// every later trigger of the workflow until a restart (S3-07). A write that
+/// still fails is left to [`sweep_orphaned_runs`] once this driver exits.
+async fn write_terminal(
+    repo: &WorkflowsRepo,
+    run_id: &Id,
+    expected: &[RunStatus],
+    status: RunStatus,
+    nodes: &[NodeRunState],
+    error: Option<&str>,
+) -> otto_core::Result<Option<i64>> {
+    let mut attempt = 0u64;
+    loop {
+        match repo
+            .update_run_if(run_id, expected, status, nodes, error, true)
+            .await
+        {
+            Ok(r) => return Ok(r),
+            Err(e) if attempt < 3 => {
+                attempt += 1;
+                tracing::warn!(%run_id, attempt, "workflow terminal write failed, retrying: {e}");
+                tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// How often [`start_orphan_run_sweep`] looks for driverless live runs.
+const ORPHAN_SWEEP: Duration = Duration::from_secs(60);
+
+/// Runs errored as orphaned since boot (metric; also logged per sweep).
+pub static ORPHANED_RUNS_SWEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Start the runtime orphan-run sweep (post-listen): a `pending`/`running`
+/// row with no live driver — even a queued run holds one, see [`spawn_run`]
+/// — can never finish, and blocks its workflow's triggers (S3-07).
+pub fn start_orphan_run_sweep(ctx: &ServerCtx) {
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let mut suspects = HashSet::new();
+        loop {
+            tokio::time::sleep(ORPHAN_SWEEP).await;
+            suspects = sweep_orphaned_runs(&ctx, &suspects).await;
+        }
+    });
+}
+
+/// One sweep pass. A live row must be driverless on TWO consecutive passes
+/// before it is errored, so a row created an instant before its
+/// [`spawn_run`] is never mistaken for an orphan. Returns this pass's
+/// suspects (driverless, first sighting).
+pub(crate) async fn sweep_orphaned_runs(ctx: &ServerCtx, prev: &HashSet<Id>) -> HashSet<Id> {
+    let repo = WorkflowsRepo::new(ctx.pool.clone());
+    let Ok(ids) = repo.list_active_run_ids_global().await else {
+        return prev.clone();
+    };
+    let mut suspects = HashSet::new();
+    for id in ids {
+        if driver_alive(&id) {
+            continue;
+        }
+        if !prev.contains(&id) {
+            suspects.insert(id);
+            continue;
+        }
+        let Ok(run) = repo.get_run(&id).await else {
+            continue;
+        };
+        let nodes = settle_interrupted_nodes(run.nodes.clone());
+        if let Ok(Some(rev)) = repo
+            .update_run_if(
+                &id,
+                &[RunStatus::Pending, RunStatus::Running],
+                RunStatus::Error,
+                &nodes,
+                Some("The run lost its engine driver and can't finish — re-run the workflow."),
+                true,
+            )
+            .await
+        {
+            let total = ORPHANED_RUNS_SWEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            tracing::warn!(run = %id, orphaned_total = total, "workflow orphan sweep: errored a driverless run");
+            emit_run_updated(ctx, &run.workspace_id, &id, "error", None, rev, None, &nodes, false);
+        }
+    }
+    suspects
 }
 
 /// Holds a run's [`live_drivers`] entry for the life of its driver task —
@@ -2767,16 +2876,15 @@ pub async fn run_workflow(
         );
         // Terminal writes are CAS on in-flight: a cancel that landed after the
         // last boundary check wins, and is finalized as a cancel.
-        let rev = match repo
-            .update_run_if(
-                &run_id,
-                &[RunStatus::Pending, RunStatus::Running],
-                RunStatus::Error,
-                &states,
-                Some(&msg),
-                true,
-            )
-            .await
+        let rev = match write_terminal(
+            &repo,
+            &run_id,
+            &[RunStatus::Pending, RunStatus::Running],
+            RunStatus::Error,
+            &states,
+            Some(&msg),
+        )
+        .await
         {
             Ok(Some(rev)) => rev,
             Ok(None) => {
@@ -2825,16 +2933,15 @@ pub async fn run_workflow(
     } else {
         None
     };
-    let rev = match repo
-        .update_run_if(
-            &run_id,
-            &[RunStatus::Pending, RunStatus::Running],
-            final_status,
-            &states,
-            err_msg.as_deref(),
-            true,
-        )
-        .await
+    let rev = match write_terminal(
+        &repo,
+        &run_id,
+        &[RunStatus::Pending, RunStatus::Running],
+        final_status,
+        &states,
+        err_msg.as_deref(),
+    )
+    .await
     {
         Ok(Some(rev)) => rev,
         // Canceled after the last node boundary: the cancel wins (it used to
@@ -2956,16 +3063,15 @@ async fn finalize_canceled_run(
     // canceled. Accepting pending/running too let a stale driver overwrite a
     // RETRY the user started meanwhile (its fresh `pending` row got this
     // driver's old node states and a canceled status: the retry died silently).
-    let rev = match repo
-        .update_run_if(
-            run_id,
-            &[RunStatus::Canceled],
-            RunStatus::Canceled,
-            states,
-            Some("canceled"),
-            true,
-        )
-        .await
+    let rev = match write_terminal(
+        repo,
+        run_id,
+        &[RunStatus::Canceled],
+        RunStatus::Canceled,
+        states,
+        Some("canceled"),
+    )
+    .await
     {
         Ok(Some(rev)) => rev,
         Ok(None) => {
@@ -8554,6 +8660,48 @@ mod tests {
             }
             other => panic!("expected Fail, got {other:?}"),
         }
+    }
+
+    /// S3-07: a live run row with no driver (its terminal write failed, its
+    /// driver panicked) is errored by the runtime sweep on its SECOND
+    /// driverless sighting — never on the first, and never while a driver
+    /// (even a queued one) holds it.
+    #[tokio::test]
+    async fn orphan_sweep_errors_driverless_runs_after_two_passes() {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "orphan-ws").await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let repo = WorkflowsRepo::new(ctx.pool.clone());
+        let wf = repo
+            .create(&"orphan-ws".into(), "WF", "", "", &WorkflowGraph::default(), &"u".into())
+            .await
+            .unwrap();
+        let orphan = repo
+            .create_run(&wf.id, &"orphan-ws".into(), &json!({}), None)
+            .await
+            .unwrap();
+        let driven = repo
+            .create_run(&wf.id, &"orphan-ws".into(), &json!({}), None)
+            .await
+            .unwrap();
+        let _driver = DriverGuard::register(&driven.id);
+        let first = sweep_orphaned_runs(&ctx, &HashSet::new()).await;
+        assert!(first.contains(&orphan.id) && !first.contains(&driven.id));
+        assert!(!repo.is_canceled(&orphan.id).await);
+        assert_eq!(repo.get_run(&orphan.id).await.unwrap().status, RunStatus::Pending);
+        sweep_orphaned_runs(&ctx, &first).await;
+        let swept = repo.get_run(&orphan.id).await.unwrap();
+        assert_eq!(swept.status, RunStatus::Error);
+        assert!(swept.error.unwrap_or_default().contains("lost its engine driver"));
+        assert_eq!(repo.get_run(&driven.id).await.unwrap().status, RunStatus::Pending);
+        // The workflow is admissible again.
+        assert!(repo
+            .admit_run_if_idle(&wf.id, &"orphan-ws".into(), &json!({}), None)
+            .await
+            .unwrap()
+            .is_none(), "the driven run still holds the slot");
     }
 
     #[test]
