@@ -101,15 +101,23 @@
       } else {
         loadError = loadErrorText(e);
         loadCause = shareErrorCause(e);
+        linkDead = isDeadLink(e);
         viewState = 'error';
       }
     }
   }
 
+  /** A revoked / expired / unknown link: retrying can never succeed, so the
+   *  error card drops its Retry (it only invited a pointless loop). */
+  let linkDead = $state(false);
+  function isDeadLink(e: unknown): boolean {
+    return e instanceof ApiError && [401, 403, 404, 410].includes(e.status);
+  }
+
   /** What a guest can act on: a dead link vs. a host that's unreachable/busy. */
   function shareErrorCause(e: unknown): string {
     if (e instanceof ApiError) {
-      if (e.status === 401 || e.status === 403 || e.status === 404 || e.status === 410) {
+      if (isDeadLink(e)) {
         return 'This share link was revoked or has expired. Ask the person who shared it for a new link.';
       }
       return 'The host had a problem opening this session. Try again in a moment.';
@@ -352,7 +360,9 @@
       <h2>Couldn’t open this session</h2>
       <p>{loadCause}</p>
       {#if loadError}<p class="hint">{loadError}</p>{/if}
-      <button class="btn ec-retry" onclick={() => void loadSession()}><Icon name="refresh" size={13} /> Retry</button>
+      {#if !linkDead}
+        <button class="btn ec-retry" onclick={() => void loadSession()}><Icon name="refresh" size={13} /> Retry</button>
+      {/if}
     </div>
   </div>
 
