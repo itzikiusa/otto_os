@@ -6159,7 +6159,7 @@ fn sandbox_policy(
 }
 
 async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
-    let out = tokio::process::Command::new("git")
+    let out = otto_git::hardened_command()
         .arg("-C")
         .arg(cwd)
         .args(["rev-parse", "--git-common-dir"])

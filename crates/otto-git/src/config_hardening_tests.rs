@@ -269,3 +269,25 @@ fn worktree_round_trip_rejects_forged_pointers() {
         "re-pointed admin gitdir"
     );
 }
+
+/// S2-11: the exported helpers carry the same hardening as `base_cmd`.
+#[test]
+fn hardened_command_helpers_carry_the_hardened_config() {
+    let tokio_cmd = crate::hardened_command();
+    let std_cmd = crate::hardened_std_command();
+    for cmd in [tokio_cmd.as_std(), &std_cmd] {
+        let env: Vec<_> = cmd.get_envs().collect();
+        let get = |k: &str| {
+            env.iter()
+                .find(|(n, _)| *n == k)
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        assert_eq!(cmd.get_program(), "git");
+        assert_eq!(
+            get("GIT_CONFIG_PARAMETERS").as_deref(),
+            Some(HARDENED_GIT_CONFIG)
+        );
+        assert_eq!(get("GIT_TERMINAL_PROMPT").as_deref(), Some("0"));
+        assert_eq!(get("GIT_PAGER").as_deref(), Some("cat"));
+    }
+}

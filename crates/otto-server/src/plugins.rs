@@ -471,7 +471,7 @@ async fn install(
                     "unsupported plugin source url '{src}'"
                 )))
             })?;
-        let out = Command::new("git")
+        let out = otto_git::hardened_command()
             .args([
                 "-c",
                 "protocol.allow=never",

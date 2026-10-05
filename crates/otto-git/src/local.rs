@@ -250,6 +250,35 @@ pub(crate) fn hardened_config_for(verb: &str) -> &'static str {
     }
 }
 
+/// A `git` command for code OUTSIDE [`LocalGit`] (rev-parse probes, goal-loop
+/// evidence, skill-eval scratch repos, plugin clones…) with the same
+/// hardening every daemon git gets: repo config can't pick a program for it
+/// to run ([`HARDENED_GIT_CONFIG`]: fsmonitor off, hooks off), no pager, no
+/// credential prompt, stdin closed, killed when dropped. Prefer `LocalGit`
+/// (output cap + timeouts) where it fits; spawning a bare
+/// `Command::new("git")` outside otto-git is refused by a guard test
+/// (`otto-server` `no_bare_git_spawns`).
+pub fn hardened_command() -> Command {
+    let mut cmd = Command::new("git");
+    harden(cmd.as_std_mut());
+    cmd.kill_on_drop(true);
+    cmd
+}
+
+/// [`hardened_command`] for synchronous callers.
+pub fn hardened_std_command() -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    harden(&mut cmd);
+    cmd
+}
+
+fn harden(cmd: &mut std::process::Command) {
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_PARAMETERS", HARDENED_GIT_CONFIG)
+        .env("GIT_PAGER", "cat")
+        .stdin(Stdio::null());
+}
+
 /// Does the work tree at `path` round-trip to the repo whose common git dir
 /// is `common`? The main tree's `.git` must BE `common`; a linked tree's
 /// `.git` file must name `<common>/worktrees/<id>`, whose `gitdir` file must
