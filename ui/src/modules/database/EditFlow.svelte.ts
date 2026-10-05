@@ -699,6 +699,10 @@ export class EditFlow {
     const sql = this.reviewSql.sql.trim();
     if (!sql) return;
     this.runningReview = true;
+    // The tab (and connection) this grid belongs to: the post-apply refresh
+    // runs in the ACTIVE tab, so it must only run while that is still this one.
+    const tabId = database.tab?.id;
+    const connId = database.selectedConnId;
     try {
       // Scope to the database the result RAN in (Mongo resolves `db.coll.…`
       // against it; Redis needs its keyspace) — not the selector's current
@@ -718,6 +722,12 @@ export class EditFlow {
       // Refresh what's ON SCREEN: re-run the statement that produced this grid
       // (`statement` is the tab's ran_statement, not the live editor buffer —
       // which may have been rewritten since) and stay on the current page.
+      // Switched away while the write ran: skip it — refreshing now would
+      // replace the OTHER tab's result with this tab's statement.
+      if (database.tab?.id !== tabId || database.selectedConnId !== connId) {
+        toasts.info('Applied in another tab', 'Re-run that tab to see the change.');
+        return;
+      }
       await database.runQuery(this.statement ?? undefined, scope, {
         transient: true,
         keepOffset: true,
