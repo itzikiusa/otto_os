@@ -70,6 +70,13 @@ in audits.
 - `Esc` closes the top-most layer only. Global shortcuts don't fire while an
   overlay is open. `ui.overlayOpen` covers `Modal`, `Drawer`, the palette and
   the new-session sheets, so register overlays properly (`ui.pushModal()`).
+- **A right-click menu has a keyboard and a touch path.** Put `use:rowMenu`
+  (`lib/rowMenu.ts`) on any element with `oncontextmenu`: the ContextMenu key,
+  ⇧F10 and a touch long-press then open the same menu
+  (`node scripts/codemods/row-menu.mjs` adds it). A double-click action is
+  also in that menu, or has a key (canvas nodes: Enter / F2 edits).
+- **Single-key shortcuts** (no modifier) act only while focus is inside their
+  surface, and can be switched off (WCAG 2.1.4) — see the Cluster workspace.
 - Everything reachable by pointer is reachable by keyboard, and every major
   verb is in ⌘K ([patterns.md §9](./patterns.md#9-keyboard-first)).
 

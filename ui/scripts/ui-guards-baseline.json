@@ -11,11 +11,6 @@
     "src/modules/canvas/CanvasFlow.svelte": 2,
     "src/modules/canvas/D2Canvas.svelte": 1,
     "src/modules/canvas/MermaidCanvas.svelte": 1,
-    "src/modules/canvas/nodes/CodeNode.svelte": 1,
-    "src/modules/canvas/nodes/FrameNode.svelte": 1,
-    "src/modules/canvas/nodes/ImageNode.svelte": 1,
-    "src/modules/canvas/nodes/JsonNode.svelte": 1,
-    "src/modules/canvas/nodes/MermaidNode.svelte": 1,
     "src/modules/database/GridView.svelte": 2,
     "src/modules/git/DiffViewer.svelte": 2,
     "src/modules/git/WipPanel.svelte": 2,
@@ -33,6 +28,7 @@
   "accent-mix-literal": {},
   "accent-text": {},
   "bare-loading": {},
+  "bidi-dir": {},
   "body-style": {},
   "color-literal": {},
   "danger-menu-ellipsis": {},
@@ -169,22 +165,10 @@
     "src/modules/database/VerticalView.svelte": 1
   },
   "outline-removed": {
-    "src/modules/canvas/CanvasFlow.svelte": 1,
-    "src/modules/canvas/PresentMode.svelte": 1,
-    "src/modules/canvas/nodes/CodeNode.svelte": 1,
-    "src/modules/canvas/nodes/FrameNode.svelte": 1,
-    "src/modules/canvas/nodes/JsonNode.svelte": 1,
-    "src/modules/canvas/nodes/MermaidNode.svelte": 1,
-    "src/modules/canvas/nodes/StickyNode.svelte": 1,
     "src/modules/git/CreatePr.svelte": 1,
     "src/modules/mission-control/WorkGraphView.svelte": 1
   },
   "physical-prop": {
-    "src/modules/canvas/AiPromptPill.svelte": 1,
-    "src/modules/canvas/CanvasPage.svelte": 1,
-    "src/modules/canvas/D2Canvas.svelte": 2,
-    "src/modules/canvas/MermaidCanvas.svelte": 2,
-    "src/modules/canvas/PresentMode.svelte": 4,
     "src/modules/product/design/DeviceFrame.svelte": 2,
     "src/modules/run-with-otto/RunStageRail.svelte": 2,
     "src/modules/workflows/WorkflowsPage.svelte": 1
@@ -207,5 +191,6 @@
   "token-fallback": {},
   "transition-literal": {},
   "uk-spelling": {},
+  "unlabeled-control": {},
   "z-index-literal": {}
 }
