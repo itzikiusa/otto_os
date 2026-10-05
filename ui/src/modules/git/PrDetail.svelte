@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { scrollBehavior } from '../../lib/motion';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // PR detail: meta, editable markdown description, diff with inline comment
@@ -349,7 +350,7 @@
   // it runs after the keyboard starts animating up.
   function scrollIntoViewOnFocus(e: FocusEvent): void {
     const el = e.currentTarget as HTMLElement;
-    setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 250);
+    setTimeout(() => el.scrollIntoView({ block: 'center', behavior: scrollBehavior() }), 250);
   }
 
   async function addGeneralComment(): Promise<void> {

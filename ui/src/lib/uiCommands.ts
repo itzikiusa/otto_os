@@ -29,6 +29,7 @@ import { isEmbedded, isNativePane } from './desktop';
 import { nativePaneSnapshot } from './nativePane';
 import { nativePanePresence } from './nativePanePolicy';
 import { hostWindowId } from './embedGuest';
+import { scrollBehavior } from './motion';
 import { paneKey, routeOf } from './sidePane';
 import { clientId } from './stores/ui.svelte';
 import { agentName, uiControl } from './stores/uiControl.svelte';
@@ -374,14 +375,6 @@ uiControl.installAbort(abortSession);
 const HIGHLIGHT_MS = 2400;
 const highlightTimers = new WeakMap<Element, ReturnType<typeof setTimeout>>();
 
-function reducedMotion(): boolean {
-  try {
-    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  } catch {
-    return false;
-  }
-}
-
 function scrollsOn(style: CSSStyleDeclaration, axis: 'x' | 'y'): boolean {
   const v = axis === 'y' ? style.overflowY : style.overflowX;
   return v === 'auto' || v === 'scroll' || v === 'overlay';
@@ -394,7 +387,7 @@ function scrollsOn(style: CSSStyleDeclaration, axis: 'x' | 'y'): boolean {
  * shoved whole page regions (a Database tab strip) out of reach for good.
  */
 export function revealElement(el: Element): void {
-  const behavior: ScrollBehavior = reducedMotion() ? 'auto' : 'smooth';
+  const behavior = scrollBehavior();
   // Past the first scroller, the thing to reveal is that scroller itself
   // (its inner scroll may still be animating).
   let target: Element = el;

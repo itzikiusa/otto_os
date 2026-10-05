@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { scrollBehavior } from '../../lib/motion';
   import { loops } from '../../lib/stores/loops.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import SessionView from '../agents/SessionView.svelte';
@@ -31,7 +32,7 @@
   async function openSession(sid: string): Promise<void> {
     openSessionId = sid;
     await tick();
-    sessEl?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    sessEl?.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
   }
 
   // Load + poll the open detail; stop polling when this view goes away.

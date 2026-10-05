@@ -1,6 +1,7 @@
 <script lang="ts">
   // Right panel: Backlinks (linked mentions) · Outgoing links · Outline ·
   // Properties (frontmatter) · OKF validation card (OKF vaults only).
+  import { scrollBehavior } from '../../lib/motion';
   import { vault } from './vault.svelte';
   import PropertiesEditor from './PropertiesEditor.svelte';
   import KnowledgeMetadata from './KnowledgeMetadata.svelte';
@@ -38,7 +39,7 @@
   function jumpToHeading(text: string): void {
     document
       .querySelector(`.read #h-${CSS.escape(slugifyHeading(text))}`)
-      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      ?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
   }
 </script>
 

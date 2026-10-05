@@ -8,6 +8,7 @@
   // Mount once in App.svelte next to <ContextMenu />.
   // Opened via the `findInPage` store (Cmd+F when no terminal is focused).
 
+  import { scrollBehavior } from '../motion';
   import { untrack } from 'svelte';
   import { findInPage } from '../findinpage.svelte';
   import Icon from './Icon.svelte';
@@ -366,7 +367,7 @@
     currentIdx = rowMatches.length + k;
     currentRange = ranges[k];
     applyCurrent();
-    ranges[k].startContainer.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    ranges[k].startContainer.parentElement?.scrollIntoView({ block: 'center', behavior: scrollBehavior() });
   }
 
   function next(): void {

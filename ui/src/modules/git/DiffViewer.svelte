@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { scrollBehavior } from '../../lib/motion';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   // Shared diff renderer (Changes / commit / PR views): unified or
@@ -874,7 +875,7 @@
   function composerFocus(e: FocusEvent): void {
     const el = e.currentTarget as HTMLElement | null;
     if (!el) return;
-    requestAnimationFrame(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+    requestAnimationFrame(() => el.scrollIntoView({ block: 'center', behavior: scrollBehavior() }));
   }
 
   // ── Hunk / line staging (WIP mode) ─────────────────────────────────────────

@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import { scrollBehavior } from '../../lib/motion';
   import { authedBlobUrl as fetchBlobUrl } from '../../lib/api/client';
   import { assetPath as vaultAssetPath } from '../../lib/api/vault';
 
@@ -209,7 +210,7 @@
   function scrollToHeading(anchor: string): void {
     requestAnimationFrame(() => {
       readEl?.querySelector(`#h-${CSS.escape(slugifyHeading(anchor))}`)?.scrollIntoView({
-        behavior: 'smooth',
+        behavior: scrollBehavior(),
         block: 'start',
       });
     });
