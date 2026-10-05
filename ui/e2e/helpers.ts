@@ -1,4 +1,4 @@
-import { expect, type Page } from '@playwright/test';
+import { expect, type Locator, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 
 // The top-level routable pages (hash router: #/<module>). `share` is excluded
@@ -50,6 +50,24 @@ export async function openPage(page: Page, id: string): Promise<void> {
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
   // Let layout/reflow + first data fetch settle.
   await page.waitForLoadState('networkidle').catch(() => {});
+}
+
+/**
+ * Open the New Session sheet with ⌘T, falling back to the TabBar + button only
+ * if the shortcut never reaches the app. The sheet is lazy-loaded
+ * (`{#await import(...)}` in App.svelte), so it appears a beat after the key
+ * press: an instant `isVisible()` check reads false, and the fallback click then
+ * lands on the sheet's own backdrop once it mounts. Wait for the sheet first.
+ */
+export async function openNewSessionSheet(page: Page): Promise<Locator> {
+  const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
+  await page.keyboard.press('Meta+t');
+  const opened = await dialog
+    .waitFor({ state: 'visible', timeout: 10_000 })
+    .then(() => true, () => false);
+  if (!opened) await page.getByTitle('New session', { exact: true }).click();
+  await expect(dialog).toBeVisible();
+  return dialog;
 }
 
 /**

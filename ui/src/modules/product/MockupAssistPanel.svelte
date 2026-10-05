@@ -307,6 +307,10 @@
     min-height: 0;
     display: flex;
     position: relative;
+    /* A short dock (the Design inspector) can't fit the empty state's
+       starters: scroll them here instead of letting them spill over the
+       composer, which left Send unclickable. */
+    overflow-y: auto;
     /* The Terminal paints its own (forced-dark) background; the empty state
        sits on the normal surface so its text uses the scheme's tokens. */
     background: var(--surface-2);

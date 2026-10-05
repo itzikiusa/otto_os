@@ -56,7 +56,7 @@ test('Browser URL field preserves left-to-right editing in RTL', async ({ page }
   await page.setViewportSize({ width: 1024, height: 768 });
   await page.addInitScript(() => localStorage.setItem('otto_direction', 'rtl'));
   await openPage(page, 'browser');
-  const address = page.getByPlaceholder('Enter URL');
+  const address = page.getByPlaceholder('e.g. https://example.com');
   await address.fill('https://example.invalid/docs?query=hello#intro');
   await expect(address).toHaveCSS('direction', 'ltr');
   await page.screenshot({ path: '/tmp/otto-ux-content-browser-rtl.png' });

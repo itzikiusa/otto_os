@@ -10,7 +10,7 @@
   //
   // Rows are assumed ~uniform `estimateHeight` px; mild variance is tolerated via
   // overscan. For wildly variable heights, wrap rows to a fixed height.
-  import { tick, type Snippet } from 'svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
   import { registerFindProvider } from '../findProviders';
 
   interface Props {
@@ -75,6 +75,36 @@
     });
   });
 
+  // The pinned row renders from one of two places: the window, or the
+  // out-of-window `.vlist-pin` copy. Crossing between them (scrolling the
+  // focused row out of view, or back in) swaps in a NEW element and the
+  // browser drops focus to <body> — a keyboard user's ↑/↓ then go nowhere.
+  // Remember whether focus was in the pinned row before the swap and hand it
+  // to the row's new element after.
+  let pinEl: HTMLDivElement | undefined = $state();
+  const pinOut = $derived(pinnedIndex >= 0 && pinnedIndex < items.length && (pinnedIndex < start || pinnedIndex >= start + count));
+  let pinHadFocus = false;
+  // The pinned row's element as last painted (read before the DOM updates).
+  let paintedPinRow: Element | null | undefined = null;
+  $effect.pre(() => {
+    void pinOut;
+    const active = document.activeElement;
+    pinHadFocus = !!active && !!paintedPinRow?.isConnected && paintedPinRow.contains(active);
+  });
+  $effect(() => {
+    const out = pinOut;
+    const at = pinnedIndex - start;
+    const rowEl = untrack(() => (out ? pinEl?.firstElementChild : winEl?.children[at]));
+    paintedPinRow = rowEl;
+    if (!pinHadFocus) return;
+    pinHadFocus = false;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    if (!(rowEl instanceof HTMLElement)) return;
+    const target = rowEl.hasAttribute('tabindex') ? rowEl : rowEl.querySelector<HTMLElement>('[tabindex="0"]');
+    target?.focus({ preventScroll: true });
+  });
+
   function onScroll(e: Event): void {
     scrollTop = (e.currentTarget as HTMLElement).scrollTop;
   }
@@ -88,8 +118,8 @@
         {@render row(item, start + i)}
       {/each}
     </div>
-    {#if pinnedIndex >= 0 && pinnedIndex < items.length && (pinnedIndex < start || pinnedIndex >= start + count)}
-      <div class="vlist-pin" style="top:{pinnedIndex * estimateHeight}px">
+    {#if pinOut}
+      <div class="vlist-pin" bind:this={pinEl} style="top:{pinnedIndex * estimateHeight}px">
         {@render row(items[pinnedIndex], pinnedIndex)}
       </div>
     {/if}
