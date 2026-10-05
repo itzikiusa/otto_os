@@ -24,6 +24,7 @@
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { pollWhileVisible, type Poller } from '../../lib/poll';
+  import { latestOnly } from '../../lib/latest';
   import type { Tone } from '../../lib/status';
 
   // ---------------------------------------------------------------------------
@@ -139,18 +140,32 @@
     setTimeout(() => statusPoll?.now({ background: true }), 16_000);
   }
 
+  // Generation guard + owner: after a workspace switch the previous
+  // workspace's cards used to stay rendered (and clickable) during the reload —
+  // toggling one PUT A's channel/allow-list/agent settings into B — and a slow
+  // response for A could land over B's.
+  const loads = latestOnly();
+  let integrationsFor = '';
   async function load(id: string): Promise<void> {
+    const t = loads.begin();
+    if (integrationsFor !== id) {
+      integrations = [];
+      integrationsFor = id;
+    }
     loading = true;
     loadError = '';
     try {
-      integrations = await api.get<Integration[]>(`/workspaces/${id}/integrations`);
+      const rows = await api.get<Integration[]>(`/workspaces/${id}/integrations`);
+      if (!t.current || wsId !== id) return;
+      integrations = rows;
     } catch (e) {
+      if (!t.current || wsId !== id) return;
       // Inline, not a toast: the cards would otherwise all read "Not
       // configured" — one Save away from overwriting a real integration.
       loadError = loadErrorText(e);
       integrations = [];
     } finally {
-      loading = false;
+      if (t.current) loading = false;
     }
   }
 
