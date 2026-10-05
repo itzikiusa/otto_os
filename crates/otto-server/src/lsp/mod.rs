@@ -238,8 +238,16 @@ async fn lsp_ws(
         }
     };
     // Same credential rules as the Files routes (`/fs/read`, `/fs/browse`):
-    // share-link (scoped) and MCP-restricted tokens never reach host files.
-    if auth.scope.is_some() || auth.mcp_only {
+    // share-link (scoped), MCP-restricted and agent-session tokens never reach
+    // host files (an unconfined language server reads the whole root).
+    if crate::feature_guard::root_route_gate(
+        crate::feature_guard::RootRoute::Lsp,
+        &auth,
+        Some(&st.ctx.pool),
+    )
+    .await
+    .is_err()
+    {
         return ws_problem(
             StatusCode::FORBIDDEN,
             "forbidden",

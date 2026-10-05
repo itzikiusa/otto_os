@@ -248,3 +248,79 @@ fn which_git() -> Option<String> {
     }
     None
 }
+
+/// An EXISTING repo as the OS enforces it: the agent still commits and
+/// branches (objects, refs, index), but cannot point the daemon's own git at
+/// a program — `.git/config`, `hooks/` and `commondir` are write-denied, and
+/// the git dir cannot be renamed away and replaced.
+#[test]
+fn seatbelt_agent_commits_but_cannot_edit_git_config_or_hooks() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let Some(git) = which_git() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = std::fs::canonicalize(tmp.path()).unwrap().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let setup = Command::new(&git)
+        .current_dir(&repo)
+        .args(["init", "-q"])
+        .status()
+        .unwrap();
+    assert!(setup.success());
+    for kv in [
+        ["user.email", "a@b.c"],
+        ["user.name", "t"],
+        ["commit.gpgsign", "false"],
+    ] {
+        Command::new(&git)
+            .current_dir(&repo)
+            .args(["config", kv[0], kv[1]])
+            .status()
+            .unwrap();
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let pol = SandboxPolicy::for_agent(
+        &repo,
+        Path::new(&home),
+        &repo.join(".otto-data"),
+        &[repo.join(".git")],
+        NetworkPolicy::Full,
+    );
+    let q = |p: &Path| shell_quote(p);
+    let g = q(Path::new(&git));
+    let (ok, err) = run_sandboxed(
+        &pol,
+        &format!(
+            "cd {} && echo hi > f.txt && {g} add f.txt && {g} commit -q -m first && {g} branch side",
+            q(&repo)
+        ),
+    );
+    assert!(ok, "commit in an existing repo must still work: {err}");
+
+    let config_before = std::fs::read_to_string(repo.join(".git/config")).unwrap();
+    let (ok, _) = run_sandboxed(
+        &pol,
+        &format!("cd {} && {g} config core.fsmonitor /tmp/x.sh", q(&repo)),
+    );
+    assert!(!ok, "editing .git/config must be refused");
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".git/config")).unwrap(),
+        config_before
+    );
+    for script in [
+        format!(
+            "mkdir -p {0}/.git/hooks && echo x > {0}/.git/hooks/pre-commit",
+            q(&repo)
+        ),
+        format!("echo /tmp > {}/.git/commondir", q(&repo)),
+        format!("mv {0}/.git {0}/.git-old", q(&repo)),
+    ] {
+        let (ok, _) = run_sandboxed(&pol, &script);
+        assert!(!ok, "must be refused: {script}");
+    }
+    assert!(repo.join(".git/HEAD").exists());
+    assert!(!repo.join(".git/hooks/pre-commit").exists());
+}

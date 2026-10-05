@@ -8139,7 +8139,19 @@ struct ProxyTicketResp {
 
 /// `POST /browser/proxy-ticket` — authed (bearer + `Browser`/Edit policy);
 /// returns a single-use ticket the take-over iframe passes as `?ticket=`.
-async fn browser_proxy_ticket(Json(req): Json<ProxyTicketReq>) -> ApiResult<Json<ProxyTicketResp>> {
+/// Share-link and MCP-restricted tokens never get one
+/// (`RootRoute::BrowserProxy`: the proxy itself only sees the ticket).
+async fn browser_proxy_ticket(
+    CurrentAuthContext(auth): CurrentAuthContext,
+    Json(req): Json<ProxyTicketReq>,
+) -> ApiResult<Json<ProxyTicketResp>> {
+    crate::feature_guard::root_route_gate(
+        crate::feature_guard::RootRoute::BrowserProxy,
+        &auth,
+        None,
+    )
+    .await
+    .map_err(ApiError)?;
     let url = req.url.trim();
     let ok_scheme = reqwest::Url::parse(url)
         .map(|u| matches!(u.scheme(), "http" | "https"))
