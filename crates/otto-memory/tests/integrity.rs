@@ -311,7 +311,10 @@ async fn merge_whose_text_equals_a_source_keeps_that_source_live() {
     assert!(!b_row.active);
     assert_eq!(b_row.superseded_by.as_deref(), Some(a.as_str()));
     let hits = search_ids(&svc, &ws, "release trains").await;
-    assert!(hits.contains(&a), "merged knowledge is searchable: {hits:?}");
+    assert!(
+        hits.contains(&a),
+        "merged knowledge is searchable: {hits:?}"
+    );
     assert!(!hits.contains(&b), "retired source is not: {hits:?}");
 }
 
@@ -332,8 +335,14 @@ async fn split_refuses_parts_equal_to_the_parent_or_each_other() {
         body: b.into(),
     };
     for parts in [
-        vec![part("1", "deploys need cmake and node"), part("2", "deploys need node")],
-        vec![part("1", "deploys need cmake"), part("2", "deploys need cmake")],
+        vec![
+            part("1", "deploys need cmake and node"),
+            part("2", "deploys need node"),
+        ],
+        vec![
+            part("1", "deploys need cmake"),
+            part("2", "deploys need cmake"),
+        ],
     ] {
         let err = svc
             .split(&ws, &user, &parent.id, otto_memory::SplitReq { parts })
@@ -351,7 +360,10 @@ async fn split_refuses_parts_equal_to_the_parent_or_each_other() {
             &user,
             &parent.id,
             otto_memory::SplitReq {
-                parts: vec![part("1", "deploys need cmake"), part("2", "deploys need node")],
+                parts: vec![
+                    part("1", "deploys need cmake"),
+                    part("2", "deploys need node"),
+                ],
             },
         )
         .await
