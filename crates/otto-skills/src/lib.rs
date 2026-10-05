@@ -18,6 +18,7 @@ use otto_context::Library;
 use otto_core::paths::safe_component;
 
 pub mod http;
+pub mod product;
 
 /// The embedded skill tree: `assets/skills/<category>/<name>/{SKILL.md,…}`.
 static BUNDLED: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/skills");

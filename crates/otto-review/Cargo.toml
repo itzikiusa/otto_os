@@ -18,7 +18,6 @@ otto-sessions.workspace = true
 otto-orchestrator.workspace = true
 otto-context.workspace = true
 otto-git.workspace = true
-otto-product.workspace = true
 otto-skills.workspace = true
 otto-agent-run.workspace = true
 chrono.workspace = true

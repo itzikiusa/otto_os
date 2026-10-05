@@ -44,7 +44,7 @@ the session manager + improvement engine), and a Svelte UI module.
 |---|---|---|
 | Feature crate | `crates/otto-product/` | `ProductService` (import/refresh/publish/draft/context), the `router()` for CRUD routes, the seven bundled skills, the memory façade |
 | · types | `crates/otto-product/src/types.rs` | Request DTOs + response wrappers (`ImportStoryReq`, `AnalyzeReq`, `InjectBundle`, …) — **not** in `otto-core` |
-| · skills | `crates/otto-product/src/skills.rs` + `crates/otto-product/assets/skills/` | The bundled agent skills, version-gated seed into the library |
+| · skills | `crates/otto-skills/src/product.rs` + `crates/otto-skills/assets/product-skills/` (re-exported as `otto_product::skills`) | The bundled agent skills, version-gated seed into the library |
 | · memory | `crates/otto-product/src/memory_facade.rs`, `extract.rs` | Ingest structured artifacts into `otto-memory`; deterministic extractors |
 | Persistence | `crates/otto-state/src/product.rs` | `ProductRepo` + the `product_*` tables |
 | Orchestration | `crates/otto-product/src/run.rs` + `host.rs` | `run_analysis` / `run_rewrite` / `run_generate_tests` / `run_generate_plan`, retries, summarizers — generic over the `ProductRunHost` trait |

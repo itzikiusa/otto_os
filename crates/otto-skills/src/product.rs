@@ -3,6 +3,10 @@
 //! skill library on daemon startup so they are editable in the UI and
 //! self-improvable by `otto-improve`.
 //!
+//! Lives here (not in `otto-product`, which re-exports it) so consumers that
+//! only need a bundled body — the review engine's `resolve_skill_inline` —
+//! depend on this leaf crate instead of the whole product-studio graph.
+//!
 //! Seeding is VERSION-GATED: a `.product-skills-version` marker file in the
 //! library root controls whether (re)seeding is needed. Bump
 //! `PRODUCT_SKILLS_SEED_VERSION` to force an overwrite of all skill dirs on
@@ -17,7 +21,7 @@ use include_dir::{include_dir, Dir};
 use otto_context::Library;
 
 /// The embedded multi-file skill tree (SKILL.md + references/ + assets/ + scripts/).
-static PRODUCT_SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/skills");
+static PRODUCT_SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/product-skills");
 
 /// Version that governs the seeded skill dirs. Increment this when the bundled
 /// skill content changes and existing installs need to be upgraded. A future

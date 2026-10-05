@@ -137,7 +137,7 @@ pub fn resolve_skill_inline(library: &otto_context::Library, name: &str) -> Stri
         return out;
     }
     // 2. Compiled-in bundled skill body (no separate references).
-    if let Some(body) = otto_product::skill_body(name) {
+    if let Some(body) = otto_skills::product::skill_body(name) {
         return body.to_string();
     }
     // 2b. `otto-skills` bundles (`otto-design-2d`, `otto-design-3d`, …). These
