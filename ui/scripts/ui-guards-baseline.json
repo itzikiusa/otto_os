@@ -189,8 +189,7 @@
     "src/modules/vault/GraphView.svelte": 4
   },
   "hand-plural": {
-    "src/lib/stores/workspace.svelte.ts": 3,
-    "src/modules/database/EditFlow.svelte.ts": 2
+    "src/modules/database/EditFlow.svelte.ts": 1
   },
   "heavy-weight": {},
   "hover-only-reveal": {},
@@ -234,15 +233,9 @@
     "src/modules/connections/SessionNetworkStatus.svelte": 1,
     "src/modules/panels/BrowserPanel.svelte": 1
   },
-  "raw-toast-body": {
-    "src/lib/stores/workspace.svelte.ts": 1,
-    "src/modules/agents/history/HistoryPage.svelte": 2
-  },
+  "raw-toast-body": {},
   "status-as-text": {},
   "straight-contraction": {
-    "src/lib/stores/apiClient.svelte.ts": 1,
-    "src/lib/stores/workspace.svelte.ts": 1,
-    "src/modules/database/EditFlow.svelte.ts": 4,
     "src/modules/vault/vault.svelte.ts": 3
   },
   "straight-couldnt": {},

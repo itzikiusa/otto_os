@@ -42,6 +42,7 @@ import { toasts } from '../toast.svelte';
 import type { PreRequestReq, TestResult } from '../api/scripts';
 import { runScript } from '../api/scriptRunner';
 import {
+import { plural } from '../plural';
   detectAndParse,
   collectionToPostman,
   isImportedEnvironment,
@@ -146,7 +147,7 @@ export interface NewHostContext {
 export function confirmNewHost(host: string, ctx: NewHostContext = {}): Promise<boolean> {
   const where = host || 'this host';
   const lines = [
-    `${where} hasn't received this stored secret before. Secrets are bound to the hosts of the requests they were saved with.`,
+    `${where} hasn’t received this stored secret before. Secrets are bound to the hosts of the requests they were saved with.`,
     '',
   ];
   if (ctx.method || ctx.url) lines.push(`Request: ${[ctx.method, ctx.url].filter(Boolean).join(' ')}`);
@@ -1039,7 +1040,7 @@ class ApiClientStore {
       this.bulkWrites--;
     }
     if (failed > 0) {
-      toasts.error(`${failed} item(s) of “${parsed.name}” weren’t imported`, firstError);
+      toasts.error(`Couldn’t import ${plural(failed, 'item')} of “${parsed.name}”`, firstError);
     }
     if (!quiet) {
       toasts.success('Imported', `${parsed.name} · ${parsed.requests.length} request(s) (${parsed.format})`);
@@ -1113,7 +1114,7 @@ class ApiClientStore {
       toasts.error(`Skipped: ${f.name}`, f.error);
     }
     if (failed.length > 3) {
-      toasts.error('More items skipped', `${failed.length - 3} further item(s) failed`);
+      toasts.error('More items skipped', `${plural(failed.length - 3, 'further item')} failed`);
     }
     return true;
   }

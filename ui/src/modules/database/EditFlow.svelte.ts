@@ -238,13 +238,13 @@ export class EditFlow {
     // Need a primary key (one or more columns), all present in the result so
     // we can target the exact row. Composite keys are supported.
     if (detail.primary_key.length === 0) {
-      this.editReason = `“${table}” has no primary key, so rows can't be safely targeted for edits.`;
+      this.editReason = `“${table}” has no primary key, so rows can’t be safely targeted for edits.`;
       return;
     }
     const missing = detail.primary_key.filter((pk) => !cols.some((c) => c.name === pk));
     if (missing.length > 0) {
-      const plural = detail.primary_key.length > 1 ? 's' : '';
-      this.editReason = `Include the primary key column${plural} (${detail.primary_key.join(', ')}) in your SELECT to enable editing.`;
+      const pkWord = detail.primary_key.length > 1 ? 'columns' : 'column';
+      this.editReason = `Include the primary key ${pkWord} (${detail.primary_key.join(', ')}) in your SELECT to enable editing.`;
       return;
     }
     this.editDb = dbName;
@@ -538,7 +538,7 @@ export class EditFlow {
     const col = this.columnPath(colIdx);
     if (this.engine !== 'mongodb' && col !== null) {
       if (path === col) {
-        toasts.warn("Columns can't be removed from a row", 'Set the value to NULL instead');
+        toasts.warn('Columns can’t be removed from a row', 'Set the value to NULL instead');
         return;
       }
       const rest = path.slice(col.length + 1);
@@ -563,7 +563,7 @@ export class EditFlow {
     const col = this.columnPath(colIdx);
     if (this.engine !== 'mongodb' && col !== null) {
       if (oldPath === col) {
-        toasts.warn("Columns can't be renamed from a row", 'Use the table designer');
+        toasts.warn('Columns can’t be renamed from a row', 'Use the table designer');
         return;
       }
       const rest = oldPath.slice(col.length + 1);
@@ -576,7 +576,7 @@ export class EditFlow {
       return;
     }
     if (/(^|\.)\d+(\.|$)/.test(oldPath) || /(^|\.)\d+(\.|$)/.test(newPath)) {
-      toasts.warn("Can't rename inside an array", '$rename does not traverse array elements');
+      toasts.warn('Can’t rename inside an array', '$rename does not traverse array elements');
       return;
     }
     this.withRow(rowIdx, (p) => {
@@ -710,7 +710,7 @@ export class EditFlow {
       const res = await database.runManagedStatement(sql, scope);
       if (res === null) {
         // Write was cancelled at the confirmation prompt — keep the modal open.
-        toasts.info('Write cancelled');
+        toasts.info('Write canceled');
         return;
       }
       toasts.success('Applied', 'Statement ran successfully');

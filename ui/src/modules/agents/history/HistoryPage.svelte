@@ -162,7 +162,7 @@
       }
       openInChat(sid);
     } catch (err) {
-      toasts.error('Couldn’t resume', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t resume', err);
     } finally {
       busy = false;
     }
@@ -210,7 +210,7 @@
       await ws.archiveSession(e.session_id);
       history.patchSession(e.session_id, { status: 'exited' });
     } catch (err) {
-      toasts.error('Couldn’t archive', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t archive', err);
     } finally {
       busy = false;
     }
