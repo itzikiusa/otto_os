@@ -63,12 +63,42 @@ pub fn session_cwd(requested: &str) -> String {
     }
 
     // Shared-temp fallback → unique per-session subdir so codex usage attributes
-    // 1:1 by cwd instead of colliding on the shared temp dir.
-    let unique = temp.join(format!("otto-product-{}", uuid::Uuid::new_v4()));
+    // 1:1 by cwd instead of colliding on the shared temp dir. The children live
+    // under ONE stable root (S4-14) that is swept of day-old leftovers here, so
+    // scratch dirs no longer accumulate in `$TMPDIR` forever.
+    let root = temp.join(SCRATCH_ROOT);
+    sweep_stale_scratch(&root, SCRATCH_MAX_AGE);
+    let unique = root.join(uuid::Uuid::new_v4().to_string());
     if let Err(e) = std::fs::create_dir_all(&unique) {
         tracing::debug!("product_run: create session cwd {}: {e}", unique.display());
     }
     unique.to_string_lossy().to_string()
+}
+
+/// Stable parent of every product scratch cwd (under the temp dir).
+pub const SCRATCH_ROOT: &str = "otto-product-scratch";
+/// Scratch dirs older than this are removed by the next [`session_cwd`] call
+/// (a product run never takes a day; the agents' sessions are long done).
+pub const SCRATCH_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// Remove children of `root` last modified more than `max_age` ago
+/// (best-effort; a missing root is fine).
+pub fn sweep_stale_scratch(root: &std::path::Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for e in entries.flatten() {
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > max_age);
+        if stale {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2832,6 +2862,19 @@ mod tests {
 
         // Cleanup.
         let _ = std::fs::remove_dir_all(out_path);
+    }
+
+    /// S4-14: product scratch dirs share one stable root, and stale ones are swept.
+    #[test]
+    fn session_cwd_uses_a_stable_swept_root() {
+        let fallback = std::env::temp_dir().to_string_lossy().to_string();
+        let out = session_cwd(&fallback);
+        let root = std::env::temp_dir().join(SCRATCH_ROOT);
+        assert!(std::path::Path::new(&out).starts_with(&root), "{out}");
+        // A zero max-age sweep removes it (age > 0 once any time has passed).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        sweep_stale_scratch(&root, std::time::Duration::from_millis(1));
+        assert!(!std::path::Path::new(&out).exists(), "stale scratch swept");
     }
 
     #[test]
