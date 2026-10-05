@@ -9,7 +9,9 @@
 //!   - any IP literal (v4 or `[v6]`): an IP in `Host` means the browser was
 //!     pointed at that address, never re-resolved — not a rebinding vector;
 //!   - `localhost` / `*.localhost` (and Tauri's `tauri.localhost`);
-//!   - mDNS `*.local` (the TLS listener's `otto.local` + the Mac's Bonjour name);
+//!   - mDNS: ONLY the TLS listener's `otto.local` and this Mac's own Bonjour
+//!     name (`scutil --get LocalHostName`) — never any other `*.local`, which a
+//!     LAN peer could answer for and rebind (S8-11);
 //!   - Tailscale MagicDNS `*.ts.net` — narrowed to the names listed in
 //!     `OTTO_ALLOWED_HOSTS` when that lists any `.ts.net` name;
 //!   - the host of the **Public link domain** (`share_base_url` setting) — the
@@ -82,13 +84,42 @@ pub(crate) fn tailscale_name_allowed(host: &str, extra: &[String]) -> bool {
     pinned.is_empty() || pinned.iter().any(|p| p.as_str() == host)
 }
 
-/// Pure verdict for a (port-stripped, lower-cased) host.
-pub(crate) fn host_allowed_with(host: &str, extra: &[String]) -> bool {
+/// This Mac's own mDNS names: the TLS listener's `otto.local` plus the Bonjour
+/// `LocalHostName` (`scutil --get LocalHostName` → `<name>.local`). Read once.
+///
+/// Only these are trusted (S8-11) — not every `*.local`: any LAN peer can
+/// answer mDNS for `evil.local` and rebind it to 127.0.0.1.
+fn own_mdns_names() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut names = vec!["otto.local".to_string()];
+        #[cfg(target_os = "macos")]
+        if let Ok(out) = std::process::Command::new("/usr/sbin/scutil")
+            .args(["--get", "LocalHostName"])
+            .output()
+        {
+            let name = String::from_utf8_lossy(&out.stdout).trim().to_ascii_lowercase();
+            if out.status.success() && !name.is_empty() {
+                names.push(format!("{name}.local"));
+            }
+        }
+        names
+    })
+}
+
+/// Pure verdict for a (port-stripped, lower-cased) host, given the trusted
+/// `.local` names.
+pub(crate) fn host_allowed_in(host: &str, extra: &[String], own_local: &[String]) -> bool {
     is_ip_literal(host)
         || is_loopback_name(host)
-        || host.ends_with(".local")
+        || own_local.iter().any(|h| h == host)
         || tailscale_name_allowed(host, extra)
         || extra.iter().any(|h| h == host)
+}
+
+/// [`host_allowed_in`] with this Mac's own mDNS names.
+pub(crate) fn host_allowed_with(host: &str, extra: &[String]) -> bool {
+    host_allowed_in(host, extra, own_mdns_names())
 }
 
 pub(crate) fn host_allowed(host: &str) -> bool {
@@ -140,6 +171,8 @@ pub struct HostGuardState {
 
 impl HostGuardState {
     pub fn new(pool: otto_state::DbPool) -> Self {
+        // Warm the mDNS-name lookup at router build, off the request path.
+        let _ = own_mdns_names();
         Self {
             pool,
             cache: Default::default(),
@@ -238,8 +271,23 @@ mod tests {
     }
 
     #[test]
+    fn only_our_own_mdns_names_are_trusted() {
+        let none: Vec<String> = vec![];
+        let own = vec!["otto.local".to_string(), "my-mac.local".to_string()];
+        assert!(host_allowed_in("otto.local", &none, &own));
+        assert!(host_allowed_in("my-mac.local", &none, &own));
+        for bad in ["evil.local", "other-mac.local", "local"] {
+            assert!(!host_allowed_in(bad, &none, &own), "{bad}");
+        }
+        // `otto.local` is always ours, whatever the Bonjour name is.
+        assert!(host_allowed_with("otto.local", &none));
+        assert!(!host_allowed_with("evil-rebind.local", &none));
+    }
+
+    #[test]
     fn rebinding_names_are_refused_ip_literals_and_ours_allowed() {
         let none: Vec<String> = vec![];
+        let own = vec!["otto.local".to_string(), "my-mac.local".to_string()];
         for ok in [
             "127.0.0.1",
             "localhost",
@@ -252,7 +300,7 @@ mod tests {
             "my-mac.local",
             "my-mac.tail1234.ts.net",
         ] {
-            assert!(host_allowed_with(ok, &none), "{ok}");
+            assert!(host_allowed_in(ok, &none, &own), "{ok}");
         }
         for bad in [
             "evil.example",
