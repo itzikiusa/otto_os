@@ -1547,7 +1547,7 @@
             ...(s.kind === 'agent' && (status === 'running' || status === 'working')
               ? [{ label: 'Restart session', icon: 'refresh', action: () => void restartAgent(s.id) }]
               : []),
-            { label: 'Archive', icon: 'archive', action: () => ws.archiveSession(s.id) },
+            { label: 'Archive', icon: 'archive', action: () => void ws.requestArchive(s.id).catch((e: unknown) => toastError('Couldn’t archive the session', e)) },
             { label: 'Delete…', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
           ] : []),
           { separator: true },
