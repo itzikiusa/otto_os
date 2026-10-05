@@ -131,35 +131,49 @@
   let loadError = $state<string | null>(null);
 
   async function initialLoad(): Promise<void> {
+    const owned = product.captureSelection();
     try {
       await product.loadVersions();
+      if (!owned()) return;
       loadError = null;
       const suggested = latestSuggested();
       if (suggested) {
         await loadVersionBodies(suggested);
       }
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (owned()) loadError = loadErrorText(e);
     }
   }
 
+  /** Bumped per body load: only the newest load (for the still-selected
+   *  story) may assign — a slow load for A never lands on B's page, and an
+   *  older poll can't replace a newer suggestion. */
+  let bodySeq = 0;
+
   async function loadVersionBodies(suggested: ProductStoryVersion): Promise<void> {
+    const seq = ++bodySeq;
+    const owned = product.captureSelection();
+    const current = () => seq === bodySeq && owned();
+    const src = source;
     loadingBodies = true;
     try {
       // Load suggested body (full).
       const fullSuggested = await product.getVersion(suggested.id);
+      if (!current()) return;
       suggestedVersion = fullSuggested;
 
       // Load source body — use the current source from detail, or fetch by id.
-      if (source) {
-        const fullSource = await product.getVersion(source.id);
+      if (src) {
+        const fullSource = await product.getVersion(src.id);
+        if (!current()) return;
         sourceVersion = fullSource;
       }
     } catch (e) {
+      if (!current()) return;
       if (suggestedVersion) toastError('Couldn’t load version bodies', e);
       else loadError = loadErrorText(e);
     } finally {
-      loadingBodies = false;
+      if (seq === bodySeq) loadingBodies = false;
     }
   }
 
@@ -189,19 +203,32 @@
 
   async function publish(): Promise<void> {
     if (!suggestedVersion || publishing) return;
-    const first = (suggestedVersion.body_md ?? '').split('\n').filter((l) => l.trim() !== '').slice(0, 4).join('\n');
+    // Publish exactly the version the user confirmed: a `product_changed`
+    // poll can swap `suggestedVersion` to n+1 while the dialog is open, and
+    // the daemon publishes to the VERSION's own story — so pin both here.
+    const v = suggestedVersion;
+    const owned = product.captureSelection();
+    if (v.story_id !== product.selectedId) {
+      toasts.warn('Not published', 'This suggestion belongs to another story — reopen Rewrite and try again.');
+      return;
+    }
+    const first = (v.body_md ?? '').split('\n').filter((l) => l.trim() !== '').slice(0, 4).join('\n');
     const ok = await confirmOutward({
       verb: `Overwrite ${targetShort}`,
       title: `Overwrite ${targetShort}?`,
       where: targetLabel,
-      what: `Suggested v${suggestedVersion.version_no} replaces the live ${targetNoun}:\n${first}`,
+      what: `Suggested v${v.version_no} replaces the live ${targetNoun}:\n${first}`,
       who: 'Everyone who can see it; Jira/Confluence notify its watchers.',
       danger: true,
     });
     if (!ok) return;
+    if (!owned() || v.story_id !== product.selectedId) {
+      toasts.warn('Not published', 'The story changed while the confirmation was open.');
+      return;
+    }
     publishing = true;
     try {
-      await product.publishVersion(suggestedVersion.id);
+      await product.publishVersion(v.id);
       toasts.success('Published', 'Suggested version published back to source.');
     } catch (e) {
       toastError('Couldn’t publish the rewrite', e);
