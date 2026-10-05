@@ -49,7 +49,6 @@ for (const scheme of ['light', 'dark']) {
     await expect(page.locator('[data-pane-key]')).toHaveCount(2, { timeout: 15_000 });
     const hosts = page.locator('.term-host');
     await expect(hosts).toHaveCount(2);
-    await page.waitForTimeout(1600);
     for (const host of [hosts.first(), hosts.last()]) {
       await expect.poll(() => host.evaluate(el => parseFloat(getComputedStyle(el.querySelector('.xterm-rows')!).fontSize))).toBeGreaterThanOrEqual(11);
       await expect.poll(() => host.getAttribute('data-cols')).toMatch(/^(8\d|9\d|\d{3,})$/);
@@ -67,9 +66,9 @@ for (const scheme of ['light', 'dark']) {
     expect(resizeColumns.length).toBeGreaterThan(0);
     expect(Math.min(...resizeColumns), 'no transient narrow PTY grid').toBeGreaterThanOrEqual(80);
     await page.screenshot({ path: info.outputPath('readable-side-by-side.png'), animations: 'disabled' });
-    await page.waitForTimeout(1200);
+    await page.waitForTimeout(1200); // ui-guards: allow — settle window before the no-churn check
     const settled = resizeColumns.length;
-    await page.waitForTimeout(700);
+    await page.waitForTimeout(700); // ui-guards: allow — absence: no resize churn after settle
     expect(resizeColumns.length, 'no resize churn after the panes settle').toBe(settled);
     expect(Math.min(...resizeColumns)).toBeGreaterThanOrEqual(80);
   });
@@ -142,16 +141,16 @@ test('terminal preserves visible scrollback when a delayed compact arrives', asy
     });
   });
   await boot(page, false);
-  await page.waitForTimeout(1600);
+  await page.waitForTimeout(1600); // ui-guards: allow — terminal attach + first paint before wheel input
   await page.locator('.xterm-screen').hover();
   await page.mouse.wheel(0, 100000);
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(300); // ui-guards: allow — wheel scroll applied before the resize
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect.poll(() => !!release).toBe(true);
   const previousGrid = grids.at(-1);
   await page.setViewportSize({ width: 1200, height: 850 });
   await expect.poll(() => grids.at(-1)).not.toBe(previousGrid);
-  await page.waitForTimeout(1300);
+  await page.waitForTimeout(1300); // ui-guards: allow — absence: no extra compact snapshot
   expect(snapshotRequests, 'attach plus only one pending optional compact').toBe(2);
   const firstRow = page.locator('.xterm-rows > div').first();
   const slider = page.locator('.xterm-scrollable-element > .scrollbar.vertical > .slider');
@@ -164,14 +163,14 @@ test('terminal preserves visible scrollback when a delayed compact arrives', asy
   const bottomTop = await slider.evaluate(el => parseFloat(getComputedStyle(el).top));
   for (let step = 0; step < 10; step++) {
     await page.mouse.wheel(0, -1000);
-    await page.waitForTimeout(40);
+    await page.waitForTimeout(40); // ui-guards: allow — deliberate wheel cadence
   }
   await expect.poll(() => firstRow.innerText()).not.toBe(bottomRow);
   await expect.poll(() => slider.evaluate(el => parseFloat(getComputedStyle(el).top))).toBeLessThan(bottomTop - 10);
   const readingTop = await slider.evaluate(el => parseFloat(getComputedStyle(el).top));
   const readingRow = await firstRow.innerText();
   release!();
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(300); // ui-guards: allow — absence: release must not jump the view
   await expect(firstRow).toHaveText(readingRow);
   await expect.poll(() => slider.evaluate(el => parseFloat(getComputedStyle(el).top))).toBe(readingTop);
 });
@@ -215,7 +214,7 @@ test('Outputs respects explicit close and makes overflowing identity keyboard-sc
   }
   await panel.getByRole('button', { name: 'Close preview', exact: true }).click();
   await expect(page.getByTestId('outputs-preview')).toBeHidden();
-  await page.waitForTimeout(250);
+  await page.waitForTimeout(250); // ui-guards: allow — absence: preview stays closed
   await expect(page.getByTestId('outputs-preview')).toBeHidden();
   await panel.getByRole('option').click();
   await expect(panel.getByRole('img')).toBeVisible();
@@ -276,7 +275,7 @@ test('terminal waits for its attach snapshot before requesting an optional compa
   await expect.poll(() => !!release).toBe(true);
   try {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.waitForTimeout(1800);
+    await page.waitForTimeout(1800); // ui-guards: allow — absence: no snapshot before the epoch
     expect(requests, 'only the initial snapshot until its epoch is known').toBe(1);
   } finally { release?.(); }
 });
