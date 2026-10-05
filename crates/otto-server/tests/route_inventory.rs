@@ -153,8 +153,13 @@ fn documented_routes_in(md: &str, out: &mut BTreeSet<(String, String)>) {
         }
     };
     let mut in_code = false;
+    // A paragraph OPENS after a blank line (or a heading); a backticked route
+    // at the start of a wrapped continuation line is prose, not an entry.
+    let mut prev_blank = true;
     for line in md.lines() {
         let t = line.trim_start();
+        let opens_paragraph =
+            std::mem::replace(&mut prev_blank, t.is_empty() || t.starts_with('#'));
         if t.starts_with("```") {
             in_code = !in_code;
             continue;
@@ -210,7 +215,7 @@ fn documented_routes_in(md: &str, out: &mut BTreeSet<(String, String)>) {
             let opens = pair
                 .captures(body.trim_start_matches('`'))
                 .is_some_and(|h| h.get(0).unwrap().start() == 0);
-            if !opens || !(is_bullet || body.starts_with('`')) {
+            if !opens || !(is_bullet || (opens_paragraph && body.starts_with('`'))) {
                 continue;
             }
             if body.starts_with('`') {
@@ -370,7 +375,9 @@ fn contract_parser_reads_every_route_spelling() {
 - GET /usage/by-kind?days=N → rollup
 | — | POST /api/v1/sessions/{id}/resume | x |
 | ANY `/plugins/{slug}` · ANY `/plugins/{slug}/{*rest}` | x |
+
 `GET /api/v1/state/formats` and `POST /api/v1/state/export` open the paragraph.
+  `GET /wrapped/continuation` is prose.
 - prose mentioning `POST /repos/{id}/checkout-update` is not an entry
 A paragraph citing `POST /mid/sentence` is not one either.
 Removed: `POST /gone` never counts.
