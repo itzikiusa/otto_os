@@ -33,6 +33,10 @@
   let sessionId = $state<string | null>(null);
   let status = $state<SessionStatus | null>(null);
   let opening = $state(false);
+  /** False once the view unmounted: an exec POST that resolves after that
+   *  must delete its session — nothing is left to show (or close) it, and a
+   *  leaked `kubectl exec -it` PTY would run on the daemon until it exits. */
+  let alive = true;
   let error = $state('');
 
   const running = $derived(containers.filter((c) => !c.init));
@@ -56,7 +60,7 @@
         title: 'Open a production shell?',
         danger: true,
       });
-      if (!ok) return;
+      if (!ok || !alive) return;
     }
     opening = true;
     error = '';
@@ -67,9 +71,13 @@
         pod,
         container: container || null,
       });
+      if (!alive) {
+        void api.del(`/sessions/${s.id}`).catch(() => {});
+        return;
+      }
       sessionId = s.id;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (alive) error = e instanceof Error ? e.message : String(e);
     } finally {
       opening = false;
     }
@@ -87,10 +95,13 @@
     }
   }
 
-  // Auto-open once when asked; kill the session on unmount.
+  // Auto-open once when asked (read untracked: a later `autoOpen` flip must
+  // not re-run this and close a live shell); kill the session on unmount.
   $effect(() => {
-    if (autoOpen) untrack(() => void open());
+    alive = true;
+    if (untrack(() => autoOpen)) untrack(() => void open());
     return () => {
+      alive = false;
       untrack(() => void close());
     };
   });

@@ -62,17 +62,23 @@
   let saved = $state<K8sPodAction[]>([]);
   let savedError = $state('');
   let savedLoading = $state(false);
+  // Latest-wins: switching workload / namespace / cluster while a list is in
+  // flight must not show the previous target's saved actions.
+  let savedSeq = 0;
   async function loadSaved(): Promise<void> {
+    const seq = ++savedSeq;
     if (!workload) return;
     savedLoading = true;
     try {
       const r = await k8sApi.podActions(clusterId, { namespace: ns, workload_kind: workload.kind, workload: workload.name });
+      if (seq !== savedSeq) return;
       saved = r.actions;
       savedError = '';
     } catch (e) {
+      if (seq !== savedSeq) return;
       savedError = loadErrorText(e);
     } finally {
-      savedLoading = false;
+      if (seq === savedSeq) savedLoading = false;
     }
   }
   $effect(() => {

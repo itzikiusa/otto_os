@@ -42,6 +42,7 @@ import { HistoryRefresh, HistoryDetail } from './apiHistory';
 import { toasts } from '../toast.svelte';
 import type { PreRequestReq, TestResult } from '../api/scripts';
 import { runScript } from '../api/scriptRunner';
+import { parseGraphqlVariables } from '../../modules/api/graphqlVars';
 import {
   detectAndParse,
   collectionToPostman,
@@ -1435,6 +1436,8 @@ class ApiClientStore {
       headers: draft.headers.map(h => ({...h})), body: draft.body,
     };
     try {
+      // Bad variables JSON fails the send here, inline, before any script runs.
+      const gqlVariables = draft.body_mode === 'graphql' ? parseGraphqlVariables(draft.graphql_variables) : null;
       if (draft.pre_request_script?.trim()) {
         const pre = await runScript({ kind:'pre', code:draft.pre_request_script, request:reqCtx, vars:runtimeVars }, signal);
         checkCurrent();
@@ -1447,9 +1450,7 @@ class ApiClientStore {
       checkCurrent();
       let effectiveBody = reqCtx.body;
       if (draft.body_mode === 'graphql') {
-        let variables: unknown = {};
-        try { variables = draft.graphql_variables?.trim() ? JSON.parse(draft.graphql_variables) : {}; } catch { /* Preserve the existing empty-object fallback. */ }
-        effectiveBody = JSON.stringify({query:reqCtx.body, variables});
+        effectiveBody = JSON.stringify({query:reqCtx.body, variables: gqlVariables ?? {}});
       }
       const settings = draft.settings;
       const body: ExecuteApiReq = {

@@ -1136,7 +1136,7 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | POST /workspaces/{wid}/db/widgets | ws editor | CreateWidgetReq | Widget |
 | PATCH /db/widgets/{id} | ws editor + owner/ws-Admin/root | UpdateWidgetReq | Widget |
 | DELETE /db/widgets/{id} | ws editor + owner/ws-Admin/root | — | 204 |
-| POST /db/widgets/{id}/run | ws editor (on the widget's CONNECTION) + owner/ws-Admin/root | — | widget query result |
+| POST /db/widgets/{id}/run | ws editor (on the widget's CONNECTION) + owner/ws-Admin/root | — | widget query result — always run **read-only** (`QueryRequest.read_only`): a widget re-runs unattended on every refresh, so a write/DDL statement is refused with the read-only 403 on every connection (the UI also refuses an obvious write at save time) |
 
 `UpdateSavedQueryReq` = `{ name?, statement? }` — a partial update; an absent
 field is left unchanged (so a rename and a statement-edit can be sent

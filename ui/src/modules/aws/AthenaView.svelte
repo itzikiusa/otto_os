@@ -25,6 +25,8 @@
   import { athenaCostUsd, fmtAgo, fmtBytes, fmtMs, awsErrorText } from './util';
   import Tabs from '../../lib/components/Tabs.svelte';
   import { statusPollMs } from '../../lib/pollBackoff';
+  import { confirmProd, isProdEnv } from '../../lib/confirmProd';
+  import { athenaIsRead, athenaLeadKeyword } from './athena-sql';
   import type {
     AthenaExecution,
     AthenaQueryState,
@@ -62,9 +64,25 @@
   const SQL_KEY = `otto_aws_athena_sql_${acctId}`;
   const WG_KEY = `otto_aws_athena_wg_${acctId}`;
   const DB_KEY = `otto_aws_athena_db_${acctId}`;
-  let sql = $state(localStorage.getItem(SQL_KEY) ?? '');
-  let workgroup = $state(localStorage.getItem(WG_KEY) ?? '');
-  let database = $state(localStorage.getItem(DB_KEY) ?? '');
+  // Storage can throw (private window, blocked site data): the editor then
+  // just starts empty and nothing is remembered.
+  function readKey(key: string): string {
+    try {
+      return localStorage.getItem(key) ?? '';
+    } catch {
+      return '';
+    }
+  }
+  function writeKey(key: string, value: string): void {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      /* not persisted — the session keeps working */
+    }
+  }
+  let sql = $state(readKey(SQL_KEY));
+  let workgroup = $state(readKey(WG_KEY));
+  let database = $state(readKey(DB_KEY));
   let editorSel = $state<{ text: string; cursor: number }>({ text: '', cursor: 0 });
 
   // Execution state.
@@ -146,11 +164,11 @@
 
   // Persist the editor + selectors.
   $effect(() => {
-    localStorage.setItem(SQL_KEY, sql);
+    writeKey(SQL_KEY, sql);
   });
   $effect(() => {
-    if (workgroup) localStorage.setItem(WG_KEY, workgroup);
-    if (database) localStorage.setItem(DB_KEY, database);
+    if (workgroup) writeKey(WG_KEY, workgroup);
+    if (database) writeKey(DB_KEY, database);
   });
 
   const treeDbs = $derived.by(() => {
@@ -225,6 +243,24 @@
     if (!canRun || running) return;
     const text = (editorSel.text.trim() || sql).trim();
     if (!text) return;
+    // DDL / DML (DROP, INSERT, CTAS, ALTER, MSCK…) runs through the same call
+    // as a SELECT: confirm where and what first — typed on a prod account —
+    // and tell the daemon it was confirmed (it refuses an unconfirmed write
+    // on prod).
+    const write = !athenaIsRead(text);
+    if (write) {
+      const prod = isProdEnv(account.environment);
+      const ok = await confirmProd({
+        env: account.environment,
+        verb: `Run ${athenaLeadKeyword(text) || 'statement'}`,
+        title: prod ? 'Run a write on production?' : 'Run a write statement?',
+        where: `Athena · ${account.name} · ${rq || account.region}${workgroup ? ` · workgroup ${workgroup}` : ''}${database ? ` · ${database}` : ''}`,
+        what: text,
+        typed: prod ? account.name : undefined,
+        danger: true,
+      });
+      if (!ok || running) return;
+    }
     const seq = ++executionGeneration;
     submitting = true;
     resultError = null;
@@ -234,12 +270,15 @@
     execMs = 0;
     ranSql = text;
     tab = 'results';
+    pollFails = 0;
+    statusUnknown = '';
     try {
       const started = rq;
       const r = await awsApi.athenaQuery(account.id, {
         sql: text,
         database: database || undefined,
         workgroup: workgroup || undefined,
+        ...(write ? { confirm: true } : {}),
       }, started || undefined);
       if (seq !== executionGeneration) return;
       qRegion = started;
@@ -261,6 +300,13 @@
   // capped at 5 s (15 s while the window is hidden) — lib/pollBackoff, shared
   // with Logs Insights.
   let pollN = 0;
+  /** Consecutive failed status polls. A transient error must not mark a
+   *  still-running query FAILED (that hid Cancel while it kept scanning):
+   *  the state stays as last known, polls retry with backoff, and after
+   *  MAX_POLL_FAILS the bar offers "Check again". */
+  let pollFails = $state(0);
+  const MAX_POLL_FAILS = 5;
+  let statusUnknown = $state('');
   function nextPollMs(): number {
     return statusPollMs(pollN++, typeof document !== 'undefined' && document.visibilityState === 'hidden');
   }
@@ -278,6 +324,8 @@
     try {
       const s = await awsApi.athenaStatus(account.id, id, undefined, undefined, requestedRegion || undefined);
       if (qid !== id || seq !== executionGeneration) return;
+      pollFails = 0;
+      statusUnknown = '';
       qstate = s.state;
       scanned = s.stats?.data_scanned_bytes ?? 0;
       execMs = s.stats?.execution_ms ?? 0;
@@ -294,9 +342,16 @@
       void loadHistory();
     } catch (e) {
       if (qid !== id || seq !== executionGeneration) return;
-      qstate = 'FAILED';
-      resultError = e instanceof Error ? e.message : String(e);
+      pollFails++;
+      statusUnknown = e instanceof Error ? e.message : String(e);
+      if (pollFails < MAX_POLL_FAILS) schedulePoll(Math.min(30_000, 2_000 * 2 ** (pollFails - 1)));
     }
+  }
+
+  function checkAgain(): void {
+    pollFails = 0;
+    statusUnknown = '';
+    schedulePoll(0);
   }
 
   async function cancel(): Promise<void> {
@@ -372,7 +427,17 @@
     ]);
   }
 
-  onDestroy(() => { executionGeneration++; historyGeneration++; catalogGeneration++; stopPoll(); });
+  onDestroy(() => {
+    // Leaving the view cancels a still-running query: nothing would poll it,
+    // and Athena bills for every byte it keeps scanning.
+    if (qid && (qstate === 'QUEUED' || qstate === 'RUNNING')) {
+      void awsApi.athenaCancel(account.id, qid, qRegion || undefined).catch(() => {});
+    }
+    executionGeneration++;
+    historyGeneration++;
+    catalogGeneration++;
+    stopPoll();
+  });
 
   const loginNeeded = $derived(isLoginRequired(new Error(catError)));
   let treeOpen = $state(!viewport.isMobile);
@@ -470,6 +535,12 @@
       </label>
       <span class="spacer"></span>
       {#if running && qid}
+        {#if statusUnknown}
+          <span class="dim" role="status" title={statusUnknown}>Status unknown{pollFails < MAX_POLL_FAILS ? ' · retrying' : ''}</span>
+          {#if pollFails >= MAX_POLL_FAILS}
+            <button class="btn small" onclick={checkAgain}>Check again</button>
+          {/if}
+        {/if}
         <button class="btn small" onclick={() => void cancel()}><Icon name="x" size={12} /> Cancel</button>
       {/if}
       <button

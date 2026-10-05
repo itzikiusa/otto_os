@@ -3387,12 +3387,26 @@ impl DbViewerService {
     /// `user_id` is threaded through to history recording (since migration 0042).
     pub async fn run_widget(&self, id: &Id, user_id: &Id) -> Result<QueryResult> {
         let widget = self.repo.get_widget(id).await?;
-        let req = QueryRequest {
-            statement: widget.statement,
-            max_rows: Some(5000),
-            ..Default::default()
-        };
-        self.run(&widget.connection_id, user_id, &req).await
+        self.run(
+            &widget.connection_id,
+            user_id,
+            &widget_request(widget.statement),
+        )
+        .await
+    }
+}
+
+/// The request a dashboard widget runs: ALWAYS read-only. Widgets re-execute
+/// unattended on every auto-refresh, so a saved `UPDATE …` / `DELETE …` must
+/// never write — `read_only` makes `run` classify the statement first and
+/// refuse a write/DDL with the `READ_ONLY_PREFIX` 403 (the card shows it),
+/// then execute reads in the engine's native read-only mode.
+fn widget_request(statement: String) -> QueryRequest {
+    QueryRequest {
+        statement,
+        max_rows: Some(5000),
+        read_only: true,
+        ..Default::default()
     }
 }
 
@@ -3523,6 +3537,27 @@ mod tests {
     //! query leaves no stale entry a later cancel could hit.
 
     use super::*;
+
+    /// S16-08: a dashboard widget re-runs unattended on every refresh, so its
+    /// request is read-only — and the read-only gate refuses a saved write.
+    #[test]
+    fn widget_request_is_read_only_and_refuses_writes() {
+        let req = widget_request("UPDATE counters SET n = n + 1".into());
+        assert!(req.read_only);
+        assert_eq!(req.max_rows, Some(5000));
+        for (engine, write) in [
+            (Engine::Mysql, "UPDATE counters SET n = n + 1"),
+            (Engine::Postgres, "DELETE FROM sessions WHERE id = 1"),
+            (Engine::Redis, "DEL k"),
+        ] {
+            let err = ensure_read_only_request(engine, write).unwrap_err();
+            assert!(
+                err.to_string().contains(READ_ONLY_PREFIX),
+                "{engine:?} {write}: {err}"
+            );
+        }
+        ensure_read_only_request(Engine::Postgres, "SELECT count(*) FROM orders").unwrap();
+    }
 
     /// DB2-07: the reaper's sweep drops expired schema graphs without anyone
     /// requesting a diagram, and keeps fresh ones.

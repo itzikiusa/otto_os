@@ -6,7 +6,7 @@
   // pod can't grow the DOM or memory without bound.
   import { untrack, tick } from 'svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
-  import { appendCapped, appendFiltered } from './logRing';
+  import { appendCapped, appendFiltered, pushPendingCapped } from './logRing';
   import Icon from '../../lib/components/Icon.svelte';
   import { downloadText } from '../../lib/components/exporters';
   import { followLogs } from '../../lib/api/k8s';
@@ -130,8 +130,23 @@
   function ingest(text: string): void {
     const parts = (carry + text).split('\n');
     carry = parts.pop() ?? '';
-    if (parts.length) pending.push(...parts);
-    if (flushRaf === null) flushRaf = requestAnimationFrame(flush);
+    if (parts.length) pushPendingCapped(pending, parts, MAX_LINES);
+    scheduleFlush();
+  }
+
+  /** rAF while visible; a timer while hidden (rAF is paused then, and the
+   *  ring should still be current when the window comes back). */
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleFlush(): void {
+    if (flushRaf !== null || flushTimer !== null) return;
+    if (typeof document !== 'undefined' && document.hidden) {
+      flushTimer = setTimeout(() => {
+        flushTimer = null;
+        flush();
+      }, 500);
+    } else {
+      flushRaf = requestAnimationFrame(flush);
+    }
   }
 
   async function start(): Promise<void> {
@@ -157,6 +172,9 @@
         ingest,
         ac.signal,
       );
+      // Superseded while awaiting: `carry` / `pending` now belong to the new
+      // stream — leave them alone.
+      if (ac.signal.aborted) return;
       if (carry) {
         pending.push(carry);
         carry = '';
@@ -196,6 +214,8 @@
       abort = null;
       if (flushRaf !== null) cancelAnimationFrame(flushRaf);
       flushRaf = null;
+      if (flushTimer !== null) clearTimeout(flushTimer);
+      flushTimer = null;
     };
   });
 
