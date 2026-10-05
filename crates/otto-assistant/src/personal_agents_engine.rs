@@ -28,55 +28,47 @@
 //!
 //! [`PersonalAgent`]: otto_state::PersonalAgent
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use otto_core::api::CreateSessionReq;
-use otto_core::domain::SessionKind;
 use otto_core::event::Event;
 use otto_core::{Error, Result};
 use otto_state::{
     AgentAutonomy, AgentRoomsRepo, FinishAgentRun, NewAgentRun, PersonalAgent, PersonalAgentRun,
     PersonalAgentSchedule, PersonalAgentsRepo, StandingGoal,
 };
-use serde_json::json;
 use tokio::sync::Semaphore;
 use tracing::warn;
 
-use crate::agent_run::{run_with_recovery, watch_for_result};
-use crate::cadence;
-use crate::report_delivery::{
-    augment_report_prompt, deliver_destination, extract_summary, report_hash, write_report,
-};
-use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
-use crate::scheduled_tasks_engine::{until_cancelled, InFlightSet, RunCancelGuard, RunCancels};
-use crate::state::ServerCtx;
+use crate::ctx::{AgentSessionRun, RunFailureNotice};
+use crate::AssistantCtx;
+use otto_core::cancel_signal::{until_cancelled, InFlightSet, RunCancelGuard, RunCancels};
 
 /// Marker the prompt-wrap embeds so the offline E2E stub returns a
 /// representative report instead of "OK".
 pub const SENTINEL: &str = "OTTO_TASK: personal_agent";
 
 /// No-progress (stuck) budget for a single run.
-const RUN_NO_PROGRESS: Duration = Duration::from_secs(600);
+pub const RUN_NO_PROGRESS: Duration = Duration::from_secs(600);
 /// Idle windows for the session watcher (waiting < stuck < grace timeout).
-const WAITING_IDLE: Duration = Duration::from_secs(60);
-const STUCK_IDLE: Duration = Duration::from_secs(300);
+pub const WAITING_IDLE: Duration = Duration::from_secs(60);
+pub const STUCK_IDLE: Duration = Duration::from_secs(300);
 /// Backoff between agent retries (capped at the slice count, last value reused).
-const RETRY_BACKOFF: [Duration; 3] = [
+pub const RETRY_BACKOFF: [Duration; 3] = [
     Duration::from_secs(3),
     Duration::from_secs(10),
     Duration::from_secs(20),
 ];
 /// Attempts per run (1 + retries). Personal agents have no per-agent retry
 /// knob in v1; two retries matches the scheduled-task default posture.
-const MAX_ATTEMPTS: u32 = 3;
+pub const MAX_ATTEMPTS: u32 = 3;
 
 /// Keep at most this many runs per agent; older runs (+ report files) are pruned.
 const KEEP_RUNS: i64 = 100;
 
-fn repo(ctx: &ServerCtx) -> PersonalAgentsRepo {
-    PersonalAgentsRepo::new(ctx.pool.clone())
+pub fn repo<C: AssistantCtx>(ctx: &C) -> PersonalAgentsRepo {
+    PersonalAgentsRepo::new(ctx.pool().clone())
 }
 
 /// Process-wide cap on concurrent personal-agent runs (bounds unattended-agent
@@ -93,8 +85,8 @@ fn run_semaphore() -> &'static Arc<Semaphore> {
     })
 }
 
-fn emit(ctx: &ServerCtx, agent: &PersonalAgent, run_id: &str, status: &str) {
-    let _ = ctx.events.send(Event::PersonalAgentRunUpdated {
+fn emit<C: AssistantCtx>(ctx: &C, agent: &PersonalAgent, run_id: &str, status: &str) {
+    let _ = ctx.events().send(Event::PersonalAgentRunUpdated {
         workspace_id: agent.workspace_id.clone(),
         agent_id: agent.id.clone(),
         run_id: run_id.to_string(),
@@ -263,9 +255,9 @@ this file at the start of every run and updates it before finishing.\n"
 /// `<data_dir>/personal/<agent_id>` — the default persona workspace. Agent ids
 /// are daemon-generated ULIDs, but re-validate before the join so a hostile id
 /// fails closed instead of escaping the data dir.
-pub fn default_agent_dir(ctx: &ServerCtx, agent_id: &str) -> std::path::PathBuf {
+pub fn default_agent_dir<C: AssistantCtx>(ctx: &C, agent_id: &str) -> std::path::PathBuf {
     let id = otto_core::paths::safe_component(agent_id).unwrap_or("invalid");
-    ctx.data_dir.join("personal").join(id)
+    ctx.data_dir().join("personal").join(id)
 }
 
 /// Validate a user-chosen agent cwd. Empty → `None` (use the default dir
@@ -295,7 +287,10 @@ pub fn validate_agent_cwd(raw: &str) -> Result<Option<std::path::PathBuf>> {
 }
 
 /// Resolve without provisioning: read-only document endpoints never seed files.
-pub fn agent_directory(ctx: &ServerCtx, agent: &PersonalAgent) -> Result<std::path::PathBuf> {
+pub fn agent_directory<C: AssistantCtx>(
+    ctx: &C,
+    agent: &PersonalAgent,
+) -> Result<std::path::PathBuf> {
     let dir = validate_agent_cwd(&agent.cwd)?.unwrap_or_else(|| default_agent_dir(ctx, &agent.id));
     match std::fs::canonicalize(&dir) {
         Ok(canonical) => Ok(canonical),
@@ -315,7 +310,10 @@ This context is maintained by the user; do not prune or rewrite it when updating
 /// Resolve + provision the agent's working directory: create it (and
 /// `memory/notes.md`, seeded once), then materialize `soul_md` into the cwd's
 /// CLAUDE.md/AGENTS.md (the swarm `provision` mechanism). Returns the cwd.
-pub async fn ensure_agent_workspace(ctx: &ServerCtx, agent: &PersonalAgent) -> Result<String> {
+pub async fn ensure_agent_workspace<C: AssistantCtx>(
+    ctx: &C,
+    agent: &PersonalAgent,
+) -> Result<String> {
     let dir = agent_directory(ctx, agent)?;
     crate::personal_agent_documents::seed_memory(&dir, &seed_notes(&agent.name)).await?;
     let cwd = dir.to_string_lossy().to_string();
@@ -343,7 +341,7 @@ pub async fn ensure_agent_workspace(ctx: &ServerCtx, agent: &PersonalAgent) -> R
     };
     let ctx_root = otto_context::materialize::default_context_root();
     let _ = otto_context::materialize::provision(
-        &ctx.context_library,
+        &ctx.context_library(),
         &cfg,
         &cwd,
         &agent.provider,
@@ -369,7 +367,7 @@ pub fn render_identity(agent: &PersonalAgent) -> String {
 
 /// The workspace's OTHER enabled agents, `(name, first line of persona)` —
 /// what the primary assistant routes to.
-async fn specialists_of(ctx: &ServerCtx, agent: &PersonalAgent) -> Vec<(String, String)> {
+async fn specialists_of<C: AssistantCtx>(ctx: &C, agent: &PersonalAgent) -> Vec<(String, String)> {
     repo(ctx)
         .list_by_workspace(&agent.workspace_id)
         .await
@@ -402,8 +400,8 @@ pub struct RoomBrief {
 
 /// The rooms `agent` belongs to, with the other members' names. Best-effort:
 /// a read failure yields no rooms (the run must not fail over it).
-async fn agent_room_briefs(ctx: &ServerCtx, agent: &PersonalAgent) -> Vec<RoomBrief> {
-    let rooms_repo = AgentRoomsRepo::new(ctx.pool.clone());
+async fn agent_room_briefs<C: AssistantCtx>(ctx: &C, agent: &PersonalAgent) -> Vec<RoomBrief> {
+    let rooms_repo = AgentRoomsRepo::new(ctx.pool().clone());
     let rooms = match rooms_repo.list_for_agent(&agent.id).await {
         Ok(r) if !r.is_empty() => r,
         Ok(_) => return Vec::new(),
@@ -493,8 +491,8 @@ pub fn render_rooms(rooms: &[RoomBrief]) -> String {
 /// run row, executes a fresh session, writes + delivers the report, and (for
 /// `trigger == "schedule"`) advances the fired schedule's cursor. Returns the
 /// run id; the run row carries the outcome (`ok`/`error`).
-pub async fn run_agent(
-    ctx: &ServerCtx,
+pub async fn run_agent<C: AssistantCtx>(
+    ctx: &C,
     agent: &PersonalAgent,
     schedule: Option<&PersonalAgentSchedule>,
     trigger: &str,
@@ -518,12 +516,12 @@ pub(crate) fn in_flight() -> &'static InFlightSet {
 /// Claim the agent's run slot without starting a run — "reset agent" holds it
 /// so no run starts while its memory and history are wiped. `None` while a
 /// run is in flight.
-pub(crate) fn claim_idle(agent_id: &str) -> Option<crate::scheduled_tasks_engine::InFlightGuard> {
+pub fn claim_idle(agent_id: &str) -> Option<otto_core::cancel_signal::InFlightGuard> {
     in_flight().claim(agent_id)
 }
 
 /// Cancel handles of this engine's in-flight runs (see
-/// [`crate::scheduled_tasks_engine::RunCancels`]).
+/// [`otto_core::cancel_signal::RunCancels`]).
 fn run_cancels() -> &'static RunCancels {
     static REG: OnceLock<RunCancels> = OnceLock::new();
     REG.get_or_init(RunCancels::default)
@@ -541,8 +539,8 @@ pub fn cancel_run(run_id: &str) -> bool {
 /// agent turn used to run inside the HTTP request, so the caller's timeout or
 /// a dropped request orphaned the run in `running`). 409 while a run of the
 /// agent is already in progress.
-pub async fn spawn_agent_run(
-    ctx: &ServerCtx,
+pub async fn spawn_agent_run<C: AssistantCtx>(
+    ctx: &C,
     agent: &PersonalAgent,
     schedule: Option<&PersonalAgentSchedule>,
     trigger: &str,
@@ -592,8 +590,8 @@ pub async fn spawn_agent_run(
 /// `running` row at once — the Otto Assistant's delegation primitive
 /// (`assistant_delegate`: "Asked *Daily Recap*…"). Same 409-while-busy rule
 /// as [`spawn_agent_run`]; recorded as a `manual` run (no schedule cursor).
-pub async fn spawn_directive_run(
-    ctx: &ServerCtx,
+pub async fn spawn_directive_run<C: AssistantCtx>(
+    ctx: &C,
     agent: &PersonalAgent,
     directive: &str,
 ) -> Result<PersonalAgentRun> {
@@ -644,8 +642,8 @@ pub async fn spawn_directive_run(
 /// only (never delivered), capped at the agent's `max_minutes`. Same
 /// one-run-per-agent rule; the goal's `last_run_at` is stamped at start so the
 /// round-robin moves on even if the run fails.
-pub async fn spawn_proactive_run(
-    ctx: &ServerCtx,
+pub async fn spawn_proactive_run<C: AssistantCtx>(
+    ctx: &C,
     agent: &PersonalAgent,
     goal_id: &str,
 ) -> Result<PersonalAgentRun> {
@@ -684,8 +682,8 @@ pub async fn spawn_proactive_run(
 }
 
 /// Open the run row (`running`) and announce it.
-async fn open_agent_run(
-    ctx: &ServerCtx,
+async fn open_agent_run<C: AssistantCtx>(
+    ctx: &C,
     agent: &PersonalAgent,
     schedule: Option<&PersonalAgentSchedule>,
     trigger: &str,
@@ -714,8 +712,8 @@ async fn open_agent_run(
 /// Execute an opened run to completion and settle it (+ the schedule cursor
 /// for a scheduled run). Returns the run id.
 #[allow(clippy::too_many_arguments)] // cancellation registration precedes publishing the running row
-async fn complete_agent_run(
-    ctx: &ServerCtx,
+async fn complete_agent_run<C: AssistantCtx>(
+    ctx: &C,
     agent: &PersonalAgent,
     schedule: Option<&PersonalAgentSchedule>,
     run_id: &str,
@@ -757,7 +755,7 @@ async fn complete_agent_run(
     let Some(result) = result else {
         if let Ok(run) = repo.get_run(&run_id).await {
             if let Some(sid) = run.session_id.as_deref() {
-                if let Err(e) = ctx.manager.kill_session(&sid.to_string()).await {
+                if let Err(e) = ctx.manager().kill_session(&sid.to_string()).await {
                     warn!(agent = %agent.id, "personal agent stop: kill session {sid}: {e}");
                 }
             }
@@ -791,8 +789,8 @@ async fn complete_agent_run(
         Ok(out) => {
             let now = Utc::now();
             let rel = report_rel(&agent.id, now);
-            let abs = ctx.data_dir.join("personal").join(&rel);
-            let (report_path, report_rel_opt) = match write_report(&abs, &out.report).await {
+            let abs = ctx.data_dir().join("personal").join(&rel);
+            let (report_path, report_rel_opt) = match C::write_report(&abs, &out.report).await {
                 Ok(()) => (Some(abs.to_string_lossy().to_string()), Some(rel.clone())),
                 Err(e) => {
                     warn!(agent = %agent.id, "personal agent: write report failed: {e}");
@@ -802,7 +800,7 @@ async fn complete_agent_run(
 
             // Notify only on meaningful change (always on for personal agents —
             // the report also always lands on the agent page regardless).
-            let hash = report_hash(&out.report);
+            let hash = C::report_hash(&out.report);
             let unchanged = repo
                 .last_ok_report_hash(&agent.id, &run_id)
                 .await
@@ -814,16 +812,16 @@ async fn complete_agent_run(
             let (delivered, derr, skipped) = if unchanged || plan.mode == "proactive" {
                 (false, None, true)
             } else {
-                let (d, e) = deliver_destination(
-                    ctx,
-                    &agent.workspace_id,
-                    agent.created_by.as_deref(),
-                    &agent.name,
-                    &agent.delivery,
-                    &out.summary,
-                    &out.report,
-                )
-                .await;
+                let (d, e) = ctx
+                    .deliver_destination(
+                        &agent.workspace_id,
+                        agent.created_by.as_deref(),
+                        &agent.name,
+                        &agent.delivery,
+                        &out.summary,
+                        &out.report,
+                    )
+                    .await;
                 (d, e, false)
             };
 
@@ -877,13 +875,13 @@ async fn complete_agent_run(
 /// Notification-center notice for an unattended agent run (review 08 · N1):
 /// once per failure streak (a failed run or a failed delivery); a clean run
 /// ends the streak. Clicking it opens the agent's Runs tab.
-async fn agent_notice(
-    ctx: &ServerCtx,
+async fn agent_notice<C: AssistantCtx>(
+    ctx: &C,
     agent: &PersonalAgent,
     error: Option<&str>,
     delivery_error: Option<&str>,
 ) {
-    let key = crate::run_notices::streak_key("personal_agent", &agent.id);
+    let key = C::run_streak_key("personal_agent", &agent.id);
     let (title, body) = match (error, delivery_error) {
         (Some(e), _) => (format!("{}’s run failed", agent.name), e.to_string()),
         (None, Some(d)) => (
@@ -891,29 +889,25 @@ async fn agent_notice(
             d.to_string(),
         ),
         (None, None) => {
-            crate::run_notices::clear_streak(&key);
+            C::clear_run_streak(&key);
             return;
         }
     };
-    crate::run_notices::notify_failure(
-        ctx,
-        crate::run_notices::RunNotice {
-            key,
-            severity: otto_core::domain::NoticeSeverity::Error,
-            title,
-            body,
-            route: format!("personal-agents/{}/runs", agent.id),
-            workspace_id: Some(agent.workspace_id.clone()),
-            user_id: agent.created_by.clone(),
-        },
-    )
+    ctx.notify_run_failure(RunFailureNotice {
+        key,
+        title,
+        body,
+        route: format!("personal-agents/{}/runs", agent.id),
+        workspace_id: Some(agent.workspace_id.clone()),
+        user_id: agent.created_by.clone(),
+    })
     .await;
 }
 
 /// Advance the fired schedule's cursor on completion — only for scheduled
 /// triggers, and only that schedule's (per-schedule cursor).
-async fn advance_cursor(
-    ctx: &ServerCtx,
+async fn advance_cursor<C: AssistantCtx>(
+    ctx: &C,
     schedule: Option<&PersonalAgentSchedule>,
     trigger: &str,
     now: DateTime<Utc>,
@@ -922,8 +916,7 @@ async fn advance_cursor(
         return;
     }
     let Some(s) = schedule else { return };
-    let tz = cadence::task_tz(&s.timezone);
-    let next = cadence::next_run(&s.schedule, now, tz).map(|d| d.to_rfc3339());
+    let next = C::cadence_next_run(&s.schedule, now, &s.timezone).map(|d| d.to_rfc3339());
     let _ = repo(ctx)
         .set_schedule_runtime(&s.id, Some(&now.to_rfc3339()), next.as_deref())
         .await;
@@ -959,13 +952,13 @@ struct ExecOutcome {
 /// headless stub (no real CLI). Otherwise every run is a **fresh, real,
 /// openable session** of the agent's pinned provider, retried up to
 /// [`MAX_ATTEMPTS`] times, capturing the Markdown report the agent writes.
-async fn execute_agent(
-    ctx: &ServerCtx,
+async fn execute_agent<C: AssistantCtx>(
+    ctx: &C,
     agent: &PersonalAgent,
     run_id: &str,
     directive: &str,
     plan: &RunPlan,
-    cancel: &crate::cancel_signal::CancelSignal,
+    cancel: &otto_core::cancel_signal::CancelSignal,
 ) -> Result<ExecOutcome> {
     let cwd = ensure_agent_workspace(ctx, agent).await?;
     let (user_context, _) = repo(ctx).context(&agent.id).await?;
@@ -985,10 +978,10 @@ async fn execute_agent(
     // Deterministic offline path for tests (mirrors scheduled_tasks_engine).
     if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
         let report = ctx
-            .orchestrator
+            .orchestrator()
             .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
             .await?;
-        let summary = extract_summary(&report);
+        let summary = C::extract_summary(&report);
         return Ok(ExecOutcome {
             report,
             summary,
@@ -1010,10 +1003,10 @@ async fn execute_agent(
                 )));
             }
             let report = ctx
-                .orchestrator
+                .orchestrator()
                 .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
                 .await?;
-            let summary = extract_summary(&report);
+            let summary = C::extract_summary(&report);
             return Ok(ExecOutcome {
                 report,
                 summary,
@@ -1022,191 +1015,35 @@ async fn execute_agent(
             });
         }
     };
-    let ws = ctx.workspaces.get(&agent.workspace_id).await?;
-
-    // The agent writes its report here; the watcher returns its contents.
-    let run_name = otto_core::paths::safe_component(run_id).unwrap_or("invalid");
-    let out_path = default_agent_dir(ctx, &agent.id).join(format!("{run_name}.report.md"));
-    if let Some(p) = out_path.parent() {
-        let _ = tokio::fs::create_dir_all(p).await;
+    let out = ctx
+        .run_agent_session(AgentSessionRun {
+            agent,
+            run_id,
+            owner: &owner,
+            cwd: &cwd,
+            prompt: &prompt,
+            plan,
+            cancel,
+        })
+        .await?;
+    if let Some(reason) = out.failure {
+        return Err(Error::Internal(format!("agent run failed: {reason}")));
     }
-    let _ = std::fs::remove_file(&out_path);
-    let augmented = augment_report_prompt(&prompt, &out_path.to_string_lossy());
-
-    // Pre-trust so the session doesn't stall on the "trust this folder?" prompt.
-    otto_sessions::trust::ensure_trusted(&agent.provider, &cwd);
-
-    let captured_sid: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let attempts = Arc::new(std::sync::atomic::AtomicI64::new(0));
-
-    let outcome = run_with_recovery(
-        &ctx.manager,
-        MAX_ATTEMPTS,
-        &RETRY_BACKOFF,
-        None,
-        |_attempt| {
-            let captured = captured_sid.clone();
-            let attempts = attempts.clone();
-            let ws = ws.clone();
-            let owner = owner.clone();
-            let cwd = cwd.clone();
-            let augmented = augmented.clone();
-            let out_path = out_path.clone();
-            async move {
-                attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                run_one_session(
-                    ctx, &ws, &owner, agent, run_id, &cwd, &augmented, &out_path, &captured, plan,
-                    cancel,
-                )
-                .await
-            }
-        },
-    )
-    .await;
-    // The watcher already read the report into `outcome`; the scratch file
-    // would otherwise pile up one per run (for a personal agent, inside the
-    // folder its next runs work in — where they could read stale reports).
-    let _ = std::fs::remove_file(&out_path);
-
-    let session_id = captured_sid
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    if outcome.errored() {
-        return Err(Error::Internal(format!(
-            "agent run failed: {}",
-            outcome.reason.map(|r| r.as_str()).unwrap_or("unknown")
-        )));
-    }
-    let report = outcome.raw.unwrap_or_default();
+    let session_id = out.session_id;
+    let report = out.report.unwrap_or_default();
     if report.trim().is_empty() {
         return Err(Error::Internal("agent produced an empty report".into()));
     }
-    let summary = extract_summary(&report);
+    let summary = C::extract_summary(&report);
     Ok(ExecOutcome {
         report,
         summary,
         session_id,
-        attempts: attempts.load(std::sync::atomic::Ordering::Relaxed).max(1),
+        attempts: out.attempts.max(1),
     })
 }
 
-/// One attempt: create a fresh visible session of the agent's provider, inject
-/// the prompt, and watch for the report file. Mirrors
-/// `scheduled_tasks_engine::run_one_agent_session`.
-#[allow(clippy::too_many_arguments)]
-async fn run_one_session(
-    ctx: &ServerCtx,
-    ws: &otto_core::domain::Workspace,
-    owner: &str,
-    agent: &PersonalAgent,
-    run_id: &str,
-    cwd: &str,
-    prompt: &str,
-    out_path: &std::path::Path,
-    captured_sid: &Arc<Mutex<Option<String>>>,
-    plan: &RunPlan,
-    cancel: &crate::cancel_signal::CancelSignal,
-) -> crate::agent_run::RunOutcome {
-    use crate::agent_run::{FailReason, RunOutcome};
-
-    let _ = std::fs::remove_file(out_path);
-    // `personal_agent` in meta is the session→agent identity the room MCP tools
-    // resolve; `browser` makes the manager reconcile the otto-browser MCP into
-    // this cwd; `model` is the per-session model pin (same plumbing as
-    // scheduled tasks). `work.origin` marks the run as ENGINE-owned: `source:
-    // "personal_agent"` is deliberately outside `BACKGROUND_SESSION_SOURCES`
-    // (these sessions stay listed in the Agents tab), so without the explicit
-    // origin the idle sweep would read them as the user's own and never
-    // reclaim them (`otto_sessions::manager::is_user_started`).
-    // `read_only` confines the session (daemon tool policy + CLI tool list +
-    // forced sandbox); a read-only run gets no browser automation either —
-    // Playwright can click and submit, the CLI's own web reading stays.
-    let mut meta = json!({
-        "source": "personal_agent",
-        "personal_agent": agent.id,
-        "run_id": run_id,
-        "browser": agent.browser && !plan.read_only,
-        "agent_mode": plan.mode,
-        "read_only": plan.read_only,
-        "work": { "origin": "personal_agent" },
-    });
-    if !agent.model.trim().is_empty() {
-        meta["model"] = json!(agent.model.trim());
-    }
-    let req = CreateSessionReq {
-        kind: SessionKind::Agent,
-        provider: Some(agent.provider.clone()),
-        title: Some(format!("Agent: {}", agent.name)),
-        cwd: Some(cwd.to_string()),
-        connection_id: None,
-        model: None,
-        meta: Some(meta),
-    };
-    // Session creation must finish even if the run future is canceled. Its
-    // completion publishes the exact session ID, then kills it when Stop won
-    // before publication. No prompt can be submitted by this detached setup.
-    let (ctx2, ws2, owner2, run2, stopped) = (
-        ctx.clone(),
-        ws.clone(),
-        owner.to_string(),
-        run_id.to_string(),
-        cancel.clone(),
-    );
-    let creation = tokio::spawn(async move {
-        let session = ctx2.manager.create(&ws2, &owner2, req, None).await?;
-        if let Err(e) = repo(&ctx2).set_run_session(&run2, &session.id).await {
-            let _ = ctx2.manager.kill_session(&session.id).await;
-            return Err(e);
-        }
-        if stopped.is_cancelled() {
-            ctx2.manager.kill_session(&session.id).await?;
-            return Err(Error::Conflict(
-                "run stopped during session creation".into(),
-            ));
-        }
-        Ok(session)
-    });
-    let session = match creation
-        .await
-        .unwrap_or_else(|e| Err(Error::Internal(e.to_string())))
-    {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(agent = %agent.id, "personal agent: create session ({}): {e}", agent.provider);
-            return RunOutcome::failed(None, FailReason::CreateFailed);
-        }
-    };
-    let sid = session.id.clone();
-    *captured_sid.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid.clone());
-
-    if wait_for_tui(&ctx.manager, &sid).await {
-        let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-        let _ = ctx.manager.input(&sid, b"\r").await;
-        if !dispatched(&ctx.manager, &sid, before).await {
-            let _ = ctx.manager.input(&sid, b"\r").await;
-        }
-    }
-
-    watch_for_result(
-        &ctx.manager,
-        &sid,
-        &agent.provider,
-        session.provider_session_id.as_deref(),
-        cwd,
-        out_path,
-        RUN_NO_PROGRESS,
-        WAITING_IDLE,
-        STUCK_IDLE,
-        Some(|t| !t.trim().is_empty()),
-        |_st| async {},
-    )
-    .await
-}
-
-async fn prune(ctx: &ServerCtx, agent_id: &str) {
+async fn prune<C: AssistantCtx>(ctx: &C, agent_id: &str) {
     if let Ok(old) = repo(ctx).prune_runs(agent_id, KEEP_RUNS).await {
         for p in old {
             let _ = tokio::fs::remove_file(&p).await;

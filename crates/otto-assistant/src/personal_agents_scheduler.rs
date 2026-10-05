@@ -19,24 +19,23 @@ use tracing::{info, warn};
 
 use otto_state::PersonalAgentsRepo;
 
-use crate::cadence;
-use crate::cancel_signal::CancelSignal;
 use crate::personal_agents_engine::{in_flight, run_agent, spawn_proactive_run};
-use crate::state::ServerCtx;
+use crate::AssistantCtx;
+use otto_core::cancel_signal::CancelSignal;
 use otto_state::AgentAutonomy;
 
 const SCAN: Duration = Duration::from_secs(60);
 
 /// Start the supervisor. Returns its cancel signal; `cancel()` stops the loop at once
 /// (mirrors the scheduled-tasks / swarm / cli-update schedulers).
-pub fn start(ctx: ServerCtx) -> CancelSignal {
+pub fn start<C: AssistantCtx>(ctx: C) -> CancelSignal {
     let cancel = CancelSignal::new();
     tokio::spawn(supervise(ctx, cancel.clone()));
     cancel
 }
 
-async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
-    let repo = PersonalAgentsRepo::new(ctx.pool.clone());
+async fn supervise<C: AssistantCtx>(ctx: C, cancel: CancelSignal) {
+    let repo = PersonalAgentsRepo::new(ctx.pool().clone());
     match repo.reap_running().await {
         Ok(n) if n > 0 => info!("personal agents: reaped {n} interrupted run(s) on startup"),
         Ok(_) => {}
@@ -56,7 +55,7 @@ async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
     }
 }
 
-async fn tick(ctx: &ServerCtx, repo: &PersonalAgentsRepo) -> otto_core::Result<()> {
+async fn tick<C: AssistantCtx>(ctx: &C, repo: &PersonalAgentsRepo) -> otto_core::Result<()> {
     let now = Utc::now();
     for (schedule, agent) in repo.list_enabled_schedules().await? {
         // Not due → skip. Busy (any run of this AGENT in flight — scheduled,
@@ -64,15 +63,15 @@ async fn tick(ctx: &ServerCtx, repo: &PersonalAgentsRepo) -> otto_core::Result<(
         // occurrence is retried next tick rather than lost (the engine
         // advances it only on completion).
         // Never before the arm instant (created / resumed / re-timed).
-        let last = cadence::effective_cursor(
+        let last = C::cadence_effective_cursor(
             &schedule.schedule,
             schedule.last_run_at.as_deref().and_then(parse_ts),
             schedule.armed_at.as_deref().and_then(parse_ts),
         );
-        let tz = cadence::task_tz(&schedule.timezone);
+        let tz = schedule.timezone.as_str();
         // The creation time anchors a never-run cron (first-fire catch-up).
         let created = parse_ts(&schedule.created_at);
-        if !cadence::is_due_since(&schedule.schedule, last, created, now, tz) {
+        if !C::cadence_is_due_since(&schedule.schedule, last, created, now, tz) {
             continue;
         }
         let Some(guard) = in_flight().claim(&agent.id) else {
@@ -95,7 +94,7 @@ async fn tick(ctx: &ServerCtx, repo: &PersonalAgentsRepo) -> otto_core::Result<(
 /// goals round-robin, at most `runs_per_day` runs in any rolling 24 h, spaced
 /// evenly (24 h / runs_per_day apart). A busy agent is skipped (its scheduled
 /// and directed work comes first); the next tick tries again.
-async fn proactive_tick(ctx: &ServerCtx, repo: &PersonalAgentsRepo, now: DateTime<Utc>) {
+async fn proactive_tick<C: AssistantCtx>(ctx: &C, repo: &PersonalAgentsRepo, now: DateTime<Utc>) {
     let agents = match repo.list_proactive().await {
         Ok(a) => a,
         Err(e) => {

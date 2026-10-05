@@ -10,7 +10,7 @@ pub mod agent_tasks_nudge;
 pub mod api_helpers;
 pub mod api_scripts;
 pub mod api_secrets;
-pub mod assistant;
+mod assistant_host;
 pub mod auth;
 pub mod browser_login_throttle;
 pub mod cadence;
@@ -57,13 +57,9 @@ pub mod model_catalog;
 pub mod modules;
 pub mod monitor;
 pub mod offload;
-mod personal_agent_documents;
 // Personal agents: tool-layer permission policy + live activity (batch 2026-10-03).
 pub mod personal_agent_activity;
-pub mod personal_agent_memory;
 pub mod personal_agent_policy;
-pub mod personal_agents_engine;
-pub mod personal_agents_scheduler;
 pub mod plugins;
 pub mod policy;
 pub mod product_chat;
@@ -136,6 +132,12 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 pub use auth::{require_ws_role, CurrentUser};
+// The Assistant + Personal Agents engines live in `otto-assistant` (wired to
+// the daemon by `assistant_host`); re-exported at their historical paths.
+pub use otto_assistant::{
+    assistant, personal_agent_documents, personal_agent_memory, personal_agents_engine,
+    personal_agents_scheduler,
+};
 pub use error::{ApiError, ApiResult};
 pub use monitor::{
     spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,

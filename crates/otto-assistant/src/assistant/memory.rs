@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 
 use super::types::{AssistantMemory, MemorySource, ProfileDoc};
 use super::{assistant_dir, emit_needs_you, emit_task, repo, system_turn};
-use crate::state::ServerCtx;
+use crate::AssistantCtx;
 
 /// The otto-memory collection the assistant writes.
 pub const COLLECTION: &str = "assistant";
@@ -93,8 +93,8 @@ fn title_of(text: &str) -> String {
 /// Save one memory for `user_id`. `pending` lands it `suggested` (review).
 /// `source_kind` ∈ `agent | user | hermes`; `source_ref` = thread id / file.
 #[allow(clippy::too_many_arguments)]
-pub async fn save(
-    ctx: &ServerCtx,
+pub async fn save<C: AssistantCtx>(
+    ctx: &C,
     user_id: &str,
     text: &str,
     kind: Option<&str>,
@@ -129,7 +129,7 @@ pub async fn save(
     // save() returns the EXISTING row for an identical fact; only a brand-new
     // row may be parked for review (an already-accepted fact stays accepted).
     let existed = ctx
-        .memory
+        .memory()
         .repo()
         .find_by_hash(
             &ws(),
@@ -141,21 +141,21 @@ pub async fn save(
         .await?
         .is_some();
     let saved = ctx
-        .memory
+        .memory()
         .save(&ws(), user_id, vec![nm])
         .await?
         .into_iter()
         .next()
         .ok_or_else(|| Error::Internal("memory save returned nothing".into()))?;
     if pending && !existed && saved.state != "suggested" {
-        return ctx.memory.set_state(&ws(), &saved.id, "suggested").await;
+        return ctx.memory().set_state(&ws(), &saved.id, "suggested").await;
     }
     Ok(saved)
 }
 
 /// Would saving `text` for `user_id` duplicate an existing live memory?
-pub async fn is_duplicate(ctx: &ServerCtx, user_id: &str, text: &str) -> bool {
-    ctx.memory
+pub async fn is_duplicate<C: AssistantCtx>(ctx: &C, user_id: &str, text: &str) -> bool {
+    ctx.memory()
         .repo()
         .find_by_hash(
             &ws(),
@@ -171,8 +171,8 @@ pub async fn is_duplicate(ctx: &ServerCtx, user_id: &str, text: &str) -> bool {
 }
 
 /// The owner's memories: `(accepted, pending)`. `q` switches to FTS recall.
-pub async fn list(
-    ctx: &ServerCtx,
+pub async fn list<C: AssistantCtx>(
+    ctx: &C,
     user_id: &str,
     q: Option<&str>,
     limit: i64,
@@ -180,7 +180,7 @@ pub async fn list(
     let limit = limit.clamp(1, 500);
     let rows: Vec<Memory> = match q.map(str::trim).filter(|q| !q.is_empty()) {
         Some(text) => ctx
-            .memory
+            .memory()
             .search(
                 &ws(),
                 MemoryQuery {
@@ -197,7 +197,7 @@ pub async fn list(
             .map(|h| h.memory)
             .collect(),
         None => {
-            ctx.memory
+            ctx.memory()
                 .list(
                     &ws(),
                     ListFilter {
@@ -219,8 +219,8 @@ pub async fn list(
 }
 
 /// Load one of the owner's memories (another user's id is `NotFound`).
-pub async fn get_owned(ctx: &ServerCtx, user_id: &str, id: &str) -> Result<Memory> {
-    let m = ctx.memory.get(&ws(), id).await?;
+pub async fn get_owned<C: AssistantCtx>(ctx: &C, user_id: &str, id: &str) -> Result<Memory> {
+    let m = ctx.memory().get(&ws(), id).await?;
     if !owned_by(&m, user_id) {
         return Err(Error::NotFound("memory".into()));
     }
@@ -228,21 +228,21 @@ pub async fn get_owned(ctx: &ServerCtx, user_id: &str, id: &str) -> Result<Memor
 }
 
 /// Soft-forget one memory; returns its undo token.
-pub async fn forget_one(ctx: &ServerCtx, user_id: &str, id: &str) -> Result<String> {
+pub async fn forget_one<C: AssistantCtx>(ctx: &C, user_id: &str, id: &str) -> Result<String> {
     get_owned(ctx, user_id, id).await?;
-    Ok(ctx.memory.soft_forget(&ws(), id).await?.undo_token)
+    Ok(ctx.memory().soft_forget(&ws(), id).await?.undo_token)
 }
 
 /// "Forget X": soft-forget up to [`MAX_FORGET`] of the owner's memories that
 /// match `query` (FTS). Returns what went, with the undo tokens.
-pub async fn forget_matching(
-    ctx: &ServerCtx,
+pub async fn forget_matching<C: AssistantCtx>(
+    ctx: &C,
     user_id: &str,
     query: &str,
 ) -> Result<(Vec<Memory>, Vec<String>)> {
     super::check_text("query", query, 1024)?;
     let hits = ctx
-        .memory
+        .memory()
         .search(
             &ws(),
             MemoryQuery {
@@ -261,7 +261,7 @@ pub async fn forget_matching(
         if !owned_by(&h.memory, user_id) || !h.memory.active {
             continue;
         }
-        if let Ok(r) = ctx.memory.soft_forget(&ws(), &h.memory.id).await {
+        if let Ok(r) = ctx.memory().soft_forget(&ws(), &h.memory.id).await {
             tokens.push(r.undo_token);
             gone.push(h.memory);
         }
@@ -270,8 +270,8 @@ pub async fn forget_matching(
 }
 
 /// Restore a forgotten memory (the chip's Undo / the Forget toast's Undo).
-pub async fn undo(ctx: &ServerCtx, user_id: &str, token: &str) -> Result<Memory> {
-    let m = ctx.memory.undo_forget(&ws(), token).await?;
+pub async fn undo<C: AssistantCtx>(ctx: &C, user_id: &str, token: &str) -> Result<Memory> {
+    let m = ctx.memory().undo_forget(&ws(), token).await?;
     if !owned_by(&m, user_id) {
         // Tokens are random secrets, but never hand back another user's row.
         return Err(Error::NotFound("memory".into()));
@@ -280,15 +280,20 @@ pub async fn undo(ctx: &ServerCtx, user_id: &str, token: &str) -> Result<Memory>
 }
 
 /// Accept a pending memory (and settle its review item, if any).
-pub async fn accept(ctx: &ServerCtx, user_id: &str, id: &str) -> Result<Memory> {
+pub async fn accept<C: AssistantCtx>(ctx: &C, user_id: &str, id: &str) -> Result<Memory> {
     get_owned(ctx, user_id, id).await?;
-    let m = ctx.memory.set_state(&ws(), id, "accepted").await?;
+    let m = ctx.memory().set_state(&ws(), id, "accepted").await?;
     settle_review(ctx, user_id, id, "accepted").await;
     Ok(m)
 }
 
 /// Close the open `memory_review` needs-you item for `memory_id`, if any.
-pub async fn settle_review(ctx: &ServerCtx, user_id: &str, memory_id: &str, outcome: &str) {
+pub async fn settle_review<C: AssistantCtx>(
+    ctx: &C,
+    user_id: &str,
+    memory_id: &str,
+    outcome: &str,
+) {
     let Ok(open) = repo(ctx).needs_you(user_id).await else {
         return;
     };
@@ -318,8 +323,8 @@ pub async fn settle_review(ctx: &ServerCtx, user_id: &str, memory_id: &str, outc
 /// An agent `assistant_remember`: save (pending when memory approval is on),
 /// post the memory chip (with Undo) into the thread, and — when pending —
 /// open a `memory_review` needs-you item. Returns `(memory, pending)`.
-pub async fn remember_from_agent(
-    ctx: &ServerCtx,
+pub async fn remember_from_agent<C: AssistantCtx>(
+    ctx: &C,
     user_id: &str,
     thread_id: Option<&str>,
     text: &str,
@@ -385,8 +390,8 @@ pub async fn remember_from_agent(
 }
 
 /// Post the "Forgot N" chip (Undo restores them all).
-pub async fn forgot_chip(
-    ctx: &ServerCtx,
+pub async fn forgot_chip<C: AssistantCtx>(
+    ctx: &C,
     user_id: &str,
     thread_id: &str,
     gone: &[Memory],
@@ -469,7 +474,7 @@ fn read_profile_sync(dir: &Path) -> Result<ProfileDoc> {
 }
 
 /// Read `profile.md` (missing ⇒ empty, `exists: false`; never provisions).
-pub async fn read_profile(ctx: &ServerCtx, user_id: &str) -> Result<ProfileDoc> {
+pub async fn read_profile<C: AssistantCtx>(ctx: &C, user_id: &str) -> Result<ProfileDoc> {
     let dir = assistant_dir(ctx, user_id);
     tokio::task::spawn_blocking(move || read_profile_sync(&dir))
         .await
@@ -478,8 +483,8 @@ pub async fn read_profile(ctx: &ServerCtx, user_id: &str) -> Result<ProfileDoc> 
 
 /// Save `profile.md` with compare-and-swap on `version` (409 when stale),
 /// atomically via a sibling temp file.
-pub async fn save_profile(
-    ctx: &ServerCtx,
+pub async fn save_profile<C: AssistantCtx>(
+    ctx: &C,
     user_id: &str,
     version: &str,
     content: &str,

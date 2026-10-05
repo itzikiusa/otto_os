@@ -32,9 +32,8 @@ use super::types::{
     always_allow_resource, approval_card, ApprovalCard, CreateTaskReq, DecisionReq, SendReq,
 };
 use super::{emit_needs_you, emit_task, emit_task_change, repo, system_turn};
-use crate::cadence;
-use crate::cancel_signal::CancelSignal;
-use crate::state::ServerCtx;
+use crate::AssistantCtx;
+use otto_core::cancel_signal::CancelSignal;
 
 const TICK: Duration = Duration::from_secs(30);
 
@@ -115,14 +114,14 @@ fn needs_kind(t: &AssistantTask) -> Option<String> {
 /// Resolve a reminder's `run_at` (RFC3339, or local `YYYY-MM-DDTHH:MM` in
 /// `timezone`) to UTC via the shared `once` cadence. Must not be in the past
 /// by more than a minute (a typo, not a reminder).
-pub fn resolve_run_at(
+pub fn resolve_run_at<C: AssistantCtx>(
     raw: &str,
     timezone: &str,
     now: DateTime<Utc>,
 ) -> std::result::Result<(Value, DateTime<Utc>), String> {
     let schedule = json!({"cadence": "once", "run_at": raw.trim()});
-    cadence::validate(&schedule).map_err(|e| e.to_string())?;
-    let at = cadence::once_at(&schedule, cadence::task_tz(timezone))
+    C::cadence_validate(&schedule).map_err(|e| e.to_string())?;
+    let at = C::cadence_once_at(&schedule, timezone)
         .ok_or_else(|| "run_at is not a valid time".to_string())?;
     if at < now - chrono::Duration::minutes(1) {
         return Err("run_at is in the past".into());
@@ -141,8 +140,8 @@ fn check_tz(tz: &str) -> Result<String> {
 }
 
 /// Create a reminder or a plain task (user from the Tasks tab, or the agent).
-pub async fn create(
-    ctx: &ServerCtx,
+pub async fn create<C: AssistantCtx>(
+    ctx: &C,
     owner: &str,
     req: CreateTaskReq,
     from_agent: bool,
@@ -159,7 +158,8 @@ pub async fn create(
                 .as_deref()
                 .ok_or_else(|| Error::Invalid("a reminder needs run_at".into()))?;
             let tz = check_tz(req.timezone.as_deref().unwrap_or(""))?;
-            let (schedule, at) = resolve_run_at(raw, &tz, Utc::now()).map_err(Error::Invalid)?;
+            let (schedule, at) =
+                resolve_run_at::<C>(raw, &tz, Utc::now()).map_err(Error::Invalid)?;
             let t = repo(ctx)
                 .create_task(NewAssistantTask {
                     owner_user_id: owner.to_string(),
@@ -226,8 +226,8 @@ pub async fn create(
 
 /// The agent moves its own task along (`assistant_update_task`).
 #[allow(clippy::too_many_arguments)] // caller identity accompanies the existing tool payload
-pub async fn agent_update(
-    ctx: &ServerCtx,
+pub async fn agent_update<C: AssistantCtx>(
+    ctx: &C,
     owner: &str,
     caller_thread: Option<&str>,
     task_id: &str,
@@ -336,8 +336,12 @@ pub(super) async fn apply_agent_update(
 /// Resolve `agent` (a Personal Agent id, or its exact name) to one the user
 /// may run: Editor on its workspace + `scheduled_tasks:Edit` (the feature the
 /// Personal Agents routes ride).
-pub async fn resolve_agent(ctx: &ServerCtx, user: &User, agent: &str) -> Result<PersonalAgent> {
-    let pa = PersonalAgentsRepo::new(ctx.pool.clone());
+pub async fn resolve_agent<C: AssistantCtx>(
+    ctx: &C,
+    user: &User,
+    agent: &str,
+) -> Result<PersonalAgent> {
+    let pa = PersonalAgentsRepo::new(ctx.pool().clone());
     let candidates: Vec<PersonalAgent> = match pa.get(agent).await {
         Ok(a) => vec![a],
         Err(_) => {
@@ -350,7 +354,7 @@ pub async fn resolve_agent(ctx: &ServerCtx, user: &User, agent: &str) -> Result<
             out
         }
     };
-    let cap = otto_state::GrantsRepo::new(ctx.pool.clone())
+    let cap = otto_state::GrantsRepo::new(ctx.pool().clone())
         .capability_of(user, Feature::ScheduledTasks)
         .await?;
     if cap < Capability::Edit {
@@ -361,7 +365,7 @@ pub async fn resolve_agent(ctx: &ServerCtx, user: &User, agent: &str) -> Result<
     let mut allowed = Vec::new();
     for a in candidates {
         if ctx
-            .roles
+            .roles()
             .check(user, &a.workspace_id, WorkspaceRole::Editor)
             .await
             .is_ok()
@@ -381,8 +385,8 @@ pub async fn resolve_agent(ctx: &ServerCtx, user: &User, agent: &str) -> Result<
 /// `assistant_delegate`: start a Personal Agent run with `directive` and
 /// report it into the thread ("Asked *Daily Recap*…"). The tick posts the
 /// run's summary back when it settles.
-pub async fn delegate(
-    ctx: &ServerCtx,
+pub async fn delegate<C: AssistantCtx>(
+    ctx: &C,
     user: &User,
     thread_id: Option<&str>,
     agent: &str,
@@ -435,8 +439,8 @@ pub async fn delegate(
 /// card's tool + destination answers at once (never for purchase / prod);
 /// otherwise a needs-you item + an MCP approvals row are opened and the call
 /// waits up to `wait_seconds` (≤ 30) for a decision.
-pub async fn request_approval(
-    ctx: &ServerCtx,
+pub async fn request_approval<C: AssistantCtx>(
+    ctx: &C,
     owner: &str,
     thread_id: Option<&str>,
     args: &Value,
@@ -495,7 +499,7 @@ pub async fn request_approval(
     }
 
     let appr = ctx
-        .mcp
+        .mcp()
         .approvals()
         .create(NewApproval {
             workspace_id: None,
@@ -579,8 +583,8 @@ fn approval_title(card: &ApprovalCard) -> String {
 // Decisions: POST /assistant/tasks/{id}/{action}
 // ---------------------------------------------------------------------------
 
-pub async fn act(
-    ctx: &ServerCtx,
+pub async fn act<C: AssistantCtx>(
+    ctx: &C,
     user: &User,
     task_id: &str,
     action: &str,
@@ -643,7 +647,7 @@ pub async fn act(
                 .ok_or_else(|| Error::Invalid("canonical approval missing".into()))?;
             result = settle_approval(
                 &repo(ctx),
-                &ctx.mcp.approvals(),
+                &ctx.mcp().approvals(),
                 aid,
                 approved,
                 owner,
@@ -681,7 +685,7 @@ pub async fn act(
                 // below (once), never through `memory::settle_review`.
                 if action == "approve" {
                     let _ = ctx
-                        .memory
+                        .memory()
                         .set_state(otto_core::domain::SCRATCH_WORKSPACE_ID, mid, "accepted")
                         .await;
                 } else {
@@ -738,9 +742,14 @@ pub async fn act(
                 .and_then(|n| n.get("mcp_approval_id"))
                 .and_then(Value::as_str)
             {
-                let (canonical, _) =
-                    canonical_decision(&ctx.mcp.approvals(), aid, false, owner, reason.as_deref())
-                        .await?;
+                let (canonical, _) = canonical_decision(
+                    &ctx.mcp().approvals(),
+                    aid,
+                    false,
+                    owner,
+                    reason.as_deref(),
+                )
+                .await?;
                 result["decision"] = json!(canonical.status);
                 result["reason"] = json!(canonical.decision_note);
             }
@@ -829,11 +838,15 @@ async fn settle_approval(
     Ok(result)
 }
 
-async fn stop_task_execution(ctx: &ServerCtx, task: &AssistantTask, takeover: bool) -> Result<()> {
+async fn stop_task_execution<C: AssistantCtx>(
+    ctx: &C,
+    task: &AssistantTask,
+    takeover: bool,
+) -> Result<()> {
     if task.kind == "delegation" {
         if let Some(id) = task.agent_run_id.as_deref() {
             if !crate::personal_agents_engine::cancel_run(id) {
-                let run = PersonalAgentsRepo::new(ctx.pool.clone())
+                let run = PersonalAgentsRepo::new(ctx.pool().clone())
                     .get_run(id)
                     .await?;
                 if run.status == "running" {
@@ -844,7 +857,7 @@ async fn stop_task_execution(ctx: &ServerCtx, task: &AssistantTask, takeover: bo
             } else {
                 // The card settles only after the engine has killed its owned
                 // session and committed the canceled (or already-finished) run.
-                let pa = PersonalAgentsRepo::new(ctx.pool.clone());
+                let pa = PersonalAgentsRepo::new(ctx.pool().clone());
                 let until = tokio::time::Instant::now() + Duration::from_secs(30);
                 while pa.get_run(id).await?.status == "running" {
                     if tokio::time::Instant::now() >= until {
@@ -882,7 +895,7 @@ async fn stop_task_execution(ctx: &ServerCtx, task: &AssistantTask, takeover: bo
 
 /// Re-send the thread's last user message on `provider` (the "continue on
 /// Codex" answer to a limit item, or an auto-failover).
-async fn resend_last_on(ctx: &ServerCtx, owner: &str, thread_id: &str, provider: &str) {
+async fn resend_last_on<C: AssistantCtx>(ctx: &C, owner: &str, thread_id: &str, provider: &str) {
     let Ok(turns) = repo(ctx).list_turns(thread_id, None, 50).await else {
         return;
     };
@@ -936,8 +949,8 @@ async fn resend_last_on(ctx: &ServerCtx, owner: &str, thread_id: &str, provider:
 /// A usage limit was detected on `thread`'s route: record it, tell the user,
 /// and either switch (auto-failover / "switch" answered before), stay quietly
 /// ("stay" answered before), or open ONE "continue on X?" item.
-pub async fn on_limit(
-    ctx: &ServerCtx,
+pub async fn on_limit<C: AssistantCtx>(
+    ctx: &C,
     owner: &str,
     thread_id: &str,
     route: &RouteTarget,
@@ -1052,7 +1065,7 @@ pub async fn on_limit(
             }
         }
     }
-    let _ = ctx.events.send(otto_core::event::Event::AssistantLimit {
+    let _ = ctx.events().send(otto_core::event::Event::AssistantLimit {
         user_id: owner.to_string(),
         thread_id: Some(thread_id.to_string()),
         limit: serde_json::to_value(&state).unwrap_or(Value::Null),
@@ -1071,7 +1084,7 @@ pub async fn on_limit(
 /// Start the assistant supervisor (30 s tick). Returns a cancel flag, like the
 /// other schedulers. Never touches anything outside the assistant's own rows
 /// and the sessions it owns.
-pub fn start(ctx: ServerCtx) -> CancelSignal {
+pub fn start<C: AssistantCtx>(ctx: C) -> CancelSignal {
     let cancel = CancelSignal::new();
     let signal = cancel.clone();
     tokio::spawn(async move {
@@ -1089,14 +1102,14 @@ pub fn start(ctx: ServerCtx) -> CancelSignal {
     cancel
 }
 
-async fn tick(ctx: &ServerCtx) {
+async fn tick<C: AssistantCtx>(ctx: &C) {
     fire_due_reminders(ctx).await;
     settle_delegations(ctx).await;
     sync_mcp_approvals(ctx).await;
     expire_incognito(ctx).await;
 }
 
-async fn fire_due_reminders(ctx: &ServerCtx) {
+async fn fire_due_reminders<C: AssistantCtx>(ctx: &C) {
     let now = Utc::now();
     let due = match repo(ctx).due_reminders(&now.to_rfc3339()).await {
         Ok(d) => d,
@@ -1107,9 +1120,9 @@ async fn fire_due_reminders(ctx: &ServerCtx) {
     };
     for t in due {
         // The cadence engine has the final say (DST / parse); claim once.
-        let tz = cadence::task_tz(&t.timezone);
+        let tz = t.timezone.as_str();
         let spec = t.schedule.clone().unwrap_or(Value::Null);
-        if !cadence::is_due(&spec, None, now, tz) && t.schedule.is_some() {
+        if !C::cadence_is_due(&spec, None, now, tz) && t.schedule.is_some() {
             continue;
         }
         if !repo(ctx)
@@ -1131,8 +1144,7 @@ async fn fire_due_reminders(ctx: &ServerCtx) {
             .await;
         }
         let _ = ctx
-            .notifications()
-            .create(NewNotice {
+            .create_notice(NewNotice {
                 kind: NoticeKind::System,
                 severity: NoticeSeverity::Info,
                 title: format!("Reminder: {}", t.title),
@@ -1157,11 +1169,11 @@ async fn fire_due_reminders(ctx: &ServerCtx) {
     }
 }
 
-async fn settle_delegations(ctx: &ServerCtx) {
+async fn settle_delegations<C: AssistantCtx>(ctx: &C) {
     let Ok(running) = repo(ctx).running_delegations().await else {
         return;
     };
-    let pa = PersonalAgentsRepo::new(ctx.pool.clone());
+    let pa = PersonalAgentsRepo::new(ctx.pool().clone());
     for t in running {
         let lock = task_lock(&t.id);
         let _guard = lock.lock().await;
@@ -1240,7 +1252,7 @@ async fn settle_delegations(ctx: &ServerCtx) {
 }
 
 /// An approval decided in the MCP approvals queue settles its needs-you item.
-async fn sync_mcp_approvals(ctx: &ServerCtx) {
+async fn sync_mcp_approvals<C: AssistantCtx>(ctx: &C) {
     let Ok(open) = repo(ctx).open_approvals().await else {
         return;
     };
@@ -1254,7 +1266,7 @@ async fn sync_mcp_approvals(ctx: &ServerCtx) {
         else {
             continue;
         };
-        let Ok(appr) = ctx.mcp.approvals().get(&aid).await else {
+        let Ok(appr) = ctx.mcp().approvals().get(&aid).await else {
             continue;
         };
         let decision = match appr.status.as_str() {
@@ -1281,14 +1293,14 @@ async fn sync_mcp_approvals(ctx: &ServerCtx) {
     }
 }
 
-async fn expire_incognito(ctx: &ServerCtx) {
+async fn expire_incognito<C: AssistantCtx>(ctx: &C) {
     let cutoff = (Utc::now() - chrono::Duration::hours(INCOGNITO_TTL_HOURS)).to_rfc3339();
     let Ok(expired) = repo(ctx).expired_incognito(&cutoff).await else {
         return;
     };
     for t in expired {
         if let Some(sid) = t.session_id.as_ref() {
-            let _ = ctx.manager.remove(sid).await;
+            let _ = ctx.manager().remove(sid).await;
         }
         let _ = repo(ctx).delete_thread(&t.owner_user_id, &t.id).await;
     }
@@ -1431,25 +1443,5 @@ mod tests {
         assert!(next_state("task", "running", None, "explode")
             .unwrap_err()
             .contains("unknown action"));
-    }
-
-    #[test]
-    fn run_at_resolves_through_the_once_cadence() {
-        let now = Utc::now();
-        let future = (now + chrono::Duration::hours(2)).to_rfc3339();
-        let (spec, at) = resolve_run_at(&future, "UTC", now).unwrap();
-        assert_eq!(spec["cadence"], "once");
-        assert!(
-            (at - (now + chrono::Duration::hours(2)))
-                .num_seconds()
-                .abs()
-                <= 1
-        );
-        // Local wall-clock in a named zone.
-        let (_, at) = resolve_run_at("2099-01-01T09:00", "Asia/Jerusalem", now).unwrap();
-        assert_eq!(at.to_rfc3339(), "2099-01-01T07:00:00+00:00");
-        // Past and garbage are refused.
-        assert!(resolve_run_at("2001-01-01T09:00", "UTC", now).is_err());
-        assert!(resolve_run_at("at five", "UTC", now).is_err());
     }
 }

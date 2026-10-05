@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/otto-core",
+    "crates/otto-assistant",
     "crates/otto-state",
     "crates/otto-rbac",
     "crates/otto-keychain",
@@ -70,6 +71,7 @@ otto-server = { path = "crates/otto-server" }
 otto-product = { path = "crates/otto-product" }
 otto-swarm = { path = "crates/otto-swarm" }
 otto-memory = { path = "crates/otto-memory" }
+otto-assistant = { path = "crates/otto-assistant" }
 otto-vault = { path = "crates/otto-vault" }
 otto-brokers = { path = "crates/otto-brokers" }
 otto-netguard = { path = "crates/otto-netguard" }

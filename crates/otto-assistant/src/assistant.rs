@@ -38,7 +38,7 @@ use otto_core::{Error, Result};
 use otto_state::{AssistantRepo, AssistantTask, AssistantThread, AssistantTurn, NewAssistantTurn};
 use serde_json::Value;
 
-use crate::state::ServerCtx;
+use crate::AssistantCtx;
 
 pub use tasks::start;
 
@@ -46,16 +46,16 @@ pub use tasks::start;
 /// see `otto_core::domain::BACKGROUND_SESSION_SOURCES`).
 pub const SESSION_SOURCE: &str = "assistant";
 
-pub fn repo(ctx: &ServerCtx) -> AssistantRepo {
-    AssistantRepo::new(ctx.pool.clone())
+pub fn repo<C: AssistantCtx>(ctx: &C) -> AssistantRepo {
+    AssistantRepo::new(ctx.pool().clone())
 }
 
 /// `<data_dir>/personal/assistant/<user_id>` — the assistant's cwd for this
 /// user (persona files, `profile.md`, `inbox/`). User ids are daemon ULIDs,
 /// re-validated before the join so a hostile id fails closed.
-pub fn assistant_dir(ctx: &ServerCtx, user_id: &str) -> PathBuf {
+pub fn assistant_dir<C: AssistantCtx>(ctx: &C, user_id: &str) -> PathBuf {
     let id = otto_core::paths::safe_component(user_id).unwrap_or("invalid");
-    ctx.data_dir.join("personal").join("assistant").join(id)
+    ctx.data_dir().join("personal").join("assistant").join(id)
 }
 
 fn to_value<T: serde::Serialize>(v: &T) -> Value {
@@ -63,13 +63,13 @@ fn to_value<T: serde::Serialize>(v: &T) -> Value {
 }
 
 /// Broadcast `assistant_turn` (owner-scoped).
-pub fn emit_turn(
-    ctx: &ServerCtx,
+pub fn emit_turn<C: AssistantCtx>(
+    ctx: &C,
     owner: &str,
     turn: &AssistantTurn,
     thread: Option<&AssistantThread>,
 ) {
-    let _ = ctx.events.send(Event::AssistantTurn {
+    let _ = ctx.events().send(Event::AssistantTurn {
         user_id: owner.to_string(),
         thread_id: turn.thread_id.clone(),
         turn: to_value(turn),
@@ -78,20 +78,20 @@ pub fn emit_turn(
 }
 
 /// Broadcast `assistant_task_update` (owner-scoped).
-pub fn emit_task(ctx: &ServerCtx, task: &AssistantTask) {
-    let _ = ctx.events.send(Event::AssistantTaskUpdate {
+pub fn emit_task<C: AssistantCtx>(ctx: &C, task: &AssistantTask) {
+    let _ = ctx.events().send(Event::AssistantTaskUpdate {
         user_id: task.owner_user_id.clone(),
         task: to_value(task),
     });
 }
 
 /// Broadcast `assistant_needs_you` with the queue size after the change.
-pub async fn emit_needs_you(ctx: &ServerCtx, task: &AssistantTask) {
+pub async fn emit_needs_you<C: AssistantCtx>(ctx: &C, task: &AssistantTask) {
     let open = repo(ctx)
         .count_needs_you(&task.owner_user_id)
         .await
         .unwrap_or(0);
-    let _ = ctx.events.send(Event::AssistantNeedsYou {
+    let _ = ctx.events().send(Event::AssistantNeedsYou {
         user_id: task.owner_user_id.clone(),
         task: to_value(task),
         open_count: open,
@@ -100,7 +100,7 @@ pub async fn emit_needs_you(ctx: &ServerCtx, task: &AssistantTask) {
 
 /// Emit the update for a task that changed state; also the needs-you event
 /// when it entered or left the queue (`was` = its state before).
-pub async fn emit_task_change(ctx: &ServerCtx, task: &AssistantTask, was: &str) {
+pub async fn emit_task_change<C: AssistantCtx>(ctx: &C, task: &AssistantTask, was: &str) {
     emit_task(ctx, task);
     if (was == "needs_you") != (task.state == "needs_you") {
         emit_needs_you(ctx, task).await;
@@ -110,8 +110,8 @@ pub async fn emit_task_change(ctx: &ServerCtx, task: &AssistantTask, was: &str) 
 /// Append a SYSTEM turn (memory chip, delegation, reminder, route, limit,
 /// approval, task) to a thread and broadcast it. Best-effort by design: a
 /// thread deleted meanwhile just drops the line.
-pub async fn system_turn(
-    ctx: &ServerCtx,
+pub async fn system_turn<C: AssistantCtx>(
+    ctx: &C,
     owner: &str,
     thread_id: &str,
     kind: &str,
@@ -134,7 +134,11 @@ pub async fn system_turn(
 }
 
 /// The caller's thread, with its live `status` derived.
-pub async fn owned_thread(ctx: &ServerCtx, owner: &str, id: &str) -> Result<AssistantThread> {
+pub async fn owned_thread<C: AssistantCtx>(
+    ctx: &C,
+    owner: &str,
+    id: &str,
+) -> Result<AssistantThread> {
     let t = repo(ctx).get_thread(owner, id).await?;
     Ok(threads::with_status(ctx, t).await)
 }

@@ -3704,6 +3704,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-assistant"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hex",
+ "otto-context",
+ "otto-core",
+ "otto-mcp",
+ "otto-memory",
+ "otto-orchestrator",
+ "otto-sessions",
+ "otto-state",
+ "otto-transcript",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "otto-aws"
 version = "0.2.0"
 dependencies = [
@@ -4208,6 +4232,7 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-vision",
+ "otto-assistant",
  "otto-aws",
  "otto-brokers",
  "otto-browser",
