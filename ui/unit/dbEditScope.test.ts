@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import * as dialect from '../src/modules/database/sql-dialect.ts';
 
 // Grid edits, "Copy as INSERT" and the post-apply refresh resolve the database
 // a result RAN in from the tab's `ran_node` through this helper. It must mirror
@@ -40,8 +41,9 @@ function literals(): Record<string, any> {
   const start = text.indexOf('export function isIntegerType(');
   const end = text.indexOf('/** The cell DRAFT');
   const ctx: Record<string, any> = {
-    escapeSqlString: (s: string) => s.replace(/'/g, "''"),
+    escapeSqlText: (s: string) => s.replace(/'/g, "''"),
     backslashEscapes: () => false,
+    boolLiteral: dialect.boolLiteral,
     isComplex: () => false,
     compactJson: (v: unknown) => JSON.stringify(v),
   };
@@ -66,7 +68,7 @@ test('big integer keys keep every digit and stay unquoted', () => {
 });
 
 function sqlModule(): Record<string, any> {
-  const ctx = { exports: {} as Record<string, any>, require: () => ({isComplex:()=>false,cellStr:String,compactJson:JSON.stringify,escapeSqlString:(s:string)=>s.replace(/'/g, "''")}) };
+  const ctx = { exports: {} as Record<string, any>, require: () => ({isComplex:()=>false,cellStr:String,compactJson:JSON.stringify,...dialect}) };
   runInNewContext(ts.transpileModule(readFileSync(new URL('../src/modules/database/edit-sql.ts', import.meta.url), 'utf8'),
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, ctx);
   return ctx.exports;
