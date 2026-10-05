@@ -2,9 +2,11 @@ name: CI
 
 # Lint, type-check, and test the Rust workspace + the Svelte UI on every push
 # and pull request. The Tauri desktop app (apps/desktop/src-tauri) is a separate,
-# macOS-only workspace (launchd + Keychain + codesigning) and is intentionally
-# NOT built here — `cargo build --workspace` from the repo root covers the daemon
-# crates and `ottod`, which is what CI guards.
+# macOS-only workspace (launchd + Keychain + codesigning), so it is NOT built on
+# these Linux runners: macos.yml's `desktop` job runs its fmt/clippy/`cargo test`
+# (supervisor plist + keep_previous_daemon, browser allow-list, window registry,
+# the no-remote-webviews capability pin) on every PR touching apps/desktop/**
+# and nightly. The daemon crates' macOS cfg branches run in macos-server.yml.
 
 on:
   push:
