@@ -38,6 +38,21 @@ function setup() {
       };
     }
     if (p === './api/lane') return { inLane: (_l: string, fn: () => void) => fn() };
+    if (p === './stores/notifications.svelte') {
+      return { notifications: { resetForIdentity: () => log.push('notifications-reset'), load: async () => { log.push('notifications-load'); } } };
+    }
+    if (p === './stores/activity.svelte') {
+      return { activity: { reset: () => log.push('activity-reset'), loadSummary: async () => {}, load: async () => {} } };
+    }
+    if (p === './lazyModule') return { lazyModule: () => ({ peek: () => null }) };
+    if (p === './stores/proof.svelte') return { proof: { identityChanged: () => log.push('proof-reset') } };
+    if (p === './stores/assistant.svelte') {
+      return { assistant: { needsState: 'ready', resync: () => log.push('assistant-resync'), loadNeedsYou: async () => {} } };
+    }
+    if (p === './stores/workspace.svelte') {
+      return { ws: { currentId: 'w', activeSessionId: null, otherWsSessions: [], statusMap: {},
+        refreshSessions: async () => {}, refreshActiveWorkflowRuns: async () => {}, refreshOtherSessions: async () => {} } };
+    }
     if (p === './live') return { appLive: { setConnected() {}, dispatch() {}, resync: () => log.push('resync') } };
     if (p === './uiCommands') {
       return new Proxy({ handleUiFrame: () => false, helloFrame: () => ({}), presenceFrame: () => ({}) }, {
@@ -73,7 +88,35 @@ test('a token change reconnects /ws/events as a first connect for the new identi
   assert.equal(h.sockets[0].closed, true, 'the old identity\'s socket is closed');
   assert.equal(h.sockets[0].onclose, null, 'and cannot schedule a competing reconnect');
   h.sockets[1].onopen();
-  assert.deepEqual(h.log, [], 'not a resync of the old identity\'s stores');
+  // S13-02: the new identity's first open drops the old identity's per-user
+  // caches and refetches (the bell, needs-you, activity, proof).
+  assert.deepEqual(
+    h.log.filter((x) => x !== 'resync'),
+    ['notifications-reset', 'activity-reset', 'proof-reset', 'notifications-load', 'assistant-resync'],
+  );
+  assert.ok(h.log.includes('resync'), 'live views refetch too');
+});
+
+test('a plain first connect does not reset identity caches', () => {
+  const h = setup();
+  h.events.start();
+  h.sockets[0].onopen();
+  assert.ok(!h.log.includes('notifications-reset'));
+});
+
+test('stop() detaches the socket so a quick restart never opens a second one (S13-08)', () => {
+  const h = setup();
+  h.events.start();
+  h.sockets[0].onopen();
+  const old = h.sockets[0];
+  h.events.stop();
+  assert.equal(old.onclose, null);
+  assert.equal(old.onmessage, null);
+  h.events.start();
+  assert.equal(h.sockets.length, 2);
+  // The old socket's close arriving late cannot schedule another connect.
+  old.onclose?.();
+  assert.equal(h.sockets.length, 2);
 });
 
 test('a token change mid-handshake still reconnects', () => {

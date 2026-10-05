@@ -426,6 +426,11 @@ class EventsClient {
   // happened to drop — reconnect as soon as the stored token changes.
   private socketToken: string | null = null;
   private authWired = false;
+  // Set when the token changed (S13-02): the next socket open resets the
+  // identity-scoped caches and resyncs every store, instead of the plain
+  // first-connect path that left the previous identity's notices, needs-you
+  // items, activity and proof packs on screen.
+  private identityPending = false;
 
   /** Send a client frame on the open socket (dropped while disconnected —
    *  the next `hello` carries the current state anyway). */
@@ -488,6 +493,7 @@ class EventsClient {
   private onAuthChanged(): void {
     if (this.stopped || getToken() === this.socketToken) return;
     this.everConnected = false;
+    this.identityPending = true;
     // Between sockets (backoff): the next connect already sends the new token.
     if (this.sock === null) return;
     // reconnectNow() is a no-op while connecting — that handshake carries the
@@ -512,10 +518,22 @@ class EventsClient {
     if (this.presenceTimer) clearTimeout(this.presenceTimer);
     this.presenceTimer = null;
     uiSocketClosed();
+    // Detach first (as reconnectNow does, S13-08): a quick stop→start would
+    // otherwise let this socket's late onclose schedule a SECOND connection,
+    // and every event / toast / notice would then be dispatched twice.
+    this.detach(this.sock);
     this.sock?.close();
     this.sock = null;
     this.state = 'offline';
     liveEvents.setConnected(false);
+  }
+
+  private detach(sock: WebSocket | null): void {
+    if (!sock) return;
+    sock.onopen = null;
+    sock.onmessage = null;
+    sock.onclose = null;
+    sock.onerror = null;
   }
 
   /** Force an immediate reconnect: cancel any pending backoff timer, drop the
@@ -533,10 +551,7 @@ class EventsClient {
     // Detach handlers first so the old socket's onclose can't schedule a
     // competing reconnect after we've already started a fresh one.
     if (this.sock) {
-      this.sock.onopen = null;
-      this.sock.onmessage = null;
-      this.sock.onclose = null;
-      this.sock.onerror = null;
+      this.detach(this.sock);
       this.sock.close();
     }
     this.sock = null;
@@ -554,6 +569,19 @@ class EventsClient {
     // here goes to the bg lane — capped, and on the alias host — instead of
     // a dozen-request burst per document on the six interactive sockets.
     inLane('bg', () => this.resyncStores());
+  }
+
+  /** First open after an identity change: drop what the previous identity
+   *  read, then refetch everything like a reconnect. */
+  private resyncForIdentity(): void {
+    notifications.resetForIdentity();
+    activity.reset();
+    if (ws.currentId) {
+      void activity.loadSummary(ws.currentId);
+      if (ws.activeSessionId) void activity.load(ws.currentId, ws.activeSessionId, true);
+    }
+    proof.identityChanged();
+    this.resyncAfterReconnect();
   }
 
   private resyncStores(): void {
@@ -644,7 +672,10 @@ class EventsClient {
       // The daemon answers again: probe the alias host now (it was suspended
       // on close). A RESTARTED daemon is re-read from /meta on `hello_ack`.
       if (reconnected) resumeAltLoopback();
-      if (reconnected) this.resyncAfterReconnect();
+      const identityChanged = this.identityPending;
+      this.identityPending = false;
+      if (identityChanged) this.resyncForIdentity();
+      else if (reconnected) this.resyncAfterReconnect();
       // The Assistant's needs-you badge lives in the sidebar, so it loads on
       // first connect too (quietly: an older daemon without the route → no badge)
       // — unless a page's own first load (Home's Today) already has it.
