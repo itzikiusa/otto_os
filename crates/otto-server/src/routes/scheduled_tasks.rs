@@ -240,6 +240,39 @@ struct UpdateReq {
     attach_proof: Option<bool>,
 }
 
+/// The PATCH fields that would change WHAT a task runs or WHERE its result
+/// goes and that actually differ from the stored task (a full-form PATCH
+/// re-sending unchanged values is not a change).
+fn owner_only_changes(task: &ScheduledTask, req: &UpdateReq) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    let diff = |new: Option<&str>, old: &str| new.is_some_and(|n| n != old);
+    if diff(req.prompt.as_deref(), &task.prompt) {
+        out.push("prompt");
+    }
+    if req.skill.as_ref().is_some_and(|s| s != &task.skill) {
+        out.push("skill");
+    }
+    if diff(req.provider.as_deref(), &task.provider) {
+        out.push("provider");
+    }
+    if diff(req.model.as_deref(), &task.model) {
+        out.push("model");
+    }
+    if diff(req.cwd.as_deref(), &task.cwd) {
+        out.push("cwd");
+    }
+    if req.destination.as_ref().is_some_and(|d| d != &task.destination) {
+        out.push("destination");
+    }
+    if req.workflow_id.as_ref().is_some_and(|w| w != &task.workflow_id) {
+        out.push("workflow");
+    }
+    if diff(req.sandbox.as_deref(), &task.sandbox) {
+        out.push("sandbox");
+    }
+    out
+}
+
 /// Distinguish "key absent" from "key present and null" for `skill`/`workflow_id`.
 fn double_option<'de, D>(de: D) -> Result<Option<Option<String>>, D::Error>
 where
@@ -443,6 +476,22 @@ async fn update(
 ) -> ApiResult<Json<ScheduledTask>> {
     let task = ctx.scheduled_tasks.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
+    // Runs execute AS `created_by` (their session, their verified Gmail for
+    // email delivery), so what runs and where the result goes is the owner's
+    // call: another Editor changing them would make A's agent run B's prompt
+    // and mail it to B's address (S3-05). Schedule/enable edits stay open.
+    let changed = owner_only_changes(&task, &req);
+    if !changed.is_empty()
+        && task.created_by.as_deref() != Some(user.id.as_str())
+        && require_ws_role(&ctx, &user, &task.workspace_id, WorkspaceRole::Admin)
+            .await
+            .is_err()
+    {
+        return Err(ApiError(Error::Forbidden(format!(
+            "only the task's owner or a workspace admin can change its {} — it runs as its owner",
+            changed.join(", ")
+        ))));
+    }
     if let Some(p) = req.provider.as_deref() {
         check_provider(p)?;
     }
@@ -704,6 +753,67 @@ pub fn builtin_presets() -> Vec<ScheduledTaskPreset> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S3-05: a task runs as its owner, so another Editor may retime/pause it
+    /// but not change its prompt or destination (403); the owner and a
+    /// workspace admin may. A full-form PATCH resending unchanged values passes.
+    #[tokio::test]
+    async fn non_owner_editor_cannot_retarget_a_task() {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "ws").await;
+        let now = chrono::Utc::now();
+        let mk = |id: &str| otto_core::domain::User {
+            id: id.into(),
+            username: id.into(),
+            display_name: id.into(),
+            is_root: false,
+            disabled: false,
+            created_at: now,
+        };
+        for (id, role) in [("owner", "editor"), ("bob", "editor"), ("adm", "admin")] {
+            sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, ?, 'x', ?, 0, ?)")
+                .bind(id).bind(id).bind(id).bind(now.to_rfc3339()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws', ?, ?)")
+                .bind(id).bind(role).execute(&pool).await.unwrap();
+        }
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let mut new = otto_state::NewScheduledTask::defaults("ws".into(), "t".into());
+        new.prompt = "daily digest".into();
+        new.created_by = Some("owner".into());
+        new.schedule = json!({"cadence":"interval","every_min":60});
+        let task = ctx.scheduled_tasks.create(new).await.unwrap();
+        let app = routes().with_state(ctx.clone());
+        let patch = |who: &str, body: Value| {
+            let mut req = Request::builder()
+                .method("PATCH")
+                .uri(format!("/scheduled-tasks/{}", task.id))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            req.extensions_mut()
+                .insert(otto_core::auth::AuthUser(mk(who)));
+            let app = app.clone();
+            async move { app.oneshot(req).await.unwrap().status() }
+        };
+        let evil = json!({"destination":{"type":"email","to":"bob@evil.test"}});
+        assert_eq!(patch("bob", evil.clone()).await, StatusCode::FORBIDDEN);
+        assert_eq!(patch("bob", json!({"prompt":"leak secrets"})).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            ctx.scheduled_tasks.get(&task.id).await.unwrap().prompt,
+            "daily digest"
+        );
+        // Schedule / enable edits, and unchanged values, stay open to Editors.
+        assert_eq!(
+            patch("bob", json!({"enabled":false,"prompt":"daily digest"})).await,
+            StatusCode::OK
+        );
+        assert_eq!(patch("owner", json!({"prompt":"weekly digest"})).await, StatusCode::OK);
+        assert_eq!(patch("adm", evil).await, StatusCode::OK);
+    }
 
     #[test]
     fn provider_check_allows_known_and_custom_slugs() {
