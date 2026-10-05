@@ -759,6 +759,16 @@ test('v0.7: post-merge fix time is NOT folded into the actual (stops at QA); lea
   assert.equal(s[0].median_cycle, 8);
 });
 
+test('v0.7: QA counts only when commits kept landing during QA', () => {
+  const mk = () => rec({ key: 'QW-1', done_at: T('2026-06-26T00:00:00Z'), intervals: [
+    iv('In Progress', '2026-06-15T00:00:00Z', '2026-06-17T00:00:00Z'),
+    iv('QA', '2026-06-17T00:00:00Z', '2026-06-26T00:00:00Z')] });
+  const idle = A.deriveGit(mk(), undefined, { hasRepos: true, workweek: [1, 2, 3, 4, 5] });
+  assert.equal(idle.qa_work_days, 0);
+  const busy = A.deriveGit(mk(), { commit_ts: [T('2026-06-18T10:00:00Z'), T('2026-06-22T10:00:00Z'), T('2026-06-24T10:00:00Z')] }, { hasRepos: true, workweek: [1, 2, 3, 4, 5] });
+  assert.ok(busy.qa_work_days > 0 && busy.dev_days > idle.dev_days, 'QA with commits on 3 days counts as work');
+});
+
 test('v0.7: rework charge-back moves time between tickets', () => {
   const r = rec({ key: 'RW-1', dev_days: 10, rework_out: 4 });
   const a = rec({ key: 'RW-0', dev_days: 2, rework_in: 4 });

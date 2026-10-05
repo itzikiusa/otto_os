@@ -164,6 +164,7 @@ const DEFAULT_CONFIG = {
   estimate_instructions: '', // extra estimator guidance ('' = built-in only)
   report_instructions: '', // override the report requirements ('' = built-in default)
   evidence_months: 18, // how far back to collect git diff evidence
+  qa_work_min_commit_days: 2, // QA counts as work only with commits on ≥ N distinct days during QA
   estimate_workers: [{ provider: 'claude', model: '' }],
   // 'split' = batches split across workers for throughput (default). 'consensus'
   // = every worker estimates the SAME batch, then a summarizer reconciles them.
@@ -247,6 +248,11 @@ function validateConfig(body) {
       throw new Error('estimate_rubric must be a string array');
     }
     c.estimate_rubric = body.estimate_rubric.map((x) => x.trim()).filter(Boolean).slice(0, 40);
+  }
+  if (body.qa_work_min_commit_days !== undefined) {
+    const n = Number(body.qa_work_min_commit_days);
+    if (!Number.isInteger(n) || n < 1 || n > 30) throw new Error('qa_work_min_commit_days must be an integer in 1..30');
+    c.qa_work_min_commit_days = n;
   }
   if (body.evidence_months !== undefined) {
     const n = Number(body.evidence_months);
@@ -347,7 +353,7 @@ function recomputeCorpora(config) {
         hasDesignStatuses: hasDesign,
         hasRepos,
         staleDays: config.stale_days,
-        qaCapDays: config.qa_cap_days,
+        qaCapDays: config.qa_cap_days, qaWorkMinCommitDays: config.qa_work_min_commit_days,
       });
     }
     store.writeJsonAtomic(file, corpus);
@@ -546,7 +552,7 @@ async function scanProject(client, account, project, full, assignees, config, gi
       gitIndex,
       hasDesignStatuses: true,
       staleDays: config.stale_days,
-      qaCapDays: config.qa_cap_days,
+      qaCapDays: config.qa_cap_days, qaWorkMinCommitDays: config.qa_work_min_commit_days,
       nowMs,
       descText: adfToText,
     });
@@ -569,7 +575,7 @@ async function scanProject(client, account, project, full, assignees, config, gi
       workweek: config.workweek,
       hasRepos: gitIndex.hasRepos,
       staleDays: config.stale_days,
-      qaCapDays: config.qa_cap_days,
+      qaCapDays: config.qa_cap_days, qaWorkMinCommitDays: config.qa_work_min_commit_days,
     });
     if (!hasDesign) rec = { ...rec, flags: rec.flags.filter((f) => f !== 'skipped_design') };
     corpus.issues[rec.key] = rec;

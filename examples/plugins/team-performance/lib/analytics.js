@@ -277,7 +277,20 @@ function deriveGit(record, gitEntry, opts) {
       if (t !== undefined) { s0 = t; prev = t; }
     }
   }
-  devDays = Math.max(devDays, gitDev);
+  // QA counts as work ONLY when the branch kept changing during QA: commits on
+  // ≥ qaWorkMinCommitDays distinct days inside a QA window → that window is
+  // still work in progress. Idle QA (waiting for testers) never counts.
+  const qaMin = opts.qaWorkMinCommitDays ?? 2;
+  let qaWork = 0;
+  for (const iv of record.intervals || []) {
+    const phase = iv.phase ?? classifyStatus(iv.status, {});
+    if (phase !== 'implementation' || !RE_QA.test(String(iv.status || '').toLowerCase())) continue;
+    const to = clipDev !== null ? Math.min(iv.to, clipDev) : iv.to;
+    if (!(to > iv.from)) continue;
+    const days = new Set(cts.filter((t) => t >= iv.from && t < to).map((t) => Math.floor(t / DAY)));
+    if (days.size >= qaMin) qaWork += businessDays(iv.from, to, workweek);
+  }
+  devDays = Math.max(devDays + qaWork, gitDev);
   const activeDays = record.impl_days !== null && record.impl_days !== undefined
     ? round2(Math.max(0, record.impl_days - qaRaw + qaCappedDays))
     : null;
@@ -330,6 +343,7 @@ function deriveGit(record, gitEntry, opts) {
     active_days: activeDays,
     dev_days: round2(devDays),
     git_dev_days: round2(gitDev),
+    qa_work_days: round2(qaWork),
     fix_days: fixDays,
     deploy_wait_days: deployWait,
     eff_done_at: effDone,
@@ -576,7 +590,7 @@ function analyzeIssue(raw, opts) {
     workweek: opts.workweek,
     hasRepos: Boolean(opts.gitIndex && opts.gitIndex.hasRepos),
     staleDays: opts.staleDays,
-    qaCapDays: opts.qaCapDays,
+    qaCapDays: opts.qaCapDays, qaWorkMinCommitDays: opts.qaWorkMinCommitDays,
   });
 }
 
@@ -619,7 +633,7 @@ function reanalyzeRecord(record, opts) {
       authors: next.git_authors || [],
       commit_ts: next.commit_ts || [],
     },
-    { workweek: opts.workweek, hasRepos: opts.hasRepos ?? true, staleDays: opts.staleDays, qaCapDays: opts.qaCapDays },
+    { workweek: opts.workweek, hasRepos: opts.hasRepos ?? true, staleDays: opts.staleDays, qaCapDays: opts.qaCapDays, qaWorkMinCommitDays: opts.qaWorkMinCommitDays },
   );
 }
 
