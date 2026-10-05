@@ -344,24 +344,16 @@ async fn open_stdio(
     })
 }
 
-/// SSRF-validate the URL, pin the vetted IP, build the client and initialize.
+/// SSRF-validate the URL, build the guarded client and initialize.
 async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live, String> {
     let permit = transport_permit().await?;
+    // Up front for a clean error (and to vet an IP-literal host); the guarded
+    // resolver then vets every name AT CONNECT TIME — the addresses it checks
+    // are the ones dialled, so DNS cannot rebind between check and connect.
     otto_netguard::check_url(url).await?;
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
-    let host = parsed.host_str().ok_or("url has no host")?.to_string();
-    let port = parsed.port_or_known_default().ok_or("url has no port")?;
-    let addrs = tokio::net::lookup_host((host.as_str(), port))
-        .await
-        .map_err(|e| format!("dns: {e}"))?;
-    let addr = addrs
-        .into_iter()
-        .find(|a| !otto_netguard::is_blocked_ip(a.ip()))
-        .ok_or("host resolves only to blocked addresses")?;
-    let client = reqwest::Client::builder()
+    let client = otto_netguard::guarded_client_builder()
         .timeout(OP_TIMEOUT)
-        .redirect(otto_netguard::redirect_policy())
-        .resolve(&host, addr)
+        .redirect(same_origin_redirects())
         .build()
         .map_err(|e| format!("http client: {e}"))?;
     let resp = http_send(&client, url, headers, init_request(), None)
@@ -388,6 +380,38 @@ async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live
         next_id: 2,
         _permit: permit,
     })
+}
+
+/// Redirects an MCP HTTP transport follows: SAME ORIGIN only (scheme, host and
+/// port of the first request), bounded, and IP-literal hops re-vetted. A
+/// cross-host 307/308 would re-send the JSON-RPC body (tool arguments) and
+/// every configured custom header — reqwest strips only `Authorization` /
+/// `Cookie`, not an `X-API-Key` read from the Keychain — to wherever the
+/// server (or anything on its path) points. No DNS on the callback thread.
+fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            return attempt.error("too many redirects");
+        }
+        let origin = attempt.previous().first();
+        if origin.is_some_and(|o| same_origin(o, attempt.url()))
+            && otto_netguard::check_url_literal(attempt.url())
+        {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
+/// Redirect hops [`same_origin_redirects`] follows.
+const MAX_REDIRECTS: usize = 5;
+
+/// Same scheme, host and (effective) port. Pure — unit-tested.
+fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str().map(str::to_ascii_lowercase) == b.host_str().map(str::to_ascii_lowercase)
+        && a.port_or_known_default() == b.port_or_known_default()
 }
 
 fn http_send(
@@ -802,6 +826,81 @@ mod tests {
         let answered: Value = serde_json::from_slice(out.trim_ascii()).unwrap();
         assert_eq!(answered["id"], json!(3));
         assert_eq!(answered["result"], json!({}), "ping answered with {{}}");
+    }
+
+    #[test]
+    fn redirects_stay_on_the_origin() {
+        let u = |s: &str| reqwest::Url::parse(s).unwrap();
+        assert!(same_origin(
+            &u("https://mcp.example/a"),
+            &u("https://MCP.example:443/b")
+        ));
+        assert!(!same_origin(
+            &u("https://mcp.example/a"),
+            &u("https://attacker.example/a")
+        ));
+        assert!(!same_origin(
+            &u("https://mcp.example/a"),
+            &u("http://mcp.example/a")
+        ));
+        assert!(!same_origin(
+            &u("https://mcp.example/a"),
+            &u("https://mcp.example:8443/a")
+        ));
+    }
+
+    /// S5-08: a cross-host 307 is NOT followed, so the secret header and the
+    /// JSON-RPC body never reach the redirect target.
+    #[tokio::test]
+    async fn a_cross_host_redirect_does_not_forward_the_secret_header() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let hit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hit2 = hit.clone();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = target.accept().await {
+                hit2.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = s
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = origin.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            // `localhost` ≠ `127.0.0.1`: a different host (and port).
+            let head = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://localhost:{}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                target_addr.port()
+            );
+            let _ = s.write_all(head.as_bytes()).await;
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(same_origin_redirects())
+            .build()
+            .unwrap();
+        let mut headers = BTreeMap::new();
+        headers.insert("X-API-Key".to_string(), "keychain-secret".to_string());
+        let resp = http_send(
+            &client,
+            &format!("http://{origin_addr}/mcp"),
+            &headers,
+            init_request(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status().as_u16(), 307, "the hop was not followed");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !hit.load(std::sync::atomic::Ordering::SeqCst),
+            "target never contacted"
+        );
     }
 
     #[tokio::test]
