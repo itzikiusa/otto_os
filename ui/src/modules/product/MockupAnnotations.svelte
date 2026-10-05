@@ -9,6 +9,7 @@
   // Coordinates are relative, so pins survive resize. Pins render at
   //   left:{x_pct*100}% top:{y_pct*100}%.
   import { tick } from 'svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toastError } from '../../lib/toastError';
   import { product } from '../../lib/stores/product.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -392,7 +393,7 @@
 
   <div class="note-list">
     {#if loading}
-      <div class="note-empty">Loading annotations…</div>
+      <Skeleton rows={3} height={28} label="annotations" />
     {:else if notes.length === 0}
       <div class="note-empty">
         No annotations yet.{mode === 'annotate' ? ' Click the mockup to drop a pin.' : ''}

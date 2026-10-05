@@ -570,7 +570,6 @@
   .stage {
     position: relative;
     margin-inline: auto;
-    transition: width var(--dur-enter) ease-out;
   }
   .frame {
     position: absolute;

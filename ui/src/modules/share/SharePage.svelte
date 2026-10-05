@@ -294,7 +294,7 @@
 {:else if viewState === 'loading'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
     <div class="error-card" role="status">
-      <div class="sp-spinner" aria-hidden="true"></div>
+      <div class="spinner" style:--spinner-size="28px" aria-hidden="true"></div>
       <p class="dim">Connecting to the shared session…</p>
     </div>
   </div>
@@ -531,18 +531,6 @@
     cursor: not-allowed;
   }
 
-  /* ── Spinner ── */
-  .sp-spinner {
-    width: 28px;
-    height: 28px;
-    border: 3px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .sp-spinner { animation-duration: 2.4s; }
-  }
 
   /* ---- main guest shell ---- */
   .share-root {

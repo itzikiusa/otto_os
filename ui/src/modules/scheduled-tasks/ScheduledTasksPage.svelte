@@ -1074,13 +1074,14 @@
 
   {#if reportOpen}
     <Modal title={reportTaskName ? `Report — ${reportTaskName}` : 'Report'} width={760} onclose={() => (reportOpen = false)}>
-      {#if reportLoading}
-        <div class="muted" role="status">Loading the report…</div>
-      {:else if reportError}
-        <div class="err" role="alert">
-          <Icon name="warning" size={12} /> Couldn’t load the report. {reportError}
-          <button class="btn small" onclick={() => reportRun && viewReport(reportRun, reportTaskName, reportRaw)}>Retry</button>
-        </div>
+      {#if reportLoading || reportError}
+        <LoadState
+          what="the report"
+          loading={reportLoading}
+          error={reportError}
+          empty
+          onretry={() => reportRun && viewReport(reportRun, reportTaskName, reportRaw)}
+        />
       {:else if !reportText.trim()}
         <div class="muted">This run wrote an empty report.</div>
       {:else if reportRaw}

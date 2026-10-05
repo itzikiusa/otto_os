@@ -426,7 +426,20 @@
         action: () => void navigator.clipboard?.writeText(`otto://design/${artifact.id}@approved#view:${id}`).then(() => toasts.success('Copied', `#view:${id}`)),
       },
       { separator: true },
-      { label: 'Delete view', icon: 'trash', danger: true, disabled: readonly, action: () => edit(removeCameraPreset(doc!, id)) },
+      {
+        label: 'Delete view…',
+        icon: 'trash',
+        danger: true,
+        disabled: readonly,
+        action: async () => {
+          const ok = await confirmer.ask(`Delete the view “${cam.name ?? cam.id}”? Embeds that point at #view:${id} fall back to the default camera.`, {
+            title: 'Delete view',
+            confirmLabel: 'Delete',
+            danger: true,
+          });
+          if (ok) edit(removeCameraPreset(doc!, id));
+        },
+      },
     ]);
   }
 

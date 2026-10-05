@@ -1059,7 +1059,7 @@
     pointer-events: none;
     /* 16px so iOS Safari doesn't zoom the page when the sink takes focus —
        the element is invisible, nothing is read at this size. */
-    font-size: 16px;
+    font-size: 16px; /* ui-guards: allow — iOS no-zoom size (invisible sink) */
   }
   /* The HUD status line over the live frame (absolutely placed, several
      segments) — not a Badge. */

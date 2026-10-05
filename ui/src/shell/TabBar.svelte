@@ -237,7 +237,7 @@
       ...(!s.archived
         ? [{ label: 'Archive', icon: 'archive', action: () => void archiveTab(id) } as MenuItem]
         : []),
-      { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteTab(id) },
+      { label: 'Delete…', icon: 'trash', danger: true, action: () => void deleteTab(id) },
     ];
   }
 

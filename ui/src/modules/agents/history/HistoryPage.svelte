@@ -1,5 +1,6 @@
 <script lang="ts">
   import { toastError } from '../../../lib/toastError';
+  import Skeleton from '../../../lib/components/Skeleton.svelte';
   // History (`#/history[/<sessionId>]`) — every past Claude/Codex conversation,
   // grouped by repo/cwd like the Codex/Claude app sidebars, with a read-only
   // conversation on the right (docs/design/conversation-view.md §5.3).
@@ -16,6 +17,7 @@
   import { ws, SCRATCH_WORKSPACE_ID } from '../../../lib/stores/workspace.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import { router } from '../../../lib/router.svelte';
+  import { PHONE_MAX } from '../../../lib/stores/viewport.svelte';
   import { registry } from '../../../lib/commands.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { toasts } from '../../../lib/toast.svelte';
@@ -104,7 +106,8 @@
       if (history.selectedKey) clearSelection();
       const want = router.parts[1];
       if (want && visible.some((e) => e.session_id === want)) return;
-      if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 768px)').matches) return;
+      // Phone (one pane at a time, push navigation): no auto-open.
+      if (typeof window !== 'undefined' && window.matchMedia?.(`(max-width: ${PHONE_MAX}px)`).matches) return;
       if (visible.length === 0) return;
       const last = recallSelection('history');
       pick(visible.find((e) => entryKey(e) === last) ?? visible[0]);
@@ -476,7 +479,7 @@
         </p>
       {/if}
       {#if history.loading && history.entries.length === 0}
-        <p class="empty-line dim">Loading conversations…</p>
+        <Skeleton rows={5} height={40} label="conversations" />
       {:else if shown === 0 && !history.error}
         <!-- The miss is explained (with its fix) by the right pane; this line
              only shows at the narrow list-only layout, where that pane is hidden. -->
@@ -802,12 +805,6 @@
     display: block;
     height: 100%;
     background: var(--accent);
-    transition: width var(--dur-enter) ease-out;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .pfill {
-      transition: none;
-    }
   }
   .rows {
     flex: 1;
@@ -1048,7 +1045,7 @@
   }
 
   /* ── narrow: list OR detail (with a back button) ───────────────────────── */
-  @media (max-width: 768px) {
+  @media (max-width: 640px) {
     .hlist {
       flex: 1;
     }

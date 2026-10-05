@@ -3,6 +3,7 @@
   // search for and pick a source, optionally set cwd + watch. Calls product.importStory()
   // then selects the new story and closes.
   import Modal from '../../lib/components/Modal.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PathField from '../../lib/components/PathField.svelte';
   import { api } from '../../lib/api/client';
@@ -123,11 +124,15 @@
 
 <Modal title="Import story" width={480} {onclose}>
   {#snippet children()}
-    {#if accountsLoading}
-      <div class="loading">Loading accounts…</div>
-    {:else if accountsError}
-      <div class="field-error" role="alert">Couldn’t load your Jira / Confluence accounts. {accountsError}</div>
-      <button class="btn small" onclick={() => void loadAccounts()}>Retry</button>
+    {#if accountsLoading || accountsError}
+      <LoadState
+        what="your Jira / Confluence accounts"
+        variant="compact"
+        loading={accountsLoading}
+        error={accountsError}
+        empty
+        onretry={() => void loadAccounts()}
+      />
     {:else if accounts.length === 0}
       <div class="no-accounts">
         <Icon name="ticket" size={16} />
@@ -259,11 +264,6 @@
 
 
 <style>
-  .loading {
-    padding: 12px 0;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .no-accounts {
     display: flex;
     align-items: flex-start;

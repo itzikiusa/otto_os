@@ -995,7 +995,7 @@
   onpointerleave={() => (hovering = false)}
 >
   {#if loading}
-    <div class="s3d-overlay center"><span class="s3d-dim">Loading 3D engine…</span></div>
+    <div class="s3d-overlay center"><span class="spinner" role="status" aria-label="Loading the 3D engine" title="Loading the 3D engine"></span></div>
   {:else if loadError}
     <div class="s3d-overlay center">
       <div class="s3d-error">

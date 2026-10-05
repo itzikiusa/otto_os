@@ -118,16 +118,13 @@
   aria-label="Browser agent"
 >
   {#if open && sessionId && !viewport.isPhone}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <!-- paneResizer makes it the focusable window splitter and wires the drag + double-click reset. -->
     <div
       class="resize-handle"
       role="separator"
-      tabindex="0"
       aria-label="Resize the browser agent"
-      onmousedown={startResize}
-      ondblclick={() => ui.setBrowserAgentH(280)}
       title={RESIZE_TITLE_VERTICAL}
-      use:paneResizer={{ value: ui.browserAgentH, min: 160, max: 900, orientation: 'horizontal', invert: true, onChange: (h) => ui.setBrowserAgentH(h), onReset: () => ui.setBrowserAgentH(280), text: (v) => `${Math.round(v)} pixels tall` }}
+      use:paneResizer={{ onDragStart: startResize, value: ui.browserAgentH, min: 160, max: 900, orientation: 'horizontal', invert: true, onChange: (h) => ui.setBrowserAgentH(h), onReset: () => ui.setBrowserAgentH(280), text: (v) => `${Math.round(v)} pixels tall` }}
     ></div>
   {/if}
 
@@ -207,8 +204,7 @@
   .resize-handle {
     position: absolute;
     top: -3px;
-    left: 0;
-    right: 0;
+    inset-inline: 0;
     height: 6px;
     cursor: row-resize;
     z-index: var(--z-sticky);

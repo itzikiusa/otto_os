@@ -307,7 +307,7 @@
       <input bind:this={searchEl} class="search-in" placeholder="Search…" bind:value={search} aria-label="Search logs" />
       {#if q}<span class="count mono">{matchCount}</span>{/if}
     </div>
-    <button class="icon-btn" onclick={() => void start()} title="Reload" aria-label="Reload logs"><Icon name="refresh" size={13} /></button>
+    <button class="icon-btn" onclick={() => void start()} title="Refresh logs" aria-label="Refresh logs"><Icon name="refresh" size={13} /></button>
     <button class="icon-btn" onclick={download} title="Download" aria-label="Download logs" disabled={!lineCount}><Icon name="arrowDown" size={13} /></button>
   </div>
 
@@ -315,7 +315,6 @@
     <div class="err">{error} <button class="btn small" onclick={() => void start()}>Retry</button></div>
   {/if}
 
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="logs-body" dir="ltr" bind:this={wrapEl} onscrollcapture={onScroll}>
     {#if !lineCount && !error}
       <div class="dim pad">{streaming ? 'Waiting for output…' : 'No log lines.'}</div>

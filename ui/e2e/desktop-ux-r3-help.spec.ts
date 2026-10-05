@@ -197,7 +197,7 @@ test('queued chapter requests use the latest selection and survive fullscreen re
     await r.fulfill({ json: { url: `${new URL(page.url()).origin}/__r3tour.mp4` } });
   });
   await page.goto('/#/walkthroughs');
-  await expect(page.getByText('Loading the tour…')).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Loading the tour' })).toBeVisible();
   await page.getByRole('button', { name: '1:30 Git, reviews and proof' }).click();
   await page.getByRole('button', { name: '2:37 Insights and Usage' }).click();
   release();

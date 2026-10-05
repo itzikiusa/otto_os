@@ -200,7 +200,7 @@
     {#snippet actions()}
       <!-- While the list is empty the EmptyState owns the one "Add account". -->
       {#if accounts.length > 0}
-        <button class="btn primary" onclick={openAdd}><Icon name="plus" size={13} /> Add account</button>
+        <button class="btn small primary" onclick={openAdd}><Icon name="plus" size={13} /> Add account</button>
       {/if}
     {/snippet}
   </PageHeader>

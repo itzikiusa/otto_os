@@ -325,8 +325,8 @@
         <div class="attach-picker">
           <input
             class="attach-search"
-            placeholder="Search scenes to attach…"
-            aria-label="Search scenes to attach"
+            placeholder="Filter scenes to attach…"
+            aria-label="Filter scenes to attach"
             bind:value={attachQuery}
             spellcheck="false"
           />

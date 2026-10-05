@@ -1026,7 +1026,7 @@
     color: var(--text);
     background: color-mix(in srgb, var(--bg-sidebar) 78%, transparent);
     border-radius: 999px;
-    transition:
+    transition: /* ui-guards: allow — the bar's own compact↔full morph, not a data bar */
       width var(--dur-enter) ease,
       border-radius var(--dur-enter) ease,
       box-shadow var(--dur-fast) ease,

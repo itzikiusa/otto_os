@@ -157,7 +157,7 @@
         <span class="rlabel">CI</span>
         <span class="rvalue">
           {#if checksLoading}
-            <span class="dim">Loading checks…</span>
+            <span class="spinner" role="status" aria-label="Loading checks" title="Loading checks"></span>
           {:else if checksError || checks === null}
             <span class="warn">Unavailable</span>
             <button class="btn small" onclick={() => probeTick++}>Retry</button>
@@ -189,7 +189,7 @@
       <div class="row-item">
         <span class="rlabel">Approvals</span>
         <span class="rvalue">
-          {#if readinessLoading}<span class="dim">Loading approvals…</span>
+          {#if readinessLoading}<span class="spinner" role="status" aria-label="Loading approvals" title="Loading approvals"></span>
           {:else if readinessError || readiness === null}
             <span class="warn">Unavailable</span>
             <button class="btn small" onclick={() => probeTick++}>Retry</button>
@@ -209,7 +209,7 @@
       <div class="row-item">
         <span class="rlabel">Open blockers</span>
         <span class="rvalue">
-          {#if readinessLoading}<span class="dim">Loading blockers…</span>
+          {#if readinessLoading}<span class="spinner" role="status" aria-label="Loading blockers" title="Loading blockers"></span>
           {:else if readiness?.review}
             <span class:bad={blockers > 0}>{blockers}</span>
             <span class="dim">of {readiness.review.unresolved_total} unresolved</span>

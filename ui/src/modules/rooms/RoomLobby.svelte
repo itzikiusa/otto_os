@@ -60,7 +60,7 @@
 </script>
 <div class="rooms-page">
   <PageHeader title="Rooms" subtitle="Work together in a session">
-    {#snippet actions()}<button class="btn" onclick={() => router.go('rooms/recaps')}>Recap archives</button>{#if auth.isRoot}<button class="btn" onclick={() => settingsOpen = true}>Connection settings…</button>{/if}<button class="btn primary" onclick={() => joinOpen = true}>Join room…</button>{/snippet}
+    {#snippet actions()}<button class="btn small" onclick={() => router.go('rooms/recaps')}>Recap archives</button>{#if auth.isRoot}<button class="btn small" onclick={() => settingsOpen = true}>Connection settings…</button>{/if}<button class="btn small primary" onclick={() => joinOpen = true}>Join room…</button>{/snippet}
   </PageHeader>
   <PageBody>
     {#if openError}<p role="alert">Couldn’t open the room. {openError} <button class="btn small" disabled={!!opening || !lastOpened} onclick={() => openRoom(lastOpened)}>Retry</button></p>{/if}

@@ -163,7 +163,7 @@
   .hero b {
     font-family: var(--pv-font-display);
     font-weight: var(--pv-display-weight);
-    font-size: 17px;
+    font-size: var(--fs-xl);
     line-height: 1.08;
     letter-spacing: -0.01em;
     color: var(--pv-ink);
@@ -218,7 +218,7 @@
   .social b {
     font-family: var(--pv-font-display);
     font-weight: var(--pv-display-weight);
-    font-size: 14px;
+    font-size: var(--fs-l);
     line-height: 1.1;
     color: var(--pv-on-primary);
     max-width: 80%;

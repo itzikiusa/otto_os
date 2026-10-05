@@ -21,7 +21,7 @@ import type {
   DesignVariantsReq,
   DesignVersion,
 } from '../../../lib/api/types';
-import { plural } from '../../../lib/plural';
+import { plural } from '../../../lib/plural.ts';
 
 export type Tone = 'neutral' | 'info' | 'warn' | 'ok' | 'bad';
 

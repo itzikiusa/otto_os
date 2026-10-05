@@ -19,7 +19,7 @@ import type {
   DesignStudio,
   DesignVersion,
 } from '../../lib/api/types';
-import { plural } from '../../lib/plural';
+import { plural } from '../../lib/plural.ts';
 
 // ── Studios ─────────────────────────────────────────────────────────────────
 

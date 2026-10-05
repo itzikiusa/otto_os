@@ -516,7 +516,6 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div class="schema-tree" role="tree" aria-label="Schema" tabindex="0" bind:this={treeEl} onkeydown={onTreeKey}>
   {#if !database.schemaLoading && database.schemaRoot.length > 0}
     <div class="tree-search">
@@ -570,7 +569,7 @@
   {#if database.schemaLoading || database.activeConnStatus?.phase === 'connecting'}
     <div class="tree-loading" role="status">
       <span class="spinner" style="--spinner-size: 13px" aria-hidden="true"></span>
-      <span>Loading schema…</span>
+      Loading schema…
     </div>
   {:else if database.activeConnStatus?.phase === 'error'}
     <div class="tree-error" role="status" aria-live="polite">
@@ -667,7 +666,6 @@
 {#snippet nodeRow(node: SchemaNode, depth: number)}
   {@const open = database.isExpanded(node.id)}
   {@const selected = database.selectedObjectPath === node.id}
-  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
   <div
     class="node"
     class:selected

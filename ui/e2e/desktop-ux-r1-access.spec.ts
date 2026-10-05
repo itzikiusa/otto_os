@@ -75,7 +75,7 @@ test('nested folder sheet owns Tab and Escape, then restores the Browse trigger'
   const browse = session.getByRole('button', { name: 'Browse…' }).first();
   await browse.focus();
   await browse.press('Enter');
-  const picker = page.getByRole('dialog', { name: 'Choose working directory' });
+  const picker = page.getByRole('dialog', { name: 'Choose working folder' });
   await expect(picker.getByRole('button', { name: 'Use this folder' })).toBeVisible();
   await picker.getByRole('button', { name: 'Use this folder' }).focus();
   await page.keyboard.press('Tab');

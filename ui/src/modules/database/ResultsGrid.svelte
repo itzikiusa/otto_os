@@ -1445,8 +1445,8 @@
           <input
             class="gt-search-input mono"
             type="text"
-            placeholder="Search rows…"
-            aria-label="Search rows"
+            placeholder="Filter rows…"
+            aria-label="Filter rows"
             value={searchInput}
             oninput={(e) => setSearch(e.currentTarget.value, true)}
             onfocus={onSearchFocus}
@@ -1455,7 +1455,7 @@
             autocomplete="off"
           />
           {#if filtering || searchInput}
-            <button class="gt-search-clear" title="Clear search" aria-label="Clear search" onclick={() => setSearch('')}>
+            <button class="gt-search-clear" title="Clear filter" aria-label="Clear filter" onclick={() => setSearch('')}>
               <Icon name="x" size={10} />
             </button>
           {/if}

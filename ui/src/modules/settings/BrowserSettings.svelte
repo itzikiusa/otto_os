@@ -6,10 +6,12 @@
   // The Chromium download is never silent: choosing a build that isn't
   // installed only offers a Download button that says how big it is.
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { browserLive } from '../../lib/stores/browserLive.svelte';
   import { nativeBrowserAvailable } from '../../lib/nativeBrowser';
   import { formatBytes } from '../../lib/metric-format';
@@ -73,6 +75,37 @@
       Chromium the Otto daemon manages and streams to you.
     </SectionIntro>
 
+    <section class="card bs-card" aria-labelledby="bs-panel">
+      <h2 id="bs-panel" class="row-title">Browser beside a session</h2>
+      <p class="row-desc">What the Browser tab of the Session panel (⌘J) shows on this device.</p>
+      <div class="choices" role="radiogroup" aria-labelledby="bs-panel">
+        <label class="choice">
+          <input
+            type="radio"
+            name="panel-browser"
+            checked={ui.browserPanelVersion === 'v2'}
+            onchange={() => ui.setBrowserPanelVersion('v2')}
+          />
+          <span>
+            <span class="choice-title">The Browser module</span>
+            <span class="row-desc">Reader and live tabs, saved marks, and an ask bar aimed at the session beside it. The default.</span>
+          </span>
+        </label>
+        <label class="choice">
+          <input
+            type="radio"
+            name="panel-browser"
+            checked={ui.browserPanelVersion === 'v1'}
+            onchange={() => ui.setBrowserPanelVersion('v1')}
+          />
+          <span>
+            <span class="choice-title">Classic session browser</span>
+            <span class="row-desc">The earlier per-session panel: native tabs and the take-over picker.</span>
+          </span>
+        </label>
+      </div>
+    </section>
+
     {#if nativeBrowserAvailable}
       <section class="card bs-card" aria-labelledby="bs-renderer">
         <h2 id="bs-renderer" class="row-title">Live tabs on this device</h2>
@@ -115,7 +148,7 @@
         <button class="btn small" onclick={() => void browserLive.load()}><Icon name="refresh" size={12} /> Retry</button>
       </section>
     {:else if !st}
-      <section class="card bs-card"><p class="row-desc" role="status">Loading browser engine settings…</p></section>
+      <section class="card bs-card"><Skeleton rows={2} height={28} label="browser engine settings" /></section>
     {:else}
       <section class="card bs-card" aria-labelledby="bs-engine">
         <h2 id="bs-engine" class="row-title">Browser engine</h2>

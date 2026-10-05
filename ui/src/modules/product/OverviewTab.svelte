@@ -1150,15 +1150,16 @@
     {:else if ef.schema_type === 'datetime'}
       <input class="field-input" type="datetime-local" bind:value={fieldDraft} />
     {:else if ef.schema_type === 'user'}
-      <select class="field-input" bind:value={fieldDraft}>
-        <option value="">Unassigned</option>
-        {#if assignablesLoading}
-          <option disabled>Loading people…</option>
-        {/if}
-        {#each assignables as u (u.account_id)}
-          <option value={u.account_id}>{u.display_name}</option>
-        {/each}
-      </select>
+      {#if assignablesLoading && assignables.length === 0}
+        <Skeleton rows={1} height={27} label="people" />
+      {:else}
+        <select class="field-input" bind:value={fieldDraft}>
+          <option value="">Unassigned</option>
+          {#each assignables as u (u.account_id)}
+            <option value={u.account_id}>{u.display_name}</option>
+          {/each}
+        </select>
+      {/if}
     {:else if (ef.schema_type === 'option' || ef.schema_type === 'priority' || ef.schema_type === 'version' || ef.schema_type === 'component') && ef.allowed_values.length > 0}
       <select class="field-input" bind:value={fieldDraft}>
         {#if !ef.required}
@@ -1327,7 +1328,7 @@
           {/each}
         </select>
         {#if versionLoading}
-          <span class="ver-loading">Loading the version…</span>
+          <span class="spinner" role="status" aria-label="Loading the version" title="Loading the version"></span>
         {/if}
       </div>
 
@@ -1448,7 +1449,7 @@
             </div>
 
             {#if product.loadingTranscripts}
-              <div class="muted">Loading transcripts…</div>
+              <LoadState what="transcripts" variant="compact" loading empty />
             {:else if product.transcripts.length === 0}
               <div class="muted">No transcripts yet. Paste a conversation below.</div>
             {:else}
@@ -1755,8 +1756,7 @@
         <div class="col-right">
           <div class="jira-section">
             {#if issueLoading}
-              <Skeleton rows={6} height={36} />
-              <div class="jira-loading">Loading Jira details…</div>
+              <Skeleton rows={6} height={36} label="Jira details" />
             {:else if issueError}
               <LoadState what="Jira details" variant="compact" error={issueError} empty onretry={() => void loadIssueFull()} />
             {:else if issueFull}
@@ -1996,10 +1996,8 @@
                 </button>
                 {#if !collapsed.development}
                   <div class="dev-body">
-                    {#if devLoading}
-                      <div class="dropdown-loading">Loading development info…</div>
-                    {:else if devError}
-                      <LoadState what="development info" variant="compact" error={devError} empty onretry={() => { devLoaded = false; void loadDevStatus(); }} />
+                    {#if devLoading || devError}
+                      <LoadState what="development info" variant="compact" loading={devLoading} error={devError} empty onretry={() => { devLoaded = false; void loadDevStatus(); }} />
                     {:else if devStatus && (devStatus.branches.length || devStatus.commits.length || devStatus.pull_requests.length)}
                       {#if devStatus.pull_requests.length}
                         <div class="dev-group">
@@ -2228,7 +2226,7 @@
     padding: 2px 8px;
     width: 72px;
     outline: none;
-    transition: border-color var(--dur-fast), width var(--dur-fast);
+    transition: border-color var(--dur-fast);
   }
   .tag-input:focus {
     border-color: var(--accent-text);
@@ -2473,10 +2471,6 @@
     font-size: var(--fs-s);
     padding: 4px 8px;
     max-width: 280px;
-  }
-  .ver-loading {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
   }
   .grow {
     flex: 1;

@@ -7,6 +7,7 @@
   // OverviewTab (which also splices a markdown ref into draftBody).
 
   import { product } from '../../lib/stores/product.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
   import { kindLabel } from '../../lib/labels';
@@ -255,7 +256,6 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="att-panel"
   class:drag-over={dragOver}
@@ -323,7 +323,7 @@
                   alt={att.filename}
                 />
               {:else if localAttUrlLoading[att.id]}
-                <span class="att-loading-hint">Loading preview…</span>
+                <Skeleton rows={1} height={64} label="the preview" />
               {:else}
                 <button
                   class="att-load-btn"
@@ -511,11 +511,6 @@
     height: 100%;
     border: none;
     border-radius: var(--radius-s);
-  }
-  .att-loading-hint {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    font-style: italic;
   }
   .att-load-btn {
     font-size: var(--fs-xs);

@@ -308,7 +308,6 @@
     {#if agents.length === 0}
       <EmptyState icon="user" title="No team yet" body="Recruit agents and they’ll appear here as a live org graph." />
     {:else}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="canvas"
         bind:this={wrapEl}

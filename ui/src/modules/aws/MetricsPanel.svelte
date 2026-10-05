@@ -157,7 +157,7 @@
       />
     {/if}
   {:else if !resp}
-    <div class="pad" role="status"><p class="load-note">Loading metrics…</p><Skeleton rows={4} height={120} /></div>
+    <div class="pad"><Skeleton rows={4} height={120} label="metrics" /></div>
   {:else}
     {#if error}
       <p class="stale">Showing the last successful load — refresh failed: {error}</p>
@@ -192,11 +192,6 @@
 </div>
 
 <style>
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .mp {
     display: flex;
     flex-direction: column;

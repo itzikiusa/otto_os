@@ -1005,7 +1005,7 @@
 {#if dirsOpen}
   <Modal title="Additional directories" onclose={() => (dirsOpen = false)}>
     <div class="field">
-      <label for="sv-extra-dir">Directories the agent may access <span class="dim">(beyond its working dir)</span></label>
+      <label for="sv-extra-dir">Folders the agent may access <span class="dim">(beyond its working folder)</span></label>
       {#if extraDirs.length > 0}
         <ul class="dir-list">
           {#each extraDirs as dir (dir)}

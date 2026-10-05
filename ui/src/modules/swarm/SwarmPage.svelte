@@ -515,7 +515,7 @@
   >
     {#snippet badge()}
       {#if detail}
-        <span class="status-pill" data-status={detail.status}>
+        <span class="swarm-status" data-status={detail.status}>
           <StatusBadge tone={SWARM_TONE[detail.status] ?? 'neutral'} label={sentenceCase(detail.status)} />
         </span>
         {#if detail.pause_reason}
@@ -742,17 +742,12 @@
 
         {#if swarm.selectedSessionId}
           {#if !viewport.isPhone}
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
             <div
               class="resizer"
               role="separator"
-              tabindex="0"
-              aria-orientation="vertical"
               aria-label="Resize the session panel"
               title={RESIZE_TITLE}
-              ondblclick={() => { viewPct = 55; persistViewPct(); }}
-              onmousedown={startResize}
-              use:paneResizer={{ value: viewPct, min: 20, max: 80, step: 3, bigStep: 10, onChange: (v) => { viewPct = v; persistViewPct(); }, onReset: () => { viewPct = 55; persistViewPct(); }, text: (v) => `${Math.round(v)} percent` }}
+              use:paneResizer={{ value: viewPct, min: 20, max: 80, step: 3, bigStep: 10, onChange: (v) => { viewPct = v; persistViewPct(); }, onReset: () => { viewPct = 55; persistViewPct(); }, onDragStart: startResize, text: (v) => `${Math.round(v)} percent` }}
             ></div>
           {/if}
           <div class="session-panel">
@@ -1007,7 +1002,7 @@
   .budget-fill.budget-warn {
     background: var(--warning);
   }
-  .status-pill {
+  .swarm-status {
     display: inline-flex;
     align-items: center;
   }

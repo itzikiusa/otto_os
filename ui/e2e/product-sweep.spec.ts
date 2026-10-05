@@ -167,6 +167,12 @@ async function settleFor(page: Page, sel: string | null, ms = 600): Promise<void
     .first()
     .waitFor({ state: 'detached', timeout: 12_000 })
     .catch(() => {});
+  // …and any LoadState / Skeleton placeholder (loaders render as skeletons).
+  await page
+    .locator('.ls-loading, .skeleton-list')
+    .first()
+    .waitFor({ state: 'detached', timeout: 12_000 })
+    .catch(() => {});
   if (sel) {
     await page.locator(sel).first().waitFor({ timeout: 9_000 }).catch(() => {});
   }

@@ -973,7 +973,7 @@
      text. 1024 so iPad portrait (834) + real-phone landscape (932) also wrap. ── */
   @media (max-width: 1024px) {
     /* Header actions wrap instead of overflowing; comfortable touch targets. */
-    .prd-title-input { height: 38px; font-size: 16px; }
+    .prd-title-input { height: 38px; font-size: 16px; } /* ui-guards: allow — 16px stops iOS zoom-on-focus */
     .prd-meta { flex-wrap: wrap; gap: 8px; font-size: var(--fs-m); min-width: 0; }
     /* Long branch names break instead of forcing horizontal overflow. */
     .prd-meta .mono { overflow-wrap: anywhere; min-width: 0; }

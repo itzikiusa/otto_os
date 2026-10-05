@@ -203,7 +203,7 @@
     {/if}
     <p class="exp-hint">
       Runs the statement on the daemon host and <strong>streams</strong> the full result to a local
-      file — for sets too large to pull into the browser. Choose the format, destination directory,
+      file — for sets too large to pull into the browser. Choose the format, destination folder,
       and an optional row limit.
     </p>
 

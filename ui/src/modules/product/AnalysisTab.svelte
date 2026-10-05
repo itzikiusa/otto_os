@@ -472,7 +472,7 @@
         {/each}
       </select>
       {#if loadingHistory}
-        <span class="dim-sm">Loading past runs…</span>
+        <span class="spinner" role="status" aria-label="Loading past runs" title="Loading past runs"></span>
       {:else if historyError}
         <span class="dim-sm hist-error" role="alert" title={historyError}><Icon name="warning" size={12} /> Couldn’t load past runs</span>
         <button class="btn small ghost" onclick={() => void loadHistory()}>Retry</button>

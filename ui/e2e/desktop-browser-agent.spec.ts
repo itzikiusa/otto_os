@@ -165,14 +165,50 @@ test('browser page: "New agent" creates a session bound to the dock without leav
   }
 });
 
-test('agent mode: right panel Browser tab has a v1/v2 switch and v2 embeds the module', async ({ page }) => {
+test('agent mode: the Session panel Browser tab embeds the module; Settings → Browser picks the classic panel', async ({ page }) => {
   await openPage(page, 'agents');
   await page.getByRole('button', { name: /E2E Shell/ }).first().click();
   const panel = page.locator('.rpanel');
   await expect(panel).toBeVisible();
   await openRightPanelTab(page, 'Browser');
 
-  const group = panel.getByRole('group', { name: 'Browser version' });
+  // No version switch inside the panel any more — the choice is a setting.
+  await expect(panel.getByRole('group', { name: 'Browser version' })).toHaveCount(0);
+  // The default is the Browser module: its URL bar + an ask bar aimed at the
+  // active session.
+  await expect(panel.getByPlaceholder('Enter URL', { exact: true })).toBeVisible();
+  await expect(panel.getByPlaceholder('Search or enter URL…')).toHaveCount(0);
+  const ask = panel.getByLabel('Ask the agent about this page');
+  await expect(ask).toBeVisible();
+  // No page open yet → disabled with the "open a page" hint, not the
+  // "attach a session" one (the session is the pane beside it).
+  await expect(ask).toHaveAttribute('placeholder', /Open a page first/);
+  // No embedded dock inside the panel — the session IS the main pane.
+  await expect(panel.getByLabel('Browser agent')).toHaveCount(0);
+
+  // Settings → Browser: the classic per-session panel.
+  await openPage(page, 'settings/browser');
+  const classic = page.getByRole('radio', { name: /Classic session browser/ });
+  await classic.check();
+  await expect(classic).toBeChecked();
+
+  // The choice persists across a reload and the panel shows the classic browser.
+  await page.reload();
+  await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
+  await openPage(page, 'agents');
+  await page.getByRole('button', { name: /E2E Shell/ }).first().click();
+  await openRightPanelTab(page, 'Browser');
+  await expect(page.locator('.rpanel').getByPlaceholder('Search or enter URL…')).toBeVisible();
+  await expect(page.locator('.rpanel').getByPlaceholder('Enter URL', { exact: true })).toHaveCount(0);
+
+  // Back to the module restores it.
+  await openPage(page, 'settings/browser');
+  await page.getByRole('radio', { name: /The Browser module/ }).check();
+  await openPage(page, 'agents');
+  await page.getByRole('button', { name: /E2E Shell/ }).first().click();
+  await openRightPanelTab(page, 'Browser');
+  await expect(page.locator('.rpanel').getByPlaceholder('Enter URL', { exact: true })).toBeVisible();
+});
   await expect(group).toBeVisible();
   // v1 is the default — the pre-existing per-session panel (its take-over
   // toolbar), no Browser-module chrome.

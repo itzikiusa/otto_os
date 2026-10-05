@@ -801,7 +801,7 @@
 
   <div class="snip-body" bind:this={wrapEl}>
     {#if loading}
-      <div class="snip-empty" role="status">Loading the snip…</div>
+      <div class="snip-empty" role="status" aria-label="Loading the snip"><span class="spinner" style:--spinner-size="24px" aria-hidden="true"></span></div>
     {:else if loadError}
       <div class="snip-empty" role="alert">
         <p class="snip-missing-title">Could not load the snip</p>

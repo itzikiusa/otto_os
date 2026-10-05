@@ -485,7 +485,7 @@
 <div class="logs">
   <aside class="groups" aria-label="Log groups" style:--groups-w="{groupsW}px">
     {#if groupsLoading && !groups}
-      <div class="pad" role="status"><p class="load-note">Loading log groups…</p><Skeleton rows={8} /></div>
+      <div class="pad"><Skeleton rows={8} label="log groups" /></div>
     {:else if groupsError && !groups}
       <EmptyState
         actionKind={groupsLogin ? 'primary' : 'secondary'}
@@ -567,7 +567,7 @@
         <div class="ev-body">
           <div class="tbl-wrap" class:windowed={tw.active(events.length)} bind:this={listEl} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
             {#if eventsLoading && !events.length}
-              <div class="pad" role="status"><p class="load-note">Loading events…</p><Skeleton rows={8} /></div>
+              <div class="pad"><Skeleton rows={8} label="events" /></div>
             {:else if eventsError && !events.length}
               <EmptyState
                 actionKind={eventsLogin ? 'primary' : 'secondary'}
@@ -689,11 +689,6 @@
 </div>
 
 <style>
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .pad {
     padding: 12px;
   }
@@ -782,7 +777,7 @@
   }
   .gi:hover,
   .gi:focus-visible {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .gi.on {
     background: var(--accent-soft);
@@ -893,7 +888,7 @@
     background: var(--hover);
   }
   .trow:focus-visible {
-    background: var(--surface-2);
+    background: var(--hover);
     outline: none;
     box-shadow: inset 0 0 0 2px var(--accent-text);
   }

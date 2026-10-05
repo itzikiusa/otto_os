@@ -270,7 +270,7 @@
     {#snippet actions()}
       {#if wsId && servers.length > 0}
         <button
-          class="btn primary"
+          class="btn small primary"
           disabled={!auth.isRoot}
           title={auth.isRoot ? undefined : 'Only the owner can add MCP servers (they run a command on this Mac)'}
           onclick={openCreate}><Icon name="plus" size={13} /> Add server</button
@@ -496,7 +496,7 @@
   }
   code {
     font-family: var(--font-mono);
-    font-size: 0.92em;
+    font-size: var(--fs-s);
   }
   .mcp-card {
     max-width: var(--settings-col);

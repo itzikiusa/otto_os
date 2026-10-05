@@ -102,7 +102,7 @@ test('opening a swarm shows the header + view switcher and fits the viewport', a
   await openSwarm(page);
   // Title + status pill render.
   await expect(page.locator('.swarm-head h1', { hasText: swarmName })).toBeVisible();
-  await expect(page.locator('.status-pill').first()).toBeVisible();
+  await expect(page.locator('.swarm-status').first()).toBeVisible();
   // The switcher and all five tabs exist.
   await expect(page.locator('.switcher')).toBeVisible();
   for (const t of SWITCHER_LABELS) {

@@ -221,7 +221,7 @@
 <div class="tbl-wrap">
   <RegionErrors errors={regionErrors} />
   {#if loading && !instances}
-    <div class="pad" role="status"><p class="load-note">Loading EC2 instances…</p><Skeleton rows={8} /></div>
+    <div class="pad"><Skeleton rows={8} label="EC2 instances" /></div>
   {:else if error}
     <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
@@ -330,11 +330,6 @@
 </div>
 
 <style>
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .pad {
     padding: 12px;
   }

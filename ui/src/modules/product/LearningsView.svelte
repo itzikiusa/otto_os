@@ -916,7 +916,7 @@
   .md-body :global(li) { margin-bottom: 0.15em; }
   .md-body :global(code) {
     font-family: var(--font-mono);
-    font-size: 0.88em;
+    font-size: var(--fs-s);
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 4px;
     border-radius: var(--radius-s);

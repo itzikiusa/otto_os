@@ -135,8 +135,7 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="widget-card" oncontextmenu={menu}>
+<div class="widget-card" role="group" aria-label={widget.title} oncontextmenu={menu}>
   <div class="wc-head">
     <span class="wc-title ellipsis" title={widget.title}>{widget.title}</span>
     <span class="wc-conn ellipsis" title="Connection: {connName}"><Icon name="db" size={9} />{connName}</span>

@@ -129,11 +129,11 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('language-servers')} subtitle="Code intelligence for Otto’s editors">
     {#snippet actions()}
-      <button class="btn" data-icon="refresh" disabled={loading} onclick={() => void load()}>
+      <button class="btn small" data-icon="refresh" disabled={loading} onclick={() => void load()}>
         <Icon name="refresh" size={13} /> {loading ? 'Checking…' : 'Refresh'}
       </button>
       {#if missingWithInstall.length > 0}
-        <button class="btn primary" disabled={installingAll} onclick={installAll}>
+        <button class="btn small primary" disabled={installingAll} onclick={installAll}>
           {installingAll ? 'Starting…' : `Install missing (${missingWithInstall.length})…`}
         </button>
       {/if}

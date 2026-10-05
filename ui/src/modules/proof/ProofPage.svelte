@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import PathField from '../../lib/components/PathField.svelte';
   // Proof section: a two-pane viewer of proof packs. Left = status filter chips
   // + the pack list; right = the open pack's detail (badges, artifacts grouped
@@ -956,7 +957,7 @@
                         <Icon name="play" size={12} /> Load video
                       </button>
                     {:else}
-                      <p class="dim media-loading" use:whenVisible={() => void fetchMedia(a.id)}>Loading media…</p>
+                      <div class="media-loading" use:whenVisible={() => void fetchMedia(a.id)}><Skeleton rows={1} height={120} label="the media" /></div>
                     {/if}
                   {/if}
                   {#if a.kind === 'pr_check'}
@@ -1208,7 +1209,7 @@
 {#if cfgOpen && detail}
   <Modal title="Proof requirements" width={480} onclose={() => (cfgOpen = false)}>
     {#if cfgLoading}
-      <p class="dim" role="status">Loading requirements…</p>
+      <LoadState what="the proof requirements" loading empty />
     {:else}
       <p class="modal-hint">Per-repo gates. These can only strengthen the default proof contract.</p>
       <label class="check-row">

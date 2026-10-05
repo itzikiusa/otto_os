@@ -367,7 +367,7 @@
     .field select {
       width: 100%;
       box-sizing: border-box;
-      font-size: 16px; /* ≥16px prevents iOS Safari zoom-on-focus */
+      font-size: 16px; /* ui-guards: allow — ≥16px prevents iOS Safari zoom-on-focus */
       padding: 10px 10px;
     }
     .check {

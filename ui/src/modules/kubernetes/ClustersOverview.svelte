@@ -146,8 +146,9 @@
         <!-- A card, not a button: the name is the one "open" control and its
              ::after stretches over the card, so the ⋯ button isn't nested
              inside another interactive element. -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
+          role="group"
+          aria-label={c.name}
           class="card cluster"
           class:prod={c.environment === 'prod'}
           data-testid="k8s-cluster-card"

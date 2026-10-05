@@ -336,7 +336,7 @@
         {#if compareError}
           <p class="compare-err" role="alert">{compareError}</p>
         {:else if compareBefore == null || compareAfter == null}
-          <p class="dim" role="status">Loading both copies…</p>
+          <LoadState what="both copies" loading empty />
         {:else}
           <DiffView before={compareBefore} after={compareAfter} mode="word" contextLines={3} />
         {/if}

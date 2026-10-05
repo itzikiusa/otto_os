@@ -80,7 +80,7 @@
     ? 'Notes the agent reads and updates between runs. Saving edits preserves the rest of your workspace.'
     : 'Background notes and references you maintain. New runs and new chats receive a snapshot; existing chats keep their current context.'}</p>
   {#if document?.path}<code class="path">{document.path}</code>{/if}
-  {#if kind === 'memory' && sharedWorkspace}<p class="hint">Agents using this same working directory share this memory file.</p>{/if}
+  {#if kind === 'memory' && sharedWorkspace}<p class="hint">Agents using this same working folder share this memory file.</p>{/if}
   {#if loading}<p class="hint" role="status">Loading {label.toLowerCase()}…</p>
   {:else}
     {#if error}<div class="error" role="alert">{error}</div>{/if}

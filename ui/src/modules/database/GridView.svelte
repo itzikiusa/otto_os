@@ -867,8 +867,9 @@
                   <span class="th-type">{c.type_hint ?? ' '}</span>
                 </span>
               </button>
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- Pointer-only refinement: columns size to their content by default (double-click restores that). -->
               <span
+                role="presentation"
                 class="th-resize"
                 class:active={dragName === c.name}
                 title="Drag to resize · double-click to fit"

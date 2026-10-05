@@ -104,7 +104,7 @@
       { label: 'Rename space…', icon: 'edit', action: () => void renameView() },
       { label: 'Add space', icon: 'plus', disabled: home.views.length >= MAX_VIEWS, action: () => void addView() },
       { separator: true },
-      { label: 'Delete space', icon: 'trash', danger: true, disabled: home.views.length <= 1, action: () => void removeView() },
+      { label: 'Delete space…', icon: 'trash', danger: true, disabled: home.views.length <= 1, action: () => void removeView() },
     ]);
   }
 
@@ -169,7 +169,8 @@
 
 <svelte:window onkeydown={onKey} />
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- Touch swipe between spaces is a touch shortcut (the Spaces tabs and ←/→
+     are the other paths); a named region takes touch handlers without a lint. -->
 <div class="home" role="region" aria-label="Home dashboard" ontouchstart={onTouchStart} ontouchend={onTouchEnd}>
   <PageHeader title="Home">
     {#snippet tabs()}

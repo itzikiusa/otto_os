@@ -884,7 +884,6 @@
     height: 100%;
     background: var(--accent);
     border-radius: 999px;
-    transition: width var(--dur-enter) ease-out;
   }
   .strip-now {
     flex: 1;

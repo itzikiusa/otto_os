@@ -680,7 +680,7 @@
       { label: 'Rename…', icon: 'edit', action: () => void rename(att!) },
       { label: 'Refresh list', icon: 'refresh', action: () => void loadAll() },
       { separator: true },
-      { label: 'Delete artifact', icon: 'trash', danger: true, action: () => void remove(att!) },
+      { label: 'Delete artifact…', icon: 'trash', danger: true, action: () => void remove(att!) },
     ];
     ctxMenu.show(e, items);
   }
@@ -942,10 +942,8 @@
 
       <div class="stage-body" class:split={codeView && isText}>
         <div class="viewport" bind:this={viewportEl}>
-          {#if sourceLoading}
-            <div class="stage-msg">Loading {att.filename}…</div>
-          {:else if sourceError}
-            <LoadState what={att.filename} error={sourceError} empty onretry={() => void loadSource(att)} />
+          {#if sourceLoading || sourceError}
+            <LoadState what={att.filename} loading={sourceLoading} error={sourceError} empty onretry={() => void loadSource(att)} />
           {:else if kind === 'html'}
             <DeviceFrame {device} {scheme}>
               <MockupViewer attachment={att} {source} hideToolbar bind:allowScripts />

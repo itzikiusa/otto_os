@@ -1049,7 +1049,7 @@
     {:else if !product.loadingTestcases}
       <div class="muted">No test cases yet. Click "Generate test cases" above.</div>
     {:else}
-      <div class="muted">Loading test cases…</div>
+      <LoadState what="test cases" loading empty />
     {/if}
   </div>
 {/if}

@@ -267,12 +267,12 @@
         onaction={openAdd}
       />
     {/snippet}
-    <div class="acct-list">
+    <div class="acct-list" role="list">
       {#each accounts as a (a.id)}
         {@const warn = expiryWarning(a.token_expires_at)}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="acct card"
+          role="listitem"
           oncontextmenu={(e) => ctxMenu.show(e, [
             { label: 'Test connection', icon: 'refresh', action: () => testAccount(a) },
             { label: 'Edit…', icon: 'edit', action: () => openEdit(a) },

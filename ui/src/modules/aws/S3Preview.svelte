@@ -130,7 +130,7 @@
   </div>
 {:else if kind === 'image' || kind === 'pdf'}
   {#if mediaLoading}
-    <div role="status"><p class="pv-dim">Loading preview…</p><Skeleton rows={4} /></div>
+    <div><Skeleton rows={4} label="preview" /></div>
   {:else if mediaError}
     <p class="pv-err" role="alert">{mediaError} <button class="btn small" onclick={() => mediaTry++}>Retry preview</button></p>
   {:else if mediaUrl && kind === 'image'}

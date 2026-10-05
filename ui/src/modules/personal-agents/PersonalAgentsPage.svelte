@@ -158,7 +158,7 @@
       <!-- One primary per view: Rooms has its own create (the list's name
            field / the empty state's "Create a room"). -->
       {#if ws.currentId && sub !== 'rooms' && agents.length > 0}
-        <button class="btn primary" data-icon="plus" onclick={() => (creating = true)}><Icon name="plus" size={12} /> New agent</button>
+        <button class="btn small primary" data-icon="plus" onclick={() => (creating = true)}><Icon name="plus" size={12} /> New agent</button>
       {/if}
     {/snippet}
   </PageHeader>

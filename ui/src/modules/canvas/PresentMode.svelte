@@ -214,7 +214,6 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   class="present"
   role="dialog"
@@ -363,7 +362,6 @@
   .progress .bar {
     height: 100%;
     background: var(--accent);
-    transition: width var(--dur-enter) ease-out;
   }
   .stage {
     max-width: 92vw;

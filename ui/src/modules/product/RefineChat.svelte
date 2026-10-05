@@ -113,10 +113,8 @@
 <div class="refine-chat">
   <!-- ── Messages ──────────────────────────────────────────────────────────── -->
   <div class="messages-area">
-    {#if loading && messages.length === 0}
-      <div class="muted center-hint">Loading messages…</div>
-    {:else if loadError && messages.length === 0}
-      <LoadState what="this thread" error={loadError} empty onretry={() => void loadThread(tid)} />
+    {#if (loading || loadError) && messages.length === 0}
+      <LoadState what="this thread" {loading} error={loadError} empty onretry={() => void loadThread(tid)} />
     {:else if messages.length === 0}
       <div class="empty-state">
         <p>No messages yet.</p>
@@ -215,10 +213,6 @@
     font-size: var(--fs-m);
     font-style: italic;
   }
-  .center-hint {
-    text-align: center;
-    padding: 24px 0;
-  }
   .empty-state {
     padding: 32px 16px;
     text-align: center;
@@ -298,7 +292,7 @@
   }
   :global(.bubble-body code) {
     font-family: var(--font-mono);
-    font-size: 0.88em;
+    font-size: var(--fs-s);
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     border-radius: var(--radius-s);
     padding: 1px 4px;

@@ -1473,12 +1473,10 @@
   </div>
 
   <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ↑/↓, Home/End). -->
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="qe-splitter"
     class:resizing
     role="separator"
-    tabindex="0"
     aria-orientation="horizontal"
     aria-label="Resize editor and results"
     title="Drag or use ↑/↓ to resize · double-click or Enter to expand"

@@ -1339,16 +1339,12 @@
     <!-- Drag handle on the panel's outer edge. Its own element (not a border) so
          it has a comfortable grab area without shifting the panel's layout.
          Mirrors .graph-resizer / .refs-resizer on the Git page. -->
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="panel-resizer"
       role="separator"
-      tabindex="0"
       aria-label="Resize the graph controls panel"
       title={RESIZE_TITLE}
-      onmousedown={startPanelResize}
-      ondblclick={() => ui.setVaultGraphPanelWidth(210)}
-      use:paneResizer={{ value: ui.vaultGraphPanelWidth, min: 200, max: 560, invert: true, onChange: (w) => ui.setVaultGraphPanelWidth(w), onReset: () => ui.setVaultGraphPanelWidth(210), text: pxWide }}
+      use:paneResizer={{ value: ui.vaultGraphPanelWidth, min: 200, max: 560, invert: true, onChange: (w) => ui.setVaultGraphPanelWidth(w), onReset: () => ui.setVaultGraphPanelWidth(210), onDragStart: startPanelResize, text: pxWide }}
     ></div>
     <button class="panel-head" onclick={() => (panelOpen = !panelOpen)} aria-expanded={panelOpen}>
       <span>Graph</span>

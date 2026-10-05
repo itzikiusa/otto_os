@@ -18,6 +18,7 @@
   import { api } from '../api/client';
   import { ws } from '../stores/workspace.svelte';
   import { toasts } from '../toast.svelte';
+  import { toastError } from '../toastError';
   import Modal from './Modal.svelte';
   import Badge from './Badge.svelte';
   import LoadState from './LoadState.svelte';
@@ -96,7 +97,7 @@
       );
       onclose();
     } catch (e) {
-      toasts.error(e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t send the context to the agent', e);
     } finally {
       sending = false;
     }

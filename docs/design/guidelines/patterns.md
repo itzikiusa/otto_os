@@ -84,10 +84,10 @@ PR description) must be:
 4. **Editable after the fact, and tracked.** If a person edits agent output,
    the version records both ("v15 · Otto, edited by you").
 
-**Agent colour: TBD.** The Design Hall mockup uses a dedicated violet
-(`--agent`) for agent labels, avatars and the message rule. That token isn't in
-`tokens.css`, and using it would fail `npm run check`. Until it lands (defined
-per scheme and contrast-checked like the tones), use:
+**Agent colour: none, by decision.** There is no `--agent` token (the early
+Design Hall mockup's violet was not adopted): agent identity is the provider
+icon and name in `AgentChip` / `AgentByline`, on neutral chrome. Mark an
+agent's message with the neutral rule and label:
 
 ```css
 .msg.agent { border-inline-start: 2px solid var(--border-strong); padding-inline-start: 10px; }
@@ -264,6 +264,11 @@ inherits the same environment marking and confirmation.
 - The request can sit in a menu (`danger: true` row) or be a `.btn.danger`.
   The **commit** happens in the confirm dialog, whose red filled button repeats
   the verb ("Delete").
+- A `danger: true` menu row that opens that confirm ends in "…" ("Delete…",
+  "Delete space…"); `npm run check` enforces it (`danger-menu-ellipsis`). A
+  danger row that acts at once with nothing to confirm (removing a Home widget,
+  which re-adds from *Add widget*) keeps a plain label and carries
+  `ui-guards: allow`.
 - Say what else goes with it: "Its token is removed from the Keychain", "3
   runs and their logs are deleted".
 - Prefer designs that don't need a confirm: archive instead of delete, versions

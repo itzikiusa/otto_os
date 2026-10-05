@@ -554,7 +554,7 @@
             <span>{COLUMN_LABEL[col]}</span>
             <span class="count" aria-label={plural(colTasks.length, 'task')}>{colTasks.length}</span>
           </div>
-          <div class="col-body">
+          <div class="col-body" role="list">
             {#each visibleIn(col) as t (t.id)}
               {@const agent = swarm.agentById(t.assignee_agent_id)}
               {@const gs = goalSummary(t.id)}
@@ -562,9 +562,9 @@
                    the select checkbox, the title button (Enter / click → the
                    task's actions; x toggles selection) and the meta buttons.
                    Never a control nested inside a role="button" card. -->
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
                 class="card kb-card"
+                role="listitem"
                 class:dragging={draggingId === t.id}
                 class:selected={selected.has(t.id)}
                 draggable="true"

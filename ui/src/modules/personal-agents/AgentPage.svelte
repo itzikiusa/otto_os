@@ -426,7 +426,7 @@
           <dt>Delivery</dt><dd class="clip" title={deliveryLabel()}>{deliveryLabel()}</dd>
           <dt>Browser use</dt><dd>{agent.browser ? 'On' : 'Off'}</dd>
           <dt>Status</dt><dd>{agent.enabled ? 'Enabled' : 'Paused — schedules don’t fire'}</dd>
-          <dt>Working dir</dt>
+          <dt>Working folder</dt>
           {#if agent.cwd}
             <dd class="mono path" dir="ltr" title={agent.cwd}>{agent.cwd}</dd>
           {:else}

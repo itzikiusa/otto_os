@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import { splitter } from '../../lib/paneResizer';
   import { dialogFocus } from '../../lib/dialogFocus';
   import { toastError } from '../../lib/toastError';
   import { sentenceCase } from '../../lib/labels';
@@ -1766,7 +1767,7 @@
     if (!w.is_main) {
       if (w.prunable) {
         // Directory is already gone — the only cleanup is dropping the entry.
-        items.push({ label: 'Remove stale entry', icon: 'trash', danger: true, action: () => void wtPrune() });
+        items.push({ label: 'Remove stale entry', icon: 'trash', danger: true, action: () => void wtPrune() }); // ui-guards: allow — no confirm: the folder is already gone, only its record is dropped
       } else {
         items.push({
           label: w.dirty ? 'Remove (discard changes)…' : 'Remove worktree…',
@@ -3555,19 +3556,19 @@
   <!-- Drag handle on the sidebar's right edge (desktop): widen it to read long
        branch names. Double-click resets to the default width. -->
   {#if !isMobile}
-    <!-- A focusable separator is the ARIA window-splitter widget; Svelte files
-         every separator as non-interactive (same as shell/SplitDivider). -->
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <!-- A focusable separator is the ARIA window-splitter widget; `splitter`
+         makes it focusable and wires its keys and drag (lib/paneResizer). -->
     <div
       class="refs-resizer"
       role="separator"
-      tabindex="0"
       aria-orientation="vertical"
       aria-label="Resize the branch list"
       aria-valuenow={ui.gitGraphSideWidth}
-      onmousedown={startSideResize}
-      ondblclick={() => ui.setGitGraphSideWidth(220)}
-      onkeydown={(e) => resizerKey(e, () => ui.gitGraphSideWidth, (w) => ui.setGitGraphSideWidth(w), 220, true)}
+      use:splitter={{
+        onkeydown: (e) => resizerKey(e, () => ui.gitGraphSideWidth, (w) => ui.setGitGraphSideWidth(w), 220, true),
+        onmousedown: startSideResize,
+        ondblclick: () => ui.setGitGraphSideWidth(220),
+      }}
       title="Drag or use ←/→ to resize · double-click to reset"
     ></div>
   {/if}
@@ -3857,7 +3858,7 @@
              never a cap. -->
         <div class="graph-more">
           {#if loadingMore}
-            <span class="dim">Loading more history…</span>
+            <span class="spinner" role="status" aria-label="Loading more history" title="Loading more history"></span>
           {:else if hasMore}
             <button class="btn small" onclick={() => void loadMore()}>
               Load older commits
@@ -3885,17 +3886,17 @@
 
   <!-- ── RIGHT: commit detail + diff / WIP staging panel ─────────────────── -->
   {#if detailOpen && !isMobile}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="graph-resizer"
       role="separator"
-      tabindex="0"
       aria-orientation="vertical"
       aria-label="Resize the commit list"
       aria-valuenow={ui.gitGraphListWidth}
-      onmousedown={startListResize}
-      ondblclick={() => ui.setGitGraphListWidth(420)}
-      onkeydown={(e) => resizerKey(e, () => ui.gitGraphListWidth, (w) => ui.setGitGraphListWidth(w), 420)}
+      use:splitter={{
+        onkeydown: (e) => resizerKey(e, () => ui.gitGraphListWidth, (w) => ui.setGitGraphListWidth(w), 420),
+        onmousedown: startListResize,
+        ondblclick: () => ui.setGitGraphListWidth(420),
+      }}
       title="Drag or use ←/→ to resize · double-click to reset"
     ></div>
   {/if}
@@ -4779,7 +4780,6 @@
     gap: 4px;
     overflow: hidden;
     padding-inline: 6px;
-    transition: width var(--dur-fast) ease-out; /* user-driven: detail open/close */
   }
   .chip-label {
     overflow: hidden;
@@ -4999,7 +4999,6 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    transition: width var(--dur-fast) ease-out; /* user-driven: open/close */
     border-inline-start: 1px solid var(--border);
     background: var(--surface);
   }

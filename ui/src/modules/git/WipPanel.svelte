@@ -1420,11 +1420,11 @@
       padding: 6px 6px;
     }
     .subject-input {
-      font-size: 16px;
+      font-size: 16px; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
       height: 38px;
     }
     .body-input {
-      font-size: 16px;
+      font-size: 16px; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
       line-height: 1.45;
     }
     .wp-composer .btn.primary {

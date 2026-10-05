@@ -95,6 +95,28 @@
 //                     (margin, flex, font-size) don't count either. → <Badge
 //                     tone label> (lib/components/Badge.svelte), the one
 //                     tinted pill.
+//   font-size-literal a px / em / rem font-size of 11px or more that is not a
+//                     var(--fs-*) step → the scale (foundations §2.1). A 16px
+//                     input that stops iOS zooming carries `ui-guards: allow`.
+//   media-width       an @media min-/max-width other than the two breakpoints
+//                     (640/641 phone, 1024/1025 tablet; layout.md §5) — a
+//                     container query or a documented allow instead.
+//   data-bar-transition  a `transition` on width / inline-size / flex-basis /
+//                     stroke-dasharray: data bars and meters show the value,
+//                     they don't animate to it (foundations §8). A resize the
+//                     user drags carries `ui-guards: allow`.
+//   local-spinner     a component rule set spinning its own ring (`animation:
+//                     … spin …`, incl. otto-spin) → the global `.spinner`
+//                     (`--spinner-size` for the diameter).
+//
+// Markup / script rules:
+//   text-loader       a <p>/<div>/<span> whose whole text is "Loading …" — a
+//                     named plain-text loader still reads as an empty state
+//                     → LoadState / Skeleton (a busy BUTTON label is fine).
+//   danger-menu-ellipsis  a menu row `{ label: '…', danger: true }` whose label
+//                     doesn't end in "…": a destructive row that opens a
+//                     confirm says so (patterns §6). An instant action with
+//                     no confirm carries `ui-guards: allow`.
 //
 // One ratcheted rule scans MARKUP:
 //
@@ -253,6 +275,12 @@ const RULES = {
   'straight-contraction': "straight apostrophe in a contraction (don't, it's, can't…) in user copy — use ’",
   'accent-mix-literal': 'hand-typed color-mix(var(--accent) N%, transparent) — use the accent ladder: --accent-faint / -soft / -soft-strong / -line / -line-strong (tokens.css)',
   'bare-loading': 'bare “Loading…” — name what loads (“Loading branches…”) or use LoadState',
+  'text-loader': 'plain-text loader (<p>/<div>/<span>Loading …</…>) — use LoadState / Skeleton',
+  'font-size-literal': 'font-size literal ≥ 11px (px/em/rem) — use the --fs-* scale (16px iOS input: ui-guards: allow)',
+  'media-width': '@media width other than 640/641 or 1024/1025 — use the two breakpoints (layout.md §5)',
+  'data-bar-transition': 'transition on width / inline-size / flex-basis / stroke-dasharray — data bars show the value, they don’t animate to it',
+  'local-spinner': 'local spinning ring (animation: …spin…) — use the global .spinner (app.css)',
+  'danger-menu-ellipsis': 'danger menu row whose label doesn’t end in “…” — a destructive row that opens a confirm ends in “…”',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
 };
 
@@ -340,6 +368,11 @@ for (const f of files) {
     if (f.rel !== 'src/app.css') {
       for (const k of css.matchAll(/@keyframes\s+([\w-]+)/g)) hit('private-keyframes', f, offset + k.index, `@keyframes ${k[1]}`);
     }
+    for (const q of css.matchAll(/@media[^{]*/g)) {
+      for (const w of q[0].matchAll(/(?:min|max)-width\s*:\s*(\d+(?:\.\d+)?)px/g)) {
+        if (!['640', '641', '1024', '1025'].includes(w[1])) hit('media-width', f, offset + q.index + w.index, `@media …${w[0]}`);
+      }
+    }
     for (const d of css.matchAll(DECL)) {
       const prop = d[3].toLowerCase();
       const value = d[4];
@@ -354,7 +387,10 @@ for (const f of files) {
       if (prop === 'font-size') {
         const px = /^\s*(\d+(?:\.\d+)?)px\b/.exec(value);
         if (px && Number(px[1]) < 11) hit('font-size-small', f, at, `font-size: ${px[1]}px`);
+        else if (px || /^\s*\d*\.?\d+r?em\b/.test(value)) hit('font-size-literal', f, at, `font-size:${value.trimEnd()}`);
       }
+      if ((prop === 'transition' || prop === 'transition-property') && /(?:^|[\s,])(?:width|inline-size|flex-basis|stroke-dasharray)(?=[\s,]|$)/.test(value)) hit('data-bar-transition', f, at, `${prop}:${value.trimEnd()}`);
+      if (f.rel !== 'src/app.css' && (prop === 'animation' || prop === 'animation-name') && /(?:^|[\s,])(?:otto-)?spin\b/.test(value)) hit('local-spinner', f, at, `${prop}:${value.trimEnd()}`);
       if (prop === 'z-index') {
         const v = value.trim().replace(/\s*!important$/, '');
         const n = /^-?\d+$/.test(v) ? Number(v) : NaN;
@@ -492,8 +528,12 @@ for (const f of files) {
   if (!/\.(svelte|ts)$/.test(f.path)) continue;
   for (const m of f.text.matchAll(/Couldn't/g)) hit('straight-couldnt', f, m.index, "Couldn't");
   const copy = stripComments(f.text).replace(/<style\b[\s\S]*?<\/style[^>]*>/gi, blank);
-  for (const m of copy.matchAll(/toasts\.(?:error|warning)\((['"`])(?!Couldn’t)(?:[^'"`\n]*?(?<![{(,]\s?)\bfailed\b(?!\s*[,)}])|Could not |Cannot )/gi)) hit('toast-failed-title', f, m.index, m[0]);
+  for (const m of copy.matchAll(/(?:toasts\.(?:error|warning)|toastError)\((['"`])(?!Couldn’t)(?:[^'"`\n]*?(?<![{(,]\s?)\bfailed\b(?!\s*[,)}])|Could not |Cannot )/gi)) hit('toast-failed-title', f, m.index, m[0]);
+  // …and a ternary title: toasts.error(ok ? 'Delete failed' : 'Archive failed', …).
+  for (const m of copy.matchAll(/(?:toasts\.(?:error|warning)|toastError)\([^'"`;\n]*\?\s*(['"`])(?!Couldn’t)[^'"`\n]*?\b(?:failed|Could not|Cannot)\b/g)) hit('toast-failed-title', f, m.index, m[0].slice(0, 80));
   for (const m of copy.matchAll(/toasts\.(?:error|warning)\([^;]*?,\s*(?:\w+ instanceof Error \? \w+\.message|String\((?:e|err|error|ex)\)|\((?:e|err|error|ex) as Error\)\.message|(?:e|err|error|ex)\.message)/g)) hit('raw-toast-body', f, m.index, m[0].slice(0, 60));
+  // …or the raw exception as the TITLE (toasts.error(e.message)).
+  for (const m of copy.matchAll(/toasts\.(?:error|warning)\(\s*(?:\w+ instanceof Error\b|String\((?:e|err|error|ex)\)|\((?:e|err|error|ex) as Error\)\.message|(?:e|err|error|ex)\.message)/g)) hit('raw-toast-body', f, m.index, m[0].slice(0, 60));
   for (const m of copy.matchAll(/\?\s*'s'\s*:\s*''|\?\s*''\s*:\s*'s'/g)) hit('hand-plural', f, m.index, m[0]);
   for (const m of copy.matchAll(/\b(?:Cancell(?:ed|ing)|colours?|Colours?|analys(?:e|ed|ing)|Analys(?:e|ed|ing)|behaviour|organis(?:e|ation)|favourite|cancelled(?=[ .,!])(?<!['"]cancelled))\b/g)) hit('uk-spelling', f, m.index, m[0]);
   {
@@ -506,6 +546,15 @@ for (const f of files) {
     }
   }
   for (const m of copy.matchAll(/(?:>\s*|['"`])Loading(?:…|\.\.\.)\s*(?=<|['"`])/g)) hit('bare-loading', f, m.index, m[0].trim());
+  if (f.path.endsWith('.svelte')) {
+    for (const m of copy.matchAll(/<(p|div|span)\b[^>]*>\s*Loading [^<{]*?(?:…|\.\.\.)\s*<\/\1>/g)) hit('text-loader', f, m.index, m[0].slice(0, 80));
+  }
+  // `{ label: 'Delete', …, danger: true }` (either order; one flat object).
+  for (const m of copy.matchAll(/\{[^{}]*\}/g)) {
+    if (!/\bdanger\s*:\s*true\b/.test(m[0])) continue;
+    const l = /\blabel\s*:\s*(['"`])((?:(?!\1).)*)\1/.exec(m[0]);
+    if (l && !/…$/.test(l[2]) && !/\.\.\.$/.test(l[2])) hit('danger-menu-ellipsis', f, m.index + l.index, `label: ${l[1]}${l[2]}${l[1]}`);
+  }
 }
 
 // ---------- rule 3 (HARD): icon-only buttons — scan markup (script/style/comments blanked) ----------

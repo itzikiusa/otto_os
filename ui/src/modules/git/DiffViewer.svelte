@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   // Shared diff renderer (Changes / commit / PR views): unified or
   // side-by-side, per-file collapse, syntax highlight, and (PR mode) inline
   // comment threads + line-gutter composer, file-navigator sidebar, search.
@@ -1252,17 +1253,12 @@
         </div>
         <!-- Drag the trailing edge to resize (desktop); double-click resets. -->
         <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="nav-resize-handle"
           role="separator"
-          tabindex="0"
           aria-label="Resize file sidebar"
-          aria-orientation="vertical"
           title="Drag or use ←/→ to resize · double-click or Enter to reset"
-          onmousedown={startNavResize}
-          ondblclick={() => setNavW(240)}
-          use:paneResizer={{ value: navW, min: 180, max: 520, onChange: setNavW, onReset: () => setNavW(240), text: (v) => `${Math.round(v)} pixels wide` }}
+          use:paneResizer={{ value: navW, min: 180, max: 520, onChange: setNavW, onReset: () => setNavW(240), onDragStart: startNavResize, text: (v) => `${Math.round(v)} pixels wide` }}
         ></div>
       {/if}
     </aside>
@@ -1433,8 +1429,8 @@
         {/if}
       </div>
     {:else if r.kind === 'pending'}
-      <div class="drow inf dfile-pending dim" role="status" data-rk={r.key} use:measure={[r.key, i]}>
-        Loading diff…
+      <div class="drow inf dfile-pending" role="status" aria-label="Loading this file’s diff" data-rk={r.key} use:measure={[r.key, i]}>
+        <Skeleton rows={1} height={14} announce={false} grace={false} />
       </div>
     {:else if r.kind === 'error'}
       <div class="drow inf dfile-error" role="alert" data-rk={r.key} use:measure={[r.key, i]}>

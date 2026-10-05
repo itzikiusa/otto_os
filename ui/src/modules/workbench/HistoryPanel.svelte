@@ -4,6 +4,7 @@
   // against the current text or another revision, and restore it (restoring
   // adds a new revision; the current text stays in history).
   import Icon from '../../lib/components/Icon.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -224,13 +225,13 @@
           <button class="btn small" onclick={() => { const s = selected; selected = null; queueMicrotask(() => (selected = s)); }}>Retry</button>
         </p>
       {:else if !detail}
-        <p class="wb-hist-note">Loading revision…</p>
+        <Skeleton rows={6} height={14} label="the revision" />
       {:else if view === 'text'}
         <pre class="wb-rev-text" data-testid="wb-rev-text">{detail.content}</pre>
       {:else if diffSides}
         <RevisionDiff {ws} {docId} {...diffSides} />
       {:else}
-        <p class="wb-hist-note">Loading revision…</p>
+        <Skeleton rows={6} height={14} label="the revision" />
       {/if}
     </section>
   {/if}

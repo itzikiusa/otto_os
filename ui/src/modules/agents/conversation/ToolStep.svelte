@@ -242,7 +242,7 @@
     {/if}
     <span class="step-status {status}" class:blocked role="img" aria-label={blocked ? 'Waiting for you' : STATUS_LABEL[status]} title={blocked ? 'Waiting for you' : STATUS_LABEL[status]}>
       {#if blocked}<Icon name="warning" size={12} />
-      {:else if status === 'running'}<span class="spin"></span>
+      {:else if status === 'running'}<span class="spinner" style:--spinner-size="10px" aria-hidden="true"></span>
       {:else if status === 'ok'}<Icon name="check" size={12} />
       {:else if status === 'err'}<Icon name="x" size={12} />
       {:else}<Icon name="minus" size={12} />{/if}
@@ -444,18 +444,6 @@
   }
   .step-status.blocked {
     color: var(--warning);
-  }
-  .spin {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    border: 2px solid var(--accent-soft-strong);
-    border-top-color: var(--accent);
-  }
-  @media (prefers-reduced-motion: no-preference) {
-    .spin {
-      animation: otto-spin 0.8s linear infinite;
-    }
   }
   
   .step-caret {

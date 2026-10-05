@@ -41,6 +41,7 @@
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { splitter } from '../../lib/paneResizer';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import {
     layout,
@@ -166,27 +167,23 @@
       : `grid-template-rows: minmax(0, ${node.frac}fr) 8px minmax(0, ${1 - node.frac}fr); grid-template-columns: minmax(0, 1fr);`}
   >
     <Self node={node.a} depth={depth + 1} />
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <!-- The window splitter (`splitter`: focus, keys, drag, double-click reset). -->
     <div
       class="gutter"
       role="separator"
-      tabindex="0"
       aria-orientation={node.axis === 'col' ? 'vertical' : 'horizontal'}
       aria-label="Resize split (arrow keys; double-click resets)"
       title="Drag to resize · double-click to split evenly"
       aria-valuenow={Math.round(node.frac * 100)}
       aria-valuemin={10}
       aria-valuemax={90}
-      onpointerdown={startDrag}
-      ondblclick={() => node.kind === 'split' && layout.setFrac(node.key, 0.5)}
-      onkeydown={gutterKeydown}
+      use:splitter={{ onkeydown: gutterKeydown, onpointerdown: startDrag, ondblclick: () => node.kind === 'split' && layout.setFrac(node.key, 0.5) }}
     ></div>
     <Self node={node.b} depth={depth + 1} />
   </div>
 {:else}
   <div class="leaf" data-pane-key={node.key} data-session={node.session}>
     {#if node.session === DB_PANE_ID}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="db-pane"
         role="group"
@@ -231,8 +228,8 @@
     {/if}
     <!-- Drop veil: hit-testable only while a pane drag is in flight, so the
          terminal below never sees the drag. -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
+      role="presentation"
       class="drop-veil"
       class:armed={zone !== null}
       data-zone={zone ?? ''}

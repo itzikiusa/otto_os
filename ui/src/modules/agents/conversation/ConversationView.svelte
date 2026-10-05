@@ -27,6 +27,7 @@
   // width.
   import { setContext, tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { splitter } from '../../../lib/paneResizer';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import TurnItem from './TurnItem.svelte';
   import Composer from './Composer.svelte';
@@ -920,16 +921,13 @@
   </div>
   {#if preview}
     {#if panelBeside}
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <div
         class="pv-resize"
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize the preview panel"
         aria-valuenow={panelPx}
-        tabindex="0"
-        onpointerdown={startResize}
-        onkeydown={resizeKey}
+        use:splitter={{ onkeydown: resizeKey, onpointerdown: startResize }}
       ></div>
     {/if}
     <div class="pv-slot" style:inline-size={panelBeside ? `${panelPx}px` : null}>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import LoadState from '../../lib/components/LoadState.svelte';
   // Lobby rail: "What Otto learned from your team". The real pending rule
   // proposals for this workspace (Learning v1, suggest-only) with Keep
   // (approve), Dismiss (reject) and Details — each decision asks first — plus
@@ -79,14 +80,8 @@
     <span class="ico"><Icon name="bulb" size={14} /></span>
     <h2 id="dh-learned-h">What Otto learned from your team</h2>
   </header>
-  {#if loading}
-    <p class="dim small" role="status">Loading what Otto learned…</p>
-  {:else if error}
-    <div class="err">
-      <Icon name="warning" size={14} />
-      <span>Couldn’t load team rules.</span>
-      <button class="btn small ghost" onclick={() => void load()}>Retry</button>
-    </div>
+  {#if loading || error}
+    <LoadState what="team rules" variant="compact" {loading} {error} empty onretry={() => void load()} />
   {:else if learned}
     <p class="counts">
       {#if pending.length}<span class="chip new">{pending.length} new</span>{/if}

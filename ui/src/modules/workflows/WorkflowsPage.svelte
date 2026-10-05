@@ -540,7 +540,7 @@
       { label: 'Tidy', icon: 'grid', title: 'Tidy layout into rows', action: tidy },
     );
     if (selectedId) {
-      items.push({ separator: true }, { label: 'Delete selected node', icon: 'trash', danger: true, action: removeSelected });
+      items.push({ separator: true }, { label: 'Delete selected node', icon: 'trash', danger: true, action: removeSelected }); // ui-guards: allow — an unsaved canvas edit (Discard reverts it), no confirm
     }
     ctxMenu.show(e, items);
   }
@@ -2229,20 +2229,15 @@
         <!-- Drag grip: bottom mode grows the height cap; side mode (docked to a
              right column) drags the left edge to change width. Double-click
              resets. (R6) -->
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="insp-grip"
           class:side={sideDock}
           role="separator"
-          tabindex="0"
-          aria-orientation={sideDock ? 'vertical' : 'horizontal'}
           aria-label="Resize node inspector"
           title="Drag or use arrow keys to resize · double-click or Enter to reset"
-          onmousedown={startInspResize}
-          ondblclick={resetInsp}
           use:paneResizer={sideDock
-            ? { value: ui.wfInspSideWidth, min: 280, max: Math.max(300, Math.round(window.innerWidth * 0.6)), invert: true, onChange: (w) => ui.setWfInspSideWidth(w), onReset: resetInsp, text: pxText }
-            : { value: ui.runDetailHeight, min: 160, max: Math.max(160, Math.round(window.innerHeight * 0.85)), orientation: 'horizontal', invert: true, onChange: (h) => { runDetailMax = false; ui.setRunDetailHeight(h); }, onReset: resetInsp, text: (v) => `${Math.round(v)} pixels tall` }}
+            ? { value: ui.wfInspSideWidth, min: 280, max: Math.max(300, Math.round(window.innerWidth * 0.6)), invert: true, onChange: (w) => ui.setWfInspSideWidth(w), onReset: resetInsp, onDragStart: startInspResize, text: pxText }
+            : { value: ui.runDetailHeight, min: 160, max: Math.max(160, Math.round(window.innerHeight * 0.85)), orientation: 'horizontal', invert: true, onChange: (h) => { runDetailMax = false; ui.setRunDetailHeight(h); }, onReset: resetInsp, onDragStart: startInspResize, text: (v) => `${Math.round(v)} pixels tall` }}
         ></div>
         <div
           class="inspector"
@@ -3317,16 +3312,12 @@
        no second full-height rail beside the app shell's right rail. Resizable. -->
   {#if viewport.isDesktop && run && run.context_dir && ui.wfCtxOpen}
     <aside class="ctx-sidebar" style="width:{ui.wfCtxWidth}px" data-testid="ctx-sidebar">
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <div
         class="ctx-resize"
         role="separator"
-        tabindex="0"
-        aria-orientation="vertical"
         aria-label="Resize context panel"
         title="Drag or use ←/→ to resize"
-        onmousedown={startCtxResize}
-        use:paneResizer={{ value: ui.wfCtxWidth, min: WF_CTX_MIN, max: WF_CTX_MAX, invert: true, onChange: (w) => ui.setWfCtxWidth(w), text: pxText }}
+        use:paneResizer={{ value: ui.wfCtxWidth, min: WF_CTX_MIN, max: WF_CTX_MAX, invert: true, onChange: (w) => ui.setWfCtxWidth(w), onDragStart: startCtxResize, text: pxText }}
       ></div>
       <div class="ctx-head">
         <div class="ctx-tabs" role="tablist" aria-label="Context panel sections">

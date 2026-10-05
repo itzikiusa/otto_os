@@ -527,7 +527,7 @@
   {/if}
 
   <div class="field">
-    <label for="ns-cwd">Working directory</label>
+    <label for="ns-cwd">Working folder</label>
     <div class="dir-add">
       <input
         id="ns-cwd"
@@ -537,7 +537,7 @@
         list="ns-recent-dirs"
         placeholder="/absolute/path/to/folder"
       />
-      <button type="button" class="btn" title="Browse for a working directory" onclick={() => (browsing = 'cwd')}>Browse…</button>
+      <button type="button" class="btn" title="Browse for a working folder" onclick={() => (browsing = 'cwd')}>Browse…</button>
     </div>
     <datalist id="ns-recent-dirs">
       {#each recentDirs as d (d)}<option value={d}></option>{/each}
@@ -634,7 +634,7 @@
 
 {#if browsing}
   <FolderPicker
-    title={browsing === 'cwd' ? 'Choose working directory' : 'Choose an additional directory'}
+    title={browsing === 'cwd' ? 'Choose working folder' : 'Choose an additional folder'}
     start={(browsing === 'cwd' ? cwd : dirDraft) ||
       (scratchMode ? scratchHome : ws.current?.root_path) ||
       '~'}

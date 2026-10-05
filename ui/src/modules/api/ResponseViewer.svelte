@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   import { plural } from '../../lib/plural';
   // Response viewer shared by the page and the compact panel: status / time /
   // size chips, then Body (Pretty · Raw · Tree · Preview) · Headers · Cookies ·
@@ -237,7 +238,8 @@
       a.remove();
       toasts.success('Response downloaded', a.download);
     } catch (e) {
-      toasts.error('Couldn’t save the response', r.body_id && e instanceof Error ? e.message : 'The file could not be written.');
+      if (r.body_id) toastError('Couldn’t save the response', e);
+      else toasts.error('Couldn’t save the response', 'The file couldn’t be written.');
     } finally {
       const u = url;
       if (u) setTimeout(() => URL.revokeObjectURL(u), 1500);

@@ -54,7 +54,7 @@
   </div>
 {:else if mode === 'working'}
   <div class="live-line" data-live-status="working" role="status">
-    <span class="spin" aria-hidden="true"></span>
+    <span class="spinner" style:--spinner-size="11px" aria-hidden="true"></span>
     <span class="who">{agentName} is working</span>
     <span class="doing" title={line?.hint || doing}><span class="sep" aria-hidden="true">·</span> <span class:mono={!!line?.mono}>{doing}</span></span>
     {#if elapsed}<span class="elapsed" aria-hidden="true">{elapsed}</span>{/if}
@@ -125,19 +125,6 @@
     flex-shrink: 0;
     font-size: var(--fs-xs);
     font-variant-numeric: tabular-nums;
-  }
-  .spin {
-    width: 11px;
-    height: 11px;
-    flex-shrink: 0;
-    border-radius: 50%;
-    border: 2px solid var(--border-strong);
-    border-top-color: var(--text-dim);
-  }
-  @media (prefers-reduced-motion: no-preference) {
-    .spin {
-      animation: otto-spin 0.8s linear infinite;
-    }
   }
   
   /* "Needs you" is the one amber state (patterns §1). */

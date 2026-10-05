@@ -198,8 +198,8 @@ test('ui: search panel, tags panel, quick switcher', async ({ page }) => {
 
   // Tags panel → tag click runs a tag: search.
   await page.locator('.left-modes button[title="Tags"]').click();
-  await expect(page.locator('.tag-row .tag', { hasText: '#oncall' })).toBeVisible();
-  await page.locator('.tag-row .tag', { hasText: '#oncall' }).click();
+  await expect(page.locator('.tag-row .tag-name', { hasText: '#oncall' })).toBeVisible();
+  await page.locator('.tag-row .tag-name', { hasText: '#oncall' }).click();
   await expect(page.locator('.search input')).toHaveValue('tag:oncall');
 
   // Quick switcher via alias.

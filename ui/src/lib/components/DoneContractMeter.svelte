@@ -103,7 +103,6 @@
   }
   .value {
     stroke: currentColor;
-    transition: stroke-dasharray 240ms ease-out;
   }
   .ring-wrap.ok {
     color: var(--success);

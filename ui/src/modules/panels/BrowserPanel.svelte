@@ -474,7 +474,6 @@
       {#each tabs as t (t.id)}
         <!-- The tab and its close are TWO real buttons (no control nested in a
              role=tab); ←/→/Home/End move between tabs (roving tabindex). -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="btab"
           class:active={t.id === activeId}

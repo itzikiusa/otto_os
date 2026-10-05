@@ -343,16 +343,7 @@
         <ul class="trail">
           {#each filtered as e (e.id)}
             <li class="row src-{e.source} kind-{e.kind} lvl-{e.level}">
-              <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events, a11y_no_noninteractive_tabindex -->
-              <div
-                class="row-main"
-                class:clickable={e.detail != null}
-                role={e.detail != null ? 'button' : undefined}
-                tabindex={e.detail != null ? 0 : undefined}
-                aria-expanded={e.detail != null ? !!expanded[e.id] : undefined}
-                onclick={() => e.detail != null && toggle(e.id)}
-                onkeydown={(ev) => e.detail != null && onRowKeydown(ev, e.id)}
-              >
+              {#snippet rowMain()}
                 <span class="row-icon"><Icon name={KIND_ICON[e.kind] ?? 'dot'} size={12} /></span>
                 <div class="row-body">
                   <div class="row-summary">{e.summary}</div>
@@ -364,7 +355,20 @@
                     {/if}
                   </div>
                 </div>
-              </div>
+              {/snippet}
+              <!-- Only a row with detail is a control (it expands); the rest is plain text. -->
+              {#if e.detail != null}
+                <div
+                  class="row-main clickable"
+                  role="button"
+                  tabindex="0"
+                  aria-expanded={!!expanded[e.id]}
+                  onclick={() => toggle(e.id)}
+                  onkeydown={(ev) => onRowKeydown(ev, e.id)}
+                >{@render rowMain()}</div>
+              {:else}
+                <div class="row-main">{@render rowMain()}</div>
+              {/if}
               {#if e.detail != null && expanded[e.id]}
                 <pre class="row-detail mono">{pretty(e.detail)}</pre>
               {/if}

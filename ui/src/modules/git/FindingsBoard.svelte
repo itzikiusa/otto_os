@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   // The Review Findings workflow board. For a completed review it lists the
   // persisted Finding rows (GET /reviews/{id}/findings) as expandable cards — a
   // status chip + severity chip + category + path:Lstart–Lend + reviewer +
@@ -299,7 +300,7 @@
               <div class="fb-field">
                 <span class="fb-field-label">Timeline</span>
                 {#if detailLoading[f.id] && !detail}
-                  <p class="dim" style="font-size: var(--fs-xs)" role="status">Loading the timeline…</p>
+                  <Skeleton rows={2} height={14} label="the timeline" />
                 {:else if detail && detail.events.length > 0}
                   <ul class="fb-timeline">
                     {#each detail.events as ev (ev.id)}

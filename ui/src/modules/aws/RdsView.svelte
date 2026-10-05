@@ -160,7 +160,7 @@
 <div class="tbl-wrap">
   <RegionErrors errors={regionErrors} />
   {#if loading && !instances}
-    <div class="pad" role="status"><p class="load-note">Loading RDS instances…</p><Skeleton rows={8} /></div>
+    <div class="pad"><Skeleton rows={8} label="RDS instances" /></div>
   {:else if error}
     <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list DB instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
@@ -267,11 +267,6 @@
     display: flex;
     justify-content: flex-end;
   }
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .pad {
     padding: 12px;
   }
@@ -330,7 +325,7 @@
   }
   .trow:hover,
   .trow:focus-visible {
-    background: var(--surface-2);
+    background: var(--hover);
     outline: none;
   }
   .trow.sel {

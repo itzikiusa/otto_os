@@ -20,6 +20,7 @@
   import { events } from '../../lib/events.svelte';
   import { sessionState, type SessionLike, type SessionStateInfo } from '../../lib/status';
   import Icon from '../../lib/components/Icon.svelte';
+  import { splitter } from '../../lib/paneResizer';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { winKey } from '../../lib/win';
@@ -432,42 +433,36 @@
       {#if r > 0}
         <!-- Row divider: only these two rows move. 20px grab zone (6px into
              each neighbour), 2px line at rest. -->
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="tgut row"
           role="separator"
-          tabindex="0"
           aria-orientation="horizontal"
           aria-label="Resize rows (drag, arrow keys; double-click to equalise)"
           title="Drag to resize · double-click to equalise"
           style="grid-row: {2 * r};"
           data-testid="tile-divider-row"
-          onpointerdown={(e) => startDrag(e, null, rowPair(r))}
-          ondblclick={resetTracks}
-          onkeydown={(e) => trackKeydown(e, null, rowPair(r))}
+          use:splitter={{ onkeydown: (e) => trackKeydown(e, null, rowPair(r)), onpointerdown: (e) => startDrag(e, null, rowPair(r)), ondblclick: resetTracks }}
         ></div>
       {/if}
       <div class="trow" data-row={r} style="grid-row: {2 * r + 1}; {rowStyle(r)}">
         {#each tiles as s, c (s.id)}
           {#if c > 0}
             <!-- Column divider INSIDE the row: only these two tiles move. -->
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
             <div
               class="tgut col"
               role="separator"
-              tabindex="0"
               aria-orientation="vertical"
               aria-label="Resize tiles (drag, arrow keys; double-click to equalise)"
               title="Drag to resize · double-click to equalise"
               style="grid-column: {2 * c};"
               data-testid="tile-divider-col"
-              onpointerdown={(e) => startDrag(e, colPair(r, c), null)}
-              ondblclick={resetTracks}
-              onkeydown={(e) => trackKeydown(e, colPair(r, c), null)}
+              use:splitter={{ onkeydown: (e) => trackKeydown(e, colPair(r, c), null), onpointerdown: (e) => startDrag(e, colPair(r, c), null), ondblclick: resetTracks }}
             ></div>
           {/if}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- A pointer drop target for tile reordering (presentation); the
+               keyboard reorders through the pane menus. -->
           <div
+            role="presentation"
             class="tile-slot"
             class:drag-over={tileDragOverId === s.id}
             data-tile-id={s.id}
@@ -507,8 +502,8 @@
           >
             <!-- A placeholder has no SessionView grip — its own header is the
                  drag source so every tile can be reordered. -->
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <header
+            <span
+              role="presentation"
               class="ph-head"
               draggable={ordered.length > 1}
               ondragstart={(e) => onTileDragStart(e, s.id)}
@@ -517,7 +512,7 @@
               <StatusDot state={tileState(s)} />
               <span class="ph-title" title={s.title ?? s.id}>{s.title ?? s.id}</span>
               <span class="chip ph-chip">{s.provider ?? '?'}</span>
-            </header>
+            </span>
             <div class="ph-body">
               <Icon name="terminal" size={20} />
               <span class="ph-cta">Click to attach</span>
@@ -532,8 +527,9 @@
             <!-- Corner grip: drags this tile's width (vs the tile to its right)
                  and height (vs the row below) in one gesture, like a window. -->
             {#if c < tiles.length - 1 || r < tileRows.length - 1}
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- Pointer-only resize shortcut (presentation); the dividers are the keyboard path. -->
               <div
+                role="presentation"
                 class="tile-corner"
                 class:w={c < tiles.length - 1}
                 class:h={r < tileRows.length - 1}

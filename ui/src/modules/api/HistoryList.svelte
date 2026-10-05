@@ -195,7 +195,7 @@
     </div>
   {/if}
 
-  {#if apiClient.historyLoadingId}<div class="state" role="status">Loading request…</div>{/if}
+  {#if apiClient.historyLoadingId}<div class="state" role="status"><span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Loading request…</div>{/if}
 
   {#if apiClient.history.length === 0 && (apiClient.historyLoadError || !apiClient.historyLoaded)}
     <LoadState

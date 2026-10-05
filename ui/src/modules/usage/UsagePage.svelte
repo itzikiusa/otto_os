@@ -1460,7 +1460,6 @@
     height: 100%;
     border-radius: var(--radius-s);
     background: var(--accent-solid);
-    transition: width var(--dur-enter) ease-out;
   }
   /* Stacked variant: width = provider share of max; segments = composition. */
   .bar-fill.stacked {

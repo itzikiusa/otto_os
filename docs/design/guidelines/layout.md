@@ -332,6 +332,16 @@ PageHeader: title = selected item (or module), item actions, primary
   empty state while items exist.
 - **Phone:** push navigation. The list is full height. Opening an item replaces
   it, and `PageHeader`'s `leading` slot shows a back button.
+- **List-pane width is the user's.** A list pane sits behind a
+  `PaneDivider` with `lib/paneResizer`'s `LIST_PANE` bounds and a
+  `storageKey`, so drag / ←→ / double-click-reset work and the width is
+  remembered. The few fixed panes below are deliberate:
+
+  | Pane | Width | Why it is fixed |
+  |---|---|---|
+  | Settings nav (`settings/Settings.svelte`) | 200 px | A short, static list of section names (sentence case, ≤ 3 words) — nothing to widen for; the form beside it is capped by `PageBody`. On phone the nav becomes the page. |
+  | Access groups list (`settings/AccessGroups.svelte`) | `minmax(180px, 240px)` grid column | A group-name column inside a settings form, not a page-level list pane; it flexes inside that range with the form and stacks on phone. |
+  | Database connections sidebar (`database/DatabasePage.svelte`) | 300 px **default** (`SIDE_DEFAULT`) | Not fixed: resizable with `PaneDivider` (`db.sideW`, up to 640 px). 300 px is the starting width because connection names carry host + database. |
 
 ### 4.2 Workbench/editor
 
@@ -477,10 +487,12 @@ Breakpoints live in `lib/stores/viewport.svelte.ts` (`PHONE_MAX = 640`,
 | tablet | 641–1024 px | `viewport.isTablet`, `@media (max-width: 1024px)` |
 | desktop | ≥ 1025 px | `viewport.isDesktop` |
 
-- Use **only these two media-query breakpoints**. The tree still has about 17
-  stray ones (760, 900, 1500…); don't add more. For anything whose width
-  depends on a split pane (Agents splits, right panel, database panes), use a
-  **container query**.
+- Use **only these two media-query breakpoints** (`max-width: 640px` /
+  `min-width: 641px`, `max-width: 1024px` / `min-width: 1025px`); `npm run
+  check` fails any other `@media` width (`media-width` ratchet; the tree is at
+  zero). For anything whose width depends on a split pane (Agents splits, right
+  panel, database panes), use a **container query**. Script that mirrors a
+  breakpoint reads `PHONE_MAX` / `TABLET_MAX`, never a literal.
 - **No horizontal page scroll** at any width. Wide content (tables, graphs,
   code) scrolls inside its own container. `expectNoHorizontalOverflow` in
   `ui/e2e/helpers.ts` asserts this.

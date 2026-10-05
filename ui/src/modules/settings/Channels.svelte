@@ -376,8 +376,10 @@
       {#snippet channelCard(channel: Channel, intg: Integration | null, icon: IconName, label: string)}
         {@const configured = !!intg?.has_bot_token}
         {@const h = health(intg, channel)}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- Right-click is a pointer shortcut; Enabled, Test, Edit, Remove and
+             Set up are controls on the card itself. -->
         <div
+          role="presentation"
           class="channel-card card"
           class:off={configured && !intg?.enabled}
           oncontextmenu={(e) => ctxMenu.show(e, [

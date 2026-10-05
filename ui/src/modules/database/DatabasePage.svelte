@@ -1278,12 +1278,10 @@
           {/key}
         </div>
         {#if database.assistOpen}
-          <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End). -->
-          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+          <!-- A focusable separator is the ARIA window-splitter widget (paneResizer sets its tabIndex and value, and adds ←/→, Home/End). -->
           <div
             class="assist-divider"
             role="separator"
-            tabindex="0"
             aria-orientation="vertical"
             aria-label="Resize assistant"
             title="Drag or use ←/→ to resize the assistant"
@@ -1315,8 +1313,9 @@
   {#if nodeVisible(node)}
     <!-- The whole header toggles (the caret button stays the keyboard/AT
          control); clicks on its own buttons — caret, row actions — don't. -->
-    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+    <!-- The caret button is the keyboard/AT toggle; a click anywhere on the head is a mouse shortcut, so the head itself is presentational. -->
     <div
+      role="presentation"
       class="sec-head"
       onclick={(e) => {
         if (!(e.target as Element).closest('button')) toggleCollapse(node.sec.id);
@@ -1379,8 +1378,9 @@
 
 {#snippet connRow(c: Connection, depth: number)}
   {@const isDb = database.connections.some((x) => x.id === c.id)}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
+    role="group"
+    aria-label={c.name}
     class="conn-row"
     class:active={database.selectedConnId === c.id}
     class:open={database.openConnIds.includes(c.id)}
@@ -1416,8 +1416,9 @@
 {/snippet}
 
 {#snippet clusterRow(cl: BrokerCluster, depth: number)}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
+    role="group"
+    aria-label={cl.name}
     class="conn-row"
     class:dragging={draggedClusterId === cl.id}
     style="padding-inline-start: {depth * 14}px"
@@ -1525,8 +1526,9 @@
     {#if sections.length > 0}
       {#if !(filtering && !dragReveal && ungrouped.length + ungroupedClusters.length === 0)}
         <!-- Ungrouped doubles as the root / no-section drop target. -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
+          role="group"
+          aria-label="Ungrouped"
           class="sec-head plain"
           class:drop-target={draggedConnId || draggedClusterId || draggedSectionId}
           ondragover={(e) => {
@@ -1566,12 +1568,12 @@
       <Icon name="search" size={12} />
       <input
         class="list-search-input"
-        placeholder="Search saved…"
+        placeholder="Filter saved queries…"
         bind:value={savedSearch}
-        aria-label="Search saved queries"
+        aria-label="Filter saved queries"
       />
       {#if savedSearch}
-        <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
+        <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
       {/if}
     </div>
     <LoadState what="saved queries" variant="compact" loading={database.savedQueriesLoading} error={database.savedQueriesError} empty={database.savedQueries.length === 0} onretry={() => database.loadSavedQueries()} />
@@ -1622,12 +1624,12 @@
       <Icon name="search" size={12} />
       <input
         class="list-search-input"
-        placeholder="Search history…"
+        placeholder="Filter history…"
         bind:value={historySearch}
-        aria-label="Search query history"
+        aria-label="Filter query history"
       />
       {#if historySearch}
-        <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
+        <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
       {/if}
     </div>
     <LoadState what="query history" variant="compact" loading={database.historyLoading} error={database.historyError} empty={database.history.length === 0} onretry={() => database.loadHistory()} />

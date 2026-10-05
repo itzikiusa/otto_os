@@ -256,7 +256,7 @@ test('Kafka topic search opens a failed detail with recovery', async ({page}) =>
   await page.route('**/topics/customer-notifications',r => r.fulfill({status:503,json:{code:'upstream',message:'Topic details unavailable'}}));
   await setup(page,'broker');
   await page.locator('.tabs button',{hasText:'Topics'}).click();
-  await page.getByLabel('Search topics').fill('customer');
+  await page.getByLabel('Filter topics').fill('customer');
   await expect(page.locator('.grid tbody tr')).toHaveCount(1);
   await page.getByText('customer-notifications',{exact:true}).click();
   await expect(page.getByText('Topic details unavailable',{exact:true})).toBeVisible();

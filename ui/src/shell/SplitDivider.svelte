@@ -7,6 +7,7 @@
   import { sidePane } from '../lib/stores/sidePane.svelte';
   import { leadingFromPointer, nudgeLeading, SPLIT_MAX, SPLIT_MIN } from '../lib/sidePane';
   import { rafCoalesce, showDragOverlay } from '../lib/dragCursor';
+  import { splitter } from '../lib/paneResizer';
 
   interface Props {
     /** Accessible name of the two panes, e.g. "Agents and Connections". */
@@ -61,15 +62,13 @@
   const pct = $derived(Math.round(sidePane.leading * 100));
 </script>
 
-<!-- A focusable separator is the ARIA "window splitter" widget; Svelte's
-     check files every separator as non-interactive. -->
-<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+<!-- The ARIA "window splitter": `splitter` makes it focusable and wires the
+     keys, the pointer drag and the double-click 50/50 reset. -->
 <div
   bind:this={el}
   class="split-divider"
   class:dragging={sidePane.dragging}
   role="separator"
-  tabindex="0"
   aria-orientation="vertical"
   aria-label={`Resize ${label}`}
   aria-valuemin={Math.round(SPLIT_MIN * 100)}
@@ -77,9 +76,7 @@
   aria-valuenow={pct}
   aria-valuetext={`${pct}% · ${100 - pct}%`}
   title="Drag to resize · double-click for 50/50"
-  onpointerdown={onPointerDown}
-  onkeydown={onKeyDown}
-  ondblclick={() => sidePane.resetSplit()}
+  use:splitter={{ onkeydown: onKeyDown, onpointerdown: onPointerDown, ondblclick: () => sidePane.resetSplit() }}
   data-testid="split-divider"
 ></div>
 

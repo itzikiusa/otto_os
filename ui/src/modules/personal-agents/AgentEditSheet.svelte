@@ -226,7 +226,7 @@
     {/if}
 
     <div class="field">
-      <label for="{uid}-cwd">Working dir (optional — empty = a private per-agent folder)</label>
+      <label for="{uid}-cwd">Working folder (optional — empty = a private per-agent folder)</label>
       <PathField bind:value={fCwd}><input id="{uid}-cwd" class="input" bind:value={fCwd} placeholder="defaults to the agent’s own workspace" /></PathField>
     </div>
 

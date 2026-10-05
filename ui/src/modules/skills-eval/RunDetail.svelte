@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   // One evaluation run: header summary + per-iteration report. Each iteration
   // shows the implementation (+ diff), every validation's issues & suggested
   // fixes, the score, before/after regression vs the previous round, and the
@@ -501,7 +502,7 @@
           {/if}
           {#if openImplDiffs.has(it.id)}
             {#if implDiffLoading.has(it.id)}
-              <p class="muted"><span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Loading diff…</p>
+              <Skeleton rows={4} height={14} label="the diff" />
             {:else if implDiffs[it.id]}
               {#if implDiffs[it.id].diff.trim()}
                 <pre class="diff">{#each implDiffs[it.id].diff.split('\n') as line, li (li)}<span class="dl {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : 'ctx'}">{line || ' '}</span>{'\n'}{/each}</pre>

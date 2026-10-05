@@ -326,9 +326,12 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- The pan / zoom surface: a pointer-driven application region (every step
+     and port inside it is a real button with its own keys). -->
 <div
   class="canvas"
+  role="application"
+  aria-label="Workflow canvas"
   bind:this={surface}
   onpointerdown={startPan}
   onpointermove={onMove}
@@ -381,7 +384,6 @@
       <!-- The card is a plain box: the node itself is the button inside it
            (select / move / delete), the output port a sibling button — never
            one control nested in another. -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="node"
         class:invalid={invalidNodes.includes(n.id)}
@@ -389,11 +391,13 @@
         class:loop={n.kind === 'loop'}
         data-status={st}
         style="left:{n.x}px; top:{n.y}px; width:{NODE_W}px; height:{nodeHeight(n)}px; --accent:{color(n.kind)};"
-        onpointerdown={(e) => startNode(e, n)}
       >
+        <!-- The press that selects / starts a move belongs to the node's own
+             button (it fills the card), not to the box around it. -->
         <button
           type="button"
           class="node-main"
+          onpointerdown={(e) => startNode(e, n)}
           aria-label={`Edit ${nodeLabel(n)}`}
           aria-pressed={selectedId === n.id}
           aria-describedby={editable ? `${hintId}-node` : undefined}
