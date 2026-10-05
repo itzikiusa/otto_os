@@ -202,7 +202,9 @@ class AuthStore {
     setToken(resp.token);
     this.me = resp.user;
     this.realUser = resp.user;
-    await this.loadCapabilities();
+    // `/meta` was fetched signed-out (tools/providers withheld from
+    // anonymous callers); reload it with the new bearer.
+    await Promise.all([this.loadCapabilities(), this.refreshMeta()]);
     this.phase = 'ready';
   }
 
@@ -211,7 +213,9 @@ class AuthStore {
     setToken(resp.token);
     this.me = resp.user;
     this.realUser = resp.user;
-    await this.loadCapabilities();
+    // `/meta` was fetched signed-out (tools/providers withheld from
+    // anonymous callers); reload it with the new bearer.
+    await Promise.all([this.loadCapabilities(), this.refreshMeta()]);
     this.phase = 'ready';
   }
 

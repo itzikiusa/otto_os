@@ -55,7 +55,7 @@ connection library unusable for every non-root account.)
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 1 | GET /api/v1/health | public | — | `{"ok":true}` |
-| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `alt_loopback_base`, see "Transport lanes") |
+| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `alt_loopback_base`, see "Transport lanes"). Without a valid bearer (once onboarding is done) only `version`, `api_version`, `needs_onboarding` are filled — `tools`/`providers`/`model_flags` empty, `default_provider`/`alt_loopback_base` null, `network_listener` false. Tool probes are cached 60 s (single-flight). |
 | 3 | POST /api/v1/onboarding/root | public, only while 0 users exist (else 409) | OnboardRootReq | LoginResp |
 | 4 | POST /api/v1/auth/login | public | LoginReq | LoginResp (401 on bad creds/disabled) |
 | 5 | POST /api/v1/auth/logout | member | — | 204 |
