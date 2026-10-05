@@ -119,6 +119,10 @@ pub struct FoundLearning {
 /// caller-facing shape; the host's run mechanics return their own outcome type,
 /// which [`ProductRunHost::run_agent_with_recovery`] flattens into this (keeping
 /// `reason` as a stable `&str` for the existing notification/error-note code).
+/// [`LensRunResult::reason`] when a newer run (a Retry after Stop) took the
+/// agent row over mid-flight: the caller must skip every status write (S4-16).
+pub const SUPERSEDED: &str = "superseded";
+
 pub struct LensRunResult {
     /// Raw text the agent wrote to its out file (or the claude transcript turn).
     pub raw: Option<String>,
@@ -619,6 +623,13 @@ pub async fn run_analysis<C: ProductRunHost>(
                         errored: false,
                     }
                 }
+                _ if result.reason == Some(SUPERSEDED) => LensOutcome {
+                    name: spec.name.clone(),
+                    provider: spec.provider.clone(),
+                    findings_json: None,
+                    findings: None,
+                    errored: true,
+                },
                 _ => {
                     let stopped = result.reason == Some("stopped");
                     let err = if result.errored {
@@ -691,7 +702,7 @@ pub async fn run_analysis<C: ProductRunHost>(
         .product_repo()
         .add_analysis_agent(NewAnalysisAgent {
             analysis_id: analysis_id.clone(),
-            name: format!("Summarizer \u{00b7} {summarizer_provider}"),
+            name: format!("{SUMMARIZER_NAME_PREFIX}{summarizer_provider}"),
             skill: "po-story-overview".into(),
             provider: summarizer_provider.clone(),
             model: String::new(),
@@ -1211,6 +1222,7 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
                 warn!("product_run(retry): set_agent_status done {agent_id}: {e}");
             }
         }
+        _ if result.reason == Some(SUPERSEDED) => {}
         _ => {
             let err = if result.errored {
                 "retry: session produced no output (timeout/exit/start failure)".to_string()
@@ -1240,6 +1252,18 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
 // Orphan reaper — auto-resume analysis agents stranded by a daemon restart
 // ---------------------------------------------------------------------------
 
+/// Summary stamped on an analysis the boot reaper finalizes (S4-10).
+pub const INTERRUPTED_SUMMARY: &str =
+    "Interrupted by a daemon restart before the summary — re-run the analysis to consolidate.";
+
+/// Display-name prefix of the summarizer agent row (see `run_analysis`).
+pub const SUMMARIZER_NAME_PREFIX: &str = "Summarizer \u{00b7} ";
+
+/// True for the analysis's summarizer row (not a lens).
+pub fn is_summarizer_agent(name: &str) -> bool {
+    name.starts_with(SUMMARIZER_NAME_PREFIX)
+}
+
 /// Run ONCE at daemon startup. After a restart, any analysis agent still in
 /// `running`/`waiting` has no surviving task driving it, so it is orphaned.
 /// For each: if it hasn't exhausted its resume budget, re-run it via
@@ -1247,6 +1271,22 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
 /// with full recovery); otherwise mark it errored and notify. Running this only at
 /// startup avoids racing legitimately-in-flight agents (there are none yet).
 pub async fn reap_orphaned_agents_on_startup<C: ProductRunHost>(ctx: C) {
+    // The analysis rows themselves (S4-10): `run_analysis` — the only writer of
+    // their final status — died with the previous daemon, so a `running` row
+    // would spin the Analysis tab forever. Finalize each as `partial` (a
+    // terminal status the UI understands); resumed lens agents still land
+    // their findings on their own rows, and a re-run re-summarizes.
+    match ctx.product_repo().list_running_analyses().await {
+        Ok(running) => {
+            for a in running {
+                let _ = ctx
+                    .product_repo()
+                    .set_analysis_status(&a.id, "partial", Some(INTERRUPTED_SUMMARY), true)
+                    .await;
+            }
+        }
+        Err(e) => warn!("orphan reaper: list_running_analyses failed: {e}"),
+    }
     let agents = match ctx.product_repo().list_unfinished_agents().await {
         Ok(a) => a,
         Err(e) => {
@@ -1263,6 +1303,21 @@ pub async fn reap_orphaned_agents_on_startup<C: ProductRunHost>(ctx: C) {
     );
 
     for agent in agents {
+        // The summarizer is not a lens: re-running it through the lens retry
+        // would store lens findings on the summarizer row (S4-10).
+        if is_summarizer_agent(&agent.name) {
+            let _ = ctx
+                .product_repo()
+                .set_agent_status(
+                    &agent.id,
+                    "error",
+                    None,
+                    Some("interrupted by daemon restart — re-run the analysis to re-summarize"),
+                    true,
+                )
+                .await;
+            continue;
+        }
         let analysis = match ctx.product_repo().get_analysis(&agent.analysis_id).await {
             Ok(a) => a,
             Err(_) => {

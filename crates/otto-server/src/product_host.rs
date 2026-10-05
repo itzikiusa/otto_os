@@ -293,8 +293,20 @@ fn register_cancel(reg: &CancelRegistry, agent_id: &str) -> Arc<AtomicBool> {
     flag
 }
 
-fn unregister_cancel(reg: &CancelRegistry, agent_id: &str) {
-    reg.lock().unwrap().remove(agent_id);
+/// Remove `agent_id`'s cancel flag ONLY when it is still `flag` (S4-16): a
+/// Stop + quick Retry registers a NEW flag under the same agent id, and the
+/// old loop's exit must not unregister it (a later Stop would go unheard).
+/// Returns `false` when a newer run superseded this one.
+fn unregister_cancel(reg: &CancelRegistry, agent_id: &str, flag: &Arc<AtomicBool>) -> bool {
+    let mut map = reg.lock().unwrap();
+    match map.get(agent_id) {
+        Some(cur) if Arc::ptr_eq(cur, flag) => {
+            map.remove(agent_id);
+            true
+        }
+        Some(_) => false,
+        None => true,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -359,8 +371,20 @@ async fn run_agent_with_recovery(
     )
     .await;
 
-    if let Some(key) = cancel_key.as_deref() {
-        unregister_cancel(&ctx.product_agent_cancels, key);
+    let mut superseded = false;
+    if let (Some(key), Some(flag)) = (cancel_key.as_deref(), cancel.as_ref()) {
+        superseded = !unregister_cancel(&ctx.product_agent_cancels, key, flag);
+    }
+    if superseded {
+        // A Retry took this agent row over while we ran: our result (and any
+        // final "error"/"done" status write) must not clobber the new attempt.
+        return LensRunResult {
+            raw: None,
+            // Nor re-point the row's session at this superseded attempt.
+            session_id: None,
+            errored: true,
+            reason: Some(otto_product::run::SUPERSEDED),
+        };
     }
     lens_result(outcome)
 }
@@ -489,5 +513,22 @@ impl otto_product::ProductStudioHost for ServerCtx {
     }
     fn emit_swarm_status(&self, workspace_id: &Id, swarm_id: &str, status: &str) {
         otto_swarm::runtime::engine::emit_status(&self.swarm_rt(), workspace_id, swarm_id, status);
+    }
+}
+
+#[cfg(test)]
+mod cancel_registry_tests {
+    use super::*;
+
+    /// S4-16: the old loop's exit never unregisters a Retry's newer flag.
+    #[test]
+    fn unregister_only_removes_the_same_flag() {
+        let reg: CancelRegistry = Default::default();
+        let old = register_cancel(&reg, "a1");
+        let new = register_cancel(&reg, "a1"); // Retry re-registers
+        assert!(!unregister_cancel(&reg, "a1", &old), "old run is superseded");
+        assert!(Arc::ptr_eq(reg.lock().unwrap().get("a1").unwrap(), &new));
+        assert!(unregister_cancel(&reg, "a1", &new));
+        assert!(reg.lock().unwrap().get("a1").is_none());
     }
 }

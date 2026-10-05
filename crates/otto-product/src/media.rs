@@ -402,14 +402,59 @@ pub async fn serve_attachment<C: ProductStudioHost>(
         "inline; filename=\"{}\"",
         att.filename.replace('"', "").replace(['\r', '\n'], "")
     );
-    let resp = Response::builder()
+    let mut resp = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, att.mime.as_str())
         .header(header::CONTENT_DISPOSITION, disposition)
-        .header("x-content-type-options", "nosniff")
+        .header("x-content-type-options", "nosniff");
+    // An uploaded HTML/SVG (or any active type) rendered inline from the
+    // daemon origin could script the API with the viewer's cookie (S4-22):
+    // serve it in an opaque sandboxed origin with no fetches.
+    if needs_csp_sandbox(&att.mime) {
+        resp = resp.header(header::CONTENT_SECURITY_POLICY, ATTACHMENT_CSP);
+    }
+    let resp = resp
         .body(Body::from(bytes))
         .map_err(|e| ApiError(Error::Internal(format!("build response: {e}"))))?;
     Ok(resp)
+}
+
+/// CSP for an attachment that could run script when rendered inline.
+pub const ATTACHMENT_CSP: &str = "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'";
+
+/// Passive media types (raster images, PDF, audio/video) render fine without a
+/// CSP — a sandboxed frame would even block the PDF viewer. Everything else
+/// (HTML, SVG, XML, unknown) gets [`ATTACHMENT_CSP`].
+pub fn needs_csp_sandbox(mime: &str) -> bool {
+    let m = mime
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let passive = matches!(
+        m.as_str(),
+        "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp" | "image/avif"
+            | "application/pdf"
+    ) || m.starts_with("audio/")
+        || m.starts_with("video/");
+    !passive
+}
+
+#[cfg(test)]
+mod csp_tests {
+    use super::*;
+
+    #[test]
+    fn active_attachment_types_are_sandboxed() {
+        for m in ["text/html", "image/svg+xml", "text/html; charset=utf-8", "application/xml", "text/plain", ""] {
+            assert!(needs_csp_sandbox(m), "{m}");
+        }
+        for m in ["image/png", "IMAGE/JPEG", "application/pdf", "video/mp4", "audio/mpeg"] {
+            assert!(!needs_csp_sandbox(m), "{m}");
+        }
+        assert!(ATTACHMENT_CSP.starts_with("sandbox"));
+    }
 }
 
 /// `PATCH /product/attachments/{aid}` — Editor. Update `kind`/`filename`.

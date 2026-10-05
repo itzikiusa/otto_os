@@ -1493,7 +1493,7 @@ Live publish requires the matching successful persisted human-approval node in t
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /workspaces/{id}/product/stories/{sid}/analyze | ws editor | AnalyzeReq | Analysis (multi-lens fan-out spawns) |
+| POST /workspaces/{id}/product/stories/{sid}/analyze | ws editor | AnalyzeReq | Analysis (multi-lens fan-out spawns). 400 above 4 providers per agent or 12 agents (lenses × providers) total; 409 while another analysis of the story is `running` |
 | POST /workspaces/{id}/product/stories/{sid}/rewrite | ws editor | RewriteReq? | 202 |
 | POST /workspaces/{id}/product/stories/{sid}/testcases/generate | ws editor | GenerateTestsReq? | 202 |
 | POST /workspaces/{id}/product/stories/{sid}/plan/generate | ws editor | GeneratePlanReq? | 202 (multi-agent: spawns N visible planning sessions + a summarizer when >1; emits `plan_run`) |
@@ -1501,7 +1501,7 @@ Live publish requires the matching successful persisted human-approval node in t
 | POST /product/stories/{sid}/to-swarm | ws editor | ToSwarmReq? | ToSwarmResp (create a swarm project from the story + seed tasks from its plan) |
 | POST /workspaces/{id}/product/stories/{sid}/inject-session | ws editor | InjectSessionReq | inject story context into a session |
 | POST /product/analyses/{aid}/agents/{agent_id}/retry | ws editor | — | 202 (re-run one analysis lens agent) |
-| POST /product/analyses/{aid}/agents/{agent_id}/stop | ws editor | — | 202 (stop a running analysis agent) |
+| POST /product/analyses/{aid}/agents/{agent_id}/stop | ws editor | — | 202 (stop a running analysis agent); 404 when `agent_id` is not an agent of `aid` |
 
 ### Product story attachments & the Design arena
 

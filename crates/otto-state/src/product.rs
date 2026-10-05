@@ -1083,6 +1083,17 @@ impl ProductRepo {
         rows.iter().map(row_to_analysis).collect()
     }
 
+    /// Every analysis still `running` (any story) — the boot reaper finalizes
+    /// these: the `run_analysis` task that would have set their final status
+    /// died with the previous daemon (S4-10).
+    pub async fn list_running_analyses(&self) -> Result<Vec<ProductAnalysis>> {
+        let rows = sqlx::query("SELECT * FROM product_analyses WHERE status = 'running'")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("list running analyses"))?;
+        rows.iter().map(row_to_analysis).collect()
+    }
+
     pub async fn get_analysis(&self, id: &Id) -> Result<ProductAnalysis> {
         let row = sqlx::query("SELECT * FROM product_analyses WHERE id = ?")
             .bind(id)
