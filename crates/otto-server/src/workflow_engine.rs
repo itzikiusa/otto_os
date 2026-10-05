@@ -27,6 +27,7 @@ use otto_brokers::types::{ConsumeReq, ValueFormat};
 use otto_channels::adapter::Adapter;
 use otto_core::domain::{Channel, User, Workspace};
 use otto_core::event::Event;
+use otto_core::text::{clip_bytes as truncate, extract_json};
 use otto_core::workflows::{
     NodeActivity, NodeRunState, NodeStatus, RunScope, RunStatus, SubagentActivity, Workflow,
     WorkflowCheckpoint, WorkflowGraph, WorkflowNode, WorkflowRun,
@@ -7927,21 +7928,6 @@ fn harvest_session_ids(output: &Value, into: &mut Vec<String>) {
     }
 }
 
-/// Tolerantly extract a JSON value from an agent reply: try the whole string,
-/// else the first balanced `{ … }` span.
-fn extract_json(text: &str) -> Option<Value> {
-    if let Ok(v) = serde_json::from_str::<Value>(text.trim()) {
-        return Some(v);
-    }
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    if end > start {
-        serde_json::from_str(&text[start..=end]).ok()
-    } else {
-        None
-    }
-}
-
 /// Extract the body of the first fenced code block (preferring the `lang` fence).
 fn extract_code_block(text: &str, lang: &str) -> Option<String> {
     let fence = format!("```{lang}");
@@ -7952,17 +7938,6 @@ fn extract_code_block(text: &str, lang: &str) -> Option<String> {
     let rest = &text[start..];
     let end = rest.find("```")?;
     Some(rest[..end].trim().to_string())
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
 }
 
 /// File extension for a `canvas` workflow node's written diagram artifact,

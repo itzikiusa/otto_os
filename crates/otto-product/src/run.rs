@@ -192,82 +192,10 @@ Respond with EXACTLY ONE ```json code block (no prose before or after) matching:
 // Pure helpers (unit-testable without an agent)
 // ---------------------------------------------------------------------------
 
-/// Extract the first JSON value from `s`.
-///
-/// Priority:
-/// 1. First ```` ```json ```` fenced block (wins even if a bare `{` appears earlier
-///    in prose before the fence).
-/// 2. First balanced `{…}` not preceded by a fence marker.
-/// 3. `None` for prose-only input.
-pub fn extract_json_block(s: &str) -> Option<serde_json::Value> {
-    // --- Strategy 1: find the first ```json ... ``` fence --------------------
-    if let Some(fence_start) = s.find("```json") {
-        let after_marker = fence_start + "```json".len();
-        // Skip an optional newline right after the marker
-        let content_start = if s[after_marker..].starts_with('\n') {
-            after_marker + 1
-        } else {
-            after_marker
-        };
-        if let Some(end_fence) = s[content_start..].find("```") {
-            let json_str = s[content_start..content_start + end_fence].trim();
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                return Some(v);
-            }
-        }
-    }
-
-    // --- Strategy 2: first balanced { ... } anywhere in the string ----------
-    find_first_balanced_object(s)
-}
-
-/// Find and parse the first balanced `{…}` block in `s`.
-fn find_first_balanced_object(s: &str) -> Option<serde_json::Value> {
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
-    let mut start: Option<usize> = None;
-    let mut in_string = false;
-    let mut escape_next = false;
-
-    for (i, &b) in bytes.iter().enumerate() {
-        if escape_next {
-            escape_next = false;
-            continue;
-        }
-        if in_string {
-            match b {
-                b'\\' => escape_next = true,
-                b'"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' => {
-                if depth == 0 {
-                    start = Some(i);
-                }
-                depth += 1;
-            }
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    if let Some(s_idx) = start {
-                        let candidate = &s[s_idx..=i];
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(candidate) {
-                            return Some(v);
-                        }
-                    }
-                    // Reset for next candidate
-                    start = None;
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
+/// Extract the first JSON value from an agent reply (```json fence first,
+/// else the first balanced `{…}` that parses). The shared implementation:
+/// see [`otto_core::text::extract_json`].
+pub use otto_core::text::extract_json as extract_json_block;
 
 /// Build the full analysis prompt for one agent.
 ///

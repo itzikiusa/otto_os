@@ -108,42 +108,8 @@ For suggested_schedule, use null OR
 }
 
 /// Extract the first JSON object from a model reply (fenced or balanced).
-pub fn extract_json(text: &str) -> Option<Value> {
-    // Prefer a ```json fenced block.
-    if let Some(start) = text.find("```json") {
-        let rest = &text[start + 7..];
-        if let Some(end) = rest.find("```") {
-            if let Ok(v) = serde_json::from_str::<Value>(rest[..end].trim()) {
-                return Some(v);
-            }
-        }
-    }
-    // Fall back to the first balanced { .. }.
-    let bytes = text.as_bytes();
-    let start = text.find('{')?;
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut esc = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        match b {
-            b'"' if !esc => in_str = !in_str,
-            b'\\' if in_str => {
-                esc = !esc;
-                continue;
-            }
-            b'{' if !in_str => depth += 1,
-            b'}' if !in_str => {
-                depth -= 1;
-                if depth == 0 {
-                    return serde_json::from_str(&text[start..=i]).ok();
-                }
-            }
-            _ => {}
-        }
-        esc = false;
-    }
-    None
-}
+/// Re-exported from [`otto_core::text::extract_json`], the one shared copy.
+pub use otto_core::text::extract_json;
 
 pub fn parse_recruited(text: &str) -> Option<RecruitedAgent> {
     let v = extract_json(text)?;

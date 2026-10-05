@@ -304,7 +304,7 @@ async fn execute_single_agent(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
                 // Replace the stored source body with the human-readable packet
                 // summary now that the prompt has been assembled from it.
                 context_summary: Some(packet.summary.clone()),
-                result_summary: Some(truncate(&reply, 4_000)),
+                result_summary: Some(otto_core::text::clip_bytes(&reply, 4_000)),
                 ..Default::default()
             },
         )
@@ -587,17 +587,6 @@ fn reconstruct_resolved(run: &OttoRun) -> ResolvedSource {
         repo_hint: None,
         metadata: serde_json::Value::Null,
     }
-}
-
-fn truncate(s: &str, cap: usize) -> String {
-    if s.len() <= cap {
-        return s.to_string();
-    }
-    let mut end = cap;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
 }
 
 async fn e2e_commit_note(wt: &str, run: &OttoRun) {

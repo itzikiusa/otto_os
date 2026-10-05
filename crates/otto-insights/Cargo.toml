@@ -12,7 +12,7 @@ otto-sessions = { workspace = true }
 # The bundled `insights` collector script (materialized next to the reports).
 otto-skills = { workspace = true }
 # `blocking` spans, like the host's `offload::blocking`.
-otto-telemetry = { workspace = true }
+otto-agent-run = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

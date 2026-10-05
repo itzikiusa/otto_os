@@ -248,7 +248,7 @@ pub async fn seed_tasks<C: ProductStudioHost>(
             return Vec::new();
         }
     };
-    let Some(v) = otto_swarm::recruiter::extract_json(&reply) else {
+    let Some(v) = otto_core::text::extract_json(&reply) else {
         warn!("product_swarm: planner returned no parseable JSON");
         return Vec::new();
     };
@@ -729,7 +729,7 @@ pub(crate) async fn seed_discovery_tasks<C: ProductStudioHost>(
 /// Parse the discovery planner's `{"tasks":[{title,description}]}` reply into
 /// seedable tasks; returns empty on no/invalid JSON (caller falls back).
 fn parse_discovery_tasks(reply: &str) -> Vec<ParsedTask> {
-    let Some(v) = otto_swarm::recruiter::extract_json(reply) else {
+    let Some(v) = otto_core::text::extract_json(reply) else {
         warn!("product_swarm: discovery planner returned no parseable JSON");
         return Vec::new();
     };
