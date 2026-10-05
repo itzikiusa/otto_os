@@ -3545,7 +3545,7 @@ reported in `depth_exceeded`.
 ### Design assist — agent turns, variants, learned rules
 
 One agent-turn pipeline for every studio and format
-(`crates/otto-server/src/design_assist.rs`; building blocks in
+(`crates/otto-design-assist/src/lib.rs`; building blocks in
 `otto_design::{variants, cite, learn}` and `otto_improve::design`). Same RBAC
 as above (`/design/*`: GET = design View, else design Edit) plus the workspace
 role from the artifact (or the `workspace_id`). Types: `DesignAssist*`,

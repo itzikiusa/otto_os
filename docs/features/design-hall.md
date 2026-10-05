@@ -39,7 +39,7 @@ built on **one artifact graph**:
 
 Code: `crates/otto-design` (router, service, store, extractor, import,
 `variants`, `cite`, `learn`), `crates/otto-server/src/design_hall.rs` (glue),
-`crates/otto-server/src/design_assist.rs` (the agent pipeline),
+`crates/otto-design-assist/src/lib.rs` (the agent pipeline),
 `crates/otto-improve/src/design.rs` (the `design` evidence source), migration
 `…_design_graph.sql` (no new migration for the pipeline).
 Contract: [`docs/contracts/api.md` § Design Hall](../contracts/api.md) and the

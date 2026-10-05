@@ -1,6 +1,6 @@
 // Design assist API — the unified agent turn, variants and learned rules.
 // Mirrors docs/contracts/api.md § "Design assist — agent turns, variants,
-// learned rules" (crates/otto-server/src/design_assist.rs). The graph routes
+// learned rules" (crates/otto-design-assist/src/lib.rs). The graph routes
 // live in lib/api/design.ts; this module only adds the assist surface the Otto
 // panel, the variants tray, the lobby hand-off and the learning page share,
 // plus the two neighbours they write through: otto-improve's edit flow

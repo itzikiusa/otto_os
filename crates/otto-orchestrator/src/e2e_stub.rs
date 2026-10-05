@@ -94,7 +94,7 @@ fn db_assist_reply() -> String {
         .to_string()
 }
 
-/// E2E stub for the unified Design Hall assist turn (`design_assist.rs`). The
+/// E2E stub for the unified Design Hall assist turn (otto-design-assist). The
 /// handler prefers the agent's in-place file edit and falls back to a fenced
 /// block in the reply, so offline we answer with a fence for the file the
 /// prompt names (the marker `E2E design`). A critique turn edits nothing. When

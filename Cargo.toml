@@ -17,6 +17,7 @@ members = [
     "crates/otto-issues",
     "crates/otto-channels",
     "crates/otto-improve",
+    "crates/otto-insights",
     "crates/otto-context",
     "crates/otto-usage",
     "crates/otto-telemetry",
@@ -32,6 +33,7 @@ members = [
     "crates/otto-ssh",
     "crates/otto-canvas",
     "crates/otto-design",
+    "crates/otto-design-assist",
     "crates/otto-workgraph",
     "crates/otto-mcp",
     "crates/otto-sandbox",
@@ -67,6 +69,7 @@ otto-git = { path = "crates/otto-git" }
 otto-issues = { path = "crates/otto-issues" }
 otto-channels = { path = "crates/otto-channels" }
 otto-improve = { path = "crates/otto-improve" }
+otto-insights = { path = "crates/otto-insights" }
 otto-context = { path = "crates/otto-context" }
 otto-skills = { path = "crates/otto-skills" }
 otto-usage = { path = "crates/otto-usage" }
@@ -83,6 +86,7 @@ otto-netguard = { path = "crates/otto-netguard" }
 otto-ssh = { path = "crates/otto-ssh" }
 otto-canvas = { path = "crates/otto-canvas" }
 otto-design = { path = "crates/otto-design" }
+otto-design-assist = { path = "crates/otto-design-assist" }
 otto-workgraph = { path = "crates/otto-workgraph" }
 otto-mcp = { path = "crates/otto-mcp" }
 otto-sandbox = { path = "crates/otto-sandbox" }

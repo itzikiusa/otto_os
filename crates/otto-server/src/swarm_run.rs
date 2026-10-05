@@ -466,7 +466,7 @@ async fn run_turn_inner(
             });
             // Carry the agent's model into meta so SessionManager can inject
             // `--model <name>` for providers that support it (claude/codex); for others
-            // it is attribution-only. Mirrors insights.rs / product_run.rs.
+            // it is attribution-only. Mirrors otto-insights / product_run.rs.
             if let Some(m) = agent
                 .model
                 .as_deref()

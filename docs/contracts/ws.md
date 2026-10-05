@@ -996,7 +996,7 @@ blind timer.
 }
 ```
 
-- Emitted by `otto-server/src/insights.rs` after a scheduled insights run
+- Emitted by `otto-insights/src/lib.rs` after a scheduled insights run
   completes (conditioned on `period_done()` returning `true`).
 - `period` — human-readable label combining the kind (`daily|weekly|monthly`)
   and the run's start date.
@@ -1283,7 +1283,7 @@ coalesce before refetching.
 
 ### `canvas_updated` / `canvas_session_started`
 
-Workspace-scoped. Emitted by `crates/otto-server/src/canvas_assist.rs` while an
+Workspace-scoped. Emitted by `crates/otto-canvas/src/assist.rs` while an
 Ask-AI agent turn edits a scene's backing source file (live, per-poll) and once
 more with the committed result; `canvas_session_started` fires at the START of
 the turn so the Canvas Assistant panel can attach the agent's shell immediately
@@ -1384,7 +1384,7 @@ their own routes.
 ### `design_assist_updated` / `design_variants_ready`
 
 Workspace-scoped states of the unified design-assist pipeline
-(`crates/otto-server/src/design_assist.rs`).
+(`crates/otto-design-assist/src/lib.rs`).
 
 ```json
 { "type": "design_assist_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "turn_id": "<Id>", "status": "starting|running|done|unchanged|conflict|failed", "mode": "generate|refine|critique|a11y|variant", "branch": "main|variant/<run>/<k>", "session_id": "<Id>" | null, "version_id": "<Id>" | null, "error": "..." | null }

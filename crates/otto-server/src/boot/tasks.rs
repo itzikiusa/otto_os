@@ -608,7 +608,7 @@ fn spawn_vault_docs_recovery(ctx: &ServerCtx) {
 /// `insights` skill for the most-recent missed period iff it has no report
 /// yet. Runs the due-check on startup (catch-up after the app was closed).
 fn start_insights_scheduler(ctx: &ServerCtx) -> impl Send + 'static {
-    let h = crate::insights::InsightsScheduler::new(ctx.clone()).start();
+    let h = otto_insights::InsightsScheduler::new(ctx.clone()).start();
     tracing::info!("insights scheduler started");
     h
 }

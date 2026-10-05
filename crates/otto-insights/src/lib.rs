@@ -41,14 +41,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::cancel_signal::CancelSignal;
+use otto_core::cancel_signal::CancelSignal;
 use tracing::{info, warn};
 
 use otto_core::event::Event;
 
-use crate::auth::{require_root, CurrentUser};
-use crate::error::{ApiError, ApiResult};
-use crate::state::ServerCtx;
+mod ctx;
+pub use ctx::InsightsCtx;
+use ctx::{require_root, ApiError, ApiResult, CurrentUser};
 
 // ---------------------------------------------------------------------------
 // Cadence kind
@@ -137,8 +137,8 @@ impl InsightsConfig {
 /// Resolve `<data_dir>/insights` from the context library root
 /// (`<data_dir>/library`). Falls back to the library root's own parent (or the
 /// library root itself if it has no parent) so this never panics.
-pub fn insights_dir(ctx: &ServerCtx) -> PathBuf {
-    let lib = &ctx.context_library.root;
+pub fn insights_dir<C: InsightsCtx>(ctx: &C) -> PathBuf {
+    let lib = &ctx.library().root;
     let data_dir = lib.parent().unwrap_or(lib);
     data_dir.join("insights")
 }
@@ -607,11 +607,11 @@ static ACTIVE_RUNS: std::sync::LazyLock<Mutex<ActiveRuns>> =
 
 /// Is this registered run still working? Its session must be alive, its report
 /// must not have changed since it started, and it must be inside the timeout.
-async fn run_alive(ctx: &ServerCtx, dir: &Path, run: &ActiveRun) -> bool {
+async fn run_alive<C: InsightsCtx>(ctx: &C, dir: &Path, run: &ActiveRun) -> bool {
     if Utc::now() - run.started_at > chrono::Duration::from_std(RUN_TIMEOUT).unwrap_or_default() {
         return false;
     }
-    let session_live = match ctx.manager.get(&run.run_id).await {
+    let session_live = match ctx.manager().get(&run.run_id).await {
         Ok(s) => s.status != otto_core::domain::SessionStatus::Exited && !s.archived,
         Err(_) => false,
     };
@@ -619,7 +619,7 @@ async fn run_alive(ctx: &ServerCtx, dir: &Path, run: &ActiveRun) -> bool {
         return false;
     }
     let (d, k) = (dir.to_path_buf(), run.report_key.clone());
-    let now_rev = crate::offload::blocking(move || report_status(&d, &k, false))
+    let now_rev = ctx::blocking(move || report_status(&d, &k, false))
         .await
         .ok()
         .and_then(|s| s.html_revision);
@@ -627,7 +627,7 @@ async fn run_alive(ctx: &ServerCtx, dir: &Path, run: &ActiveRun) -> bool {
 }
 
 /// Live runs under `dir`, with liveness evaluated (async) before the prune.
-async fn live_runs(ctx: &ServerCtx, dir: &Path) -> Vec<ActiveRun> {
+async fn live_runs<C: InsightsCtx>(ctx: &C, dir: &Path) -> Vec<ActiveRun> {
     let candidates = ACTIVE_RUNS.lock().await.all_live(dir, |_| true);
     let mut dead = Vec::new();
     for r in &candidates {
@@ -726,8 +726,8 @@ fn materialize_collector(dir: &Path) -> std::io::Result<PathBuf> {
 /// Returns the spawned session id on success. Returns `Ok(None)` (a no-op) when
 /// the `insights` skill is not installed in the Library — the caller logs a
 /// warning and the UI tells the user to install it.
-pub async fn run_insights(
-    ctx: &ServerCtx,
+pub async fn run_insights<C: InsightsCtx>(
+    ctx: &C,
     kind: Kind,
     offset: i64,
     as_of: NaiveDate,
@@ -736,7 +736,7 @@ pub async fn run_insights(
     // The insights skill is manual-install. If absent, skip (don't spawn a
     // session that would just say "no such skill").
     let installed = ctx
-        .context_library
+        .library()
         .skill_path(INSIGHTS_SKILL)
         .map(|p| p.exists())
         .unwrap_or(false);
@@ -758,7 +758,7 @@ pub async fn run_insights(
     let data_dir = insights_dir(ctx)
         .parent()
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| ctx.context_library.root.clone());
+        .unwrap_or_else(|| ctx.library().root.clone());
     let cwd = data_dir.to_string_lossy().into_owned();
 
     // Provider/model come from the insights config (built-in or custom, e.g.
@@ -793,7 +793,7 @@ pub async fn run_insights(
     }
     let report_revision = {
         let (d, k) = (dir.clone(), report_key.clone());
-        crate::offload::blocking(move || report_status(&d, &k, false))
+        ctx::blocking(move || report_status(&d, &k, false))
             .await
             .ok()
             .and_then(|s| s.html_revision)
@@ -816,7 +816,7 @@ pub async fn run_insights(
         meta: Some(meta),
     };
 
-    let session = ctx.manager.create(&ws, &user_id, req, None).await?;
+    let session = ctx.manager().create(&ws, &user_id, req, None).await?;
     let sid = session.id.clone();
     info!(session = %sid, kind = kind.word(), offset, provider = %provider, "insights: started run");
     registry.register(
@@ -832,15 +832,9 @@ pub async fn run_insights(
 
     // Inject the prompt once the TUI has drawn + settled, then let it run
     // headlessly (no result-file watch — the skill writes its own artifacts).
-    let manager = Arc::clone(&ctx.manager);
+    let host = ctx.clone();
     tokio::spawn(async move {
-        if crate::review_session::wait_for_tui(&manager, &sid).await {
-            let _ = manager
-                .input(&sid, &crate::review_session::bracketed_paste(&prompt))
-                .await;
-            tokio::time::sleep(crate::review_session::PASTE_TO_ENTER).await;
-            let _ = manager.input(&sid, b"\r").await;
-        } else {
+        if !host.submit_prompt(&sid, &prompt).await {
             warn!(session = %sid, "insights: session TUI never became ready");
         }
         // Give the run a generous window to finish, then archive the throwaway
@@ -849,7 +843,7 @@ pub async fn run_insights(
         // independently, so the session itself is disposable — mirrors the
         // review-session cleanup (which archives when done).
         tokio::time::sleep(RUN_TIMEOUT).await;
-        let _ = manager.archive(&sid).await;
+        let _ = host.manager().archive(&sid).await;
     });
 
     Ok(Some(session.id))
@@ -859,10 +853,12 @@ pub async fn run_insights(
 /// Prefers a root member; falls back to any member. User-facing list: the
 /// scratch workspace is created at boot (so it would sort first) and has no
 /// members, which would leave insights with no host on a fresh install.
-async fn pick_host(ctx: &ServerCtx) -> Option<(otto_core::domain::Workspace, otto_core::Id)> {
-    let workspaces = ctx.workspaces.list_user_all().await.ok()?;
+async fn pick_host<C: InsightsCtx>(
+    ctx: &C,
+) -> Option<(otto_core::domain::Workspace, otto_core::Id)> {
+    let workspaces = ctx.workspaces().list_user_all().await.ok()?;
     let ws = workspaces.into_iter().find(|w| !w.archived)?;
-    let members = ctx.workspaces.members(&ws.id).await.ok()?;
+    let members = ctx.workspaces().members(&ws.id).await.ok()?;
     // Prefer the workspace admin/first member as the actor.
     let user_id = members.first().map(|m| m.user_id.clone())?;
     Some((ws, user_id))
@@ -906,28 +902,31 @@ pub struct RunResp {
 
 /// Insights API routes. Paths are relative to the `/api/v1` mount; auth is
 /// applied by the host middleware (writes additionally require root).
-pub fn routes() -> Router<ServerCtx> {
+pub fn routes<C: InsightsCtx>() -> Router<C> {
     Router::new()
-        .route("/insights/config", get(get_config).put(put_config))
-        .route("/insights/reports", get(get_reports))
-        .route("/insights/report", get(get_report))
-        .route("/insights/report-status", get(get_report_status))
-        .route("/insights/run", post(post_run))
-        .route("/insights/runs/active", get(get_active_runs))
-        .route("/insights/runs/{id}/cancel", post(cancel_run))
+        .route(
+            "/insights/config",
+            get(get_config::<C>).put(put_config::<C>),
+        )
+        .route("/insights/reports", get(get_reports::<C>))
+        .route("/insights/report", get(get_report::<C>))
+        .route("/insights/report-status", get(get_report_status::<C>))
+        .route("/insights/run", post(post_run::<C>))
+        .route("/insights/runs/active", get(get_active_runs::<C>))
+        .route("/insights/runs/{id}/cancel", post(cancel_run::<C>))
 }
 
 /// `GET /insights/runs/active` — runs still generating (oldest first), so the
 /// page restores its progress banner after being left and re-opened.
-async fn get_active_runs(State(ctx): State<ServerCtx>) -> ApiResult<Json<Vec<ActiveRun>>> {
+async fn get_active_runs<C: InsightsCtx>(State(ctx): State<C>) -> ApiResult<Json<Vec<ActiveRun>>> {
     let dir = insights_dir(&ctx);
     Ok(Json(live_runs(&ctx, &dir).await))
 }
 
 /// `POST /insights/runs/{id}/cancel` — stop a run: kill its session and drop
 /// it from the registry. Root only, like starting one. 404 for an unknown run.
-async fn cancel_run(
-    State(ctx): State<ServerCtx>,
+async fn cancel_run<C: InsightsCtx>(
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> ApiResult<axum::http::StatusCode> {
@@ -939,13 +938,13 @@ async fn cancel_run(
         .remove_run(&dir, &id)
         .ok_or_else(|| ApiError(otto_core::Error::NotFound("insights run".into())))?;
     let sid: otto_core::Id = run.run_id;
-    let _ = ctx.manager.kill_session(&sid).await;
-    let _ = ctx.manager.archive(&sid).await;
+    let _ = ctx.manager().kill_session(&sid).await;
+    let _ = ctx.manager().archive(&sid).await;
     info!(session = %sid, "insights: run cancelled");
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-async fn get_config(State(ctx): State<ServerCtx>) -> ApiResult<Json<InsightsConfig>> {
+async fn get_config<C: InsightsCtx>(State(ctx): State<C>) -> ApiResult<Json<InsightsConfig>> {
     let dir = insights_dir(&ctx);
     // std::fs off the async workers, like every other insights file read.
     let cfg = tokio::task::spawn_blocking(move || read_config(&dir))
@@ -958,8 +957,8 @@ async fn get_config(State(ctx): State<ServerCtx>) -> ApiResult<Json<InsightsConf
     Ok(Json(cfg))
 }
 
-async fn put_config(
-    State(ctx): State<ServerCtx>,
+async fn put_config<C: InsightsCtx>(
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(cfg): Json<InsightsConfig>,
 ) -> ApiResult<Json<InsightsConfig>> {
@@ -978,8 +977,8 @@ async fn put_config(
     Ok(Json(cfg))
 }
 
-async fn get_reports(
-    State(ctx): State<ServerCtx>,
+async fn get_reports<C: InsightsCtx>(
+    State(ctx): State<C>,
     Query(q): Query<ReportsQuery>,
 ) -> ApiResult<Json<Vec<ReportView>>> {
     let dir = insights_dir(&ctx);
@@ -1002,12 +1001,12 @@ struct StatusQuery {
     summary: bool,
 }
 
-async fn get_report_status(
-    State(ctx): State<ServerCtx>,
+async fn get_report_status<C: InsightsCtx>(
+    State(ctx): State<C>,
     Query(q): Query<StatusQuery>,
 ) -> ApiResult<Json<ReportStatus>> {
     let dir = insights_dir(&ctx);
-    let status = crate::offload::blocking(move || report_status(&dir, &q.key, q.summary))
+    let status = ctx::blocking(move || report_status(&dir, &q.key, q.summary))
         .await
         .map_err(ApiError)?;
     Ok(Json(status))
@@ -1022,8 +1021,8 @@ struct ReportQuery {
 /// Serve a report's HTML by absolute path, gated to the insights dir so an
 /// authed caller can never read arbitrary files off disk. The UI loads this
 /// (with the bearer token) into the report iframe.
-async fn get_report(
-    State(ctx): State<ServerCtx>,
+async fn get_report<C: InsightsCtx>(
+    State(ctx): State<C>,
     Query(q): Query<ReportQuery>,
 ) -> ApiResult<Html<String>> {
     // Canonicalize + read on the blocking pool, not a runtime worker.
@@ -1046,8 +1045,8 @@ async fn get_report(
     Ok(Html(html))
 }
 
-async fn post_run(
-    State(ctx): State<ServerCtx>,
+async fn post_run<C: InsightsCtx>(
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<RunReq>,
 ) -> ApiResult<Json<RunResp>> {
@@ -1084,7 +1083,7 @@ async fn post_run(
             attached: true,
         }));
     }
-    let report_revision = crate::offload::blocking(move || report_status(&dir, &key, false))
+    let report_revision = ctx::blocking(move || report_status(&dir, &key, false))
         .await
         .map_err(ApiError)?
         .html_revision;
@@ -1142,12 +1141,12 @@ impl Drop for InsightsSchedulerHandle {
 /// The opt-in, catch-up insights scheduler. Ticks ~hourly; for each ENABLED
 /// cadence whose currently-due period has no report, it runs the skill (one run
 /// at a time via an in-flight set).
-pub struct InsightsScheduler {
-    ctx: ServerCtx,
+pub struct InsightsScheduler<C: InsightsCtx> {
+    ctx: C,
 }
 
-impl InsightsScheduler {
-    pub fn new(ctx: ServerCtx) -> Self {
+impl<C: InsightsCtx> InsightsScheduler<C> {
+    pub fn new(ctx: C) -> Self {
         Self { ctx }
     }
 
@@ -1244,7 +1243,7 @@ impl InsightsScheduler {
                 // without polling. Best-effort: a missed send is not an error.
                 if period_done(&insights_dir(&ctx), kind, start, end) {
                     let period_label = format!("{} {}", word, start.format("%Y-%m-%d"));
-                    let _ = ctx.events.send(Event::InsightReady {
+                    let _ = ctx.events().send(Event::InsightReady {
                         period: period_label,
                         session_id,
                     });

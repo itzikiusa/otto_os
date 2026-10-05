@@ -10607,7 +10607,7 @@ export interface DesignPruneReq {
 }
 
 // ---- Design assist (the unified agent turn, variants, learned rules) ------
-// Mirrors crates/otto-server/src/design_assist.rs + otto-design cite/learn.
+// Mirrors crates/otto-design-assist/src/lib.rs + otto-design cite/learn.
 
 /** `POST /design/artifacts/{id}/assist` modes (`variant` is `/variants` only). */
 export type DesignAssistMode = 'generate' | 'refine' | 'critique' | 'a11y';
