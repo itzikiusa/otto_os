@@ -2455,9 +2455,9 @@ async fn monitor_routes_enforce_cluster_grants() {
         &ctx,
         &owner,
         &id,
-        &[
-            (&["discover"], None),
-            (&["metrics"], Some(&["namespace:shop"])),
+        vec![
+            (vec!["discover"], None),
+            (vec!["metrics"], Some(vec!["namespace:shop"])),
         ],
     )
     .await;
@@ -2538,9 +2538,9 @@ async fn fleet_and_overview_are_filtered_to_the_callers_grants() {
         &ctx,
         &owner,
         &id,
-        &[
-            (&["discover"], None),
-            (&["metrics"], Some(&["namespace:shop"])),
+        vec![
+            (vec!["discover"], None),
+            (vec!["metrics"], Some(vec!["namespace:shop"])),
         ],
     )
     .await;

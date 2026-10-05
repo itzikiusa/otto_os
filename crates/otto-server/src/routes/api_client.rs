@@ -95,7 +95,7 @@ fn cookie_jar(scope: &Id) -> Arc<reqwest_cookie_store::CookieStoreMutex> {
         OnceLock::new();
     let jars = JARS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut map = jars.lock().unwrap_or_else(|e| e.into_inner());
-    map.entry(wid.clone())
+    map.entry(scope.clone())
         .or_insert_with(|| {
             Arc::new(reqwest_cookie_store::CookieStoreMutex::new(
                 reqwest_cookie_store::CookieStore::default(),
