@@ -103,6 +103,9 @@
      *  re-fetched diff with the same key keeps viewed marks, expansions and
      *  the open composer for paths that still exist (a push re-fetches). */
     stateKey?: string;
+    /** Revision the diff's NEW side is at (a commit / PR head). History and
+     *  Blame open there instead of the local HEAD. */
+    rev?: string;
   }
   let {
     diff,
@@ -116,6 +119,7 @@
     wip,
     loadFile,
     stateKey,
+    rev,
   }: Props = $props();
 
   let mode = $state<'unified' | 'split'>('unified');
@@ -835,7 +839,9 @@
       (fd) => {
         done();
         if (ctl.signal.aborted || d !== diff) return;
-        land(d, file.path, fd ?? { ...file, hunks: [], hunks_omitted: false, too_large: false }, null);
+        // Nothing came back for this path: `hunks_omitted` keeps it reading
+        // as "No diff available", not as an empty (looks-unchanged) body.
+        land(d, file.path, fd ?? { ...file, hunks: [], hunks_omitted: true, too_large: false }, null);
       },
       (e: unknown) => {
         done();
@@ -1012,12 +1018,12 @@
       {
         label: 'History',
         icon: 'note',
-        action: () => gitBridge.openFileTool({ kind: 'history', repoId, path: file.path }),
+        action: () => gitBridge.openFileTool({ kind: 'history', repoId, path: file.path, rev }),
       },
       {
         label: 'Blame',
         icon: 'note',
-        action: () => gitBridge.openFileTool({ kind: 'blame', repoId, path: file.path }),
+        action: () => gitBridge.openFileTool({ kind: 'blame', repoId, path: file.path, rev }),
       },
     ]);
   }
@@ -1128,6 +1134,8 @@
     // Don't steal keys while the user is typing in a text field.
     const tag = (e.target as HTMLElement).tagName.toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    // Bare keys only: ⌘[ / ⌘] (back/forward), Ctrl+N and friends are not ours.
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === ']' || e.key === 'n') {
       e.preventDefault();
       navToFile(+1);

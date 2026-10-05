@@ -21,6 +21,14 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let retryRev = $state(0);
+  /** One page of the log. A full page means there may be more — say so and
+   *  offer "Load more" instead of silently stopping at the page size. */
+  const PAGE = 200;
+  let hasMore = $state(false);
+  let moreBusy = $state(false);
+  let moreError = $state<string | null>(null);
+  const logUrl = (id: string, p: string, skip: number): string =>
+    `/repos/${id}/log?all=true&limit=${PAGE}&skip=${skip}&follow=true&path=${encodeURIComponent(p)}`;
 
   $effect(() => {
     void retryRev;
@@ -28,15 +36,16 @@
     const p = path;
     loading = true;
     error = null;
+    hasMore = false;
+    moreError = null;
     // Switching files aborts the previous request; a late response is dropped.
     const ctl = new AbortController();
     api
-      .get<CommitInfo[]>(
-        `/repos/${id}/log?all=true&limit=200&follow=true&path=${encodeURIComponent(p)}`,
-        ctl.signal,
-      )
+      .get<CommitInfo[]>(logUrl(id, p, 0), ctl.signal)
       .then((rows) => {
-        if (!ctl.signal.aborted) commits = rows;
+        if (ctl.signal.aborted) return;
+        commits = rows;
+        hasMore = rows.length >= PAGE;
       })
       .catch((e: unknown) => {
         if (ctl.signal.aborted) return;
@@ -48,6 +57,25 @@
       });
     return () => ctl.abort();
   });
+
+  async function loadMore(): Promise<void> {
+    if (moreBusy) return;
+    const id = repoId;
+    const p = path;
+    moreBusy = true;
+    moreError = null;
+    try {
+      const rows = await api.get<CommitInfo[]>(logUrl(id, p, commits.length));
+      if (id !== repoId || p !== path) return;
+      const seen = new Set(commits.map((c) => c.sha));
+      commits = [...commits, ...rows.filter((c) => !seen.has(c.sha))];
+      hasMore = rows.length >= PAGE;
+    } catch (e) {
+      if (id === repoId && p === path) moreError = loadErrorText(e);
+    } finally {
+      moreBusy = false;
+    }
+  }
 
   function when(date: string): string {
     const d = new Date(date);
@@ -86,11 +114,30 @@
           </li>
         {/each}
       </ul>
+      {#if hasMore}
+        <div class="fh-pad fh-more">
+          <span class="dim">Showing the latest {commits.length} commits.</span>
+          <button class="btn small" disabled={moreBusy} onclick={() => void loadMore()}>
+            {moreBusy ? 'Loading…' : 'Load more'}
+          </button>
+          {#if moreError}<span class="fh-more-err" role="alert">Couldn’t load more: {moreError}</span>{/if}
+        </div>
+      {/if}
     {/if}
   </div>
 </section>
 
 <style>
+  .fh-more {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--fs-xs);
+  }
+  .fh-more-err {
+    color: var(--danger);
+  }
   .fh {
     display: flex;
     flex-direction: column;
