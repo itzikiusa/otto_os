@@ -112,8 +112,9 @@ struct PathIndexLine {
     path: String,
 }
 
-/// `(vault root, recovery dir)` pairs whose `.gitignore` is known present —
-/// one `openat` per dir per process, not per save.
+/// `(vault root, recovery dir)` pairs whose `.gitignore` was written or found
+/// — saves the `openat` dance per save. NOT trusted alone: see
+/// [`known_ignored`].
 fn ignored_dirs() -> &'static Mutex<std::collections::HashSet<(String, &'static str)>> {
     static DONE: OnceLock<Mutex<std::collections::HashSet<(String, &'static str)>>> =
         OnceLock::new();
@@ -124,6 +125,24 @@ fn ignored_dirs() -> &'static Mutex<std::collections::HashSet<(String, &'static 
 const RECOVERY_GITIGNORE: &[u8] =
     b"# Otto recovery data (private note history / deleted notes): never commit.\n*\n";
 
+/// Is `<root>/<dir>/.gitignore` known present? The process-wide cache only
+/// short-cuts the create; one `lstat` confirms the file is still there, so a
+/// user deleting `.otto-history` (or just its `.gitignore`) gets it recreated
+/// on the next write instead of after a daemon restart (S7-07).
+fn known_ignored(key: &(String, &'static str)) -> bool {
+    if !ignored_dirs().lock().is_ok_and(|d| d.contains(key)) {
+        return false;
+    }
+    let path = std::path::Path::new(&key.0).join(key.1).join(".gitignore");
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+        return true;
+    }
+    if let Ok(mut d) = ignored_dirs().lock() {
+        d.remove(key);
+    }
+    false
+}
+
 impl VaultEngine {
     /// Make sure `<root>/<dir>/.gitignore` exists (blocking), created through
     /// the symlink-refusing directory capability and never overwriting a
@@ -131,7 +150,7 @@ impl VaultEngine {
     /// isn't ignored yet — it is retried on the next write.
     pub(crate) fn ignore_recovery_dir(root: &str, dir: &'static str) {
         let key = (root.to_string(), dir);
-        if ignored_dirs().lock().is_ok_and(|d| d.contains(&key)) {
+        if known_ignored(&key) {
             return;
         }
         let Ok((parent, name)) = Self::text_parent(root, &format!("{dir}/.gitignore")) else {
@@ -164,7 +183,7 @@ impl VaultEngine {
     /// task hop once the dir is known ignored.
     async fn ignore_recovery_dir_async(root: &str, dir: &'static str) {
         let key = (root.to_string(), dir);
-        if ignored_dirs().lock().is_ok_and(|d| d.contains(&key)) {
+        if known_ignored(&key) {
             return;
         }
         let _ = blocking(move || {
@@ -801,5 +820,30 @@ impl VaultEngine {
         drop(publication);
         self.rescan_after_mutation(id).await;
         Ok(dest)
+    }
+}
+
+#[cfg(test)]
+mod gitignore_tests {
+    use super::*;
+
+    /// S7-07: the process-wide "already ignored" cache used to be trusted
+    /// forever — deleting `.otto-history` left history files un-ignored until
+    /// a restart. The cache is now confirmed with a stat.
+    #[test]
+    fn a_deleted_recovery_dir_gets_its_gitignore_back() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path().canonicalize().unwrap();
+        let root = root.to_string_lossy().into_owned();
+        let gi = std::path::Path::new(&root).join(".otto-history/.gitignore");
+        VaultEngine::ignore_recovery_dir(&root, ".otto-history");
+        assert_eq!(std::fs::read(&gi).unwrap(), RECOVERY_GITIGNORE);
+        std::fs::remove_dir_all(gi.parent().unwrap()).unwrap();
+        VaultEngine::ignore_recovery_dir(&root, ".otto-history");
+        assert_eq!(std::fs::read(&gi).unwrap(), RECOVERY_GITIGNORE, "recreated");
+        // A user's own .gitignore is never overwritten.
+        std::fs::write(&gi, b"custom\n").unwrap();
+        VaultEngine::ignore_recovery_dir(&root, ".otto-history");
+        assert_eq!(std::fs::read(&gi).unwrap(), b"custom\n");
     }
 }
