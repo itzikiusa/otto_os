@@ -150,8 +150,9 @@ const daemonEnv = {
     OTTO_PLUGINS_HOME: join(dataDir, 'plugins-home'),
     OTTO_SECRETS: 'file',
     OTTO_SECRETS_ALLOW_PLAINTEXT: '1',
-    // `ottod=info` for the `boot: ready …` / `db maintenance: …` lines.
-    RUST_LOG: process.env.RUST_LOG ?? 'warn,ottod=info',
+    // `info` for the `boot: ready …` / `db maintenance: …` lines — logged by
+    // ottod and by the composition root it drives (`otto_server::boot`).
+    RUST_LOG: process.env.RUST_LOG ?? 'warn,ottod=info,otto_server::boot=info',
 };
 
 /** Spawn ottod with stderr captured (and echoed for warn+ lines). */
