@@ -5329,6 +5329,12 @@ impl SessionManager {
                 "session is archived — unarchive it first".into(),
             ));
         }
+        // Checked BEFORE the old process is retired: a refusal leaves it as is.
+        if session.kind == SessionKind::Agent {
+            if let Some(msg) = missing_cwd_refusal(&session) {
+                return Err(Error::Conflict(msg));
+            }
+        }
         let mut spec = match spec_override {
             Some(s) => s,
             None => {
@@ -6137,10 +6143,67 @@ async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::Path
     Some(std::fs::canonicalize(&abs).unwrap_or(abs))
 }
 
+/// Resume refuses an agent whose folder is gone (S20-04). The respawn used to
+/// `create_dir_all` it: the agent then woke in an EMPTY folder, believed the
+/// project had been wiped and could start recreating files. A moved/deleted
+/// repo is the user's to restore — say so instead (409). Exempt (still
+/// recreated on spawn): the scratch ("No workspace") home and Otto-managed
+/// folders under its data dir, which are Otto's to rebuild.
+fn missing_cwd_refusal(session: &Session) -> Option<String> {
+    let home = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    missing_cwd_refusal_in(session, &home.join("Library/Application Support/Otto"))
+}
+
+fn missing_cwd_refusal_in(session: &Session, otto_data: &std::path::Path) -> Option<String> {
+    let cwd = std::path::Path::new(&session.cwd);
+    if session.cwd.trim().is_empty()
+        || session.workspace_id == otto_core::domain::SCRATCH_WORKSPACE_ID
+        || cwd.starts_with(otto_data)
+        || cwd.is_dir()
+    {
+        return None;
+    }
+    Some(format!(
+        "folder {} no longer exists — restore it (or move the session's repo back), or read the conversation in History",
+        session.cwd
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use otto_core::domain::{SessionKind, Workspace};
+
+    #[test]
+    fn resume_refuses_a_missing_folder_but_not_scratch_or_otto_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("moved-away");
+        let data = dir.path().join("otto-data");
+        let mk = |ws: &str, cwd: &std::path::Path| Session {
+            id: "s".into(),
+            workspace_id: ws.into(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: "t".into(),
+            status: SessionStatus::Exited,
+            cwd: cwd.to_string_lossy().into_owned(),
+            provider_session_id: Some("p".into()),
+            connection_id: None,
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta: serde_json::json!({}),
+        };
+        let msg = missing_cwd_refusal_in(&mk("ws", &gone), &data).expect("missing folder refused");
+        assert!(msg.contains("no longer exists"), "{msg}");
+        assert!(!gone.exists(), "the refusal must not recreate the folder");
+        assert!(missing_cwd_refusal_in(&mk("ws", dir.path()), &data).is_none());
+        assert!(missing_cwd_refusal_in(&mk(otto_core::domain::SCRATCH_WORKSPACE_ID, &gone), &data).is_none());
+        assert!(missing_cwd_refusal_in(&mk("ws", &data.join("db-assist/x")), &data).is_none());
+    }
     use otto_state::NewSession;
 
     /// r3-01-09: the process table is only read when a sweep needs it, and
