@@ -2915,6 +2915,10 @@ mod tests {
             "CREATE TEMP TABLE t (id int)",
             "SELECT set_config('search_path', 'x', false)",
             "SELECT pg_advisory_lock(1)",
+            "SELECT * INTO TEMP t2 FROM t",
+            "select id into temporary table t3 from t",
+            "SELECT * INTO UNLOGGED t4 FROM t",
+            "WITH x AS (SELECT 1) SELECT * INTO TEMP t5 FROM x",
         ] {
             assert!(types::sql_leaves_session_state(sql), "{sql}");
         }
@@ -2922,6 +2926,7 @@ mod tests {
             "SELECT * FROM t",
             "UPDATE t SET a = 1",
             "CREATE TABLE t (id int)",
+            "SELECT into_x, \"intox\" FROM t",
         ] {
             assert!(!types::sql_leaves_session_state(sql), "{sql}");
         }

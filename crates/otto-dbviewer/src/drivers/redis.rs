@@ -303,6 +303,9 @@ impl Driver for RedisDriver {
         if commands.is_empty() {
             return Err(types::invalid("redis: no command provided"));
         }
+        for parts in &commands {
+            refuse_connection_state_command(parts)?;
+        }
 
         let db = keyspace_for(cfg, req)?;
         let mut conn = self.connect(cfg, db).await?;
@@ -1145,6 +1148,41 @@ fn split_args(line: &str) -> Vec<String> {
 // --- Command table ----------------------------------------------------------
 
 /// ~80 common Redis commands with one-line summaries for autocomplete.
+/// Refuse commands that change the state of the CONNECTION rather than the
+/// data. The console runs over a shared, multiplexed connection: a `SELECT 3`
+/// would silently re-point every later command (from any tab) at db 3, a
+/// `MULTI` would queue everyone's commands into one transaction, a
+/// `SUBSCRIBE`/`MONITOR` turns the connection into a push stream, and
+/// `AUTH`/`HELLO`/`RESET`/`QUIT`/`CLIENT REPLY` swap or break it outright.
+fn refuse_connection_state_command(parts: &[String]) -> Result<()> {
+    let Some(head) = parts.first() else {
+        return Ok(());
+    };
+    let name = head.to_ascii_uppercase();
+    let sub = parts.get(1).map(|s| s.to_ascii_uppercase());
+    let why = match name.as_str() {
+        "SELECT" => "switch the database with the connection's database picker instead",
+        "MULTI" | "EXEC" | "DISCARD" | "WATCH" | "UNWATCH" => {
+            "transactions are not supported in the console"
+        }
+        "SUBSCRIBE" | "PSUBSCRIBE" | "SSUBSCRIBE" | "UNSUBSCRIBE" | "PUNSUBSCRIBE"
+        | "SUNSUBSCRIBE" | "MONITOR" => {
+            "pub/sub and MONITOR streams are not supported in the console"
+        }
+        "RESET" | "QUIT" | "HELLO" | "AUTH" => {
+            "connection credentials and protocol are managed by the connection settings"
+        }
+        "CLIENT" if sub.as_deref() == Some("REPLY") => {
+            "CLIENT REPLY would desynchronise the shared connection"
+        }
+        _ => return Ok(()),
+    };
+    Err(types::invalid(format!(
+        "redis: {name}{} changes the shared connection's state and is not allowed here — {why}",
+        if name == "CLIENT" { " REPLY" } else { "" }
+    )))
+}
+
 const REDIS_COMMANDS: &[(&str, &str)] = &[
     ("GET", "GET key — get the value of a key"),
     ("SET", "SET key value — set a key to a string value"),
@@ -1296,7 +1334,6 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
         "INFO [section] — server statistics and configuration",
     ),
     ("DBSIZE", "DBSIZE — number of keys in the current database"),
-    ("SELECT", "SELECT index — switch to a logical database"),
     (
         "FLUSHDB",
         "FLUSHDB — remove all keys from the current database",
@@ -1316,13 +1353,6 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
     ("COMMAND", "COMMAND [COUNT|INFO|DOCS] — command metadata"),
     ("MEMORY", "MEMORY USAGE key — estimate memory used by a key"),
     ("WAIT", "WAIT numreplicas timeout — wait for replication"),
-    ("MULTI", "MULTI — start a transaction"),
-    ("EXEC", "EXEC — execute a queued transaction"),
-    ("DISCARD", "DISCARD — discard a queued transaction"),
-    (
-        "SUBSCRIBE",
-        "SUBSCRIBE channel [channel ...] — subscribe to channels",
-    ),
     ("PUBLISH", "PUBLISH channel message — publish to a channel"),
 ];
 
@@ -1331,6 +1361,43 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_state_commands_are_refused() {
+        let p = |line: &str| split_args(line);
+        for line in [
+            "SELECT 3",
+            "select 1",
+            "MULTI",
+            "EXEC",
+            "DISCARD",
+            "WATCH k",
+            "UNWATCH",
+            "SUBSCRIBE ch",
+            "psubscribe news.*",
+            "SSUBSCRIBE s",
+            "UNSUBSCRIBE",
+            "MONITOR",
+            "CLIENT REPLY OFF",
+            "client reply skip",
+            "RESET",
+            "QUIT",
+            "HELLO 3",
+            "AUTH user pass",
+        ] {
+            let e = refuse_connection_state_command(&p(line)).unwrap_err();
+            assert!(e.to_string().contains("shared connection"), "{line}: {e}");
+        }
+        let e = refuse_connection_state_command(&p("SELECT 2")).unwrap_err();
+        assert!(e.to_string().contains("database picker"), "{e}");
+        for ok in ["GET k", "CLIENT LIST", "PUBLISH ch m", "INFO", "DBSIZE"] {
+            assert!(refuse_connection_state_command(&p(ok)).is_ok(), "{ok}");
+        }
+        // The console's completions no longer offer them.
+        for gone in ["SELECT", "MULTI", "EXEC", "DISCARD", "SUBSCRIBE"] {
+            assert!(REDIS_COMMANDS.iter().all(|(c, _)| *c != gone), "{gone}");
+        }
+    }
 
     #[test]
     fn binary_bulk_string_renders_base64_not_placeholder() {
