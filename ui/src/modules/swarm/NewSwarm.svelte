@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Create a swarm — from a preset (5 templates) or blank.
   import Modal from '../../lib/components/Modal.svelte';
   import { toastError } from '../../lib/toastError';
@@ -47,7 +48,7 @@
     </button>
     {#each swarm.presets as p (p.slug)}
       <button class="preset" class:sel={selected === p.slug} onclick={() => (selected = p.slug)}>
-        <div class="p-name">{p.name} <span class="dim">· {p.agents.length} agent{p.agents.length === 1 ? '' : 's'}</span></div>
+        <div class="p-name">{p.name} <span class="dim">· {plural(p.agents.length, 'agent')}</span></div>
         <div class="p-desc dim">{p.description}</div>
       </button>
     {/each}

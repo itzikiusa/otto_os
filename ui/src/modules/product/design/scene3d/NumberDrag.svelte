@@ -144,7 +144,7 @@
   }
   .nd-label {
     flex: 0 0 auto;
-    padding: 0 5px;
+    padding: 0 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
@@ -168,12 +168,12 @@
     background: transparent;
     color: var(--text);
     font-size: var(--fs-xs);
-    padding: 0 5px;
+    padding: 0 4px;
     font-variant-numeric: tabular-nums;
     outline: none;
   }
   .nd-unit {
-    padding-block: 0; padding-inline: 0 5px;
+    padding-block: 0; padding-inline: 0 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

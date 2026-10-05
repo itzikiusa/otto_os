@@ -1647,7 +1647,7 @@
   }
   .mini {
     font-size: var(--fs-xs);
-    padding: 2px 7px;
+    padding: 2px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -1760,7 +1760,7 @@
     position: sticky;
     top: 0;
     z-index: 1;
-    padding-block: 3px;
+    padding-block: 2px;
     background: var(--surface);
   }
   .sec.sub {
@@ -1815,7 +1815,7 @@
   .chips {
     display: flex;
     flex-wrap: wrap;
-    gap: 3px;
+    gap: 2px;
   }
   /* Label ellipsizes in its own span; the × icon stays whole (ellipsis on
      the button itself would clip the icon, not the text). */
@@ -1858,7 +1858,7 @@
   .hits button {
     display: block;
     width: 100%;
-    padding: 3px 6px;
+    padding: 2px 6px;
     border: none;
     background: none;
     color: var(--text);
@@ -1870,7 +1870,7 @@
     white-space: nowrap;
   }
   .hits button:hover {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
   }
   .chk {
     display: flex;
@@ -1913,7 +1913,7 @@
   .tooltip {
     position: absolute;
     max-width: 260px;
-    padding: 3px 8px;
+    padding: 2px 8px;
     font-size: var(--fs-xs);
     color: var(--text);
     background: color-mix(in srgb, var(--surface) 94%, transparent);

@@ -1403,7 +1403,7 @@
     grid-row: 1;
     justify-self: end;
     width: 5px;
-    margin-inline-end: -3px;
+    margin-inline-end: -2px;
     cursor: col-resize;
     position: relative;
     z-index: 2;
@@ -1475,7 +1475,7 @@
   .pal-item {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     width: 100%;
     height: 26px;
     margin-block-end: 1px;
@@ -1809,7 +1809,7 @@
   .cb-warn {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--warning);
   }
@@ -1843,7 +1843,7 @@
   }
   .split:hover,
   .split:focus-visible {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .grip {
     width: 36px;
@@ -1916,7 +1916,7 @@
   .distinct {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     margin-inline-start: 6px;
@@ -2001,7 +2001,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding-inline-end: 3px;
+    padding-inline-end: 2px;
   }
   .chip-x {
     display: inline-grid;

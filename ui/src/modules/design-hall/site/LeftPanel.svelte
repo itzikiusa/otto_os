@@ -323,7 +323,7 @@
   .tabs button {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .body {
     flex: 1;

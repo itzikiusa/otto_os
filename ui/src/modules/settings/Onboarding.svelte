@@ -260,7 +260,7 @@
   .ob-card {
     width: 440px;
     max-width: calc(100vw - 32px);
-    padding: 22px 30px 28px;
+    padding: 22px 28px 28px;
   }
   .ob-progress {
     display: flex;
@@ -283,7 +283,7 @@
   .ob-mark {
     font-size: var(--fs-hero);
     font-weight: 600;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.01em;
     text-align: center;
     margin-bottom: 4px;
     background: linear-gradient(120deg, var(--accent), color-mix(in srgb, var(--accent) 50%, var(--text)));

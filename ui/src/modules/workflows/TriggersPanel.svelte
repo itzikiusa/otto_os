@@ -467,7 +467,7 @@
   .fl {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .fl span {
     font-size: var(--fs-xs);
@@ -479,7 +479,7 @@
   .fl textarea {
     font: inherit;
     font-size: var(--fs-m);
-    padding: 4px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -521,7 +521,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 6px;
+    padding: 4px 6px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface);

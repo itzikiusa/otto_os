@@ -441,7 +441,7 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    padding-block: 3px; padding-inline: 8px 4px;
+    padding-block: 2px; padding-inline: 8px 4px;
     border-bottom: 1px solid var(--border);
     background: var(--surface-2);
     flex-shrink: 0;
@@ -523,7 +523,7 @@
     transition: background var(--dur-fast) ease-out;
   }
   .tree-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .tree-row.is-dir {
     color: var(--text);
@@ -609,9 +609,9 @@
   }
   .truncated-badge {
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     flex-shrink: 0;
   }

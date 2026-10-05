@@ -320,7 +320,7 @@
   .exp-input {
     flex: 1;
     min-width: 0;
-    padding: 6px 9px;
+    padding: 6px 8px;
     font-size: var(--fs-m);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -345,7 +345,7 @@
   .exp-dest {
     font-size: var(--fs-s);
     color: var(--text-dim);
-    padding: 6px 9px;
+    padding: 6px 8px;
     border: 1px dashed var(--border);
     border-radius: var(--radius-s);
     overflow: hidden;
@@ -357,7 +357,7 @@
   .exp-progress {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .exp-bar {
     position: relative;

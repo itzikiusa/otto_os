@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { dialogFocus } from '../../lib/dialogFocus';
   import { toastError } from '../../lib/toastError';
   import { sentenceCase } from '../../lib/labels';
@@ -1912,7 +1913,7 @@
       // Preview is advisory — a repo whose daemon predates it still rebases.
     }
     const ok = await confirmer.ask(
-      `Rebase \`${currentBranch}\` onto \`${onto}\`? ${commits} commit${commits === 1 ? '' : 's'} will be replayed; conflicts open the resolver. Uncommitted changes are stashed and restored afterwards.`,
+      `Rebase \`${currentBranch}\` onto \`${onto}\`? ${plural(commits, 'commit')} will be replayed; conflicts open the resolver. Uncommitted changes are stashed and restored afterwards.`,
       { title: 'Rebase', confirmLabel: 'Rebase', danger: false },
     );
     if (ok) await mutate('/rebase', { onto, auto_stash: true }, 'Rebased', onto);
@@ -3645,7 +3646,7 @@
               </div>
               <div class="ci-meta">
                 <span class="dim">
-                  {status.changes.length} file{status.changes.length === 1 ? '' : 's'} changed{wipStagedCount > 0
+                  {plural(status.changes.length, 'file')} changed{wipStagedCount > 0
                     ? ` · ${wipStagedCount} staged`
                     : ''}
                 </span>
@@ -3833,7 +3834,7 @@
               Load older commits
             </button>
           {:else}
-            <span class="dim">{commits.length} commit{commits.length === 1 ? '' : 's'} · beginning of history</span>
+            <span class="dim">{plural(commits.length, 'commit')} · beginning of history</span>
           {/if}
         </div>
       </div>
@@ -3879,9 +3880,9 @@
       <span class="mob-diff-title mono">{wipSelected ? '// WIP' : (selectedCommit?.short_sha ?? 'Diff')}</span>
       <span class="grow"></span>
       {#if wipSelected}
-        <span class="mob-sec-count">{status.changes.length} file{status.changes.length === 1 ? '' : 's'}</span>
+        <span class="mob-sec-count">{plural(status.changes.length, 'file')}</span>
       {:else if diffFileCount !== null}
-        <span class="mob-sec-count">{diffFileCount} file{diffFileCount === 1 ? '' : 's'}</span>
+        <span class="mob-sec-count">{plural(diffFileCount, 'file')}</span>
       {/if}
       <span class="mob-close" aria-hidden="true"><Icon name="x" size={14} /></span>
     </button>
@@ -4051,7 +4052,7 @@
      a thin hit-area straddling the border that lights up on hover. */
   .refs-resizer {
     flex: 0 0 6px;
-    margin-inline-start: -3px;
+    margin-inline-start: -2px;
     cursor: col-resize;
     z-index: 1;
   }
@@ -4144,7 +4145,7 @@
     transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .ref-folder:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   /* The count pill is surface-2 too — lift it so it doesn't vanish on hover. */
   .ref-folder:hover .ref-count {
@@ -4166,7 +4167,7 @@
   .folder-children {
     /* The guide drops from the centre of the folder's 11px chevron (22 + 5.5),
        and nested rows' dots then line up under the folder icon. */
-    margin-inline-start: 27px;
+    margin-inline-start: 28px;
     border-inline-start: 1.5px solid var(--border);
   }
   .ref-action-row {
@@ -4189,7 +4190,7 @@
   .ref-row {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     width: 100%;
     height: 24px;
     padding-block: 0;
@@ -4217,10 +4218,10 @@
     text-align: start;
   }
   .ref-more-leaves:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .ref-row:hover:not(:disabled) {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .ref-row:disabled {
@@ -4275,7 +4276,7 @@
   }
   /* Accent outline while a valid merge source hovers this local branch. */
   .ref-row.drag-target {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--text);
     outline: 1.5px solid var(--accent-text);
     outline-offset: -1.5px;
@@ -4334,7 +4335,7 @@
     flex-shrink: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
     color: var(--worktree-text);
     opacity: 0.85;
     white-space: nowrap;
@@ -4344,7 +4345,7 @@
   }
   .ref-ab {
     display: inline-flex;
-    gap: 3px;
+    gap: 2px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -4388,7 +4389,7 @@
   }
   .graph-resizer {
     flex: 0 0 6px;
-    margin-inline-start: -3px;
+    margin-inline-start: -2px;
     cursor: col-resize;
   }
   .graph-resizer:hover {
@@ -4422,7 +4423,7 @@
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     user-select: none;
   }
@@ -4483,13 +4484,13 @@
     transition: background var(--dur-fast) ease-out;
   }
   .graph-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .graph-row-selected,
   .graph-row-selected:hover {
     /* Clear selected state: accent wash + inset accent bar (inset avoids a
        layout shift that a left border would cause on the selected row only). */
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     box-shadow: inset 2px 0 0 0 var(--accent);
   }
   /* Mirror the inline-start accent rail to the right edge under RTL. */
@@ -4512,7 +4513,7 @@
       background: color-mix(in srgb, var(--accent) 42%, transparent);
     }
     100% {
-      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      background: var(--accent-soft-strong);
     }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -4564,14 +4565,14 @@
     border-radius: var(--radius-s);
     border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   /* Conflicted-files chip on the WIP row — conflicts must be visible from the
      graph itself, not only after opening the WIP panel. */
   .wip-conflicts {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -4625,7 +4626,7 @@
   .ci-top {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     overflow: hidden;
   }
   .ci-subject {
@@ -4641,7 +4642,7 @@
   .ref-chip {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -4661,7 +4662,7 @@
   }
   /* Local branch — subtle, neutral. */
   .ref-chip.kind-local {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   /* Remote-tracking branch — distinct teal/cyan so it never reads as local. */
@@ -4697,7 +4698,7 @@
     flex-shrink: 0;
     gap: 2px;
     margin-inline-start: 2px;
-    padding-inline-start: 3px;
+    padding-inline-start: 2px;
     border-inline-start: 1px solid color-mix(in srgb, var(--accent-contrast) 45%, transparent);
     font-variant-numeric: tabular-nums;
   }
@@ -4864,7 +4865,7 @@
     letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .ref-pop-row.is-worktree {
@@ -4903,7 +4904,7 @@
   .on-branch-hint {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     min-width: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -4920,7 +4921,7 @@
     color: var(--text-dim);
   }
   .stash-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .stash-msg {
@@ -5035,7 +5036,7 @@
     font-size: var(--fs-xs);
     color: var(--accent-text);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .detail-subject {
     font-size: var(--fs-m);
@@ -5197,7 +5198,7 @@
     /* Branch/tag column stays a compact, aligned column on phones; chips clip on
        the left and the full refs are available in the detail header on tap. */
     .mobile .graph-panel { --branch-col-w: 108px; }
-    .mobile .branch-cell { gap: 3px; padding-inline: 4px; }
+    .mobile .branch-cell { gap: 2px; padding-inline: 4px; }
     .mobile .branch-cell .ref-chip { max-width: 96px; }
 
     /* Close (✕) for the open commit detail — bump to a ≥40px touch target. */

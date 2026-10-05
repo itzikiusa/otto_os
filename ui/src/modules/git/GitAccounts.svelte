@@ -492,7 +492,7 @@
   .test-result {
     display: flex;
     align-items: flex-start;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     margin-top: 4px;
     overflow-wrap: anywhere;

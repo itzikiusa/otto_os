@@ -304,9 +304,9 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .06em;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .n-meta {
@@ -354,7 +354,7 @@
   .form-label {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;

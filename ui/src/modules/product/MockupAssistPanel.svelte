@@ -202,7 +202,7 @@
   .ma-title {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-m);
     font-weight: 600;
   }
@@ -218,15 +218,15 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 3px 10px;
+    padding: 2px 10px;
     cursor: pointer;
   }
   .embedded .ma-format button {
-    padding: 2px 7px;
+    padding: 2px 6px;
     font-size: var(--fs-xs);
   }
   .ma-format button.on {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .ma-format button:disabled {
@@ -243,7 +243,7 @@
   }
   .ma-provider select {
     font-size: var(--fs-xs);
-    padding: 2px 5px;
+    padding: 2px 4px;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: transparent;
@@ -354,7 +354,7 @@
     color: var(--text);
     border-radius: var(--radius-m);
     font-size: var(--fs-xs);
-    padding: 6px 9px;
+    padding: 6px 8px;
     cursor: pointer;
     text-align: start;
     line-height: 1.4;

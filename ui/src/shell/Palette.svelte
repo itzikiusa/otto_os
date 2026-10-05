@@ -746,7 +746,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 1px 5px;
+    padding: 1px 4px;
   }
   .pal-ask {
     border-top: 1px solid var(--border);
@@ -777,7 +777,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);
-    padding: 9px 11px;
+    padding: 8px 10px;
     font-size: var(--fs-m);
     line-height: 1.5;
     resize: vertical;
@@ -854,7 +854,7 @@
     border-radius: var(--radius-s);
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .pal-hit:hover {
     background: var(--hover);
@@ -903,7 +903,7 @@
     line-height: 1.6;
   }
   .pal-hit-btn:hover {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent-text);
   }

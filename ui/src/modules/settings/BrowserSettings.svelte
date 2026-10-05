@@ -301,7 +301,7 @@
     gap: 10px;
   }
   .choice input {
-    margin-top: 3px;
+    margin-top: 2px;
   }
   .choice-text {
     flex: 1;

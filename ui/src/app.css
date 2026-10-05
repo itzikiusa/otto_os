@@ -77,7 +77,7 @@ a:hover {
 }
 ::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--text-dim) 35%, transparent);
-  border-radius: 5px;
+  border-radius: var(--radius-s);
   border: 2px solid transparent;
   background-clip: content-box;
 }
@@ -103,7 +103,7 @@ a:hover {
   justify-content: center;
   gap: 6px;
   height: 26px;
-  padding: 0 11px;
+  padding: 0 10px;
   border-radius: var(--radius-s);
   border: 1px solid var(--border);
   background: var(--surface);
@@ -124,7 +124,7 @@ a:hover {
   flex-shrink: 0;
 }
 .btn:hover {
-  background: var(--surface-2);
+  background: var(--hover);
 }
 .btn:active {
   opacity: 0.8;
@@ -219,7 +219,7 @@ a:hover {
 select.input,
 textarea.input {
   height: 27px;
-  padding: 0 9px;
+  padding: 0 8px;
   border-radius: var(--radius-s);
   /* A control's outline must read (>= 3:1, WCAG 1.4.11): --control-border,
      not the decorative --border. */
@@ -231,7 +231,7 @@ textarea.input {
 }
 textarea.input {
   height: auto;
-  padding: 7px 9px;
+  padding: 6px 8px;
   resize: vertical;
   line-height: 1.5;
 }
@@ -258,7 +258,7 @@ textarea.input {
   gap: 6px;
   min-width: 0;
   height: 27px;
-  padding: 0 9px;
+  padding: 0 8px;
   border-radius: var(--radius-s);
   border: 1px solid var(--control-border);
   background: var(--surface-2);
@@ -287,7 +287,7 @@ textarea.input {
 .checkbox-row {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   font-size: var(--fs-m);
 }
 
@@ -296,7 +296,7 @@ textarea.input {
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   height: 20px;
   padding: 0 8px;
   border-radius: 999px;

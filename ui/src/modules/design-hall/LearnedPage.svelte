@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // What Otto learned from your team (`#/design/learned[/pending|rules|memory|
   // signals|settings][/<edit id>]`). Learning v1 is suggest-only: a
   // deterministic extractor turns repeated design signals (≥ 3 across ≥ 2
@@ -434,7 +435,7 @@
         </div>
         <div class="set">
           <div><strong>Where rules live</strong>
-            <p class="dim">Skill <code>{learned.skill}</code> · <span class="path" title={learned.skill_path}>{learned.skill_path}</span> · {learned.active.length} rule{learned.active.length === 1 ? '' : 's'}</p></div>
+            <p class="dim">Skill <code>{learned.skill}</code> · <span class="path" title={learned.skill_path}>{learned.skill_path}</span> · {plural(learned.active.length, 'rule')}</p></div>
           <button class="btn small" onclick={exportRules}><Icon name="download" size={12} /> Export rules (.md)</button>
         </div>
         <div class="set">
@@ -514,7 +515,7 @@
                     <span class="meta">
                       <span class="chip"><Icon name="file" size={11} /> skill: {learned.skill}</span>
                       {#if r.applied_at}<span class="dim small">accepted {rel(r.applied_at)}</span>{/if}
-                      <span class="dim small">{r.evidence.length} signal{r.evidence.length === 1 ? '' : 's'}</span>
+                      <span class="dim small">{plural(r.evidence.length, 'signal')}</span>
                     </span>
                   </button>
                   <button class="icon-btn" onclick={(ev) => ruleMenu(ev, r)} aria-label="Rule actions" title="Rule actions" aria-haspopup="menu"
@@ -774,7 +775,7 @@
     border-block-end: 1px solid var(--border);
   }
   td {
-    padding: 7px 12px;
+    padding: 6px 12px;
     border-block-end: 1px solid var(--border);
     white-space: nowrap;
   }
@@ -802,7 +803,7 @@
   .kind {
     font-size: var(--fs-xs);
     font-weight: 500;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);

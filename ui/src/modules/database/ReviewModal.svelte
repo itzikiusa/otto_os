@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Review-SQL modal (shared by cell edits, row duplication, deletes and the
   // doc editor). The textarea is the source of truth for what runs — it is
   // controlled: every keystroke goes back to the owner through `onsql`.
@@ -56,7 +57,7 @@
             <thead>
               <tr>
                 {#if multiRow}<th class="rd-row">row</th>{/if}
-                <th class="rd-op"><span class="rd-badge">{lines.length} change{lines.length === 1 ? '' : 's'}</span></th>
+                <th class="rd-op"><span class="rd-badge">{plural(lines.length, 'change')}</span></th>
                 <th>path</th>
                 <th>before</th>
                 <th class="rd-arrow" aria-hidden="true"></th>
@@ -145,7 +146,7 @@
     white-space: nowrap;
   }
   .review-diff td {
-    padding: 3px 8px;
+    padding: 2px 8px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
     vertical-align: top;
     word-break: break-word;
@@ -182,7 +183,7 @@
   .rd-arrow {
     width: 1ch;
     color: var(--text-dim);
-    padding: 3px 2px;
+    padding: 2px 2px;
   }
   .rd-more {
     color: var(--text-dim);
@@ -203,7 +204,7 @@
     width: 100%;
     resize: vertical;
     min-height: 92px;
-    padding: 9px 11px;
+    padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);

@@ -1207,10 +1207,10 @@
   .needs-you-badge {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     flex-shrink: 0;
     height: 18px;
-    padding: 0 7px;
+    padding: 0 6px;
     border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -1229,7 +1229,7 @@
   /* Per-session task roll-up "done/total" — matches the sidebar chip. */
   .task-chip {
     flex-shrink: 0;
-    padding: 0 5px;
+    padding: 0 4px;
     height: 16px;
     line-height: 16px;
     border-radius: 999px;
@@ -1293,8 +1293,8 @@
     height: 18px;
     font-size: var(--fs-xs);
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    padding: 0 7px;
+    background: var(--accent-soft);
+    padding: 0 6px;
     border-radius: 999px;
     white-space: nowrap;
   }
@@ -1305,11 +1305,11 @@
     flex: 0 100 auto;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     min-width: 22px;
     max-width: 320px;
     height: 20px;
-    padding: 0 7px;
+    padding: 0 6px;
     border: 1px solid transparent;
     border-radius: 999px;
     background: var(--surface-2);
@@ -1341,7 +1341,7 @@
   }
   .meta-extra::before {
     content: '·';
-    margin-inline: 5px;
+    margin-inline: 4px;
     opacity: 0.6;
   }
   .meta-idle {
@@ -1403,7 +1403,7 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);

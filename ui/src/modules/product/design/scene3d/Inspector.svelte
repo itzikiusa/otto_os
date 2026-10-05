@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../../../lib/plural';
   // Scene inspector — the game-studio right panel. With nothing selected it shows
   // the SCENE (background, grid) and CAMERA panels; an object gets Transform +
   // Material (+ Text / Model) + Notes; a light gets its light panel; a group gets
@@ -373,7 +374,7 @@
 
     {#if group}
       <section class="s3d-panel">
-        {@render panelHead('group', 'Group', `${group.children.length} member${group.children.length === 1 ? '' : 's'}`)}
+        {@render panelHead('group', 'Group', `${plural(group.children.length, 'member')}`)}
         {#if open.group !== false}
           <div class="s3d-panel-body">
             {#if group.children.length}
@@ -438,7 +439,7 @@
   .s3d-head-name-input {
     font-weight: 600;
     font-size: var(--fs-m);
-    padding: 3px 6px;
+    padding: 2px 6px;
     border: 1px solid transparent;
     border-radius: var(--radius-s);
     background: transparent;
@@ -465,7 +466,7 @@
   .s3d-id {
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
@@ -490,7 +491,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: 0;
     background: transparent;
     color: var(--text-dim);
@@ -595,7 +596,7 @@
     flex-shrink: 0;
   }
   .s3d-reset:hover:not(:disabled) {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .s3d-check {
@@ -622,11 +623,11 @@
     color: var(--text);
     border-radius: var(--radius-s);
     font: var(--fs-xs) var(--font-ui);
-    padding: 3px 7px;
+    padding: 2px 6px;
     cursor: pointer;
   }
   .s3d-mini:hover:not(:disabled) {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .s3d-mini:disabled {
     opacity: 0.5;
@@ -673,7 +674,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     padding: 8px 2px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);

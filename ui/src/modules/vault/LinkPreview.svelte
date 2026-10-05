@@ -53,7 +53,7 @@
   .lp-type {
     font-size: var(--fs-xs);
     font-weight: 400;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border: 1px solid var(--border);
     border-radius: 999px;
     color: var(--text-dim);

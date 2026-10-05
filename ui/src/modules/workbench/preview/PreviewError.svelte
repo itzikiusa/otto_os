@@ -32,7 +32,7 @@
     margin: 12px;
     padding: 10px 12px;
     border: 1px solid var(--danger);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     background: var(--danger-soft);
     color: var(--text);
     display: flex;

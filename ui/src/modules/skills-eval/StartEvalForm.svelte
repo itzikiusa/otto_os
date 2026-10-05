@@ -531,8 +531,8 @@
     position: relative;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 3px 9px;
+    gap: 4px;
+    padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: 999px;
     font-size: var(--fs-xs);

@@ -777,7 +777,7 @@
   /* Hints and sub-controls under a toggle line up with its label text
      (SettingToggle: 15px box + 10px gap). */
   .indent {
-    padding-inline-start: 25px;
+    padding-inline-start: 24px;
   }
   .field-err {
     margin: 0;

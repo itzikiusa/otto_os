@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Per-agent results block for a Skills Lab review — the same embedded-terminal
   // pattern as the code-review ReviewAgents: Open mounts a live <Terminal> for
   // the agent's session inline (multiple can be open at once), Retry re-runs one
@@ -78,7 +79,7 @@
         {/if}
         {#if agent.findings && agent.findings.length > 0}
           <button class="btn small ghost" aria-expanded={!!agentExpanded[agent.name]} onclick={() => toggleAgent(agent.name)}>
-            {agentExpanded[agent.name] ? 'Hide findings' : `${agent.findings.length} finding${agent.findings.length === 1 ? '' : 's'}`}
+            {agentExpanded[agent.name] ? 'Hide findings' : `${plural(agent.findings.length, 'finding')}`}
           </button>
         {/if}
         <span class="rp-status-pill" data-status={agent.status}><StatusBadge status={runStatus(agent.status)} /></span>
@@ -129,7 +130,7 @@
     height: min(360px, 65vh); margin: 8px 0 2px; border: 1px solid var(--border);
     border-radius: var(--radius-m); overflow: hidden; overscroll-behavior: contain; background: var(--term-bg);
   }
-  .rp-agent-findings { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+  .rp-agent-findings { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .rp-finding { display: flex; align-items: baseline; gap: 6px; font-size: var(--fs-xs); line-height: 1.4; }
   .rp-finding-body { flex: 1; min-width: 0; }
   .rp-loc { font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }

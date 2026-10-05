@@ -488,7 +488,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 14px 7px;
+    padding: 8px 14px 6px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
   }
@@ -496,7 +496,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 12px 7px;
+    padding: 8px 12px 6px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     flex-shrink: 0;
@@ -534,7 +534,7 @@
   }
   .single-pane .pane-header {
     border-bottom: 1px solid var(--border);
-    padding: 8px 14px 7px;
+    padding: 8px 14px 6px;
   }
   .single-pane .md-body {
     padding: 14px 16px;

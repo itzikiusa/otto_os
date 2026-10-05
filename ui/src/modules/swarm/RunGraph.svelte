@@ -330,7 +330,7 @@
     color: var(--text-dim);
   }
   .node-badge.done {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .node-badge.run {

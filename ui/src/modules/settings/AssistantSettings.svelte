@@ -403,7 +403,7 @@
   .segmented > button {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .model-cell {
     min-width: 200px;
@@ -430,7 +430,7 @@
     cursor: pointer;
   }
   .radio input {
-    margin-top: 3px;
+    margin-top: 2px;
   }
   .radio > span {
     display: flex;

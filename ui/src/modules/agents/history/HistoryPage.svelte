@@ -805,8 +805,8 @@
     width: 100%;
     display: flex;
     align-items: center;
-    gap: 5px;
-    padding: 6px 6px 3px;
+    gap: 4px;
+    padding: 6px 6px 2px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -847,7 +847,7 @@
     padding-inline-end: 4px;
   }
   .row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .row.on {
     background: var(--accent-soft);
@@ -898,7 +898,7 @@
   .row-meta {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
@@ -975,7 +975,7 @@
   .dmeta {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
@@ -1026,7 +1026,7 @@
     flex-shrink: 0;
   }
   .doutputs-head:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .doutputs-head:focus-visible {
     outline: 2px solid var(--accent-text);

@@ -1096,7 +1096,7 @@
   .th-line {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     min-width: 0;
   }
   th.num .th-line {
@@ -1276,7 +1276,7 @@
   }
   .grid tbody tr.odd td.rownum,
   .grid tbody tr:not(.spacer):hover td.rownum {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .grid thead .rownum {
     z-index: 3;
@@ -1347,7 +1347,7 @@
     color: var(--text-dim);
     font-style: italic;
     font-size: var(--fs-xs);
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
   }
   .grid :global(.cell.bool) {
     color: var(--text);

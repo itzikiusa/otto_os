@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // S3: bucket list → object browser with breadcrumb prefixes (folder rows
@@ -565,7 +566,7 @@
 {#if !bucket}
   <ViewToolbar
     title="S3"
-    subtitle={buckets ? `${buckets.length} bucket${buckets.length === 1 ? '' : 's'}` : ''}
+    subtitle={buckets ? `${plural(buckets.length, 'bucket')}` : ''}
     bind:filter={bucketFilter}
     filterPlaceholder="Filter buckets…"
     loading={bucketsLoading}
@@ -896,7 +897,7 @@
     align-items: center;
   }
   .crumb:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .crumb.cur {
     color: var(--text);

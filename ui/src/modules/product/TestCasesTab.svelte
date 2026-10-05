@@ -416,7 +416,7 @@
       const result = await product.bulkApproveTestcases(activeRun.id, [...selected]);
       clearSelection();
       toasts.success(
-        `${result.approved} case${result.approved !== 1 ? 's' : ''} accepted`,
+        `${plural(result.approved, 'case')} accepted`,
       );
     } catch (e) {
       toasts.error('Couldn’t accept the selected cases', product.errMsg(e));
@@ -501,7 +501,7 @@
       const approvedCount = activeCases.filter((c) => c.status === 'approved').length;
       toasts.success(
         'Run approved',
-        `${approvedCount} case${approvedCount !== 1 ? 's' : ''} accepted — skill learning kicked off.`,
+        `${plural(approvedCount, 'case')} accepted — skill learning kicked off.`,
       );
     } catch (e) {
       toasts.error('Couldn’t approve run', product.errMsg(e));
@@ -650,7 +650,7 @@
                  a person approves them. -->
             <AgentByline at={activeRun.created_at} testid="testcases-byline" />
             <span class="pill {statusClass(activeRun.status)}">{statusLabel(activeRun.status)}</span>
-            <span class="rh-count">{activeCases.length} case{activeCases.length !== 1 ? 's' : ''}</span>
+            <span class="rh-count">{plural(activeCases.length, 'case')}</span>
           </div>
 
           <div class="rh-actions">
@@ -1153,7 +1153,7 @@
     padding: 0 12px;
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     font-size: var(--fs-s);
     font-weight: 600;
@@ -1162,7 +1162,7 @@
     transition: background var(--dur-fast);
   }
   .confluence-link:hover {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft-strong);
     text-decoration: none;
   }
 
@@ -1307,7 +1307,7 @@
     line-height: 1;
     color: var(--text-dim);
     opacity: 0.45;
-    letter-spacing: -3px;
+    letter-spacing: -0.01em;
     cursor: grab;
     padding-inline-end: 2px;
     user-select: none;
@@ -1352,7 +1352,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: 999px;
   }
   .pri-high {
@@ -1452,7 +1452,7 @@
     padding-inline-start: 20px;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .steps-list li {
     font-size: var(--fs-s);

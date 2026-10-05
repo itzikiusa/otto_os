@@ -404,7 +404,7 @@
     flex-shrink: 0;
   }
   .status-done {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .status-running {
@@ -434,7 +434,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 3px 8px;
+    padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
@@ -447,7 +447,7 @@
     transition: background var(--dur-fast);
   }
   .view-swarm-btn:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
 
   /* ── Run body (expanded) ──────────────────────────────────────────── */
@@ -542,7 +542,7 @@
     color: var(--text);
   }
   .task-summary-text {
-    margin-block: 0; margin-inline: 13px 0;
+    margin-block: 0; margin-inline: 12px 0;
     font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;

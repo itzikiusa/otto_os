@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
@@ -207,7 +208,7 @@
         // Name every failure: the rest of the batch still installed.
         toasts.error(
           `${failed.length} ${category} skill${failed.length === 1 ? '' : 's'} failed to install`,
-          failed.map((f) => `${f.name}: ${f.error}`).join('\n') + (n > 0 ? `\nInstalled ${n} other${n === 1 ? '' : 's'}.` : ''),
+          failed.map((f) => `${f.name}: ${f.error}`).join('\n') + (n > 0 ? `\nInstalled ${plural(n, 'other')}.` : ''),
         );
       } else if (n === 0) {
         toasts.info(
@@ -449,7 +450,7 @@
   /* Two lines, full text in the tooltip — some descriptions run 6+ lines. */
   .skill-desc {
     font-size: var(--fs-s);
-    margin-top: 3px;
+    margin-top: 2px;
     line-height: 1.45;
     display: -webkit-box;
     -webkit-line-clamp: 2;

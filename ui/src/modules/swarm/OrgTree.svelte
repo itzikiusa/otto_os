@@ -317,7 +317,7 @@
   .show-done {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
@@ -327,7 +327,7 @@
     align-items: center;
     gap: 8px;
     min-height: 36px;
-    padding-block: 3px;
+    padding-block: 2px;
     box-sizing: border-box;
     cursor: grab;
   }
@@ -355,7 +355,7 @@
     font-variant-numeric: tabular-nums;
   }
   .org-row.drag-over {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     outline: 1px dashed color-mix(in srgb, var(--accent-text) 60%, transparent);
   }
   .org-row.dragging-self {
@@ -373,14 +373,14 @@
     margin: 4px 6px;
   }
   .drop-zone.drop-active {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 50%, transparent);
     color: var(--accent-text);
   }
   .add-top-btn {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     width: 100%;
     border: none;
     background: transparent;

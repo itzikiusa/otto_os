@@ -7,6 +7,7 @@ import { sectionLabel } from './catalog';
 import { lines, links, str } from './render';
 import { resolveBackground, sectionContrast, type Theme } from './theme';
 import type { SiteDoc, SitePage } from './types';
+import { plural } from '../../../../lib/plural';
 
 export type AuditLevel = 'error' | 'warn' | 'info';
 
@@ -63,7 +64,7 @@ export function auditPage(doc: SiteDoc, page: SitePage, t: Theme): AuditFinding[
     }
     placeholders += links(s.props, 'links').filter((l) => l.href.trim() === '#').length;
   }
-  if (placeholders) add('info', 'placeholder-links', null, null, `${placeholders} link${placeholders === 1 ? '' : 's'} still point to “#”.`);
+  if (placeholders) add('info', 'placeholder-links', null, null, `${plural(placeholders, 'link')} still point to “#”.`);
   void doc;
   return out;
 }

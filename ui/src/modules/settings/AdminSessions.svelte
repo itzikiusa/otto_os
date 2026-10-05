@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
@@ -119,7 +120,7 @@
   async function runBulk(ids: string[], kind: 'terminate' | 'remove', label: string): Promise<void> {
     if (ids.length === 0) return;
     const ok = await confirmer.ask(
-      `${label} ${ids.length} session${ids.length === 1 ? '' : 's'}?${
+      `${label} ${plural(ids.length, 'session')}?${
         kind === 'remove' ? ' They and their history are permanently deleted.' : ' Their processes are killed; the rows and history are kept.'
       }`,
       { title: `${label} sessions`, confirmLabel: label, danger: true },
@@ -145,8 +146,8 @@
     bulkBusy = false;
     selected = new Set();
     const past = kind === 'remove' ? 'Deleted' : 'Terminated';
-    if (failed === 0) toasts.success(`${past} ${done} session${done === 1 ? '' : 's'}`);
-    else toasts.error(`Couldn’t ${label.toLowerCase()} ${failed} session${failed === 1 ? '' : 's'}`, `${done} succeeded, ${failed} failed. Refresh and try again.`);
+    if (failed === 0) toasts.success(`${past} ${plural(done, 'session')}`);
+    else toasts.error(`Couldn’t ${label.toLowerCase()} ${plural(failed, 'session')}`, `${done} succeeded, ${failed} failed. Refresh and try again.`);
     await load();
   }
 

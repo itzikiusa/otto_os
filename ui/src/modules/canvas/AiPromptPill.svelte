@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Floating "describe it and I'll draw it" prompt, anchored top-center over the
   // canvas. One agent turn → blocks inserted near the existing content. Stays
   // open after a run so you can refine/regenerate; Esc or the ✕ closes it.
@@ -48,7 +49,7 @@
       const { x, y } = insertOrigin();
       const n = canvas.insertAssist(res, x, y);
       if (n > 0) {
-        toasts.success('Added to canvas', `${n} block${n === 1 ? '' : 's'} inserted.`);
+        toasts.success('Added to canvas', `${plural(n, 'block')} inserted.`);
         prompt = '';
       } else {
         toasts.info('Nothing to add', res.note || 'The agent did not return a diagram.');
@@ -104,7 +105,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     background: var(--surface);
     border: 1px solid var(--accent);
     border-radius: 999px;
@@ -131,7 +132,7 @@
   }
   .modes button {
     font-size: var(--fs-xs);
-    padding: 3px 7px;
+    padding: 2px 6px;
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--text-dim);
@@ -144,7 +145,7 @@
     color: var(--accent-contrast);
   }
   .run {
-    padding: 5px 12px;
+    padding: 4px 12px;
     border: none;
     background: var(--accent-solid);
     color: var(--accent-contrast);

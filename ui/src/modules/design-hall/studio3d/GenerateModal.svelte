@@ -215,7 +215,7 @@
   select {
     font: inherit;
     font-size: var(--fs-m);
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -258,7 +258,7 @@
     display: flex;
     gap: 10px;
     align-items: flex-start;
-    padding: 9px 10px;
+    padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     cursor: pointer;
@@ -272,7 +272,7 @@
     color: var(--text-dim);
   }
   .prov input {
-    margin-block-start: 3px;
+    margin-block-start: 2px;
     accent-color: var(--accent);
   }
   .prov-main {

@@ -127,7 +127,7 @@
     cursor: pointer;
   }
   .tool:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .tool.active {
     background: var(--accent-solid);
@@ -137,6 +137,6 @@
     width: 22px;
     height: 1px;
     background: var(--border);
-    margin: 5px 0;
+    margin: 4px 0;
   }
 </style>

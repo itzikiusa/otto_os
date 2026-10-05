@@ -257,7 +257,7 @@
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
-    padding: 3px 7px;
+    padding: 2px 6px;
   }
   .cwd-input {
     background: var(--surface);
@@ -303,7 +303,7 @@
   .sec-trigger {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     width: 100%;
     padding: 8px 12px;
     background: none;

@@ -18,6 +18,7 @@ import { toasts } from '../toast.svelte';
 import type { DiffResp, FileChange, PullMode, Repo, RepoStatusResp } from '../api/types';
 import { reportPull } from '../../modules/git/pullFlow';
 import { asUiError, capList, highlightWhenReady } from './pagePort';
+import { plural } from '../plural';
 
 const SUB_TABS = ['graph', 'prs', 'review', 'focus'] as const;
 type SubTab = (typeof SUB_TABS)[number];
@@ -213,7 +214,7 @@ registerUiCommands('git', {
     const verb = args.unstage ? 'Unstage' : 'Stage';
     const list = paths.slice(0, 20).join('\n') + (paths.length > 20 ? `\n… and ${paths.length - 20} more` : '');
     const ok = await ctx.confirmWrite({
-      what: `${verb} ${paths.length} file${paths.length === 1 ? '' : 's'}:\n${list}`,
+      what: `${verb} ${plural(paths.length, 'file')}:\n${list}`,
       where: `${repo.name} (${s.branch})`,
       verb,
       connId: `git:${repo.id}`,
@@ -316,7 +317,7 @@ registerUiCommands('git', {
     const n = s.ahead;
     const ok = await ctx.confirmWrite({
       what: `${s.upstream
-        ? `Push ${n} commit${n === 1 ? '' : 's'} from ${s.branch} to ${s.upstream}.`
+        ? `Push ${plural(n, 'commit')} from ${s.branch} to ${s.upstream}.`
         : `Publish the new branch ${s.branch} to the remote${repo.remote_url ? ` (${repo.remote_url})` : ''}.`
       }\n\nWho sees it: everyone with access to the remote repository.`,
       where: `${repo.name} (${s.branch})`,

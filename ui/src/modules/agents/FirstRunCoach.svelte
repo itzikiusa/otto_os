@@ -381,11 +381,11 @@
   }
   .coach-close:hover {
     color: var(--text);
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .coach-head {
     display: flex;
-    gap: 13px;
+    gap: 12px;
     align-items: flex-start;
     margin-bottom: 18px;
   }
@@ -397,7 +397,7 @@
     display: grid;
     place-items: center;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .coach-head > div:last-child {
     min-width: 0;
@@ -415,7 +415,7 @@
 
   .step {
     display: flex;
-    gap: 11px;
+    gap: 10px;
     padding: 12px 0;
     border-top: 1px solid var(--border);
   }
@@ -465,14 +465,14 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.5;
-    margin-top: 3px;
+    margin-top: 2px;
   }
   .install-list {
     margin: 6px 0;
     padding-inline-start: 16px;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
 
   .tool-chips,
@@ -548,7 +548,7 @@
     padding: 0 18px;
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
   }
   .launch-hint {
     margin: 0;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Settings → Trust & safety → "Secret storage" (root only).
   // Shows which store holds integration secrets (GET /admin/secrets/status)
   // and, while they sit in the PLAINTEXT secrets.json, a warning banner plus
@@ -62,7 +63,7 @@
     actionError = '';
     try {
       const r = await api.post<SecretsMigrationReport>('/admin/secrets/secure', { confirm: true });
-      toasts.success('Secrets encrypted', `${r.migrated} secret${r.migrated === 1 ? '' : 's'} moved; the plaintext file was deleted.`);
+      toasts.success('Secrets encrypted', `${plural(r.migrated, 'secret')} moved; the plaintext file was deleted.`);
       await load();
     } catch (e) {
       // A failure AFTER the switch (final live check) leaves the daemon on the

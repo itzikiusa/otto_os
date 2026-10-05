@@ -129,7 +129,7 @@
     white-space: nowrap;
   }
   .title:hover:not(:disabled) {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .title-input {
     font-size: var(--fs-m);

@@ -21,6 +21,7 @@ import type {
   DesignVariantsReq,
   DesignVersion,
 } from '../../../lib/api/types';
+import { plural } from '../../../lib/plural';
 
 export type Tone = 'neutral' | 'info' | 'warn' | 'ok' | 'bad';
 
@@ -638,7 +639,7 @@ export function assistSignalSummary(kind: string, payload: Record<string, unknow
       const d = str('direction');
       const cited = Array.isArray(p.cited) ? p.cited.length : 0;
       const what = mode === 'variant' ? `a “${directionName(d)}” variant` : mode === 'a11y' ? 'an accessibility fix' : 'a new version';
-      return `Otto drafted ${what}${cited ? ` · cited ${cited} reference${cited === 1 ? '' : 's'}` : ''}`;
+      return `Otto drafted ${what}${cited ? ` · cited ${plural(cited, 'reference')}` : ''}`;
     }
     case 'a11y_fix': {
       const rule = str('rule');

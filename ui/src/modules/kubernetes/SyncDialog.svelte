@@ -58,7 +58,7 @@
   .facts {
     display: grid;
     grid-template-columns: auto 1fr;
-    gap: 3px 12px;
+    gap: 2px 12px;
     margin: 0;
     font-size: var(--fs-s);
   }

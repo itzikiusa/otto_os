@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Skills Evaluator module: a left list of past runs + "New evaluation", and a
   // right pane showing either the start form or a selected run's live report.
   import { untrack } from 'svelte';
@@ -199,7 +200,7 @@
       runs = [...runs, ...page.items.filter((r) => !have.has(r.id))];
       nextCursor = page.next_cursor;
     } catch (e) {
-      toasts.error("Couldn’t load more evaluations", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t load more evaluations", e);
     } finally {
       loadingMore = false;
     }
@@ -229,7 +230,7 @@
       mode = 'detail';
       toasts.success('Evaluation started', 'Watch progress in the report.');
     } catch (e) {
-      toasts.error("Couldn’t start the evaluation", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t start the evaluation", e);
     } finally {
       starting = false;
     }
@@ -450,7 +451,7 @@
     cursor: pointer;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .se-item:hover {
     background: var(--hover);
@@ -484,7 +485,7 @@
   .se-item-meta {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

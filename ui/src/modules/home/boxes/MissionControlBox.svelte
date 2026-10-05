@@ -191,7 +191,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 1px 7px;
+    padding: 1px 6px;
     font-size: var(--fs-xs);
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -216,7 +216,7 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: none;
     background: transparent;
     color: var(--text);

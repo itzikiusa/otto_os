@@ -251,7 +251,7 @@
   .state {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;

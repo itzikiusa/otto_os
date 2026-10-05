@@ -29,6 +29,6 @@
   th { font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); }
   .num { text-align: end; font-variant-numeric: tabular-nums; }
   .warnings { color: var(--warning); }
-  .reviewed { display: flex; align-items: flex-start; gap: 7px; margin: 14px 0; font-size: var(--fs-m); }
+  .reviewed { display: flex; align-items: flex-start; gap: 6px; margin: 14px 0; font-size: var(--fs-m); }
   .error { color: var(--danger); overflow-wrap: anywhere; }
 </style>

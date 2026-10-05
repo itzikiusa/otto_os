@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // LearningsView — workspace-scoped knowledge base.
   // Patterns to follow (kind='pattern') vs Cases to avoid (kind='avoid').
   // Inactive (AI-suggested) learnings surface with an Accept button.
@@ -250,7 +251,7 @@
           <button class:active={filter === f.value} aria-pressed={filter === f.value} onclick={() => (filter = f.value)}>{f.label}</button>
         {/each}
       </div>
-      <span class="lv-count">{product.learnings.length} learning{product.learnings.length !== 1 ? 's' : ''}</span>
+      <span class="lv-count">{plural(product.learnings.length, 'learning')}</span>
       <span class="spacer"></span>
       <button
         class="btn small"
@@ -650,7 +651,7 @@
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
-    padding: 5px 9px;
+    padding: 4px 8px;
     box-sizing: border-box;
   }
   .field-input:focus { outline: none; border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
@@ -662,7 +663,7 @@
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
-    padding: 6px 9px;
+    padding: 6px 8px;
     resize: vertical;
     box-sizing: border-box;
     font-family: inherit;
@@ -676,7 +677,7 @@
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
-    padding: 3px 7px;
+    padding: 2px 6px;
   }
   .form-actions {
     display: flex;
@@ -706,13 +707,13 @@
   .col-header {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     padding: 8px 12px;
     border-radius: var(--radius-s);
     margin-bottom: 2px;
   }
   .pattern-header {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
     color: var(--accent-text);
   }
@@ -731,7 +732,7 @@
     font-size: var(--fs-xs);
     opacity: 0.7;
     background: color-mix(in srgb, currentColor 15%, transparent);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
   }
   .empty-col {
@@ -752,7 +753,7 @@
     background: var(--surface);
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    gap: 6px;
     transition: opacity var(--dur-enter);
   }
   .learning-card.inactive {
@@ -768,14 +769,14 @@
   .suggested-banner {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 14%, transparent);
     border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
     border-radius: var(--radius-s);
-    padding: 3px 8px;
+    padding: 2px 8px;
     text-transform: uppercase;
     letter-spacing: .06em;
   }
@@ -796,7 +797,7 @@
   .card-actions {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex-shrink: 0;
   }
 
@@ -853,7 +854,7 @@
     align-items: center;
     gap: 4px;
     font-size: var(--fs-xs);
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text-dim);

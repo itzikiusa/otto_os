@@ -119,7 +119,7 @@
       try {
         await aws.loadAthenaTables(account.id, db, rq);
       } catch (e) {
-        toasts.error(`Couldn’t list tables in ${db}`, e instanceof Error ? e.message : String(e));
+        toastError(`Couldn’t list tables in ${db}`, e);
       } finally {
         tablesLoading = { ...tablesLoading, [db]: false };
       }
@@ -632,7 +632,7 @@
     align-items: center;
     gap: 4px;
     width: 100%;
-    padding: 3px 8px;
+    padding: 2px 8px;
     border: 0;
     background: transparent;
     color: var(--text);
@@ -642,7 +642,7 @@
     font-size: var(--fs-m);
   }
   .node:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .node.cur .nlabel {
     font-weight: 600;
@@ -745,11 +745,11 @@
   .st {
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .st.succeeded {
     color: var(--success);
@@ -770,7 +770,7 @@
     gap: 2px;
   }
   .tabs button {
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: 0;
     border-bottom: 2px solid transparent;
     background: transparent;
@@ -823,7 +823,7 @@
     cursor: pointer;
   }
   .trow:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .trow:focus-visible {
     background: var(--surface-2);

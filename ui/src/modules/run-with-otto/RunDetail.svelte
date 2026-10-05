@@ -298,7 +298,7 @@
   .branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
   .tl-item { display: flex; gap: 10px; }
-  .tl-dot { width: 8px; height: 8px; border-radius: 999px; margin-top: 5px; flex: none; background: var(--text-dim); }
+  .tl-dot { width: 8px; height: 8px; border-radius: 999px; margin-top: 4px; flex: none; background: var(--text-dim); }
   .tl-dot.tone-success { background: var(--status-working); }
   .tl-dot.tone-danger { background: var(--status-exited); }
   .tl-dot.tone-warning { background: var(--status-warn); }

@@ -648,7 +648,7 @@
     background: var(--hover);
   }
   .sec-head.drop {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     border-inline-start-color: var(--accent);
   }
   .sec-head.plain {
@@ -688,7 +688,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     padding: 0 6px;
     flex: none;
   }
@@ -767,7 +767,7 @@
   .ctab {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     padding: 0 10px;
     border-inline-end: 1px solid var(--border);
     font-size: var(--fs-m);
@@ -786,7 +786,7 @@
   .ctab-main {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     align-self: stretch;
     padding: 0;
     border: none;
@@ -822,12 +822,12 @@
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 0 5px;
+    padding: 0 4px;
   }
   .tunnel-pill {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: var(--radius-s);
@@ -962,7 +962,7 @@
     }
     /* Bigger sidebar text + roomier tap targets. */
     .cluster {
-      padding-block: 7px;
+      padding-block: 6px;
     }
     .cn {
       font-size: var(--fs-l);

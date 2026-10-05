@@ -221,7 +221,7 @@
     border: 0;
     background: transparent;
     color: var(--text-dim);
-    padding: 4px 9px;
+    padding: 4px 8px;
     font: inherit;
     font-size: var(--fs-s);
     cursor: pointer;
@@ -230,7 +230,7 @@
     border-inline-start: 1px solid var(--border);
   }
   .ranges button.on {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--text);
     font-weight: 600;
   }

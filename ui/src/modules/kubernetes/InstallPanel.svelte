@@ -153,7 +153,7 @@
     border-radius: var(--radius-m);
     display: grid;
     place-items: center;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .compact .install-icon {

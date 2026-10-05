@@ -592,7 +592,7 @@
     flex: 1;
     flex-direction: column;
     gap: 2px;
-    padding-block: 5px 6px; padding-inline: 14px 10px;
+    padding-block: 4px 6px; padding-inline: 14px 10px;
     min-height: 0;
   }
   .step {
@@ -611,7 +611,7 @@
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
     flex-shrink: 0;
   }
@@ -675,7 +675,7 @@
     width: 26px;
     height: 26px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     flex-shrink: 0;
   }
@@ -789,7 +789,7 @@
     cursor: pointer;
   }
   .zbtn:hover {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .zpct {
     font-size: var(--fs-xs);

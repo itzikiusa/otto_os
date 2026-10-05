@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { actionOperation, readOperation } from './permissions';
   // k9s-like cluster workspace. Top bar: cluster switcher · namespace combobox
@@ -269,7 +270,7 @@
       const s = await k8sApi.k9s(cluster.id, { workspace_id: wsId, ns: k8s.namespace || null });
       k8s.k9sSessionId = s.id;
     } catch (e) {
-      toasts.error('k9s failed to start', e instanceof Error ? e.message : String(e));
+      toastError('k9s failed to start', e);
     } finally {
       k9sOpening = false;
     }
@@ -685,14 +686,14 @@
     border: none;
     background: transparent;
     text-align: start;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-radius: var(--radius-s);
     font-size: var(--fs-m);
     color: var(--text-dim);
     cursor: pointer;
   }
   .kind:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .kind.active {
@@ -832,7 +833,7 @@
   kbd {
     display: inline-block;
     min-width: 18px;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);

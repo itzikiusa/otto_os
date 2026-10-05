@@ -412,7 +412,7 @@
   .cell {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .pinned {
     color: var(--text-dim);
@@ -423,7 +423,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 5px 8px;
+    padding: 4px 8px;
     font-size: var(--fs-m);
   }
   .tester {
@@ -439,7 +439,7 @@
     align-self: flex-start;
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     margin: 8px 10px;
     padding: 4px 0;
     border: none;

@@ -1348,7 +1348,7 @@
   }
   .sidebar.tauri-top {
     /* room for overlaid traffic lights in the Tauri window */
-    padding-top: 26px;
+    padding-top: 24px;
   }
   /* Window-drag handle filling the empty 26px traffic-lights inset (Tauri only).
      The sidebar's content is padded below it, so this overlays nothing
@@ -1529,7 +1529,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 7px 14px;
+    padding: 6px 14px;
     font-size: var(--fs-s);
     background: color-mix(in srgb, var(--warning) 18%, var(--surface));
     color: var(--text);

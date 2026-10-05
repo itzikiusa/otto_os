@@ -127,7 +127,7 @@
     background: none;
     border: none;
     border-radius: var(--radius-s);
-    padding: 7px 10px;
+    padding: 6px 10px;
     cursor: pointer;
     color: var(--text);
   }

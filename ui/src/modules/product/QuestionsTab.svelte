@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Questions tab — filters by status/category; inline edit, answer/discard,
   // delete, add question; multi-select + post to Jira/Confluence.
   import { product } from '../../lib/stores/product.svelte';
@@ -264,7 +265,7 @@
     const n = ids.length;
     const ok = await confirmOutward({
       verb: 'Post comment',
-      title: `Post ${n} question${n !== 1 ? 's' : ''} to ${postTarget}?`,
+      title: `Post ${plural(n, 'question')} to ${postTarget}?`,
       where: isJira
         ? `Jira ${story?.source_key ?? ''} “${story?.title ?? ''}” — as one comment`
         : `Confluence page “${story?.title ?? ''}” — as one comment`,
@@ -276,7 +277,7 @@
     try {
       await product.postQuestions({ ids });
       selectedIds = new Set();
-      toasts.success(`Posted ${ids.length} question${ids.length !== 1 ? 's' : ''}`);
+      toasts.success(`Posted ${plural(ids.length, 'question')}`);
     } catch (e) {
       toasts.error('Couldn’t post', product.errMsg(e));
     } finally {
@@ -372,7 +373,7 @@
             onchange={toggleSelectAll}
           />
           <span class="sel-count">
-            {selectedIds.size > 0 ? `${selectedIds.size} selected` : `${filtered.length} question${filtered.length !== 1 ? 's' : ''}`}
+            {selectedIds.size > 0 ? `${selectedIds.size} selected` : `${plural(filtered.length, 'question')}`}
           </span>
         </label>
       </div>
@@ -649,7 +650,7 @@
   }
   .q-cb {
     flex-shrink: 0;
-    margin-top: 3px;
+    margin-top: 2px;
     accent-color: var(--accent);
     cursor: pointer;
   }
@@ -660,7 +661,7 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .q-top {
     display: flex;
@@ -681,7 +682,7 @@
   .q-chips {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex-shrink: 0;
   }
   .q-rationale {
@@ -767,7 +768,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 5px 8px;
+    padding: 4px 8px;
     font-family: inherit;
   }
   .edit-sel {
@@ -802,7 +803,7 @@
   .form-label {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
@@ -835,7 +836,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 5px 8px;
+    padding: 4px 8px;
     align-self: flex-start;
   }
 

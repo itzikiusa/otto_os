@@ -167,7 +167,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);

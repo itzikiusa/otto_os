@@ -334,7 +334,7 @@
   .fa {
     display: flex;
     flex-wrap: wrap;
-    gap: 5px;
+    gap: 4px;
     margin-top: 8px;
   }
   .fa {

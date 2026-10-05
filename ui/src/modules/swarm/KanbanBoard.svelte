@@ -189,7 +189,7 @@
     try {
       res = await fn();
     } catch (e) {
-      toasts.error(`Couldn’t ${verb} the ${n === 1 ? 'task' : 'tasks'}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t ${verb} the ${n === 1 ? 'task' : 'tasks'}`, e);
       return;
     }
     if (res.failed.length === 0) {
@@ -897,7 +897,7 @@
   .gchip {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: transparent;

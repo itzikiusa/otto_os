@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // First-run panel: the daemon can't find the `aws` CLI. Offers "Install now"
   // (Admin on `aws`), shows the installer's progress + a collapsible log tail
   // while `/aws/status` is polled every 1.5 s (the store re-arms the poll on
@@ -18,7 +19,7 @@
     try {
       await aws.startInstall();
     } catch (e) {
-      toasts.error('Install failed to start', e instanceof Error ? e.message : String(e));
+      toastError('Install failed to start', e);
     }
   }
 </script>

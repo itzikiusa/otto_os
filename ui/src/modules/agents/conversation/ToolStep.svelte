@@ -464,7 +464,7 @@
     flex-shrink: 0;
   }
   .step-body {
-    padding-block: 2px 10px; padding-inline: 29px 8px;
+    padding-block: 2px 10px; padding-inline: 28px 8px;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -577,7 +577,7 @@
   .file-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     max-width: 100%;
     font-size: var(--fs-xs);
     padding: 2px 8px;

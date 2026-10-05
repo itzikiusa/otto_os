@@ -407,7 +407,7 @@
     margin-top: 10px;
   }
   .rail-group-label {
-    padding: 6px 8px 3px;
+    padding: 6px 8px 2px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
@@ -426,7 +426,7 @@
     gap: 2px;
     width: 100%;
     min-height: 28px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 0;
     border-radius: var(--radius-s);
     background: transparent;
@@ -534,14 +534,14 @@
   }
   .guide-body :global(h2) {
     font-size: var(--fs-l);
-    margin: 26px 0 8px;
+    margin: 24px 0 8px;
   }
   .guide-body :global(h3) {
     font-size: var(--fs-m);
     margin: 18px 0 6px;
   }
   .guide-body :global(li) {
-    margin: 3px 0;
+    margin: 2px 0;
   }
   .guide-body :global(ul),
   .guide-body :global(ol) {
@@ -594,7 +594,7 @@
   .guide-body :global(kbd) {
     display: inline-block;
     min-width: 18px;
-    padding: 0 5px;
+    padding: 0 4px;
     border: 1px solid var(--border-strong);
     border-bottom-width: 2px;
     border-radius: var(--radius-s);

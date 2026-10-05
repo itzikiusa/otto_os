@@ -103,7 +103,7 @@
   .wb-qo-input {
     width: 100%;
     box-sizing: border-box;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);

@@ -115,7 +115,7 @@
     grid-template-columns: minmax(140px, 1.4fr) minmax(100px, 1fr) 60px 60px 70px 70px 70px 80px 90px 160px;
     align-items: center;
     gap: 8px;
-    padding: 7px 14px;
+    padding: 6px 14px;
   }
   .thead {
     position: sticky;

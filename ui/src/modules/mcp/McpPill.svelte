@@ -62,7 +62,7 @@
     display: inline-block;
     font-size: var(--fs-xs);
     line-height: 1.5;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     white-space: nowrap;
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Import connections from another DB tool. No file picker, no path config: the
   // daemon reads each tool's config from its own standard location. Three steps —
   //   1. pick a tool (the daemon already told us which are present + how many),
@@ -241,7 +242,7 @@
                 <span class="tool-name">{s.label}</span>
                 <span class="tool-sub" class:found={s.present}>
                   {#if s.present}
-                    {s.count ?? 0} connection{(s.count ?? 0) === 1 ? '' : 's'} found
+                    {plural(s.count ?? 0, 'connection')} found
                   {:else}
                     Not found
                   {/if}
@@ -453,7 +454,7 @@
     border-radius: var(--radius-s);
     display: grid;
     place-items: center;
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .tool-body {
@@ -612,7 +613,7 @@
     border-radius: var(--radius-s);
     display: grid;
     place-items: center;
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .row.disabled .row-kind {
@@ -643,7 +644,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .06em;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);

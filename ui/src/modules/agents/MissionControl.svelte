@@ -683,7 +683,7 @@
     cursor: pointer;
   }
   .wq-view-del:hover:not(:disabled) {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--danger);
   }
   .wq-view-del:disabled {
@@ -761,7 +761,7 @@
     background: var(--accent-solid);
     color: var(--accent-contrast);
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 1px 6px;
     font-size: var(--fs-xs);
     font-weight: 600;
   }
@@ -790,7 +790,7 @@
     cursor: pointer;
   }
   .item.clickable:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .item.clickable:focus-visible {
     outline: 2px solid var(--accent-text);
@@ -809,7 +809,7 @@
   .item-meta {
     display: flex;
     gap: 4px;
-    margin-top: 3px;
+    margin-top: 2px;
     flex-wrap: wrap;
   }
 
@@ -818,7 +818,7 @@
     color: var(--text-dim);
     background: var(--surface-2);
     border-radius: var(--radius-s);
-    padding: 1px 5px;
+    padding: 1px 4px;
   }
   /* A repo is a full path — truncate it inside the card instead of letting
      the bucket's overflow:hidden chop it mid-character. */
@@ -882,10 +882,10 @@
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     margin-inline-start: auto;
     height: 20px;
-    padding: 0 7px;
+    padding: 0 6px;
     border: 1px dashed var(--border);
     border-radius: 999px;
     background: transparent;

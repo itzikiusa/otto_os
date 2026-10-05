@@ -216,7 +216,7 @@
     grid-template-columns: 32px 1fr 90px;
     gap: 8px;
     align-items: center;
-    margin-bottom: 3px;
+    margin-bottom: 2px;
   }
   .bar {
     height: 8px;

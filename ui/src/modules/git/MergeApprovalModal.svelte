@@ -268,7 +268,7 @@
     color: var(--success);
   }
   .bchip.tgt {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .arrow {
@@ -301,7 +301,7 @@
   .strat {
     display: flex;
     align-items: flex-start;
-    gap: 9px;
+    gap: 8px;
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
@@ -309,7 +309,7 @@
     transition: border-color var(--dur-fast), background var(--dur-fast);
   }
   .strat:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .strat.active {
     border-color: var(--accent);
@@ -354,7 +354,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding: 9px 11px;
+    padding: 8px 10px;
     border-radius: var(--radius-m);
     background: color-mix(in srgb, var(--warning) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
@@ -423,7 +423,7 @@
     .conflict-files li { overflow-wrap: anywhere; }
     .block-head .mono,
     .note .mono { overflow-wrap: anywhere; }
-    .strat { padding: 11px 12px; }
+    .strat { padding: 10px 12px; }
     .strat input { width: 18px; height: 18px; }
     .strat-label { font-size: var(--fs-m); }
     .strat-hint { font-size: var(--fs-xs); }

@@ -93,7 +93,7 @@
   .controls .field { margin: 0; max-width: 100%; }
   select { max-width: 100%; }
   .dim { color: var(--text-dim); }
-  .password-option, .workspaces label { display: flex; align-items: center; gap: 7px; font-size: var(--fs-m); margin: 0 0 6px; }
+  .password-option, .workspaces label { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); margin: 0 0 6px; }
   .password-note { color: var(--warning); }
   .workspaces { display: grid; gap: 6px; max-height: 220px; overflow: auto; margin: 12px 0; }
   .result { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 12px; }

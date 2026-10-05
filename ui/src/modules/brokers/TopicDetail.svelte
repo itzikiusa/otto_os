@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   import { untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -554,7 +556,7 @@
       cfgName = '';
       cfgValue = '';
     } catch (e) {
-      toasts.error("Couldn’t update the config", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t update the config", e);
     } finally {
       cfgSaving = false;
     }
@@ -578,7 +580,7 @@
       toasts.success(`Deleted ${topic}`);
       ondeleted();
     } catch (e) {
-      toasts.error("Couldn’t delete the topic", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t delete the topic", e);
     }
   }
 
@@ -596,7 +598,7 @@
         const full: ConsumeReq = { ...lastReq, preview: false };
         messages = (await api.post<ConsumeResp>(consumeUrl(), full)).messages;
       } catch (e) {
-        toasts.error("Couldn’t export the messages", e instanceof Error ? e.message : String(e));
+        toastError("Couldn’t export the messages", e);
         return;
       } finally {
         exporting = false;
@@ -796,7 +798,7 @@
               <span class="badge">{selected.value.format}{selected.value.schema_id != null ? ` #${selected.value.schema_id}` : ''}</span>
             {/if}
             {#if selected.headers.length > 0}
-              <span class="badge muted-badge">{selected.headers.length} header{selected.headers.length === 1 ? '' : 's'}</span>
+              <span class="badge muted-badge">{plural(selected.headers.length, 'header')}</span>
             {/if}
             {#if result}
               {@const pct = offsetPct(selected, result.partitions)}
@@ -1055,7 +1057,7 @@
   }
   .consume-bar select,
   .consume-bar input {
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1069,7 +1071,7 @@
   .filter-group {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex: 1;
     min-width: 100px;
   }
@@ -1088,7 +1090,7 @@
   .auto {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
@@ -1143,7 +1145,7 @@
     background: var(--surface);
   }
   tbody td {
-    padding: 5px 10px;
+    padding: 4px 10px;
     border-top: 1px solid var(--border);
   }
   .message-open {
@@ -1182,7 +1184,7 @@
   /* Offset-position bar cell */
   .pos-cell {
     width: 56px;
-    padding: 5px 8px;
+    padding: 4px 8px;
   }
   .pos-bar-wrap {
     width: 48px;
@@ -1232,7 +1234,7 @@
     letter-spacing: .06em;
     padding: 2px 6px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   h5 {
@@ -1270,7 +1272,7 @@
     border-bottom: 1px solid var(--border);
   }
   .cfg-set input {
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1293,7 +1295,7 @@
   .chk-opt {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
@@ -1302,7 +1304,7 @@
   .headers-section {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .headers-title {
     display: flex;
@@ -1315,12 +1317,12 @@
   }
   .header-row {
     display: flex;
-    gap: 5px;
+    gap: 4px;
     align-items: center;
   }
   .header-key {
     width: 140px;
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1329,7 +1331,7 @@
   }
   .header-val {
     flex: 1;
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1359,7 +1361,7 @@
   .field input,
   .field select,
   .field textarea {
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);

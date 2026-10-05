@@ -225,7 +225,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 5px 7px;
+    padding: 4px 6px;
     color: var(--text);
     font-size: var(--fs-m);
     min-width: 120px;
@@ -237,7 +237,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 5px 7px;
+    padding: 4px 6px;
     color: var(--text);
     font-size: var(--fs-m);
     width: 90px;
@@ -245,7 +245,7 @@
   .thresh-label {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

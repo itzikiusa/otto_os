@@ -478,9 +478,9 @@
   }
   .att-kind-badge {
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
     flex-shrink: 0;
@@ -570,7 +570,7 @@
   }
   .att-action-btn {
     font-size: var(--fs-xs);
-    padding: 2px 7px;
+    padding: 2px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;

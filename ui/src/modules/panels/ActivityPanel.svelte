@@ -410,7 +410,7 @@
     color: var(--text-dim);
     background: var(--surface-2);
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 1px 6px;
   }
   .empty-line {
     font-size: var(--fs-xs);
@@ -431,7 +431,7 @@
   .add-task-btn {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     height: 18px;
     padding: 0 6px;
     border: 1px solid var(--border);
@@ -452,7 +452,7 @@
   .task-add {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     margin: 2px 0 4px;
   }
   .task-input {
@@ -507,13 +507,13 @@
     text-transform: uppercase;
     letter-spacing: .06em;
     border-radius: 999px;
-    padding: 0 5px;
+    padding: 0 4px;
     line-height: 14px;
     align-self: center;
   }
   .badge.board {
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .badge.queued {
     color: var(--warning);
@@ -548,12 +548,12 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .task {
     display: flex;
     align-items: baseline;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-s);
     line-height: 1.35;
   }
@@ -603,7 +603,7 @@
   }
   .tab {
     height: 20px;
-    padding: 0 7px;
+    padding: 0 6px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -612,7 +612,7 @@
     cursor: pointer;
   }
   .tab:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .tab.on {
     background: var(--surface-2);
@@ -628,7 +628,7 @@
     background: var(--surface-2);
     color: var(--text);
     font-size: var(--fs-xs);
-    padding: 0 7px;
+    padding: 0 6px;
     outline: none;
   }
   .search:focus {
@@ -703,7 +703,7 @@
     outline-offset: -2px;
   }
   .row-main:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .row-icon {
     flex-shrink: 0;

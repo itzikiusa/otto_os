@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // DB Explorer page (mirrors ApiPage): left sidebar = connection picker +
   // SchemaTree + a Saved/History switch; main = a tab strip (Query / Builder /
@@ -263,7 +264,7 @@
       await database.loadConnections();
       editConnection(copy);
       toasts.info('Configuration duplicated', 'Set a password for the new connection. Access grants were not copied.');
-    } catch (error) { toasts.error('Couldn’t duplicate connection', error instanceof Error ? error.message : String(error)); }
+    } catch (error) { toastError('Couldn’t duplicate connection', error); }
   }
 
   // --- Section hierarchy (THE unified tree: every kind + broker clusters) ----
@@ -829,7 +830,7 @@
     const dbs = database.connections.length + database.otherConnections.length;
     const prod = [...database.connections, ...database.otherConnections].filter((c) => c.environment === 'prod').length;
     const k = brokers.clusters.length;
-    const parts = [`${dbs} connection${dbs === 1 ? '' : 's'}`];
+    const parts = [`${plural(dbs, 'connection')}`];
     if (prod > 0) parts.push(`${prod} prod`);
     if (k > 0) parts.push(`${k} Kafka cluster${k === 1 ? '' : 's'}`);
     return `${parts.join(' · ')}.`;
@@ -1763,7 +1764,7 @@
   .tree-search {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     padding: 4px 6px 6px;
     margin-bottom: 2px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
@@ -1829,7 +1830,7 @@
     background: var(--surface-2);
     color: var(--text);
     border-radius: var(--radius-s);
-    padding: 4px 7px;
+    padding: 4px 6px;
     font-size: var(--fs-s);
   }
   .list-search-input:focus {
@@ -1843,7 +1844,7 @@
     background: var(--surface-2);
     color: var(--text);
     border-radius: var(--radius-s);
-    padding: 4px 7px;
+    padding: 4px 6px;
     margin: 0 2px;
     font-size: var(--fs-s);
   }
@@ -1881,7 +1882,7 @@
     gap: 6px;
     /* min-height (not a fixed height) so the row grows when a long name wraps. */
     min-height: 26px;
-    padding: 3px 6px;
+    padding: 2px 6px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -2083,7 +2084,7 @@
   }
   .ss {
     height: 24px;
-    padding: 0 7px;
+    padding: 0 6px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -2093,7 +2094,7 @@
     cursor: pointer;
   }
   .ss:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .ss.active {
     background: var(--accent-soft);
@@ -2127,7 +2128,7 @@
     flex: 1;
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     min-width: 0;
     border: none;
     background: transparent;
@@ -2193,7 +2194,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 14px;
+    padding: 6px 14px;
     font-size: var(--fs-s);
     line-height: 1.4;
     color: var(--success);
@@ -2211,7 +2212,7 @@
   .schema-conn {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     height: 30px;
     padding: 0 6px;
     margin-bottom: 4px;
@@ -2227,8 +2228,8 @@
   .kind-tag {
     flex-shrink: 0;
     font-size: var(--fs-xs);
-    letter-spacing: 0.03em;
-    padding: 1px 5px;
+    letter-spacing: .06em;
+    padding: 1px 4px;
     border-radius: 999px;
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
@@ -2251,12 +2252,12 @@
     cursor: pointer;
   }
   .type-chip:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .type-chip.on {
     color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   /* Prod / guarded connection tabs get a tinted edge. */
   .conn-tab.prod {
@@ -2272,7 +2273,7 @@
   .conn-tabs {
     display: flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     height: 36px;
     padding: 0 10px;
     border-bottom: 1px solid var(--border);
@@ -2289,7 +2290,7 @@
     text-transform: uppercase;
     letter-spacing: .06em;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     border-radius: 999px;
     padding: 1px 6px;
     flex-shrink: 0;
@@ -2299,7 +2300,7 @@
     display: flex;
     align-items: center;
     height: 26px;
-    padding-block: 0; padding-inline: 9px 3px;
+    padding-block: 0; padding-inline: 8px 2px;
     border-radius: var(--radius-s);
     border: 1px solid transparent;
     color: var(--text-dim);
@@ -2310,7 +2311,7 @@
     transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .conn-tab:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .conn-tab.active {
     background: var(--surface);
@@ -2320,7 +2321,7 @@
   .conn-tab-main {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     min-width: 0;
     border: none;
     background: transparent;
@@ -2412,7 +2413,7 @@
     align-items: center;
     gap: 6px;
     height: 24px;
-    padding: 0 11px;
+    padding: 0 10px;
   }
   .view-switch .mt :global(svg) {
     opacity: 0.75;
@@ -2457,7 +2458,7 @@
     .view-switch .mt {
       font-size: 0;
       gap: 0;
-      padding: 0 9px;
+      padding: 0 8px;
     }
   }
   .cap-chip {
@@ -2466,7 +2467,7 @@
     letter-spacing: .06em;
     color: var(--text-dim);
     background: var(--surface-2);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
   }
   .test-dot {
@@ -2503,7 +2504,7 @@
   .conn-state {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -2617,7 +2618,7 @@
   .rail-label {
     writing-mode: vertical-rl;
     font-size: var(--fs-xs);
-    letter-spacing: 0.12em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     user-select: none;
   }

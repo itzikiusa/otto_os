@@ -250,7 +250,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 7px 9px;
+    padding: 6px 8px;
     font-size: var(--fs-m);
   }
   .check {

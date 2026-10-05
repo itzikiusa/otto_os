@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../../lib/plural';
   // DesignArena — the Product → **Design** tab (design/product-design-arena.md §4).
   // ONE arena for every design artifact of a story: a Figma/Canva-style 2D side
   // (HTML screens in device frames, Excalidraw boards, Mermaid diagrams) and a
@@ -226,7 +227,7 @@
   onDestroy(() => clearInterval(ticker));
   const saveLabel = $derived.by(() => {
     if (!att) return '';
-    if (localInvalid) return `invalid document — not saved (${localInvalid.length} issue${localInvalid.length === 1 ? '' : 's'})`;
+    if (localInvalid) return `invalid document — not saved (${plural(localInvalid.length, 'issue')})`;
     switch (saveState) {
       case 'dirty': return 'unsaved';
       case 'saving': return 'saving…';
@@ -1154,7 +1155,7 @@
   }
   .ss {
     height: 20px;
-    padding: 0 7px;
+    padding: 0 6px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -1170,7 +1171,7 @@
   .list-actions {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex-wrap: wrap;
     width: 100%;
   }
@@ -1206,9 +1207,9 @@
   .group-head {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     width: 100%;
-    padding: 7px 10px 3px;
+    padding: 6px 10px 2px;
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -1237,7 +1238,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: none;
     background: transparent;
     color: var(--text);
@@ -1282,7 +1283,7 @@
   }
   .refine-btn:hover,
   .row-more:hover {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .mockup-type {
@@ -1291,7 +1292,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .06em;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);
     color: var(--text-dim);
@@ -1315,7 +1316,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .06em;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: 999px;
     max-width: 80px;
     overflow: hidden;

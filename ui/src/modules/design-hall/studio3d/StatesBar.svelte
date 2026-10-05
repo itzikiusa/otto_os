@@ -149,7 +149,7 @@
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    padding-block: 5px; padding-inline: 12px 6px;
+    padding-block: 4px; padding-inline: 12px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-l);
     background: var(--surface);
@@ -175,7 +175,7 @@
     background: transparent;
     color: var(--text-dim);
     font: var(--fs-s) / 1 var(--font-ui);
-    padding: 6px 11px;
+    padding: 6px 10px;
     border-radius: var(--radius-s);
     cursor: pointer;
   }

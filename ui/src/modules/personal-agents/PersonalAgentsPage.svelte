@@ -270,7 +270,7 @@
   .name:focus-visible { outline: none; }
   .name:focus-visible::after { outline: 2px solid var(--accent-text); outline-offset: -1px; }
   .paused .name { color: var(--text-dim); }
-  .prov { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: var(--fs-s); color: var(--text-dim); }
+  .prov { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: var(--fs-s); color: var(--text-dim); }
   .prov :global(svg) { flex-shrink: 0; }
   .prov-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Positioned + later in the DOM than .name::after, so they paint above it

@@ -511,7 +511,7 @@
   }
   .filters {
     display: flex;
-    gap: 7px;
+    gap: 6px;
     flex-wrap: wrap;
     align-items: center;
   }
@@ -524,7 +524,7 @@
   .view-toggle button {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .banner-err {
     display: flex;

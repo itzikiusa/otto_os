@@ -380,7 +380,7 @@
   }
   .drop-ind {
     position: absolute;
-    background: color-mix(in srgb, var(--accent) 26%, transparent);
+    background: var(--accent-soft-strong);
     border: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
     border-radius: var(--radius-s);
     pointer-events: none;

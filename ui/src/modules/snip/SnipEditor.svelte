@@ -332,11 +332,11 @@
           if (!allowed || disposed) return;
           allowClose = true;
           try { await win.close(); }
-          catch (e) { allowClose = false; toasts.error('Couldn’t close the editor', String(e)); }
+          catch (e) { allowClose = false; toastError('Couldn’t close the editor', e); }
         });
       });
       if (disposed) stop(); else unlisten = stop;
-    }).catch((e) => toasts.error('Couldn’t register the close guard', String(e)));
+    }).catch((e) => toastError('Couldn’t register the close guard', e));
     return () => { disposed = true; unlisten?.(); };
   });
 

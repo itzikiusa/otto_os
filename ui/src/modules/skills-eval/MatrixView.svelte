@@ -555,7 +555,7 @@
     cursor: pointer;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .mx-item:hover {
     background: var(--hover);
@@ -582,7 +582,7 @@
   .mx-item-meta {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -701,8 +701,8 @@
     position: relative;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 3px 9px;
+    gap: 4px;
+    padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: 999px;
     font-size: var(--fs-xs);
@@ -842,7 +842,7 @@
   .score {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-weight: 600;
     font-size: var(--fs-m);
   }

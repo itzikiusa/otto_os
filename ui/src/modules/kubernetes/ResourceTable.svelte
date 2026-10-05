@@ -204,7 +204,7 @@
     box-sizing: border-box;
   }
   .rt-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .rt-row.selected {
     background: var(--accent-soft);

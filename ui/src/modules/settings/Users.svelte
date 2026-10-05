@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
@@ -160,7 +161,7 @@
     }
     toasts.success(
       role === 'none' ? 'Removed from all workspaces' : `Set to ${role} in all workspaces`,
-      `${targets.length} workspace${targets.length === 1 ? '' : 's'} updated`,
+      `${plural(targets.length, 'workspace')} updated`,
     );
   }
 
@@ -575,9 +576,7 @@
     {:else}
       <div class="urow controls">
         <span class="dim">
-          Member of {memberWsCount} of {ws.workspaces.length} workspace{ws.workspaces.length === 1
-            ? ''
-            : 's'}
+          Member of {memberWsCount} of {plural(ws.workspaces.length, 'workspace')}
         </span>
         <span class="grow"></span>
         <span class="dim">Set all to</span>

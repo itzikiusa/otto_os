@@ -71,7 +71,7 @@
 </details>
 <style>
   .network { flex-shrink: 0; min-width: 0; border-block-end: 1px solid var(--border); font-size: var(--fs-xs); }
-  summary { cursor: pointer; padding: 5px 9px; display: flex; align-items: center; gap: 4px; color: var(--text-dim); list-style: none; }
+  summary { cursor: pointer; padding: 4px 8px; display: flex; align-items: center; gap: 4px; color: var(--text-dim); list-style: none; }
   summary::-webkit-details-marker { display: none; }
   summary:hover { color: var(--text); }
   .chev { display: inline-flex; flex-shrink: 0; transition: transform var(--dur-fast) ease-out; }
@@ -82,6 +82,6 @@
   .sum-text { min-width: 0; overflow-wrap: anywhere; }
   .warn { color: var(--warning); }
   @media (prefers-reduced-motion: reduce) { .chev { transition: none; } }
-  .contents { max-height: 40vh; overflow: auto; padding: 5px 9px; } .endpoint { display: grid; gap: 3px; margin-block: 8px; }
+  .contents { max-height: 40vh; overflow: auto; padding: 4px 8px; } .endpoint { display: grid; gap: 2px; margin-block: 8px; }
   code { white-space: normal; overflow-wrap: anywhere; } p { margin: 6px 0; } .error { color: var(--danger); }
 </style>

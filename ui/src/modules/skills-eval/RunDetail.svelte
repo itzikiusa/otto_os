@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // One evaluation run: header summary + per-iteration report. Each iteration
   // shows the implementation (+ diff), every validation's issues & suggested
   // fixes, the score, before/after regression vs the previous round, and the
@@ -444,7 +445,7 @@
           </span>
         {/if}
         {#if run.impl_cli}<span class="chip" title="Implementation agent">{run.impl_cli}</span>{/if}
-        <span class="chip">{run.target_iterations} iteration{run.target_iterations === 1 ? '' : 's'}</span>
+        <span class="chip">{plural(run.target_iterations, 'iteration')}</span>
         {#each run.iterations as it (it.id)}
           <span class="chip score {scoreClass(it.score)}">Iteration {it.iter}: {it.score.toFixed(0)}</span>
         {/each}
@@ -534,7 +535,7 @@
                 </button>
                 {#if a.findings.length > 0}
                   <button class="btn small ghost" aria-expanded={openFindings.has(key)} onclick={() => (openFindings = toggle(openFindings, key))}>
-                    {openFindings.has(key) ? 'Hide issues' : `${a.findings.length} issue${a.findings.length === 1 ? '' : 's'}`}
+                    {openFindings.has(key) ? 'Hide issues' : `${plural(a.findings.length, 'issue')}`}
                   </button>
                 {/if}
                 <StatusBadge status={evalStatus(a.status)} />
@@ -794,7 +795,7 @@
     font-size: var(--fs-s);
   }
   .rd-loading {
-    padding: 30px;
+    padding: 28px;
     text-align: center;
   }
   .rd-head {
@@ -877,7 +878,7 @@
     padding-inline-start: 10px;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .impl-top,
   .improve-top,
@@ -936,12 +937,12 @@
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .val-top {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     flex-wrap: wrap;
   }
   .val-name {
@@ -975,7 +976,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 3px;
+    margin-bottom: 2px;
   }
   .issue,
   .fix {
@@ -989,9 +990,9 @@
     font-weight: 600;
     letter-spacing: .06em;
     text-transform: uppercase;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: var(--radius-s);
-    margin-inline-end: 5px;
+    margin-inline-end: 4px;
     background: var(--danger-soft);
     color: var(--danger);
     vertical-align: middle;
@@ -1085,7 +1086,7 @@
 
   .sev {
     display: inline-block;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -1093,7 +1094,7 @@
     text-transform: uppercase;
   }
   .sev-info {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .sev-warn {
@@ -1140,7 +1141,7 @@
     cursor: pointer;
   }
   .chip-toggle.on {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
     color: var(--accent-text);
   }

@@ -319,8 +319,8 @@
   .grp-h {
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 3px 4px;
+    gap: 6px;
+    padding: 2px 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
@@ -346,7 +346,7 @@
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     padding: 0 6px;
     border-radius: 999px;
   }

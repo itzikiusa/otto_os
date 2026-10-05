@@ -330,7 +330,7 @@
   .favorite-row { display: flex; align-items: center; min-width: 0; }
   .favorite-row > button:first-child { flex: 1; min-width: 0; }
   .shortcut-list .remove-favorite { width: 24px; flex: 0 0 24px; display: grid; place-items: center; color: var(--text-dim); }
-  .shortcut-list button:hover, .shortcut-list button.current { background: var(--surface-2); }
+  .shortcut-list button:hover, .shortcut-list button.current { background: var(--hover); }
   @media (max-width: 640px) {
     .pick-content { flex-direction: column; }
     .shortcuts { flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -360,7 +360,7 @@
     padding: 4px;
     cursor: pointer;
   }
-  .crumb button:hover { background: var(--surface-2); color: var(--text); }
+  .crumb button:hover { background: var(--hover); color: var(--text); }
   .crumb button[aria-current] { color: var(--text); }
   .retry { margin: 0 14px 14px; }
   .pick-tools {
@@ -456,7 +456,7 @@
     font-size: var(--fs-xs);
     padding: 2px 6px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
     text-transform: uppercase;
     letter-spacing: .06em;

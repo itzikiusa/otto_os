@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../../lib/plural';
   // Site Studio "Design" inspector for the selection:
   //   nothing selected → Page + Site settings, the brand kit, and the page's
   //                      accessibility / quality findings (click one to select);
@@ -603,7 +604,7 @@
     </div>
     <div class="group">
       <div class="gh"><span class="k">Checks</span>
-        <span class="dim small">{errors ? `${errors} to fix` : 'No blockers'}{warns ? ` · ${warns} warning${warns === 1 ? '' : 's'}` : ''}</span>
+        <span class="dim small">{errors ? `${errors} to fix` : 'No blockers'}{warns ? ` · ${plural(warns, 'warning')}` : ''}</span>
       </div>
       {#if findings.length}
         <ul class="findings">
@@ -847,7 +848,7 @@
   .radios label {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
   }
   .note {
     margin: 8px 0 0;

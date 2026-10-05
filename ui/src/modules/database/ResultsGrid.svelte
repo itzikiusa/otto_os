@@ -1843,7 +1843,7 @@
   .rg-switch {
     display: flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     flex-wrap: wrap;
     padding: 2px 2px 8px;
     flex-shrink: 0;
@@ -1851,7 +1851,7 @@
   .rg-seg {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 24px;
     padding: 0 10px;
     border: 1px solid var(--border);
@@ -1867,7 +1867,7 @@
   }
   .rg-seg.on {
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .rg-seg.err {
@@ -2108,7 +2108,7 @@
   .grid-notice {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    background: var(--accent-soft);
     border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
     border-radius: var(--radius-s);
     padding: 4px 8px;
@@ -2152,7 +2152,7 @@
     border-color: color-mix(in srgb, var(--status-exited) 45%, transparent);
   }
   .chip.raw {
-    padding-block: 0; padding-inline: 9px 4px;
+    padding-block: 0; padding-inline: 8px 4px;
     border-style: dashed;
   }
   .chip-op {
@@ -2164,7 +2164,7 @@
     margin-block: 0; margin-inline: 1px 0;
     border: none;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     font-weight: 600;
     cursor: pointer;
@@ -2181,7 +2181,7 @@
     display: inline-flex;
     align-items: center;
     gap: 2px;
-    padding-block: 0; padding-inline: 6px 3px;
+    padding-block: 0; padding-inline: 6px 2px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text);
@@ -2259,7 +2259,7 @@
   .gt-search {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 26px;
     box-sizing: border-box;
     padding: 0 8px;
@@ -2372,12 +2372,12 @@
   .tb-masked {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 22px;
     padding: 0 9px;
     border-radius: var(--radius-s);
     border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     font-size: var(--fs-s);
     font-weight: 600;
@@ -2401,7 +2401,7 @@
     align-items: center;
     gap: 4px;
     padding: 3px 9px;
-    border-radius: 5px;
+    border-radius: var(--radius-s);
     border: 1px solid color-mix(in srgb, var(--danger) 50%, transparent);
     background: color-mix(in srgb, var(--danger) 14%, transparent);
     color: var(--danger);
@@ -2416,7 +2416,7 @@
     align-items: center;
     gap: 4px;
     padding: 3px 9px;
-    border-radius: 5px;
+    border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text-dim);
@@ -2428,7 +2428,7 @@
   }
   .sel-clear {
     padding: 3px 8px;
-    border-radius: 5px;
+    border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: transparent;
     color: var(--text-dim);
@@ -2465,7 +2465,7 @@
   .grid-foot {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     height: 24px;
     margin-top: 4px;
     padding: 0 2px;
@@ -2505,11 +2505,11 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     cursor: pointer;
   }
   .sort-chip:hover {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft-strong);
   }
   .sort-chip-name {
     max-width: 180px;

@@ -303,7 +303,7 @@
   }
   .field input,
   .field select {
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -368,7 +368,7 @@
       width: 100%;
       box-sizing: border-box;
       font-size: 16px; /* ≥16px prevents iOS Safari zoom-on-focus */
-      padding: 10px 11px;
+      padding: 10px 10px;
     }
     .check {
       font-size: var(--fs-m);

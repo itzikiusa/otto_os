@@ -301,7 +301,7 @@
     align-items: flex-start;
     gap: 8px;
     width: 100%;
-    padding: 5px 6px;
+    padding: 4px 6px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;

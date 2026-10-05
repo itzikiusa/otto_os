@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { broadcastScope } from './viewFilters';
   import { toastError } from '../../lib/toastError';
   // Split layout host: renders the nested split TREE (`layout.tree`) through the
@@ -133,7 +134,7 @@
       );
       if (targetWorkspace === scope && broadcastText.trim() === text) broadcastText = '';
       const n = resp.session_ids.length;
-      toasts.info('Broadcast sent', `Delivered to ${n} session${n === 1 ? '' : 's'}.`);
+      toasts.info('Broadcast sent', `Delivered to ${plural(n, 'session')}.`);
     } catch (e) {
       toastError('Couldn’t send the broadcast', e);
     } finally {
@@ -211,7 +212,7 @@
     flex-shrink: 0;
   }
   .broadcast-toggle {
-    gap: 5px;
+    gap: 4px;
   }
   .broadcast-toggle.active {
     border-color: var(--accent);

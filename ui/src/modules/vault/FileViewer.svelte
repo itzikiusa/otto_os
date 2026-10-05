@@ -418,7 +418,7 @@
   .img-wrap img {
     max-width: 100%;
     max-height: 100%;
-    border-radius: 8px;
+    border-radius: var(--radius-m);
   }
   .d2-wrap {
     /* d2 renders theme-aware (dark themeID in dark mode) — no forced bg. */

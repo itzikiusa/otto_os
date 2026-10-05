@@ -28,6 +28,7 @@
 </script>
 
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // LIVE CONTEXT for a typed vault note: matches the note's entity hints
   // (service / workload names, repo paths, DB names, collections, dashboards)
   // against the rest of Otto through the modules' existing read APIs — K8s
@@ -346,7 +347,7 @@
       {#each ctx.dashboards as d (d.id)}
         <div class="lc-card">
           <div class="head"><Icon name="chart" size={13} /><span class="t">{d.name}</span><span class="pill">Dashboard</span></div>
-          <div class="sub">{d.layout.length} panel{d.layout.length === 1 ? '' : 's'}</div>
+          <div class="sub">{plural(d.layout.length, 'panel')}</div>
           <div class="acts"><button class="btn small" onclick={() => openDashboard(d)}>Open dashboard</button></div>
         </div>
       {/each}

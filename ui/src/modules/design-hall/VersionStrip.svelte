@@ -132,9 +132,9 @@
     flex: none;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 24px;
-    padding: 0 9px;
+    padding: 0 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface);

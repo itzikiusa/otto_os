@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // PR detail: meta, editable markdown description, diff with inline comment
   // threads, general comments, approve/merge/decline, "open as session".
@@ -358,7 +359,7 @@
       await postComment(newComment.trim());
       if (!disposed) newComment = '';
     } catch (e) {
-      toasts.error('Couldn’t post the comment', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t post the comment', e);
     } finally {
       if (!disposed) busy = '';
     }
@@ -420,7 +421,7 @@
       });
       // createSession → addSession → navigateToSession handles routing.
     } catch (e) {
-      toasts.error('Couldn’t open session', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t open session', e);
     } finally {
       if (!disposed) busy = '';
     }
@@ -503,7 +504,7 @@
         {#if pr.mergeable === false}<span class="chip bad"><Icon name="warning" size={12} /> Conflicts</span>{/if}
         {#if pr.approved_by.length > 0}
           <span class="chip ok" title={pr.approved_by.join(', ')}>
-            <Icon name="check" size={12} /> {pr.approved_by.length} approval{pr.approved_by.length === 1 ? '' : 's'}
+            <Icon name="check" size={12} /> {plural(pr.approved_by.length, 'approval')}
           </span>
         {/if}
       </div>
@@ -825,8 +826,8 @@
   .reviewer-row {
     display: flex;
     align-items: center;
-    gap: 9px;
-    padding: 5px 0;
+    gap: 8px;
+    padding: 4px 0;
     font-size: var(--fs-s);
   }
   .reviewer-avatar {
@@ -937,7 +938,7 @@
     grid-template-columns: 72px 1fr auto auto;
     align-items: center;
     gap: 10px;
-    padding: 7px 12px;
+    padding: 6px 12px;
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-s);
   }

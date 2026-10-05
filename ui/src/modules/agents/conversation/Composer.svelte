@@ -582,7 +582,7 @@
     grid-template-columns: auto 1fr auto;
     align-items: baseline;
     gap: 10px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-radius: var(--radius-s);
     cursor: pointer;
     font-size: var(--fs-s);
@@ -661,7 +661,7 @@
     gap: 6px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    padding: 5px 6px 0;
+    padding: 4px 6px 0;
     min-width: 0;
     flex-wrap: wrap;
     row-gap: 2px;

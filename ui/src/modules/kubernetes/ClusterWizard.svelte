@@ -346,13 +346,13 @@
     cursor: pointer;
   }
   .ctx:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .ctx.on {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .ctx input {
-    margin-top: 3px;
+    margin-top: 2px;
   }
   .ctx-main {
     display: flex;
@@ -407,7 +407,7 @@
   }
   .env-chip {
     height: 24px;
-    padding: 0 13px;
+    padding: 0 12px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);

@@ -88,7 +88,7 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-    padding-block: 7px;
+    padding-block: 6px;
     padding-inline: 12px 4px;
     border: 0;
     background: transparent;

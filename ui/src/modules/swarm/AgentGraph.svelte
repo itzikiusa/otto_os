@@ -436,7 +436,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 3px;
+    padding: 2px;
   }
   .canvas {
     position: absolute;
@@ -480,9 +480,9 @@
   .node-hit {
     display: flex;
     align-items: flex-start;
-    gap: 9px;
+    gap: 8px;
     width: 100%;
-    padding: 9px 11px;
+    padding: 8px 10px;
     border: none;
     background: transparent;
     color: var(--text);
@@ -562,7 +562,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     box-shadow: var(--shadow);
-    padding: 5px;
+    padding: 4px;
   }
   /* Invisible bridge over the 6px gap: the tooltip lives inside `.node`, so
      without it the pointer "leaves" the node while crossing the gap and the
@@ -589,13 +589,13 @@
     background: transparent;
     color: var(--text);
     border-radius: var(--radius-s);
-    padding: 5px 6px;
+    padding: 4px 6px;
     cursor: pointer;
     font-size: var(--fs-xs);
     text-align: start;
   }
   .tip-row:hover {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
 
   /* ── Side rail ── */
@@ -640,13 +640,13 @@
   .brief-row {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     width: 100%;
     border: none;
     background: transparent;
     color: var(--text);
     border-radius: var(--radius-s);
-    padding: 5px 7px;
+    padding: 4px 6px;
     cursor: pointer;
     font-size: var(--fs-s);
     text-align: start;
@@ -673,7 +673,7 @@
     align-items: center;
     gap: 6px;
     margin: 8px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text-dim);
@@ -701,8 +701,8 @@
   .task-card {
     display: flex;
     align-items: flex-start;
-    gap: 7px;
-    padding: 7px 9px;
+    gap: 6px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-inline-start-width: 3px;
     border-radius: var(--radius-s);
@@ -735,7 +735,7 @@
   .task-meta {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
   }
   .pchip {

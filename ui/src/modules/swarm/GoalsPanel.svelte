@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Per-task Goals view: the goals the Coordinator verifies for a task, each with
   // a live status, the measured value + verdict summary, and retry budget. Lets
   // you add / edit / delete goals and run (or stop) verification on demand.
@@ -54,7 +55,7 @@
       if (res.started) toasts.success('Verification started', 'Watch goal statuses update live.');
       else toasts.info("Verification didn't start", res.reason ?? 'Verification could not start.');
     } catch (e) {
-      toasts.error("Couldn’t start verification", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t start verification", e);
     } finally {
       verifying = false;
     }
@@ -65,7 +66,7 @@
       await swarm.stopVerify(task.id);
       toasts.info('Verification stopped');
     } catch (e) {
-      toasts.error("Couldn’t stop verification", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t stop verification", e);
     }
   }
 
@@ -88,7 +89,7 @@
       try {
         await swarm.deleteGoal(g.id);
       } catch (e) {
-        toasts.error("Couldn’t delete the goal", e instanceof Error ? e.message : String(e));
+        toastError("Couldn’t delete the goal", e);
       }
     }
   }
@@ -230,7 +231,7 @@
   .pair .k {
     color: var(--text-dim);
     opacity: 0.7;
-    margin-inline-end: 3px;
+    margin-inline-end: 2px;
   }
   .pair.measured {
     color: var(--text);

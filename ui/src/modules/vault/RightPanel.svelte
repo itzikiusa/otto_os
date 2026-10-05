@@ -225,7 +225,7 @@
     color: var(--text-dim);
     background: var(--hover);
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 1px 6px;
   }
   .badge.err {
     background: var(--danger-soft);
@@ -238,7 +238,7 @@
     background: none;
     border: none;
     border-radius: var(--radius-s);
-    padding: 5px 8px;
+    padding: 4px 8px;
     cursor: pointer;
     color: var(--text);
   }
@@ -289,7 +289,7 @@
     border-collapse: collapse;
   }
   .props td {
-    padding: 3px 6px;
+    padding: 2px 6px;
     vertical-align: top;
     border-top: 1px solid var(--border);
     word-break: break-word;

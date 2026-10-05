@@ -231,6 +231,13 @@ const RULES = {
   'transition-literal': 'transition with a literal 80–220 ms duration — use var(--dur-fast) / var(--dur-enter)',
   'straight-couldnt': "straight apostrophe in “Couldn't” — write Couldn’t (content.md §3)",
   'toast-failed-title': 'toasts.error titled “… failed” / “Could not …” — use toastError(\'Couldn’t <verb> …\', e)',
+  'off-grid-spacing': 'padding/margin/gap px value off the spacing scale (2 px steps to 24, 4 px above; foundations.md §3)',
+  'letter-spacing-literal': 'letter-spacing other than .06em (uppercase micro-labels) or -0.01em (titles)',
+  'raw-toast-body': 'toast body is the raw exception (e.message / String(e)) — use toastError(title, e)',
+  'hand-plural': "hand-rolled plural (`? 's' : ''`) — use plural(n, word) from lib/plural.ts",
+  'uk-spelling': 'UK spelling in user copy (Cancelled, colour, analyse, behaviour…) — US English (content.md)',
+  'straight-contraction': "straight apostrophe in a contraction (don't, it's, can't…) in user copy — use ’",
+  'bare-loading': 'bare “Loading…” — name what loads (“Loading branches…”) or use LoadState',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
 };
 
@@ -349,6 +356,13 @@ for (const f of files) {
       if (prop === 'font-weight' && /^\s*(6[5-9]\d|[7-9]\d\d|bold|bolder)\b/.test(value)) hit('heavy-weight', f, at, `font-weight:${value.trimEnd()}`);
       if (prop === 'font' && /(?:^|\s)(6[5-9]\d|[7-9]\d\d|bold|bolder)(?=\s)/.test(value)) hit('heavy-weight', f, at, `font:${value.trimEnd()}`);
       if ((prop === 'outline' || prop === 'outline-color') && /var\(\s*--accent\s*\)/.test(value)) hit('focus-accent', f, at, `${prop}:${value.trimEnd()}`);
+      if (/^(?:padding|margin|gap|row-gap|column-gap)(?:-[a-z-]+)?$/.test(prop)) {
+        for (const m of value.matchAll(/(?<![\w.])-?(\d+)px\b/g)) {
+          const n = Number(m[1]);
+          if (n >= 2 && (n <= 24 ? n % 2 : n % 4)) hit('off-grid-spacing', f, vAt + m.index, `${prop}: …${m[0]}`);
+        }
+      }
+      if (prop === 'letter-spacing' && !/^\s*(?:\.06em|0\.06em|-0?\.01em|0|normal|inherit)\s*$/.test(value)) hit('letter-spacing-literal', f, at, `letter-spacing:${value.trimEnd()}`);
       if (prop === 'padding' || prop === 'margin' || prop === 'inset') {
         const parts = splitTop(value.replace(/!important/, '').trim());
         if (parts.length === 4 && parts[1] !== parts[3]) hit('physical-shorthand', f, at, `${prop}:${value.trimEnd()}`);
@@ -432,7 +446,13 @@ for (const f of files) {
   }
   if (!/\.(svelte|ts)$/.test(f.path)) continue;
   for (const m of f.text.matchAll(/Couldn't/g)) hit('straight-couldnt', f, m.index, "Couldn't");
-  for (const m of f.text.matchAll(/toasts\.error\((['"`])(?:[A-Z][A-Za-z ]*? failed|Could not )/g)) hit('toast-failed-title', f, m.index, m[0]);
+  const copy = stripComments(f.text).replace(/<style\b[\s\S]*?<\/style[^>]*>/gi, blank);
+  for (const m of copy.matchAll(/toasts\.(?:error|warning)\((['"`])(?!Couldn’t)(?:[^'"`\n]*?(?<![{(,]\s?)\bfailed\b(?!\s*[,)}])|Could not |Cannot )/gi)) hit('toast-failed-title', f, m.index, m[0]);
+  for (const m of copy.matchAll(/toasts\.(?:error|warning)\([^;]*?,\s*(?:\w+ instanceof Error \? \w+\.message|String\((?:e|err|error|ex)\)|\((?:e|err|error|ex) as Error\)\.message|(?:e|err|error|ex)\.message)/g)) hit('raw-toast-body', f, m.index, m[0].slice(0, 60));
+  for (const m of copy.matchAll(/\?\s*'s'\s*:\s*''|\?\s*''\s*:\s*'s'/g)) hit('hand-plural', f, m.index, m[0]);
+  for (const m of copy.matchAll(/\b(?:Cancell(?:ed|ing)|colours?|Colours?|analys(?:e|ed|ing)|Analys(?:e|ed|ing)|behaviour|organis(?:e|ation)|favourite|cancelled(?=[ .,!])(?<!['"]cancelled))\b/g)) hit('uk-spelling', f, m.index, m[0]);
+  for (const m of copy.matchAll(/\b(?:[Dd]on|[Cc]an|[Ww]on|[Ii]sn|[Dd]oesn|[Dd]idn|[Ww]asn|[Aa]ren|[Hh]asn|[Hh]aven|[Ss]houldn|[Ww]ouldn)'t\b|\b(?:[Ii]t|[Tt]hat|[Tt]here|[Ww]hat|[Ll]et)'s\b|\b(?:[Yy]ou|[Ww]e|[Tt]hey)'(?:re|ll|ve|d)\b|\bI'(?:m|ll|ve|d)\b/g)) hit('straight-contraction', f, m.index, m[0]);
+  for (const m of copy.matchAll(/(?:>\s*|['"`])Loading(?:…|\.\.\.)\s*(?=<|['"`])/g)) hit('bare-loading', f, m.index, m[0].trim());
 }
 
 // ---------- rule 3 (HARD): icon-only buttons — scan markup (script/style/comments blanked) ----------

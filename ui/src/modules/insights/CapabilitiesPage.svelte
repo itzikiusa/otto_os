@@ -239,7 +239,7 @@
   .dep-list { list-style: none; margin: 0; border-block-start: 1px solid var(--border); padding-block: 8px; padding-inline: 36px 14px; }
   .dep-row  {
     display: flex; align-items: center; gap: 8px;
-    padding: 3px 0; font-size: var(--fs-s); min-width: 0;
+    padding: 2px 0; font-size: var(--fs-s); min-width: 0;
   }
   .dep-ok  { display: flex; align-items: center; flex-shrink: 0; color: var(--success); }
   .dep-ok.bad { color: var(--danger); }

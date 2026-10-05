@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Shared per-agent results block for BOTH the PR review (ReviewPanel) and the
   // local working-tree review (LocalReviewPanel) — so "Open" (inline live
   // terminal), "Retry", per-agent findings and status pills behave identically
@@ -151,7 +152,7 @@
           <button class="btn small ghost" onclick={() => toggleAgent(agent.name)}>
             {agentExpanded[agent.name]
               ? 'Hide'
-              : `${agent.findings.length} finding${agent.findings.length === 1 ? '' : 's'}`}
+              : `${plural(agent.findings.length, 'finding')}`}
           </button>
         {/if}
         <span class="rp-status-pill" data-status={agent.status}><StatusBadge status={runStatus(agent.status)} /></span>
@@ -268,7 +269,7 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .rp-finding {
     display: flex;
@@ -292,7 +293,7 @@
 
   .severity-chip {
     display: inline-block;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -300,7 +301,7 @@
     text-transform: uppercase;
   }
   .sev-info {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .sev-warn {
@@ -318,7 +319,7 @@
   /* A1: finding lifecycle state chips */
   .rp-state-chip {
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 4px;
     text-transform: uppercase;
     font-weight: 600;
     letter-spacing: .06em;

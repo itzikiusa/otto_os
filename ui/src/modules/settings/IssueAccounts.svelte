@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -86,7 +87,7 @@
 
   function testLabel(r: Exclude<TestResult, 'busy'>): string {
     return r.ok
-      ? `Connected · ${r.projects} project${r.projects === 1 ? '' : 's'} visible`
+      ? `Connected · ${plural(r.projects, 'project')} visible`
       : `Couldn’t connect: ${r.error}`;
   }
 
@@ -421,7 +422,7 @@
   .test-result {
     display: flex;
     align-items: flex-start;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     margin-top: 4px;
     overflow-wrap: anywhere;

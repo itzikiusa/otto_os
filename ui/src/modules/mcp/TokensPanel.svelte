@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import Icon from '../../lib/components/Icon.svelte';
   import { toastError } from '../../lib/toastError';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -142,7 +143,7 @@
     const toolPart =
       scope.tools == null
         ? 'all tools'
-        : `${scope.tools.length} tool${scope.tools.length === 1 ? '' : 's'}`;
+        : `${plural(scope.tools.length, 'tool')}`;
     const writePart = scope.allow_writes ? 'read + write' : 'read-only';
     const wsPart = scope.workspace_id ? ' • 1 workspace' : '';
     return `${toolPart} • ${writePart}${wsPart}`;
@@ -372,7 +373,7 @@
   }
   .inp {
     font-size: var(--fs-s);
-    padding: 5px 9px;
+    padding: 4px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -398,7 +399,7 @@
   .pick-grp {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .grp-name {
     font-size: var(--fs-s);
@@ -408,7 +409,7 @@
   .ptool {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-s);
     color: var(--text);
   }
@@ -419,7 +420,7 @@
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 16%, transparent);
     border-radius: var(--radius-s);
-    padding: 0 5px;
+    padding: 0 4px;
   }
   .cactions {
     display: flex;
@@ -469,7 +470,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 9px 12px;
+    padding: 8px 12px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
   .tok-row:last-child {

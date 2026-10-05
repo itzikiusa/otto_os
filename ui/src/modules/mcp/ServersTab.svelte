@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // The governed MCP server registry: each row shows transport, a health pill,
   // tool count, injection-risk badge, and an enabled toggle, with Discover /
   // Health check / Delete actions. "Add server" opens the create form.
@@ -63,7 +64,7 @@
     setBusy(s.id, 'discover');
     try {
       const tools = await mcpCpApi.cpDiscover(s.id);
-      toasts.success('Discovered tools', `${tools.length} tool${tools.length === 1 ? '' : 's'} from ${s.name}`);
+      toasts.success('Discovered tools', `${plural(tools.length, 'tool')} from ${s.name}`);
       await onReload();
     } catch (e) {
       toastError('Couldn’t discover tools', e);
@@ -142,7 +143,7 @@
 
 <div class="servers">
   <div class="bar">
-    <span class="count">{servers.length} server{servers.length === 1 ? '' : 's'}</span>
+    <span class="count">{plural(servers.length, 'server')}</span>
     <span class="grow"></span>
     <button class="btn small" data-testid="mcp-rules-btn" onclick={() => (rulesOpen = true)}>Rules</button>
     <button class="btn small" onclick={() => void onReload()} title="Refresh">

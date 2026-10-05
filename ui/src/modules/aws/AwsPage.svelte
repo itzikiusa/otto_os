@@ -113,7 +113,7 @@
     try {
       await aws.beginLogin(a.id, wsId);
     } catch (e) {
-      toasts.error('Sign-in failed to start', e instanceof Error ? e.message : String(e));
+      toastError('Sign-in failed to start', e);
     }
   }
 
@@ -315,7 +315,7 @@
   .svc-badge {
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface-2);
     border: 1px solid var(--border);

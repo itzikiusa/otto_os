@@ -171,7 +171,7 @@
   }
   .err-code {
     font-size: var(--fs-xs);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     color: var(--danger);
     background: var(--danger-soft);
@@ -186,7 +186,7 @@
     letter-spacing: .06em;
     color: var(--text-dim);
     background: var(--surface-2);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
   }
   .err-grow {

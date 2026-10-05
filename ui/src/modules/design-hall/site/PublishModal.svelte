@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../../lib/plural';
   // Publish sheets for a site. Both targets stay on this Mac:
   //   zip   — the static site (HTML per page + ONE site.css whose first block is
   //           the brand tokens as --brand-* CSS variables + assets) as a download;
@@ -119,7 +120,7 @@
     {#if mode === 'zip'}
       <p class="lead">Downloads <strong>{artifact.title}</strong> v{seq} as a static site you can host anywhere.</p>
       <ul class="checks">
-        <li><Icon name="check" size={12} /> {pages} page{pages === 1 ? '' : 's'} of semantic HTML — no scripts, motion is pure CSS</li>
+        <li><Icon name="check" size={12} /> {plural(pages, 'page')} of semantic HTML — no scripts, motion is pure CSS</li>
         <li><Icon name="check" size={12} /> One <span class="mono">site.css</span>, starting with your brand tokens as <span class="mono">--brand-*</span> CSS variables</li>
         <li><Icon name="check" size={12} /> Images from your library copied into <span class="mono">assets/</span></li>
         <li><Icon name="check" size={12} /> {embedCount ? `${embedCount} 3D embed${embedCount === 1 ? '' : 's'} as poster images (the interactive runtime lands later)` : 'Responsive: desktop, tablet and mobile from the same files'}</li>
@@ -209,12 +210,12 @@
   }
   .checks :global(svg) {
     flex: none;
-    margin-block-start: 3px;
+    margin-block-start: 2px;
     color: var(--success);
   }
   .warns :global(svg) {
     flex: none;
-    margin-block-start: 3px;
+    margin-block-start: 2px;
     color: var(--warning);
   }
   .banner {

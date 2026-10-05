@@ -13,6 +13,7 @@ import { confirmProd, isProdEnv } from '../../lib/confirmProd';
 import { toasts } from '../../lib/toast.svelte';
 import { k8s } from '../../lib/stores/k8s.svelte';
 import { clusterLabel, kindDef } from './k8s-util';
+import { toastError } from '../../lib/toastError';
 
 export interface ActionDef {
   id: K8sAction;
@@ -156,7 +157,7 @@ export async function runAction(
     else toasts.warn(`${def.label.replace(/…$/, '')} · ${row.name}`, resp.message);
     return resp;
   } catch (e) {
-    toasts.error(`${def.label.replace(/…$/, '')} failed`, e instanceof Error ? e.message : String(e));
+    toastError(`${def.label.replace(/…$/, '')} failed`, e);
     return null;
   }
 }

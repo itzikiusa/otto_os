@@ -1027,7 +1027,7 @@
   }
   .ver {
     font-size: var(--fs-xs);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: var(--success-soft);
     color: var(--success);

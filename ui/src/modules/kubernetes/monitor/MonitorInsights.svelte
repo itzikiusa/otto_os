@@ -239,7 +239,7 @@
   .verdict {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -280,7 +280,7 @@
     background: none;
     border: 1px solid transparent;
     border-radius: var(--radius-s);
-    padding: 5px 6px;
+    padding: 4px 6px;
     font-size: var(--fs-s);
     cursor: pointer;
     color: inherit;
@@ -336,7 +336,7 @@
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
     background: var(--surface-2);
-    padding: 0 3px;
+    padding: 0 2px;
     border-radius: var(--radius-s);
   }
   .md :global(pre) {
@@ -354,7 +354,7 @@
   .md :global(td),
   .md :global(th) {
     border: 1px solid var(--border);
-    padding: 3px 8px;
+    padding: 2px 8px;
   }
   .dim {
     color: var(--text-dim);

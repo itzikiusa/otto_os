@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // MCP Control Plane — three focused sections: Otto's built-in server,
   // governed external servers, and approval/audit activity.
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
@@ -137,7 +138,7 @@
           >
             {s.label}
             {#if s.id === 'servers' && wsId && !loading && !loadError}<span class="count">{servers.length}</span>{/if}
-            {#if s.id === 'activity' && pending > 0}<span class="badge" data-testid="mcp-pending-badge" title="{pending} approval{pending === 1 ? '' : 's'} waiting for you">{pending}</span>{/if}
+            {#if s.id === 'activity' && pending > 0}<span class="badge" data-testid="mcp-pending-badge" title="{plural(pending, 'approval')} waiting for you">{pending}</span>{/if}
           </button>
         {/each}
       </div>
@@ -218,7 +219,7 @@
   }
   .badge {
     min-width: 16px;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: 999px;
     /* A pending queue is "needs you" — the amber state, not an error (patterns §5). */
     background: var(--warning-soft);

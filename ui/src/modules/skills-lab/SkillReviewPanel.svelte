@@ -595,7 +595,7 @@
   .lr-list li { display: flex; }
   .lr-item {
     flex: 1; min-width: 0; text-align: start; background: transparent; border: 1px solid transparent;
-    border-radius: var(--radius-m); padding: 7px 9px; cursor: pointer; color: var(--text); display: flex; flex-direction: column; gap: 4px;
+    border-radius: var(--radius-m); padding: 6px 8px; cursor: pointer; color: var(--text); display: flex; flex-direction: column; gap: 4px;
   }
   .lr-item:hover { background: var(--hover); }
   .lr-item.active { border-color: color-mix(in srgb, var(--accent) 28%, transparent); background: var(--accent-soft); }
@@ -615,7 +615,7 @@
   .lr-field { display: flex; flex-direction: column; gap: 6px; border: none; margin: 0; padding: 0; }
   .lr-field > span { font-size: var(--fs-s); font-weight: 500; color: var(--text-dim); }
   .lr-skills-failed { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--warning); }
-  .lr-radio, .lr-check { display: flex; align-items: center; gap: 7px; font-size: var(--fs-s); }
+  .lr-radio, .lr-check { display: flex; align-items: center; gap: 6px; font-size: var(--fs-s); }
   .lr-textarea { resize: vertical; }
   .lr-instructions {
     margin: 0; font-size: var(--fs-s); color: var(--text-dim); line-height: 1.5;
@@ -651,11 +651,11 @@
   .verdict-block .lr-verdict-badge { background: var(--danger-soft); color: var(--danger); }
   .lr-avg { font-size: var(--fs-xs); color: var(--text-dim); }
   .lr-score { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
-  .lr-score td { padding: 3px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .lr-score td { padding: 2px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
   .lr-area { font-weight: 600; white-space: nowrap; }
   .lr-num { text-align: end; white-space: nowrap; color: var(--text-dim); }
   .lr-notes { color: var(--text-dim); }
-  .lr-findings { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+  .lr-findings { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .lr-agents-sec h4, .lr-summary h5 { margin: 8px 0 4px; }
   .lr-plan { margin-block: 4px 8px; margin-inline: 18px 0; font-size: var(--fs-s); line-height: 1.5; }
 

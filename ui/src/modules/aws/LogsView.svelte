@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // CloudWatch Logs: log groups (server-side prefix search, paged) on the left;
   // on the right either the Events view — stream picker, time-range presets,
@@ -615,7 +616,7 @@
     {:else}
       <div class="ins">
         <div class="bar">
-          <span class="lbl">{insightGroups.length ? `${insightGroups.length} group${insightGroups.length === 1 ? '' : 's'}` : 'Tick log groups on the left'}</span>
+          <span class="lbl">{insightGroups.length ? `${plural(insightGroups.length, 'group')}` : 'Tick log groups on the left'}</span>
           <div class="seg" role="group" aria-label="Time range">
             {#each RANGES as r (r.id)}
               <button class:on={rangeId === r.id} aria-pressed={rangeId === r.id} onclick={() => (rangeId = r.id)}>{r.label}</button>
@@ -726,7 +727,7 @@
     color: var(--text-dim);
     font: inherit;
     font-size: var(--fs-s);
-    padding: 3px 8px;
+    padding: 2px 8px;
     cursor: pointer;
   }
   .seg button + button {
@@ -764,7 +765,7 @@
     color: var(--text);
     font: inherit;
     text-align: start;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-radius: var(--radius-m);
     cursor: pointer;
   }
@@ -858,7 +859,7 @@
     text-transform: uppercase;
     letter-spacing: .06em;
     color: var(--text-dim);
-    padding: 5px 10px;
+    padding: 4px 10px;
     border-bottom: 1px solid var(--border);
   }
   .tbl th.ts {
@@ -882,7 +883,7 @@
     cursor: pointer;
   }
   .trow:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .trow:focus-visible {
     background: var(--surface-2);
@@ -978,10 +979,10 @@
     cursor: pointer;
   }
   .chip-l {
-    padding-block: 2px; padding-inline: 9px 4px;
+    padding-block: 2px; padding-inline: 8px 4px;
   }
   .chip-x {
-    padding-block: 2px; padding-inline: 3px 7px;
+    padding-block: 2px; padding-inline: 2px 6px;
     color: var(--text-dim);
   }
   .ins-res {

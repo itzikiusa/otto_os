@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Canvas Studio entry. Left: scene list. Right: an infinite Mermaid board that
   // renders the scene's agent-edited `.mermaid` source (full rich diagrams), or a
   // hero to start a new canvas. You never write Mermaid — you describe what you
@@ -162,7 +163,7 @@
       const created = await canvas.create('Untitled canvas', blankDoc(format));
       await canvas.open(created.id);
     } catch (e) {
-      toasts.error('Couldn’t create canvas', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create canvas', e);
     }
   }
 </script>

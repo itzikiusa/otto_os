@@ -122,7 +122,7 @@
     color: var(--success);
   }
   .chip.accent {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .chip.done {

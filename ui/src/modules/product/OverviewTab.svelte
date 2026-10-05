@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // Overview tab — shows the selected story's detail: title, source link, stage
   // badge, issue_type, a version dropdown (with body_md rendering), Refresh
@@ -479,7 +480,7 @@
       );
       transitionsLoaded = true;
     } catch (e) {
-      toasts.error('Couldn’t load transitions', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t load transitions', e);
     } finally {
       transitionsLoading = false;
     }
@@ -570,7 +571,7 @@
       );
       assignablesLoaded = true;
     } catch (e) {
-      toasts.error('Couldn’t load assignable users', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t load assignable users', e);
     } finally {
       assignablesLoading = false;
     }
@@ -615,7 +616,7 @@
         `/issue/${story.account_id}/${story.source_key}/editmeta`,
       );
     } catch (e) {
-      toasts.error('Couldn’t load editable fields', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t load editable fields', e);
       editmeta = []; // loaded-but-empty: every field stays read-only
     } finally {
       editmetaLoading = false;
@@ -764,7 +765,7 @@
       fieldDraft = null;
       toasts.info('Field updated');
     } catch (e) {
-      toasts.error('Couldn’t update field', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update field', e);
     } finally {
       fieldSaving = false;
     }
@@ -804,7 +805,7 @@
       titleDraft = '';
       toasts.info('Title updated');
     } catch (e) {
-      toasts.error('Couldn’t update title', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update title', e);
     } finally {
       titleSaving = false;
     }
@@ -845,7 +846,7 @@
       descDraft = '';
       toasts.info('Description updated');
     } catch (e) {
-      toasts.error('Couldn’t update description', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update description', e);
     } finally {
       descSaving = false;
     }
@@ -1073,7 +1074,7 @@
       toasts.success('Comment posted');
       await loadIssueFull();
     } catch (e) {
-      toasts.error('Couldn’t post comment', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t post comment', e);
     } finally {
       postingComment = false;
     }
@@ -1270,11 +1271,11 @@
 
       <!-- counts row -->
       <div class="counts-row">
-        <span class="count-chip" title="Versions"><Icon name="archive" size={11} />{detail.counts.versions} version{detail.counts.versions !== 1 ? 's' : ''}</span>
+        <span class="count-chip" title="Versions"><Icon name="archive" size={11} />{plural(detail.counts.versions, 'version')}</span>
         <span class="count-chip" title="Analyses"><Icon name="gauge" size={11} />{detail.counts.analyses} analys{detail.counts.analyses !== 1 ? 'es' : 'is'}</span>
         <span class="count-chip" title="Open questions"><Icon name="comment" size={11} />{detail.counts.open_questions} open question{detail.counts.open_questions !== 1 ? 's' : ''}</span>
-        <span class="count-chip" title="Notes"><Icon name="note" size={11} />{detail.counts.notes} note{detail.counts.notes !== 1 ? 's' : ''}</span>
-        <span class="count-chip" title="Test cases"><Icon name="check" size={11} />{detail.counts.testcases} test{detail.counts.testcases !== 1 ? 's' : ''}</span>
+        <span class="count-chip" title="Notes"><Icon name="note" size={11} />{plural(detail.counts.notes, 'note')}</span>
+        <span class="count-chip" title="Test cases"><Icon name="check" size={11} />{plural(detail.counts.testcases, 'test')}</span>
       </div>
 
       <!-- tags row -->
@@ -2183,18 +2184,18 @@
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 5px;
+    gap: 4px;
     margin-top: 8px;
   }
   .tag-chip {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
-    padding-block: 2px; padding-inline: 9px 8px;
+    gap: 2px;
+    padding-block: 2px; padding-inline: 8px 8px;
     border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 500;
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   }
@@ -2223,7 +2224,7 @@
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    padding: 2px 9px;
+    padding: 2px 8px;
     width: 72px;
     outline: none;
     transition: border-color var(--dur-fast), width var(--dur-fast);
@@ -2267,7 +2268,7 @@
     background: transparent;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 5px 10px;
+    padding: 4px 10px;
     cursor: pointer;
     text-align: start;
     font-size: var(--fs-s);
@@ -2292,7 +2293,7 @@
     font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
   }
@@ -2307,7 +2308,7 @@
   .ov-stage-btn {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     padding-block: 0; padding-inline: 0 4px;
     border: none;
     border-radius: 999px;
@@ -2612,12 +2613,12 @@
   .user-row {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
   }
   .user-row-sm {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
   }
   .avatar {
@@ -2638,7 +2639,7 @@
     width: 24px;
     height: 24px;
     border-radius: 50%;
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -2662,8 +2663,8 @@
     height: 24px;
     display: inline-flex;
     align-items: center;
-    gap: 3px;
-    padding: 0 9px;
+    gap: 2px;
+    padding: 0 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
@@ -2718,7 +2719,7 @@
   }
   .label-chip {
     font-size: var(--fs-xs);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text-dim);
@@ -2792,7 +2793,7 @@
   .field-multiselect {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     max-height: 160px;
     overflow-y: auto;
     padding: 4px;
@@ -2922,9 +2923,9 @@
   }
   .status-sm {
     font-size: var(--fs-xs);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .mono-sm {
@@ -3041,7 +3042,7 @@
     display: inline-block;
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 2px 9px;
+    padding: 2px 8px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--warning) 15%, transparent);
     color: var(--warning);
@@ -3158,7 +3159,7 @@
     transition: background var(--dur-fast), color var(--dur-fast);
   }
   .att-load-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border-color: var(--accent);
   }

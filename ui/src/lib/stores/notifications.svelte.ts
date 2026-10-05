@@ -19,6 +19,7 @@ import { ws } from './workspace.svelte';
 import { router } from '../router.svelte';
 import { parseNoticeRoute } from '../noticeRoute';
 import { isEmbedded } from '../desktop';
+import { toastError } from '../toastError';
 
 /** Most ids one bulk read / dismiss call may carry (daemon `BULK_MAX`). */
 const BULK_MAX = 500;
@@ -444,7 +445,7 @@ class NotificationStore {
     } catch (e) {
       // Revert AND say so — a silent revert looks like the toggle "didn't take".
       this.settings = prev;
-      toasts.error('Couldn’t save notification settings', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save notification settings', e);
     }
   }
 
@@ -528,7 +529,7 @@ class NotificationStore {
           break;
       }
     } catch (e) {
-      toasts.error('Couldn’t open it', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t open it', e);
     }
   }
 

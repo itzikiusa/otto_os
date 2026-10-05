@@ -169,7 +169,7 @@
     align-items: center;
     gap: 4px;
     height: 22px;
-    padding: 0 9px;
+    padding: 0 8px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -190,7 +190,7 @@
   }
   .mfb-chip {
     height: 18px;
-    padding: 0 7px;
+    padding: 0 6px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: transparent;

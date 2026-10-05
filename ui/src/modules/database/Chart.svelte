@@ -259,7 +259,7 @@
   .num-value {
     font-size: 34px;
     font-weight: 600;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.01em;
     color: var(--text);
     font-variant-numeric: tabular-nums;
     line-height: 1;

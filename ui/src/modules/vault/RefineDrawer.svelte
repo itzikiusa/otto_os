@@ -169,7 +169,7 @@
       toasts.success('Refine undone', 'The note is back to what it was before the agent’s edit.');
       if (!vault.editing && vault.notePath === path) void vault.open(path);
     } catch (e) {
-      toasts.error('Couldn’t undo the refine', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t undo the refine', e);
     } finally {
       undoing = false;
     }

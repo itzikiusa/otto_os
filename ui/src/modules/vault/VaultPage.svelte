@@ -566,12 +566,12 @@
   .vault-pick {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text);
     border-radius: var(--radius-m);
-    padding: 5px 10px;
+    padding: 4px 10px;
     font-size: var(--fs-s);
     cursor: pointer;
     max-width: 260px;
@@ -593,7 +593,7 @@
   .okf-chip {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.4px;
+    letter-spacing: .06em;
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -621,13 +621,13 @@
   .run-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--accent-text);
     background: var(--accent-soft);
     border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
     border-radius: 999px;
-    padding: 2px 9px;
+    padding: 2px 8px;
     cursor: pointer;
     white-space: nowrap;
     animation: otto-pulse 1.4s ease-in-out infinite;

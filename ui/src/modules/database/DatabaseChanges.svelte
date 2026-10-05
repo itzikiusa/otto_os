@@ -312,7 +312,7 @@
     text-align: start;
     margin-bottom: 6px;
     overflow-wrap: anywhere;
-    padding: 7px 10px;
+    padding: 6px 10px;
     cursor: pointer;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -343,7 +343,7 @@
   label {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     margin: 10px 0;
     font-size: var(--fs-s);
   }
@@ -381,7 +381,7 @@
   }
   .badge {
     font-size: var(--fs-xs);
-    padding: 3px 7px;
+    padding: 2px 6px;
     background: var(--hover);
     border: 1px solid var(--border);
     border-radius: var(--radius-l);

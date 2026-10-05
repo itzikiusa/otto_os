@@ -620,7 +620,7 @@
     gap: 8px;
     width: 100%;
     min-height: 40px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 1px solid transparent;
     border-radius: var(--radius-m);
     background: transparent;
@@ -701,7 +701,7 @@
   .legend > span {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .partial {
     display: flex;

@@ -732,7 +732,7 @@
   .tree-error-head {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     color: var(--danger);
     font-weight: 600;
   }
@@ -761,7 +761,7 @@
   }
   .node:focus-visible {
     outline: none;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
   }
   /* Active database = bold, like Workbench's default schema. */
@@ -816,7 +816,7 @@
   .node-label {
     display: flex;
     align-items: baseline;
-    gap: 7px;
+    gap: 6px;
     min-width: 0;
     flex: 1;
     border: none;
@@ -881,7 +881,7 @@
   .node-failed {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--danger);
     padding-top: 2px;
@@ -983,7 +983,7 @@
     color: var(--text);
   }
   .hit:hover {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .hit-name {
     flex: 1;
@@ -1006,7 +1006,7 @@
   .tree-search {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     padding: 4px 6px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
     color: var(--text-dim);

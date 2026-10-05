@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../lib/plural';
   // Notification center bell: unread badge + an anchored popover of notices.
   //
   // It lives in the Navigator header / collapsed Rail (`side`: the panel opens
@@ -275,7 +276,7 @@
     close();
     const n = notifications.notices.length;
     const ok = await confirmer.ask(
-      `Delete all ${n} notification${n === 1 ? '' : 's'}? This can't be undone.`,
+      `Delete all ${plural(n, 'notification')}? This can't be undone.`,
       { title: 'Clear all notifications', confirmLabel: 'Clear all' },
     );
     if (ok) await notifications.clear();
@@ -507,7 +508,7 @@
     min-width: 16px;
     height: 16px;
     padding: 0 4px;
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     background: var(--accent-solid);
     color: var(--accent-contrast);
     font-size: var(--fs-xs);
@@ -629,7 +630,7 @@
   }
 
   .nb-section {
-    padding: 8px 14px 3px;
+    padding: 8px 14px 2px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
@@ -648,7 +649,7 @@
     min-height: 48px;
     padding-block: 8px;
     /* The trailing gutter holds the dismiss button. */
-    padding-inline: 4px 30px;
+    padding-inline: 4px 28px;
     border: none;
     border-radius: inherit;
     background: transparent;
@@ -722,7 +723,7 @@
   }
   .nb-count {
     flex-shrink: 0;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
@@ -757,7 +758,7 @@
     align-items: center;
     gap: 4px;
     margin: -4px 0 6px;
-    margin-inline-start: 41px;
+    margin-inline-start: 40px;
     padding: 1px 4px;
     border: none;
     border-radius: var(--radius-s);
@@ -772,7 +773,7 @@
   .nb-detail {
     position: relative;
     margin: 0 8px 8px;
-    margin-inline-start: 41px;
+    margin-inline-start: 40px;
   }
   .nb-detail pre {
     margin: 0;

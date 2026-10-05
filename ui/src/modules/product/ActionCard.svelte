@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // ActionCard — renders ONE agent-proposed DiscoveryAction as a trustworthy
   // card with an explicit Apply button. Nothing is applied until the PO clicks;
   // every apply is reversible (sticky "✓ … · Undo" row) and toasted.
@@ -127,7 +128,7 @@
       createdQuestionIds = result.created_question_ids;
       await product.loadQuestions();
       applied = true;
-      appliedLabel = `Added ${picked.length} question${picked.length === 1 ? '' : 's'}`;
+      appliedLabel = `Added ${plural(picked.length, 'question')}`;
       toasts.success(appliedLabel);
     } catch (e) {
       toasts.error('Couldn’t add questions', product.errMsg(e));
@@ -149,7 +150,7 @@
       createdNoteIds = result.created_note_ids;
       await product.loadNotes();
       applied = true;
-      appliedLabel = `Added ${picked.length} note${picked.length === 1 ? '' : 's'}`;
+      appliedLabel = `Added ${plural(picked.length, 'note')}`;
       toasts.success(appliedLabel);
     } catch (e) {
       toasts.error('Couldn’t add notes', product.errMsg(e));
@@ -310,7 +311,7 @@
         >
           {applying
             ? 'Adding…'
-            : `Add ${checkedCount} question${checkedCount === 1 ? '' : 's'}`}
+            : `Add ${plural(checkedCount, 'question')}`}
         </button>
       </div>
     {:else if action.type === 'add_notes'}
@@ -383,7 +384,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border-bottom: 1px solid var(--border);
   }
   /* The proposal's kind: a neutral micro-label at the 11px floor. */
@@ -457,7 +458,7 @@
   .item-label {
     display: flex;
     align-items: flex-start;
-    gap: 7px;
+    gap: 6px;
     padding: 4px 6px;
     cursor: pointer;
   }
@@ -493,7 +494,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .06em;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     color: var(--text-dim);
@@ -536,7 +537,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 7px 11px;
+    padding: 6px 10px;
     background: var(--success-soft);
     border-color: color-mix(in srgb, var(--success) 35%, transparent);
   }

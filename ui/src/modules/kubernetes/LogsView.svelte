@@ -440,7 +440,7 @@
   .live {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     color: var(--success);
   }
   .live-dot {

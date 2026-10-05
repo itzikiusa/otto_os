@@ -243,13 +243,13 @@
   .bubble {
     max-width: 76%;
     border-radius: var(--radius-s);
-    padding: 8px 11px;
+    padding: 8px 10px;
     display: flex;
     flex-direction: column;
     gap: 4px;
   }
   .bubble-user {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-bottom-right-radius: 3px;
   }
@@ -323,7 +323,7 @@
     padding: 2px 8px;
     border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -332,7 +332,7 @@
     white-space: nowrap;
   }
   .story-updated-chip:hover {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
   }
 
   /* ── Input area ─────────────────────────────────────────────────────────── */
@@ -355,14 +355,14 @@
     color: var(--text-dim);
   }
   .rc-provider select {
-    padding: 3px 6px;
+    padding: 2px 6px;
   }
 
   .msg-input {
     flex: 1;
     min-width: 0;
     resize: none;
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);

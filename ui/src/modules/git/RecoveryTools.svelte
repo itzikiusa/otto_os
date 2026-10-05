@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { onMount, onDestroy } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { GitRecoveryEntry, GitInteractivePlan, GitBisectState, RepoStatusResp, MergeResult } from '../../lib/api/types';
@@ -79,7 +80,7 @@
   async function startRebase(): Promise<void> {
     if (!plan) return;
     const snapshot = $state.snapshot(plan);
-    const yes = await confirmer.ask(`Replay ${snapshot.commits.length} commit${snapshot.commits.length === 1 ? '' : 's'} in the displayed order onto ${snapshot.onto_sha.slice(0, 10)}? This rewrites local history.`, {
+    const yes = await confirmer.ask(`Replay ${plural(snapshot.commits.length, 'commit')} in the displayed order onto ${snapshot.onto_sha.slice(0, 10)}? This rewrites local history.`, {
       title: 'Start interactive rebase', confirmLabel: 'Start rebase', danger: true,
     });
     if (!yes || !alive) return;
@@ -155,7 +156,7 @@
         <div class="actions"><label>Onto revision <input bind:value={onto} oninput={() => { plan = null; }} placeholder="main or a commit SHA" disabled={busy} /></label>
           <button class="btn" disabled={busy || !onto.trim()} onclick={preview}>Preview plan</button></div>
         {#if plan}
-          <p>{plan.commits.length} commit{plan.commits.length === 1 ? '' : 's'} · current {plan.head_sha.slice(0, 10)} → onto {plan.onto_sha.slice(0, 10)}</p>
+          <p>{plural(plan.commits.length, 'commit')} · current {plan.head_sha.slice(0, 10)} → onto {plan.onto_sha.slice(0, 10)}</p>
           <div class="scroll">
             {#each plan.commits as commit, index (commit.sha)}
               <div class="entry">
@@ -178,7 +179,7 @@
         <p>{bisect.finished ? 'First bad commit found' : 'Test the current candidate, then mark the result.'}</p>
         <div class="entry"><div><code>{bisect.first_bad ?? bisect.current_sha}</code><p>{bisect.current_subject}</p></div>
           <button class="btn" onclick={() => inspect(bisect!.first_bad ?? bisect!.current_sha)}>Inspect in graph</button></div>
-        {#if bisect.remaining !== null && !bisect.finished}<p>{bisect.remaining} commit{bisect.remaining === 1 ? '' : 's'} remain{bisect.remaining === 1 ? 's' : ''} in the range.</p>{/if}
+        {#if bisect.remaining !== null && !bisect.finished}<p>{plural(bisect.remaining, 'commit')} remain{bisect.remaining === 1 ? 's' : ''} in the range.</p>{/if}
         <div class="actions">
           {#if !bisect.finished}
             <button class="btn primary" disabled={busy} onclick={() => bisectAction('good')}>Works (good)</button>
@@ -203,8 +204,8 @@
   nav, .actions { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
   nav { align-items: center; justify-content: space-between; }
   p { margin: 4px 0; overflow-wrap: anywhere; }
-  label { display: flex; flex-direction: column; gap: 5px; flex: 1; }
-  input, select { padding: 7px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; min-width: 0; }
+  label { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+  input, select { padding: 6px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-s); min-width: 0; }
   .scroll { max-height: 45vh; overflow: auto; }
   .entry { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--border); }
   .entry > div { flex: 1; min-width: 0; }

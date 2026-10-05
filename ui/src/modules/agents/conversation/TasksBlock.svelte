@@ -98,7 +98,7 @@
     border-inline-start: 1px solid var(--border);
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   li {
     display: flex;

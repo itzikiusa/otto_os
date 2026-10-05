@@ -150,7 +150,7 @@
   }
   .sn-chip {
     font-size: var(--fs-xs);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: none;

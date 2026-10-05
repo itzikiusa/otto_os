@@ -155,7 +155,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     min-width: 0;
   }
   .changes li + li,

@@ -325,7 +325,7 @@
     if (n === 0) return true;
     return confirmer.ask(
       `${n} un-applied change${n === 1 ? '' : 's'} in the results ${n === 1 ? 'is' : 'are'} not saved to the database and will be lost.`,
-      { title: `Discard ${n} change${n === 1 ? '' : 's'}?`, confirmLabel: 'Discard', danger: true },
+      { title: `Discard ${plural(n, 'change')}?`, confirmLabel: 'Discard', danger: true },
     );
   }
   async function closeTabAt(i: number): Promise<void> {
@@ -1569,7 +1569,7 @@
   .qe-tabs {
     display: flex;
     align-items: stretch;
-    gap: 3px;
+    gap: 2px;
     margin-bottom: 8px;
     overflow-x: auto;
     scrollbar-width: thin;
@@ -1582,7 +1582,7 @@
     gap: 6px;
     height: 26px;
     max-width: 220px;
-    padding-block: 0; padding-inline: 11px 4px;
+    padding-block: 0; padding-inline: 10px 4px;
     border: 1px solid transparent;
     border-bottom: none;
     border-top-left-radius: var(--radius-s);
@@ -1632,7 +1632,7 @@
   .qe-tab-agent {
     display: inline-flex;
     align-items: center;
-    padding: 1px 3px;
+    padding: 1px 2px;
     border-radius: var(--radius-s);
     background: var(--accent-soft);
     color: var(--accent-text);
@@ -1688,7 +1688,7 @@
     flex: 0 0 auto;
   }
   .qe-tab-new:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     border-color: var(--border);
     color: var(--accent-text);
   }
@@ -1750,7 +1750,7 @@
     flex-wrap: wrap;
     gap: 8px;
     margin-bottom: 8px;
-    padding: 5px 10px;
+    padding: 4px 10px;
     font-size: var(--fs-s);
     color: var(--text);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
@@ -1799,7 +1799,7 @@
   .qe-var {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     background: var(--surface-2);
     border-radius: var(--radius-s);
     padding: 2px 6px;
@@ -1825,7 +1825,7 @@
   .qe-var-esc {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
@@ -1837,7 +1837,7 @@
   .btn.small.ghost.on {
     color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   /* ⌨ shortcuts popover */
   .qe-kbd {
@@ -1862,7 +1862,7 @@
     box-shadow: var(--shadow);
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .qe-kbd-title {
     font-size: var(--fs-xs);
@@ -1922,7 +1922,7 @@
   .qe-timeout {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -1952,7 +1952,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     height: 24px;
-    padding: 0 7px;
+    padding: 0 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     cursor: pointer;
@@ -1970,7 +1970,7 @@
   }
   .qe-masked-badge {
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
   }
   .sr-only {
     position: absolute;

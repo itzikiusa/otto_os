@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Shared diff renderer (Changes / commit / PR views): unified or
   // side-by-side, per-file collapse, syntax highlight, and (PR mode) inline
   // comment threads + line-gutter composer, file-navigator sidebar, search.
@@ -909,7 +910,7 @@
   /** "Stage hunk" → "Stage 4 lines" once lines inside THIS hunk are picked. */
   function selLabel(verb: string, path: string, hi: number): string {
     const n = sel !== null && sel.path === path && sel.hunk === hi ? sel.lines.size : 0;
-    return n > 0 ? `${verb} ${n} line${n === 1 ? '' : 's'}` : `${verb} hunk`;
+    return n > 0 ? `${verb} ${plural(n, 'line')}` : `${verb} hunk`;
   }
 
   async function applyHunk(file: FileDiff, hi: number, hunk: Hunk, op: HunkOp): Promise<void> {
@@ -1148,7 +1149,7 @@
           <span class="del">−{stats.del}</span>
         </span>
         {#if cCount > 0}
-          <span class="nav-comment-badge" title="{cCount} comment{cCount === 1 ? '' : 's'}">
+          <span class="nav-comment-badge" title="{plural(cCount, 'comment')}">
             💬{cCount}
           </span>
         {/if}
@@ -1204,7 +1205,7 @@
       <div class="nav-header">
         {#if !navCollapsed}
           <span class="nav-title">
-            {totalFiles} file{totalFiles === 1 ? '' : 's'}
+            {plural(totalFiles, 'file')}
             <span class="nav-viewed-count">· {viewedCount}/{totalFiles} viewed</span>
           </span>
         {/if}
@@ -1324,7 +1325,7 @@
             </span>
             <span class="grow"></span>
             {#if prMode && cCount > 0}
-              <span class="file-comment-badge" data-find-skip title="{cCount} comment{cCount === 1 ? '' : 's'}">
+              <span class="file-comment-badge" data-find-skip title="{plural(cCount, 'comment')}">
                 💬 {cCount}
               </span>
             {/if}
@@ -1450,9 +1451,9 @@
     <div class="diff-toolbar">
       <span class="diff-stats">
         {#if search}
-          <span>{matchCount} / {diff.files.length} file{diff.files.length === 1 ? '' : 's'}</span>
+          <span>{matchCount} / {plural(diff.files.length, 'file')}</span>
         {:else}
-          {diff.files.length} file{diff.files.length === 1 ? '' : 's'}
+          {plural(diff.files.length, 'file')}
         {/if}
         <span class="add">+{totals.add}</span>
         <span class="del">−{totals.del}</span>
@@ -1601,7 +1602,7 @@
     flex-shrink: 0;
   }
   .nav-collapse-btn:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .nav-search-wrap {
@@ -1643,7 +1644,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 3px 8px;
+    padding: 2px 8px;
     inline-size: 100%;
     border: 0;
     background: transparent;
@@ -1657,7 +1658,7 @@
     white-space: nowrap;
   }
   .nav-dir-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .nav-dir-chevron {
@@ -1689,7 +1690,7 @@
   .nav-file {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     padding: 4px 8px;
     padding-inline-start: 6px;
     cursor: pointer;
@@ -1700,7 +1701,7 @@
     min-width: 0;
   }
   .nav-file:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .nav-file.nav-file-viewed {
     opacity: 0.45;
@@ -1711,7 +1712,7 @@
     min-width: 0;
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     block-size: 100%;
     padding: 0;
     border: 0;
@@ -1874,7 +1875,7 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 7px 12px;
+    padding: 6px 12px;
     border: none;
     background: var(--surface-2);
     cursor: pointer;
@@ -1965,7 +1966,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 3px 12px;
+    padding: 2px 12px;
     font-size: var(--fs-xs);
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 7%, var(--surface));
@@ -2008,14 +2009,14 @@
   }
   .gut.commentable:hover,
   .gut.selectable:hover {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   /* Small ghost actions in the sticky hunk header — accent, never louder than
      the code they sit above. */
   .hunk-btn {
     flex-shrink: 0;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-radius: var(--radius-s);
     background: none;
@@ -2025,7 +2026,7 @@
     white-space: nowrap;
   }
   .hunk-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .hunk-btn:disabled {
     opacity: 0.5;
@@ -2148,7 +2149,7 @@
     .diff-stats { font-size: var(--fs-m); }
     .add, .del { font-size: var(--fs-m); }
     .toolbar-search { font-size: var(--fs-m); height: 32px; width: 100%; }
-    .dfile-head { font-size: var(--fs-m); padding: 9px 12px; min-height: 40px; }
+    .dfile-head { font-size: var(--fs-m); padding: 8px 12px; min-height: 40px; }
     .dfile-path { font-size: var(--fs-m); }
     .hunk-header { font-size: var(--fs-s); padding: 4px 12px; }
     /* The fixed gutter+sign grid columns keep the code column from being
@@ -2159,7 +2160,7 @@
       font-size: var(--fs-xs);
       width: 30px;
       min-width: 30px;
-      padding-block: 0; padding-inline: 3px 5px;
+      padding-block: 0; padding-inline: 2px 4px;
     }
     .sign { width: 13px; }
     /* Wrap code so long lines don't push the page wider than the screen.
@@ -2222,7 +2223,7 @@
   /* Hunk line cap: "Show N more lines" affordance */
   .hunk-cap-cell {
     text-align: center;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-top: 1px dashed var(--border);
   }
   .hunk-cap-btn {

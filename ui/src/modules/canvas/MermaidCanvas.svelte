@@ -572,8 +572,8 @@
     align-items: center;
     gap: 6px;
     max-width: 80%;
-    padding: 7px 12px;
-    border-radius: 8px;
+    padding: 6px 12px;
+    border-radius: var(--radius-m);
     background: color-mix(in srgb, var(--danger) 16%, var(--surface));
     border: 1px solid var(--danger);
     color: var(--text);
@@ -591,8 +591,8 @@
   .mode-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 4px 9px;
+    gap: 4px;
+    padding: 4px 8px;
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
@@ -604,7 +604,7 @@
   .code-toggle {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     padding: 4px 10px;
     border-radius: 999px;
     background: var(--surface);

@@ -358,7 +358,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
@@ -436,13 +436,13 @@
   .output-toggle {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     border: none;
     background: transparent;
     color: var(--text);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     cursor: pointer;
     padding: 2px 0;
   }
@@ -470,7 +470,7 @@
   }
   .nav-btn:hover {
     color: var(--text);
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .output-body {
     flex: 1;
@@ -515,8 +515,8 @@
     color: var(--warning);
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 3px 8px;
-    margin: 3px 0;
+    padding: 2px 8px;
+    margin: 2px 0;
     cursor: pointer;
     text-align: start;
   }

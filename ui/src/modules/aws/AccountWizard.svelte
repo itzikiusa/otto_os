@@ -431,7 +431,7 @@
   }
   .modes button.on {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .hint {
     margin: 0;
@@ -474,7 +474,7 @@
   }
   .prof:hover,
   .prof.on {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .pname {
     font-weight: 600;

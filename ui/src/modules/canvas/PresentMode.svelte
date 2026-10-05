@@ -484,7 +484,7 @@
   }
   .ctl:hover,
   .ctl.on {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--accent-text);
   }
   .counter {

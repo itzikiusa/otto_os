@@ -254,7 +254,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    padding: 4px 9px;
+    padding: 4px 8px;
     font-size: var(--fs-s);
     cursor: pointer;
   }
@@ -309,7 +309,7 @@
     grid-template-columns: 170px minmax(110px, 1fr) minmax(140px, 1.4fr) 130px 70px 40px 80px 80px;
     align-items: center;
     gap: 8px;
-    padding: 7px 14px;
+    padding: 6px 14px;
   }
   .thead {
     position: sticky;
@@ -358,7 +358,7 @@
     font-family: var(--font-mono);
   }
   .dry {
-    margin-inline-start: 5px;
+    margin-inline-start: 4px;
     flex: none;
     font-size: var(--fs-xs);
     text-transform: uppercase;

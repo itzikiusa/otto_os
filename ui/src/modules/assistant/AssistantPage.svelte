@@ -245,7 +245,7 @@
   .prov {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 20px;
     padding: 0 8px;
     border-radius: 999px;

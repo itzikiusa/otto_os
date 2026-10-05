@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Insights view — two tabs:
   //   • Reports: list/detail. Left = a timeline of generated reports (period
   //     chips, date, the one-line headline, KPI deltas, action-item status);
@@ -694,7 +695,7 @@
                     {/if}
                     {#if acts.total > 0}
                       <div class="row-actions">
-                        <span class="dim">{acts.total} action{acts.total === 1 ? '' : 's'}</span>
+                        <span class="dim">{plural(acts.total, 'action')}</span>
                         {#if acts.regressed}<span class="tag warning"><span class="dot"></span>{acts.regressed} regressed</span>{/if}
                         {#if acts.improved}<span class="tag success"><span class="dot"></span>{acts.improved} improved</span>{/if}
                         {#if acts.fresh}<span class="tag info"><span class="dot"></span>{acts.fresh} new</span>{/if}
@@ -823,9 +824,9 @@
   .filter-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 22px;
-    padding: 0 9px;
+    padding: 0 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: transparent;
@@ -864,8 +865,8 @@
     flex-direction: column;
     align-items: stretch;
     width: 100%;
-    gap: 5px;
-    padding: 9px 10px;
+    gap: 4px;
+    padding: 8px 10px;
     border: 1px solid transparent;
     border-radius: var(--radius-m);
     background: transparent;

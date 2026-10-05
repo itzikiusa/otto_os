@@ -458,7 +458,7 @@
     flex-shrink: 0;
   }
   .tabbar.tauri-pad {
-    padding-inline-start: 78px;
+    padding-inline-start: 76px;
   }
   .tabs {
     display: flex;
@@ -469,7 +469,7 @@
     flex: 1;
     min-width: 0;
     height: 100%;
-    padding: 5px 0;
+    padding: 4px 0;
   }
   .tabs::-webkit-scrollbar {
     display: none;
@@ -511,7 +511,7 @@
     flex-shrink: 0;
   }
   .tab:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .tab.active {
     background: var(--surface);

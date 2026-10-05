@@ -298,7 +298,7 @@
     display: flex;
     flex-wrap: wrap;
     justify-content: center;
-    gap: 7px;
+    gap: 6px;
     padding: 4px 8px 2px;
   }
   /* On phone the chips become a single horizontal-scroll row. */
@@ -312,7 +312,7 @@
   }
   .starter-chip {
     flex-shrink: 0;
-    padding: 5px 11px;
+    padding: 4px 10px;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: var(--surface);
@@ -324,7 +324,7 @@
     transition: background var(--dur-fast), border-color var(--dur-fast);
   }
   .starter-chip:hover {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .see-hint {
@@ -349,13 +349,13 @@
   .bubble {
     max-width: 80%;
     border-radius: var(--radius-s);
-    padding: 8px 11px;
+    padding: 8px 10px;
     display: flex;
     flex-direction: column;
     gap: 4px;
   }
   .bubble-user {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-bottom-right-radius: 3px;
   }
@@ -444,13 +444,13 @@
     flex-basis: 100%;
   }
   .dc-provider select {
-    padding: 3px 6px;
+    padding: 2px 6px;
   }
   .msg-input {
     flex: 1;
     min-width: 0;
     resize: none;
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);

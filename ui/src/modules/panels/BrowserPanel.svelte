@@ -742,7 +742,7 @@
     transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .btab:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .btab.active {
     background: var(--surface);
@@ -808,14 +808,14 @@
     cursor: pointer;
   }
   .btab-new:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
 
   .toolbar {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     padding: 8px 8px;
     border-bottom: 1px solid var(--border);
     border-top: 1px solid var(--border);
@@ -849,7 +849,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 10px;
+    padding: 4px 10px;
     border-top: 1px solid var(--border);
     flex-shrink: 0;
   }
@@ -917,7 +917,7 @@
     width: 100%;
   }
   .quick-link:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 35%, transparent);
   }
   .ql-text {
@@ -964,7 +964,7 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     padding: 4px 6px;
     border-radius: var(--radius-s);
     border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
@@ -994,7 +994,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 5px 8px;
+    padding: 4px 8px;
     box-shadow: var(--glass-shadow);
   }
   .annot-count {

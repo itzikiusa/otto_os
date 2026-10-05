@@ -595,7 +595,7 @@
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    padding: 7px 8px;
+    padding: 6px 8px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
   .note:last-child {

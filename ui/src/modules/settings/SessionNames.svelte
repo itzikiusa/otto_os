@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -93,7 +94,7 @@
     const active = resp?.active === t.id;
     if (
       !(await confirmer.ask(
-        `Delete custom theme “${t.label}” and its ${t.capacity} name${t.capacity === 1 ? '' : 's'}?${active ? ' New sessions go back to numbered names.' : ''} Sessions already named from it keep their names.`,
+        `Delete custom theme “${t.label}” and its ${plural(t.capacity, 'name')}?${active ? ' New sessions go back to numbered names.' : ''} Sessions already named from it keep their names.`,
         { title: 'Delete theme?', confirmLabel: 'Delete theme' },
       ))
     )
@@ -158,7 +159,7 @@
           t.id,
           t.label,
           t.sample.join(' · ') || 'No names yet',
-          `${t.capacity} name${t.capacity === 1 ? '' : 's'} · then #2, #3…`,
+          `${plural(t.capacity, 'name')} · then #2, #3…`,
           true,
         )}
       {/each}
@@ -202,7 +203,7 @@
           placeholder={'Dad\nMom\nSister\nBrother'}
           bind:value={newNames}
         ></textarea>
-        <span class="hint">{newNameCount} name{newNameCount === 1 ? '' : 's'}</span>
+        <span class="hint">{plural(newNameCount, 'name')}</span>
       </div>
       <div class="form-actions">
         <button

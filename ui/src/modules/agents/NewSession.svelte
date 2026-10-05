@@ -666,7 +666,7 @@
   .seg {
     display: flex;
     gap: 4px;
-    padding: 3px;
+    padding: 2px;
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
@@ -814,7 +814,7 @@
     letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .provider-desc {
@@ -824,7 +824,7 @@
   .toggle-row {
     display: flex;
     align-items: flex-start;
-    gap: 9px;
+    gap: 8px;
     padding: 4px 0;
     cursor: pointer;
   }
@@ -853,7 +853,7 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);

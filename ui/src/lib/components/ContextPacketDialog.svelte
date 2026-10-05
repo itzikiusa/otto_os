@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../plural';
   // Shared "Send to agent" dialog — B2a.
   //
   // Workflow:
@@ -87,7 +88,7 @@
       const label = kindLabel(kind);
       toasts.success(
         total > 0
-          ? `${label} sent — ${total} secret${total === 1 ? '' : 's'} redacted`
+          ? `${label} sent — ${plural(total, 'secret')} redacted`
           : `${label} sent to agent`,
       );
       onclose();
@@ -205,7 +206,7 @@
     display: inline-block;
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 3px 8px;
+    padding: 2px 8px;
     border-radius: 999px;
     margin-bottom: 8px;
   }

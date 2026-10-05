@@ -253,7 +253,7 @@
   .da-title {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-m);
     font-weight: 600;
     white-space: nowrap;
@@ -264,14 +264,14 @@
     color: var(--text);
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
-    padding: 2px 5px;
+    padding: 2px 4px;
     cursor: pointer;
     text-transform: capitalize;
   }
   .da-working {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--accent-text);
     font-weight: 600;
@@ -337,7 +337,7 @@
     color: var(--text-dim);
     border-radius: 999px;
     font-size: var(--fs-s);
-    padding: 3px 11px;
+    padding: 2px 10px;
     cursor: pointer;
     text-transform: capitalize;
   }
@@ -347,7 +347,7 @@
   }
   .da-prov.on {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--text);
   }
   .da-ask {

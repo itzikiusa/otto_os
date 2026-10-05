@@ -275,7 +275,7 @@
   .var-editor {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     padding-block: 6px 10px; padding-inline: 22px 4px;
   }
   .var-row {

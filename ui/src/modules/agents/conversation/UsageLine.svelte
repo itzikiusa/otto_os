@@ -35,7 +35,7 @@
     display: inline-flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 3px 10px;
+    gap: 2px 10px;
     min-width: 0;
     font-size: var(--fs-xs);
     color: var(--text-dim);

@@ -159,7 +159,7 @@
   .kind {
     font-size: var(--fs-xs);
     font-weight: 500;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);

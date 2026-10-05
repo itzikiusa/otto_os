@@ -18,6 +18,7 @@
 </script>
 
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // The right-hand pane of Insights → Reports: one report, rendered.
   //
   //   header   — period chip · date · generated-at, the one-line headline, and
@@ -264,7 +265,7 @@
           <div class="r-section-head">
             <h3 id="ap-title" class="section-title">Action plan</h3>
             <span class="dim r-vs">
-              {parsed.actions.length} item{parsed.actions.length === 1 ? '' : 's'}{#if regressed > 0}{' · '}<span class="warn-text">{regressed} regressed</span>{/if}
+              {plural(parsed.actions.length, 'item')}{#if regressed > 0}{' · '}<span class="warn-text">{regressed} regressed</span>{/if}
             </span>
           </div>
           <ol class="actions" data-testid="action-plan">
@@ -630,7 +631,7 @@
     padding-inline-start: 22px;
   }
   .report-md :global(li) {
-    margin: 3px 0;
+    margin: 2px 0;
   }
   .report-md :global(table) {
     border-collapse: collapse;

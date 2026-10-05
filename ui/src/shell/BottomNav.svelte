@@ -244,7 +244,7 @@
     inset-inline-end: 4px;
     min-width: 15px;
     height: 15px;
-    padding: 0 3px;
+    padding: 0 2px;
     border-radius: 999px;
     /* Count-chip language (tint + semantic text), opaque over the bar —
        white on the bright working-green was ~2:1. */

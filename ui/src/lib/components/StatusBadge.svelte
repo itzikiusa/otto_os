@@ -37,7 +37,7 @@
   .sbadge {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
     font-weight: 500;
@@ -47,7 +47,7 @@
   }
   .sbadge.pill {
     height: 18px;
-    padding: 0 7px;
+    padding: 0 6px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);

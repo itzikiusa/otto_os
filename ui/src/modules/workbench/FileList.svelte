@@ -253,7 +253,7 @@
     background: transparent;
     color: var(--text);
     font-size: var(--fs-s);
-    padding-block: 5px;
+    padding-block: 4px;
     outline: none;
   }
   .wb-search:focus-within {
@@ -283,7 +283,7 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 0;
     border-radius: var(--radius-s);
     background: transparent;

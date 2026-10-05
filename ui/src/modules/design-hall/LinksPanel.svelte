@@ -365,7 +365,7 @@
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 10px;
     align-items: start;
-    padding: 9px 0;
+    padding: 8px 0;
   }
   .row + .row {
     border-block-start: 1px solid var(--border);
@@ -382,7 +382,7 @@
   .main {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     min-width: 0;
   }
   .t {

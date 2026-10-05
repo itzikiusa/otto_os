@@ -170,7 +170,7 @@
     color: var(--text);
   }
   .drawer-close:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   /* `side` is the reading-direction side: in RTL the Navigator drawer comes
      from the right (logical insets + a mirrored slide). */

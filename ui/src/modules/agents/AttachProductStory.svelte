@@ -140,7 +140,7 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     max-height: 340px;
     overflow-y: auto;
   }
@@ -153,13 +153,13 @@
     background: transparent;
     border: 1px solid transparent;
     border-radius: var(--radius-m);
-    padding: 7px 10px;
+    padding: 6px 10px;
     cursor: pointer;
     color: var(--text);
     font-size: var(--fs-m);
   }
   .story-row:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .story-row:disabled {

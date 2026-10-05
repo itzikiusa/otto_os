@@ -151,7 +151,7 @@
     align-items: center;
     gap: 4px;
     height: 22px;
-    padding-block: 0; padding-inline: 3px 6px;
+    padding-block: 0; padding-inline: 2px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);

@@ -443,7 +443,7 @@
   .s3d-hier-filter {
     flex: 1 1 auto;
     min-width: 0;
-    padding: 3px 6px;
+    padding: 2px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -461,7 +461,7 @@
     line-height: 1.5;
   }
   .s3d-section {
-    padding: 8px 8px 3px;
+    padding: 8px 8px 2px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
@@ -480,7 +480,7 @@
     outline: none;
   }
   .s3d-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .s3d-row:focus-visible {
     box-shadow: inset 0 0 0 1px var(--accent);
@@ -556,7 +556,7 @@
     flex-shrink: 0;
   }
   .s3d-icon-btn:hover:not(:disabled) {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .s3d-icon-btn:disabled {

@@ -208,6 +208,7 @@
 </script>
 
 <script lang="ts">
+  import { toastError } from '../toastError';
   // xterm.js terminal bound to WS /ws/term/{id} per docs/contracts/ws.md.
   // Binary frames → term.write; JSON control frames for status/exit/scrollback.
   import { untrack } from 'svelte';
@@ -761,7 +762,7 @@
       const frame = targetTransform ? targetTransform(input) : input;
       if (frame !== null) targetSocket.send(JSON.stringify(frame));
     } catch (e) {
-      toasts.error('Couldn’t paste image', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t paste image', e);
     }
   }
 
@@ -3143,7 +3144,7 @@
     display: flex;
     align-items: baseline;
     gap: 8px;
-    padding: 3px 8px;
+    padding: 2px 8px;
     cursor: pointer;
     color: var(--text);
   }
@@ -3199,7 +3200,7 @@
   }
   .badge {
     font-size: var(--fs-xs);
-    padding: 3px 8px;
+    padding: 2px 8px;
     border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);
@@ -3355,7 +3356,7 @@
     transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .tb-btn:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .tb-btn.tb-active {

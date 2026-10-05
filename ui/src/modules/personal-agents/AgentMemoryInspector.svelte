@@ -151,7 +151,7 @@
   .text { overflow-wrap: anywhere; }
   .item input {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: var(--radius-s); padding: 5px 8px; font: inherit;
+    border-radius: var(--radius-s); padding: 4px 8px; font: inherit;
   }
   .item input:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 1px; }
   .meta { color: var(--text-dim); font-size: var(--fs-s); }

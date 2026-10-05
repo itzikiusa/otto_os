@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../../lib/plural';
   import { loadErrorText } from '../../../lib/loadError';
   import { radioKey } from '../../../lib/radioKey';
   // Per-cluster Monitor view — the Monitor half of the cluster workspace
@@ -403,7 +404,7 @@
     if (e.kind === 'k8s_event') return (e.detail?.message as string | undefined) ?? '';
     if (e.kind === 'version') {
       const pods = e.detail?.next_restarts as number | undefined;
-      return `new version ${e.reason}${pods ? ` · ${pods} pod${pods === 1 ? '' : 's'} on it` : ''}`;
+      return `new version ${e.reason}${pods ? ` · ${plural(pods, 'pod')} on it` : ''}`;
     }
     if (e.kind === 'restart') {
       const p = e.detail?.prev_restarts as number | undefined;
@@ -668,7 +669,7 @@
   }
   .cluster-pick:hover {
     border-color: var(--border);
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .dot {
     width: 9px;
@@ -738,7 +739,7 @@
     color: var(--text);
   }
   .wl td {
-    padding: 7px 10px;
+    padding: 6px 10px;
     border-bottom: 1px solid var(--border);
     vertical-align: top;
   }
@@ -867,12 +868,12 @@
     grid-template-columns: 10px 150px 80px minmax(120px, 1fr) 2fr;
     gap: 8px;
     align-items: baseline;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-radius: var(--radius-s);
     font-size: var(--fs-s);
   }
   .timeline li:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .tdot {
     width: 8px;

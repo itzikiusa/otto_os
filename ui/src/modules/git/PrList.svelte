@@ -344,7 +344,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-top: 5px;
+    margin-top: 4px;
     font-size: var(--fs-xs);
   }
   /* source→target separator mirrors in place under RTL. */

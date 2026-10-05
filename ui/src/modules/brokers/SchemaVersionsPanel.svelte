@@ -232,7 +232,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 3px 0;
+    padding: 2px 0;
     font-size: var(--fs-m);
   }
   .vnum {

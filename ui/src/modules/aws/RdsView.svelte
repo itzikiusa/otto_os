@@ -349,11 +349,11 @@
     margin-inline-start: 6px;
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .tag.pl {
     margin: 0;

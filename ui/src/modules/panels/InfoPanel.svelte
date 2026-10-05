@@ -302,7 +302,7 @@
     background: var(--surface-2);
     color: var(--text);
     font-size: var(--fs-xs);
-    padding: 3px 6px;
+    padding: 2px 6px;
   }
   .ws-select:focus {
     outline: none;
@@ -376,7 +376,7 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .dir-row {
     display: flex;

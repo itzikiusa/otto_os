@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PathField from '../../lib/components/PathField.svelte';
   // Proof section: a two-pane viewer of proof packs. Left = status filter chips
   // + the pack list; right = the open pack's detail (badges, artifacts grouped
@@ -170,7 +171,7 @@
     const c = filterCounts;
     if (!c || !c.all) return '';
     const parts = STATUS_FILTERS.filter((f) => f !== 'all' && (c[f] ?? 0) > 0).map((f) => `${c[f]} ${f}`);
-    return `${c.all} pack${c.all === 1 ? '' : 's'}${parts.length ? ` · ${parts.join(' · ')}` : ''}. `;
+    return `${plural(c.all, 'pack')}${parts.length ? ` · ${parts.join(' · ')}` : ''}. `;
   });
 
   // Group the open pack's artifacts by kind for display.
@@ -655,7 +656,7 @@
     if (!detail) return;
     const t = detail.pack.title || 'this pack';
     const n = detail.artifacts.length;
-    if (!(await confirmer.ask(`Delete proof pack “${t}”? Its ${n} artifact${n === 1 ? '' : 's'} and snapshots are deleted too.`, { title: 'Delete proof pack' }))) {
+    if (!(await confirmer.ask(`Delete proof pack “${t}”? Its ${plural(n, 'artifact')} and snapshots are deleted too.`, { title: 'Delete proof pack' }))) {
       return;
     }
     try {
@@ -1307,7 +1308,7 @@
   .pack-item {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     padding: 8px 10px;
     border: 1px solid transparent;
     background: transparent;
@@ -1525,18 +1526,18 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
     cursor: pointer;
     text-align: start;
-    margin-bottom: 5px;
+    margin-bottom: 4px;
     font-size: var(--fs-s);
   }
   .child-link:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .icon-btn.small {
     width: 22px;

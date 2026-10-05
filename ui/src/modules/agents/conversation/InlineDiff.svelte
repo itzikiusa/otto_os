@@ -248,7 +248,7 @@
     color: var(--text-dim);
     font: inherit;
     font-size: var(--fs-xs);
-    padding: 5px 10px;
+    padding: 4px 10px;
     cursor: pointer;
   }
   .idiff-more:hover {
@@ -283,7 +283,7 @@
     text-align: start;
   }
   .pdiff-head:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .pdiff-head:focus-visible {
     outline: 2px solid var(--accent-text);

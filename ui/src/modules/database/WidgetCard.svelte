@@ -196,9 +196,9 @@
   .wc-conn {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     max-width: 40%;
-    padding: 1px 7px;
+    padding: 1px 6px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
@@ -225,7 +225,7 @@
     gap: 4px;
     align-self: flex-start;
     margin-bottom: 4px;
-    padding: 1px 7px;
+    padding: 1px 6px;
     font-size: var(--fs-xs);
     color: var(--warning);
     background: var(--status-warn-soft);

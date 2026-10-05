@@ -525,7 +525,7 @@
     flex-wrap: wrap;
     gap: 8px 10px;
     min-height: 46px;
-    padding: 7px 14px;
+    padding: 6px 14px;
     box-sizing: border-box;
     border-bottom: 1px solid var(--border);
   }
@@ -565,18 +565,18 @@
     background: transparent;
     color: var(--text);
     cursor: pointer;
-    padding: 3px 7px;
+    padding: 2px 6px;
     border-radius: var(--radius-s);
   }
   .rv-switch:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     border-color: var(--border);
   }
   .rv-count {
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 0 5px;
-    border-radius: 8px;
+    padding: 0 4px;
+    border-radius: var(--radius-m);
     background: var(--surface-2);
     color: var(--text-dim);
   }
@@ -606,17 +606,17 @@
     height: 15px;
     padding: 0 4px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 3px;
+    gap: 2px;
   }
   .rv-tabs > .conflict-tab,
   .rv-tabs > .conflict-tab.active {
     color: var(--warning);
-    gap: 5px;
+    gap: 4px;
   }
   .conflict-count {
     background: var(--warning-soft);

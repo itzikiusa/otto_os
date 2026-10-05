@@ -343,7 +343,7 @@
   .tab {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     border: none;
     border-bottom: 2px solid transparent;
     background: transparent;

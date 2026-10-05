@@ -1,3 +1,4 @@
+import { plural } from '../plural';
 // Search for the response JSON tree: which nodes match a query (by key or by
 // primitive value) and which containers must stay expanded to reveal them.
 // Paths use JSONPath-ish notation (`$.data[0].id`) so a row can offer
@@ -45,10 +46,10 @@ export function searchTree(root: unknown, query: string, limit = 20_000): TreeSe
 
 /** A one-line preview of a value for collapsed rows. */
 export function preview(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.length} item${value.length === 1 ? '' : 's'}]`;
+  if (Array.isArray(value)) return `[${plural(value.length, 'item')}]`;
   if (value !== null && typeof value === 'object') {
     const n = Object.keys(value).length;
-    return `{${n} key${n === 1 ? '' : 's'}}`;
+    return `{${plural(n, 'key')}}`;
   }
   return typeof value === 'string' ? JSON.stringify(value) : String(value);
 }

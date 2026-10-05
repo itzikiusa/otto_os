@@ -331,13 +331,13 @@
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
     border-radius: var(--radius-s);
-    padding: 7px 9px;
+    padding: 6px 8px;
   }
   .chip {
     display: inline-block;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     font-size: var(--fs-xs);
     text-transform: uppercase;
@@ -349,7 +349,7 @@
   .seg {
     display: flex;
     gap: 4px;
-    padding: 3px;
+    padding: 2px;
     margin-bottom: 12px;
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -490,7 +490,7 @@
   .toggle-row {
     display: flex;
     align-items: flex-start;
-    gap: 9px;
+    gap: 8px;
     padding: 2px 0;
     cursor: pointer;
   }

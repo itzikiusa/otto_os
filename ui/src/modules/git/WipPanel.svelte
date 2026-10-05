@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // GitKraken-style WIP panel: shown in the graph's RIGHT detail pane when the
   // WIP row is selected. Unstaged / Staged file trees (per-file + per-folder
   // stage toggles, discard), a per-file working diff, and the commit composer.
@@ -334,7 +335,7 @@
           `${left.length} file${left.length === 1 ? ' still has' : 's still have'} changes: ${left.slice(0, 3).join(', ')}${left.length > 3 ? '…' : ''}`,
         );
       } else {
-        toasts.info(`Discarded ${paths.length} file${paths.length === 1 ? '' : 's'}`);
+        toasts.info(`Discarded ${plural(paths.length, 'file')}`);
       }
     } catch (e) {
       toastError('Couldn’t discard the changes', e);
@@ -368,7 +369,7 @@
   ): void {
     e.preventDefault();
     const paths = node.files.map((f) => f.path);
-    const n = `${paths.length} file${paths.length === 1 ? '' : 's'}`;
+    const n = `${plural(paths.length, 'file')}`;
     ctxMenu.show(e, [
       {
         label: `${section === 'staged' ? 'Unstage' : 'Stage'} ${node.name}/ (${n})`,
@@ -686,7 +687,7 @@
         type="checkbox"
         checked={section === 'staged'}
         onchange={() => stagePaths(node.files.map((f) => f.path), section === 'unstaged')}
-        title="{section === 'staged' ? 'Unstage' : 'Stage'} {node.path}/ ({node.files.length} file{node.files.length === 1 ? '' : 's'})"
+        title="{section === 'staged' ? 'Unstage' : 'Stage'} {node.path}/ ({plural(node.files.length, 'file')})"
         aria-label="{section === 'staged' ? 'Unstage' : 'Stage'} folder {node.path}"
       />
       <button
@@ -709,7 +710,7 @@
         onclick={() =>
           void discardPaths(
             node.files.map((f) => f.path),
-            `${node.path}/ (${node.files.length} file${node.files.length === 1 ? '' : 's'})`,
+            `${node.path}/ (${plural(node.files.length, 'file')})`,
             section,
           )}
       >
@@ -740,7 +741,7 @@
 <div class="wip-panel">
   <div class="wp-head">
     <span class="wp-title mono">// WIP</span>
-    <span class="wp-count">{status.changes.length} file{status.changes.length === 1 ? '' : 's'} changed</span>
+    <span class="wp-count">{plural(status.changes.length, 'file')} changed</span>
     <span class="grow"></span>
     <button class="icon-btn wp-close" onclick={onclose} title="Close WIP panel" aria-label="Close WIP panel"><Icon name="x" size={14} /></button>
   </div>
@@ -1070,13 +1071,13 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: none;
     background: var(--surface-2);
     color: var(--text);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
   }
   .wp-sec-toggle {
     flex: 1;
@@ -1097,7 +1098,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     min-width: 16px;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: 999px;
     background: var(--surface);
     color: var(--text-dim);
@@ -1113,11 +1114,11 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: var(--radius-s);
   }
   .wp-sec-head .wp-sec-action:hover {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .wp-sec-head .wp-sec-action.danger {
     color: var(--danger);
@@ -1146,7 +1147,7 @@
   .wp-name {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     flex: 1;
     min-width: 0;
     height: 26px;
@@ -1168,7 +1169,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    padding: 3px 5px;
+    padding: 2px 4px;
     border-radius: var(--radius-s);
     line-height: 1;
     opacity: 0;
@@ -1257,7 +1258,7 @@
   }
   .wp-side:hover {
     color: var(--text);
-    background: var(--surface-2);
+    background: var(--hover);
   }
 
   .kind {
@@ -1284,7 +1285,7 @@
     color: var(--danger);
   }
   .k-renamed {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .k-conflicted {
@@ -1337,7 +1338,7 @@
   .subject-input {
     width: 100%;
     height: 30px;
-    padding-inline-end: 78px;
+    padding-inline-end: 76px;
     font-weight: 600;
   }
   .body-input {
@@ -1399,7 +1400,7 @@
      annotates a row that is already busy with a kind badge and a name. */
   .chip.partial {
     height: 15px;
-    padding: 0 5px;
+    padding: 0 4px;
     font-size: var(--fs-xs);
     color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 35%, transparent);
@@ -1407,7 +1408,7 @@
   }
   .wp-target > button {
     height: 18px;
-    padding: 0 7px;
+    padding: 0 6px;
     font-size: var(--fs-xs);
   }
   .dim {
@@ -1436,7 +1437,7 @@
     }
     .wp-discard {
       opacity: 1;
-      padding: 6px 7px;
+      padding: 6px 6px;
     }
     .subject-input {
       font-size: 16px;

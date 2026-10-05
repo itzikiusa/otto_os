@@ -222,7 +222,7 @@
     word-break: break-word;
   }
   .empty {
-    padding: 30px;
+    padding: 28px;
     text-align: center;
     color: var(--text-dim);
   }

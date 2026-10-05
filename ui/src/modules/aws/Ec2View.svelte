@@ -114,7 +114,7 @@
       toasts.success(`${action} sent`, `${i.instance_id}: ${r.previous_state} → ${r.current_state}`);
       await load();
     } catch (e) {
-      toasts.error(`${action} failed`, e instanceof Error ? e.message : String(e));
+      toastError(`${action} failed`, e);
     } finally {
       busy = { ...busy, [i.instance_id]: false };
     }
@@ -392,7 +392,7 @@
     cursor: pointer;
   }
   .trow:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .trow:focus-visible {
     background: var(--surface-2);

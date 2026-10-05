@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import SectionIntro from './SectionIntro.svelte';
@@ -204,7 +205,7 @@
     {/snippet}
     {#if orphaned.length}
       <div class="orphan-note">
-        <span>{orphaned.length} token{orphaned.length === 1 ? '' : 's'} belong to sessions that no longer exist.</span>
+        <span>{plural(orphaned.length, 'token')} belong to sessions that no longer exist.</span>
         <button class="btn small danger" disabled={revoking.size > 0} onclick={revokeOrphaned}>Revoke deleted-session tokens…</button>
       </div>
     {/if}

@@ -537,12 +537,12 @@
     color: var(--text-dim);
     height: 28px;
     min-width: 28px;
-    padding: 0 7px;
+    padding: 0 6px;
     cursor: pointer;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 5px;
+    gap: 4px;
     font: inherit;
     font-size: var(--fs-s);
   }
@@ -568,7 +568,7 @@
     padding: 8px 12px;
     border: 1px solid color-mix(in srgb, var(--warning) 55%, transparent);
     background: var(--warning-soft);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     font-size: var(--fs-s);
   }
 
@@ -585,7 +585,7 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 18px 26px 60px;
+    padding: 18px 24px 60px;
     /* Use the space the user gives us: folding the side panes widens the
        measure up to 1240px instead of stranding it at a fixed 860px column.
        96% keeps a breathing gutter at every pane width. */
@@ -617,7 +617,7 @@
     border-bottom: 1px dashed currentColor;
   }
   .read :global(span.tag) {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border-radius: 999px;
     padding: 1px 8px;
@@ -664,7 +664,7 @@
   }
   .read :global(img) {
     max-width: 100%;
-    border-radius: 8px;
+    border-radius: var(--radius-m);
   }
   .read :global(pre) {
     overflow-x: auto;

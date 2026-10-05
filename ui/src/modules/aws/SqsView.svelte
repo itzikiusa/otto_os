@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { mapLimit } from '../../lib/poll';
@@ -301,7 +302,7 @@
 
 <ViewToolbar
   title="SQS"
-  subtitle={queues ? `${queues.length} queue${queues.length === 1 ? '' : 's'}` : ''}
+  subtitle={queues ? `${plural(queues.length, 'queue')}` : ''}
   bind:filter
   filterPlaceholder="Filter queues…"
   {loading}
@@ -558,7 +559,7 @@
     cursor: pointer;
   }
   .trow:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .trow:focus-visible {
     background: var(--surface-2);
@@ -579,11 +580,11 @@
   .tag {
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .tag.dim {
     background: var(--surface-2);
@@ -627,7 +628,7 @@
     border-bottom: 1px solid var(--border);
   }
   .tabs button {
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: 0;
     border-bottom: 2px solid transparent;
     background: transparent;

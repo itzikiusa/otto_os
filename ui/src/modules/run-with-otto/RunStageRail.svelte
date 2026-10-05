@@ -144,7 +144,7 @@
   .rail.mini {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
   }
   .seg {
     width: 14px;

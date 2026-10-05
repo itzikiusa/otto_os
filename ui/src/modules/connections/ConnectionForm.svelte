@@ -918,7 +918,7 @@
   }
   .kind-chip {
     height: 24px;
-    padding: 0 11px;
+    padding: 0 10px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -939,7 +939,7 @@
   }
   .env-chip {
     height: 24px;
-    padding: 0 13px;
+    padding: 0 12px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);

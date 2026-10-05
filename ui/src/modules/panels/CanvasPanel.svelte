@@ -399,7 +399,7 @@
     cursor: pointer;
   }
   .ref-main:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .ref-chevron {
     flex-shrink: 0;
@@ -495,9 +495,9 @@
   .footer-btn {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 24px;
-    padding: 0 9px;
+    padding: 0 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -533,7 +533,7 @@
     background: var(--bg);
     color: var(--text);
     font-size: var(--fs-xs);
-    padding: 0 7px;
+    padding: 0 6px;
     outline: none;
     box-sizing: border-box;
   }

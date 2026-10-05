@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Right panel → References: search the team library (shipped work first) and
   // borrow from it — Add as reference (an explicit, pinned `references` link),
   // Start from this (a new draft forked from that version, `derived_from`),
@@ -175,7 +176,7 @@
     {:else if !hits.length}
       <p class="dim">No designs match. Try fewer words or clear a filter.</p>
     {:else}
-      <p class="count dim">{hits.length} result{hits.length === 1 ? '' : 's'} from the team library · shipped first</p>
+      <p class="count dim">{plural(hits.length, 'result')} from the team library · shipped first</p>
       <ul>
         {#each hits as h (h.artifact.id)}
           {@const a = h.artifact}
@@ -195,7 +196,7 @@
                   {/each}
                   <StatusPill status={a.status} />
                 </div>
-                {#if h.reference_count}<div class="dim small">Used as reference in {h.reference_count} design{h.reference_count === 1 ? '' : 's'}</div>{/if}
+                {#if h.reference_count}<div class="dim small">Used as reference in {plural(h.reference_count, 'design')}</div>{/if}
                 {#if h.snippet}<div class="snip dim small">{h.snippet.replace(/<\/?[^>]+>/g, '')}</div>{/if}
               </div>
             </div>
@@ -334,7 +335,7 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .t {
     display: flex;
@@ -368,7 +369,7 @@
   .cite {
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: var(--radius-s);
     color: var(--success);
     background: var(--success-soft);
@@ -423,7 +424,7 @@
     grid-template-columns: 104px minmax(0, 1fr) auto auto;
     gap: 6px;
     align-items: baseline;
-    padding-block: 3px; padding-inline: 12px 0;
+    padding-block: 2px; padding-inline: 12px 0;
     border-inline-start: 1px solid var(--border-strong);
     font-size: var(--fs-s);
   }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { api } from '../../lib/api/client';
   import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
@@ -283,7 +284,7 @@
         </select>
       {/if}
       <span class="spacer"></span>
-      <span class="count">{filtered.length} topic{filtered.length === 1 ? '' : 's'}</span>
+      <span class="count">{plural(filtered.length, 'topic')}</span>
       {#if hasStatErrors}
         <button class="btn small" onclick={retryStats} title="Retry failed message-count fetches">
           <Icon name="refresh" size={12} /> Retry counts
@@ -462,7 +463,7 @@
   }
   .search {
     width: 240px;
-    padding: 6px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -472,13 +473,13 @@
   .chk {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     white-space: nowrap;
   }
   .toolbar select {
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -549,7 +550,7 @@
     width: 110px;
   }
   table.grid td {
-    padding: 7px 14px;
+    padding: 6px 14px;
     border-bottom: 1px solid var(--border);
   }
   table.grid td.num {

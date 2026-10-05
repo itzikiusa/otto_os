@@ -392,7 +392,7 @@
   }
   /* Same section-label treatment as the main sidebar's groups. */
   .settings-nav-heading {
-    padding: 8px 10px 3px;
+    padding: 8px 10px 2px;
     font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.06em;

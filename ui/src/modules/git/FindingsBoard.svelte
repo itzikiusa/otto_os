@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // The Review Findings workflow board. For a completed review it lists the
   // persisted Finding rows (GET /reviews/{id}/findings) as expandable cards — a
   // status chip + severity chip + category + path:Lstart–Lend + reviewer +
@@ -156,7 +157,7 @@
 <div class="fb" data-workspace-id={workspaceId}>
   <!-- Header: counts + Proof Pack -->
   <div class="fb-header">
-    <span class="fb-count">{findings.length} finding{findings.length === 1 ? '' : 's'}</span>
+    <span class="fb-count">{plural(findings.length, 'finding')}</span>
     {#if statusCounts['verified']}
       <span class="chip status-verified fb-hchip">{statusCounts['verified']} verified</span>
     {/if}
@@ -345,7 +346,7 @@
   .fb-filter-row {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex-wrap: wrap;
   }
   .fb-filter-label {
@@ -361,7 +362,7 @@
     color: var(--text-dim);
     border-radius: 999px;
     font-size: var(--fs-xs);
-    padding: 2px 9px;
+    padding: 2px 8px;
     cursor: pointer;
     text-transform: capitalize;
     line-height: 1.6;
@@ -399,11 +400,11 @@
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
-    margin-top: 5px;
+    margin-top: 4px;
     font-size: var(--fs-xs);
   }
   .fb-cat {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border-radius: var(--radius-s);
     padding: 1px 6px;
@@ -444,7 +445,7 @@
     flex-direction: column;
     gap: 8px;
   }
-  .fb-field { display: flex; flex-direction: column; gap: 3px; }
+  .fb-field { display: flex; flex-direction: column; gap: 2px; }
   .fb-field-label {
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -476,7 +477,7 @@
 
   /* Status chips (shared vocabulary; high-contrast light-green + black for verified). */
   .chip.status-open { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
-  .chip.status-accepted { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
+  .chip.status-accepted { background: var(--accent-soft-strong); color: var(--accent-text); }
   .chip.status-fixed { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
   .chip.status-verified { background: var(--success-soft); color: var(--success); font-weight: 600; }
   .chip.status-false_positive { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
@@ -486,7 +487,7 @@
   .chip.sev2-critical { background: var(--danger-soft); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, transparent); font-weight: 600; }
   .chip.sev2-high { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
   .chip.sev2-medium { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
-  .chip.sev2-low { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
+  .chip.sev2-low { background: var(--accent-soft); color: var(--accent-text); }
   .chip.sev2-info { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 
   /* The filter pills reuse status-/sev2- classes for their idle tint, but the

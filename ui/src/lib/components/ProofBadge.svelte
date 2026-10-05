@@ -35,11 +35,11 @@
     display: inline-flex;
     align-items: center;
     height: 18px;
-    padding: 0 7px;
+    padding: 0 6px;
     border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.01em;
+    letter-spacing: .06em;
     white-space: nowrap;
     border: 1px solid transparent;
     background: var(--surface-2);
@@ -57,7 +57,7 @@
   }
   .proof-badge.accent {
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 35%, transparent);
   }
   .proof-badge.warn {

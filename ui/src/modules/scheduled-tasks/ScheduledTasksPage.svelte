@@ -1134,7 +1134,7 @@
   .name { font-size: var(--fs-m); font-weight: 600; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--text-dim); font-size: var(--fs-s); min-width: 0; }
   .dest { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 36ch; }
-  .cron { font-family: var(--font-mono); font-size: var(--fs-xs); padding: 0 5px; border-radius: var(--radius-s); background: var(--surface-2); color: var(--text); direction: ltr; }
+  .cron { font-family: var(--font-mono); font-size: var(--fs-xs); padding: 0 4px; border-radius: var(--radius-s); background: var(--surface-2); color: var(--text); direction: ltr; }
   .task-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
   .runs { margin-block-start: 10px; border-block-start: 1px solid var(--border); padding-block-start: 8px; display: flex; flex-direction: column; gap: 6px; }
   .run { display: flex; align-items: center; gap: 8px; font-size: var(--fs-s); flex-wrap: wrap; color: var(--text); min-height: 26px; }
@@ -1143,7 +1143,7 @@
   .run-sum.none { color: var(--text-dim); font-style: italic; }
   .run-err { flex-basis: 100%; margin: 0; padding-inline-start: 4px; font-size: var(--fs-xs); color: var(--danger); overflow-wrap: anywhere; display: flex; gap: 4px; align-items: baseline; }
   .run-err.warn { color: var(--warning); }
-  .pill { font-size: var(--fs-xs); padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; }
+  .pill { font-size: var(--fs-xs); padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; }
   .pill.ok { background: var(--success-soft); color: var(--success); border-color: transparent; }
   .pill.warn { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
   .form { display: flex; flex-direction: column; gap: 12px; max-width: 720px; }

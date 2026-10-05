@@ -697,7 +697,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 5px;
+    gap: 4px;
     min-width: 26px;
     height: 26px;
     padding: 0 6px;
@@ -709,7 +709,7 @@
     cursor: pointer;
   }
   .toolbar button:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .toolbar button:focus-visible {
     outline: 2px solid var(--accent-text);
@@ -725,7 +725,7 @@
   .sep {
     width: 1px;
     height: 16px;
-    margin: 0 3px;
+    margin: 0 2px;
     background: var(--border);
   }
   .zoom-label {

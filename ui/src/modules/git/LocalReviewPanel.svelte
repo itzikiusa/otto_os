@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Local working-tree review panel: diff against a chosen base branch, run
   // the configured review agents, show findings with checkboxes, and hand
   // selected findings off to a new agent session.
@@ -315,7 +316,7 @@
         comment_ids: checkedIds,
       });
       ws.addSession(session); // navigates to the new session via addSession → navigateToSession
-      toasts.success(`Handed ${checkedIds.length} finding${checkedIds.length === 1 ? '' : 's'} to ${provider}`);
+      toasts.success(`Handed ${plural(checkedIds.length, 'finding')} to ${provider}`);
     } catch (e) {
       toastError('Couldn’t hand off the review', e);
     }
@@ -446,7 +447,7 @@
       </p>
     {:else}
       <div class="lrp-findings-header">
-        <span class="lrp-findings-count">{review.comments.length} finding{review.comments.length === 1 ? '' : 's'}</span>
+        <span class="lrp-findings-count">{plural(review.comments.length, 'finding')}</span>
         <div class="lrp-sel-btns">
           <button class="btn small ghost" onclick={selectAll} disabled={allSelected}>Select all</button>
           <button class="btn small ghost" onclick={selectNone} disabled={noneSelected}>None</button>
@@ -516,7 +517,7 @@
                 {#if run.agents && run.agents.length > 0}
                   <span class="dim" style="font-size:var(--fs-xs)">{run.agents.filter(a => a.status === 'done').length}/{run.agents.length} agents</span>
                 {/if}
-                <span class="dim" style="font-size:var(--fs-xs)">{run.comments.length} finding{run.comments.length === 1 ? '' : 's'}</span>
+                <span class="dim" style="font-size:var(--fs-xs)">{plural(run.comments.length, 'finding')}</span>
                 <span class="grow"></span>
                 <span class="dim" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /></span>
               </button>
@@ -649,7 +650,7 @@
     border-radius: 50%;
     animation: otto-spin 0.8s linear infinite;
     vertical-align: middle;
-    margin-inline-end: 3px;
+    margin-inline-end: 2px;
   }
 
   /* Agent cards */
@@ -729,7 +730,7 @@
     user-select: none;
   }
   .lrp-comment:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .lrp-chk {
     margin-top: 2px;
@@ -785,7 +786,7 @@
   /* Severity chips */
   .severity-chip {
     display: inline-block;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -793,7 +794,7 @@
     text-transform: uppercase;
   }
   .sev-info {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .sev-warn {
@@ -854,7 +855,7 @@
     flex-wrap: wrap;
   }
   .lrp-history-run-header:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .lrp-history-run-body {
     padding: 4px 8px 8px;

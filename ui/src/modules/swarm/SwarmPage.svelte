@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   import { tick, untrack } from 'svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { paneResizer, RESIZE_TITLE, LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
@@ -294,7 +296,7 @@
       await swarm.setParallelCap(detail.id, v);
     } catch (e) {
       input.value = String(cap);
-      toasts.error("Couldn’t change parallel sessions", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t change parallel sessions", e);
     }
   }
 
@@ -319,7 +321,7 @@
     try {
       await swarm.updateSwarm(detail.id, { max_total_runs: next } as Partial<Swarm>);
     } catch (e) {
-      toasts.error("Couldn’t change the run budget", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t change the run budget", e);
     }
   }
 
@@ -370,7 +372,7 @@
       }
       projModal = false;
     } catch (e) {
-      toasts.error("Couldn’t save the project", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t save the project", e);
     } finally {
       projSaving = false;
     }
@@ -390,7 +392,7 @@
         projModal = false;
         toasts.success('Project deleted');
       } catch (e) {
-        toasts.error("Couldn’t delete the project", e instanceof Error ? e.message : String(e));
+        toastError("Couldn’t delete the project", e);
       }
     }
   }
@@ -411,7 +413,7 @@
         const next = swarm.swarms[0];
         if (next && !viewport.isPhone) void openSwarm(next.id);
       } catch (e) {
-        toasts.error("Couldn’t delete the swarm", e instanceof Error ? e.message : String(e));
+        toastError("Couldn’t delete the swarm", e);
       }
     }
   }
@@ -429,7 +431,7 @@
       await swarm.runTask(created);
       view = 'kanban';
     } catch (e) {
-      toasts.error("Couldn’t run the task", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t run the task", e);
     }
   }
 
@@ -485,7 +487,7 @@
     try {
       await swarm.updateSwarm(detail.id, patch);
     } catch (e) {
-      toasts.error("Couldn’t raise the budget", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t raise the budget", e);
       return;
     }
     await lifecycle('resume');
@@ -642,7 +644,7 @@
               <div class="ws-hits">
                 {#each swarm.elsewhere as w (w.id)}
                   <button class="btn small" onclick={() => ws.select(w.id)}>
-                    {w.name} · {w.count} swarm{w.count === 1 ? '' : 's'}
+                    {w.name} · {plural(w.count, 'swarm')}
                   </button>
                 {/each}
               </div>
@@ -1045,7 +1047,7 @@
   .seg-tabs > .seg {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .seg-tabs > .seg:hover:not(.active) {
     color: var(--text);
@@ -1159,7 +1161,7 @@
     }
     .swarm-page.compact .swarm-item {
       font-size: var(--fs-l);
-      padding: 11px 12px;
+      padding: 10px 12px;
     }
 
   }

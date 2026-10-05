@@ -255,7 +255,7 @@
         router.go('browser');
         await browser.openTab(url);
       } catch (e) {
-        toasts.error('Couldn’t open it in Otto’s browser', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t open it in Otto’s browser', e);
       }
     })();
   }
@@ -1100,7 +1100,7 @@
   .pv-resize {
     flex-shrink: 0;
     width: 6px;
-    margin-inline: -3px;
+    margin-inline: -2px;
     cursor: col-resize;
     position: relative;
     z-index: 2;
@@ -1155,7 +1155,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
   }
   .day::before,
   .day::after {
@@ -1279,7 +1279,7 @@
     padding: 6px 0;
   }
   .live-artifacts .chip {
-    gap: 5px;
+    gap: 4px;
     color: var(--text);
     font: inherit;
     font-size: var(--fs-xs);
@@ -1316,7 +1316,7 @@
     transform: translateX(50%);
   }
   .jump-pill:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .jump-pill:focus-visible {
     outline: 2px solid var(--accent-text);

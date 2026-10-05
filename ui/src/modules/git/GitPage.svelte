@@ -265,7 +265,7 @@
         r.name,
       );
     } catch (e) {
-      toasts.error('Couldn’t link account', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t link account', e);
       // Snap the <select> back to the stored binding — the change never landed.
       await git.loadAllRepos(true);
     }
@@ -308,7 +308,7 @@
       await git.loadAllRepos(true);
       toasts.info('Repository removed', r.name);
     } catch (e) {
-      toasts.error('Couldn’t remove the repository', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove the repository', e);
     }
   }
 </script>
@@ -816,7 +816,7 @@
   .repo-name {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-m);
     font-weight: 600;
     min-width: 0;

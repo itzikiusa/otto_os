@@ -578,7 +578,7 @@
   .role-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex-shrink: 0;
     font-size: var(--fs-s);
     padding: 2px 8px;

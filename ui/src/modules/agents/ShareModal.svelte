@@ -458,7 +458,7 @@
   .sm-sender-warn {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--warning);
     padding: 4px 0;
@@ -495,7 +495,7 @@
     border-radius: var(--radius-m);
     color: var(--text);
     font-size: var(--fs-m);
-    padding: 7px 10px;
+    padding: 6px 10px;
     appearance: auto;
   }
   .sm-select:focus,
@@ -537,9 +537,9 @@
     flex-shrink: 0;
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
-    padding: 5px 10px;
+    padding: 4px 10px;
   }
   .sm-qr-wrap {
     display: flex;
@@ -559,7 +559,7 @@
   .sm-role-note {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     margin: 0;
@@ -630,7 +630,7 @@
     font-size: var(--fs-s);
   }
   .sm-share-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .sm-share-info {
     display: flex;
@@ -659,7 +659,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .06em;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 15%, transparent);
     color: var(--text-dim);
@@ -681,7 +681,7 @@
   }
   .sm-revoke-btn {
     font-size: var(--fs-xs);
-    padding: 3px 8px;
+    padding: 2px 8px;
     color: var(--danger);
     border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   }

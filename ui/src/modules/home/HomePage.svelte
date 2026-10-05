@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Home: Otto's one "desktop". The ambient backdrop fills the page; on it sit
   // a greeting + today's glance cards (HomeToday) and the active space's
   // widgets — up to 8 live boxes (Agents, Mission Control, DB dashboards,
@@ -94,7 +95,7 @@
   async function removeView(): Promise<void> {
     const v = home.active;
     if (!v) return;
-    if (await confirmer.ask(`Delete space “${v.name}” and its ${v.boxes.length} widget${v.boxes.length === 1 ? '' : 's'}?`, { title: 'Delete space' })) {
+    if (await confirmer.ask(`Delete space “${v.name}” and its ${plural(v.boxes.length, 'widget')}?`, { title: 'Delete space' })) {
       home.removeView(v.id);
     }
   }
@@ -357,7 +358,7 @@
   .spaces .num {
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
   }
   .spaces .space.active .num {
     color: var(--accent-text);

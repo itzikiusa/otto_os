@@ -48,6 +48,7 @@
 </script>
 
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { copyText } from './results-format';
@@ -74,7 +75,7 @@
 
   function copyPatch(): void {
     const ops = recordPatch(rows);
-    void copyText(JSON.stringify(ops, null, 2), ['Copied', `JSON patch with ${ops.length} op${ops.length === 1 ? '' : 's'}`]);
+    void copyText(JSON.stringify(ops, null, 2), ['Copied', `JSON patch with ${plural(ops.length, 'op')}`]);
   }
 </script>
 
@@ -82,7 +83,7 @@
   <div class="rd" data-testid="record-diff">
     <div class="rd-bar">
       <span class="rd-count">
-        {#if diffCount === 0}No differences — the records are identical.{:else}<strong>{diffCount}</strong> difference{diffCount === 1 ? '' : 's'} across {rows.length} field{rows.length === 1 ? '' : 's'}{/if}
+        {#if diffCount === 0}No differences — the records are identical.{:else}<strong>{diffCount}</strong> difference{diffCount === 1 ? '' : 's'} across {plural(rows.length, 'field')}{/if}
       </span>
       <span class="grow"></span>
       <label class="rd-only"><input type="checkbox" bind:checked={onlyDiff} /> only differences</label>
@@ -126,7 +127,7 @@
   .rd-only {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
   }
   .grow {
@@ -147,7 +148,7 @@
     position: sticky;
     top: 0;
     text-align: start;
-    padding: 5px 8px;
+    padding: 4px 8px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);

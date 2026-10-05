@@ -167,7 +167,7 @@
   .tunnel-pill {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     border: 1px solid var(--border);

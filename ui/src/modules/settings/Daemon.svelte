@@ -331,7 +331,7 @@
   }
   /* Sub-controls line up with the toggle's label text (15px box + 10px gap). */
   .indent {
-    margin-inline-start: 25px;
+    margin-inline-start: 24px;
   }
   /* margin-block only: a `margin: 0` here out-ranked `.indent` and pulled
      Port / Network back under the checkbox instead of under its label. */

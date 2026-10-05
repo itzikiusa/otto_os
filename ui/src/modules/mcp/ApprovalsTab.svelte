@@ -80,7 +80,7 @@
       const list = await mcpCpExtraApi.autoApproveRules();
       allowFor = { approval: a, catalog: list.categories };
     } catch (e) {
-      toasts.error('Couldn’t load the auto-approve catalog', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t load the auto-approve catalog', e);
     } finally {
       allowLoading = null;
     }
@@ -390,7 +390,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 6px 9px;
+    padding: 6px 8px;
     font-size: var(--fs-m);
   }
   .link {

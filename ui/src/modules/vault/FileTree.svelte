@@ -392,7 +392,7 @@
   .row {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 26px;
     padding-inline-end: 8px;
     font-size: var(--fs-s);
@@ -457,7 +457,7 @@
     }
   }
   .row.checked {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .sel-bar {
     display: flex;
@@ -510,7 +510,7 @@
   .prov {
     font-size: var(--fs-xs);
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     border-radius: 999px;
     padding: 0 7px;
     white-space: nowrap;

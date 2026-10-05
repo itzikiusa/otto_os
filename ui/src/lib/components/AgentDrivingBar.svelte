@@ -114,7 +114,7 @@
     gap: 8px;
     min-width: 0;
     min-height: 30px;
-    padding-block: 3px;
+    padding-block: 2px;
     padding-inline: 20px 12px;
     border-top: 1px solid var(--separator);
     /* Agent identity is a neutral 2 px start rule (patterns §2), the live

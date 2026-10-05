@@ -313,7 +313,7 @@
   .err {
     color: var(--danger);
     background: var(--danger-soft);
-    padding: 7px 9px;
+    padding: 6px 8px;
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
   }
@@ -329,7 +329,7 @@
     background: var(--surface-2);
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .stat .k {
     font-size: var(--fs-xs);
@@ -373,10 +373,10 @@
   .path-row {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 7px 9px;
+    padding: 6px 8px;
     background: var(--surface);
   }
   .path {
@@ -386,7 +386,7 @@
   .arts {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .art {
     display: flex;
@@ -395,7 +395,7 @@
     text-align: start;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 7px 9px;
+    padding: 6px 8px;
     background: var(--surface);
     color: var(--text);
     font: inherit;
@@ -492,15 +492,15 @@
   .findings {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .finding {
     display: flex;
     align-items: flex-start;
-    gap: 7px;
+    gap: 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 6px 9px;
+    padding: 6px 8px;
     background: var(--surface);
   }
   .finding.error {

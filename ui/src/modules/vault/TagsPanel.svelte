@@ -63,7 +63,7 @@
     background: none;
     border: none;
     border-radius: var(--radius-s);
-    padding: 5px 8px;
+    padding: 4px 8px;
     cursor: pointer;
   }
   .tag-row:hover {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Dry-run preview of what a session spawn would materialize for a workspace
   // + provider — the exact skill files, soul, generated AGENTS.md / CLAUDE.md
   // content and runtime hooks — WITHOUT spawning a session or touching disk.
@@ -136,7 +137,7 @@
 
       <!-- Files the spawn would write -->
       <div class="files-head">
-        <span class="files-title">{result.files.length} file{result.files.length === 1 ? '' : 's'}</span>
+        <span class="files-title">{plural(result.files.length, 'file')}</span>
       </div>
       <ul class="files">
         {#each result.files as f (f.path)}
@@ -238,7 +239,7 @@
     border: 1px solid color-mix(in srgb, var(--text-dim) 30%, transparent);
   }
   .badge.enforced {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   }
@@ -266,7 +267,7 @@
   }
   .chip {
     font-size: var(--fs-xs);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -306,7 +307,7 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 6px 9px;
+    padding: 6px 8px;
     background: none;
     border: none;
     cursor: pointer;

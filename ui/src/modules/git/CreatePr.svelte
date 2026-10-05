@@ -390,7 +390,7 @@
     gap: 4px;
     height: auto;
     min-height: 30px;
-    padding: 3px 6px;
+    padding: 2px 6px;
   }
   .chips-text {
     flex: 1;
@@ -456,7 +456,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: none;
     background: transparent;
     border-radius: var(--radius-s);
@@ -466,7 +466,7 @@
     color: var(--text);
   }
   .rev-suggest-item:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   /* Draft toggle sits at the start of the footer, before the buttons. */
   .draft-toggle {

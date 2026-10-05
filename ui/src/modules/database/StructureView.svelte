@@ -1178,7 +1178,7 @@
   .st-title {
     display: flex;
     align-items: center;
-    gap: 9px;
+    gap: 8px;
     color: var(--accent-text);
   }
   .st-title h2 {
@@ -1193,7 +1193,7 @@
     letter-spacing: .06em;
     color: var(--text-dim);
     background: var(--surface-2);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
   }
   .rowcount {
@@ -1308,10 +1308,10 @@
     cursor: pointer;
   }
   .ib-row:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .ib-row.on {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .ib-fname {
@@ -1352,13 +1352,13 @@
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-radius: var(--radius-s);
     cursor: pointer;
   }
   .ib-dir:hover {
-    background: color-mix(in srgb, var(--accent) 26%, transparent);
+    background: var(--accent-soft-strong);
   }
   .ib-x {
     display: inline-flex;
@@ -1383,7 +1383,7 @@
   }
   .ib-sep {
     height: 1px;
-    margin: 3px 0;
+    margin: 2px 0;
     background: var(--border);
   }
   /* Mongo fields table */
@@ -1451,7 +1451,7 @@
   .ib-warn code {
     font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    padding: 0 3px;
+    padding: 0 2px;
     border-radius: var(--radius-s);
   }
   .ib-unique,
@@ -1502,7 +1502,7 @@
     display: flex;
     justify-content: space-between;
     gap: 8px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -1564,7 +1564,7 @@
     white-space: nowrap;
   }
   .tbl td {
-    padding: 5px 10px;
+    padding: 4px 10px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
     font-size: var(--fs-s);
     vertical-align: top;
@@ -1589,7 +1589,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     padding: 0 4px;
     border-radius: var(--radius-s);
     vertical-align: middle;
@@ -1607,7 +1607,7 @@
   .fk-list {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     margin: 0;
     padding: 0;
     list-style: none;
@@ -1620,7 +1620,7 @@
     font-size: var(--fs-s);
     background: var(--surface-2);
     border: 1px solid var(--border);
-    padding: 2px 9px;
+    padding: 2px 8px;
     border-radius: 999px;
     color: var(--text);
   }
@@ -1631,7 +1631,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 10px;
+    padding: 4px 10px;
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -1681,7 +1681,7 @@
     cursor: pointer;
   }
   .idx-act:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .idx-act.danger:hover:not(:disabled) {
@@ -1750,12 +1750,12 @@
     text-transform: uppercase;
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: 999px;
   }
   .tag.unique {
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .ddl {
     margin: 0;

@@ -640,7 +640,7 @@
   .picker {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     border: 0;
     background: none;
     padding: 2px 4px;
@@ -769,7 +769,7 @@
   .st {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

@@ -467,7 +467,7 @@
   .status-pill {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
   }
   .hdot {
@@ -613,7 +613,7 @@
     border-bottom: 1px solid var(--border);
   }
   .events td {
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
     vertical-align: top;
   }

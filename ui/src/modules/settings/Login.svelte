@@ -63,14 +63,14 @@
   .login-card {
     width: 320px;
     max-width: calc(100vw - 32px);
-    padding: 28px 26px 24px;
+    padding: 28px 24px 24px;
     display: flex;
     flex-direction: column;
   }
   .login-mark {
     font-size: var(--fs-hero);
     font-weight: 600;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.01em;
     text-align: center;
   }
   .login-sub {

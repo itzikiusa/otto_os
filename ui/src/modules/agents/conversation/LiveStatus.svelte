@@ -97,7 +97,7 @@
     gap: 8px;
     padding-block: 6px;
     padding-inline: 8px;
-    margin-inline-start: 11px;
+    margin-inline-start: 10px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     min-width: 0;
@@ -145,7 +145,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin-inline-start: 11px;
+    margin-inline-start: 10px;
     padding: 10px 12px;
     border-radius: var(--radius-m);
     background: var(--warning-soft);

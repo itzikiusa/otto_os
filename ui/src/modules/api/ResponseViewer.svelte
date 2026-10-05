@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Response viewer shared by the page and the compact panel: status / time /
   // size chips, then Body (Pretty · Raw · Tree · Preview) · Headers · Cookies ·
   // Timeline · Tests. A failed send shows inline with the reason and what to
@@ -310,7 +311,7 @@
     <div class="stream-console">
       <div class="head">
         <span class="chip" class:ok={apiStream.status === 'open'} class:bad={apiStream.status === 'error'}>{STREAM_STATUS[apiStream.status] ?? apiStream.status}</span>
-        <span class="meta">{apiStream.items.length} message{apiStream.items.length === 1 ? '' : 's'}{apiStream.dropped ? ` · ${apiStream.dropped} older discarded` : ''}</span>
+        <span class="meta">{plural(apiStream.items.length, 'message')}{apiStream.dropped ? ` · ${apiStream.dropped} older discarded` : ''}</span>
         <span class="grow"></span>
         <button class="btn small ghost" onclick={() => apiStream.clear()} disabled={apiStream.items.length === 0}>Clear</button>
       </div>
@@ -697,7 +698,7 @@
     border-bottom-color: var(--accent);
   }
   .count {
-    margin-inline-start: 5px;
+    margin-inline-start: 4px;
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
@@ -848,7 +849,7 @@
     gap: 8px;
     padding: 5px 8px;
     border-inline-start: 2px solid var(--border);
-    margin-inline-start: 5px;
+    margin-inline-start: 4px;
     font-size: var(--fs-s);
   }
   .trace-dot {
@@ -895,7 +896,7 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .test-item {
     display: flex;
@@ -936,7 +937,7 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     padding: 4px 0;
   }
   :global(.stream-vlist) {

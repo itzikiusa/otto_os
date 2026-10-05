@@ -998,7 +998,7 @@
     gap: 8px;
     flex: 1;
     min-width: 0;
-    padding: 7px 8px;
+    padding: 6px 8px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -1039,7 +1039,7 @@
     }
   }
   .row-menu-btn:hover {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .tree-toggle {
@@ -1063,7 +1063,7 @@
     margin-inline-start: calc(var(--depth, 1) * 14px);
   }
   .story-row-wrap.child .story-row {
-    padding-block: 5px;
+    padding-block: 4px;
   }
   .story-row-wrap.child .story-title {
     font-size: var(--fs-s);
@@ -1080,7 +1080,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     cursor: pointer;
     text-align: start;
   }
@@ -1121,7 +1121,7 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .story-title {
     font-size: var(--fs-m);
@@ -1153,7 +1153,7 @@
     flex-shrink: 0;
   }
   .tag-filter-btn {
-    padding: 1px 7px;
+    padding: 1px 6px;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: transparent;
@@ -1178,7 +1178,7 @@
   .story-tags {
     display: flex;
     flex-wrap: wrap;
-    gap: 3px;
+    gap: 2px;
     margin-top: 1px;
   }
   /* Tags are metadata, not selection: neutral chips. */
@@ -1217,7 +1217,7 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    padding: 3px;
+    padding: 2px;
     background: color-mix(in srgb, var(--text-dim) 7%, transparent);
     border-radius: var(--radius-m);
     overflow-x: auto;
@@ -1242,7 +1242,7 @@
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .st:hover {
     color: var(--text);
@@ -1272,7 +1272,7 @@
   }
   .sub-tab-strip .st {
     height: 24px;
-    padding: 0 9px;
+    padding: 0 8px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     border: 1px solid transparent;
@@ -1419,7 +1419,7 @@
       color: var(--text-dim);
       background: color-mix(in srgb, var(--text-dim) 14%, transparent);
       border-radius: 999px;
-      padding: 1px 9px;
+      padding: 1px 8px;
     }
 
     /* Panels: collapsed by default; the open one gets the remaining height and
@@ -1474,13 +1474,13 @@
     .st {
       height: 38px;
       font-size: var(--fs-m);
-      padding: 0 13px;
+      padding: 0 12px;
     }
     /* Keep the sub-nav touch-friendly but still a notch smaller than the groups. */
     .sub-tab-strip .st {
       height: 34px;
       font-size: var(--fs-m);
-      padding: 0 11px;
+      padding: 0 10px;
     }
     .product-body {
       padding: 14px;

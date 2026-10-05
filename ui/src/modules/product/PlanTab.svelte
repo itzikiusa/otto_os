@@ -683,7 +683,7 @@
   }
 
   /* Provider multi-select: global .pill-toggle + the provider mark. */
-  .pl-provider-group { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pl-provider-group { display: flex; flex-wrap: wrap; gap: 4px; }
   .pl-provider-group .pill-toggle:disabled { cursor: not-allowed; opacity: 0.5; }
 
   /* Autonomy toggle */
@@ -786,8 +786,8 @@
   .status-in_progress { background: var(--warning-soft); color: var(--warning); }
   .status-done { background: var(--success-soft); color: var(--success); }
 
-  .items { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 5px; }
-  .item { display: flex; align-items: flex-start; gap: 9px; font-size: var(--fs-m); line-height: 1.5; }
+  .items { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+  .item { display: flex; align-items: flex-start; gap: 8px; font-size: var(--fs-m); line-height: 1.5; }
   .item.status-done .item-text { text-decoration: line-through; color: var(--text-dim); }
   .item-text { color: var(--text); padding-top: 1px; }
   .checkbox {

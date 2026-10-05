@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Cross-link card: shows the swarm project created from this product story
   // (via Plan → Swarm), including task counts, run count, and accumulated cost.
   // Calls GET /product/stories/{sid}/swarm on mount and whenever the story id
@@ -86,19 +87,19 @@
       {#if runCount > 0}
         <span class="stat">
           <Icon name="clock" size={11} />
-          {runCount} run{runCount === 1 ? '' : 's'}
+          {plural(runCount, 'run')}
         </span>
       {/if}
       {#if link.prs.length > 0}
         <span class="stat">
           <Icon name="pr" size={11} />
-          {link.prs.length} PR{link.prs.length === 1 ? '' : 's'}
+          {plural(link.prs.length, 'PR')}
         </span>
       {/if}
       {#if link.artifacts.length > 0}
         <span class="stat">
           <Icon name="note" size={11} />
-          {link.artifacts.length} artifact{link.artifacts.length === 1 ? '' : 's'}
+          {plural(link.artifacts.length, 'artifact')}
         </span>
       {/if}
     </div>

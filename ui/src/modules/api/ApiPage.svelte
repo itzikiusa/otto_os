@@ -620,8 +620,8 @@
   }
   .resizer.row {
     height: 6px;
-    margin-top: -3px;
-    margin-bottom: -3px;
+    margin-top: -2px;
+    margin-bottom: -2px;
     cursor: row-resize;
     border-top: 1px solid var(--border);
     background-clip: content-box;

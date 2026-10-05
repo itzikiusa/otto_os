@@ -884,7 +884,7 @@
     border-color: var(--accent);
   }
   .pill.on {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     border-color: var(--accent);
   }
   .pill.empty {
@@ -1136,7 +1136,7 @@
      overflow ⋯ — the shared segmented padding is a few px too wide at 375. */
   @media (max-width: 640px) {
     .win-seg > :global(button) {
-      padding-inline: 7px;
+      padding-inline: 6px;
     }
   }
 </style>

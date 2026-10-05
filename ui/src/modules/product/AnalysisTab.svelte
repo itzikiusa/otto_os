@@ -872,14 +872,14 @@
   .chip-group {
     display: flex;
     flex-wrap: wrap;
-    gap: 5px;
+    gap: 4px;
   }
   .chips-muted {
     pointer-events: none;
   }
   .chip {
     height: 22px;
-    padding: 0 9px;
+    padding: 0 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: transparent;
@@ -895,7 +895,7 @@
     color: var(--text);
   }
   .chip-on {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent-text);
   }
@@ -907,7 +907,7 @@
   .focus-wrap {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     padding-top: 8px;
     border-top: 1px solid var(--border);
     margin-top: 2px;
@@ -959,7 +959,7 @@
   .summarizer-wrap {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
   }
   .field-label {
     font-size: var(--fs-xs);
@@ -975,7 +975,7 @@
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
-    padding: 3px 8px;
+    padding: 2px 8px;
     height: 26px;
   }
   .hist-error {
@@ -1155,7 +1155,7 @@
   .coll-trigger {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     background: none;
     border: none;
     color: var(--text-dim);
@@ -1246,7 +1246,7 @@
     letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .sl-title {
@@ -1278,7 +1278,7 @@
     gap: 10px;
     flex-wrap: wrap;
     margin: 6px 0 4px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
     border: 1px solid var(--border);
@@ -1305,7 +1305,7 @@
     flex-shrink: 0;
   }
   .sl-hint-btn:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     border-color: var(--accent);
   }
 </style>

@@ -522,7 +522,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    padding: 1px 3px;
+    padding: 1px 2px;
     border-radius: var(--radius-s);
     font: inherit;
   }
@@ -576,7 +576,7 @@
   .cell.name.nav {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     border: none;
     background: transparent;
     color: var(--text);

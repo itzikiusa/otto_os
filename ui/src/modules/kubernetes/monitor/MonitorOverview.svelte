@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../../lib/plural';
   // Monitor overview: one card per registered cluster (health badge, pods,
   // restarts by class, memory vs limits, rps / error %, version drift, and the
   // collector status line with the exact metrics-server RBAC message when it
@@ -185,7 +186,7 @@
 
             {#if r.drift.length}
               <div class="drift" title={r.drift.map((d) => `${d.workload}: ${d.versions.join(', ')}`).join('\n')}>
-                <Icon name="branch" size={12} /> {r.drift.length} workload{r.drift.length === 1 ? '' : 's'} running mixed versions
+                <Icon name="branch" size={12} /> {plural(r.drift.length, 'workload')} running mixed versions
               </div>
             {/if}
 
@@ -359,7 +360,7 @@
   .drift {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     color: orange;
   }

@@ -102,7 +102,7 @@
   .md :global(pre) {
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     padding: 10px 12px;
     overflow-x: auto;
   }

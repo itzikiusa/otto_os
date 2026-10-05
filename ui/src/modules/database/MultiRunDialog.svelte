@@ -931,7 +931,7 @@
     gap: 8px;
     inline-size: 100%;
     min-inline-size: 0;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 0;
     border-radius: var(--radius-s);
     background: transparent;
@@ -1064,7 +1064,7 @@
   }
   .mr-table th,
   .mr-table td {
-    padding: 3px 8px;
+    padding: 2px 8px;
     border-block-end: 1px solid var(--separator);
     text-align: start;
     white-space: nowrap;

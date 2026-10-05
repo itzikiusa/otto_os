@@ -247,16 +247,16 @@
   .chat-meta {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .chat-status {
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .06em;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .chat-status.status-archived {
