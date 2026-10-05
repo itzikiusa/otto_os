@@ -11,7 +11,7 @@ otto-context = { workspace = true }
 otto-sessions = { workspace = true }
 # The bundled `insights` collector script (materialized next to the reports).
 otto-skills = { workspace = true }
-# `blocking` spans, like the host's `offload::blocking`.
+# `offload::blocking` (the one shared spawn_blocking + panic re-raise helper).
 otto-agent-run = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
