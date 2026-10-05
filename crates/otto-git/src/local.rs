@@ -203,6 +203,53 @@ fn commit_graph_enabled() -> bool {
     std::env::var("OTTO_GIT_COMMIT_GRAPH").map_or(true, |v| v.trim() != "0")
 }
 
+/// Config every daemon git runs with, as `-c` would set it but through the
+/// environment (`GIT_CONFIG_PARAMETERS`), so argv keeps its shape for
+/// [`verb_of`] and the test shims, and a per-spawn `GIT_CONFIG_COUNT` (the
+/// askpass credential reset) does not clobber it. A confined agent can write
+/// the repo's `.git`, and the daemon polls status / fetches it unconfined:
+///
+/// - `core.fsmonitor=false` — an fsmonitor hook is a program `git status`
+///   runs on every refresh;
+/// - `core.hooksPath=/dev/null` — no hook (`reference-transaction` fires on a
+///   background fetch) runs, except on the verbs a person runs on purpose
+///   ([`HOOK_VERBS`], which keep the repo's hooks).
+///
+/// `diff.external`/textconv are refused per command (`--no-ext-diff
+/// --no-textconv`, [`DIFF_FORMAT`]) and the pager by `GIT_PAGER=cat`; other
+/// program-valued keys (`core.sshCommand`, `credential.helper`, filters) are
+/// legitimately user-set, so the Seatbelt profile keeps agents from writing
+/// `.git/config` instead.
+pub(crate) const HARDENED_GIT_CONFIG: &str = "'core.fsmonitor=false' 'core.hooksPath=/dev/null'";
+/// [`HARDENED_GIT_CONFIG`] for a [`HOOK_VERBS`] spawn: the repo's hooks run.
+pub(crate) const HOOKED_GIT_CONFIG: &str = "'core.fsmonitor=false'";
+
+/// Verbs a person runs deliberately (commit / merge / push / branch switch…)
+/// whose hooks (pre-commit, commit-msg, pre-push, LFS post-checkout) they
+/// expect to run. Every other daemon git — status polling, fetch, log, diff,
+/// gc, commit-graph — runs with hooks disabled.
+pub(crate) const HOOK_VERBS: &[&str] = &[
+    "commit",
+    "merge",
+    "pull",
+    "push",
+    "rebase",
+    "cherry-pick",
+    "revert",
+    "am",
+    "checkout",
+    "switch",
+];
+
+/// The `GIT_CONFIG_PARAMETERS` value a spawn of `verb` runs with.
+pub(crate) fn hardened_config_for(verb: &str) -> &'static str {
+    if HOOK_VERBS.contains(&verb) {
+        HOOKED_GIT_CONFIG
+    } else {
+        HARDENED_GIT_CONFIG
+    }
+}
+
 /// The git subcommand in an argv, for error text: `args[0]`, or `args[2]` when
 /// the call is prefixed with `-c <key=value>` (the diff family does that).
 fn verb_of<'a>(args: &'a [&'a str]) -> &'a str {
@@ -762,6 +809,11 @@ impl LocalGit {
         let mut cmd = Command::new(&self.git_bin);
         cmd.current_dir(&self.repo_path)
             .env("GIT_TERMINAL_PROMPT", "0")
+            // The repo's `.git` is writable by the (sandboxed) agent working in
+            // it, but THIS git runs unconfined as the user: never let repo
+            // config pick a program for it to run (see `HARDENED_GIT_CONFIG`).
+            .env("GIT_CONFIG_PARAMETERS", HARDENED_GIT_CONFIG)
+            .env("GIT_PAGER", "cat")
             // Force English output: every error classification here
             // (`local_refusal`, "CONFLICT", "has no upstream branch", …) matches
             // git's English wording, which a non-English LANG silently breaks.
@@ -1156,6 +1208,7 @@ impl LocalGit {
         mut limit: StdoutLimit,
     ) -> Result<(std::process::Output, Cut)> {
         cmd.process_group(0).kill_on_drop(true);
+        cmd.env("GIT_CONFIG_PARAMETERS", hardened_config_for(verb));
         if class == SpawnClass::LocalRead {
             // A read must never take `index.lock`: `git status` otherwise
             // refreshes the index opportunistically, and an agent's concurrent

@@ -2,6 +2,8 @@
 //! provider clients (GitHub / Bitbucket Cloud / GitLab) plus the axum router
 //! implementing contract endpoints #31–#56.
 
+#[cfg(test)]
+mod config_hardening_tests;
 mod diff_cache;
 #[cfg(test)]
 mod diff_tests;
