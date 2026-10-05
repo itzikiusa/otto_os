@@ -1542,7 +1542,7 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "aws_sqs_peek",
-                "description": "MUTATING (aws_sqs Edit): peek up to `max` (1..10, default 10) messages on an SQS queue (receive-message with visibility timeout 0) — message_id, body, attributes, message_attributes. The messages stay visible, BUT every peek increments each message's receive count, so on a queue with a redrive policy repeated peeks can move messages to the dead-letter queue. Only peek when the user asked you to.",
+                "description": "MUTATING (aws_sqs Edit): peek up to `max` (1..10) SQS messages (visibility timeout 0, they stay visible). Each peek bumps their receive count — can dead-letter.",
                 "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string" }, "url": { "type": "string", "description": "Queue URL from aws_sqs_list_queues." }, "max": { "type": "integer" }, "region": { "type": "string" } }, "required": ["account_id", "url"] }
             },
             {
