@@ -348,6 +348,9 @@ pub struct JiraClient {
     http: reqwest::Client,
 }
 
+/// Page cap for [`JiraClient::list_projects`] (100 projects per page).
+const PROJECT_PAGES_MAX: usize = 20;
+
 impl JiraClient {
     pub fn new(base_url: &str, email: &str, token: &str) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
@@ -362,38 +365,8 @@ impl JiraClient {
         }
     }
 
-    /// List projects available in the Jira instance, ordered by name.
-    /// Uses `/rest/api/3/project/search` (Cloud); falls back to `/rest/api/3/project`
-    /// (Server / older Cloud) if the paginated endpoint 404s.
-    pub async fn list_projects(&self) -> Result<Vec<IssueProject>> {
-        let search_url = format!("{}/rest/api/3/project/search", self.base_url);
-        let resp = self
-            .http
-            .get(&search_url)
-            .header("Authorization", &self.auth_header)
-            .header("Accept", "application/json")
-            .query(&[("maxResults", "100"), ("orderBy", "name")])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira project/search request: {e}")))?;
-
-        let (is_paginated, resp) = if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            // Fall back to bare array endpoint.
-            let fallback_url = format!("{}/rest/api/3/project", self.base_url);
-            let r = self
-                .http
-                .get(&fallback_url)
-                .header("Authorization", &self.auth_header)
-                .header("Accept", "application/json")
-                .query(&[("maxResults", "100"), ("orderBy", "name")])
-                .send()
-                .await
-                .map_err(|e| Error::Upstream(format!("jira project list fallback request: {e}")))?;
-            (false, r)
-        } else {
-            (true, resp)
-        };
-
+    /// Status-check and decode one project-list response.
+    async fn project_body(resp: reqwest::Response) -> Result<serde_json::Value> {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -401,21 +374,82 @@ impl JiraClient {
                 "jira project list failed ({status}): {body}"
             )));
         }
-
-        let body: serde_json::Value = resp
-            .json()
+        resp.json()
             .await
-            .map_err(|e| Error::Upstream(format!("jira project list parse: {e}")))?;
+            .map_err(|e| Error::Upstream(format!("jira project list parse: {e}")))
+    }
 
-        // Paginated response: { values: [...] }; bare response: [...]
-        let projects_arr: &[serde_json::Value] = if is_paginated {
-            body.get("values")
+    /// List projects available in the Jira instance, ordered by name.
+    /// Uses `/rest/api/3/project/search` (Cloud); falls back to `/rest/api/3/project`
+    /// (Server / older Cloud) if the paginated endpoint 404s.
+    ///
+    /// The paginated endpoint is walked with `startAt` until `isLast` (or an
+    /// empty page), capped at [`PROJECT_PAGES_MAX`] pages — a single request
+    /// used to silently truncate instances with more than 100 projects.
+    pub async fn list_projects(&self) -> Result<Vec<IssueProject>> {
+        const PAGE: usize = 100;
+        let search_url = format!("{}/rest/api/3/project/search", self.base_url);
+        let mut all: Vec<serde_json::Value> = Vec::new();
+        let mut start_at: usize = 0;
+        for page_no in 0..PROJECT_PAGES_MAX {
+            let start_s = start_at.to_string();
+            let page_s = PAGE.to_string();
+            let resp = self
+                .http
+                .get(&search_url)
+                .header("Authorization", &self.auth_header)
+                .header("Accept", "application/json")
+                .query(&[
+                    ("maxResults", page_s.as_str()),
+                    ("orderBy", "name"),
+                    ("startAt", start_s.as_str()),
+                ])
+                .send()
+                .await
+                .map_err(|e| Error::Upstream(format!("jira project/search request: {e}")))?;
+
+            if page_no == 0 && resp.status() == reqwest::StatusCode::NOT_FOUND {
+                // Fall back to the bare-array endpoint (Server / older
+                // Cloud), which returns every visible project at once.
+                let fallback_url = format!("{}/rest/api/3/project", self.base_url);
+                let r = self
+                    .http
+                    .get(&fallback_url)
+                    .header("Authorization", &self.auth_header)
+                    .header("Accept", "application/json")
+                    .query(&[("orderBy", "name")])
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        Error::Upstream(format!("jira project list fallback request: {e}"))
+                    })?;
+                let body = Self::project_body(r).await?;
+                all = body.as_array().cloned().unwrap_or_default();
+                break;
+            }
+
+            let body = Self::project_body(resp).await?;
+            let page = body
+                .get("values")
                 .and_then(|v| v.as_array())
-                .map(|a| a.as_slice())
-                .unwrap_or(&[])
-        } else {
-            body.as_array().map(|a| a.as_slice()).unwrap_or(&[])
-        };
+                .cloned()
+                .unwrap_or_default();
+            let got = page.len();
+            all.extend(page);
+            start_at += got;
+            let is_last = body
+                .get("isLast")
+                .and_then(|v| v.as_bool())
+                // No `isLast`: fall back to the total, else a short page.
+                .unwrap_or_else(|| match body.get("total").and_then(|v| v.as_u64()) {
+                    Some(total) => start_at as u64 >= total,
+                    None => got < PAGE,
+                });
+            if got == 0 || is_last {
+                break;
+            }
+        }
+        let projects_arr = all.as_slice();
 
         let mut results = Vec::with_capacity(projects_arr.len());
         for p in projects_arr {
@@ -565,6 +599,15 @@ impl JiraClient {
             if offset >= window_end || token.is_none() || n == 0 {
                 break;
             }
+        }
+        // The page cap ran out before the walk reached the window: the
+        // memoised token for this "load more" depth expired (or was evicted),
+        // and re-walking from 0 can't get there within one request. An empty
+        // Ok here read as "no more results" and ended the list silently.
+        if out.is_empty() && start_at > 0 && offset < start_at && token.is_some() {
+            return Err(Error::Invalid(
+                "result window expired — refine the search or start it again".into(),
+            ));
         }
         Ok(out)
     }
@@ -3370,5 +3413,72 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0]["id"], "2");
         assert!(!reached);
+    }
+
+    /// Serve `router` on an ephemeral loopback port; returns its origin.
+    async fn fixture(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn list_projects_walks_every_page() {
+        use axum::extract::Query;
+        use std::collections::HashMap;
+        let router = axum::Router::new().route(
+            "/rest/api/3/project/search",
+            axum::routing::get(|Query(q): Query<HashMap<String, String>>| async move {
+                let start: usize = q.get("startAt").and_then(|s| s.parse().ok()).unwrap_or(0);
+                // 230 projects, served 100 per page.
+                let end = (start + 100).min(230);
+                let values: Vec<_> = (start..end)
+                    .map(|i| serde_json::json!({"key": format!("P{i}"), "name": format!("p{i}")}))
+                    .collect();
+                axum::Json(serde_json::json!({
+                    "values": values, "startAt": start, "total": 230, "isLast": end == 230
+                }))
+            }),
+        );
+        let base = fixture(router).await;
+        let projects = JiraClient::new(&base, "e", "t")
+            .list_projects()
+            .await
+            .unwrap();
+        assert_eq!(projects.len(), 230, "no silent truncation at 100");
+        assert_eq!(projects[229].key, "P229");
+    }
+
+    #[tokio::test]
+    async fn load_more_past_an_expired_walk_errors_instead_of_empty() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        // Every page is full and has a next token; with no memoised walk a
+        // deep "load more" can't be reached within the per-request page cap.
+        let n = Arc::new(AtomicU32::new(0));
+        let router = axum::Router::new().route(
+            "/rest/api/3/search/jql",
+            axum::routing::get(move || {
+                let n = Arc::clone(&n);
+                async move {
+                    let p = n.fetch_add(1, Ordering::SeqCst);
+                    let issues: Vec<_> = (0..JQL_PAGE)
+                        .map(|i| serde_json::json!({"key": format!("K-{p}-{i}"), "fields": {"summary": "s"}}))
+                        .collect();
+                    axum::Json(serde_json::json!({"issues": issues, "nextPageToken": format!("t{p}")}))
+                }
+            }),
+        );
+        let base = fixture(router).await;
+        let c = JiraClient::new(&base, "e", "t");
+        let err = c
+            .search_jql("project = EXPIRED_WALK_TEST", 50 * JQL_PAGE)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("result window expired"), "{err}");
     }
 }
