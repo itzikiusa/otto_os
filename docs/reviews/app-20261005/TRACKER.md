@@ -1,6 +1,6 @@
 # Current checkpoint — 2026-10-05 09:03 local
 
-Iterations 4 and 5 findings have repairs and recorded follow-up evidence. The twenty-role final iteration-6 review is closing; [SCORES.md](SCORES.md) holds its latest published values and remaining deductions. This effort will deliver one continuation PR. No deployment is authorized or performed.
+Iterations 4 and 5 findings have repairs and recorded follow-up evidence. The twenty-role final iteration-6 review is complete; [SCORES.md](SCORES.md) holds its latest published values and remaining deductions. This effort will deliver one continuation PR. No deployment is authorized or performed.
 
 Main through PR82 (`9ab214dd`) is integrated without losing the concurrent design changes. The four iteration-5 defects (departed History resume, departed/reopened Product publication, Personal Agents list ABA ownership, and stale/duplicate scheduled admission) have targeted failing-then-passing evidence. Final acceptance additionally repaired History navigation awaiting a page chunk, Audit keyboard/touch detail disclosure and Product initial deep-link selection during workspace startup.
 

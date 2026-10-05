@@ -1,5 +1,21 @@
 # Scores and evidence
 
+## Final bounded result — iterations 4–6 complete
+
+| Category | Final mean | Minimum partition/lens | Evidence scope |
+|---|---:|---:|---|
+| Correctness | **9.88** | **9.8** | Repaired matrix independently rechecked; named regression evidence |
+| Performance | **9.20** | **8.9** | Current scale/measured UI work; full sustained run and RSS attribution incomplete |
+| External static design | **9.96** | **9.80** | External ten-lens assessment; rendered/native limits remain |
+| Internal static design | **10.00** | **10.00** | Five bounded repair partitions; distinct from the external ten lenses |
+| UX | **9.82** | **9.8** | Named task/recovery journeys; remaining native/mounted limits explicit |
+
+**The overall every-partition 9.8 target was not reached: performance remains below it.** No confirmed blocker/major remains open in the bounded repair matrix. These are review judgments, not whole-app reliability percentages. Final dimensions, fixed-rubric deductions and unresolved acceptance work: [iteration-6-scores.md](iteration-6-scores.md). Iteration 5 preserved checkpoints: [iteration-5-scores.md](iteration-5-scores.md). Execution: [VERIFICATION.md](VERIFICATION.md); measurements: [PERFORMANCE.md](PERFORMANCE.md).
+
+## Historical checkpoints — preserved
+
+The table and narrative below retain their original provisional status and numbers. Their “Pending” entries describe that earlier checkpoint and are superseded by the final table above; they are not current delivery status.
+
 Baseline source: `03f2bc3e` (PR78). Target: 9.8 in every category and partition/lens. Rubric: [PLAN.md](PLAN.md). These are reviewer judgments over declared coverage, not measured probabilities that the app is defect-free.
 
 | Category | Iteration 4 baseline | Iteration 4 after fixes | Iteration 5 | Iteration 6 |
