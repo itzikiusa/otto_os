@@ -137,7 +137,7 @@ test('API request draft and focus survive all shell breakpoints', async ({ page 
   const url = page.getByLabel('Request URL', { exact: true });
   await url.fill('https://fixture.invalid/unsaved-breakpoint-review');
   release();
-  await expect(page.getByText('Loading saved requests…', { exact: true })).toHaveCount(0);
+  await expect(page.locator('.api-page[aria-busy="true"]')).toHaveCount(0);
   for (const width of [834, 390, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     await expect(url).toHaveValue('https://fixture.invalid/unsaved-breakpoint-review');

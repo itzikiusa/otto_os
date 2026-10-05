@@ -12,7 +12,7 @@ test('typing in the API editor during initial discovery survives its empty respo
   await url.fill('https://fixture.invalid/accepted-draft');
   const loaded=page.waitForResponse(response=>response.url().endsWith(`/workspaces/${id}/api-client/requests/summaries`));
   release();await loaded;
-  await expect(page.getByText('Loading saved requests…',{exact:true})).toHaveCount(0);
+  await expect(page.locator('.api-page[aria-busy="true"]')).toHaveCount(0);
   await expect(url).toHaveValue('https://fixture.invalid/accepted-draft');
   await expect(page.getByText('Create your first request',{exact:true})).toHaveCount(0);
 });

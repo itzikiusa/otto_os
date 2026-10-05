@@ -59,12 +59,13 @@ export async function openPage(page: Page, id: string): Promise<void> {
  */
 export async function openApiEditor(page: Page): Promise<void> {
   await openPage(page, 'api');
-  // The editor is temporarily visible during the first workspace fetch. Wait
-  // for that fetch before deciding whether the empty-workspace CTA is needed.
-  await expect(page.getByText('Loading saved requests…', { exact: true })).toHaveCount(0);
+  // The editor shows (aria-busy) while the workspace's lists are in flight; an
+  // untouched empty workspace swaps it for onboarding once they settle. Decide
+  // only after that, or the onboarding check races the swap.
   const url = page.getByLabel('Request URL', { exact: true });
   const onboarding = page.getByText('Create your first request', { exact: true });
   await expect(url.or(onboarding).first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.api-page[aria-busy="true"]')).toHaveCount(0, { timeout: 15_000 });
   if (await onboarding.isVisible()) {
     await page.getByRole('button', { name: 'New request', exact: true }).first().click();
   }

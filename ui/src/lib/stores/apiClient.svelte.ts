@@ -614,6 +614,17 @@ class ApiClientStore {
     return null;
   }
   loading = $state(false);
+  /** The workspace whose lists settled (loaded or failed) at least once. Not
+   *  cleared by a refetch, so a reload never re-enters the "not loaded" state. */
+  listsSettledFor: Id | null = $state(null);
+  /** The current workspace's lists are in flight OR have not been asked for
+   *  yet. `loading` alone is false on the first render, before the page's
+   *  effect starts `loadAll` — an empty-looking store then read as "nothing
+   *  saved" and flashed onboarding → editor → onboarding. */
+  get listsPending(): boolean {
+    const wid = this.wsId();
+    return this.loading || (wid !== null && this.listsSettledFor !== wid);
+  }
   /** Why the collections + requests lists couldn't load (the sidebar tree's
    *  inline error with Retry); null when fine. Scoped per list so a failed
    *  environments refresh can never paint "Couldn’t load" over the tree. */
@@ -720,7 +731,10 @@ class ApiClientStore {
         this.envLoadError = errMsg(e);
       }
     } finally {
-      if (current()) this.loading = false;
+      if (current()) {
+        this.loading = false;
+        this.listsSettledFor = wid;
+      }
     }
     if (current()) void this.loadSshConnections();
   }
