@@ -4467,7 +4467,7 @@ recall), and each Personal Agent's own `memory/notes.md` (unchanged). With
 `accept`; otherwise they are `accepted` and shown as a chip with Undo.
 
 **DTOs** (Rust: stored rows in `crates/otto-state/src/assistant.rs`, request/response
-shapes in `crates/otto-server/src/assistant/{types,router,limits}.rs`; TS:
+shapes in `crates/otto-assistant/src/assistant/{types,router,limits}.rs`; TS:
 `ui/src/lib/api/types.ts` `// ── Otto Assistant`):
 
 ```text

@@ -33,6 +33,7 @@ tokio-util = { version = "0.7.19", features = ["io"] }
 tempfile.workspace = true
 rustix = { workspace = true, features = ["process"] }
 otto-core.workspace = true
+otto-assistant.workspace = true
 otto-state.workspace = true
 otto-rbac.workspace = true
 otto-netguard.workspace = true

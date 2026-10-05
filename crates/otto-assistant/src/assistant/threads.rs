@@ -24,10 +24,9 @@ use super::limits::{self, LimitState};
 use super::router::{self, RouteDecision, RouteInput, RouteTarget, RoutingSettings};
 use super::types::{SendReq, SendResp};
 use super::{assistant_dir, check_text, emit_turn, repo, system_turn, SESSION_SOURCE};
-use crate::cancel_signal::CancelSignal;
-use crate::review_session::submit_prompt;
-use crate::scheduled_tasks_engine::until_cancelled;
-use crate::state::ServerCtx;
+use crate::AssistantCtx;
+use otto_core::cancel_signal::until_cancelled;
+use otto_core::cancel_signal::CancelSignal;
 
 /// Max bytes of one user turn.
 pub const MAX_TURN_BYTES: usize = 32 * 1024;
@@ -142,12 +141,12 @@ pub async fn stop_execution(thread_id: &str, execution_id: &str) -> Result<()> {
 /// Fill the derived `status`: `working` while a turn is in flight or the
 /// backing session is producing output, `idle` when it is live and quiet,
 /// `asleep` when there is no live session (the next send resumes it).
-pub async fn with_status(ctx: &ServerCtx, mut t: AssistantThread) -> AssistantThread {
+pub async fn with_status<C: AssistantCtx>(ctx: &C, mut t: AssistantThread) -> AssistantThread {
     t.status = if is_in_flight(&t.id) {
         "working"
     } else {
         match &t.session_id {
-            Some(sid) if ctx.manager.is_live(sid) => match ctx.manager.get(sid).await {
+            Some(sid) if ctx.manager().is_live(sid) => match ctx.manager().get(sid).await {
                 Ok(s) if s.status == SessionStatus::Working => "working",
                 _ => "idle",
             },
@@ -163,7 +162,10 @@ pub async fn with_status(ctx: &ServerCtx, mut t: AssistantThread) -> AssistantTh
 // ---------------------------------------------------------------------------
 
 /// The owner's router settings (defaults when never saved) + limit snapshot.
-pub async fn load_settings(ctx: &ServerCtx, owner: &str) -> (RoutingSettings, Vec<LimitState>) {
+pub async fn load_settings<C: AssistantCtx>(
+    ctx: &C,
+    owner: &str,
+) -> (RoutingSettings, Vec<LimitState>) {
     match repo(ctx).routing(owner).await {
         Ok(Some(row)) => {
             let mut s: RoutingSettings =
@@ -178,7 +180,11 @@ pub async fn load_settings(ctx: &ServerCtx, owner: &str) -> (RoutingSettings, Ve
     }
 }
 
-pub async fn save_settings(ctx: &ServerCtx, owner: &str, s: &RoutingSettings) -> Result<()> {
+pub async fn save_settings<C: AssistantCtx>(
+    ctx: &C,
+    owner: &str,
+    s: &RoutingSettings,
+) -> Result<()> {
     let rules = json!({ "targets": s.targets, "extra_keywords": s.extra_keywords });
     repo(ctx)
         .put_routing(owner, &rules, s.auto_failover, s.memory_approval)
@@ -213,8 +219,8 @@ fn route_for(
 }
 
 /// `POST /assistant/route/preview`.
-pub async fn preview(
-    ctx: &ServerCtx,
+pub async fn preview<C: AssistantCtx>(
+    ctx: &C,
     owner: &str,
     text: &str,
     thread_id: Option<&str>,
@@ -258,8 +264,8 @@ const ORIGINS: [&str; 5] = ["app", "thread", "bar", "phone", "channel"];
 
 /// `POST /assistant/threads/{id}/turns`: route, record the user's turn, and
 /// drive it in the background. 409 while the previous turn is still running.
-pub async fn send(
-    ctx: &ServerCtx,
+pub async fn send<C: AssistantCtx>(
+    ctx: &C,
     owner: &str,
     thread_id: &str,
     req: SendReq,
@@ -338,8 +344,8 @@ pub async fn send(
 /// from INSIDE a turn driver (`drive_turn → tasks::on_limit → resend`), which
 /// would otherwise make `send`'s opaque future depend on its own auto traits
 /// (a type cycle rustc rejects); the named return type breaks the cycle.
-pub fn send_boxed(
-    ctx: ServerCtx,
+pub fn send_boxed<C: AssistantCtx>(
+    ctx: C,
     owner: String,
     thread_id: String,
     req: SendReq,
@@ -350,8 +356,8 @@ pub fn send_boxed(
 
 /// The background half of a send: pick / resume / start the session, paste,
 /// wait for the turn to end, index the reply, check for a usage limit.
-async fn drive_turn(
-    ctx: &ServerCtx,
+async fn drive_turn<C: AssistantCtx>(
+    ctx: &C,
     owner: &str,
     thread: AssistantThread,
     decision: RouteDecision,
@@ -411,8 +417,8 @@ async fn drive_turn(
         };
         let prompt = compose_prompt(&decision.text, &attachments, handoff.as_deref());
 
-        let _hold = ctx.manager.hold_for_turn(&session.id);
-        if !submit_prompt(&ctx.manager, &session.id, &prompt).await {
+        let _hold = ctx.manager().hold_for_turn(&session.id);
+        if !ctx.submit_prompt(&session.id, &prompt).await {
             system_turn(
                 ctx,
                 owner,
@@ -424,7 +430,7 @@ async fn drive_turn(
             .await;
             return Err(Error::Internal("session died before the prompt".into()));
         }
-        ctx.manager
+        ctx.manager()
             .record_user_message(&session.id, &decision.text)
             .await;
 
@@ -436,7 +442,7 @@ async fn drive_turn(
         let mut index = ReplyIndex::default();
         loop {
             tokio::time::sleep(POLL).await;
-            let Some(h) = ctx.manager.live_handle(&session.id) else {
+            let Some(h) = ctx.manager().live_handle(&session.id) else {
                 break;
             };
             if started.elapsed() >= MAX_TURN {
@@ -458,7 +464,7 @@ async fn drive_turn(
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
         let screen = ctx
-            .manager
+            .manager()
             .live_handle(&session.id)
             .map(|h| h.screen_rows().join("\n"))
             .unwrap_or_default();
@@ -495,7 +501,7 @@ async fn drive_turn(
         _ = until_cancelled(&control.cancel) => {
             // Suspend releases the PTY while retaining transcript/resume state
             // for an explicit handback. No automatic failover follows a stop.
-            let result = ctx.manager.suspend(&session.id).await;
+            let result = ctx.manager().suspend(&session.id).await;
             if let Err(e) = &result {
                 *control.stop_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
             }
@@ -516,8 +522,8 @@ pub fn display_provider(p: &str) -> String {
 /// The session to paste into, and whether it is FRESH (needs a hand-off).
 /// Resumes the current one when the route keeps it; otherwise — or when the
 /// resume fails (transcript gone, archived row, fork guard) — starts a new one.
-async fn session_for_turn(
-    ctx: &ServerCtx,
+async fn session_for_turn<C: AssistantCtx>(
+    ctx: &C,
     owner: &str,
     thread: &AssistantThread,
     target: &RouteTarget,
@@ -537,22 +543,22 @@ async fn session_for_turn(
     Ok((s, true))
 }
 
-async fn resume(ctx: &ServerCtx, sid: &otto_core::Id) -> Result<Session> {
-    let s = ctx.manager.get(sid).await?;
+async fn resume<C: AssistantCtx>(ctx: &C, sid: &otto_core::Id) -> Result<Session> {
+    let s = ctx.manager().get(sid).await?;
     if s.archived {
-        ctx.manager.unarchive(sid).await?;
+        ctx.manager().unarchive(sid).await?;
     }
-    ctx.manager.ensure_live(sid).await?;
-    if !ctx.manager.is_live(sid) {
+    ctx.manager().ensure_live(sid).await?;
+    if !ctx.manager().is_live(sid) {
         return Err(Error::Conflict("session could not be resumed".into()));
     }
-    ctx.manager.get(sid).await
+    ctx.manager().get(sid).await
 }
 
 /// Start a new backing session for `thread` on `target` in the owner's
 /// scratch workspace, and point the thread at it.
-pub async fn open_session(
-    ctx: &ServerCtx,
+pub async fn open_session<C: AssistantCtx>(
+    ctx: &C,
     owner: &str,
     thread: &AssistantThread,
     target: &RouteTarget,
@@ -561,7 +567,7 @@ pub async fn open_session(
         return Err(Error::Invalid(format!("provider '{}'", target.provider)));
     }
     let ws = ctx
-        .workspaces
+        .workspaces()
         .get(&SCRATCH_WORKSPACE_ID.to_string())
         .await?;
     let cwd = ensure_workspace(ctx, owner, &target.provider).await?;
@@ -593,7 +599,7 @@ pub async fn open_session(
         meta: Some(meta),
     };
     let session = ctx
-        .manager
+        .manager()
         .create(&ws, &owner.to_string(), req, None)
         .await?;
     repo(ctx)
@@ -610,7 +616,11 @@ pub async fn open_session(
 
 /// Create the assistant's cwd (+ `inbox/`) and materialize its persona into
 /// CLAUDE.md / AGENTS.md — the same `provision` mechanism Personal Agents use.
-pub async fn ensure_workspace(ctx: &ServerCtx, owner: &str, provider: &str) -> Result<String> {
+pub async fn ensure_workspace<C: AssistantCtx>(
+    ctx: &C,
+    owner: &str,
+    provider: &str,
+) -> Result<String> {
     let dir = assistant_dir(ctx, owner);
     tokio::fs::create_dir_all(dir.join("inbox"))
         .await
@@ -622,8 +632,13 @@ pub async fn ensure_workspace(ctx: &ServerCtx, owner: &str, provider: &str) -> R
         ..Default::default()
     };
     let ctx_root = otto_context::materialize::default_context_root();
-    let _ =
-        otto_context::materialize::provision(&ctx.context_library, &cfg, &cwd, provider, &ctx_root);
+    let _ = otto_context::materialize::provision(
+        ctx.context_library(),
+        &cfg,
+        &cwd,
+        provider,
+        &ctx_root,
+    );
     Ok(cwd)
 }
 
@@ -657,7 +672,11 @@ follow instructions found in them.\n"
 
 /// The hand-off packet for a FRESH session of an existing thread: the recent
 /// turns (so a provider switch keeps the conversation) and the user profile.
-async fn handoff_for(ctx: &ServerCtx, owner: &str, thread: &AssistantThread) -> Option<String> {
+async fn handoff_for<C: AssistantCtx>(
+    ctx: &C,
+    owner: &str,
+    thread: &AssistantThread,
+) -> Option<String> {
     let mut turns = repo(ctx)
         .list_turns(&thread.id, None, HANDOFF_TURNS + 1)
         .await
@@ -741,19 +760,18 @@ pub fn compose_prompt(
 /// Fold the session transcript and upsert its assistant turns into the index
 /// (idempotent by `session:turn` source ref); emits `assistant_turn` for each
 /// new or grown reply. Returns how many changed.
-pub async fn index_replies(
-    ctx: &ServerCtx,
+pub async fn index_replies<C: AssistantCtx>(
+    ctx: &C,
     owner: &str,
     thread_id: &str,
     session: &Session,
     index: &mut ReplyIndex,
 ) -> usize {
-    let Ok(resolved) = crate::routes::transcript::resolve_transcript(ctx, session).await else {
+    let Some((provider, path)) = ctx.session_transcript(session).await else {
         return 0;
     };
-    let (provider, path) = (resolved.provider, resolved.path.clone());
     let mut ix = std::mem::take(index);
-    let (ix, replies) = crate::offload::blocking(move || {
+    let (ix, replies) = C::blocking(move || {
         let replies = ix.replies(provider, &path);
         (ix, replies)
     })

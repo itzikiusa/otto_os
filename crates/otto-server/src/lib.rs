@@ -11,7 +11,7 @@ pub mod api_helpers;
 /// Moved to `otto-apiclient`; re-exported so `crate::api_scripts` paths hold.
 pub use otto_apiclient::scripts as api_scripts;
 pub mod api_secrets;
-pub mod assistant;
+mod assistant_host;
 pub mod auth;
 pub mod boot;
 pub mod browser_login_throttle;
@@ -56,13 +56,9 @@ pub mod model_catalog;
 pub mod modules;
 pub mod monitor;
 pub use otto_agent_run::offload;
-mod personal_agent_documents;
 // Personal agents: tool-layer permission policy + live activity (batch 2026-10-03).
 pub mod personal_agent_activity;
-pub mod personal_agent_memory;
 pub mod personal_agent_policy;
-pub mod personal_agents_engine;
-pub mod personal_agents_scheduler;
 pub mod plugins;
 pub mod policy;
 pub mod product_host;
@@ -136,6 +132,12 @@ pub use error::{ApiError, ApiResult};
 pub use monitor::{
     spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
     spawn_usage_recorder, AuthScanner, CredentialMonitor,
+};
+// The Assistant + Personal Agents engines live in `otto-assistant` (wired to
+// the daemon by `assistant_host`); re-exported at their historical paths.
+pub use otto_assistant::{
+    assistant, personal_agent_documents, personal_agent_memory, personal_agents_engine,
+    personal_agents_scheduler,
 };
 pub use state::ServerCtx;
 pub use workflow_trigger_scheduler::spawn_workflow_event_trigger_listener;

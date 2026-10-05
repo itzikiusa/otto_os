@@ -1097,7 +1097,7 @@ blind timer.
   "run_id": "<Id>", "status": "running|ok|error" }
 ```
 
-- Emitted by `otto_server::personal_agents_engine` when a personal-agent run
+- Emitted by `otto_assistant::personal_agents_engine` when a personal-agent run
   starts, finishes (`ok`) or errors.
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Personal Agents page re-fetches the agent's run history on a matching
@@ -1642,7 +1642,7 @@ saved Context, while existing sessions retain their initial context.
 Otto Assistant (`api.md` "Otto Assistant"). **Owner-scoped**: each event carries
 the assistant owner's `user_id` and is delivered ONLY to that user's
 connections — not to workspace members and not to root (the assistant is
-personal). Emitted by `crates/otto-server/src/assistant.rs` and its submodules.
+personal). Emitted by `crates/otto-assistant/src/assistant.rs` and its submodules.
 Reply prose still streams over the session-family `transcript_live` /
 `transcript_appended` events of `thread.session_id`; these four events carry the
 assistant's own index and queue.

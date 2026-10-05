@@ -22,7 +22,7 @@ use super::memory::{self, to_wire};
 use super::repo;
 use super::tasks;
 use super::types::CreateTaskReq;
-use crate::state::ServerCtx;
+use crate::AssistantCtx;
 
 /// Every `{tool}` segment, and the MCP tool it backs.
 pub const TOOLS: [(&str, &str); 8] = [
@@ -59,8 +59,8 @@ pub fn calling_session(auth: &AuthContext, body: &Value) -> Option<String> {
 }
 
 /// Resolve the calling session to the caller's thread (see module docs).
-async fn resolve_thread(
-    ctx: &ServerCtx,
+async fn resolve_thread<C: AssistantCtx>(
+    ctx: &C,
     user: &User,
     session_id: Option<&str>,
 ) -> Result<Option<AssistantThread>> {
@@ -68,7 +68,7 @@ async fn resolve_thread(
         return Ok(None);
     };
     let session = ctx
-        .manager
+        .manager()
         .get(&sid.to_string())
         .await
         .map_err(|_| Error::Invalid("unknown session_id".into()))?;
@@ -83,7 +83,12 @@ async fn resolve_thread(
     Ok(Some(repo(ctx).get_thread(&user.id, thread_id).await?))
 }
 
-pub async fn run(ctx: &ServerCtx, auth: &AuthContext, tool: &str, body: Value) -> Result<Value> {
+pub async fn run<C: AssistantCtx>(
+    ctx: &C,
+    auth: &AuthContext,
+    tool: &str,
+    body: Value,
+) -> Result<Value> {
     if !TOOLS.iter().any(|(t, _)| *t == tool) {
         return Err(Error::NotFound(format!("assistant tool '{tool}'")));
     }

@@ -56,6 +56,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-improve` | Self-improvement engine |
 | `otto-insights` | Insights — opt-in catch-up scheduler + reports/config/run API that runs the `insights` skill in a headless agent session (behind `InsightsCtx`) |
 | `otto-context` | Context assembly |
+| `otto-assistant` | Personal Assistant (threads, tasks, memory, routing, limits) + Personal Agents engine & scheduler, behind an `AssistantCtx` trait (routes, read-only agent policy and activity feed stay in `otto-server`) |
 | `otto-memory` | Workspace-scoped agent knowledge store (keyword/FTS5 recall; no embeddings) |
 | `otto-vault` | Vault docs home — file-backed Obsidian-parity markdown vaults + OKF (derived SQLite index: notes, links, tags, FTS, graph) |
 | `otto-canvas` | Canvas scene CRUD (file-backed visual scenes) + the agent-assist engine (`assist.rs`; the host runs the agent turn via `CanvasAssistCtx`) |
