@@ -24,7 +24,7 @@ use otto_sessions::SessionManager;
 use otto_state::ReviewsRepo;
 use tokio::sync::Mutex;
 
-use crate::agent_run::{
+use otto_agent_run::agent_run::{
     run_with_recovery_until, watch_for_result_guarded, FailReason, RunOutcome, WatchGuard,
     WatchStatus,
 };
@@ -439,7 +439,7 @@ pub type SharedStates = Arc<Mutex<Vec<ReviewAgentState>>>;
 /// from it either. For non-claude providers the lens method is delivered inline
 /// in the prompt (see `compose_review_lens_prompt` / `run_review_core`), so the
 /// bundle is pure downside and is withheld. An empty/None dir ⇒ `None`.
-pub(crate) fn review_skills_extra_dirs(
+pub fn review_skills_extra_dirs(
     provider: &str,
     skills_add_dir: Option<&str>,
 ) -> Option<serde_json::Value> {
@@ -640,7 +640,7 @@ async fn persist_agent<F: FnOnce(&mut ReviewAgentState)>(
 /// any other lens's file is added, skipping exact duplicates. Returns the
 /// slugs with neither a readable file nor a finding in the merge — lenses that
 /// had not finished when the result was adopted.
-pub(crate) fn merge_lens_files(
+pub fn merge_lens_files(
     findings: &mut Vec<ReviewFinding>,
     lens_files: &[(String, PathBuf)],
 ) -> Vec<String> {
@@ -678,7 +678,7 @@ pub(crate) fn merge_lens_files(
 /// The reviewer row's terminal note: `N findings`, or — when lenses were still
 /// running at adoption — a note starting with `partial` (which
 /// `review_run_complete` in `modules.rs` keys on) naming them.
-pub(crate) fn partial_or_count_note(count: usize, missing: &[String]) -> String {
+pub fn partial_or_count_note(count: usize, missing: &[String]) -> String {
     let plural = if count == 1 { "" } else { "s" };
     if missing.is_empty() {
         format!("{count} finding{plural}")
@@ -898,7 +898,8 @@ pub async fn claude_prompt_landed(
                 let path = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
                 // Only THIS turn's bytes (past `offset`), read off the runtime:
                 // a reused session's transcript can be tens of MB.
-                if crate::offload::blocking(move || user_record_after(&path, offset)).await {
+                if otto_agent_run::offload::blocking(move || user_record_after(&path, offset)).await
+                {
                     return true;
                 }
             }
@@ -997,7 +998,7 @@ async fn wait_for_tui_with(
 /// Which teardown a finished reviewer's session gets: `suspend` when the
 /// provider can resume the transcript later (so "Open session" on a finished
 /// review still replays it), `kill` otherwise. Pure so the mapping is testable.
-pub(crate) fn stop_action(supports_resume: bool) -> &'static str {
+pub fn stop_action(supports_resume: bool) -> &'static str {
     if supports_resume {
         "suspend"
     } else {
@@ -1010,7 +1011,7 @@ pub(crate) fn stop_action(supports_resume: bool) -> &'static str {
 /// file-descriptor footprint — leaving them live after the summarizer ran is
 /// what walks `lsof` up over a day of reviews. Best-effort: a failure is a log
 /// line, never a review error.
-pub(crate) async fn stop_review_sessions(manager: &Arc<SessionManager>, session_ids: &[String]) {
+pub async fn stop_review_sessions(manager: &Arc<SessionManager>, session_ids: &[String]) {
     for sid in session_ids {
         let Ok(session) = manager.get(sid).await else {
             continue;
@@ -1085,7 +1086,7 @@ fn paste_echoed(manager: &Arc<SessionManager>, sid: &otto_core::Id, probe: &str)
         return false;
     };
     let rows = h.screen_rows();
-    let tail = crate::agent_tasks_nudge::strip_ansi(&h.scrollback(200));
+    let tail = otto_agent_run::screen::strip_ansi(&h.scrollback(200));
     [rows.join(" "), rows.concat(), tail]
         .iter()
         .any(|text| screen_shows_paste(&normalize_ws(text), probe))
@@ -1294,9 +1295,9 @@ mod tests {
         // raw-byte match missed it and the prompt was pasted a second time.
         let probe = "You are a Codex worker on /repo (branch";
         let raw = b"\x1b[2m> \x1b[22mYou are a\x1b[1C Codex worker\x1b[0m on /repo (branch main)";
-        let plain = crate::agent_tasks_nudge::strip_ansi(raw);
+        let plain = otto_agent_run::screen::strip_ansi(raw);
         assert!(screen_shows_paste(&normalize_ws(&plain), probe));
-        let placeholder = crate::agent_tasks_nudge::strip_ansi(
+        let placeholder = otto_agent_run::screen::strip_ansi(
             b"\x1b[38;5;246m[Pasted text #1 +812 lines]\x1b[39m",
         );
         assert!(screen_shows_paste(&normalize_ws(&placeholder), probe));

@@ -67,7 +67,7 @@ fn is_cancelled(flag: &Arc<AtomicBool>) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// PTY driving constants (match review_session.rs — claude's TUI is slow).
+// PTY driving constants (match otto_review::session — claude's TUI is slow).
 // ---------------------------------------------------------------------------
 
 const OUTPUT_POLL: Duration = Duration::from_millis(1000);

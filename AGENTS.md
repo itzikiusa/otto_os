@@ -66,7 +66,9 @@ Otto.app (Tauri / otto-desktop)
 | `otto-skills` | Bundled, versioned skill library |
 | `otto-product` | Product Story Analysis — Jira/Confluence story workflows, the analysis/rewrite/test/plan runners, story watcher, discovery chat, refinement, attachments/annotations, design formats, Product↔Swarm (host hooks via `ProductCtx` / `ProductRunHost` / `ProductStudioHost`) |
 | `otto-swarm` | Agent Swarm (role agents, org tree, coordinator) |
-| `otto-server` | Axum routes wiring the crates together; also hosts the multi-agent code-review engine, swarm runtime, workflow engine & plugin supervisor. `boot/` is the daemon composition root (`open_state` → `build_ctx` → recovery → `spawn_background`; `ServerCtx::from_parts` is the one context literal, shared with `ServerCtx::for_tests`) |
+| `otto-agent-run` | Agent-run primitives for PTY-driven CLI agents: result-file watcher + recovery (`agent_run`), transcript turn oracle, off-runtime blocking IO |
+| `otto-review` | Multi-agent code-review engine — reviewer sessions, managed summarizer + deterministic fallback, and the pure core (diff render/caps, configs/budgets, lens expansion, prompts, draft parsing); routes + ctx-bound orchestration stay in `otto-server` |
+| `otto-server` | Axum routes wiring the crates together; also hosts the code-review routes + orchestration, swarm runtime, workflow engine & plugin supervisor. `boot/` is the daemon composition root (`open_state` → `build_ctx` → recovery → `spawn_background`; `ServerCtx::from_parts` is the one context literal, shared with `ServerCtx::for_tests`) |
 | `ottod` | The daemon binary: process setup, single-instance lock, listeners, shutdown; drives `otto_server::boot` |
 
 > The Tauri desktop shell lives in `apps/desktop/src-tauri` and is a **separate,

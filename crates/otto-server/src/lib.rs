@@ -4,7 +4,7 @@
 //! integration time.
 
 pub mod agent_refs;
-pub mod agent_run;
+pub use otto_agent_run::agent_run;
 pub mod agent_session;
 pub mod agent_tasks_nudge;
 pub mod api_helpers;
@@ -58,7 +58,7 @@ pub mod mockup_assist;
 pub mod model_catalog;
 pub mod modules;
 pub mod monitor;
-pub mod offload;
+pub use otto_agent_run::offload;
 mod personal_agent_documents;
 // Personal agents: tool-layer permission policy + live activity (batch 2026-10-03).
 pub mod personal_agent_activity;
@@ -74,9 +74,9 @@ pub mod provider_resolve;
 pub mod repo_directory;
 pub mod report_delivery;
 pub mod resource_sessions;
-pub mod review_fallback;
-pub mod review_session;
-mod review_summarizer;
+pub use otto_review::fallback as review_fallback;
+pub use otto_review::session as review_session;
+use otto_review::summarizer as review_summarizer;
 pub mod rooms;
 pub mod routes;
 pub mod run_callback;
@@ -111,7 +111,7 @@ pub mod test_support;
 pub mod transcript_cache;
 pub mod transcript_tail;
 pub mod transport;
-pub mod turn_oracle;
+pub use otto_agent_run::turn_oracle;
 pub mod ui_bridge;
 // Moved to `otto_mcp::outward`; re-exported so `crate::ui_commands` keeps working.
 pub use otto_mcp::outward::ui_commands;

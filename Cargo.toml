@@ -38,6 +38,8 @@ members = [
     "crates/otto-browser",
     "crates/otto-transcript",
     "crates/otto-workflows",
+    "crates/otto-agent-run",
+    "crates/otto-review",
 ]
 # Custom plugins are out-of-process sidecars installed at RUNTIME under
 # ~/otto-plugins (not workspace members, not compiled into the app). See
@@ -69,6 +71,8 @@ otto-context = { path = "crates/otto-context" }
 otto-skills = { path = "crates/otto-skills" }
 otto-usage = { path = "crates/otto-usage" }
 otto-telemetry = { path = "crates/otto-telemetry" }
+otto-agent-run = { path = "crates/otto-agent-run" }
+otto-review = { path = "crates/otto-review" }
 otto-server = { path = "crates/otto-server" }
 otto-product = { path = "crates/otto-product" }
 otto-swarm = { path = "crates/otto-swarm" }

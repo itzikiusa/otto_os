@@ -378,17 +378,7 @@ pub fn looks_like_permission_prompt(screen_lower: &str) -> bool {
     NEEDLES.iter().any(|n| screen_lower.contains(n))
 }
 
-/// Drop ESC/CSI/OSC sequences from a screen snapshot, keeping printable text.
-pub fn strip_ansi(bytes: &[u8]) -> String {
-    otto_core::text::strip_ansi_bytes(bytes)
-        .chars()
-        .filter_map(|c| match c {
-            '\n' | '\r' | '\t' => Some(' '),
-            c if c.is_control() => None,
-            c => Some(c),
-        })
-        .collect()
-}
+pub use otto_agent_run::screen::strip_ansi;
 
 #[cfg(test)]
 mod tests {

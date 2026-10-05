@@ -65,6 +65,8 @@ otto-context.workspace = true
 otto-skills.workspace = true
 otto-usage.workspace = true
 otto-telemetry.workspace = true
+otto-agent-run.workspace = true
+otto-review.workspace = true
 # Conversation view: the shared transcript parser (design docs/design/conversation-view.md).
 otto-transcript.workspace = true
 otto-product.workspace = true

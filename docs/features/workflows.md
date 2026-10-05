@@ -178,7 +178,7 @@ turn. A claude parent ends a turn every time a sub-agent reports back, and it
 ends one the instant it has *launched* them ("waiting on the four sweep
 agents") — so "the first `end_turn` wins" used to cut steps off mid-flight. The
 engine instead runs a **turn oracle**
-(`crates/otto-server/src/turn_oracle.rs`) over the provider's own transcript.
+(`crates/otto-agent-run/src/turn_oracle.rs`) over the provider's own transcript.
 A step completes only when **all three** hold:
 
 1. **The turn ended natively.** *claude:* the last message-bearing line is an
