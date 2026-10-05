@@ -11,6 +11,7 @@ import { beginNavigation, finishNavigationPaint } from './telemetry';
 // can return to previously-viewed pages.
 
 import { SvelteMap } from 'svelte/reactivity';
+import { dropShareToken, storeShareToken, storedShareToken } from './shareTokenStore';
 import { winKey } from './win';
 import { lsGet, lsSet } from './storage';
 import { isEmbedded } from './desktop';
@@ -27,6 +28,8 @@ import { activeNavId } from './sidebar';
 // The token is intentionally NOT stored in localStorage (would clobber a real
 // owner login under the 'otto_token' key and survive the session).
 // Replacing a token for the same session must refresh the guest's role too.
+// It IS mirrored into tab-scoped sessionStorage (shareTokenStore.ts) so a
+// reload of the guest page keeps access.
 const _shareTokens = new SvelteMap<string, string>();
 
 // Per-window last-route persistence (multi-window restore). Desktop-app only:
@@ -122,7 +125,16 @@ function loadLastByModule(): Map<string, string> {
 /** Retrieve the in-memory share token captured for a given session.
  *  Returns null if the URL didn't carry one or the token has been consumed. */
 export function getShareToken(sessionId: string): string | null {
-  return _shareTokens.get(sessionId) ?? null;
+  const t = _shareTokens.get(sessionId);
+  if (t) return t;
+  // A reload: the URL no longer carries the token, but this tab kept it.
+  return storedShareToken(sessionId);
+}
+
+/** The link is dead (revoked / expired): forget the tab's stored copy so a
+ *  reload doesn't keep presenting it. The in-memory token stays for this view. */
+export function forgetStoredShareToken(sessionId: string): void {
+  dropShareToken(sessionId);
 }
 
 /** decodeURIComponent that never throws: a malformed `%` escape in a pasted
@@ -266,6 +278,7 @@ class Router {
       const token = parts[2];
       if (sessionId && token) {
         _shareTokens.set(sessionId, token);
+        storeShareToken(sessionId, token);
         // Remove the token segment from the URL immediately (replaceState so
         // it doesn't create a new history entry — the token is one-time-view).
         const cleanHash = `#/s/${encodeURIComponent(sessionId)}`;

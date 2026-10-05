@@ -3,12 +3,20 @@
   import { tick } from 'svelte';
   import { api, setToken, ApiError } from '../../lib/api/client';
   import type { LoginResp, Workspace } from '../../lib/api/types';
-  import { auth } from '../../lib/stores/auth.svelte';
+  import { auth, ONBOARDING_RESUME_KEY } from '../../lib/stores/auth.svelte';
+  import { ssSet, ssRemove } from '../../lib/storage';
+  import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { FsBrowse } from '../../lib/api/types';
 
-  let step = $state(0);
+  // A reload after the root account exists resumes here (auth boot reads the
+  // tab's saved step); the account is signed in already, so Finish skips it.
+  const resumed = auth.onboardingResumeStep !== null;
+  let step = $state(auth.onboardingResumeStep ?? 0);
+  $effect(() => {
+    if (step >= 2 && (rootLogin || resumed)) ssSet(ONBOARDING_RESUME_KEY, String(step));
+  });
   let card = $state<HTMLElement | null>(null);
   $effect(() => {
     const currentStep = step;
@@ -28,10 +36,14 @@
   // setup fails so Retry cannot attempt to create the account again.
   let rootLogin = $state<LoginResp | null>(null);
 
+  /** Length in code points — the daemon counts `chars()`, so an emoji is one
+   *  character here too (UTF-16 `length` counted it as two and enabled the
+   *  button for a password the server then refused). */
+  const pwLen = $derived([...password].length);
   const strength = $derived.by(() => {
     let score = 0;
-    if (password.length >= 10) score++;
-    if (password.length >= 14) score++;
+    if (pwLen >= 10) score++;
+    if (pwLen >= 14) score++;
     if (/[A-Z]/.test(password) && /[a-z]/.test(password)) score++;
     if (/\d/.test(password)) score++;
     if (/[^A-Za-z0-9]/.test(password)) score++;
@@ -40,7 +52,7 @@
   const strengthLabel = $derived(
     ['too short', 'weak', 'fair', 'good', 'strong', 'excellent'][strength] ?? 'weak',
   );
-  const pwValid = $derived(password.length >= 10 && password === password2);
+  const pwValid = $derived(pwLen >= 10 && password === password2);
 
   // ClickHouse powers usage tracking; surface whether it's already present so
   // the user knows what to expect (install happens from the Usage dashboard
@@ -84,6 +96,13 @@
     return rootLogin;
   }
 
+  /** A raw fetch failure ("Load failed" / "Failed to fetch") means the daemon
+   *  isn't answering — say that, not the browser's words. */
+  function failureText(e: unknown): string {
+    if (!(e instanceof ApiError)) return 'Otto’s background service isn’t responding — it may still be starting. Try again in a moment.';
+    return e.message;
+  }
+
   let pwError = $state('');
   let rootTaken = $state(false);
   async function confirmPassword(): Promise<void> {
@@ -97,7 +116,7 @@
     } catch (e) {
       pwError = rootTaken
         ? 'A root account already exists on this Otto daemon. Sign in with its password instead.'
-        : `Couldn’t create the account: ${e instanceof Error ? e.message : String(e)}`;
+        : `Couldn’t create the account: ${failureText(e)}`;
     } finally {
       busy = false;
     }
@@ -128,17 +147,39 @@
     if (busy) return;
     busy = true;
     error = '';
+    let login: LoginResp | null = null;
     try {
-      const login = await ensureRoot();
-      if (!skipWorkspace && wsName.trim() !== '' && wsPath.trim() !== '') {
-        await api.post<Workspace>('/workspaces', { name: wsName.trim(), root_path: wsPath.trim() });
-      }
-      if (auth.meta) auth.meta.needs_onboarding = false;
-      await auth.acceptLogin(login);
+      // Resumed after a reload: the account exists and this tab is signed in.
+      if (!resumed || rootLogin) login = await ensureRoot();
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = failureText(e);
       busy = false;
       return;
+    }
+    // The workspace is OPTIONAL: a failure here must not block Finish (it
+    // used to keep failing, with the error on the tool-check step). Finish
+    // anyway and say how to recover — the Agents first-run coach creates one.
+    let wsFailed: unknown = null;
+    if (!skipWorkspace && wsName.trim() !== '' && wsPath.trim() !== '') {
+      try {
+        await api.post<Workspace>('/workspaces', { name: wsName.trim(), root_path: wsPath.trim() });
+      } catch (e) {
+        wsFailed = e;
+      }
+    }
+    try {
+      ssRemove(ONBOARDING_RESUME_KEY);
+      auth.onboardingResumeStep = null;
+      if (auth.meta) auth.meta.needs_onboarding = false;
+      if (login) await auth.acceptLogin(login);
+      else await auth.boot();
+    } catch (e) {
+      error = failureText(e);
+      busy = false;
+      return;
+    }
+    if (wsFailed) {
+      toasts.error('Setup finished, but the workspace wasn’t created', `${failureText(wsFailed)} — create it from the Agents page.`);
     }
     busy = false;
   }
@@ -167,6 +208,14 @@
       <div class="ob-body">
         <h1 tabindex="-1">Set the root password</h1>
         <p>The root account manages users, workspaces, and daemon settings.</p>
+        <!-- A real form: Enter in any field submits (it did nothing before). -->
+        <form
+          class="ob-form"
+          onsubmit={(e) => {
+            e.preventDefault();
+            if (pwValid && !busy && !rootTaken) void confirmPassword();
+          }}
+        >
 
         <div class="field">
           <label for="ob-name">Display name <span class="dim">(optional)</span></label>
@@ -183,7 +232,7 @@
               ></div>
             </div>
             <span id="ob-strength" class="hint">
-              {password.length < 10 ? `At least 10 characters (${password.length}/10)` : strengthLabel}
+              {pwLen < 10 ? `At least 10 characters (${pwLen}/10)` : strengthLabel}
             </span>
           </div>
         </div>
@@ -196,21 +245,29 @@
         {#if pwError}<div class="hint err" role="alert">{pwError}</div>{/if}
 
         <div class="ob-actions">
-          <button class="btn" disabled={busy} onclick={() => (step = 0)}>Back</button>
+          <button type="button" class="btn" disabled={busy} onclick={() => (step = 0)}>Back</button>
           {#if rootTaken}
-            <button class="btn primary" onclick={() => void auth.boot()}>Go to sign in</button>
+            <button type="button" class="btn primary" onclick={() => void auth.boot()}>Go to sign in</button>
           {:else}
-            <button class="btn primary" disabled={!pwValid || busy} onclick={confirmPassword}>
+            <button type="submit" class="btn primary" disabled={!pwValid || busy}>
               {busy ? 'Creating the account…' : pwError ? 'Try again' : 'Create account'}<!-- ui-guards: allow — resubmits the form, not a failed load -->
             </button>
           {/if}
         </div>
+        </form>
       </div>
     {:else if step === 2}
       <div class="ob-body">
         <h1 tabindex="-1">Create your first workspace</h1>
-        {#if rootLogin}<p class="ob-done" role="status"><Icon name="check" size={12} /> Root account created.</p>{/if}
+        {#if rootLogin || resumed}<p class="ob-done" role="status"><Icon name="check" size={12} /> Root account created.</p>{/if}
         <p>A workspace maps to a project directory. Sessions and repos live inside it.</p>
+        <form
+          class="ob-form"
+          onsubmit={(e) => {
+            e.preventDefault();
+            if (wsName.trim() !== '' && wsPath.trim() !== '' && !checkingPath) void confirmWorkspace();
+          }}
+        >
 
         <div class="field">
           <label for="ob-wsname">Name</label>
@@ -230,7 +287,7 @@
               aria-invalid={pathError !== ''}
               aria-describedby="ob-path-err"
             />
-            <button class="btn" onclick={() => (browsing = true)}>Browse…</button>
+            <button type="button" class="btn" onclick={() => (browsing = true)}>Browse…</button>
           </div>
           <span id="ob-path-err" class="hint err" role="status">{pathError}</span>
         </div>
@@ -238,16 +295,17 @@
         <div class="ob-actions">
           <!-- The root account exists from here on: going back to its password
                step could only suggest editing a password that is already set. -->
-          {#if !rootLogin}<button class="btn" onclick={() => (step = 1)}>Back</button>{/if}
-          <button class="btn ghost" onclick={() => { skipWorkspace = true; step = 3; }}>Skip</button>
+          {#if !rootLogin && !resumed}<button type="button" class="btn" onclick={() => (step = 1)}>Back</button>{/if}
+          <button type="button" class="btn ghost" onclick={() => { skipWorkspace = true; step = 3; }}>Skip</button>
           <button
+            type="submit"
             class="btn primary"
             disabled={wsName.trim() === '' || wsPath.trim() === '' || checkingPath}
-            onclick={confirmWorkspace}
           >
             {checkingPath ? 'Checking…' : 'Continue'}
           </button>
         </div>
+        </form>
       </div>
     {:else if step === 3}
       <div class="ob-body">
@@ -279,7 +337,7 @@
         </p>
 
         <div class="ob-actions">
-          <button class="btn" onclick={() => (step = 2)}>Back</button>
+          <button type="button" class="btn" onclick={() => (step = 2)}>Back</button>
           <button class="btn primary" onclick={() => (step = 4)}>Continue</button>
         </div>
       </div>
@@ -317,7 +375,7 @@
         {#if error}<div class="hint err" role="alert">{error}</div>{/if}
 
         <div class="ob-actions">
-          <button class="btn" disabled={busy} onclick={() => (step = 3)}>Back</button>
+          <button type="button" class="btn" disabled={busy} onclick={() => (step = 3)}>Back</button>
           <button class="btn primary" disabled={busy} onclick={finish}>
             {busy ? 'Setting up…' : 'Finish setup'}
           </button>
@@ -500,5 +558,8 @@
   .tool-status.ok {
     background: color-mix(in srgb, var(--status-working) 18%, transparent);
     color: var(--success);
+  }
+  .ob-form {
+    display: contents;
   }
 </style>

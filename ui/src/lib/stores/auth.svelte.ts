@@ -76,8 +76,16 @@ function metaWithin(ms: number): Promise<MetaResp> {
   return Promise.race([api.get<MetaResp>('/meta', ctl.signal), expired]).finally(() => clearTimeout(timer));
 }
 
+/** Tab-scoped (sessionStorage) wizard step, saved once the root account
+ *  exists: a reload mid-setup then RESUMES the wizard instead of landing in
+ *  the app with the workspace / usage / tool steps silently skipped (S20-11).
+ *  Cleared by Finish. */
+export const ONBOARDING_RESUME_KEY = 'otto_onboarding_step';
+
 class AuthStore {
   phase: BootPhase = $state('loading');
+  /** Set when a reload resumed the first-run wizard past root creation. */
+  onboardingResumeStep: number | null = $state(null);
   meta: MetaResp | null = $state(null);
   /** Effective (acted-as) user — the identity the UI renders as. */
   me: User | null = $state(null);
@@ -215,6 +223,12 @@ class AuthStore {
         await this.loadMe();
         // Errors are non-fatal.
         await this.loadCapabilities();
+      }
+      const resume = Number(ssGet(ONBOARDING_RESUME_KEY) ?? '');
+      if (Number.isInteger(resume) && resume >= 2 && resume <= 4) {
+        this.onboardingResumeStep = resume;
+        this.phase = 'onboarding';
+        return;
       }
       this.phase = 'ready';
     } catch (e) {

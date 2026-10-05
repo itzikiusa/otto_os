@@ -3,7 +3,8 @@
   // No rail, no navigator, no right panel — just the session header + terminal.
   //
   // The share token was captured from the URL fragment by the router (Task 3.1)
-  // and stored in-memory; we read it here via getShareToken(sessionId).
+  // and stored in-memory (mirrored into this tab's sessionStorage so a reload
+  // keeps access); we read it here via getShareToken(sessionId).
   // All API calls use the scoped token directly (not the owner login token).
   //
   // Task 7.5: Email-OTP gate. When the session load returns a 403 with the
@@ -16,7 +17,7 @@
   import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import Icon from '../../lib/components/Icon.svelte';
   import { getSharedSession, getShareWhoami, verifyShareOtp, extendShare } from '../../lib/api/share';
-  import { getShareToken } from '../../lib/router.svelte';
+  import { forgetStoredShareToken, getShareToken } from '../../lib/router.svelte';
   import type { Session, SessionStatus } from '../../lib/api/types';
   import { ApiError } from '../../lib/api/client';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -102,6 +103,7 @@
         loadError = loadErrorText(e);
         loadCause = shareErrorCause(e);
         linkDead = isDeadLink(e);
+        if (linkDead) forgetStoredShareToken(id);
         viewState = 'error';
       }
     }
@@ -164,9 +166,13 @@
         otpInput = '';
         otpError = null;
         viewState = 'otp';
-      } else if (e instanceof ApiError && [401, 403, 404, 410].includes(e.status)) {
+      } else if (isDeadLink(e)) {
         loadError = null;
         loadCause = shareErrorCause(e);
+        // Revoked mid-view: no Retry (it can never succeed), and a reload
+        // must not resurrect the stored token.
+        linkDead = true;
+        forgetStoredShareToken(id);
         viewState = 'error';
       }
       // A network blip keeps the terminal (it reconnects on its own).
@@ -292,8 +298,8 @@
       <div class="error-icon"><Icon name="warning" size={26} /></div>
       <h2>This link is invalid or has expired</h2>
       <p>
-        This share link is missing a token or has already expired.
-        Ask the owner to send you a new link.
+        This page has no access token. Open the original link again (from
+        your message or email) — or, if it has expired, ask the owner for a new one.
       </p>
     </div>
   </div>

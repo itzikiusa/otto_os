@@ -353,10 +353,25 @@ test('detention archives (no confirm — it is resumable) and respects the role 
   assert.equal(failed[0], 'Couldn’t send “Refactor” to detention');
 });
 
-test('the box wires kick-out to ws.killSession and detention to ws.archiveSession', () => {
+test('detention: a cancelled working-guard confirm is not a detention', async () => {
+  const failed: string[] = [];
+  const deps = { archive: async () => false, failed: (t: string) => void failed.push(t) };
+  assert.equal(await sendToDetention(student({ visual: 'working' }), deps), false);
+  assert.deepEqual(failed, []);
+});
+
+test('kick-out of a back-row engine session says which run loses it', () => {
+  const p = kickOutPrompt(student({ background: true, source: 'workflow' }));
+  assert.match(p.message, /running workflow session/);
+  assert.match(p.message, /workflow run that owns it loses it/);
+  assert.doesNotMatch(kickOutPrompt(student()).message, /run that owns it/);
+});
+
+test('the box wires kick-out to ws.killSession and detention to the guarded ws.requestArchive', () => {
   const src = readFileSync(join(import.meta.dirname, '..', 'src/modules/home/boxes/ClassroomsBox.svelte'), 'utf8');
   assert.match(src, /kill: \(id\) => ws\.killSession\(id\)/);
-  assert.match(src, /archive: \(id\) => ws\.archiveSession\(id\)/);
+  assert.match(src, /archive: \(id\) => ws\.requestArchive\(id\)/);
+  assert.doesNotMatch(src, /ws\.archiveSession\(/, 'detention must go through the working-guard');
   assert.match(src, /ask: \(message, opts\) => confirmer\.ask\(message, opts\)/);
   assert.doesNotMatch(src, /[^.\w]confirm\(/, 'never the native confirm()');
   // Destructive rows only for students the caller can manage.

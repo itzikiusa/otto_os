@@ -9582,7 +9582,12 @@ export interface HistoryEntry {
   turns: number | null;
   status: HistoryStatus;
   transcript_path: string;
+  /** The CLI left resumable state (a provider session id), whatever the
+   *  status — an ended conversation resumes too. Archived rows stay true;
+   *  resume refuses them (409) until unarchived. */
   resumable: boolean;
+  /** Archived Otto row (false for `on_disk`; absent from older daemons). */
+  archived?: boolean;
 }
 
 export interface HistoryQuery {

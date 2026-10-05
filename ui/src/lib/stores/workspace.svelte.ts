@@ -1701,6 +1701,24 @@ class WorkspaceStore {
     });
   }
 
+  /** User-facing archive (session menu, History, Classrooms' detention).
+   *  Archiving kills the PTY, so — like closing the tab or restarting — a
+   *  WORKING agent asks first (its in-flight turn is lost; Undo unarchives
+   *  the session but cannot bring the turn back). Idle/exited archive at once.
+   *  Resolves false when the user cancelled; a failed archive rejects. */
+  async requestArchive(id: Id): Promise<boolean> {
+    if (this.statusMap[id] === 'working') {
+      const name = this.sessions.find((x) => x.id === id)?.title?.trim() || this.otherWsSessions.find((x) => x.id === id)?.title?.trim() || 'this session';
+      const ok = await confirmer.ask(
+        `“${name}” is working right now and will stop mid-turn. Archiving stops the agent; you can restore the session from the Archived list, but its current turn is lost.`,
+        { title: 'Archive working session?', confirmLabel: 'Archive session', danger: true },
+      );
+      if (!ok) return false;
+    }
+    await this.archiveSession(id);
+    return true;
+  }
+
   async unarchiveSession(id: Id): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/unarchive`);
     this.applyArchiveState(s);
@@ -1735,19 +1753,23 @@ class WorkspaceStore {
    *  the pane header used to ask; the other paths restarted silently.
    *  Failures surface as a toast. */
   async requestRestart(id: Id): Promise<void> {
-    if (this.statusMap[id] === 'working') {
-      const name = this.sessions.find((x) => x.id === id)?.title?.trim() || 'this session';
-      const ok = await confirmer.ask(
-        `“${name}” is working right now. Restarting stops its current turn and starts the agent again, resuming its saved conversation where it can.`,
-        { title: 'Restart working session?', confirmLabel: 'Restart session', danger: true },
-      );
-      if (!ok) return;
-    }
+    if (!(await this.confirmRestart(id))) return;
     try {
       await this.restartSession(id);
     } catch (e) {
       toastError('Couldn’t restart', e);
     }
+  }
+
+  /** The restart working-guard on its own, for callers that restart as part
+   *  of a larger action (SessionView's "Save & restart"). True = go ahead. */
+  async confirmRestart(id: Id): Promise<boolean> {
+    if (this.statusMap[id] !== 'working') return true;
+    const name = this.sessions.find((x) => x.id === id)?.title?.trim() || 'this session';
+    return confirmer.ask(
+      `“${name}” is working right now. Restarting stops its current turn and starts the agent again, resuming its saved conversation where it can.`,
+      { title: 'Restart working session?', confirmLabel: 'Restart session', danger: true },
+    );
   }
 
   async renameSession(id: Id, title: string): Promise<void> {

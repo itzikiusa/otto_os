@@ -450,7 +450,15 @@ pub struct HistoryEntry {
     /// `running|idle|exited|reconnectable` from the session row, or `on_disk`.
     pub status: String,
     pub transcript_path: String,
+    /// The CLI left resumable state (a provider session id) — whatever the
+    /// row's status: ended rows resume too (`ensure_live` respawns any agent
+    /// with a provider id). An ARCHIVED row is still `resumable`; the UI
+    /// offers Unarchive first (resume refuses archived rows with a 409).
     pub resumable: bool,
+    /// The Otto row is archived (false for `on_disk` transcripts). Absent
+    /// from older daemons → false.
+    #[serde(default)]
+    pub archived: bool,
 }
 
 #[cfg(test)]

@@ -50,10 +50,12 @@ export function freshness(run: (signal?: AbortSignal) => Promise<boolean>): {
  *  arrives (bursts coalesced), a 5-min safety net while the event socket is
  *  up, and the original `ms` cadence only while it is down. */
 export function livePoll(
-  run: () => Promise<boolean>,
+  run: (signal?: AbortSignal) => Promise<boolean>,
   ms: number,
   on: readonly string[],
   opts: { match?: (ev: LiveEvent) => boolean; debounceMs?: number; maxWaitMs?: number; minIntervalMs?: number; immediate?: boolean } = {},
 ): Poller {
-  return liveQuery({ run: () => run(), on, fallbackMs: ms, floorMs: 5000, jitter: 0, ...opts });
+  // Hand the poller's signal through: `stop()` (box unmounted / off screen)
+  // must abort an in-flight fetch, as `poll` above does.
+  return liveQuery({ run: (signal) => run(signal), on, fallbackMs: ms, floorMs: 5000, jitter: 0, ...opts });
 }
