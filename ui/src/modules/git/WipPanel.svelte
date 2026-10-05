@@ -932,9 +932,9 @@
         <span class="grow"></span>
         {#if partial.has(selectedPath)}
           <!-- Both sides exist: pick which one the hunk actions operate on. -->
-          <div class="segmented wp-target">
-            <button class:active={!stagedView} onclick={() => (stagedView = false)}>Unstaged</button>
-            <button class:active={stagedView} onclick={() => (stagedView = true)}>Staged</button>
+          <div class="segmented wp-target" role="group" aria-label="Diff side">
+            <button class:active={!stagedView} aria-pressed={!stagedView} onclick={() => (stagedView = false)}>Unstaged</button>
+            <button class:active={stagedView} aria-pressed={stagedView} onclick={() => (stagedView = true)}>Staged</button>
           </div>
         {/if}
         <button class="icon-btn wp-close" onclick={() => (selectedPath = null)} title="Close diff" aria-label="Close diff"><Icon name="x" size={14} /></button>

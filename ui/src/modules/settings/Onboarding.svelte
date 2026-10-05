@@ -201,7 +201,7 @@
             <button class="btn primary" onclick={() => void auth.boot()}>Go to sign in</button>
           {:else}
             <button class="btn primary" disabled={!pwValid || busy} onclick={confirmPassword}>
-              {busy ? 'Creating the account…' : pwError ? 'Try again' : 'Create account'}
+              {busy ? 'Creating the account…' : pwError ? 'Try again' : 'Create account'}<!-- ui-guards: allow — resubmits the form, not a failed load -->
             </button>
           {/if}
         </div>

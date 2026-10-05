@@ -151,9 +151,14 @@
 //                     owns the one "Couldn’t load X / detail / Retry" look
 //                     (components.md §11).
 //   local-tablist     a `role="tablist"` outside lib/components (a `.segmented`
-//                     tablist is exempt — components.md §3) → <Tabs>
-//                     (lib/components/Tabs.svelte: one underline style, arrow
-//                     keys, roving focus).
+//                     class no longer exempts it — any look can be a <Tabs>
+//                     with `variant`) → <Tabs> (lib/components/Tabs.svelte:
+//                     one style, arrow keys, roving focus, named panels).
+//   segmented-state   a button inside a `.segmented` group that marks its
+//                     selection with `active` but carries no `aria-pressed`,
+//                     `aria-selected`/`aria-checked` or `role="tab|radio"` —
+//                     VoiceOver reads identical buttons with no state. Plain
+//                     action groups (no `active`) are fine.
 //
 // Two more ratcheted rules scan SCRIPT code (.ts/.js files and the non-style
 // part of .svelte files, comments blanked) — perf patterns (GAPS §0 G):
@@ -331,6 +336,7 @@ const RULES = {
   'icon-size': 'off-scale <Icon size> — 12, 13–14, 16, 24–26 (20 in phone touch chrome only); run scripts/codemods/icon-sizes.mjs (foundations §9)',
   'inline-retry': 'hand-rolled Retry button — use LoadState (error + onretry) or EmptyState tone="error" (components.md §11)',
   'local-tablist': 'local role="tablist" — use <Tabs> (lib/components/Tabs.svelte; components.md §3)',
+  'segmented-state': '.segmented value picker whose selected button (class:active) has no aria-pressed / role="tab|radio" — the state is invisible to a screen reader (components.md §3)',
   'smooth-scroll': "literal behavior: 'smooth' — use scrollBehavior() from lib/motion.ts (reduced motion)",
   'disabled-opacity': 'opacity literal on a disabled state — use var(--disabled-opacity) (scripts/codemods/disabled-opacity.mjs)',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
@@ -606,7 +612,11 @@ for (const f of files) {
   }
   for (const m of copy.matchAll(/(?:>\s*|['"`])Loading(?:…|\.\.\.)\s*(?=<|['"`])/g)) hit('bare-loading', f, m.index, m[0].trim());
   if (f.path.endsWith('.svelte')) {
-    for (const m of copy.matchAll(/<(p|div|span)\b[^>]*>\s*Loading [^<{]*?(?:…|\.\.\.)\s*<\/\1>/g)) hit('text-loader', f, m.index, m[0].slice(0, 80));
+    // `{…}` interpolations count (`Loading {label.toLowerCase()}…`); LoadState
+    // itself renders the one sanctioned (visually hidden) loading line.
+    if (f.rel !== 'src/lib/components/LoadState.svelte') {
+      for (const m of copy.matchAll(/<(p|div|span)\b[^>]*>\s*Loading (?:[^<{]|\{[^{}]*\})*?(?:…|\.\.\.)\s*<\/\1>/g)) hit('text-loader', f, m.index, m[0].slice(0, 80));
+    }
   }
   // `{ label: 'Delete', …, danger: true }` (either order; one flat object).
   for (const m of copy.matchAll(/\{[^{}]*\}/g)) {
@@ -715,10 +725,20 @@ for (const f of files) {
     }
   }
   if (!f.rel.startsWith('src/lib/components/')) {
-    for (const m of markup.matchAll(/\bRetry\b[^<>]*<\/button>/g)) hit('inline-retry', f, m.index, m[0].slice(0, 60));
-    for (const m of markup.matchAll(/<[a-z][\w-]*\b[^>]*\brole="tablist"[^>]*>/g)) {
-      if (/\bclass(?:=["{][^"}]*|:)\bsegmented\b/.test(m[0])) continue;
-      hit('local-tablist', f, m.index, m[0].slice(0, 80));
+    for (const m of markup.matchAll(/\b(?:Retry|Try again)\b[^<>]*<\/button>/g)) hit('inline-retry', f, m.index, m[0].slice(0, 60));
+    for (const m of markup.matchAll(/<[a-z][\w-]*\b[^>]*\brole="tablist"[^>]*>/g)) hit('local-tablist', f, m.index, m[0].slice(0, 80));
+  }
+  // A `.segmented` group (up to its first closing </div>; segments don't nest
+  // divs) whose `active`-marked buttons expose no state.
+  for (const g of markup.matchAll(/<div\b[^>]*\bclass="[^"]*\bsegmented\b[^"]*"[^>]*>([\s\S]*?)<\/div>/g)) {
+    const body = g[1];
+    for (const b of body.matchAll(/<button\b/g)) {
+      const end = tagEnd(body, b.index + 7);
+      if (end === -1) continue;
+      const tag = body.slice(b.index, end);
+      if (!/\bclass:active\b|\bclass="[^"]*\bactive\b|\{[^}]*'active'/.test(tag)) continue;
+      if (/\baria-(?:pressed|selected|checked)\b|\brole="(?:tab|radio|menuitemradio)"/.test(tag)) continue;
+      hit('segmented-state', f, g.index + g[0].indexOf(body) + b.index, tag.slice(0, 80));
     }
   }
 }

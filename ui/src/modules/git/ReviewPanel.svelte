@@ -1179,7 +1179,7 @@
       <Icon name="warning" size={14} />
       <span class="rp-error-msg">The review failed. <span class="dim">{review.error ?? 'No reason was reported — check Settings → Logs.'}</span></span>
       <button class="btn small" disabled={starting} onclick={startReview}>
-        {starting ? 'Starting…' : 'Try again'}
+        {starting ? 'Starting…' : 'Try again'}<!-- ui-guards: allow — re-runs the review (an action), not a failed load -->
       </button>
     </div>
     <div class="rp-jira-row">
@@ -1537,11 +1537,11 @@
         </p>
 
         <!-- Scope: the global default vs. a config bound to THIS repository. -->
-        <div class="segmented cfg-scope">
-          <button class:active={configScope === 'global'} onclick={() => setConfigScope('global')}>
+        <div class="segmented cfg-scope" role="group" aria-label="Review config scope">
+          <button class:active={configScope === 'global'} aria-pressed={configScope === 'global'} onclick={() => setConfigScope('global')}>
             Global default
           </button>
-          <button class:active={configScope === 'repo'} onclick={() => setConfigScope('repo')}>
+          <button class:active={configScope === 'repo'} aria-pressed={configScope === 'repo'} onclick={() => setConfigScope('repo')}>
             This repository
           </button>
         </div>

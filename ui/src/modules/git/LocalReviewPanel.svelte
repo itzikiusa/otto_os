@@ -417,7 +417,7 @@
       <Icon name="warning" size={14} />
       <span class="lrp-error-msg">The review failed. <span class="dim">{review.error ?? 'No reason was reported — check Settings → Logs.'}</span></span>
       <button class="btn small" disabled={starting} onclick={startReview}>
-        {starting ? 'Starting…' : 'Try again'}
+        {starting ? 'Starting…' : 'Try again'}<!-- ui-guards: allow — re-runs the review (an action), not a failed load -->
       </button>
     </div>
   {:else}
