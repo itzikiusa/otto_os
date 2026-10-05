@@ -5349,10 +5349,12 @@ async fn get_review_config(
 
 async fn put_review_config(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(body): Json<ReviewConfig>,
 ) -> crate::error::ApiResult<Json<ReviewConfig>> {
     crate::auth::require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
     let value = serde_json::to_value(&body).map_err(|e| {
         crate::error::ApiError(otto_core::Error::Internal(format!("serialize: {e}")))
@@ -5372,10 +5374,12 @@ async fn get_review_presets(
 
 async fn put_review_presets(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(body): Json<Vec<ReviewConfigPreset>>,
 ) -> crate::error::ApiResult<Json<Vec<ReviewConfigPreset>>> {
     crate::auth::require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     // Reject blank/duplicate ids up front — a dangling or ambiguous id would
     // silently fall repos back to the global config.
     let mut seen = std::collections::HashSet::new();
@@ -5641,6 +5645,7 @@ async fn open_agent_session(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<otto_core::api::OpenAgentSessionReq>,
 ) -> ApiResult<Json<otto_core::api::OpenAgentSessionResp>> {
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
@@ -5656,6 +5661,17 @@ async fn open_agent_session(
     }
     if meta.get("work").is_none() {
         meta["work"] = serde_json::json!({ "origin": "delegation" });
+    }
+    // The delegating lead, stamped by the server from the credential (never
+    // the body): `/sessions/{id}/message` lets an agent's own token reach
+    // only itself and the workers it opened here (S11-02).
+    match crate::feature_guard::agent_session_of(&auth) {
+        Some(lead) => meta[DELEGATED_BY_META] = serde_json::json!(lead),
+        None => {
+            if let Some(m) = meta.as_object_mut() {
+                m.remove(DELEGATED_BY_META);
+            }
+        }
     }
     let create = otto_core::api::CreateSessionReq {
         kind: SessionKind::Agent,
@@ -5701,6 +5717,40 @@ async fn open_agent_session(
     }))
 }
 
+/// Session meta key naming the agent session that opened this one through
+/// `POST /workspaces/{id}/sessions/open` (server-owned: PATCH cannot set it).
+pub const DELEGATED_BY_META: &str = otto_sessions::http::DELEGATED_BY_META;
+
+/// Confinement of an agent session's OWN credential on the REST twins of the
+/// terminal (S11-02 / S1-11): `/ws/term` already lets such a token attach only
+/// to its own session. `/input` follows the same rule; `/message` also
+/// reaches the workers the agent opened (its `otto_send_message` tool). A
+/// person's credential (`own == None`) is unaffected.
+pub fn agent_input_rule(
+    own: Option<&Id>,
+    target_id: &Id,
+    target_meta: &Value,
+    allow_delegated: bool,
+) -> Result<()> {
+    let Some(own) = own else {
+        return Ok(());
+    };
+    if own == target_id {
+        return Ok(());
+    }
+    let delegated = target_meta
+        .get(DELEGATED_BY_META)
+        .and_then(serde_json::Value::as_str)
+        == Some(own.as_str());
+    if allow_delegated && delegated {
+        return Ok(());
+    }
+    Err(Error::Forbidden(
+        "an agent session's credential may only send to its own session or a worker it opened"
+            .into(),
+    ))
+}
+
 /// `POST /sessions/{id}/message` — deliver ONE message to ONE live agent
 /// session as if typed + Enter: the targeted counterpart of
 /// `/workspaces/{id}/broadcast`, for a lead driving a single worker. Same
@@ -5709,6 +5759,7 @@ async fn session_message(
     Path(session_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<otto_core::api::SessionMessageReq>,
 ) -> ApiResult<Json<otto_core::api::SessionMessageResp>> {
     let text = req.text.trim();
@@ -5718,6 +5769,13 @@ async fn session_message(
     let session = input_session(&ctx, &user.id, &session_id)
         .await
         .map_err(ApiError)?;
+    agent_input_rule(
+        crate::feature_guard::agent_session_of(&auth),
+        &session.id,
+        &session.meta,
+        true,
+    )
+    .map_err(ApiError)?;
     if session.kind != SessionKind::Agent {
         return Err(ApiError(Error::Invalid(
             "messages can only be sent to agent sessions".into(),
@@ -5814,6 +5872,13 @@ async fn send_input(
     let session = ctx.manager.get(&session_id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &session.workspace_id, WorkspaceRole::Editor).await?;
     crate::auth::require_session_owner_or_admin(&ctx, &user, &session).await?;
+    agent_input_rule(
+        crate::feature_guard::agent_session_of(&auth),
+        &session.id,
+        &session.meta,
+        false,
+    )
+    .map_err(ApiError)?;
 
     // `submit` omitted/true: paste + a real Enter via `submit_text` — writing
     // `"{text}\n"` in one burst makes bracketed-paste TUIs (Claude Code, Codex)
@@ -6958,5 +7023,36 @@ mod review_cancel_guard_tests {
         drop(guard);
         let map = reg.lock().unwrap();
         assert!(Arc::ptr_eq(map.get("r1").unwrap(), &newer));
+    }
+}
+
+#[cfg(test)]
+mod agent_input_rule_tests {
+    use super::{agent_input_rule, DELEGATED_BY_META};
+    use otto_core::Id;
+    use serde_json::json;
+
+    /// S11-02 / S1-11: the REST twins of `/ws/term` confine an agent
+    /// session's own token like the WS gate does.
+    #[test]
+    fn agent_token_reaches_only_its_own_session_and_its_workers() {
+        let me = Id::from("lead");
+        let sibling = Id::from("sibling-shell");
+        let worker = Id::from("worker");
+        let worker_meta = json!({ DELEGATED_BY_META: "lead" });
+        let other_worker_meta = json!({ DELEGATED_BY_META: "someone-else" });
+        // A person's credential is unaffected.
+        assert!(agent_input_rule(None, &sibling, &json!({}), false).is_ok());
+        // Own session: /input and /message.
+        assert!(agent_input_rule(Some(&me), &me, &json!({}), false).is_ok());
+        assert!(agent_input_rule(Some(&me), &me, &json!({}), true).is_ok());
+        // A sibling (the owner's unsandboxed shell): never.
+        assert!(agent_input_rule(Some(&me), &sibling, &json!({}), false).is_err());
+        assert!(agent_input_rule(Some(&me), &sibling, &json!({}), true).is_err());
+        // Its own worker: /message yes (otto_send_message), raw /input no.
+        assert!(agent_input_rule(Some(&me), &worker, &worker_meta, true).is_ok());
+        assert!(agent_input_rule(Some(&me), &worker, &worker_meta, false).is_err());
+        // Another lead's worker: no.
+        assert!(agent_input_rule(Some(&me), &worker, &other_worker_meta, true).is_err());
     }
 }

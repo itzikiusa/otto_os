@@ -383,6 +383,55 @@ Notes:
   the run's `cwd`, the board posts tagged with this `run_id`, tokens/cost, and the raw
   result JSON; it is a pure client view (no new endpoint).
 
+## Credential class — person-only routes (S11-01/03, S8-01, S1-02, S3-01)
+
+An agent session's own credential (an author session's API token —
+`managed_session_id` — or a session's internal MCP credential —
+`mcp_session_id`) authorizes **as its owner**, often root. The feature guard
+therefore also reads a **credential class** for each `(method, route)`
+(`otto_server::policy::route_class`, printed as `[Admin]` / `[Secret]` /
+`[Outward]` in `crates/otto-server/tests/snapshots/policy_decisions.txt`):
+
+- **`Admin`** — identity / policy / daemon administration and human approval
+  gates (writes): `/users*`, `/access/groups*`, `/access/roles*`,
+  `PUT /access/{kind}/{id}`, `/workspaces/{id}/members`, `/admin/*` (not
+  `/admin/impersonate/stop`), `/plugin-admin*`, `PUT /settings`,
+  `/settings/import`, `/settings/skill-eval`, `/settings/pr-review*`,
+  `/room-settings`, `/room-recap-settings`, `/state/restore`,
+  `/state/archive/restore`, `/state/git/*`, `/insights/config`,
+  `/telemetry/config`, `/usage/{config,budgets,install}`, `/aws/install`,
+  `/k8s/install`, `/browser/live/{install,settings}`, MCP governance
+  (`/mcp/otto-server`, `/mcp/auto-approve*`, `/mcp/policies*`,
+  `/mcp-servers/{id}`, `/workspaces/{id}/mcp-servers`), the shared
+  `/library/*` (not `/library/bundled*`), `/skill-evaluations/{id}/promote`,
+  and the approval decisions `/mcp/approvals/{id}/decide`,
+  `/workflow-runs/{id}/approve`, `/runs/{id}/approve`,
+  `/database-changes/{id}/approve`,
+  `/workspaces/{wid}/workgraph/approvals/{aid}/decide`.
+- **`Secret`** — plaintext credentials or credential minting (any method):
+  `/browser/credentials/{id}/reveal`, `/state/connections/export`,
+  `/state/archive`, `/admin/secrets/*`; writes to `/auth/tokens`,
+  `/mcp/tokens*`, `/sessions/{id}/share`.
+- **`Outward`** — tag only, **not enforced** (pending a product decision; the
+  `otto-pr` skill drives PRs with its session token): PR create / merge /
+  approve / decline / comment, push, Jira / Confluence writes, product
+  publish, channel test, broker produce / replay / offset reset, SQS
+  send / delete / purge / redrive, EC2 start / stop / reboot, k8s
+  actions / exec / pod-http / resource.
+
+On an `Admin` or `Secret` route every credential that is not a person's own
+(`ui_bridge::is_human` false: agent session, internal / outward MCP, share
+link) gets `403`. The handlers repeat the check (`auth::require_human`) next
+to `require_root` as a second layer.
+
+Agent session tokens are also confined on the terminal's REST twins:
+`POST /sessions/{id}/input` reaches only the caller's own session (as
+`/ws/term` already did), and `POST /sessions/{id}/message` reaches only the
+caller's own session or a worker it opened through
+`POST /workspaces/{id}/sessions/open` (the server stamps the worker's
+`meta.delegated_by` from the credential; `PATCH /sessions/{id}` cannot set or
+change it). Anything else → `403`.
+
 ## API Tokens (#87–#89)
 
 Long-lived personal access tokens for driving the daemon over HTTP from scripts/CLIs
@@ -579,8 +628,8 @@ same-workspace, so a scratch session hands over only to another scratch session.
 | POST /sessions/{id}/unarchive | session owner-or-admin | — | Session (restore an archived session; it becomes `reconnectable`) |
 | POST /sessions/{id}/kill | session owner-or-admin | — | Session (kill the PTY but KEEP the row un-archived; resumable providers can be reopened) |
 | POST /sessions/bulk | per-id session owner-or-admin | `BulkSessionsReq {action: "archive"\|"delete"\|"kill", ids}` (≤200 ids) | `BulkSessionResult[]` — non-owned/missing ids come back `ok:false` instead of failing the batch |
-| POST /sessions/{id}/input | ws editor + **session owner-or-admin** | `SendInputReq{text, submit?}` — `submit` omitted/true: bracketed paste + a real Enter (`SessionManager::submit_text`, the path that actually sends in Claude Code / Codex); `submit: false`: the text verbatim, no newline | 200 |
-| POST /sessions/{id}/message | ws editor + **session owner-or-admin** | `SessionMessageReq{text}` | `SessionMessageResp{session_id, delivered}` — one message to ONE live **agent** session via `submit_text` (paste + Enter), recorded on its trail; 400 for a connection session, 409 when the session is not live. The targeted counterpart of `/workspaces/{id}/broadcast`, for a lead agent driving a worker |
+| POST /sessions/{id}/input | ws editor + **session owner-or-admin**; an agent session's credential only its own session (`403` otherwise) | `SendInputReq{text, submit?}` — `submit` omitted/true: bracketed paste + a real Enter (`SessionManager::submit_text`, the path that actually sends in Claude Code / Codex); `submit: false`: the text verbatim, no newline | 200 |
+| POST /sessions/{id}/message | ws editor + **session owner-or-admin**; an agent session's credential only its own session or a worker whose `meta.delegated_by` is that session (`403` otherwise) | `SessionMessageReq{text}` | `SessionMessageResp{session_id, delivered}` — one message to ONE live **agent** session via `submit_text` (paste + Enter), recorded on its trail; 400 for a connection session, 409 when the session is not live. The targeted counterpart of `/workspaces/{id}/broadcast`, for a lead agent driving a worker |
 | GET /sessions/{id}/wait?status=&timeout_secs= | session owner-or-admin | — | `WaitSessionResp{session, reached}` — blocks until the session's status is one of `status` (comma-separated, default `idle,exited`) or `timeout_secs` (default 20, cap 25) passes; `reached:false` at the deadline. `idle` = the agent's turn ended |
 | POST /sessions/{id}/handover | ws editor + **owner-or-admin of the source (and of an existing target)** | — | starts a handover; progress via `SessionMetaUpdated` |
 | POST /sessions/{id}/handover/brief | ws editor + **session owner-or-admin** (the brief digests the session's transcript) | — | generates a handover brief for the session |
@@ -1362,7 +1411,7 @@ occurrence_count, created_at, updated_at`.
 |---|---|---|---|
 | POST /workspaces/{id}/broadcast | ws editor | BroadcastReq `{text, session_ids?}` | BroadcastResp `{session_ids}` |
 | POST /workspaces/{id}/relay | ws editor | RelayReq `{text}` | RelayResp `{session_ids, broadcast, unaddressed, text}` |
-| POST /workspaces/{id}/sessions/open | ws editor | OpenAgentSessionReq `{provider, title?, cwd?, model?, prompt?, meta?}` | OpenAgentSessionResp `{session, prompt_dispatch}` — creates an **agent** session (`meta.work.origin = "delegation"` unless the caller supplied `work`) and, when `prompt` is set, submits it as the first user message on a background task once the TUI has drawn (`prompt_dispatch: "queued"`, else `"none"`); poll `GET /sessions/{id}/wait` |
+| POST /workspaces/{id}/sessions/open | ws editor | OpenAgentSessionReq `{provider, title?, cwd?, model?, prompt?, meta?}` | OpenAgentSessionResp `{session, prompt_dispatch}` — creates an **agent** session (`meta.work.origin = "delegation"` unless the caller supplied `work`; `meta.delegated_by` = the calling agent session, stamped from the credential — a body value is dropped) and, when `prompt` is set, submits it as the first user message on a background task once the TUI has drawn (`prompt_dispatch: "queued"`, else `"none"`); poll `GET /sessions/{id}/wait` |
 
 Relay delivers a **name-addressed** message: the leading token(s) of `text` may
 name session handles (`ronaldo: …`, `ronaldo, messi: …`, bare `ronaldo do X`) or

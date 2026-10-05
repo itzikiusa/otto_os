@@ -440,3 +440,167 @@ async fn canvas_grant_alone_does_not_open_design_routes() {
         StatusCode::FORBIDDEN
     );
 }
+
+// ---------------------------------------------------------------------------
+// Credential class (S11-01/03, S8-01, S1-02, S3-01): every Admin / Secret
+// route refuses an agent session's own credential, even when it acts as root.
+// ---------------------------------------------------------------------------
+
+/// The credential a request carries in [`class_app`].
+#[derive(Clone, Copy, Debug)]
+enum Cred {
+    /// A person's own login token.
+    Human,
+    /// An author session's API token (`managed_session_id`).
+    AgentToken,
+    /// A session's internal MCP credential used as a bearer (`mcp_session_id`).
+    AgentMcpSession,
+}
+
+/// Every registered `(method, template)` the policy tags with a credential
+/// class, mounted as a stub behind the real guard; the caller is ROOT so the
+/// feature axis always passes and only the class gate can refuse.
+fn class_app(pool: DbPool, user: User, cred: Cred) -> (Router, Vec<(Method, String, String)>) {
+    use otto_server::policy::route_class;
+    let state = TestState {
+        grants: GrantsRepo::new(pool),
+    };
+    async fn ok() -> &'static str {
+        "ok"
+    }
+    let root = super::policy_coverage::repo_root();
+    let methods = [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+    ];
+    let mut protected: Router<TestState> = Router::new();
+    let mut tagged = Vec::new();
+    for template in super::policy_coverage::registered_routes(&root) {
+        if template.starts_with("/ws/")
+            || template == "/browser/proxy"
+            || template.starts_with("/plugins/")
+        {
+            continue;
+        }
+        let full = format!("/api/v1{template}");
+        let classes: Vec<_> = methods
+            .iter()
+            .filter_map(|m| route_class(m, &full).map(|c| (m.clone(), c)))
+            .collect();
+        if classes.is_empty() {
+            continue;
+        }
+        protected = protected.route(&template, axum::routing::any(ok));
+        // `{id}` → `x1`, `{*rest}` → `a`: any concrete segment matches.
+        let concrete: String = template
+            .split('/')
+            .map(|seg| {
+                if seg.starts_with("{*") {
+                    "a".to_string()
+                } else if seg.starts_with('{') {
+                    "x1".to_string()
+                } else {
+                    seg.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        for (m, c) in classes {
+            tagged.push((m, format!("/api/v1{concrete}"), format!("{c:?}")));
+        }
+    }
+    let protected = protected.route_layer(from_fn_with_state(
+        state.clone(),
+        feature_guard::<TestState>,
+    ));
+    let injected = Arc::new(user);
+    let protected = protected.layer(from_fn(move |mut req: Request, next: Next| {
+        let u = injected.clone();
+        async move {
+            let mut ctx = otto_core::auth::AuthContext {
+                real_user: (*u).clone(),
+                effective_user: (*u).clone(),
+                scope: None,
+                mcp_only: false,
+                mcp_scope: None,
+                mcp_internal: false,
+                mcp_session_id: None,
+                managed_session_id: None,
+            };
+            match cred {
+                Cred::Human => {}
+                Cred::AgentToken => ctx.managed_session_id = Some("agent-sess".into()),
+                Cred::AgentMcpSession => ctx.mcp_session_id = Some("agent-sess".into()),
+            }
+            req.extensions_mut().insert(AuthUser((*u).clone()));
+            req.extensions_mut().insert(ctx);
+            next.run(req).await
+        }
+    }));
+    (
+        Router::new().nest("/api/v1", protected).with_state(state),
+        tagged,
+    )
+}
+
+#[tokio::test]
+async fn agent_credentials_are_refused_on_every_admin_and_secret_route() {
+    let pool = mem_pool().await;
+    let root = seed_user(&pool, "root-owner", true).await;
+    let (human_app, tagged) = class_app(pool.clone(), root.clone(), Cred::Human);
+    // Sanity floor: the scanner and the tag table both still work, and the
+    // findings' named routes are among the tagged ones.
+    let admin_or_secret: Vec<_> = tagged.iter().filter(|(_, _, c)| c != "Outward").collect();
+    assert!(
+        admin_or_secret.len() >= 60,
+        "only {} tagged",
+        admin_or_secret.len()
+    );
+    for must in [
+        (Method::PUT, "/api/v1/settings"),
+        (Method::POST, "/api/v1/plugin-admin/install"),
+        (Method::PATCH, "/api/v1/users/x1"),
+        (Method::POST, "/api/v1/admin/impersonate/x1"),
+        (Method::POST, "/api/v1/state/connections/export"),
+        (Method::POST, "/api/v1/browser/credentials/x1/reveal"),
+        (Method::POST, "/api/v1/sessions/x1/share"),
+        (Method::POST, "/api/v1/workflow-runs/x1/approve"),
+    ] {
+        assert!(
+            admin_or_secret
+                .iter()
+                .any(|(m, p, _)| *m == must.0 && p == must.1),
+            "{} {} must be tagged Admin/Secret",
+            must.0,
+            must.1
+        );
+    }
+
+    let mut wrong = Vec::new();
+    for cred in [Cred::AgentToken, Cred::AgentMcpSession] {
+        let (agent_app, _) = class_app(pool.clone(), root.clone(), cred);
+        for (m, path, class) in &tagged {
+            let human = status(&human_app, m.clone(), path).await;
+            let agent = status(&agent_app, m.clone(), path).await;
+            let want_agent = if class == "Outward" {
+                // Tag only until the user decides (see `credential_class_gate`).
+                StatusCode::OK
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            if human != StatusCode::OK || agent != want_agent {
+                wrong.push(format!(
+                    "{cred:?} {m} {path} [{class}]: human {human}, agent {agent} (want {want_agent})"
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "credential-class gate:\n{}",
+        wrong.join("\n")
+    );
+}

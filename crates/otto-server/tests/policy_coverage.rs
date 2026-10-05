@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 // `repo_root` mirrors route_inventory.rs; the source walk is shared with it
 // (both suites are modules of the single `it` test binary).
 
-fn repo_root() -> PathBuf {
+pub(crate) fn repo_root() -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {
         if dir.join("crates").is_dir() && dir.join("docs/contracts/api.md").is_file() {
@@ -90,7 +90,7 @@ fn extract_route_paths(src: &str) -> Vec<String> {
     paths
 }
 
-fn registered_routes(root: &Path) -> BTreeSet<String> {
+pub(crate) fn registered_routes(root: &Path) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     for (_, src) in &super::route_inventory::daemon_sources(root) {
         if !src.contains(".route(") {
@@ -197,7 +197,8 @@ const POLICY_SNAPSHOT: &str = "tests/snapshots/policy_decisions.txt";
 const POLICY_SNAPSHOT_UPDATE_ENV: &str = "OTTO_UPDATE_POLICY_SNAPSHOT";
 
 /// Golden snapshot of the WHOLE policy table: `(method, route template) →
-/// decision` for every registered route × GET/POST/PUT/PATCH/DELETE.
+/// decision [credential class]` for every registered route ×
+/// GET/POST/PUT/PATCH/DELETE.
 ///
 /// `policy_for` is a long ORDERED if-chain, so an innocent-looking new rule
 /// can shadow a later one and silently change another route's capability
@@ -209,7 +210,7 @@ const POLICY_SNAPSHOT_UPDATE_ENV: &str = "OTTO_UPDATE_POLICY_SNAPSHOT";
 #[test]
 fn policy_decisions_match_the_golden_snapshot() {
     use axum::http::Method;
-    use otto_server::policy::policy_for;
+    use otto_server::policy::{policy_for, route_class};
 
     let root = repo_root();
     let routes = registered_routes(&root);
@@ -234,7 +235,16 @@ fn policy_decisions_match_the_golden_snapshot() {
             format!("/api/v1{template}")
         };
         for m in &methods {
-            lines.push(format!("{m:<6} {full} => {:?}", policy_for(m, &full)));
+            // The credential class (Admin / Secret / Outward) rides on the same
+            // line, so a route that silently loses its "person only" tag shows
+            // up in the diff just like a capability-tier change.
+            let class = route_class(m, &full)
+                .map(|c| format!(" [{c:?}]"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "{m:<6} {full} => {:?}{class}",
+                policy_for(m, &full)
+            ));
         }
     }
     let current = format!(

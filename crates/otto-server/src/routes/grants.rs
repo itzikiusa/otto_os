@@ -182,10 +182,12 @@ pub async fn get_grants<C: GrantsCtx>(
 pub async fn put_grants<C: GrantsCtx>(
     Path(id): Path<Id>,
     State(ctx): State<C>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<UserGrantsReq>,
 ) -> ApiResult<Json<UserGrantsResp>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     // Ensure the target user exists.
     ctx.users_repo().get(&id).await?;
 
@@ -303,10 +305,12 @@ pub async fn get_plugin_grants<C: GrantsCtx>(
 pub async fn put_plugin_grants<C: GrantsCtx>(
     Path(id): Path<Id>,
     State(ctx): State<C>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<UserGrantsReq>,
 ) -> ApiResult<Json<UserGrantsResp>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     ctx.users_repo().get(&id).await?;
 
     let repo = ctx.grants_repo();

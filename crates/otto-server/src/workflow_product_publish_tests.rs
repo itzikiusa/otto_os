@@ -365,6 +365,17 @@ impl Fixture {
         suffix: &str,
         body: Value,
     ) -> (axum::http::StatusCode, Value) {
+        self.request_as(None, method, suffix, body).await
+    }
+
+    /// `managed_session_id` set plays a workflow agent step's own token.
+    async fn request_as(
+        &self,
+        managed_session_id: Option<&str>,
+        method: &str,
+        suffix: &str,
+        body: Value,
+    ) -> (axum::http::StatusCode, Value) {
         use tower::ServiceExt;
         let mut request = axum::http::Request::builder()
             .method(method)
@@ -375,6 +386,18 @@ impl Fixture {
         request
             .extensions_mut()
             .insert(otto_core::auth::AuthUser(self.user.clone()));
+        request
+            .extensions_mut()
+            .insert(otto_core::auth::AuthContext {
+                real_user: self.user.clone(),
+                effective_user: self.user.clone(),
+                scope: None,
+                mcp_only: false,
+                mcp_scope: None,
+                mcp_internal: false,
+                mcp_session_id: None,
+                managed_session_id: managed_session_id.map(Into::into),
+            });
         let response = self.approval_api().oneshot(request).await.unwrap();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
@@ -523,4 +546,27 @@ async fn review4_product_publish_ordinary_approval_api_keeps_legacy_shape() {
         .request("POST", "approve", json!({"node_id":"gate","approved":true}))
         .await;
     assert_eq!(status, axum::http::StatusCode::OK);
+}
+
+/// S3-01: the agent a `human_approval` gate supervises authorizes as the
+/// run's owner — its own token must never pass the gate.
+#[tokio::test]
+async fn agent_session_token_cannot_approve_a_workflow_human_gate() {
+    let f = Fixture::new("jira").await;
+    sqlx::query("UPDATE workflow_runs SET status='running',waiting_approval=1,approval_node_id='gate' WHERE id=?")
+        .bind(&f.run.id).execute(&f.ctx.pool).await.unwrap();
+    let (status, body) = f
+        .request_as(
+            Some("agent-step-session"),
+            "POST",
+            "approve",
+            json!({"node_id":"gate","approved":true}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{body}");
+    let run = WorkflowsRepo::new(f.ctx.pool.clone())
+        .get_run(&f.run.id)
+        .await
+        .unwrap();
+    assert!(run.waiting_approval, "the gate must still be waiting");
 }

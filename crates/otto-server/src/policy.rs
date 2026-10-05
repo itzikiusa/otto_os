@@ -1434,10 +1434,226 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     Deny
 }
 
+// ---------------------------------------------------------------------------
+// Credential class (S11-01/02/03, S8-01, S1-02, S3-01).
+// ---------------------------------------------------------------------------
+
+/// What KIND of credential a route needs — orthogonal to the feature axis
+/// above. An agent session's own token (and a session's internal MCP
+/// credential) authorizes AS ITS OWNER, often root, so `require_root` and the
+/// feature grant alone cannot tell "the person" from "the person's agent".
+/// The feature guard reads this tag and refuses every non-human credential
+/// ([`crate::ui_bridge::is_human`] is false: agent-session, MCP-only and
+/// share-link tokens) on [`RouteClass::Admin`] and [`RouteClass::Secret`]
+/// routes. [`RouteClass::Outward`] is a tag only for now (the user's
+/// `otto-pr` skill drives PRs with its session token); making the guard
+/// refuse it too is a one-line change in `feature_guard::credential_class_gate`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RouteClass {
+    /// Administers identity, policy or the daemon itself (users, grants,
+    /// impersonation, settings, plugins, restores, MCP governance config,
+    /// binaries installed and run by the daemon) or decides a human approval
+    /// gate. A credential that can do this can make itself unconfined.
+    Admin,
+    /// Returns credential material in plaintext or mints a credential (saved
+    /// passwords, connection passwords, tokens, share links, full state).
+    Secret,
+    /// Reaches outside the machine on the user's behalf (PR merge/approve,
+    /// push, Jira/Confluence/Slack/Telegram writes, broker produce, SQS
+    /// send/delete, k8s/EC2 actions). Tag only — not enforced yet.
+    Outward,
+}
+
+/// The credential class of `(method, matched_path)`, or `None` for an
+/// ordinary route. `matched_path` is the same `/api/v1`-prefixed template
+/// [`policy_for`] takes. Reads stay untagged unless they return secrets.
+pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
+    use RouteClass::{Admin as A, Outward as O, Secret as S};
+    let p = matched_path.strip_prefix("/api/v1").unwrap_or(matched_path);
+    let read = method == Method::GET || method == Method::HEAD || method == Method::OPTIONS;
+    let write = !read;
+
+    // --- Secret: plaintext credentials / credential minting (any method). ---
+    if matches!(
+        p,
+        "/browser/credentials/{id}/reveal"
+            | "/state/connections/export"
+            | "/state/archive"
+            | "/admin/secrets/status"
+            | "/admin/secrets/secure"
+    ) {
+        return Some(S);
+    }
+    // Minting: a PAT (a laundered human credential), MCP tokens, share links
+    // (a share token passes `agent_attach_rule` on /ws/term — S1-02).
+    if write
+        && (p == "/auth/tokens"
+            || p == "/mcp/tokens"
+            || p.starts_with("/mcp/tokens/")
+            || p == "/sessions/{id}/share")
+    {
+        return Some(S);
+    }
+
+    // --- Admin: identity, policy and daemon administration (writes). ---
+    if write {
+        let admin = p == "/users"
+            || p.starts_with("/users/")
+            || p.starts_with("/access/groups")
+            || p.starts_with("/access/roles")
+            || p == "/access/{kind}/{id}"
+            || p == "/workspaces/{id}/members"
+            || (p.starts_with("/admin/") && p != "/admin/impersonate/stop")
+            || p == "/plugin-admin"
+            || p.starts_with("/plugin-admin/")
+            || matches!(
+                p,
+                "/settings"
+                    | "/settings/import"
+                    | "/settings/skill-eval"
+                    | "/settings/pr-review"
+                    | "/settings/pr-review/presets"
+                    | "/room-settings"
+                    | "/room-recap-settings"
+                    | "/state/restore"
+                    | "/state/archive/restore"
+                    | "/insights/config"
+                    | "/telemetry/config"
+                    | "/usage/config"
+                    | "/usage/budgets"
+                    // Binaries the daemon downloads and runs.
+                    | "/usage/install"
+                    | "/aws/install"
+                    | "/k8s/install"
+                    | "/browser/live/install"
+                    | "/browser/live/settings"
+                    // MCP governance + the servers it spawns (`command`/`args`).
+                    | "/mcp/otto-server"
+                    | "/mcp/auto-approve"
+                    | "/mcp/auto-approve/{id}"
+                    | "/mcp/policies"
+                    | "/mcp/policies/{id}"
+                    | "/mcp/policies/import"
+                    | "/mcp-servers/{id}"
+                    | "/workspaces/{id}/mcp-servers"
+                    // Human approval gates: the agent the gate supervises
+                    // must never pass it itself (S3-01).
+                    | "/mcp/approvals/{id}/decide"
+                    | "/workflow-runs/{id}/approve"
+                    | "/runs/{id}/approve"
+                    | "/database-changes/{id}/approve"
+                    | "/workspaces/{wid}/workgraph/approvals/{aid}/decide"
+            )
+            || p.starts_with("/state/git/")
+            // The shared skill/soul library is loaded into every session.
+            || (p.starts_with("/library/") && !p.starts_with("/library/bundled"))
+            || p == "/skill-evaluations/{id}/promote";
+        if admin {
+            return Some(A);
+        }
+    }
+
+    // --- Outward (tag only; writes). ---
+    if write {
+        let outward = p == "/repos/{id}/push"
+            || p == "/repos/{id}/tag/push"
+            || p == "/repos/{id}/api-collections/push"
+            || p == "/repos/{id}/prs"
+            || (p.starts_with("/repos/{id}/prs/{number}")
+                && !p.ends_with("/readiness")
+                && !p.ends_with("/diff")
+                && !p.ends_with("/commits")
+                && !p.ends_with("/checks"))
+            || (p.starts_with("/issue/")
+                && !matches!(
+                    p,
+                    "/issue/search" | "/issue/confluence/search" | "/issue/my-work"
+                )
+                && !p.starts_with("/issue/accounts"))
+            || p == "/findings/{id}/jira"
+            || p.starts_with("/product/stories/{sid}/publish")
+            || p == "/product/testcase-runs/{rid}/publish"
+            || p == "/product/versions/{vid}/publish"
+            || p == "/workspaces/{id}/integrations/{channel}/test"
+            || p == "/brokers/clusters/{id}/topics/{topic}/produce"
+            || p == "/brokers/clusters/{id}/replay"
+            || p == "/brokers/clusters/{id}/groups/{group}/reset"
+            || matches!(
+                p,
+                "/aws/accounts/{id}/sqs/queues/send"
+                    | "/aws/accounts/{id}/sqs/queues/delete-message"
+                    | "/aws/accounts/{id}/sqs/queues/purge"
+                    | "/aws/accounts/{id}/sqs/queues/redrive"
+                    | "/aws/accounts/{id}/ec2/instances/{instance_id}/reboot"
+                    | "/aws/accounts/{id}/ec2/instances/{instance_id}/start"
+                    | "/aws/accounts/{id}/ec2/instances/{instance_id}/stop"
+            )
+            || matches!(
+                p,
+                "/k8s/clusters/{id}/actions"
+                    | "/k8s/clusters/{id}/exec"
+                    | "/k8s/clusters/{id}/pod-http"
+                    | "/k8s/clusters/{id}/resource"
+            );
+        if outward {
+            return Some(O);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::http::Method;
+
+    #[test]
+    fn credential_classes_cover_the_findings_and_leave_ordinary_routes_alone() {
+        let c = |m: Method, p: &str| route_class(&m, p);
+        use RouteClass::{Admin as A, Outward as O, Secret as S};
+        // S11-01 / S8-01: settings, plugins, users, grants, impersonation, restore.
+        assert_eq!(c(Method::PUT, "/api/v1/settings"), Some(A));
+        assert_eq!(c(Method::POST, "/api/v1/plugin-admin/install"), Some(A));
+        assert_eq!(
+            c(Method::POST, "/api/v1/plugin-admin/{slug}/enable"),
+            Some(A)
+        );
+        assert_eq!(c(Method::POST, "/api/v1/users"), Some(A));
+        assert_eq!(c(Method::PATCH, "/api/v1/users/{id}"), Some(A));
+        assert_eq!(c(Method::PUT, "/api/v1/users/{id}/grants"), Some(A));
+        assert_eq!(
+            c(Method::POST, "/api/v1/admin/impersonate/{user_id}"),
+            Some(A)
+        );
+        assert_eq!(c(Method::POST, "/api/v1/state/archive/restore"), Some(A));
+        assert_eq!(c(Method::PUT, "/api/v1/workspaces/{id}/members"), Some(A));
+        // S3-01: human approval gates.
+        assert_eq!(
+            c(Method::POST, "/api/v1/workflow-runs/{id}/approve"),
+            Some(A)
+        );
+        // S11-03 / S1-02: plaintext secrets and credential minting.
+        assert_eq!(c(Method::POST, "/api/v1/state/connections/export"), Some(S));
+        assert_eq!(
+            c(Method::POST, "/api/v1/browser/credentials/{id}/reveal"),
+            Some(S)
+        );
+        assert_eq!(c(Method::POST, "/api/v1/sessions/{id}/share"), Some(S));
+        assert_eq!(c(Method::POST, "/api/v1/auth/tokens"), Some(S));
+        // Outward: tagged, never Admin/Secret.
+        assert_eq!(
+            c(Method::POST, "/api/v1/repos/{id}/prs/{number}/merge"),
+            Some(O)
+        );
+        assert_eq!(c(Method::POST, "/api/v1/repos/{id}/push"), Some(O));
+        // Reads and ordinary work stay untagged.
+        assert_eq!(c(Method::GET, "/api/v1/settings"), None);
+        assert_eq!(c(Method::GET, "/api/v1/users"), None);
+        assert_eq!(c(Method::GET, "/api/v1/repos/{id}/prs/{number}/diff"), None);
+        assert_eq!(c(Method::POST, "/api/v1/sessions/{id}/input"), None);
+        assert_eq!(c(Method::POST, "/api/v1/admin/impersonate/stop"), None);
+        assert_eq!(c(Method::GET, "/api/v1/auth/tokens"), None);
+    }
 
     // Helper: every test path carries the `/api/v1` nest prefix the guard sees.
     fn pol(m: Method, path: &str) -> PolicyDecision {

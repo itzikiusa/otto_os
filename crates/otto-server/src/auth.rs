@@ -135,6 +135,25 @@ pub fn require_root(user: &User) -> Result<(), ApiError> {
     }
 }
 
+/// Require a PERSON's own credential (S11-01, S8-01). An agent session's
+/// token, a session's internal MCP credential, an MCP-only token and a share
+/// link all authorize as their owner — often root — so `require_root` alone
+/// passes them. Pair this with `require_root` on every identity / policy /
+/// daemon-administration write and every credential reveal. The central
+/// feature guard enforces the same rule from `policy::route_class`; this is
+/// the handler-side second layer.
+pub fn require_human(auth: &AuthContext) -> Result<(), ApiError> {
+    if crate::ui_bridge::is_human(auth) {
+        Ok(())
+    } else {
+        Err(ApiError(Error::Forbidden(
+            "a person signed in to Otto must do this — an agent session's, MCP or share \
+             credential cannot"
+                .into(),
+        )))
+    }
+}
+
 /// Gate access to a session by ownership-or-admin.
 ///
 /// Returns `Ok(())` when **any** of:
