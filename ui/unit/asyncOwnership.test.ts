@@ -283,3 +283,17 @@ test('archiving the last workspace asks once then enters scratch context', async
   ws.refreshSessions=async()=>{};ws.waitForSessions=async()=>{};ws.restoreLayout=()=>{};
   await ws.archiveWorkspace('A');assert.equal(decisions,1);assert.equal(ws.currentId,null);
 });
+
+test('a selection made while /workspaces is in flight keeps the list and settles it (side-pane guest)', async () => {
+  const { ws, release } = bootWorkspace('A', [{ id: 'A' }, { id: 'B' }]);
+  const loading = ws.load();
+  await new Promise((resolve) => setImmediate(resolve));
+  // The guest follows the host's workspace before its own list landed.
+  const picking = ws.select('B');
+  release();
+  await loading;
+  await picking;
+  assert.deepEqual(ws.workspaces.map((w: { id: string }) => w.id), ['A', 'B'], 'the list is applied, not dropped');
+  assert.equal(ws.listSettled, true, 'never stuck unsettled');
+  assert.equal(ws.currentId, 'B', 'the explicit selection wins over the saved default');
+});

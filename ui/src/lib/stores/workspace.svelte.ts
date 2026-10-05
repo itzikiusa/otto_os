@@ -484,7 +484,13 @@ class WorkspaceStore {
       this.resetArchived();
     }
     const selection = this.selectionGeneration;
-    const current = () => generation === this.loadGeneration && token === getToken() && selection === this.selectionGeneration;
+    // `fresh`: this is still the newest load for this identity — its LIST is
+    // valid. `current`: nobody selected a workspace meanwhile either (the side
+    // pane's guest follows the host's workspace before its own list lands) —
+    // only then may it pick the default selection. A selection made meanwhile
+    // must not leave the list empty and `listSettled` false forever.
+    const fresh = () => generation === this.loadGeneration && token === getToken();
+    const current = () => fresh() && selection === this.selectionGeneration;
     // The hidden scratch workspace — best-effort: a daemon without it leaves
     // `scratch` null and the sheet falls back to `~`. Fetched WITH the list
     // (perf F3: one round-trip instead of two before the session list).
@@ -508,11 +514,17 @@ class WorkspaceStore {
       this.listSettled = true;
       throw e;
     }
-    if (!current()) return;
+    if (!fresh()) return;
     this.workspaces = workspaces;
     const scratch = await scratchReq;
-    if (!current()) return;
+    if (!fresh()) return;
     this.scratch = scratch;
+    if (!current()) {
+      // Someone already chose the workspace — keep their choice.
+      dropBoot();
+      this.listSettled = true;
+      return;
+    }
     const target = workspaces.find((w) => w.id === saved) ?? workspaces[0] ?? null;
     if (target?.id !== saved) dropBoot();
     // select()/selectNone() set currentId before their first await, so the

@@ -900,6 +900,15 @@
     }),
   );
 
+  // The host's workspace, applied once this pane's list knows it.
+  let guestWorkspace = $state<string | null>(null);
+  $effect(() => {
+    const id = guestWorkspace;
+    if (!id || !ws.listSettled) return;
+    guestWorkspace = null;
+    if (ws.currentId !== id && ws.workspaces.some((w) => w.id === id)) void ws.select(id);
+  });
+
   // Host → pane: which module the main pane shows, and its workspace (the
   // pane follows a workspace switch).
   $effect(() => {
@@ -1006,7 +1015,9 @@
     const stop = startGuest({
       runMenu: (id) => handleMenu(id),
       selectWorkspace: (id) => {
-        if (ws.currentId !== id) void ws.select(id);
+        // The host can name its workspace before this pane's own list landed:
+        // hold it until the list settles instead of selecting an unknown id.
+        guestWorkspace = id;
       },
       runCommand: (id) => void registry.all.find((c) => c.id === id)?.run(),
     });
