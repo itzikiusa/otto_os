@@ -762,6 +762,17 @@ pub fn ws_router<S: SessionsCtx>(authenticator: Arc<dyn TokenAuthenticator>, ctx
         .with_state(state)
 }
 
+/// HTTP status for a failed session lookup on attach (review S1-26): only a
+/// row that is really gone is 404 ("session gone" — the client stops
+/// reconnecting). A transient DB error (busy, pool timeout) is 503, so the
+/// client retries instead of declaring a live session dead.
+fn lookup_failure_status(e: &Error) -> StatusCode {
+    match e {
+        Error::NotFound(_) => StatusCode::NOT_FOUND,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
 fn problem(status: StatusCode, e: &Error) -> Response {
     let body = Problem {
         code: e.code().to_string(),
@@ -842,7 +853,7 @@ async fn ws_auth_gate<S: SessionsCtx>(
     // 2. Session lookup.
     let session = match st.ctx.manager().get(&session_id).await {
         Ok(s) => s,
-        Err(e) => return problem(StatusCode::NOT_FOUND, &e),
+        Err(e) => return problem(lookup_failure_status(&e), &e),
     };
 
     // 2b. Agent-credential confinement. This root-mounted route never passes
@@ -1035,7 +1046,7 @@ async fn term_ws<S: SessionsCtx>(
     // Auth and owner-gate already enforced by ws_auth_gate middleware.
     let session = match st.ctx.manager().get(&session_id).await {
         Ok(s) => s,
-        Err(e) => return problem(StatusCode::NOT_FOUND, &e),
+        Err(e) => return problem(lookup_failure_status(&e), &e),
     };
     let initial_status = session.status;
     // Echo `otto-bearer` only when the client used the subprotocol path (Task
@@ -1370,9 +1381,21 @@ struct InputJob {
 struct InputQueue {
     tx: tokio::sync::mpsc::UnboundedSender<InputJob>,
     budget: Arc<tokio::sync::Semaphore>,
+    /// Shared with the writer task: once cleared, queued input is DISCARDED
+    /// instead of written (review S1-25). Up to the whole byte budget could
+    /// sit queued when re-auth narrowed `can_input` or evicted the viewer,
+    /// and the writer used to deliver all of it afterwards.
+    allowed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl InputQueue {
+    /// This connection lost input authority (re-auth narrowed it, or the
+    /// viewer is being evicted): drop everything still queued.
+    fn revoke(&self) {
+        self.allowed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Budget a frame of `len` bytes holds. A frame larger than the whole
     /// budget holds all of it (it waits for an empty queue, then goes alone).
     fn cost(len: usize) -> u32 {
@@ -1509,6 +1532,8 @@ where
     let budget = Arc::new(tokio::sync::Semaphore::new(INPUT_BUDGET_BYTES));
     let (res_tx, res_rx) = tokio::sync::mpsc::channel(64);
     let task_budget = budget.clone();
+    let allowed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let task_allowed = allowed.clone();
     tokio::spawn(async move {
         let mut carry: Option<InputJob> = None;
         loop {
@@ -1540,6 +1565,12 @@ where
                     Err(_) => break,
                 }
             }
+            if !task_allowed.load(std::sync::atomic::Ordering::SeqCst) {
+                // Revoked: discard, never write (the socket is going away or
+                // can no longer type — no notice to report).
+                task_budget.add_permits(cost as usize);
+                continue;
+            }
             let res = write(bytes, user).await;
             task_budget.add_permits(cost as usize);
             if res.is_err() && user {
@@ -1549,7 +1580,14 @@ where
             let _ = res_tx.try_send(res);
         }
     });
-    (InputQueue { tx, budget }, res_rx)
+    (
+        InputQueue {
+            tx,
+            budget,
+            allowed,
+        },
+        res_rx,
+    )
 }
 
 /// [`spawn_input_queue`] wired to the session manager for one connection.
@@ -1720,8 +1758,14 @@ async fn serve_terminal<S: SessionsCtx>(
             // gone) → tell the client and drop the socket.
             update = next_can_input(&mut can_rx) => {
                 match update {
-                    Some(allowed) => can_input &= allowed,
+                    Some(allowed) => {
+                        can_input &= allowed;
+                        if !can_input {
+                            input_q.revoke();
+                        }
+                    }
                     None => {
+                        input_q.revoke();
                         let _ = socket.send(Message::Close(None)).await;
                         return;
                     }
@@ -1872,6 +1916,7 @@ async fn serve_terminal<S: SessionsCtx>(
             // also resolves here (signal was sent) → evict; only `Closed`
             // (handled in next_evict) is a non-event that stops this branch.
             _ = next_evict(&mut evict_rx) => {
+                input_q.revoke();
                 let frame = r#"{"type":"terminated"}"#;
                 let _ = socket.send(Message::Text(frame.into())).await;
                 return;
@@ -3647,6 +3692,34 @@ mod input_queue_tests {
         panic!("writer never delivered {total} bytes");
     }
 
+    /// Review S1-25: input already queued when the viewer loses input
+    /// authority (re-auth narrowing, eviction) is discarded, not written.
+    #[tokio::test]
+    async fn revoked_queue_discards_input_already_queued() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (q, _res, writes, _) = gated(gate.clone(), false);
+        push(&q, b"first".to_vec(), true, None).await;
+        // The first write is stuck in the child; more queues up behind it.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        push(&q, b"queued-after".to_vec(), true, None).await;
+        q.revoke();
+        gate.add_permits(10);
+        settle(&writes, 5).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let delivered: Vec<u8> = writes
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|w| w.0.clone())
+            .collect();
+        assert_eq!(
+            delivered, b"first",
+            "nothing queued after the revoke is written"
+        );
+        // The budget is returned: the queue does not wedge.
+        assert_eq!(q.budget.available_permits(), INPUT_BUDGET_BYTES);
+    }
+
     #[tokio::test]
     async fn thousands_of_keystrokes_behind_a_stuck_write_are_all_delivered_in_order() {
         let gate = Arc::new(Semaphore::new(0));
@@ -3918,6 +3991,25 @@ mod snapshot_encoding_tests {
         assert!(
             ratio > 1.33,
             "base64-in-JSON is {ratio:.3}× the binary form (binary {binary} B, json {json} B)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lookup_status_tests {
+    use super::*;
+
+    /// Review S1-26: a transient DB error on the attach's session lookup is
+    /// not "session gone".
+    #[test]
+    fn only_a_missing_session_is_404() {
+        assert_eq!(
+            lookup_failure_status(&Error::NotFound("session".into())),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            lookup_failure_status(&Error::Internal("database is locked".into())),
+            StatusCode::SERVICE_UNAVAILABLE
         );
     }
 }

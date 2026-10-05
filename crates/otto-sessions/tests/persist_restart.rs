@@ -301,6 +301,40 @@ async fn user_sessions_survive_a_daemon_restart_and_engine_ones_do_not() {
     })
     .await;
 
+    // ── restart #2 with a transient DB failure at adoption (S1-09) ─────────
+    // The lookup fails, so the holder is left running and DEFERRED — and a
+    // later retry adopts the SAME process instead of a resume forking it.
+    let (_, kept) = second.shutdown_for_restart().await;
+    assert_eq!(kept, 1);
+    drop(second);
+    let third = daemon(&w, &holders);
+    sqlx::query("ALTER TABLE sessions RENAME TO sessions_s1_09")
+        .execute(&w.pool)
+        .await
+        .unwrap();
+    let adopted = third.adopt_holders().await;
+    sqlx::query("ALTER TABLE sessions_s1_09 RENAME TO sessions")
+        .execute(&w.pool)
+        .await
+        .unwrap();
+    assert!(adopted.is_empty(), "the lookup failed: nothing adopted yet");
+    assert!(!third.is_live(&id));
+    assert!(
+        pid_alive(pid) && pid_alive(holder_pid),
+        "a transient DB error must not end the session's process"
+    );
+    assert_eq!(
+        third.retry_deferred_adoptions().await,
+        vec![id.clone()],
+        "the deferred holder is adopted on retry"
+    );
+    assert_eq!(
+        third.live_pid(&id),
+        Some(pid),
+        "the SAME process, not a respawn"
+    );
+    let second = third;
+
     // ── deliberate close: process AND holder go, nothing leaks ─────────────
     second.archive(&id).await.expect("archive");
     wait_until("shell gone", Duration::from_secs(10), || !pid_alive(pid)).await;

@@ -527,6 +527,16 @@ pub(crate) fn spawn_and_attach(
         Ok(Ok(())) => {}
         Ok(Err(msg)) => return Err(Error::Internal(format!("pty holder: {msg}"))),
         Err(_) => {
+            // A holder that is up but slow may already have spawned the
+            // child: end it through the holder first (KILL escalates past an
+            // ignored HUP), or SIGKILLing only the holder orphans a child
+            // that ignores HUP (review S1-24). Bounded by the escalation.
+            if terminate(&socket).is_ok() {
+                let _ = crate::held::wait_holder_gone(
+                    &socket,
+                    Duration::from_secs(2 * crate::KILL_GRACE.as_secs() + 1),
+                );
+            }
             // Still not ready, so not reaped either: its pid is still ours.
             #[cfg(unix)]
             // SAFETY: signalling our own unreaped child.
@@ -588,8 +598,16 @@ pub fn terminate(socket: &Path) -> std::io::Result<()> {
     let hello = serde_json::to_vec(&Hello::ours()).unwrap_or_default();
     s.write_all(&frame::encode(frame::HELLO, &hello))?;
     // Wait for the ack so our KILL is processed by THIS connection's handler
-    // (not dropped as pre-handshake noise).
-    let _ = frame::read_sync(&mut s);
+    // (not dropped as pre-handshake noise). No ack = a wedged holder that
+    // never claimed this connection: the KILL would be lost, so this is a
+    // failure, not a success (review S1-08).
+    let (kind, _) = frame::read_sync(&mut s)?;
+    if kind != frame::HELLO_ACK {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("pty holder: unexpected frame {kind:#x} instead of HELLO_ACK"),
+        ));
+    }
     s.write_all(&frame::encode(frame::KILL, &[]))?;
     s.write_all(&frame::encode(frame::RELEASE, &[]))?;
     // Give the holder a moment to read them before we hang up.
@@ -911,6 +929,24 @@ async fn serve_client(stream: tokio::net::UnixStream, sh: Arc<Shared>) {
         return;
     }
 
+    // Read this client's frames BEFORE the (possibly large, slow) SNAPSHOT
+    // write: a terminate()-style client sends KILL right after HELLO_ACK,
+    // and a racing newer client's HELLO could kick this one while the
+    // snapshot is still being written — the KILL must not be left unread
+    // in the socket buffer (review S1-08).
+    let superseded = Arc::new(AtomicBool::new(false));
+    let (ack_tx, mut ack_rx) = mpsc::unbounded_channel::<InputAck>();
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<(u64, Vec<u8>)>();
+    let input_task = tokio::spawn(input_loop(Arc::clone(&sh.handle), in_rx, ack_tx));
+    let (eof_tx, mut eof_rx) = oneshot::channel::<()>();
+    let mut reader_task = tokio::spawn(client_reader(
+        rd,
+        Arc::clone(&sh),
+        in_tx,
+        eof_tx,
+        Arc::clone(&superseded),
+    ));
+
     let snap = sh.handle.snapshot_and_subscribe(EMULATOR_SCROLLBACK_LINES);
     let mut payload = frame::grid(snap.cols, snap.rows).to_vec();
     payload.extend_from_slice(&snap.data);
@@ -918,23 +954,22 @@ async fn serve_client(stream: tokio::net::UnixStream, sh: Arc<Shared>) {
         .await
         .is_err()
     {
+        reader_task.abort();
+        input_task.abort();
         sh.release_claim(gen);
         return;
     }
     let mut out = snap.output;
-
-    let (ack_tx, mut ack_rx) = mpsc::unbounded_channel::<InputAck>();
-    let (in_tx, in_rx) = mpsc::unbounded_channel::<(u64, Vec<u8>)>();
-    let input_task = tokio::spawn(input_loop(Arc::clone(&sh.handle), in_rx, ack_tx));
-    let (eof_tx, mut eof_rx) = oneshot::channel::<()>();
-    let reader_task = tokio::spawn(client_reader(rd, Arc::clone(&sh), in_tx, eof_tx));
     let mut exit_rx = sh.handle.on_exit();
+    let mut kicked = false;
     let mut exit_sent = false;
 
     loop {
         tokio::select! {
             changed = kick.changed() => {
                 if changed.is_err() || *kick.borrow() != gen {
+                    superseded.store(true, Ordering::SeqCst);
+                    kicked = true;
                     let _ = write_frame(&mut wr, frame::SUPERSEDED, &[]).await;
                     break;
                 }
@@ -998,9 +1033,15 @@ async fn serve_client(stream: tokio::net::UnixStream, sh: Arc<Shared>) {
             }
         }
     }
-    reader_task.abort();
     input_task.abort();
     let _ = wr.shutdown().await;
+    if kicked {
+        // Drain control frames this client already sent (a KILL / RELEASE
+        // racing the kick) until it hangs up — bounded: a superseded daemon
+        // closes on SUPERSEDED, a terminate() client within 300 ms.
+        let _ = tokio::time::timeout(Duration::from_millis(500), &mut reader_task).await;
+    }
+    reader_task.abort();
     sh.release_claim(gen);
 }
 
@@ -1010,9 +1051,22 @@ async fn client_reader(
     sh: Arc<Shared>,
     in_tx: mpsc::UnboundedSender<(u64, Vec<u8>)>,
     eof_tx: oneshot::Sender<()>,
+    superseded: Arc<AtomicBool>,
 ) {
     loop {
-        match frame::read_async(&mut rd).await {
+        let frame = frame::read_async(&mut rd).await;
+        if superseded.load(Ordering::SeqCst) {
+            // Replaced by a newer client: only the frozen control frames
+            // still count (input / resizes belong to the new client).
+            match frame {
+                Ok((kind, _)) => {
+                    control_frame(&sh, kind);
+                    continue;
+                }
+                Err(_) => break,
+            }
+        }
+        match frame {
             Ok((frame::INPUT, payload)) if payload.len() >= 8 => {
                 let mut seq = [0u8; 8];
                 seq.copy_from_slice(&payload[..8]);
