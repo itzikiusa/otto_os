@@ -8,6 +8,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   const tiled = $derived(ws.viewMode === 'tiled');
   const mission = $derived(ws.viewMode === 'mission');
@@ -53,10 +54,7 @@
        accepted a draft. Keep that form mounted; real workspace navigation
        and the ordinary empty state still show their loading skeleton. -->
   {#if ws.sessionsError}
-    <div role="alert">
-      <p>Could not load sessions: {ws.sessionsError}</p>
-      <button class="btn" onclick={() => void ws.retrySessions()}>Retry</button>
-    </div>
+    <LoadState variant="compact" what="sessions" error={ws.sessionsError} empty onretry={() => void ws.retrySessions()} />
   {/if}
   {#if ws.sessionsError && !ws.layoutReady}
     <!-- A failed selection must not mount another workspace's panes. -->

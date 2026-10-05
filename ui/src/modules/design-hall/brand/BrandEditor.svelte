@@ -53,6 +53,7 @@
   import { copyWithToast } from './edit';
   import { diffTokens, normalizeBrandDoc, parseBrandDoc, rulesForKit, serializeBrandDoc, validateBrandDoc } from './tokens';
   import { guardUnsaved } from '../../../lib/leaveGuard';
+  import LoadState from '../../../lib/components/LoadState.svelte';
 
   interface Props {
     id: string;
@@ -447,7 +448,7 @@
 {:else if phase === 'error'}
   <PageHeader title="Brand Kit" crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]} />
   <PageBody>
-    <p class="err" role="alert"><Icon name="warning" size={14} /> Couldn’t load the brand kit. <span class="dim">{loadError}</span> <button class="btn small" onclick={() => void load()}>Retry</button></p>
+    <LoadState variant="compact" what="the brand kit" error={loadError || 'No details were reported.'} empty onretry={() => void load()} />
   </PageBody>
 {:else if phase === 'gone'}
   <PageHeader title="Brand Kit" crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]} />
@@ -711,19 +712,6 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
-  }
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    font-size: var(--fs-s);
-  }
-  .err > :global(svg) {
-    color: var(--danger);
-  }
-  .dim {
-    color: var(--text-dim);
   }
   @media (max-width: 1024px) {
     .brand-grid {

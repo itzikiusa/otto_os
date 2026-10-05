@@ -99,13 +99,14 @@
   --status-warn: var(--warning);
 
   /* Semantic tones (dark-scheme defaults; light values below). The bare name
-     is TEXT-SAFE: >= 4.5:1 on --bg, --surface, --surface-2 and on its own
-     -soft tint in every theme. Use -soft for tinted backgrounds/chips and
+     is TEXT-SAFE: >= 4.5:1 on --bg, --bg-sidebar, --surface, --surface-2,
+     --surface-3 and on its own -soft tint over each, in every theme
+     (unit/tokenContrast.test.ts enforces it). Use -soft for tinted backgrounds/chips and
      --danger-solid for a filled destructive button carrying white text. */
-  --danger: #ff8a80;
-  --warning: #e3b341;
-  --success: #56d06c;
-  --info: #6cb2ff;
+  --danger: #ffa49f;
+  --warning: #e3b64a;
+  --success: #5dd372;
+  --info: #8ac1ff;
   --danger-solid: #c42b22;
   /* Text/icon on a --danger-solid fill (the confirm sheet's red button). */
   --danger-contrast: #ffffff;
@@ -194,10 +195,10 @@
    so the two can never drift apart. */
 html[data-scheme='light']:not([data-theme='pro-dark']) {
   color-scheme: light;
-  --danger: #b3261e;
-  --warning: #8a5100;
-  --success: #17702f;
-  --info: #0858b8;
+  --danger: #a7221e;
+  --warning: #804c00;
+  --success: #17662a;
+  --info: #0855af;
   --status-working: var(--success);
   --status-idle: var(--text-dim);
   --status-exited: var(--danger);
@@ -404,10 +405,10 @@ html[data-scheme='light']:not([data-theme='pro-dark']) .otto-force-dark {
   --text: #f2f2f5;
   --text-dim: #b9b9bf;
   --term-bg: #131318;
-  --danger: #ff8a80;
-  --warning: #e3b341;
-  --success: #56d06c;
-  --info: #6cb2ff;
+  --danger: #ffa49f;
+  --warning: #e3b64a;
+  --success: #5dd372;
+  --info: #8ac1ff;
   --status-working: #28c840;
   --status-idle: var(--text-dim);
   --status-exited: #ff5f57;

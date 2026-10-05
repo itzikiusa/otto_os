@@ -22,7 +22,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ResultsGrid from '../database/ResultsGrid.svelte';
   import RegionPicker from './RegionPicker.svelte';
-  import { athenaCostUsd, fmtAgo, fmtBytes, fmtMs, awsErrorText, serviceTabKey } from './util';
+  import { athenaCostUsd, fmtAgo, fmtBytes, fmtMs, awsErrorText } from './util';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import { statusPollMs } from '../../lib/pollBackoff';
   import type {
     AthenaExecution,
@@ -508,9 +509,16 @@
         <span class="dim">{canRun ? 'Write a query and press ⌘↵.' : 'You can browse the catalog and history; running queries needs Edit on Athena.'}</span>
       {/if}
       <span class="spacer"></span>
-      <div class="tabs" role="tablist" aria-label="Query output">
-        <button role="tab" tabindex={tab === 'results' ? 0 : -1} onkeydown={serviceTabKey} aria-selected={tab === 'results'} class:on={tab === 'results'} onclick={() => (tab = 'results')}>Results</button>
-        <button role="tab" tabindex={tab === 'history' ? 0 : -1} onkeydown={serviceTabKey} aria-selected={tab === 'history'} class:on={tab === 'history'} onclick={() => { tab = 'history'; void loadHistory(); }}>History</button>
+      <div class="out-tabs">
+        <Tabs
+          label="Query output"
+          tabs={[{ id: 'results', label: 'Results' }, { id: 'history', label: 'History' }]}
+          value={tab}
+          onchange={(id) => {
+            tab = id;
+            if (id === 'history') void loadHistory();
+          }}
+        />
       </div>
     </div>
 
@@ -761,22 +769,9 @@
     color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 16%, transparent);
   }
-  .tabs {
-    display: flex;
-    gap: 2px;
-  }
-  .tabs button {
-    padding: 6px 10px;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: var(--fs-m);
-  }
-  .tabs button.on {
-    color: var(--text);
-    border-bottom-color: var(--accent);
+  .out-tabs :global(.otabs) {
+    border-block-end: 0;
+    padding-inline: 0;
   }
   .results {
     flex: 1;

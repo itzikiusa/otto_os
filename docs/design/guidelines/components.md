@@ -130,7 +130,11 @@ it switches content:
 - When a tab is addressable, the tab is a **route** (`#/insights/health`), so
   back/forward and deep links work.
 - A segmented control that picks a *value* (List | Graph, Desktop | Tablet |
-  Phone) uses `aria-pressed` on each button instead of tab roles.
+  Phone, Unstaged | Staged) uses `aria-pressed` on each button instead of tab
+  roles, inside `role="group"` + `aria-label`. `class:active` alone is
+  invisible to VoiceOver — `ui-guards` fails it (`segmented-state`). A group of
+  plain ACTIONS (Set all to Viewer | Editor | Admin) has no `active` and needs
+  neither; keep a destructive action out of such a group.
 - Tab counts go after the label in `--text-dim` (`Pending 3`), not in a
   coloured bubble, unless the count means "needs you" (then use `--warning`).
 - Selection is shown by the surface lift of `.segmented > .active`. Don't use
@@ -164,7 +168,9 @@ roving focus with arrow keys, disabled tabs skipped.
 Document tabs with a close button (open clusters, open notes, query tabs) are
 a different control and keep their own strip. `ui-guards` ratchets every other
 `role="tablist"` outside `lib/components` (`local-tablist`; a `.segmented`
-tablist is exempt): migrate a strip when you touch it.
+view switch is exempt only when it wires `lib/tabKeys` — the class alone is
+not): migrate a strip when you touch it. A tablist owns only tabs — put other
+controls in `trailing`.
 
 ## 4. Chips, badges and status
 

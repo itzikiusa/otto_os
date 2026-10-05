@@ -14,6 +14,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   interface Props {
     repoId: string;
@@ -253,11 +254,7 @@
 <Modal title="New pull request" width={520} onclose={requestClose} dismissable={!busy && !drafting}>
   <div class="createpr-form">
   {#if branchesError}
-    <div class="cp-error" role="alert">
-      <Icon name="warning" size={14} />
-      <span class="grow">Couldn’t load the branches. <span class="dim">{branchesError}</span></span>
-      <button class="btn small" onclick={() => branchesRev++}>Retry</button>
-    </div>
+    <LoadState variant="compact" what="the branches" error={branchesError} empty onretry={() => branchesRev++} />
   {/if}
   <div class="row branch-row" style="gap: 12px; margin-bottom: 12px">
     <div class="field grow" style="margin: 0">
@@ -428,24 +425,6 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-  }
-  .cp-error {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 12px;
-    padding: 8px 10px;
-    border-radius: var(--radius-m);
-    background: var(--danger-soft);
-    font-size: var(--fs-s);
-  }
-  .cp-error > :global(svg) {
-    color: var(--danger);
-    flex-shrink: 0;
-  }
-  .cp-error .grow {
-    flex: 1;
-    min-width: 0;
   }
   .cp-where {
     margin: 0;

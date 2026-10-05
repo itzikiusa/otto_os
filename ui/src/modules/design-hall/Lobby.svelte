@@ -33,6 +33,7 @@
   import { createDesign } from './create';
   import { generateFromBrief, referenceOf, suggestReferences } from './assist/handoff';
   import { library } from './library.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   interface Props {
     view: 'grid' | 'spatial';
@@ -420,12 +421,7 @@
           {#if library.loading && !library.loaded}
             <Skeleton rows={1} height={220} />
           {:else if library.error && !library.loaded}
-            <div class="inline-err" role="alert">
-              <Icon name="warning" size={14} />
-              <span>Couldn’t load the design library.</span>
-              <span class="dim err-detail">{library.error}</span>
-              <button class="btn small" onclick={() => void library.load()}>Retry</button>
-            </div>
+            <LoadState variant="compact" what="the design library" error={library.error} empty onretry={() => void library.load()} />
           {:else if recent.length === 0}
             <p class="dim">Nothing here yet. Designs you and your agents make — and the ones already in Product and Canvas — show up here.</p>
           {:else}
@@ -838,9 +834,6 @@
   }
   .inline-err > :global(svg) {
     color: var(--danger);
-  }
-  .err-detail {
-    font-size: var(--fs-xs);
   }
   /* Rail */
   .rail {

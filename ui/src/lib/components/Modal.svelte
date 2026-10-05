@@ -63,8 +63,10 @@
       },
     };
   }
+  // `[contenteditable]` covers CodeMirror's content node: without it, focus
+  // inside an editor counts as "outside" the list and Tab jumps to the ✕.
   const FOCUSABLE =
-    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [contenteditable="true"], [contenteditable=""], [tabindex]:not([tabindex="-1"])';
 
   function focusables(): HTMLElement[] {
     if (!sheetEl) return [];
@@ -114,6 +116,11 @@
   });
 
   function onKeydown(e: KeyboardEvent) {
+    // A key something inside already handled — CodeMirror closing its
+    // completion popup or search panel on Escape, a nested picker — bubbles
+    // here with defaultPrevented set. Closing the sheet on top of that throws
+    // away the user's edit (same rule as lib/dialogFocus.ts).
+    if (e.defaultPrevented) return;
     // Nested pickers are separate sheets. Only the top sheet may trap keys;
     // otherwise an underlying New Session modal steals focus on every Tab.
     const sheets = document.querySelectorAll<HTMLElement>('.sheet[role="dialog"][aria-modal="true"]');

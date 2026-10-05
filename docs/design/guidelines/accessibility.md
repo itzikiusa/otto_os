@@ -73,7 +73,10 @@ in audits.
 - **A right-click menu has a keyboard and a touch path.** Put `use:rowMenu`
   (`lib/rowMenu.ts`) on any element with `oncontextmenu`: the ContextMenu key,
   ⇧F10 and a touch long-press then open the same menu
-  (`node scripts/codemods/row-menu.mjs` adds it). A double-click action is
+  (`node scripts/codemods/row-menu.mjs` adds it). The chord works while focus
+  is on the element or any non-editable control inside it (a header's sort
+  button), so a non-focusable `<div>`/`<tr>` host is still reachable as long
+  as it contains a focusable control; a host with none needs `tabindex="0"`. A double-click action is
   also in that menu, or has a key (canvas nodes: Enter / F2 edits).
 - **Single-key shortcuts** (no modifier) act only while focus is inside their
   surface, and can be switched off (WCAG 2.1.4) — see the Cluster workspace.

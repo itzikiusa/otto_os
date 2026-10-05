@@ -34,6 +34,7 @@
     annosHash,
     uploadNeeded,
   } from './annotations';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   // The shell keys this editor by id; cleanup saves belong to that mounted image.
   const snipId = router.parts[1] ?? '';
@@ -803,11 +804,7 @@
     {#if loading}
       <div class="snip-empty" role="status" aria-label="Loading the snip"><span class="spinner" style:--spinner-size="24px" aria-hidden="true"></span></div>
     {:else if loadError}
-      <div class="snip-empty" role="alert">
-        <p class="snip-missing-title">Could not load the snip</p>
-        <p>{loadError}</p>
-        <button class="btn" onclick={() => void loadImage()}>Retry</button>
-      </div>
+      <LoadState variant="compact" what="the snip" error={loadError} empty onretry={() => void loadImage()} />
     {:else if missing}
       <div class="snip-empty snip-missing" role="alert">
         <Icon name="image" size={26} />

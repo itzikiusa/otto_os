@@ -10,6 +10,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Switch from '../../lib/components/Switch.svelte';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import GoalEditor from './GoalEditor.svelte';
   import SkillPicker from './SkillPicker.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -195,28 +196,11 @@
 </script>
 
 <Modal title="Swarm settings{detail ? ` — ${detail.name}` : ''}" width={640} {onclose}>
-  <div
-    class="tabs"
-    role="tablist"
-    aria-label="Swarm settings section"
-    tabindex="-1"
-    onkeydown={(e) => {
-      const i = TABS.findIndex((t) => t.id === tab);
-      const n = e.key === 'ArrowRight' ? i + 1 : e.key === 'ArrowLeft' ? i - 1 : e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : null;
-      if (n === null) return;
-      e.preventDefault();
-      const j = (n + TABS.length) % TABS.length;
-      tab = TABS[j].id;
-      (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]')[j]?.focus();
-    }}
-  >
-    {#each TABS as t (t.id)}
-      <button class="tab" class:active={tab === t.id} role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1} onclick={() => (tab = t.id)}>
-        <Icon name={t.icon} size={13} /> {t.label}
-      </button>
-    {/each}
+  <div class="settings-tabs">
+    <Tabs label="Swarm settings section" tabs={TABS} value={tab} onchange={(id) => (tab = id)} idBase="swarm-settings" />
   </div>
 
+  <div role="tabpanel" id="swarm-settings-panel-{tab}" aria-labelledby="swarm-settings-tab-{tab}">
   {#if tab === 'goals'}
     <p class="hint">Standing goals are the swarm’s quality bar — verified on every task in addition to the task’s own goals.</p>
     <div class="bar">
@@ -323,6 +307,7 @@
       </LoadState>
     {/if}
   {/if}
+  </div>
 
   {#snippet footer()}
     <button class="btn ghost" onclick={onclose}>Close</button>
@@ -338,30 +323,8 @@
 {/if}
 
 <style>
-  .tabs {
-    display: flex;
-    gap: 4px;
-    border-bottom: 1px solid var(--border);
+  .settings-tabs {
     margin-bottom: 12px;
-  }
-  .tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    border: none;
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    padding: 6px 10px;
-    font-size: var(--fs-s);
-    cursor: pointer;
-  }
-  .tab:hover {
-    color: var(--text);
-  }
-  .tab.active {
-    color: var(--accent-text);
-    border-bottom-color: var(--accent);
   }
   .hint {
     font-size: var(--fs-s);

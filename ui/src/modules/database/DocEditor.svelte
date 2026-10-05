@@ -12,6 +12,7 @@
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import type { EditFlow } from './EditFlow.svelte';
   import { claimFind, editorEscGuard } from './doc-modal';
+  import { confirmer } from '../../lib/confirm.svelte';
 
   interface Props {
     flow: EditFlow;
@@ -25,6 +26,28 @@
   // edits echoing back (a reopen remounts this component).
   const initial = untrack(() => flow.docEditor?.draft ?? '');
 
+  // Esc / ✕ / backdrop / Cancel all land here: an edited draft asks first, so
+  // a stray Esc (or a misclick on the backdrop) never silently drops the edit.
+  let closing = false;
+  async function close() {
+    const open = flow.docEditor;
+    if (!open || closing) return;
+    if (open.draft !== initial) {
+      closing = true;
+      const discard = await confirmer.ask('Discard your changes to this document?', {
+        title: 'Discard changes',
+        confirmLabel: 'Discard',
+        danger: true,
+      });
+      closing = false;
+      if (!discard) {
+        editor?.focus();
+        return;
+      }
+    }
+    if (flow.docEditor === open) flow.docEditor = null;
+  }
+
   $effect(() => claimFind(() => editor?.openSearch()));
   // After the Modal's own initial focus (it only knows form controls).
   $effect(() => {
@@ -35,7 +58,7 @@
 </script>
 
 {#if flow.docEditor}
-  <Modal title={inserting ? 'Insert document' : 'Edit document'} width={720} onclose={() => (flow.docEditor = null)}>
+  <Modal title={inserting ? 'Insert document' : 'Edit document'} width={720} onclose={close}>
     <div class="cell-viewer">
       <div class="cv-tools">
         <p class="cv-hint">
@@ -70,7 +93,7 @@
       <div class="cv-foot">
         {#if flow.docEditor.err}<span class="cv-err">{flow.docEditor.err}</span>{/if}
         <span class="grow"></span>
-        <button class="btn small ghost" onclick={() => (flow.docEditor = null)}>Cancel</button>
+        <button class="btn small ghost" onclick={close}>Cancel</button>
         <button class="btn small primary" onclick={() => flow.saveDocEdit()} title="Validate and review the statement (⌘⏎)">Save…</button>
       </div>
     </div>

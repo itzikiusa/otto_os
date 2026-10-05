@@ -153,6 +153,16 @@
     if (!userId || savingWs.length || allMembersLoading || allMembersError) return;
     const targets = ws.workspaces.filter((w) => roleIn(w.id, userId) !== role);
     if (targets.length === 0) return;
+    // Removing revokes access everywhere at once and drops the role history:
+    // irreversible from here, so it asks first (patterns §6).
+    if (role === 'none') {
+      const name = users.find((u) => u.id === userId)?.username ?? 'this user';
+      const ok = await confirmer.ask(
+        `Remove @${name} from ${plural(targets.length, 'workspace')}? They lose access to each one immediately; their roles there are not kept.`,
+        { title: 'Remove from all workspaces', confirmLabel: 'Remove', danger: true },
+      );
+      if (!ok || memberUserId !== userId) return;
+    }
     const results = await Promise.all(targets.map((w) => setRoleIn(w.id, userId, role)));
     const updated = results.filter(Boolean).length;
     if (updated !== targets.length) {
@@ -581,15 +591,24 @@
         <span class="grow"></span>
         <span class="dim">Set all to</span>
         <div class="segmented" role="group" aria-label="Set the role in every workspace">
-          {#each roleOptions as r (r)}
+          {#each roleOptions.filter((r) => r !== 'none') as r (r)}
             <button
               disabled={savingWs.length > 0}
               onclick={() => void setRoleEverywhere(r)}
             >
-              {r === 'none' ? 'Remove' : ROLE_LABEL[r]}
+              {ROLE_LABEL[r]}
             </button>
           {/each}
         </div>
+        <!-- Removal is not a role value: kept out of the picker, styled as
+             destructive, and confirmed before it runs. -->
+        <button
+          class="btn small danger"
+          disabled={savingWs.length > 0 || memberWsCount === 0}
+          onclick={() => void setRoleEverywhere('none')}
+        >
+          Remove from all…
+        </button>
       </div>
       <div class="card matrix">
         <div class="matrix-head">
