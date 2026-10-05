@@ -1551,7 +1551,7 @@ pub fn node_catalog() -> Vec<NodeTypeSpec> {
           "Pause the run until an operator calls the resume endpoint.", 1, 1, "#f0c040", "user-check"),
         n("condition", "Condition", "Flow",
           "Evaluate an expression on the input; outputs { result, value }. Pair with edge conditions to branch.", 1, 1, "#f0c040", "git-branch"),
-        n("loop", "Loop (Until)", "Flow",
+        n("loop", "Repeat (Until)", "Flow",
           "Re-run inner steps until an expression holds or max iterations (e.g. fix → review until score ≥ 80).", 1, 1, "#f0c040", "repeat"),
         // Swarm task: wired — enqueues via SwarmRepo. Requires swarm_id +
         // project_id in params; the task is created in "todo" status so the
