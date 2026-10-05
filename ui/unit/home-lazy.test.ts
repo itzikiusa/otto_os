@@ -19,7 +19,7 @@ test('HomeBox loads every box kind lazily', () => {
   const src = read('src/modules/home/HomeBox.svelte');
   const boxes = staticImports(src).filter((s) => /\/boxes\/\w+Box\.svelte$/.test(s));
   assert.deepEqual(boxes, [], 'map the kind to () => import(...) in BODY_LOADERS');
-  for (const k of ['SessionsBox', 'MissionControlBox', 'DbDashboardBox', 'K8sBox', 'InsightsBox', 'UsageBox']) {
+  for (const k of ['SessionsBox', 'MissionControlBox', 'DbDashboardBox', 'K8sBox', 'InsightsBox', 'UsageBox', 'ClassroomsBox']) {
     assert.match(src, new RegExp(`import\\('\\./boxes/${k}\\.svelte'\\)`), k);
   }
 });
@@ -63,4 +63,13 @@ test('service worker never caches the proxy, plugin UIs or credentialed URLs', (
   assert.match(sw, /c\.put\('\/', clone\)/);
   assert.doesNotMatch(sw, /c\.put\(event\.request, clone\)\);\n\s*const ct = resp\.headers/);
   assert.doesNotMatch(sw, /CACHE_NAME = 'otto-shell-v4'/, 'bump CACHE_NAME on a policy change');
+});
+
+test('Classrooms keeps three.js behind a dynamic import', () => {
+  for (const f of ['src/modules/home/boxes/ClassroomsBox.svelte', 'src/modules/home/classrooms/scene.ts', 'src/modules/home/classrooms/model.ts']) {
+    const imports = staticImports(read(f));
+    assert.ok(!imports.some((s) => s === 'three' || s.startsWith('three/')), `${f} must not statically import three`);
+  }
+  assert.match(read('src/modules/home/classrooms/scene.ts'), /import\('three'\)/);
+  assert.match(read('scripts/bundle-budget.mjs'), /three: \['home'/);
 });
