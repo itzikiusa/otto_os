@@ -3,6 +3,8 @@ name: macOS
 # macOS-only behavior the Linux CI never exercises: the Seatbelt sandbox
 # (`sandbox-exec` profiles in otto-sandbox), the PTY/session manager on Darwin
 # (otto-sessions, which confines spawned shells through otto-sandbox), the
+# PTY + holder semantics (otto-pty: SIGHUP on master close, TIOCSWINSZ, unix
+# socket path limits), the
 # Keychain store, and the standalone Tauri desktop workspace
 # (apps/desktop/src-tauri — not part of the root workspace).
 #
@@ -14,6 +16,7 @@ on:
       - 'crates/otto-sandbox/**'
       - 'crates/otto-keychain/**'
       - 'crates/otto-sessions/**'
+      - 'crates/otto-pty/**'
       - 'apps/desktop/**'
       - '.github/workflows/macos.yml'
   push:
@@ -22,6 +25,7 @@ on:
       - 'crates/otto-sandbox/**'
       - 'crates/otto-keychain/**'
       - 'crates/otto-sessions/**'
+      - 'crates/otto-pty/**'
       - 'apps/desktop/**'
   schedule:
     - cron: '53 3 * * *'
@@ -64,12 +68,12 @@ jobs:
           tool: cargo-nextest@0.9.146
 
       - name: cargo clippy (macOS cfg)
-        run: cargo clippy -p otto-sandbox -p otto-sessions -p otto-keychain --all-targets -- -D warnings
+        run: cargo clippy -p otto-sandbox -p otto-pty -p otto-sessions -p otto-keychain --all-targets -- -D warnings
 
       # The Keychain-touching cases are #[ignore]d / opt-in; the default set
       # still runs the macOS cfg branches (file secret store, ACL helpers).
       - name: cargo nextest
-        run: cargo nextest run -p otto-sandbox -p otto-sessions -p otto-keychain --profile ci --no-fail-fast
+        run: cargo nextest run -p otto-sandbox -p otto-pty -p otto-sessions -p otto-keychain --profile ci --no-fail-fast
 
   desktop:
     name: Desktop app (Tauri, macOS)

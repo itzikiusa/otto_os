@@ -763,6 +763,17 @@ pub fn ws_router<S: SessionsCtx>(authenticator: Arc<dyn TokenAuthenticator>, ctx
         .with_state(state)
 }
 
+/// HTTP status for a failed session lookup on attach (review S1-26): only a
+/// row that is really gone is 404 ("session gone" — the client stops
+/// reconnecting). A transient DB error (busy, pool timeout) is 503, so the
+/// client retries instead of declaring a live session dead.
+fn lookup_failure_status(e: &Error) -> StatusCode {
+    match e {
+        Error::NotFound(_) => StatusCode::NOT_FOUND,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
 fn problem(status: StatusCode, e: &Error) -> Response {
     let body = Problem {
         code: e.code().to_string(),
@@ -849,7 +860,7 @@ async fn ws_auth_gate<S: SessionsCtx>(
     // 2. Session lookup.
     let session = match st.ctx.manager().get(&session_id).await {
         Ok(s) => s,
-        Err(e) => return problem(StatusCode::NOT_FOUND, &e),
+        Err(e) => return problem(lookup_failure_status(&e), &e),
     };
 
     // 2b. Agent-credential confinement. This root-mounted route never passes
@@ -1042,7 +1053,7 @@ async fn term_ws<S: SessionsCtx>(
     // Auth and owner-gate already enforced by ws_auth_gate middleware.
     let session = match st.ctx.manager().get(&session_id).await {
         Ok(s) => s,
-        Err(e) => return problem(StatusCode::NOT_FOUND, &e),
+        Err(e) => return problem(lookup_failure_status(&e), &e),
     };
     let initial_status = session.status;
     // Echo `otto-bearer` only when the client used the subprotocol path (Task
@@ -3851,6 +3862,25 @@ mod snapshot_encoding_tests {
         assert!(
             ratio > 1.33,
             "base64-in-JSON is {ratio:.3}× the binary form (binary {binary} B, json {json} B)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lookup_status_tests {
+    use super::*;
+
+    /// Review S1-26: a transient DB error on the attach's session lookup is
+    /// not "session gone".
+    #[test]
+    fn only_a_missing_session_is_404() {
+        assert_eq!(
+            lookup_failure_status(&Error::NotFound("session".into())),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            lookup_failure_status(&Error::Internal("database is locked".into())),
+            StatusCode::SERVICE_UNAVAILABLE
         );
     }
 }
