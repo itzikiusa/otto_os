@@ -879,11 +879,11 @@
       );
       // Reflect the new title in the header + story list without a full refresh.
       product.patchLocalTitle(s.id, next);
+      toasts.info('Title updated', s.source_key);
       if (!onStory(s)) return;
       issueFull = full;
       editingTitle = false;
       titleDraft = '';
-      toasts.info('Title updated');
     } catch (e) {
       toastError('Couldn’t update title', e);
     } finally {
@@ -924,11 +924,11 @@
       // The body column reads from the cached source version — patch it locally
       // with exactly what we just sent so the change shows without a refresh.
       product.patchLocalBody(s.id, draft);
+      toasts.info('Description updated', s.source_key);
       if (!onStory(s)) return;
       issueFull = full;
       editingDesc = false;
       descDraft = '';
-      toasts.info('Description updated');
     } catch (e) {
       toastError('Couldn’t update description', e);
     } finally {
