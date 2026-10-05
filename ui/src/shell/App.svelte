@@ -79,7 +79,7 @@
   import { git } from '../lib/stores/git.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { events } from '../lib/events.svelte';
-  import { installKeyMap, routeFind, type KeyAction } from '../lib/keys';
+  import { dismissTopDialog, installKeyMap, modalKeyVerdict, routeFind, type KeyAction } from '../lib/keys';
   import { attachMenuBridge, attachCloseHandler, handleMenu } from '../lib/menu';
   import { gcWindowKeys } from '../lib/win';
   import { openExternal, isExternalUrl } from '../lib/external';
@@ -431,6 +431,10 @@
   // One dispatcher for the key map, the side-by-side pane (which hands the
   // window its window-level chords) and nothing else.
   function runKeyAction(action: KeyAction | 'shortcuts', index?: number): void {
+    // A dialog is up: ⌘W closes it, window verbs never act behind it.
+    const verdict = modalKeyVerdict(action, ui.modalCount > 0);
+    if (verdict === 'dismiss') return dismissTopDialog();
+    if (verdict === 'drop') return;
     switch (action) {
       case 'shortcuts':
         shortcutsOpen = true;
@@ -481,7 +485,7 @@
         ws.closeActiveTab();
         break;
       case 'reopenTab':
-        ws.reopenClosedTab();
+        void ws.reopenClosedTab();
         break;
       case 'nextTab':
         ws.cycleTab(1);
@@ -536,6 +540,8 @@
   $effect(() => {
     return installKeyMap((action, _e, index) => {
       if (isEmbedded) {
+        // A dialog open in the pane owns its chords (see runKeyAction).
+        if (ui.modalCount > 0) return runKeyAction(action, index);
         // The side pane: pane verbs run here, window verbs in the host.
         const target = embeddedKeyTarget(action, paneKey(router.parts.join('/')));
         if (target === 'host') postToHost({ type: 'key', action, ...(index ? { index } : {}) });

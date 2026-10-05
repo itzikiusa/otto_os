@@ -223,6 +223,34 @@ export function appModifier(
   return e.metaKey || (e.ctrlKey && !term && !mac);
 }
 
+/** What a window chord does while a dialog (Modal / confirm) is open: the
+ *  window behind it must not change under the user. ⌘W closes the TOP dialog
+ *  (like a macOS sheet), and anything that would open, switch, split or reload
+ *  behind it is dropped. View-only chords (zoom, find, sidebar) still run. */
+export type ModalKeyVerdict = 'run' | 'drop' | 'dismiss';
+
+const DROP_UNDER_MODAL = new Set<string>([
+  'palette', 'askOtto', 'broadcast', 'hardReload', 'settings', 'updateCLIs',
+  'newSession', 'reopenTab', 'nextTab', 'prevTab', 'nextSession', 'prevSession',
+  'jumpSession', 'splitVertical', 'splitHorizontal', 'navBack', 'navForward',
+  'toggleSidePane',
+  // native menu ids (lib/menu.ts)
+  'new-session', 'new-workspace', 'session-restart', 'session-kill', 'settings',
+]);
+
+export function modalKeyVerdict(action: string, modalOpen: boolean): ModalKeyVerdict {
+  if (!modalOpen) return 'run';
+  if (action === 'closeTab' || action === 'close-tab') return 'dismiss';
+  return DROP_UNDER_MODAL.has(action) ? 'drop' : 'run';
+}
+
+/** Close the top dialog the way Esc does — Modal.svelte only lets the TOP
+ *  sheet react, and honours `dismissable={false}` (a busy form stays). */
+export function dismissTopDialog(): void {
+  const target = (document.activeElement as HTMLElement | null) ?? document.body;
+  target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+}
+
 /** `index` is the 1-based session number for the `jumpSession` action. */
 export type KeyDispatcher = (action: KeyAction, e: KeyboardEvent, index?: number) => void;
 

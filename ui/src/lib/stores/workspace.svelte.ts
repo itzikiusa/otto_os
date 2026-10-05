@@ -1307,27 +1307,39 @@ class WorkspaceStore {
    *  null for cancel. Applies (and records) the remembered preference: a
    *  single-tab close under "Always archive" or "Always delete" is silent —
    *  the user opted out of the question in Settings → Appearance, and asking
-   *  anyway made the setting a lie. One guard remains: a close that ends
-   *  **more than one** session (Close others / to the right / all) always
-   *  confirms once, naming the count, whatever the preference. */
+   *  anyway made the setting a lie. Two guards remain: a close that ends
+   *  **more than one** session (Close others / to the right / all), or one
+   *  that stops a **working** agent mid-turn, always confirms once, whatever
+   *  the preference. */
   private async resolveCloseAction(ids: Id[]): Promise<'close' | 'archive' | 'delete' | null> {
     const ending = ids.filter((id) => this.isEndable(id));
     if (ending.length === 0) return 'close';
     const n = ending.length;
     const many = n > 1;
+    const busy = ending.filter((id) => this.statusMap[id] === 'working').length;
     const pref = ui.closeTabPref;
-    if ((pref === 'archive' || pref === 'delete') && !many) return pref;
+    if ((pref === 'archive' || pref === 'delete') && !many && busy === 0) return pref;
     const name = this.sessions.find((s) => s.id === ending[0])?.title?.trim() || 'this session';
+    const busyNote =
+      busy === 0
+        ? ''
+        : many
+          ? `\n\n${plural(busy, 'session')} ${busy === 1 ? 'is' : 'are'} working right now and will stop mid-turn.`
+          : `\n\n“${name}” is working right now and will stop mid-turn.`;
     if (pref === 'archive' || pref === 'delete') {
       const del = pref === 'delete';
-      const what = del
-        ? `Closing these tabs deletes ${n} sessions: they stop and their history is removed for good. This can’t be undone.`
-        : `Closing these tabs archives ${n} sessions: they stop and keep their history (resumable from the Archived list).`;
+      const what = !many
+        ? del
+          ? `Closing this tab deletes “${name}”: it stops and its history is removed for good. This can’t be undone.`
+          : `Closing this tab archives “${name}”: it stops and keeps its history (resumable from the Archived list).`
+        : del
+          ? `Closing these tabs deletes ${n} sessions: they stop and their history is removed for good. This can’t be undone.`
+          : `Closing these tabs archives ${n} sessions: they stop and keep their history (resumable from the Archived list).`;
       const ok = await confirmer.ask(
-        `${what}\n\nYour remembered choice is “Always ${pref}” — change it in Settings → Appearance.`,
+        `${what}${busyNote}\n\nYour remembered choice is “Always ${pref}” — change it in Settings → Appearance.`,
         {
-          title: `${del ? 'Delete' : 'Archive'} ${n} sessions?`,
-          confirmLabel: `${del ? 'Delete' : 'Archive'} ${n} sessions`,
+          title: many ? `${del ? 'Delete' : 'Archive'} ${n} sessions?` : `${del ? 'Delete' : 'Archive'} working session?`,
+          confirmLabel: many ? `${del ? 'Delete' : 'Archive'} ${n} sessions` : `${del ? 'Delete' : 'Archive'} session`,
           danger: del,
         },
       );
@@ -1336,7 +1348,7 @@ class WorkspaceStore {
     const message = many
       ? `Closing these tabs ends ${n} sessions. Archive stops them and keeps their history (resumable from the Archived list); Delete stops them and removes their history for good.`
       : `Closing this tab ends “${name}”. Archive stops it and keeps its history (resumable from the Archived list); Delete stops it and removes its history for good.`;
-    const picked = await confirmer.choose(message, {
+    const picked = await confirmer.choose(message + busyNote, {
       title: many ? `Close ${n} sessions?` : 'Close session?',
       options: [
         { label: many ? `Archive ${n} sessions` : 'Archive session', value: 'archive', kind: 'primary' },
@@ -1359,9 +1371,11 @@ class WorkspaceStore {
     return `${base} — asks to archive or delete the session`;
   }
 
-  /** Reopen the most recently closed tab (⌘⇧T). Skips ids whose session no
-   *  longer exists. */
-  reopenClosedTab(): void {
+  /** Reopen the most recently closed tab (⌘⇧T). Closing a session's tab
+   *  archives it, so an id missing from the live list is unarchived and
+   *  reopened; one that is gone for good (deleted — {@link killSession} also
+   *  drops it from the list) is skipped. */
+  async reopenClosedTab(): Promise<void> {
     while (this.recentlyClosed.length > 0) {
       const id = this.recentlyClosed[this.recentlyClosed.length - 1];
       this.recentlyClosed = this.recentlyClosed.slice(0, -1);
@@ -1369,7 +1383,19 @@ class WorkspaceStore {
         this.navigateToSession(id);
         return;
       }
+      try {
+        await this.unarchiveAndOpen(id);
+        return;
+      } catch {
+        // deleted (or not ours any more) — try the next one
+      }
     }
+  }
+
+  /** Undo an archive: bring the session back to the live list and open it. */
+  async unarchiveAndOpen(id: Id): Promise<void> {
+    await this.unarchiveSession(id);
+    this.navigateToSession(id);
   }
 
   /** Move tab `id` to `targetIndex` in `openTabs` and persist the order. */
@@ -1499,10 +1525,12 @@ class WorkspaceStore {
    *  setting feel broken). Bulk deletes keep their own one-time confirm.
    *  Failures surface as a toast. */
   async requestDeleteSession(id: Id): Promise<void> {
-    if (ui.closeTabPref !== 'delete') {
+    // "Always delete" skips this — but never for an agent working mid-turn.
+    const working = this.statusMap[id] === 'working';
+    if (ui.closeTabPref !== 'delete' || working) {
       const name = this.sessions.find((s) => s.id === id)?.title?.trim();
       const ok = await confirmer.ask(
-        `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.`,
+        `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.${working ? ' It is working right now and will stop mid-turn.' : ''}`,
         { title: 'Delete session', confirmLabel: 'Delete' },
       );
       if (!ok) return;
@@ -1517,6 +1545,8 @@ class WorkspaceStore {
   async killSession(id: Id): Promise<void> {
     await api.del(`/sessions/${id}`);
     this.closeTab(id);
+    // Gone for good: ⌘⇧T / "Reopen closed tab" must not offer it.
+    this.recentlyClosed = this.recentlyClosed.filter((t) => t !== id);
     this.sessions = this.sessions.filter((s) => s.id !== id);
     this.otherWsSessions = this.otherWsSessions.filter((s) => s.id !== id);
     this.dropArchived(id);
@@ -1592,7 +1622,9 @@ class WorkspaceStore {
   async archiveSession(id: Id): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/archive`);
     this.applyArchiveState(s);
-    toasts.info('Session archived', s.title);
+    toasts.push('info', 'Session archived', s.title, 8000, {
+      action: { label: 'Undo', run: () => this.unarchiveAndOpen(id) },
+    });
   }
 
   async unarchiveSession(id: Id): Promise<void> {
