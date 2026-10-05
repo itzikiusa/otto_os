@@ -48,6 +48,19 @@ pub trait Adapter: Send + Sync {
         self.send(chat, thread, text).await
     }
 
+    /// Report a bridge-side failure to the sender ("couldn't deliver your
+    /// message", "couldn't start a session"). Chat channels post it like any
+    /// message; a webhook — whose `send` is a no-op (no activity feed) —
+    /// overrides it so the caller is told instead of waiting forever.
+    async fn send_notice(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+        text: &str,
+    ) -> anyhow::Result<String> {
+        self.send(chat, thread, text).await
+    }
+
     /// Edit a previously sent message in-place (used for the rolling activity feed).
     async fn edit(&self, chat: &str, message_id: &str, text: &str) -> anyhow::Result<()>;
 

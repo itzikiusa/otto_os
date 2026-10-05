@@ -559,6 +559,18 @@ impl SlackAdapter {
 // Socket Mode listener
 // ---------------------------------------------------------------------------
 
+/// Sleep `ms`, waking early (in 250 ms slices) once `cancel` is set: a
+/// disabled / shut-down listener in a (≤ 60 s) backoff must not linger and
+/// make one more `apps.connections.open` call.
+async fn sleep_unless_cancelled(ms: u64, cancel: &AtomicBool) {
+    let mut left = ms;
+    while left > 0 && !cancel.load(Ordering::Relaxed) {
+        let step = left.min(250);
+        tokio::time::sleep(Duration::from_millis(step)).await;
+        left -= step;
+    }
+}
+
 /// Open and maintain a Slack Socket Mode connection until `cancel` is set.
 /// Each inbound `message` event is forwarded to `bridge`. Every connect /
 /// drop / failure is reported to `health` (Settings → Channels shows it).
@@ -606,7 +618,7 @@ pub async fn run(
                     backoff_ms = BACKOFF_MAX_MS;
                 }
                 health.failed(&detail, permanent);
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                sleep_unless_cancelled(backoff_ms, &cancel).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
             }
@@ -627,7 +639,7 @@ pub async fn run(
                 let why = redact_url(&e, &wss_url);
                 error!("slack: websocket connect failed: {why}");
                 health.failed(&format!("Socket Mode connect failed: {why}"), false);
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                sleep_unless_cancelled(backoff_ms, &cancel).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
             }
@@ -643,7 +655,7 @@ pub async fn run(
                     ),
                     false,
                 );
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                sleep_unless_cancelled(backoff_ms, &cancel).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
             }
@@ -825,7 +837,7 @@ pub async fn run(
             health.reconnecting(&drop_reason);
         }
         // Pause before reconnecting (exponential backoff, reset on successful hello).
-        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        sleep_unless_cancelled(backoff_ms, &cancel).await;
         backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
     }
 }

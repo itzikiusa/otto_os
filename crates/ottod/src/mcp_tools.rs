@@ -4761,6 +4761,66 @@ fn answered_inline(msg: &Value) -> bool {
     )
 }
 
+/// The longest request line the bridge buffers (8 MiB). A huge or newline-
+/// free input used to grow `read_line`'s buffer without limit; an over-long
+/// line is discarded up to its newline and answered with -32700.
+const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+/// What [`read_bounded_line`] read.
+#[derive(Debug, PartialEq)]
+enum BoundedLine {
+    /// A whole line (newline included) is in the buffer.
+    Line,
+    /// The line was over the cap — consumed and dropped; the buffer is empty.
+    TooLong,
+    /// End of input before any byte.
+    Eof,
+}
+
+/// `read_line` with a cap: buffers at most `max` bytes of one line, and
+/// past that keeps CONSUMING (without storing) up to the newline, so memory
+/// stays bounded whatever the peer sends.
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max: usize,
+) -> std::io::Result<BoundedLine> {
+    buf.clear();
+    let (mut any, mut too_long) = (false, false);
+    loop {
+        let avail = reader.fill_buf().await?;
+        if avail.is_empty() {
+            return Ok(match (any, too_long) {
+                (false, _) => BoundedLine::Eof,
+                (true, true) => BoundedLine::TooLong,
+                (true, false) => BoundedLine::Line,
+            });
+        }
+        any = true;
+        let (used, done) = match avail.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (avail.len(), false),
+        };
+        if !too_long {
+            if buf.len() + used > max {
+                too_long = true;
+                buf.clear();
+                buf.shrink_to_fit();
+            } else {
+                buf.extend_from_slice(&avail[..used]);
+            }
+        }
+        reader.consume(used);
+        if done {
+            return Ok(if too_long {
+                BoundedLine::TooLong
+            } else {
+                BoundedLine::Line
+            });
+        }
+    }
+}
+
 /// The JSON-RPC loop: read newline-delimited requests from `reader`, answer
 /// them on `writer`, until EOF.
 ///
@@ -4788,17 +4848,26 @@ where
     });
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CALLS));
     let mut inflight = tokio::task::JoinSet::new();
-    let mut line = String::new();
+    let mut buf = Vec::new();
     let result = loop {
-        line.clear();
-        let n = match reader.read_line(&mut line).await {
-            Ok(n) => n,
+        match read_bounded_line(&mut reader, &mut buf, MAX_LINE_BYTES).await {
+            Ok(BoundedLine::Line) => {}
+            Ok(BoundedLine::Eof) => break Ok(()), // the client closed the pipe.
+            Ok(BoundedLine::TooLong) => {
+                let _ = tx.send(rpc_err(
+                    Value::Null,
+                    -32700,
+                    format!("parse error: request line exceeds {MAX_LINE_BYTES} bytes"),
+                ));
+                continue;
+            }
             Err(e) => break Err(format!("read stdin: {e}")),
-        };
-        if n == 0 {
-            break Ok(()); // EOF: the client closed the pipe.
         }
         while inflight.try_join_next().is_some() {}
+        let Ok(line) = std::str::from_utf8(&buf) else {
+            let _ = tx.send(rpc_err(Value::Null, -32700, "parse error: invalid UTF-8"));
+            continue;
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -4862,6 +4931,34 @@ async fn write_line<W: AsyncWrite + Unpin>(stdout: &mut W, value: &Value) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S5-20: an over-long line is dropped (to its newline) and the next one
+    /// still reads; memory never holds more than the cap.
+    #[tokio::test]
+    async fn bounded_lines_drop_an_oversized_line_and_continue() {
+        let input = format!("{}\n{{\"ok\":1}}\ntail", "x".repeat(100));
+        let mut r = BufReader::with_capacity(16, input.as_bytes());
+        let mut buf = Vec::new();
+        assert_eq!(
+            read_bounded_line(&mut r, &mut buf, 32).await.unwrap(),
+            BoundedLine::TooLong
+        );
+        assert!(buf.capacity() <= 32);
+        assert_eq!(
+            read_bounded_line(&mut r, &mut buf, 32).await.unwrap(),
+            BoundedLine::Line
+        );
+        assert_eq!(buf, b"{\"ok\":1}\n");
+        assert_eq!(
+            read_bounded_line(&mut r, &mut buf, 32).await.unwrap(),
+            BoundedLine::Line
+        );
+        assert_eq!(buf, b"tail");
+        assert_eq!(
+            read_bounded_line(&mut r, &mut buf, 32).await.unwrap(),
+            BoundedLine::Eof
+        );
+    }
 
     /// S5-07: a native irreversible writer's governed envelope maps back to
     /// the native result — executed → the tool's content; pending → the

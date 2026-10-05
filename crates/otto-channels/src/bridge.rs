@@ -116,7 +116,7 @@ impl ChatReply {
     async fn say(&self, text: &str) {
         if let Err(e) = self
             .adapter
-            .send(&self.chat, self.thread.as_deref(), text)
+            .send_notice(&self.chat, self.thread.as_deref(), text)
             .await
         {
             warn!("bridge: could not post the failure notice: {e}");
@@ -893,7 +893,7 @@ impl Bridge {
                         warn!("bridge: failed to create session: {e}");
                         drop(_conv);
                         let _ = adapter
-                            .send(&msg.chat, msg.thread.as_deref(), CREATE_FAILED_REPLY)
+                            .send_notice(&msg.chat, msg.thread.as_deref(), CREATE_FAILED_REPLY)
                             .await;
                         return;
                     }

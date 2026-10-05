@@ -94,7 +94,57 @@ struct TgMessage {
     from: Option<TgUser>,
     chat: TgChat,
     text: Option<String>,
+    /// A photo / document / video's caption — the question sent WITH a file.
+    #[serde(default)]
+    caption: Option<String>,
     message_thread_id: Option<i64>,
+    // Attachment kinds (presence only): the bridge cannot fetch them, but a
+    // message carrying one must not vanish without a reply.
+    #[serde(default)]
+    photo: Option<serde_json::Value>,
+    #[serde(default)]
+    document: Option<serde_json::Value>,
+    #[serde(default)]
+    video: Option<serde_json::Value>,
+    #[serde(default)]
+    voice: Option<serde_json::Value>,
+    #[serde(default)]
+    audio: Option<serde_json::Value>,
+}
+
+impl TgMessage {
+    /// True when the message carries a file Otto does not download.
+    fn has_attachment(&self) -> bool {
+        self.photo.is_some()
+            || self.document.is_some()
+            || self.video.is_some()
+            || self.voice.is_some()
+            || self.audio.is_some()
+    }
+}
+
+/// Note appended for the agent when a captioned message carried a file.
+const ATTACHMENT_NOTE: &str =
+    "[The user also attached a file, which Otto cannot receive over Telegram — ask them to paste its content as text if you need it.]";
+
+/// Reply to a file sent with no text: say so instead of dropping it.
+const ATTACHMENT_ONLY_REPLY: &str =
+    "I can only read text over Telegram — files aren't supported. Please send your question (or the file's content) as a text message.";
+
+/// What a message forwards to the bridge: its text, else its caption (plus a
+/// note when a file came with it). `None` for a message with neither (a bare
+/// file — answered with [`ATTACHMENT_ONLY_REPLY`] — or a service message).
+/// Pure — unit-tested.
+fn inbound_text(msg: &TgMessage) -> Option<String> {
+    if let Some(t) = msg.text.as_ref().filter(|t| !t.trim().is_empty()) {
+        return Some(t.clone());
+    }
+    let caption = msg.caption.as_ref().filter(|c| !c.trim().is_empty())?;
+    Some(if msg.has_attachment() {
+        format!("{caption}\n\n{ATTACHMENT_NOTE}")
+    } else {
+        caption.clone()
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +271,10 @@ impl Adapter for TelegramAdapter {
         });
         if let Some(t) = thread {
             body["reply_to_message_id"] = serde_json::json!(t.parse::<i64>().unwrap_or(0));
+            // The user may have deleted the message we answer: still deliver
+            // (else "message to be replied not found" — permanent — loses
+            // the final answer).
+            body["allow_sending_without_reply"] = serde_json::json!(true);
         }
         let tg: TgResponse<TgMessage> = self.post_json("sendMessage", &body).await?;
         if !tg.ok {
@@ -254,6 +308,10 @@ impl Adapter for TelegramAdapter {
         });
         if let Some(t) = thread {
             body["reply_to_message_id"] = serde_json::json!(t.parse::<i64>().unwrap_or(0));
+            // The user may have deleted the message we answer: still deliver
+            // (else "message to be replied not found" — permanent — loses
+            // the final answer).
+            body["allow_sending_without_reply"] = serde_json::json!(true);
         }
         let tg: TgResponse<TgMessage> = self.post_json("sendMessage", &body).await?;
         if !tg.ok {
@@ -326,7 +384,9 @@ impl Adapter for TelegramAdapter {
 
         if let Some(t) = thread {
             if let Ok(mid) = t.parse::<i64>() {
-                form = form.text("reply_to_message_id", mid.to_string());
+                form = form
+                    .text("reply_to_message_id", mid.to_string())
+                    .text("allow_sending_without_reply", "true");
             }
         }
 
@@ -457,7 +517,24 @@ async fn poll_once(
 ) -> Poll {
     let url = format!("{base}/bot{token}/getUpdates?timeout={LONG_POLL_TIMEOUT}&offset={offset}");
 
-    let resp = match http.get(&url).send().await {
+    // The held-open request (up to LONG_POLL_TIMEOUT s) is abandoned as soon
+    // as `cancel` is set: after a config edit the NEW poller waits for this
+    // one's lock, so ignoring the flag answered messages up to 40 s late.
+    // Nothing is lost — the dropped request's updates are re-fetched from
+    // the persisted offset by the next generation.
+    let send = http.get(&url).send();
+    tokio::pin!(send);
+    let sent = loop {
+        tokio::select! {
+            r = &mut send => break r,
+            () = tokio::time::sleep(Duration::from_millis(250)) => {
+                if cancel.load(Ordering::Relaxed) {
+                    return Poll::Cancelled;
+                }
+            }
+        }
+    };
+    let resp = match sent {
         Ok(r) => r,
         Err(e) => {
             if cancel.load(Ordering::Relaxed) {
@@ -556,7 +633,26 @@ pub async fn run(
 
         for update in &updates {
             if let Some(msg) = &update.message {
-                if let Some(text) = &msg.text {
+                if inbound_text(msg).is_none() && msg.has_attachment() {
+                    // A bare file: tell an admitted sender instead of
+                    // dropping it silently (strangers get nothing).
+                    let user = msg
+                        .from
+                        .as_ref()
+                        .map(|u| u.id.to_string())
+                        .unwrap_or_default();
+                    if crate::bridge::integration_admits(&integ, &user) {
+                        let adapter = Arc::clone(&adapter);
+                        let chat = msg.chat.id.to_string();
+                        let reply_to = msg.message_id.to_string();
+                        tokio::spawn(async move {
+                            let _ = adapter
+                                .send(&chat, Some(&reply_to), ATTACHMENT_ONLY_REPLY)
+                                .await;
+                        });
+                    }
+                }
+                if let Some(text) = &inbound_text(msg) {
                     let user = msg
                         .from
                         .as_ref()
@@ -769,6 +865,83 @@ mod tests {
             Poll::Updates(u) => assert_eq!(u[0].update_id, 41),
             _ => panic!("expected updates"),
         }
+    }
+
+    fn tg(v: serde_json::Value) -> TgMessage {
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// S5-17: a captioned file forwards its caption (noting the file); a bare
+    /// file forwards nothing (it is answered instead); text wins.
+    #[test]
+    fn captions_are_read_and_bare_files_are_flagged() {
+        let m = tg(serde_json::json!({"message_id": 1, "chat": {"id": 9},
+            "caption": "why does this fail?", "document": {"file_id": "f"}}));
+        let t = inbound_text(&m).unwrap();
+        assert!(t.starts_with("why does this fail?"), "{t}");
+        assert!(t.contains("cannot receive"), "{t}");
+        let bare = tg(serde_json::json!({"message_id": 2, "chat": {"id": 9},
+            "photo": [{"file_id": "p"}]}));
+        assert!(inbound_text(&bare).is_none());
+        assert!(bare.has_attachment());
+        let plain = tg(serde_json::json!({"message_id": 3, "chat": {"id": 9}, "text": "hi"}));
+        assert_eq!(inbound_text(&plain).as_deref(), Some("hi"));
+    }
+
+    /// S5-16: a reply survives the user deleting the message it answers.
+    #[tokio::test]
+    async fn replies_are_sent_even_without_the_replied_message() {
+        use axum::Json;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let s2 = Arc::clone(&seen);
+        let router = axum::Router::new().route(
+            "/botTOKEN/sendMessage",
+            axum::routing::post(move |Json(body): Json<serde_json::Value>| {
+                let s2 = Arc::clone(&s2);
+                async move {
+                    s2.lock().unwrap().push(body);
+                    Json(serde_json::json!({"ok": true, "result": {"message_id": 7, "chat": {"id": 1}}}))
+                }
+            }),
+        );
+        let base = fixture(router).await;
+        let a = TelegramAdapter::with_base("TOKEN", base);
+        a.send("1", Some("55"), "x").await.unwrap();
+        a.send_formatted("1", Some("55"), "x").await.unwrap();
+        for body in seen.lock().unwrap().iter() {
+            assert_eq!(body["reply_to_message_id"], 55);
+            assert_eq!(body["allow_sending_without_reply"], true, "{body}");
+        }
+    }
+
+    /// S5-15: a cancel set while getUpdates is HELD OPEN ends the poll at
+    /// once, not when Telegram finally answers.
+    #[tokio::test]
+    async fn a_held_open_poll_ends_on_cancel() {
+        let router = axum::Router::new().route(
+            "/botTOKEN/getUpdates",
+            axum::routing::get(|| async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                "{}"
+            }),
+        );
+        let base = fixture(router).await;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            c.store(true, Ordering::SeqCst);
+        });
+        let health = crate::health::Health::begin("tg-test-held", Channel::Telegram);
+        let http = build_long_poll_client();
+        let started = std::time::Instant::now();
+        let out = poll_once(&http, &base, "TOKEN", 0, &cancel, &health).await;
+        assert!(matches!(out, Poll::Cancelled));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

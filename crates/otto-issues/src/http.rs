@@ -227,6 +227,11 @@ async fn update_account<S: IssuesCtx>(
     let label = req.label.as_deref().unwrap_or(&account.label);
     let email = req.email.as_deref().unwrap_or(&account.email);
     let base_url = req.base_url.as_deref().unwrap_or(&account.base_url);
+    // Repointing the account at another HOST must come with a fresh token:
+    // the stored one would otherwise be sent (as `email:token` Basic auth) to
+    // whatever host the caller names — a PAT or a prompt-injected agent could
+    // exfiltrate the credential with one PATCH.
+    require_token_for_host_change(&account.base_url, base_url, req.token.as_deref())?;
 
     // Token rotation: non-empty → store new ref, delete old; empty/absent → keep.
     let token_ref = if let Some(tok) = req.token.as_deref().filter(|t| !t.is_empty()) {
@@ -246,6 +251,41 @@ async fn update_account<S: IssuesCtx>(
         .update_account(&id, label, email, &token_ref, base_url, token_expires_at)
         .await?;
     Ok(Json(updated))
+}
+
+/// The scheme + host + port a Jira / Confluence base URL sends credentials to
+/// (host lower-cased). `None` when it does not parse.
+fn credential_origin(base_url: &str) -> Option<(String, String, Option<u16>)> {
+    let u = reqwest::Url::parse(base_url.trim()).ok()?;
+    Some((
+        u.scheme().to_string(),
+        u.host_str()?.to_ascii_lowercase(),
+        u.port_or_known_default(),
+    ))
+}
+
+/// Refuse a base-URL change that moves the stored token to a different
+/// origin unless the update carries a new, non-empty token. A path-only
+/// change on the same host keeps the token. Pure — unit-tested.
+fn require_token_for_host_change(
+    current: &str,
+    next: &str,
+    token: Option<&str>,
+) -> Result<(), Error> {
+    let fresh = token.is_some_and(|t| !t.trim().is_empty());
+    let moved = match (credential_origin(current), credential_origin(next)) {
+        (Some(a), Some(b)) => a != b,
+        // Unparseable either side: only an identical string is "the same".
+        _ => current.trim() != next.trim(),
+    };
+    if moved && !fresh {
+        return Err(Error::Invalid(
+            "changing the account's host requires a new token — the stored token is only \
+             ever sent to the host it was saved for"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn delete_account<S: IssuesCtx>(
@@ -899,5 +939,23 @@ mod tests {
     fn root_can_access_any_account() {
         let account = account_owned_by("alice");
         assert!(authorize_account(&account, &user("root", true)).is_ok());
+    }
+
+    /// S17-06: a host change without a fresh token is refused; the same
+    /// host (any path / case), or a new token, is fine.
+    #[test]
+    fn a_host_change_needs_a_fresh_token() {
+        let cur = "https://acme.atlassian.net";
+        assert!(require_token_for_host_change(cur, "https://evil.example", None).is_err());
+        assert!(require_token_for_host_change(cur, "https://evil.example", Some("  ")).is_err());
+        assert!(require_token_for_host_change(cur, "http://acme.atlassian.net", None).is_err());
+        assert!(
+            require_token_for_host_change(cur, "https://acme.atlassian.net:8443", None).is_err()
+        );
+        assert!(require_token_for_host_change(cur, "https://evil.example", Some("new")).is_ok());
+        assert!(
+            require_token_for_host_change(cur, "https://ACME.atlassian.net/wiki/", None).is_ok()
+        );
+        assert!(require_token_for_host_change(cur, cur, None).is_ok());
     }
 }
