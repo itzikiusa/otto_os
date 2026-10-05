@@ -931,7 +931,12 @@ impl LocalGit {
     async fn hooks_path_in_worktree(&self) -> bool {
         let run = |args: &'static [&'static str]| {
             let mut cmd = self.base_cmd();
-            cmd.args(args).kill_on_drop(true);
+            // Read the REPO's value: the hardened `core.hooksPath=/dev/null`
+            // would otherwise answer for it. Neither `config --get` nor
+            // `rev-parse` runs a hook; fsmonitor stays off.
+            cmd.env("GIT_CONFIG_PARAMETERS", HOOKED_GIT_CONFIG)
+                .args(args)
+                .kill_on_drop(true);
             async move {
                 let out = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
                     .await
