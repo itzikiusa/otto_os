@@ -17,6 +17,15 @@ import { apiCtx, seedWorkspace, seedShellSession } from './seed';
 let workspaceId = '';
 let sessionId = '';
 
+// The copy chord and the force-selection modifier are platform conventions, and
+// the browser under test runs on this host. macOS: ⌘C (the browser's own copy
+// command) and ⌥-drag (`macOptionClickForcesSelection`). Linux/Windows — CI's
+// headless Chromium — bare Ctrl+C must stay SIGINT, so the terminal's copy chord
+// is Ctrl+Shift+C, and xterm forces a selection with Shift-drag there.
+const IS_MAC = process.platform === 'darwin';
+const COPY_CHORD = IS_MAC ? 'Meta+c' : 'Control+Shift+C';
+const FORCE_SELECT_KEY = IS_MAC ? 'Alt' : 'Shift';
+
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
@@ -67,7 +76,7 @@ test.describe('desktop terminal copy', () => {
     expect(state.mirror, 'xterm selection mirrored into the helper textarea').toContain('OTTOCOPY');
 
     // STEP 2 — does the selection reach the clipboard?
-    await page.keyboard.press('ControlOrMeta+c');
+    await page.keyboard.press(COPY_CHORD);
     await expect
       .poll(async () => page.evaluate(() => navigator.clipboard.readText()), { timeout: 5_000 })
       .toContain('OTTOCOPY');
@@ -118,7 +127,7 @@ test.describe('desktop terminal copy', () => {
           e.clipboardData?.getData('text/plain') ?? '';
       });
     });
-    await page.keyboard.press('ControlOrMeta+c');
+    await page.keyboard.press(COPY_CHORD);
     await expect
       .poll(
         async () =>
@@ -175,7 +184,7 @@ test.describe('desktop terminal copy', () => {
     console.log('[forced-selection]', JSON.stringify(forced));
     expect(forced.mirror, 'the mirror holds the terminal selection').toContain('OTTOCOPY');
 
-    await page.keyboard.press('ControlOrMeta+c');
+    await page.keyboard.press(COPY_CHORD);
     await expect
       .poll(
         async () =>
@@ -190,7 +199,8 @@ test.describe('desktop terminal copy', () => {
   // hands the drag to the app and cancels it, so NO selection is created. The
   // only escape is `shouldForceSelection`, which on macOS is
   // `altKey && macOptionClickForcesSelection` — and that option defaults to
-  // FALSE, so there was no way to select at all. Every copy path is gated on
+  // FALSE, so there was no way to select at all (off macOS xterm forces it with
+  // Shift instead, so the drag below uses FORCE_SELECT_KEY). Every copy path is gated on
   // `hasSelection()`, so all of them silently did nothing and Edit ▸ Copy came
   // up greyed. `Terminal.svelte` now enables the option; ⌥-drag is the same
   // gesture iTerm2 and Terminal.app use.
@@ -219,12 +229,12 @@ test.describe('desktop terminal copy', () => {
         const ta = document.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
         if (ta) ta.value = '';
       });
-      if (alt) await page.keyboard.down('Alt');
+      if (alt) await page.keyboard.down(FORCE_SELECT_KEY);
       await page.mouse.move(box.x + 8, box.y + 20);
       await page.mouse.down();
       await page.mouse.move(box.x + box.width - 40, box.y + 120, { steps: 25 });
       await page.mouse.up();
-      if (alt) await page.keyboard.up('Alt');
+      if (alt) await page.keyboard.up(FORCE_SELECT_KEY);
       await page.waitForTimeout(400);
       return readMirror();
     };
@@ -281,7 +291,7 @@ test.describe('desktop terminal copy', () => {
           e.clipboardData?.getData('text/plain') ?? '';
       });
     });
-    await page.keyboard.press('ControlOrMeta+c');
+    await page.keyboard.press(COPY_CHORD);
     await page.waitForTimeout(500);
     const copied = await page.evaluate(
       () => (window as unknown as Record<string, string>).__ottoCopied,

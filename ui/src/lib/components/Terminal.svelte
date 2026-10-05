@@ -1935,6 +1935,20 @@
           // send us down the permissioned path the browser is refusing.)
           copySawEvent = false;
           e.stopPropagation();
+          // Ctrl+Shift+C has NO native copy command behind it (on any OS —
+          // the browser's own chord is ⌘C / Ctrl+C), so leaving it to the
+          // browser means no `copy` event ever fires and the fallback below
+          // runs 80 ms later, outside the gesture, on the permissioned API.
+          // Run the permission-free command ourselves, synchronously, while
+          // the keydown is still a user gesture; `onCopy` fills the clipboard
+          // with the terminal selection and sets `copySawEvent`.
+          if (e.ctrlKey && e.shiftKey && !e.metaKey) {
+            try {
+              document.execCommand('copy');
+            } catch {
+              /* refused — the async fallback below still gets its turn */
+            }
+          }
           // If the browser never fires `copy`, nothing was copied and the
           // async API is the only route left. Say so when that is refused
           // too — a silent failure is indistinguishable from a working copy
