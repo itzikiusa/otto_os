@@ -177,6 +177,9 @@ opt-level = 1
 # rebuilds everything (slower once), subsequent ones are faster.
 [profile.release]
 lto = false
+# Keep the symbol table (a few MB): ottod's panic hook force-captures a
+# backtrace, and a fully stripped binary symbolizes every frame to a bare
+# address — useless without the ASLR slide. DWARF debuginfo still goes.
 strip = "debuginfo"
 
 # Vendored vt100 fork: top-anchored scroll regions feed scrollback so codex
