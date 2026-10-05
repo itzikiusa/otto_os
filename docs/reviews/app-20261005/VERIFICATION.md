@@ -380,3 +380,62 @@ Workspace rustfmt and strict all-target clippy passed. The4,696-case nextest run
 ## Main design integration (source checkpoint)
 
 Fetched main515a8f80 containing designPR79/80/81. It adds no Rust/Cargo changes relative to03f2bc3e. Merge produced ten UI conflicts. Resolutions preserve originating-operation/approval/draft/pagination guards alongside main copy, Skeleton/LoadState, focus/ARIA and URL-selection presentation. Five candidates were prepared by the session implementer and independently inspected; root resolved the other five. Actual conflict files were byte-checked against the prepared merge before applying candidates. Added supplied Vault backlinks presentation patch and corrected one imported Overview toast typo. No conflict markers or whitespace errors remain. Integrated type/unit/browser acceptance is **pending** during Claude's exclusive film slot; source merge is not runtime acceptance.
+
+## Iteration5 source follow-up queued
+
+Independent C1 and root source trace confirm History resume has no lifecycle/context fence before follow-up navigation: a response held until after leaving History calls openInChat and returns to the old session. Added a mounted same-document navigation regression to desktop-review4-session-recovery.spec.ts. Test is **unrun**, production unchanged pending actual RED after film release. This is a new confirmed issue in an existing repaired flow, not a claimed passing fix.
+
+## Iteration 5 merged source — 2026-10-05 07:58 local
+
+- Repaired full-gate failures now GREEN: route_inventory::every_registered_route_is_documented (1/1, 0.374s) and MCP tools_list_catalog_stays_within_its_byte_budget (1/1, 0.02s). No catalog budget relaxation. Initial mistakenly library-scoped route selection ran zero tests and is not evidence. Logs: /tmp/otto-review05-{route,catalog}-gate.log.
+- Mounted History departed resume: expected RED (late completion navigated back to Agents), then GREEN after lifetime/context guards.
+- Mounted Product departed publication: first fixture selector matched both titles; corrected exact title selector, then expected RED (B lost active selection after A response), then GREEN after caller lifetime + store selection ownership fence. Existing store publication behavior unchanged. Both cases GREEN together, 2/2 in 5.1s; /tmp/otto-review05-departure-green.log.
+- Full merged UI check/unit and complete focused browser controls still pending. Historical pre-merge results are not substituted.
+
+- Merged unit run: initial 1292/1330 passed,38 failed due missing fixture imports (labels/plural/toastAgentEdit/toastError), not removed assertions. Updated adapters to actual helpers. New PersonalAgents list ABA/stale-loading tests established 3/3 RED; request-generation fix applied. Full rerun GREEN **1333/1333**,15.07s, /tmp/otto-review05-merged-unit2.log.
+- Merged desktop run **14/15 passed**: only mixed session batch stopped before exercising behavior because New session tooltip changed; test updated to exact accessible button name. Includes ordinary History import/retry and Product exact content conflicts, destination recovery, departed publication and reopened-dialog A→B→A. Rerun pending; /tmp/otto-review05-merged-browser.log.
+- Scheduled admission RED: **3 control passes /5 intended failures** (disable, retime, both ABA and same-snapshot concurrent admission),1.99s. Actual open_run boundary with database rows/events, /tmp/otto-review05-schedule-red.log. Repair delegated; no GREEN yet.
+
+- Merged UI clean check GREEN: ui-guards1014files + svelte-check0errors/0warnings + node/e2e/unit type-checks, /tmp/otto-review05-merged-ui-check3.log.
+- Production UI build GREEN6.63s; bundle budget GREEN without increasing budgets, /tmp/otto-review05-merged-ui-build.log and /tmp/otto-review05-merged-bundle-budget.log.
+- Mixed session batch exact accessible-selector rerun GREEN1/1,4.5s. All15 distinct merged desktop cases have now passed, preserving initial failed attempt rather than claiming a single15/15run. /tmp/otto-review05-batch-rerun.log.
+
+- Scheduled atomic admission and prior controls GREEN57/57,9.67s (/tmp/otto-review05-schedule-green.log). Follow-on0174 partial running-task index is verified with actual0084 schema+EXPLAIN in isolated in-memory SQLite; it changes task-history index traversal into a covering lookup on running rows. Rust migration rerun queued.
+- Additional mounted API Automation Cancel/failed Save/successful Save/Discard case GREEN; publication reopened-dialog capture GREEN,2/2total7.2s (/tmp/otto-review05-visual.log). Inspected screenshots in screenshots/publication-{desktop,phone}-{light,dark}.png: labels, content preview, destination text and footer controls readable/reachable, dialog clamped at1440×1000 and390×844 in both schemes. Scope is this dialog; no whole-app visual acceptance inferred.
+
+## Runtime checkpoint64a850e6 — complete pre-measurement checks
+
+- `cargo fmt --all --check` GREEN; workspace/all-target `cargo clippy ... -D warnings` GREEN43.21s.
+- After0174partial-index migration, scheduled admission+prior workflow/task controls GREEN57/57,9.79s. /tmp/otto-review05-schedule-index-green.log.
+- `cargo test --workspace --doc` GREEN;33library targets each report0doc-tests (not33testcases). /tmp/otto-review05-doctests.log.
+- Fresh `cargo build -p ottod` GREEN1m50s. Known large __eh_frame linker warning retained. /tmp/otto-review05-perf-build.log.
+- UI check again GREEN0errors/0warnings including newly authored child-allocation measurement spec. /tmp/otto-review05-preperf-check.log.
+- Performance run source/hash provenance root: /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-review05-perf.aukj8tbd. Runtime diff to64a850e6 empty; remaining dirty files are evidence and test-only workload. Measurements pending.
+
+## Performance measurement progress (runtime64a850e6)
+
+- Actual mounted child history measurement passed1/1 (13.1s case/18.2s run):100 inspections and1200-turn bidirectional paging, zero retained child bodies at GC checkpoints. Inspection p50 74.27ms /p95 82.78ms; no recorded long tasks. Heap20.71MiB warm →21.06MiB after100 →23.36MiB after paging; all Chromium processes RSS1204.89→1265.28→1297.11MiB. The RSS increase is unassigned; this does **not** establish absence of a leak. Raw child-allocation.json in the provenance root. A second100-cycle recovery extension is authored but unrun.
+- Read-only actual-app sample completed25 samples/120s: otto-desktop CPU mean3.27% /max4.1%,RSS100.80→100.81MiB; the15 matching ottod processes (main+bridges, not15 agents) total CPU mean1.64% /max2.8%,RSS258.34→256.77MiB. Excludes unattributed native WebKit/GPU processes and is the installed app, not the candidate revision. Raw real-app-process-samples.jsonl.
+- First isolated scale attempt stopped at167.2s,N3focus: host load12.7 exceeded unchanged12 cap; available31.68GiB,swap growth0. Teardown left0 test processes. N5 was not reached; partial results are not acceptance. Teams and Spotlight were high CPU in a follow-up observation; causality is not established. Aborted raw output retained in scale/.
+- Load settled7.67 and a same-limit retry started08:26 in scale-retry/. Sustained run still pending. No production source edits during measurements.
+
+- Same-limit scale retry **completed exit0 in375.4s,66samples,0teardown leftovers**. Baseline0→N1→N3→N5→recovery completed, headedChromium/defaultWebGL. Mean steady CPU atN5: daemon2.3–2.6%,renderer12.7–14.8%,ClickHouse1.2–1.3%,GPU15.1–21.0% dependingview. Separate groups must not be mistaken for total-app CPU. Post-GC heap17.2MiB baseline→32.0MiB N5; daemonRSS162.7→272.4MiB;renderer530.1→712.4MiB. Recovery returns CPU nearidle, but RSS remains elevated; sustained memory acceptance remains pending. Raw and analyzer in scale-retry/,scale-retry-analysis.txt. Synthetic agents, not real provider workload.
+-15minute sustained3-agent workload started08:32local under identical source/UI/safety limits, output sustained/. No passing result yet.
+
+- Sustained run **incomplete**,exit1:safety abort at413.9s on hostload12.03>12;available32.16GiB,swap-8MiB. Teardown0leftovers418.6s. Full15minute memory acceptance not met; partial raw retained. Runtimefreeze released08:40 for final bounded fixes/acceptance.
+
+## Final bounded browser acceptance and two follow-up repairs
+
+- New History deferred page-readiness case established mounted RED: accepted Settings hash was replaced by Agents before its page could mount. Production guard now watches pendingTarget and synchronously compares originating hash; same mounted case GREEN plus13/13unit controls (2new boundary cases were intendedRED). Initial unit command accidentally requested absent tsx; corrected to repository node --test command before recordingRED.
+- MCP Audit title-only identity/error information reproduced as absent keyboard/touch disclosure. Added native details/summary with wrapping full identifiers, decision reason and error. Same mounted case GREEN with keyboard activation and phone theme captures. Both repairs GREEN2/2,4.5s, /tmp/otto-review06-boundary-green.log.
+- Expanded acceptance **18/18GREEN,1.4min**:8session/history cases (including200mountedchildinspections+1200turnpaging),WorkbenchfailedolderRetry/concurrentinsert/back/restore,3Canvasassistformats failed/empty/acceptedprompt,3PersonalAgentsmountedABA,scheduleddeep-link/failedSave/newerinput/Keep/finalpersist,sharedDiff50k/10kpages/fullsource downloads,VaultbacklinksfailureRetry. /tmp/otto-review06-acceptance.log. Numeric observations in PERFORMANCE.md/measurements; no memory plateau claim.
+- Recovery follow-up **7/7GREEN,18.9s**:2environment Save controls (newer values plus double secret rename; clean A→B→A),Canvas3MBsave+versionrestore,VaultfailedopenRetry/stalefailure,Vaultfailedsave retainsnewtyping,Canvasfailedpendingdraft acrossscenes andExcalidrawfailedhandedit recovery. /tmp/otto-review06-recovery.log. No real network request or production secret used.
+
+## Closing integration checkpoint — 2026-10-05 09:00 local
+
+- Product explicit deep link initially opened the newest story instead of its target (actual mounted assertion failure). The route ran before workspace initialization, whose reset then cleared selection without rerunning the route. Commit `552b6f84` orders workspace initialization before selection, subscribes routed selection to the workspace, and suppresses premature URL write-back. Same uninstrumented initial-link / Keep editing / Discard regression passed **3/3 repeats**, 6.6 seconds; `/tmp/otto-review06-product-green.log`. Temporary diagnostic reads changed reactive dependencies and were removed before the passing run.
+- Combined RoomRecap revision-failure / Retry / held old-page / new archive identity case passed **1/1 in WebKit**, `/tmp/otto-review06-recap.log`. MCP Audit disclosure passed with full server/tool/error text, keyboard operation, phone bounds and inspected light/dark captures; `/tmp/otto-review06-audit-capture.log`.
+- Integrated main `9ab214dd` (PR82) in merge `0c4862ab`, with no conflicts. Its version/tour changes postdate the `64a850e6` runtime measurements; those measurements are not represented as an exact final-head benchmark.
+- Final integrated UI check passed **0 errors / 0 warnings** (1,014 guarded files plus app/node/e2e/unit type checks); **1,335/1,335 unit tests** passed in 14.35 seconds; production build passed in 6.50 seconds. Existing browser-externalization warnings remain. Logs: `/tmp/otto-review06-integrated-{ui-check,units,build}.log`.
+- Bundle budget passed without increasing thresholds: `/tmp/otto-review06-integrated-bundle-budget.log`. The initial command mistakenly named a nonexistent npm `budget` script; the repository's actual `node scripts/bundle-budget.mjs` command was then executed successfully. No missing-script attempt is counted as verification.
+- Full desktop suite was not rerun by this continuation. Focused current-source journey results above and Claude's baseline-diffed design suite remain distinct. Native physical-device and complete sustained-memory acceptance remain open.

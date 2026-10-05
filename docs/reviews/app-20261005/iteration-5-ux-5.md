@@ -1,0 +1,35 @@
+# Iteration 5 — UX partition 5
+
+**Bounded verdict: no new confirmed UX defect. Provisional score: 9.6/10.** Runtime source checkpoint: `64a850e6`. This review covers existing repairs and their merged task-completion, recovery and trust behavior. It does not certify the complete settings/plugins/usage/insights/home/share/auth/cloud/rooms/assistant/personal-agents/proof/shared partition.
+
+Read PLAN.md, VERIFICATION.md and iteration-4-ux-5.md; inspected the repaired Insights and token controls, platform ownership regression inventory, and Proof request ownership. No tests, builds, browser sessions, source edits, git mutations or delegation were performed. Execution below is inherited from the root's recorded results, not this reviewer's execution. Only this report was written.
+
+## Repair assessment
+
+- **R4-U5-01 closed at source and regression scope.** `ui/src/modules/settings/InsightsSettings.svelte:144` drains queued agent changes; the schedule completion path also calls that drain. Failed agent persistence retains the intended provider/model pair and exposes explicit Retry. Provider changes cancel the previous debounce; the picker uses the failed pair during recovery. The original silent model loss is no longer present in the inspected flow. `ui/unit/platformOwnership4.test.ts:132` covers schedule success/failure drain, followed by failed-model Retry, provider reset and provider rejection before/after debounce. The current merged unit suite is green; the mounted Insights Retry case also has a recorded passing execution after the alert locator correction. These are distinct forms of evidence, not an assertion that every schedule/provider permutation ran in a browser.
+- **R4-U5-02 closed at source and regression scope.** `ui/src/modules/settings/PersonalAccessTokens.svelte:75` guards mint while a reveal exists, and the Create control is disabled under the same condition. Enter reaches the guarded function. Copy failure retains the secret for manual selection; Done explicitly dismisses it. `ui/unit/platformOwnership4.test.ts:191` tests repeated submit and clipboard rejection before Done. No real credential was minted, revoked or copied by this review. Native clipboard interaction remains an acceptance limit.
+- **Personal Agents and Proof retain the intended scope.** Root established three actual Personal Agents list ABA/stale-loading failures and repaired request-generation ownership before the merged **1333/1333** unit pass. This defect is fixed, not an open finding. The store regression cases at `ui/unit/platformOwnership4.test.ts:247` and `:261` cover obsolete success/error/finally publication. Proof list generation guards at `ui/src/lib/stores/proof.svelte.ts:52` and cursor ownership at `:76` preserve the current filter and list; the existing unit matrix also covers close/detail ownership. Three mounted ABA cases are authored but **unrun**: they cannot be counted as browser acceptance.
+- **Recap identity defect closed at mounted scope.** VERIFICATION.md records the corrected WebKit regression failing at the intended new-archive first-event assertion, then passing after keying the panel by archive identity. A held old page cannot replace the new archive. The revision protocol additionally has owner-scoped HTTP and unchanged-poll counter evidence. Do not reopen this defect merely because broader native room/media acceptance is outside this bounded matrix.
+
+## Evidence calibration and remaining checks
+
+The merged UI check reports **0 errors / 0 warnings**, all **1333 units pass**, and production build plus unchanged bundle budgets pass. Root records **15 distinct desktop cases** passing across the original run and focused reruns, plus the additional API Automation journey; these are not 15 independent partition-5 passes. The partition-specific mounted evidence includes Insights Retry and the separately recorded WebKit recap identity case. Root also records current Rust clippy, doc-test commands and daemon build green; those gates do not substitute for user journeys.
+
+The concrete remaining acceptance work is (1) execute the three authored mounted ABA cases so navigation, loading feedback and final rendered selection are verified together; (2) exercise the token reveal's native clipboard rejection/manual-copy/Done path, which currently has controlled component-function evidence. The mounted Insights case covers debounce/Retry, while schedule-then-model success/failure ordering remains supported by controlled production-function regressions rather than a complete rendered permutation matrix. These are bounded evidence gaps, not new confirmed product bugs or an excuse to impose a partition-wide ceiling.
+
+Plugins, Home, Usage, share/auth/cloud, Assistant and other shared components retain only the earlier stated sampling and inherited baseline evidence; this report makes no new whole-surface acceptance claim for them. Visual/a11y/copy ownership remains with Claude. External provider operations, real guest access and multi-device media were not exercised here.
+
+The root's current N=0/1/3/5 scale retry is green at its stated synthetic workload. Recovery RSS remains elevated and sustained measurement is ongoing. Neither steady responsiveness nor these UX repairs establish performance/memory closure.
+
+## Fixed PLAN rubric
+
+| Dimension | Score / 2 | Evidence and bounded deduction |
+|---|---:|---|
+| Task completion/discovery | 2.0 | Within this repair matrix, queued model changes now complete or expose Retry, token creation has an explicit reveal lifecycle, and scoped list/recap selection has green regression evidence. No remaining task-blocking defect is established. |
+| Feedback/state clarity | 2.0 | Failed model persistence stays visible and retryable; current-scope request completion owns loading/error state. Mounted Insights feedback and recap identity evidence complement the current unit matrix. |
+| Recovery/retry | 1.9 | Retry, rollback, debounce and retained one-time secret have passing controlled regressions. Native clipboard failure/manual recovery remains a specifically unexecuted boundary. |
+| Draft/scope/trust preservation | 1.9 | Intended provider/model and token reveal are retained; Personal Agents/Proof ownership has current green unit evidence and recap identity is mounted-green. Three mounted ABA cases remain unrun, leaving rendered navigation ownership incompletely verified. |
+| Executed end-to-end journeys | 1.8 | Current affected mounted Insights/recap journeys plus merged controls are verified; mounted ABA and the token native recovery boundary remain bounded gaps. This meets PLAN's affected-repair/failure-path anchor, not the full-matrix 1.9/2.0 anchor. |
+| **Total** | **9.6 / 10** | Provisional bounded judgment with inherited execution. No new blocker/major finding; 9.8 acceptance is not claimed. |
+
+The earlier iteration-4 score remains 7.5/10 in its original report. The increase reflects repaired defects and newly recorded execution, not silent replacement of that assessment.

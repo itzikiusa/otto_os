@@ -1,4 +1,18 @@
-## Current checkpoint (2026-10-05 04:20 UTC)
+# Current checkpoint — 2026-10-05 09:03 local
+
+Iterations 4 and 5 findings have repairs and recorded follow-up evidence. The twenty-role final iteration-6 review is closing; [SCORES.md](SCORES.md) holds its latest published values and remaining deductions. This effort will deliver one continuation PR. No deployment is authorized or performed.
+
+Main through PR82 (`9ab214dd`) is integrated without losing the concurrent design changes. The four iteration-5 defects (departed History resume, departed/reopened Product publication, Personal Agents list ABA ownership, and stale/duplicate scheduled admission) have targeted failing-then-passing evidence. Final acceptance additionally repaired History navigation awaiting a page chunk, Audit keyboard/touch detail disclosure and Product initial deep-link selection during workspace startup.
+
+Final integrated UI check: 0 errors / 0 warnings; 1,335 unit passes; production build and unchanged bundle budget passed. Focused browser batches and exact failed-then-repaired Rust checks are recorded in [VERIFICATION.md](VERIFICATION.md), including failures rather than relabeling earlier runs.
+
+Synthetic N=0/1/3/5 plus recovery completed. The 15-minute sustained run stopped at 414 seconds under the unchanged host-load safety limit. Native attribution and representative non-session workloads remain incomplete; see [PERFORMANCE.md](PERFORMANCE.md). The 9.8-in-every-partition target is not met merely by completing three iterations.
+
+The entries below are historical discovery/repair checkpoints, not the current open-defect list. Later review dispositions and named execution results supersede their original “reserved” and “pending” states.
+
+---
+
+## Historical checkpoint (2026-10-05 04:20 UTC)
 
 Iteration 4 repair acceptance remains in progress; all twenty baseline reviews and five implementation roles are complete. New broad discovery is frozen until this checkpoint closes. Current provisional scores: correctness **8.72 / minimum 8.3**, performance **8.40 / minimum 8.0**, UX **8.30 / minimum 7.9**. See iteration-4-provisional-scores.md for dimensions, evidence and deductions. Design's same-reviewer static mean is **9.96 / minimum 9.80**; integrated/rendered acceptance remains separate. The target stays 9.8 in every partition/lens.
 

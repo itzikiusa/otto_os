@@ -1,0 +1,83 @@
+{
+  "scope": "One mounted parent; 1200 synthetic child turns; browser processes only. Initial100 inspection timings; an additional100 inspections check recovery after paging. ForcedGC between checkpoints. Measured timings/RSS are observations, not a native-app guarantee.",
+  "childReads": 249,
+  "inspectionMs": {
+    "n": 100,
+    "p50": 100.17083300000013,
+    "p95": 118.6998339999991,
+    "max": 126.81262499999866
+  },
+  "longTaskMs": {
+    "n": 0,
+    "p50": 0,
+    "p95": 0,
+    "max": 0
+  },
+  "samples": [
+    {
+      "phase": "warm",
+      "wallMs": 1791179022911,
+      "heapBytes": 21823064,
+      "bodies": 0,
+      "domNodes": 641,
+      "browserTotalRssKiB": 586992
+    },
+    {
+      "phase": "inspection-20",
+      "wallMs": 1791179025054,
+      "heapBytes": 22046104,
+      "bodies": 0,
+      "domNodes": 641,
+      "browserTotalRssKiB": 605984
+    },
+    {
+      "phase": "inspection-40",
+      "wallMs": 1791179027200,
+      "heapBytes": 22084384,
+      "bodies": 0,
+      "domNodes": 641,
+      "browserTotalRssKiB": 626976
+    },
+    {
+      "phase": "inspection-60",
+      "wallMs": 1791179029336,
+      "heapBytes": 22152492,
+      "bodies": 0,
+      "domNodes": 632,
+      "browserTotalRssKiB": 638800
+    },
+    {
+      "phase": "inspection-80",
+      "wallMs": 1791179031470,
+      "heapBytes": 22163796,
+      "bodies": 0,
+      "domNodes": 632,
+      "browserTotalRssKiB": 643920
+    },
+    {
+      "phase": "inspection-100",
+      "wallMs": 1791179033590,
+      "heapBytes": 22227124,
+      "bodies": 0,
+      "domNodes": 632,
+      "browserTotalRssKiB": 645856
+    },
+    {
+      "phase": "paging-recovered",
+      "wallMs": 1791179037268,
+      "heapBytes": 25628120,
+      "bodies": 0,
+      "domNodes": 632,
+      "browserTotalRssKiB": 696336
+    },
+    {
+      "phase": "repeat-100-recovered",
+      "wallMs": 1791179047685,
+      "heapBytes": 24710592,
+      "bodies": 0,
+      "domNodes": 632,
+      "browserTotalRssKiB": 710928
+    }
+  ],
+  "execution": "desktop-browser project, default headless Chromium; different rendering mode from the earlier headed sample. Compare recovery checkpoints within this run, not absolute RSS against the previous run."
+}
