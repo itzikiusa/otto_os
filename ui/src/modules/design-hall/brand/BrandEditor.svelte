@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../../lib/plural';
+  import { loadErrorText } from '../../../lib/loadError';
   // Brand Kit editor (`#/design/brand/<id>`): one `otto-brand/1` kit.
   //
   //   left  — Colors (live contrast) · Typography · Spacing & radius · Logos ·
@@ -59,9 +61,7 @@
   }
   let { id, kits, onnew }: Props = $props();
 
-  function errText(e: unknown): string {
-    return e instanceof Error ? e.message : String(e);
-  }
+  const errText = loadErrorText;
 
   // ── Load ──────────────────────────────────────────────────────────────────
   let phase = $state<'loading' | 'ready' | 'error' | 'gone' | 'invalid'>('loading');
@@ -292,7 +292,7 @@
     draftImpact = null;
     impactFor = '';
     if (res.links.broken.length) {
-      toasts.warn('Saved with link problems', `${res.links.broken.length} logo reference${res.links.broken.length === 1 ? '' : 's'} point at a missing design.`);
+      toasts.warn('Saved with link problems', `${plural(res.links.broken.length, 'logo reference')} ${res.links.broken.length === 1 ? 'points' : 'point'} at a missing design.`);
     }
     void loadUsage();
   }

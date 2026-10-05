@@ -22,7 +22,7 @@ test('ClickHouse native unknown table: title, server suggestion, code chip', () 
     'clickhouse',
     'upstream: Code: 60. DB::Exception: Table default.userz does not exist. Maybe you meant default.users?. (UNKNOWN_TABLE)',
   );
-  assert.equal(e.title, 'Table `default.userz` doesn\'t exist.');
+  assert.equal(e.title, 'Table `default.userz` doesn’t exist.');
   assert.deepEqual(e.suggestions, ['default.users']);
   assert.equal(e.code, 'Code 60 · UNKNOWN_TABLE');
   assert.equal(e.kind, 'unknown_table');
@@ -33,7 +33,7 @@ test('ClickHouse legacy native text with stack trace still reads cleanly', () =>
     'clickhouse',
     'upstream: Code: 60. DB::Exception: DB::Exception: Table default.userz does not exist. (UNKNOWN_TABLE)\n0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c6f4a3b in /usr/bin/clickhouse',
   );
-  assert.equal(e.title, 'Table `default.userz` doesn\'t exist.');
+  assert.equal(e.title, 'Table `default.userz` doesn’t exist.');
   assert.equal(e.code, 'Code 60 · UNKNOWN_TABLE');
 });
 
@@ -78,7 +78,7 @@ test('ClickHouse memory, timeout, auth and readonly', () => {
     'Code: 516. DB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.. (AUTHENTICATION_FAILED)',
   );
   assert.equal(auth.title, 'Sign-in to ClickHouse failed for `default`.');
-  assert.equal(auth.hint, 'Check the profile\'s user and password.');
+  assert.equal(auth.hint, 'Check the profile’s user and password.');
   const ro = normalizeDbError('clickhouse', 'Code: 164. DB::Exception: Cannot execute query in readonly mode. (READONLY)');
   assert.equal(ro.title, 'This user is read-only on the server.');
 });
@@ -100,7 +100,7 @@ test('ClickHouse network error drops the request URL', () => {
     'clickhouse',
     'upstream: error sending request for url (http://10.0.3.4:8123/?database=prod&query_id=otto-1): client error (Connect): tcp connect error: Connection refused (os error 61)',
   );
-  assert.equal(e.title, 'Can\'t reach ClickHouse at 10.0.3.4:8123 (connection refused).');
+  assert.equal(e.title, 'Can’t reach ClickHouse at 10.0.3.4:8123 (connection refused).');
   assert.equal(e.kind, 'network');
   assert.ok(!e.title.includes('query_id'));
 });
@@ -128,7 +128,7 @@ test('MySQL syntax, auth, network, pool, timeout', () => {
   const auth = normalizeDbError('mysql', "error returned from database: 1045 (28000): Access denied for user 'app'@'10.0.0.5' (using password: YES)");
   assert.equal(auth.title, 'MySQL rejected user `app` from 10.0.0.5.');
   const net = normalizeDbError('mysql', 'error communicating with database: Connection refused (os error 61)');
-  assert.equal(net.title, 'Can\'t reach MySQL (connection refused).');
+  assert.equal(net.title, 'Can’t reach MySQL (connection refused).');
   const pool = normalizeDbError('mysql', 'pool timed out while waiting for an open connection');
   assert.equal(pool.title, 'All connections are busy.');
   const to = normalizeDbError('mysql', 'Query execution was interrupted, maximum statement execution time exceeded\nERRNO: 3024\nSQLSTATE: HY000');
@@ -177,7 +177,7 @@ test('Mongo command, write, unreachable — tagged and legacy', () => {
   assert.equal(dup.title, 'Duplicate key on index `email_1`.');
   assert.equal(dup.cause, '{ email: "a@b.c" } already exists in app.users.');
   const down = normalizeDbError('mongodb', "Can't reach MongoDB at db:27017: I/O error: Connection refused (os error 61)");
-  assert.equal(down.title, 'Can\'t reach MongoDB at db:27017 (connection refused).');
+  assert.equal(down.title, 'Can’t reach MongoDB at db:27017 (connection refused).');
 });
 
 test('mongosh script failure: exit code + last error line', () => {

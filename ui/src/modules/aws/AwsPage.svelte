@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // AWS console module. Routes: `#/aws` (accounts overview) ·
@@ -15,6 +16,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -38,6 +40,7 @@
   import LogsView from './LogsView.svelte';
   import { logsRoute } from './util';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import type { AwsAccount, AwsService, Feature } from '../../lib/api/types';
 
   const SERVICES: readonly AwsService[] = ['s3', 'sqs', 'ec2', 'athena', 'eks', 'rds'];
@@ -103,7 +106,7 @@
   async function signIn(a: AwsAccount): Promise<void> {
     const wsId = ws.currentId;
     if (!wsId) {
-      toasts.error('No workspace', 'Select a workspace to attach the sign-in session to');
+      toasts.error(NO_WORKSPACE, 'The sign-in session is attached to a workspace.');
       return;
     }
     if (!resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'edit')) {
@@ -113,7 +116,7 @@
     try {
       await aws.beginLogin(a.id, wsId);
     } catch (e) {
-      toasts.error('Sign-in failed to start', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start sign-in', e);
     }
   }
 
@@ -135,6 +138,25 @@
   });
 
   const canAdmin = $derived(auth.isRoot);
+
+  // ⌘K: the module's verbs, plus one "Open AWS account …" per account.
+  $effect(() =>
+    registry.register('aws', [
+      { id: 'aws.accounts', title: 'Show AWS accounts', group: 'AWS', keywords: 'amazon cloud overview', run: () => router.go('aws') },
+      { id: 'aws.add', title: 'Add an AWS account…', group: 'AWS', keywords: 'amazon sso profile keys', disabled: !canAdmin || !aws.installed, run: openCreate },
+      ...(account && logsAllowed && !routeLogs
+        ? [{ id: 'aws.logs', title: `Open CloudWatch Logs for ${account.name}`, group: 'AWS', keywords: 'cloudwatch log groups insights', run: () => router.go(logsRoute(account.id)) }]
+        : []),
+      ...aws.accounts.map((a) => ({
+        id: `aws.open.${a.id}`,
+        title: `Open AWS account ${a.name}`,
+        group: 'AWS',
+        detail: a.environment,
+        keywords: 'amazon s3 sqs ec2 athena eks rds',
+        run: () => router.go(`aws/${encodeURIComponent(a.id)}`),
+      })),
+    ]),
+  );
   // No accounts at all → the list pane is hidden and one page-level EmptyState
   // (with the single "Add account" CTA) owns the page.
   // The accounts rail's width — drag / ←→ on the divider, remembered across visits.
@@ -161,18 +183,18 @@
   {#snippet badge()}
     {#if routeAccountId && account}
       <EnvBadge env={account.environment} />
-      {#if routeService}<span class="svc-badge">{SERVICE_LABEL[routeService]}</span>{:else if routeLogs}<span class="svc-badge">CloudWatch Logs</span>{/if}
+      {#if routeService}<Badge label={SERVICE_LABEL[routeService]} />{:else if routeLogs}<Badge label="CloudWatch Logs" />{/if}
     {/if}
   {/snippet}
   {#snippet actions()}
     {#if aws.installed && routeAccountId && account && !routeLogs && logsAllowed}
-      <button class="btn" onclick={() => router.go(logsRoute(account.id))} data-testid="aws-open-logs" aria-label="CloudWatch Logs" title="CloudWatch Logs">
-        <Icon name="text" size={13} />{#if !viewport.isPhone} Logs{/if}
+      <button class="btn small" onclick={() => router.go(logsRoute(account.id))} data-testid="aws-open-logs" aria-label="CloudWatch Logs" title="CloudWatch Logs">
+        <Icon name="text" size={12} />{#if !viewport.isPhone} Logs{/if}
       </button>
     {/if}
     {#if aws.installed && canAdmin && aws.accounts.length > 0}
-      <button class="btn primary" onclick={openCreate} data-testid="aws-add-account" aria-label="Add account" title="Add account">
-        <Icon name="plus" size={13} />{#if !viewport.isPhone} Add account{/if}
+      <button class="btn small primary" onclick={openCreate} data-testid="aws-add-account" aria-label="Add account" title="Add account">
+        <Icon name="plus" size={12} />{#if !viewport.isPhone} Add account{/if}
       </button>
     {/if}
   {/snippet}
@@ -232,20 +254,20 @@
           />
         {:else if routeLogs}
           {#if !logsAllowed}
-            <EmptyState variant="page" icon="lock" title="No access" body="Reading CloudWatch Logs needs the account's CloudWatch (metrics) permission. Ask an administrator for a grant." />
+            <EmptyState variant="page" icon="lock" title="No access" body="Reading CloudWatch Logs needs the account’s CloudWatch (metrics) permission. Ask an administrator for a grant." />
           {:else}
             {#key `${account.id}/logs/${aws.accessRevision}`}
               <LogsView {account} onsignin={() => void signIn(account)} />
             {/key}
           {/if}
         {:else if !routeService}
-          <EmptyState variant="page" icon="lock" title="No AWS services available" body="You don't have View on any AWS service for this account. Ask an administrator for a grant." />
+          <EmptyState variant="page" icon="lock" title="No AWS services available" body="You don’t have View on any AWS service for this account. Ask an administrator for a grant." />
         {:else if !serviceAllowedByRbac}
           <EmptyState
             variant="page"
             icon="lock"
             title="No access"
-            body={`You don't have View on ${routeService.toUpperCase()} for the AWS console. Ask an administrator for a grant.`}
+            body={`You don’t have View on ${routeService.toUpperCase()} for the AWS console. Ask an administrator for a grant.`}
           />
         {:else}
           {#key `${account.id}/${routeService}/${aws.accessRevision}`}
@@ -311,15 +333,6 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
-  }
-  .svc-badge {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
   }
   /* Box + focus ring come from the global .input-group (app.css). */
   .rail-col {

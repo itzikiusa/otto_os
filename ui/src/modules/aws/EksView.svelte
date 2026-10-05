@@ -143,7 +143,7 @@
 <div class="tbl-wrap">
   <RegionErrors errors={regionErrors} />
   {#if loading && !clusters}
-    <div class="pad" role="status"><p class="load-note">Loading EKS clusters…</p><Skeleton rows={5} /></div>
+    <div class="pad"><Skeleton rows={5} label="EKS clusters" /></div>
   {:else if error}
     <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list clusters" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
@@ -222,11 +222,6 @@
 {/if}
 
 <style>
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .pad {
     padding: 12px;
   }
@@ -277,7 +272,7 @@
     cursor: pointer;
   }
   .trow:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .trow:focus-visible {
     background: var(--surface-2);

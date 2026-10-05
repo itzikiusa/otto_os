@@ -20,7 +20,7 @@ export type RejectedChoice = 'pull' | 'force' | null;
 export async function askRejectedPush(branch: string, upstream: string | null): Promise<RejectedChoice> {
   const target = upstream ?? `origin/${branch}`;
   const { value } = await confirmer.choose(
-    `${target} has commits that ${branch} doesn't. Pull them in first, then push again.\n\n` +
+    `${target} has commits that ${branch} doesn’t. Pull them in first, then push again.\n\n` +
       `If you rewrote ${branch} on purpose (amend, rebase, squash), force push with lease ` +
       `replaces ${target} with your local branch — commits only on the remote are dropped ` +
       `from it. The lease refuses if someone pushed since you last fetched.`,

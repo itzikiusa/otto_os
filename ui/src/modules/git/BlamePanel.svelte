@@ -263,7 +263,7 @@
     font-size: var(--fs-xs);
   }
   .bl-table tr:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .tw-spacer td {
     padding: 0;

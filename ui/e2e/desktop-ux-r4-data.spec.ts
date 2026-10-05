@@ -182,12 +182,12 @@ test('Kafka masked live tail keeps masking incremental reads and labels mixed re
   await page.clock.install();
   await page.getByRole('checkbox',{name:'Mask',exact:true}).check();await page.getByRole('checkbox',{name:'Live',exact:true}).check();
   await expect(page.locator('.msg-list tbody tr')).toHaveCount(1);expect(reads[0].mask).toBe(true);
-  await expect(page.locator('.masked-badge')).toBeVisible();
+  await expect(page.locator('.masked-note')).toBeVisible();
   await page.clock.fastForward(60_000);await expect(page.locator('.msg-list tbody tr')).toHaveCount(2);
-  expect(reads[1]).toMatchObject({start_offsets:[{partition:0,offset:1}],mask:true});await expect(page.locator('.masked-badge')).toBeVisible();
+  expect(reads[1]).toMatchObject({start_offsets:[{partition:0,offset:1}],mask:true});await expect(page.locator('.masked-note')).toBeVisible();
   await page.getByRole('button',{name:'Inspect partition 0 offset 1',exact:true}).click();await expect(page.locator('.msg-detail')).toContainText('[MASKED]');
   await page.getByRole('checkbox',{name:'Mask',exact:true}).uncheck();await page.clock.fastForward(60_000);await expect(page.locator('.msg-list tbody tr')).toHaveCount(3);
-  expect(reads[2].mask).toBeUndefined();await expect(page.locator('.masked-badge')).toHaveCount(0);
+  expect(reads[2].mask).toBeUndefined();await expect(page.locator('.masked-note')).toHaveCount(0);
   await page.getByRole('checkbox',{name:'Live',exact:true}).uncheck();
 });
 

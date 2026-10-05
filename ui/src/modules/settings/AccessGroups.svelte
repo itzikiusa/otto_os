@@ -496,6 +496,12 @@
   .layout.single {
     grid-template-columns: minmax(0, 1fr);
   }
+  /* Phone: the group list stacks above the editor (layout.md §4.1). */
+  @media (max-width: 640px) {
+    .layout {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
   .list-pane {
     display: flex;
     flex-direction: column;

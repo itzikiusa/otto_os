@@ -576,9 +576,9 @@
       {/if}
       {#each clusterOpts as c (c.id)}
         <button
-          class="pill"
+          class="pill-toggle"
           class:on={clusters.includes(c.id)}
-          class:empty={c.rows === 0}
+          class:no-data={c.rows === 0}
           onclick={() => toggleCluster(c.id)}
           title={c.rows === 0 ? `${c.name}: nothing collected in this window` : `${c.name}: ${c.rows.toLocaleString()} rows in ${window}`}
           aria-pressed={clusters.includes(c.id)}
@@ -792,7 +792,7 @@
       {#if reqs.enabled_on.length === 0}
         <div class="note card" data-testid="k8s-fleet-requests-off">
           <b>No cluster keeps request path labels yet.</b>
-          <span class="dim">Per-route drill-down needs <em>Keep request path labels</em> in a cluster's Monitor settings (it multiplies request rows per pod by the number of routes — enable it where you need it).</span>
+          <span class="dim">Per-route drill-down needs <em>Keep request path labels</em> in a cluster’s Monitor settings (it multiplies request rows per pod by the number of routes — enable it where you need it).</span>
           <span class="links">
             {#each reqs.disabled_on as c (c.id)}
               <button class="btn small ghost" onclick={() => router.go(`kubernetes/${encodeURIComponent(c.id)}/monitor/settings`)}>{c.name} settings</button>
@@ -867,27 +867,8 @@
     gap: 6px;
     align-items: center;
   }
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding-block: 3px; padding-inline: 8px 10px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    cursor: pointer;
-  }
-  .pill:hover {
-    border-color: var(--accent);
-  }
-  .pill.on {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    border-color: var(--accent);
-  }
-  .pill.empty {
+  /* Cluster filters ride the global .pill-toggle (`.on` when picked). */
+  .no-data {
     opacity: 0.6;
   }
   .dot {
@@ -1015,7 +996,7 @@
     color: var(--text);
   }
   .wl td {
-    padding: 7px 10px;
+    padding: 6px 10px;
     border-bottom: 1px solid var(--border);
     vertical-align: top;
   }
@@ -1072,7 +1053,7 @@
   }
   .vt-row:focus-visible {
     outline: none;
-    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+    box-shadow: inset 0 0 0 2px var(--accent-line-strong);
   }
   .vt-td {
     padding: 0 10px;
@@ -1085,7 +1066,7 @@
     cursor: pointer;
   }
   .wl-row:hover {
-    background: color-mix(in srgb, var(--accent) 4%, transparent);
+    background: var(--accent-faint);
   }
   .num {
     text-align: end;
@@ -1136,7 +1117,7 @@
      overflow ⋯ — the shared segmented padding is a few px too wide at 375. */
   @media (max-width: 640px) {
     .win-seg > :global(button) {
-      padding-inline: 7px;
+      padding-inline: 6px;
     }
   }
 </style>

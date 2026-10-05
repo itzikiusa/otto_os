@@ -1,11 +1,11 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // First-run panel: the daemon can't find the `aws` CLI. Offers "Install now"
   // (Admin on `aws`), shows the installer's progress + a collapsible log tail
   // while `/aws/status` is polled every 1.5 s (the store re-arms the poll on
   // each response), and auto-continues when the binary appears.
   import { aws } from '../../lib/stores/aws.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
   const job = $derived(aws.status?.install ?? null);
@@ -18,7 +18,7 @@
     try {
       await aws.startInstall();
     } catch (e) {
-      toasts.error('Install failed to start', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start the install', e);
     }
   }
 </script>
@@ -35,13 +35,11 @@
     </p>
 
     {#if running}
-      <div class="progress" role="progressbar" aria-label="Installing the AWS CLI" aria-busy="true">
-        <div class="bar"></div>
-      </div>
+      <div class="indeterminate" role="progressbar" aria-label="Installing the AWS CLI" aria-busy="true"></div>
       <p class="status">Installing… this can take a minute or two.</p>
     {:else if failed}
       <p class="status err">
-        Install failed{job?.error ? `: ${job.error}` : ''}.
+        Couldn’t install the AWS CLI{job?.error ? `: ${job.error}` : ''}.
       </p>
     {/if}
 
@@ -110,40 +108,6 @@
   code {
     font-family: var(--font-mono);
     font-size: var(--fs-s);
-  }
-  .progress {
-    position: relative;
-    height: 6px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    overflow: hidden;
-  }
-  /* Indeterminate sweep along the reading direction: a logical offset, so it
-     runs right-to-left in RTL. */
-  .bar {
-    position: absolute;
-    inset-block: 0;
-    inset-inline-start: -40%;
-    inline-size: 40%;
-    background: var(--accent);
-    border-radius: 999px;
-    animation: aws-install-sweep 1.4s ease-in-out infinite;
-  }
-  @keyframes aws-install-sweep {
-    from {
-      inset-inline-start: -40%;
-    }
-    to {
-      inset-inline-start: 100%;
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .bar {
-      animation: none;
-      inset-inline-start: 0;
-      inline-size: 100%;
-      opacity: 0.5;
-    }
   }
   .status {
     margin: 0;

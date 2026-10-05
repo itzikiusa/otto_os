@@ -208,15 +208,15 @@
     {/snippet}
     {#snippet actions()}
       {#if FILM && !showFilm && showArticle && !viewport.isPhone}
-        <button class="btn ghost" onclick={watchTour} data-label="Watch the tour" data-icon="play">
+        <button class="btn small ghost" onclick={watchTour} data-label="Watch the tour" data-icon="play">
           <Icon name="play" size={12} /> Watch the tour
         </button>
       {/if}
       {#if selected?.route && showArticle}
         <button
-          class="btn primary"
+          class="btn small primary"
           disabled={!openAllowed}
-          title={openAllowed ? `Go to ${selected.title}` : `You don't have access to ${selected.title}. Ask an admin for access.`}
+          title={openAllowed ? `Go to ${selected.title}` : `You don’t have access to ${selected.title}. Ask an admin for access.`}
           onclick={() => selected?.route && router.go(selected.route)}
           data-testid="guide-open-module"
         >
@@ -247,8 +247,8 @@
                 bind:this={searchEl}
                 bind:value={query}
                 type="search"
-                placeholder="Search guides and shortcuts"
-                aria-label="Search guides"
+                placeholder="Filter guides and shortcuts…"
+                aria-label="Filter guides"
                 autocomplete="off"
                 spellcheck="false"
                 data-testid="guide-search"
@@ -313,7 +313,7 @@
               {:else}
                 <EmptyState
                   icon="book"
-                  title="There's no guide called “{param}”"
+                  title="There’s no guide called “{param}”"
                   body="It may have been renamed. Pick one from the list, or start at the beginning."
                   actionLabel="Open Getting started"
                   onaction={() => open(DEFAULT_GUIDE_ID)}
@@ -372,7 +372,7 @@
   }
   .rail-search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .phone .rail-search {
     height: 38px;
@@ -407,7 +407,7 @@
     margin-top: 10px;
   }
   .rail-group-label {
-    padding: 6px 8px 3px;
+    padding: 6px 8px 2px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
@@ -426,7 +426,7 @@
     gap: 2px;
     width: 100%;
     min-height: 28px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 0;
     border-radius: var(--radius-s);
     background: transparent;
@@ -534,14 +534,14 @@
   }
   .guide-body :global(h2) {
     font-size: var(--fs-l);
-    margin: 26px 0 8px;
+    margin: 24px 0 8px;
   }
   .guide-body :global(h3) {
     font-size: var(--fs-m);
     margin: 18px 0 6px;
   }
   .guide-body :global(li) {
-    margin: 3px 0;
+    margin: 2px 0;
   }
   .guide-body :global(ul),
   .guide-body :global(ol) {
@@ -594,7 +594,7 @@
   .guide-body :global(kbd) {
     display: inline-block;
     min-width: 18px;
-    padding: 0 5px;
+    padding: 0 4px;
     border: 1px solid var(--border-strong);
     border-bottom-width: 2px;
     border-radius: var(--radius-s);

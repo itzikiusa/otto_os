@@ -309,7 +309,7 @@
     border-radius: var(--radius-m);
   }
   .editor :global(.svelte-flow__controls) {
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     border-radius: var(--radius-m);
     overflow: hidden;
   }
@@ -319,7 +319,7 @@
     color: var(--text);
   }
   .editor :global(.svelte-flow__controls-button:hover) {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .editor :global(.svelte-flow__controls-button svg) {
     fill: var(--text);

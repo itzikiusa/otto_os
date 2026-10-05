@@ -110,7 +110,7 @@
   .sb-item {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .sb-btn {
     border: none;
@@ -122,7 +122,7 @@
     border-radius: var(--radius-s);
   }
   .sb-btn:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   /* A long branch name (feature/…/…) ellipsizes instead of running into the
      docked "Ask Otto" chip centred in this bar; the tooltip has it whole. */

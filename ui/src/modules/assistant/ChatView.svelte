@@ -7,6 +7,7 @@
   // Every action the assistant takes sits between the messages as a card
   // (threadCards → buildTimeline); each reply carries who wrote it.
   import { setContext, tick, untrack } from 'svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import AgentChip from '../../lib/components/AgentChip.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
@@ -160,7 +161,7 @@
                   <span class="avatar" aria-hidden="true"><Icon name="assistant" size={12} /></span>
                   <strong>Otto</strong>
                   <AgentChip />
-                  <span class="badge" data-testid="provider-badge" title={`Written by ${w.label}`}><ProviderIcon provider={w.provider} size={12} />{w.label}</span>
+                  <Badge testid="provider-badge" title={`Written by ${w.label}`}><ProviderIcon provider={w.provider} size={12} />{w.label}</Badge>
                   {#if m.item.ts}<span class="dim">· <time datetime={m.item.ts} title={new Date(m.item.ts).toLocaleString()}>{clock(m.item.ts)}</time></span>{/if}
                 </div>
                 <MemoryChips cards={entry.memory} onreview={onopenmemory} />
@@ -286,19 +287,6 @@
     border: 1px solid var(--border);
     color: var(--text);
   }
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    height: 20px;
-    padding: 0 8px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    font-weight: 500;
-  }
   .atts {
     list-style: none;
     margin: 0;
@@ -311,7 +299,7 @@
   .att {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 22px;
     padding: 0 8px;
     border: 1px solid var(--border);
@@ -378,7 +366,7 @@
     inset-inline-start: 50%;
     transform: translateX(-50%);
     bottom: 84px;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   :global([dir='rtl']) .jump {
     transform: translateX(50%);

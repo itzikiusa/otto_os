@@ -269,7 +269,7 @@
 
 <style>
   .oas {
-    padding: 18px 26px 60px;
+    padding: 18px 24px 60px;
     max-width: min(1240px, 96%);
     width: 100%;
     margin: 0 auto;
@@ -288,8 +288,8 @@
     font-size: var(--fs-xs);
     color: var(--accent-text);
     border: 1px solid var(--accent);
-    border-radius: 5px;
-    padding: 1px 7px;
+    border-radius: var(--radius-s);
+    padding: 1px 6px;
     white-space: nowrap;
   }
   .desc {
@@ -318,7 +318,7 @@
   }
   .op {
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     margin: 6px 0;
     overflow: hidden;
   }
@@ -326,7 +326,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     cursor: pointer;
     list-style: none;
   }
@@ -339,9 +339,9 @@
   .method {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.4px;
+    letter-spacing: .06em;
     border-radius: var(--radius-s);
-    padding: 2px 7px;
+    padding: 2px 6px;
     min-width: 46px;
     text-align: center;
     flex-shrink: 0;
@@ -390,7 +390,7 @@
   }
   th, td {
     border: 1px solid var(--border);
-    padding: 3px 8px;
+    padding: 2px 8px;
     text-align: start;
   }
   th {
@@ -426,7 +426,7 @@
   .ex {
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     padding: 10px 12px;
     font-size: var(--fs-xs);
     overflow-x: auto;

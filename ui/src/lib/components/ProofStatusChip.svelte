@@ -36,11 +36,11 @@
     align-items: center;
     gap: 4px;
     height: 18px;
-    padding: 0 7px;
+    padding: 0 6px;
     border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.01em;
+    letter-spacing: .06em;
     white-space: nowrap;
     text-transform: capitalize;
     border: 1px solid transparent;
@@ -49,7 +49,7 @@
   }
   .proof-status.compact {
     height: 16px;
-    padding: 0 5px;
+    padding: 0 4px;
     font-size: var(--fs-xs);
   }
   .proof-status .risk {

@@ -32,7 +32,7 @@ test('Skeleton is a labelled status region unless a parent owns the announcement
 });
 
 test('every overlay backdrop uses the scrim tokens, defined for each scheme', () => {
-  for (const f of ['src/lib/components/Modal.svelte', 'src/shell/Drawer.svelte', 'src/shell/BottomNav.svelte']) {
+  for (const f of ['src/lib/components/Modal.svelte', 'src/shell/Drawer.svelte']) {
     assert.match(read(f), /background: var\(--scrim\)/, f);
     assert.doesNotMatch(read(f), /rgba\(0, 0, 0, 0\.\d+\)\s*;[^}]*z-index/, f);
   }
@@ -51,11 +51,15 @@ test('Modal: only a press that began on the backdrop closes; dismissable gates e
 });
 
 test('BottomNav "More" sheet is a real dialog', () => {
+  // The sheet is the shared shell Drawer, which owns the dialog semantics
+  // (role=dialog, pushModal, dialogFocus, Esc, scrim) — asserted for Drawer above.
   const src = read('src/shell/BottomNav.svelte');
-  assert.match(src, /dialogFocus/);
-  assert.match(src, /ui\.pushModal\(\)/);
+  assert.match(src, /<Drawer\b[^>]*title="More"/);
   assert.match(src, /aria-expanded=\{moreOpen\}/);
   assert.doesNotMatch(src, /svelte-ignore/);
+  const drawer = read('src/shell/Drawer.svelte');
+  assert.match(drawer, /dialogFocus/);
+  assert.match(drawer, /ui\.pushModal\(\)/);
 });
 
 test('motion: one global spin/pulse, and a reduced-motion alternative for .spinner', () => {
@@ -82,4 +86,11 @@ test('status-* tokens are not used for text in shared components', () => {
   for (const f of ['ProofBadge', 'ProofStatusChip', 'DoneContractMeter', 'ResourceAccess', 'DiffView']) {
     assert.doesNotMatch(read(`src/lib/components/${f}.svelte`), /(^|\s)color:\s*var\(--status-/m, f);
   }
+});
+
+test('Modal names its dialog by the visible title and keeps aria-label for locators', () => {
+  const src = read('src/lib/components/Modal.svelte');
+  assert.match(src, /const titleId = \$props\.id\(\);/);
+  assert.match(src, /role="dialog"[\s\S]*?aria-labelledby=\{titleId\}[\s\S]*?aria-label=\{title\}/);
+  assert.match(src, /<h2 id=\{titleId\}>\{title\}<\/h2>/);
 });

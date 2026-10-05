@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { focusOnMount } from '../../lib/focusOnMount';
   // SQL / Redis / Mongo editor. Wraps the shared CodeEditor with a server-backed
   // completion source (debounced /db/completion). Cmd/Ctrl+Enter runs; toolbar
   // has Run / Save / Explain-with-agent. Results render in the ResultsGrid below.
@@ -324,8 +325,8 @@
     const n = unappliedEdits(closing);
     if (n === 0) return true;
     return confirmer.ask(
-      `${n} un-applied change${n === 1 ? '' : 's'} in the results ${n === 1 ? 'is' : 'are'} not saved to the database and will be lost.`,
-      { title: `Discard ${n} change${n === 1 ? '' : 's'}?`, confirmLabel: 'Discard', danger: true },
+      `${plural(n, 'un-applied change')} in the results ${n === 1 ? 'is' : 'are'} not saved to the database and will be lost.`,
+      { title: `Discard ${plural(n, 'change')}?`, confirmLabel: 'Discard', danger: true },
     );
   }
   async function closeTabAt(i: number): Promise<void> {
@@ -1024,7 +1025,7 @@
 </script>
 
 <div class="query-editor" bind:this={rootEl}>
-  <div class="qe-tabs" role="tablist" aria-label="Query tabs">
+  <div class="qe-tabs scroll-thin" role="tablist" aria-label="Query tabs">
     {#each database.tabs as t, i (t.id)}
       <div
         class="qe-tab"
@@ -1067,11 +1068,10 @@
           </span>
         {/if}
         {#if renaming === i}
-          <!-- svelte-ignore a11y_autofocus -->
           <input
             class="qe-tab-rename mono"
             bind:value={renameText}
-            autofocus
+            use:focusOnMount
             onclick={(e) => e.stopPropagation()}
             onblur={() => commitRename(t)}
             onkeydown={(e) => {
@@ -1108,8 +1108,8 @@
   <div class="qe-toolbar">
     <div class="qe-actions">
     {#if tab.running}
-      <button class="btn small stop" onclick={() => database.abortQuery(undefined, { report: true })} title="Stop the running query">
-        <Icon name="x" size={12} />
+      <button class="btn small danger qe-stop" onclick={() => database.abortQuery(undefined, { report: true })} title="Stop the running query">
+        <Icon name="stop" size={12} />
         Stop
       </button>
     {:else}
@@ -1236,7 +1236,7 @@
     </div>
     <div class="qe-settings">
     {#if database.capabilities?.sql && database.databaseNames.length > 0}
-      <label class="qe-db" title="Active database — queries run scoped to it, so you don't need a db. prefix">
+      <label class="qe-db" title="Active database — queries run scoped to it, so you don’t need a db. prefix">
         <Icon name="db" size={12} />
         <select
           class="input"
@@ -1307,7 +1307,7 @@
         }}
       />
       <Icon name="lock" size={12} />
-      {#if tab.mask}<span class="qe-masked-badge">Masked</span>{:else}<span>Mask</span>{/if}
+      {#if tab.mask}<strong>Masked</strong>{:else}<span>Mask</span>{/if}
     </label>
     <label
       class="qe-mask qe-wrap"
@@ -1403,7 +1403,7 @@
         </span>
       {:else}
         <span class="qe-script-state warn">
-          mongosh is not installed on the daemon's PATH — <code class="mono">brew install mongosh</code>, then retry.
+          mongosh is not installed on the daemon’s PATH — <code class="mono">brew install mongosh</code>, then retry.
         </span>
         <button
           class="qe-script-retry"
@@ -1418,12 +1418,11 @@
 
   {#if saving}
     <div class="save-bar">
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="input grow"
         placeholder={savedLinked ? 'Name (blank = keep current)' : 'Query name'}
         bind:value={saveName}
-        autofocus
+        use:focusOnMount
         onkeydown={(e) => {
           if (e.key === 'Enter') confirmSave();
           else if (e.key === 'Escape') saving = false;
@@ -1474,12 +1473,10 @@
   </div>
 
   <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ↑/↓, Home/End). -->
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="qe-splitter"
     class:resizing
     role="separator"
-    tabindex="0"
     aria-orientation="horizontal"
     aria-label="Resize editor and results"
     title="Drag or use ↑/↓ to resize · double-click or Enter to expand"
@@ -1569,10 +1566,9 @@
   .qe-tabs {
     display: flex;
     align-items: stretch;
-    gap: 3px;
+    gap: 2px;
     margin-bottom: 8px;
     overflow-x: auto;
-    scrollbar-width: thin;
     padding-bottom: 1px;
     border-bottom: 1px solid var(--border);
   }
@@ -1582,7 +1578,7 @@
     gap: 6px;
     height: 26px;
     max-width: 220px;
-    padding-block: 0; padding-inline: 11px 4px;
+    padding-block: 0; padding-inline: 10px 4px;
     border: 1px solid transparent;
     border-bottom: none;
     border-top-left-radius: var(--radius-s);
@@ -1632,7 +1628,7 @@
   .qe-tab-agent {
     display: inline-flex;
     align-items: center;
-    padding: 1px 3px;
+    padding: 1px 2px;
     border-radius: var(--radius-s);
     background: var(--accent-soft);
     color: var(--accent-text);
@@ -1688,7 +1684,7 @@
     flex: 0 0 auto;
   }
   .qe-tab-new:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     border-color: var(--border);
     color: var(--accent-text);
   }
@@ -1750,11 +1746,11 @@
     flex-wrap: wrap;
     gap: 8px;
     margin-bottom: 8px;
-    padding: 5px 10px;
+    padding: 4px 10px;
     font-size: var(--fs-s);
     color: var(--text);
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border: 1px solid var(--accent-line);
+    background: var(--accent-faint);
     border-radius: var(--radius-s);
   }
   .qe-script.missing {
@@ -1788,7 +1784,7 @@
     cursor: pointer;
   }
   .qe-script-retry:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
     color: var(--accent-text);
   }
   .qe-vars-label {
@@ -1799,7 +1795,7 @@
   .qe-var {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     background: var(--surface-2);
     border-radius: var(--radius-s);
     padding: 2px 6px;
@@ -1825,7 +1821,7 @@
   .qe-var-esc {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
@@ -1837,7 +1833,7 @@
   .btn.small.ghost.on {
     color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   /* ⌨ shortcuts popover */
   .qe-kbd {
@@ -1859,10 +1855,10 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .qe-kbd-title {
     font-size: var(--fs-xs);
@@ -1892,14 +1888,9 @@
     padding: 1px 6px;
     white-space: nowrap;
   }
-  .btn.stop {
-    border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
-    color: var(--danger);
+  /* The one control that matters mid-run: the shared danger button, weighted. */
+  .qe-stop {
     font-weight: 600;
-  }
-  .btn.stop:hover {
-    background: color-mix(in srgb, var(--status-exited) 26%, transparent);
   }
   .kbd {
     font-size: var(--fs-xs);
@@ -1922,7 +1913,7 @@
   .qe-timeout {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -1952,7 +1943,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     height: 24px;
-    padding: 0 7px;
+    padding: 0 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     cursor: pointer;
@@ -1967,10 +1958,6 @@
     background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent-text);
-  }
-  .qe-masked-badge {
-    font-weight: 600;
-    letter-spacing: 0.02em;
   }
   .sr-only {
     position: absolute;

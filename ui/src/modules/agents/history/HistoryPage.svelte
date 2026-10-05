@@ -1,5 +1,6 @@
 <script lang="ts">
   import { toastError } from '../../../lib/toastError';
+  import Skeleton from '../../../lib/components/Skeleton.svelte';
   // History (`#/history[/<sessionId>]`) — every past Claude/Codex conversation,
   // grouped by repo/cwd like the Codex/Claude app sidebars, with a read-only
   // conversation on the right (docs/design/conversation-view.md §5.3).
@@ -16,6 +17,8 @@
   import { ws, SCRATCH_WORKSPACE_ID } from '../../../lib/stores/workspace.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import { router } from '../../../lib/router.svelte';
+  import { PHONE_MAX } from '../../../lib/stores/viewport.svelte';
+  import { registry } from '../../../lib/commands.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { api } from '../../../lib/api/client';
@@ -103,7 +106,8 @@
       if (history.selectedKey) clearSelection();
       const want = router.parts[1];
       if (want && visible.some((e) => e.session_id === want)) return;
-      if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 768px)').matches) return;
+      // Phone (one pane at a time, push navigation): no auto-open.
+      if (typeof window !== 'undefined' && window.matchMedia?.(`(max-width: ${PHONE_MAX}px)`).matches) return;
       if (visible.length === 0) return;
       const last = recallSelection('history');
       pick(visible.find((e) => entryKey(e) === last) ?? visible[0]);
@@ -132,6 +136,18 @@
 
   // ── Actions ─────────────────────────────────────────────────────────────────
   let busy = $state(false);
+  let searchEl = $state<HTMLInputElement | null>(null);
+
+  // ⌘K verbs while History is open (resume runs the same path as the button).
+  $effect(() =>
+    registry.register('history', [
+      { id: 'history.search', title: 'Search conversation history', group: 'History', keywords: 'find past conversation transcript prompt', run: () => searchEl?.focus() },
+      { id: 'history.rescan', title: 'Rescan conversation history', group: 'History', keywords: 'refresh import disk transcripts', run: () => void rescan() },
+      { id: 'history.scope-workspace', title: 'Show this workspace’s conversations', group: 'History', keywords: 'scope filter', run: () => (scope = 'workspace') },
+      { id: 'history.scope-scratch', title: 'Show conversations with no workspace', group: 'History', keywords: 'scope scratch filter', run: () => (scope = 'scratch') },
+      ...(sel && canEdit ? [{ id: 'history.resume', title: resumeLabel(sel), detail: entryTitle(sel), group: 'History', keywords: 'continue resume conversation', run: () => void resume(sel) }] : []),
+    ]),
+  );
 
   /** Resume in Otto: import (on_disk) → restart (exited/reconnectable) → open in Chat. */
   async function resume(e: HistoryEntry): Promise<void> {
@@ -149,7 +165,7 @@
       }
       openInChat(sid);
     } catch (err) {
-      toasts.error('Couldn’t resume', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t resume', err);
     } finally {
       busy = false;
     }
@@ -197,7 +213,7 @@
       await ws.archiveSession(e.session_id);
       history.patchSession(e.session_id, { status: 'exited' });
     } catch (err) {
-      toasts.error('Couldn’t archive', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t archive', err);
     } finally {
       busy = false;
     }
@@ -370,7 +386,7 @@
       {@const cur = headSel}
       {#if canEdit && cur.session_id && cur.status !== 'on_disk'}
         <button class="icon-btn" data-overflow="-3" data-icon="archive" data-label="Archive session" onclick={() => void archive(cur)} disabled={busy}
-          aria-label="Archive" title="Archive the session — restore it any time from the sidebar's Archived list">
+          aria-label="Archive" title="Archive the session — restore it any time from the sidebar’s Archived list">
           <Icon name="archive" size={14} />
         </button>
       {/if}
@@ -416,6 +432,7 @@
         <Icon name="search" size={12} />
         <input
           class="search"
+          bind:this={searchEl}
           placeholder="Search titles and first prompts…"
           bind:value={history.q}
           oninput={onSearchInput}
@@ -462,7 +479,7 @@
         </p>
       {/if}
       {#if history.loading && history.entries.length === 0}
-        <p class="empty-line dim">Loading conversations…</p>
+        <Skeleton rows={5} height={40} label="conversations" />
       {:else if shown === 0 && !history.error}
         <!-- The miss is explained (with its fix) by the right pane; this line
              only shows at the narrow list-only layout, where that pane is hidden. -->
@@ -523,7 +540,7 @@
       {/if}
       {#if history.hasMore && !history.loading}
         <button class="btn small more" onclick={() => void history.loadMore()} disabled={history.loadingMore}>
-          {history.loadingMore ? 'Loading…' : 'Load older conversations'}
+          {history.loadingMore ? 'Loading older conversations…' : 'Load older conversations'}
         </button>
       {/if}
     </div>
@@ -565,7 +582,7 @@
           icon="search"
           title="No matches yet"
           body="No matches in this part of history. Load more to keep looking."
-          actionLabel={history.loadingMore ? 'Loading…' : 'Load more'}
+          actionLabel={history.loadingMore ? 'Loading more history…' : 'Load more'}
           onaction={() => void history.loadMore()}
         />
       {:else}
@@ -719,7 +736,7 @@
   }
   .search-wrap:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .search {
     flex: 1;
@@ -788,12 +805,6 @@
     display: block;
     height: 100%;
     background: var(--accent);
-    transition: width var(--dur-enter) ease-out;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .pfill {
-      transition: none;
-    }
   }
   .rows {
     flex: 1;
@@ -805,8 +816,8 @@
     width: 100%;
     display: flex;
     align-items: center;
-    gap: 5px;
-    padding: 6px 6px 3px;
+    gap: 4px;
+    padding: 6px 6px 2px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -847,7 +858,7 @@
     padding-inline-end: 4px;
   }
   .row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .row.on {
     background: var(--accent-soft);
@@ -898,7 +909,7 @@
   .row-meta {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
@@ -975,7 +986,7 @@
   .dmeta {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
@@ -1026,7 +1037,7 @@
     flex-shrink: 0;
   }
   .doutputs-head:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .doutputs-head:focus-visible {
     outline: 2px solid var(--accent-text);
@@ -1034,7 +1045,7 @@
   }
 
   /* ── narrow: list OR detail (with a back button) ───────────────────────── */
-  @media (max-width: 768px) {
+  @media (max-width: 640px) {
     .hlist {
       flex: 1;
     }

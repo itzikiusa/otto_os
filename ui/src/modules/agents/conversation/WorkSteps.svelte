@@ -54,7 +54,7 @@
     <button class="steps-head" onclick={() => (open = !open)} aria-expanded={open} title={tip}>
       <span class="steps-mark" class:running class:wait={running && waiting} class:bad={!running && failed > 0} aria-hidden="true">
         {#if running && waiting}<Icon name="warning" size={12} />
-        {:else if running}<span class="spin"></span>
+        {:else if running}<span class="spinner" style:--spinner-size="10px" aria-hidden="true"></span>
         {:else if failed}<Icon name="warning" size={12} />
         {:else}<Icon name="check" size={12} />{/if}
       </span>
@@ -142,7 +142,7 @@
     color: var(--danger);
     background: var(--danger-soft);
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 1px 6px;
   }
   .steps-meta {
     flex-shrink: 0;
@@ -173,18 +173,6 @@
     padding-inline-start: 6px;
     border-inline-start: 1px solid var(--border);
     min-width: 0;
-  }
-  .spin {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
-    border-top-color: var(--accent);
-  }
-  @media (prefers-reduced-motion: no-preference) {
-    .spin {
-      animation: otto-spin 0.8s linear infinite;
-    }
   }
   
   /* ≤360px: the step count / duration yield to the summary. */

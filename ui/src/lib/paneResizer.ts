@@ -1,13 +1,16 @@
-// The keyboard + ARIA half of a pane resizer — the WAI-ARIA "window splitter".
-// Pointer dragging stays with each page (their drag maths differ); this action
-// makes the same separator reachable and operable without a mouse and exposes
-// its value to assistive tech, matching shell/SplitDivider.svelte:
+// The WAI-ARIA "window splitter" as one action: it makes the separator
+// focusable (role + tabindex), exposes its value to assistive tech, adds the
+// keys, and — given `onDragStart` — wires the pointer drag and double-click
+// reset too, so the markup is a plain labelled <div> with no hand-written
+// tabindex or handlers (Svelte's a11y lint cannot see that a focusable
+// separator is a widget). The drag maths stay with each page:
 //   ←/→ (↑/↓ for a horizontal separator) nudge by `step`, ⇧ by `bigStep`,
 //   Home/End jump to the limits, Enter resets (when `onReset` is given).
 //
 //   <div class="side-resizer" role="separator" aria-label="Resize connections sidebar"
 //        title="Drag or use ←/→ to resize · double-click or Enter to reset"
-//        use:paneResizer={{ value: sideW, min: 200, max: 480, onChange: (w) => (sideW = w), onReset: resetSideW }}></div>
+//        use:paneResizer={{ value: sideW, min: 200, max: 480, onChange: (w) => (sideW = w),
+//                           onReset: resetSideW, onDragStart: startDrag }}></div>
 //
 // `invert` is for a separator on the LEADING edge of the pane it sizes (the pane
 // grows when the divider moves toward the start, e.g. a right-hand rail).
@@ -53,6 +56,9 @@ export interface PaneResizerOptions {
   invert?: boolean;
   /** `aria-valuetext`, e.g. (v) => `${v} px`. */
   text?: (value: number) => string;
+  /** The page's pointer drag, attached as `mousedown` (double-click then
+   *  runs `onReset`). Leave it out when the page wires its own pointer events. */
+  onDragStart?: (e: MouseEvent) => void;
 }
 
 export function paneResizer(node: HTMLElement, initial: PaneResizerOptions) {
@@ -88,8 +94,15 @@ export function paneResizer(node: HTMLElement, initial: PaneResizerOptions) {
     o.onChange(Math.max(o.min, Math.min(o.max, o.value + delta)));
   }
 
+  const onMouseDown = (e: MouseEvent): void => o.onDragStart?.(e);
+  const onDblClick = (): void => {
+    if (o.onDragStart) o.onReset?.();
+  };
+
   sync();
   node.addEventListener('keydown', onKeyDown);
+  node.addEventListener('mousedown', onMouseDown);
+  node.addEventListener('dblclick', onDblClick);
   return {
     update(next: PaneResizerOptions) {
       o = next;
@@ -97,6 +110,50 @@ export function paneResizer(node: HTMLElement, initial: PaneResizerOptions) {
     },
     destroy() {
       node.removeEventListener('keydown', onKeyDown);
+      node.removeEventListener('mousedown', onMouseDown);
+      node.removeEventListener('dblclick', onDblClick);
+    },
+  };
+}
+
+/** Handlers of a custom window splitter (see {@link splitter}). */
+export interface SplitterHandlers {
+  onkeydown: (e: KeyboardEvent) => void;
+  onpointerdown?: (e: PointerEvent) => void;
+  onmousedown?: (e: MouseEvent) => void;
+  ondblclick?: (e: MouseEvent) => void;
+}
+
+/**
+ * The same window-splitter widget for separators whose value logic is their
+ * own (a fraction split, a 2-D tile grid, a row/column pair): the markup keeps
+ * `role="separator"`, its label and its `aria-value*`; this makes it focusable
+ * and attaches the keys + pointer handlers. Use `paneResizer` when the value is
+ * a plain width/height.
+ *
+ *   <div role="separator" aria-label="Resize tiles" aria-valuenow={pct}
+ *        use:splitter={{ onkeydown: onKey, onpointerdown: startDrag, ondblclick: reset }}></div>
+ */
+export function splitter(node: HTMLElement, initial: SplitterHandlers) {
+  let h = initial;
+  node.tabIndex = 0;
+  const key = (e: KeyboardEvent): void => h.onkeydown(e);
+  const pointer = (e: PointerEvent): void => h.onpointerdown?.(e);
+  const mouse = (e: MouseEvent): void => h.onmousedown?.(e);
+  const dbl = (e: MouseEvent): void => h.ondblclick?.(e);
+  node.addEventListener('keydown', key);
+  node.addEventListener('pointerdown', pointer);
+  node.addEventListener('mousedown', mouse);
+  node.addEventListener('dblclick', dbl);
+  return {
+    update(next: SplitterHandlers) {
+      h = next;
+    },
+    destroy() {
+      node.removeEventListener('keydown', key);
+      node.removeEventListener('pointerdown', pointer);
+      node.removeEventListener('mousedown', mouse);
+      node.removeEventListener('dblclick', dbl);
     },
   };
 }

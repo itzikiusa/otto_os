@@ -294,7 +294,7 @@
 {:else if viewState === 'loading'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
     <div class="error-card" role="status">
-      <div class="sp-spinner" aria-hidden="true"></div>
+      <div class="spinner" style:--spinner-size="28px" aria-hidden="true"></div>
       <p class="dim">Connecting to the shared session…</p>
     </div>
   </div>
@@ -360,7 +360,7 @@
 {:else}
   <div class="share-root" style={`zoom:${ui.zoom}`}>
     <header class="share-header">
-      <span class="session-title" title={session?.title ?? ''}>{session?.title ?? 'Loading…'}</span>
+      <span class="session-title" title={session?.title ?? ''}>{session?.title ?? 'Loading session…'}</span>
       <span class="header-spacer"></span>
       {#if session}
         <span class="status-badge status-{status}" title="Session status">
@@ -491,7 +491,7 @@
     text-align: center;
     font-size: var(--fs-2xl);
     font-family: var(--font-mono);
-    letter-spacing: 0.18em;
+    letter-spacing: 0.18em; /* ui-guards: allow — one-time-code digits spaced for reading back */
     padding: 10px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
@@ -502,7 +502,7 @@
   .otp-input:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .otp-error {
     font-size: var(--fs-s);
@@ -531,18 +531,6 @@
     cursor: not-allowed;
   }
 
-  /* ── Spinner ── */
-  .sp-spinner {
-    width: 28px;
-    height: 28px;
-    border: 3px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .sp-spinner { animation-duration: 2.4s; }
-  }
 
   /* ---- main guest shell ---- */
   .share-root {
@@ -578,7 +566,7 @@
   .role-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex-shrink: 0;
     font-size: var(--fs-s);
     padding: 2px 8px;

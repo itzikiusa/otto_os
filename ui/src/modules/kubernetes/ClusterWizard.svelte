@@ -14,6 +14,7 @@
   import { k8s } from '../../lib/stores/k8s.svelte';
   import { k8sApi } from '../../lib/api/k8s';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { Environment, K8sCluster, K8sDiscoveredContext } from '../../lib/api/types';
 
   interface Props {
@@ -111,11 +112,11 @@
   async function testAndToast(c: K8sCluster): Promise<void> {
     try {
       const r = await k8sApi.testCluster(c.id);
-      if (r.ok) toasts.success(`${c.name}: connected`, `${r.server_version ?? ''} · ${r.latency_ms} ms`.trim());
-      else toasts.warn(`${c.name}: saved, but unreachable`, r.message);
+      if (r.ok) toasts.success(`Connected to ${c.name}`, `${r.server_version ?? ''} · ${r.latency_ms} ms`.trim());
+      else toasts.warn(`Saved ${c.name}, but couldn’t reach it`, r.message);
       void k8s.loadCapabilities(c.id, true);
     } catch (e) {
-      toasts.warn(`${c.name}: saved, test failed`, e instanceof Error ? e.message : String(e));
+      toasts.warn(`Saved ${c.name}, but couldn’t test it`, loadErrorText(e));
     }
   }
 
@@ -227,7 +228,7 @@
           <textarea id="k8s-yaml" class="input mono" rows="10" bind:value={yamlText} placeholder="apiVersion: v1&#10;kind: Config&#10;…" spellcheck="false"></textarea>
         </div>
         <div class="field">
-          <label for="k8s-paste-ctx">Context name <span class="dim">(optional — defaults to the file's current-context)</span></label>
+          <label for="k8s-paste-ctx">Context name <span class="dim">(optional — defaults to the file’s current-context)</span></label>
           <input id="k8s-paste-ctx" class="input mono" bind:value={pasteContext} />
         </div>
       {:else}
@@ -346,13 +347,13 @@
     cursor: pointer;
   }
   .ctx:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .ctx.on {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .ctx input {
-    margin-top: 3px;
+    margin-top: 2px;
   }
   .ctx-main {
     display: flex;
@@ -407,7 +408,7 @@
   }
   .env-chip {
     height: 24px;
-    padding: 0 13px;
+    padding: 0 12px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -419,7 +420,7 @@
   }
   .env-chip.selected {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
     color: var(--accent-text);
     font-weight: 500;
   }

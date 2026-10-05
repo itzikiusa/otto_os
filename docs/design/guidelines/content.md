@@ -107,17 +107,29 @@ user's terms.
   work."). The **CTA** is the verb from [§2](#2-verbs).
 - **Placeholders** are examples ("Weekly dependency report",
   "https://api.example.com"), not instructions and never the label.
-- **Search vs Filter fields.** "Search …" when the field asks the server or a
-  full-text index for things that aren't on screen ("Search issues…",
-  "Search notes…"); "Filter …" when it narrows the list already shown ("Filter
-  topics…", "Filter sessions…"). Name the thing, and always end with "…". A
-  search that covers only part of the data says so ("Search loaded
-  messages…") with a note and a way to load the rest.
+- **Search vs Filter fields** — decided by where the matching runs:
+  - **"Filter …"** narrows data the page already holds, in the browser: the
+    list on screen, a loaded registry, local guides ("Filter topics…",
+    "Filter sessions…", "Filter guides and shortcuts…", "Filter memories…").
+  - **"Search …"** sends the query to the daemon or a server-side index and
+    returns things that aren't loaded ("Search issues…", "Search notes…",
+    "Search titles and first prompts…" in History).
+  - A command palette that does both (local commands + server hits) is
+    "Search …".
+
+  The placeholder names the thing and ends with "…"; the `aria-label` is the
+  same words without the ellipsis ("Filter sessions"). A search that covers
+  only part of the data says so ("Search loaded messages…") with a note and a
+  way to load the rest.
 - **Tooltips** (`title`) name the control or add one fact. For an icon button
   the tooltip equals its `aria-label`. For disabled controls, the tooltip says
   why they are disabled.
 - **Loading text** names the thing: "Loading proof packs…", "Assembling…",
-  "Preparing…". Not a bare "Loading…".
+  "Preparing…". Not a bare "Loading…". And a loading *region* is not a
+  sentence: a list, card or pane that is loading shows `LoadState` /
+  `Skeleton` (named via its `what` / `label`), never a `<p>Loading …</p>`
+  (`text-loader` ratchet). The words are for busy buttons ("Saving…") and
+  screen-reader labels.
 
 ## 6. Names on screen
 

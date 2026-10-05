@@ -1,5 +1,6 @@
 <script lang="ts">
   import { confirmer } from '../confirm.svelte';
+  import Skeleton from './Skeleton.svelte';
   import { toasts } from '../toast.svelte';
   import { untrack } from 'svelte';
   import { accessApi } from '../api/access';
@@ -194,7 +195,7 @@
   </header>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if notice}<p role="status">{notice}</p>{/if}
-  {#if loading}<p>Loading access…</p>
+  {#if loading}<Skeleton rows={2} height={28} label="access" />
   {:else if policy}
     <nav aria-label="Access views">
       <button class="btn" class:primary={tab === 'rules'} onclick={() => (tab = 'rules')}

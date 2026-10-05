@@ -95,7 +95,7 @@
     if (!story || !ws.currentId) return;
 
     const targetSwarm = swarm.swarms.find((s) => s.id === targetSwarmId);
-    const teamName = targetSwarm ? `"${targetSwarm.name}"` : 'a swarm';
+    const teamName = targetSwarm ? `“${targetSwarm.name}”` : 'a swarm';
 
     const attCount = 0; // attachment count not tracked here; overview has the panel
     const ok = await confirmer.ask(
@@ -225,10 +225,8 @@
           <!-- ── Expanded detail ────────────────────────────────────── -->
           {#if isOpen}
             <div class="run-body">
-              {#if expandLoading}
-                <div class="muted inner-pad">Loading details…</div>
-              {:else if expandError}
-                <LoadState what="the run details" variant="compact" error={expandError} empty onretry={() => { const id = summary.run.id; expandedId = null; void toggleRun(id); }} />
+              {#if expandLoading || expandError}
+                <LoadState what="the run details" variant="compact" loading={expandLoading} error={expandError} empty onretry={() => { const id = summary.run.id; expandedId = null; void toggleRun(id); }} />
               {:else if expandedDetail}
                 <!-- Report markdown -->
                 {#if expandedDetail.run.report_md}
@@ -404,7 +402,7 @@
     flex-shrink: 0;
   }
   .status-done {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .status-running {
@@ -434,7 +432,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 3px 8px;
+    padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
@@ -447,7 +445,7 @@
     transition: background var(--dur-fast);
   }
   .view-swarm-btn:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
 
   /* ── Run body (expanded) ──────────────────────────────────────────── */
@@ -492,7 +490,7 @@
   }
   :global(.md-body code) {
     font-family: var(--font-mono);
-    font-size: 0.9em;
+    font-size: var(--fs-s);
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
     border-radius: var(--radius-s);
     padding: 1px 4px;
@@ -542,7 +540,7 @@
     color: var(--text);
   }
   .task-summary-text {
-    margin-block: 0; margin-inline: 13px 0;
+    margin-block: 0; margin-inline: 12px 0;
     font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.5;

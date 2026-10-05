@@ -112,7 +112,7 @@
   /** ⋯ next to Pause/Resume: the destructive verbs stay one step away from the primary. */
   function moreMenu(e: MouseEvent): void {
     ctxMenu.show(e, [
-      { label: 'Stop loop…', icon: 'square', danger: true, action: () => void stop() },
+      { label: 'Stop loop…', icon: 'stop', danger: true, action: () => void stop() },
       ...(loop?.status === 'running' ? [] : [{ label: 'Delete loop…', icon: 'trash' as const, danger: true, action: () => void del() }]),
     ]);
   }
@@ -478,9 +478,8 @@
     border-color: var(--status-working);
   }
   @media (prefers-reduced-motion: no-preference) {
-    .step.active .step-dot { animation: pulse 1.6s ease-in-out infinite; }
+    .step.active .step-dot { animation: otto-pulse 1.6s ease-in-out infinite; }
   }
-  @keyframes pulse { 50% { opacity: 0.45; } }
   .stats {
     display: flex;
     flex-wrap: wrap;

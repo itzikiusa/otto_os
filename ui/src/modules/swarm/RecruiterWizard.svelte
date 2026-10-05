@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { loadErrorText } from '../../lib/loadError';
   // Recruiter: name a role → an AI helper proposes a full agent definition
   // (title, reports-to, specialization, soul, skills, provider, schedule) → edit
   // → Hire.
@@ -139,23 +140,28 @@
       skills,
       schedule: scheduleRaw ?? null,
     };
-    let hired = 0;
+    const hiredNames: string[] = [];
     try {
       for (let i = 0; i < n; i++) {
-        // Suffix names when hiring multiple so they're distinguishable.
+        // Suffix names when hiring multiple so they’re distinguishable.
         const body = n > 1 ? { ...base, name: `${base.name} ${i + 1}` } : base;
         await swarm.createAgent(swarm.detail.id, body);
-        hired += 1;
+        hiredNames.push(body.name);
       }
       toasts.success(n > 1 ? `Hired ${n}× ${name}` : `${name} hired`);
       if (proposalRunId) swarm.markRecruitHired(proposalRunId);
       onclose();
     } catch (e) {
-      // A mid-batch failure still hired the first copies — say how many, so a
-      // retry doesn't silently double them.
-      const msg = e instanceof Error ? e.message : String(e);
-      if (hired > 0) toasts.error(`Hired ${hired} of ${n} — the rest failed`, msg);
-      else toasts.error("Couldn’t hire the agent", msg);
+      // A mid-batch failure still hired the first copies — a partial success
+      // (warning) that names who exists, so a retry doesn’t silently double them.
+      if (hiredNames.length > 0) {
+        toasts.warn(
+          `Hired ${hiredNames.length} of ${n}`,
+          `Hired: ${hiredNames.join(', ')}. Couldn’t hire the rest: ${loadErrorText(e)}`,
+        );
+      } else {
+        toastError('Couldn’t hire the agent', e);
+      }
     } finally {
       busy = false;
     }

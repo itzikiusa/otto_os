@@ -4,6 +4,7 @@
   // the graph), right panel (backlinks / outgoing / outline / properties /
   // OKF). Files on disk are the truth; the daemon keeps a derived index.
   import { onMount } from 'svelte';
+  import { focusOnMount } from '../../lib/focusOnMount';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -300,7 +301,7 @@
         <button class="icon-btn vh-tool" title="Quick switcher (⌘O)" aria-label="Quick switcher" data-icon="search" onclick={() => (vault.switcherOpen = true)}>
           <Icon name="search" size={14} />
         </button>
-        <button class="btn primary" title="New note (⌘N)" data-icon="plus" onclick={() => openNewNote('')}>
+        <button class="btn small primary" title="New note (⌘N)" data-icon="plus" onclick={() => openNewNote('')}>
           <Icon name="plus" size={13} /> New note
         </button>
         <!-- Collapses FIRST (not data-keep): once anything overflows, this
@@ -402,7 +403,7 @@
           <!-- Each tab is a presentational wrapper around TWO real buttons (the
                tab + its close), so the close control isn't nested inside an
                interactive role=tab. Middle-click closes too. -->
-          <div class="tabstrip" role="tablist" aria-label="Open notes">
+          <div class="tabstrip scroll-thin" role="tablist" aria-label="Open notes">
             {#each vault.tabs as t, i (t.kind + ':' + t.path)}
               {@const tabName = t.kind === 'note'
                 ? (t.path.split('/').pop() ?? t.path).replace(/\.md$/i, '')
@@ -510,8 +511,7 @@
     <form class="av-body" onsubmit={(e) => { e.preventDefault(); void submitCreate(); }}>
       <div class="field">
         <label for="av-name">Name</label>
-        <!-- svelte-ignore a11y_autofocus -->
-        <input id="av-name" class="input" bind:value={cName} placeholder="Team Docs" autofocus />
+        <input id="av-name" class="input" bind:value={cName} placeholder="Team Docs" use:focusOnMount />
       </div>
       <div class="field">
         <label for="av-path">Folder</label>
@@ -566,12 +566,12 @@
   .vault-pick {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text);
     border-radius: var(--radius-m);
-    padding: 5px 10px;
+    padding: 4px 10px;
     font-size: var(--fs-s);
     cursor: pointer;
     max-width: 260px;
@@ -593,7 +593,7 @@
   .okf-chip {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.4px;
+    letter-spacing: .06em;
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -621,13 +621,13 @@
   .run-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--accent-text);
     background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: 999px;
-    padding: 2px 9px;
+    padding: 2px 8px;
     cursor: pointer;
     white-space: nowrap;
     animation: otto-pulse 1.4s ease-in-out infinite;
@@ -700,7 +700,6 @@
     padding: 4px 8px 0;
     border-bottom: 1px solid var(--border);
     overflow-x: auto;
-    scrollbar-width: thin;
   }
   .vtab {
     display: inline-flex;

@@ -21,7 +21,7 @@
   <div class="list">
     {#each shown as t (t.tag)}
       <button class="tag-row" onclick={() => vault.searchTag(t.tag)}>
-        <span class="tag">#{t.tag}</span>
+        <span class="tag-name">#{t.tag}</span>
         <span class="count">{t.count}</span>
       </button>
     {/each}
@@ -63,13 +63,13 @@
     background: none;
     border: none;
     border-radius: var(--radius-s);
-    padding: 5px 8px;
+    padding: 4px 8px;
     cursor: pointer;
   }
   .tag-row:hover {
     background: var(--hover);
   }
-  .tag {
+  .tag-name {
     color: var(--accent-text);
     font-size: var(--fs-s);
   }

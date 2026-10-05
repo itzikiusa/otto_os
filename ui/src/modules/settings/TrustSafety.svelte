@@ -346,7 +346,7 @@
         <EmptyState
           icon="shield"
           title="No audit entries yet"
-          body="Sign-ins, API token changes and security settings changes are recorded here, and can't be edited or deleted."
+          body="Sign-ins, API token changes and security settings changes are recorded here, and can’t be edited or deleted."
         />
       {/if}
     {:else}

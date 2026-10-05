@@ -407,7 +407,7 @@
     color: var(--text-dim);
     background: var(--surface-2);
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 1px 6px;
   }
   .empty-line {
     font-size: var(--fs-xs);
@@ -438,7 +438,7 @@
     width: 100%;
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     padding: 4px 6px;
     border: none;
     border-radius: var(--radius-s);
@@ -450,10 +450,10 @@
     cursor: pointer;
   }
   .arow:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .arow.on {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .aicon {
     flex-shrink: 0;
@@ -523,7 +523,7 @@
     cursor: pointer;
   }
   .pactions .icon-btn:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .pbody {
@@ -559,7 +559,7 @@
     min-height: 200px;
     width: 100%;
     border: none;
-    background: #fff;
+    background: #fff; /* ui-guards: allow — a web page’s default canvas, not app chrome */
   }
   .ext-link {
     display: inline-flex;

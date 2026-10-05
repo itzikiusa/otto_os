@@ -1,5 +1,6 @@
 <script module lang="ts">
   import type { DesignArtifact as DA } from '../../lib/api/types';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   export interface CompareSide {
     artifact: DA;
     versionId: string;
@@ -66,10 +67,10 @@
       const key = `${s.artifact.id}:${s.versionId}`;
       if (untrack(get)?.key === key) return;
       const asText = isTextFormat(s.artifact.format);
-      let cancelled = false;
+      let canceled = false;
       void fetchContent(s.artifact.id, { version: s.versionId, asText }).then(
         (c) => {
-          if (cancelled) {
+          if (canceled) {
             if (c.blobUrl) URL.revokeObjectURL(c.blobUrl);
             return;
           }
@@ -78,11 +79,11 @@
           set({ key, text: c.text, blobUrl: c.blobUrl, error: null });
         },
         (e) => {
-          if (!cancelled) set({ key, text: null, blobUrl: null, error: e instanceof Error ? e.message : String(e) });
+          if (!canceled) set({ key, text: null, blobUrl: null, error: e instanceof Error ? e.message : String(e) });
         },
       );
       return () => {
-        cancelled = true;
+        canceled = true;
       };
     };
   }
@@ -133,7 +134,7 @@
           <span class="title" title={p.s.artifact.title}>{p.s.artifact.id === currentId ? '' : `${p.s.artifact.title} · `}</span>
           <select class="input" aria-label={`${p.n} version`} value={p.s.versionId} onchange={(e) => p.set((e.currentTarget as HTMLSelectElement).value)}>
             {#each versionsOf[p.s.artifact.id] ?? [] as v (v.id)}<option value={v.id}>{labelOf(p.s, v)}</option>{/each}
-            {#if !(versionsOf[p.s.artifact.id] ?? []).length}<option value={p.s.versionId}>Loading…</option>{/if}
+            {#if !(versionsOf[p.s.artifact.id] ?? []).length}<option value={p.s.versionId}>Selected version</option>{/if}
           </select>
         </label>
       {/each}
@@ -143,7 +144,7 @@
         {#each [{ s: left, l: loadedL }, { s: right, l: loadedR }] as p, i (i)}
           <div class="pane">
             {#if !p.l}
-              <p class="msg">Loading version…</p>
+              <Skeleton rows={6} height={16} label="this version" />
             {:else if p.l.error}
               <p class="msg err"><Icon name="warning" size={14} /> Couldn’t load this version. {p.l.error}</p>
             {:else}
@@ -159,7 +160,7 @@
         {#if loadedL && loadedR && !loadedL.error && !loadedR.error}
           <DiffView before={pretty(left.artifact.format, loadedL.text)} after={pretty(right.artifact.format, loadedR.text)} mode="split" contextLines={4} />
         {:else}
-          <p class="msg">Loading versions…</p>
+          <Skeleton rows={8} height={16} label="the versions" />
         {/if}
       </div>
     {/if}

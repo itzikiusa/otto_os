@@ -80,7 +80,7 @@
     ? 'Notes the agent reads and updates between runs. Saving edits preserves the rest of your workspace.'
     : 'Background notes and references you maintain. New runs and new chats receive a snapshot; existing chats keep their current context.'}</p>
   {#if document?.path}<code class="path">{document.path}</code>{/if}
-  {#if kind === 'memory' && sharedWorkspace}<p class="hint">Agents using this same working directory share this memory file.</p>{/if}
+  {#if kind === 'memory' && sharedWorkspace}<p class="hint">Agents using this same working folder share this memory file.</p>{/if}
   {#if loading}<p class="hint" role="status">Loading {label.toLowerCase()}…</p>
   {:else}
     {#if error}<div class="error" role="alert">{error}</div>{/if}
@@ -103,7 +103,7 @@
         <div class="actions">
           <button type="button" class="btn primary" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save'}</button>
           <button type="button" class="btn" disabled={saving} onclick={() => { draft = document?.content ?? ''; editing = false; error = ''; }}>Cancel</button>
-          {#if error}<button type="button" class="btn" disabled={saving} onclick={load}>Reload saved version</button>{/if}
+          {#if error}<button type="button" class="btn" disabled={saving} onclick={load}>Load saved version</button>{/if}
         </div>
       {:else}
         {#if document.content}<Markdown md={document.content} />{:else}<p class="hint">No {label.toLowerCase()} yet.</p>{/if}

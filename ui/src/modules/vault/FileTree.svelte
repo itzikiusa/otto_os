@@ -8,6 +8,8 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { vault, type TreeNode } from './vault.svelte';
+  import { tick } from 'svelte';
+  import { focusOnMount } from '../../lib/focusOnMount';
 
   let {
     onNewNote,
@@ -119,7 +121,64 @@
     void vault.rename(n.entry.path, dir + name);
   }
 
-  function menu(e: MouseEvent, n: TreeNode): void {
+  // ── Tree keyboard (WAI-ARIA tree view, roving tabindex) ─────────────────────
+  // One row is in the Tab order: the last focused row, else the open note/file,
+  // else the first row. ↑/↓/Home/End move it, → opens a folder or steps into
+  // it, ← closes it or steps out to the parent folder (mirrored under RTL),
+  // Enter/Space opens, ContextMenu / ⇧F10 opens the row menu. The list is
+  // virtualized, so the focused row is pinned (kept mounted) and scrolled to.
+  let treeEl = $state<HTMLElement | null>(null);
+  let focusPath = $state<string | null>(null);
+  let scrollVer = $state(0);
+  const tabStop = $derived.by(() => {
+    if (focusPath && flat.some((n) => n.entry.path === focusPath)) return focusPath;
+    return flat.find((n) => isActive(n))?.entry.path ?? flat[0]?.entry.path ?? null;
+  });
+  const tabIndex = $derived(tabStop ? flat.findIndex((n) => n.entry.path === tabStop) : -1);
+
+  function focusRow(i: number): void {
+    const n = flat[Math.max(0, Math.min(flat.length - 1, i))];
+    if (!n) return;
+    focusPath = n.entry.path;
+    scrollVer++;
+    void tick().then(() => treeEl?.querySelector<HTMLElement>(`[data-path="${CSS.escape(n.entry.path)}"]`)?.focus());
+  }
+
+  function rowKey(e: KeyboardEvent, n: TreeNode): void {
+    if (e.target !== e.currentTarget) return; // the checkbox / rename input own their keys
+    const i = flat.indexOf(n);
+    const isDir = n.entry.kind === 'dir';
+    const rtl = treeEl ? getComputedStyle(treeEl).direction === 'rtl' : false;
+    const key = rtl && e.key === 'ArrowRight' ? 'ArrowLeft' : rtl && e.key === 'ArrowLeft' ? 'ArrowRight' : e.key;
+    if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End') {
+      e.preventDefault();
+      focusRow(key === 'Home' ? 0 : key === 'End' ? flat.length - 1 : i + (key === 'ArrowDown' ? 1 : -1));
+    } else if (key === 'ArrowRight') {
+      e.preventDefault();
+      if (isDir && !n.open) void vault.toggleDir(n);
+      else if (isDir && n.children.length) focusRow(i + 1);
+    } else if (key === 'ArrowLeft') {
+      e.preventDefault();
+      if (isDir && n.open) {
+        void vault.toggleDir(n);
+        return;
+      }
+      const cut = n.entry.path.lastIndexOf('/');
+      const parent = cut > 0 ? flat.findIndex((x) => x.entry.path === n.entry.path.slice(0, cut)) : -1;
+      if (parent >= 0) focusRow(parent);
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      rowClick(n, e);
+    } else if (e.key === 'F2') {
+      e.preventDefault();
+      startRename(n);
+    } else if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+      e.preventDefault();
+      menu(e, n);
+    }
+  }
+
+  function menu(e: MouseEvent | KeyboardEvent, n: TreeNode): void {
     const isDir = n.entry.kind === 'dir';
     ctxMenu.show(e, [
       ...(isDir
@@ -197,7 +256,7 @@
       },
       { separator: true },
       {
-        label: 'Move to trash',
+        label: 'Move to trash', // ui-guards: allow — reversible (restore from the trash), so no confirm
         icon: 'trash',
         danger: true,
         action: () => void vault.trash(n.entry.path),
@@ -222,7 +281,7 @@
   }
 </script>
 
-<div class="tree" role="tree">
+<div class="tree" role="tree" aria-label="Vault files" bind:this={treeEl}>
   {#if flat.length === 0}
     <div class="empty">
       No notes yet.
@@ -235,6 +294,9 @@
       items={flat}
       estimateHeight={26}
       class="tree-list"
+      pinnedIndex={tabIndex}
+      scrollIndex={tabIndex}
+      scrollVersion={scrollVer}
       findText={(n: TreeNode) => (n.entry.kind === 'note' ? n.entry.name.replace(/\.md$/i, '') : n.entry.name)}
     >
       {#snippet row(n: TreeNode)}
@@ -245,13 +307,17 @@
           class:drag-over={dragOver === n.entry.path}
           style="padding-inline-start: {8 + n.depth * 14}px"
           role="treeitem"
+          data-path={n.entry.path}
           class:checked={selected.has(n.entry.path)}
           aria-selected={isActive(n)}
-          tabindex="0"
+          aria-level={n.depth + 1}
+          aria-expanded={n.entry.kind === 'dir' ? n.open : undefined}
+          tabindex={n.entry.path === tabStop ? 0 : -1}
           draggable={n.entry.kind !== 'dir'}
           onclick={(e) => rowClick(n, e)}
+          onfocus={() => (focusPath = n.entry.path)}
           onauxclick={(e) => rowAuxClick(n, e)}
-          onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && rowClick(n, e)}
+          onkeydown={(e) => rowKey(e, n)}
           oncontextmenu={(e) => menu(e, n)}
           ondragstart={(e) => onDragStart(e, n)}
           ondragover={(e) => {
@@ -290,11 +356,11 @@
             {/if}
           {/if}
           {#if renaming === n.entry.path}
-            <!-- svelte-ignore a11y_autofocus -->
             <input
               class="rename"
+              aria-label="New name"
               bind:value={renameValue}
-              autofocus
+              use:focusOnMount={{ select: true }}
               onclick={(e) => e.stopPropagation()}
               onkeydown={(e) => {
                 if (e.key === 'Enter') commitRename(n);
@@ -392,7 +458,7 @@
   .row {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 26px;
     padding-inline-end: 8px;
     font-size: var(--fs-s);
@@ -457,7 +523,7 @@
     }
   }
   .row.checked {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .sel-bar {
     display: flex;
@@ -510,9 +576,9 @@
   .prov {
     font-size: var(--fs-xs);
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     border-radius: 999px;
-    padding: 0 7px;
+    padding: 0 8px;
     white-space: nowrap;
     max-width: 110px;
     overflow: hidden;

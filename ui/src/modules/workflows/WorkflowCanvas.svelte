@@ -326,9 +326,12 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- The pan / zoom surface: a pointer-driven application region (every step
+     and port inside it is a real button with its own keys). -->
 <div
   class="canvas"
+  role="application"
+  aria-label="Workflow canvas"
   bind:this={surface}
   onpointerdown={startPan}
   onpointermove={onMove}
@@ -336,7 +339,11 @@
   onwheel={onWheel}
 >
   <div class="dots"></div>
-  <div class="viewport" style="transform: translate({tx}px,{ty}px) scale({scale});">
+  <!-- Graph coordinates are physical (x grows right; edges are SVG paths and
+       cards use left/top from the saved layout), so the world layer is pinned
+       LTR: under RTL the cards would mirror but the edges and ports wouldn't.
+       Card text still reads in its own direction (dir="auto" on .body). -->
+  <div class="viewport" dir="ltr" style="transform: translate({tx}px,{ty}px) scale({scale});">
     <svg class="edges" width="6000" height="4000">
       {#each graph.edges as e (e.id)}
         {@const s = nodeOf(e.source)}
@@ -377,7 +384,6 @@
       <!-- The card is a plain box: the node itself is the button inside it
            (select / move / delete), the output port a sibling button — never
            one control nested in another. -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="node"
         class:invalid={invalidNodes.includes(n.id)}
@@ -385,11 +391,13 @@
         class:loop={n.kind === 'loop'}
         data-status={st}
         style="left:{n.x}px; top:{n.y}px; width:{NODE_W}px; height:{nodeHeight(n)}px; --accent:{color(n.kind)};"
-        onpointerdown={(e) => startNode(e, n)}
       >
+        <!-- The press that selects / starts a move belongs to the node's own
+             button (it fills the card), not to the box around it. -->
         <button
           type="button"
           class="node-main"
+          onpointerdown={(e) => startNode(e, n)}
           aria-label={`Edit ${nodeLabel(n)}`}
           aria-pressed={selectedId === n.id}
           aria-describedby={editable ? `${hintId}-node` : undefined}
@@ -399,7 +407,7 @@
           <span class="stripe"></span>
           <span class="head">
             <span class="ic"><Icon name={asIcon(spec(n.kind)?.icon, 'box')} size={14} /></span>
-            <span class="body">
+            <span class="body" dir="auto">
               <span class="title" title={nodeLabel(n)}>{nodeLabel(n)}</span>
               <span class="kind">{spec(n.kind)?.label ?? n.kind}</span>
             </span>
@@ -446,8 +454,8 @@
   </div>
 
   <div class="hud">
-    <button class="zbtn" onclick={() => (scale = Math.min(2, scale * 1.15))} title="Zoom in" aria-label="Zoom in">+</button>
-    <button class="zbtn" onclick={() => (scale = Math.max(0.3, scale * 0.87))} title="Zoom out" aria-label="Zoom out">−</button>
+    <button class="zbtn" onclick={() => (scale = Math.min(2, scale * 1.15))} title="Zoom in" aria-label="Zoom in"><Icon name="plus" size={12} /></button>
+    <button class="zbtn" onclick={() => (scale = Math.max(0.3, scale * 0.87))} title="Zoom out" aria-label="Zoom out"><Icon name="minus" size={12} /></button>
     <button class="zbtn" onclick={fit} title="Reset view" aria-label="Reset view"><Icon name="maximize" size={12} /></button>
     <span class="zpct">{Math.round(scale * 100)}%</span>
   </div>
@@ -484,13 +492,13 @@
   .viewport {
     position: absolute;
     top: 0;
-    left: 0;
+    left: 0; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
     transform-origin: 0 0;
   }
   .edges {
     position: absolute;
     top: 0;
-    left: 0;
+    left: 0; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
     overflow: visible;
     pointer-events: none;
   }
@@ -546,7 +554,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     cursor: grab;
     user-select: none;
     transition: border-color var(--dur-fast) ease-out;
@@ -592,7 +600,7 @@
     flex: 1;
     flex-direction: column;
     gap: 2px;
-    padding-block: 5px 6px; padding-inline: 14px 10px;
+    padding-block: 4px 6px; padding-inline: 14px 10px;
     min-height: 0;
   }
   .step {
@@ -611,7 +619,7 @@
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
     flex-shrink: 0;
   }
@@ -649,7 +657,7 @@
   }
   .node.selected {
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent), var(--shadow);
+    box-shadow: 0 0 0 2px var(--accent-line), var(--glass-shadow);
   }
   /* Run status uses the shared run vocabulary (lib/status.ts): running is
      info-blue and pulses, succeeded is green — they used to share one green,
@@ -662,7 +670,7 @@
   }
   .stripe {
     position: absolute;
-    left: 0;
+    left: 0; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
     top: 8px;
     bottom: 8px;
     width: 4px;
@@ -675,7 +683,7 @@
     width: 26px;
     height: 26px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     flex-shrink: 0;
   }
@@ -741,10 +749,10 @@
     top: calc(50% - 6px);
   }
   .port.in {
-    left: -7px;
+    left: -7px; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
   }
   .port.out {
-    right: -7px;
+    right: -7px; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
     padding: 0;
     cursor: crosshair;
   }
@@ -774,7 +782,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .zbtn {
     display: grid;
@@ -789,7 +797,7 @@
     cursor: pointer;
   }
   .zbtn:hover {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .zpct {
     font-size: var(--fs-xs);

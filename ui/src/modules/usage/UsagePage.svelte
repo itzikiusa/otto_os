@@ -10,6 +10,10 @@
   import { guardUnsaved } from '../../lib/leaveGuard';
   import { onTabKey } from '../../lib/tabKeys';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
+  import { kindLabel } from '../../lib/labels';
+  import { pluralNoun } from '../../lib/plural';
+  import { registry } from '../../lib/commands.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -121,6 +125,18 @@
     configOpen = !configOpen;
     if (configOpen) queueMicrotask(() => settingsEl?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
   }
+
+  // ⌘K verbs while Usage is open.
+  $effect(() =>
+    registry.register('usage', [
+      { id: 'usage.refresh', title: 'Refresh usage', group: 'Usage', keywords: 'reload tokens cost', run: () => void usage.loadAll() },
+      { id: 'usage.view-overview', title: 'Show usage overview', group: 'Usage', keywords: 'dashboard charts', run: () => (view = 'overview') },
+      { id: 'usage.view-report', title: 'Show usage report tables', group: 'Usage', keywords: 'ccusage daily monthly table', run: () => (view = 'report') },
+      ...WINDOWS.map((w) => ({ id: `usage.window-${w.days}`, title: `Show the last ${w.days} days`, group: 'Usage', keywords: `usage window range ${w.label}`, run: () => usage.setDays(w.days) })),
+      { id: 'usage.export-summary', title: 'Export usage summary (JSON)', group: 'Usage', keywords: 'download save json report', run: exportSummary },
+      ...(admin ? [{ id: 'usage.settings', title: 'Open usage storage and retention', group: 'Usage', keywords: 'clickhouse retention interval settings', run: () => { if (!configOpen) toggleSettings(); } }] : []),
+    ]),
+  );
 
   /** Downloads land in the user's Downloads folder with no visible change on
    *  the page — say what was exported. */
@@ -240,9 +256,9 @@
 
   // Shared formatters (content.md → numbers): 1.2k / 3.4M, KB/MB/GB.
   const fmtNum = formatCount;
-  /** "1 session" / "3 sessions". */
+  /** "1 session" / "3,412 sessions" — lib/plural with a locale-formatted count. */
   function plural(n: number, one: string, many = one + 's'): string {
-    return `${formatCount(n)} ${n === 1 ? one : many}`;
+    return `${formatCount(n)} ${pluralNoun(n, one, many)}`;
   }
   function fmtCost(n: number): string {
     if (n === 0) return '$0';
@@ -507,7 +523,7 @@
       <EmptyState
         variant="page"
         icon="chart"
-        title="You don't have access to usage"
+        title="You don’t have access to usage"
         body="Token and cost history is visible to people granted Usage. Ask whoever set up this Otto for access."
       />
     {:else if !usage.status}
@@ -526,7 +542,7 @@
       <EmptyState
         variant="page"
         icon="chart"
-        title="Usage tracking isn't set up"
+        title="Usage tracking isn’t set up"
         body="Otto records token usage once the root account sets up usage tracking."
       />
     {:else if !usage.status.available}
@@ -867,7 +883,7 @@
                 {#each usage.summary.by_kind as f (f.feature)}
                   <div class="bar-row feat-row">
                     <span class="bar-name" title={featureLabel(f.feature)}>
-                      <span class="kind-badge">{featureLabel(f.feature)}</span>
+                      <Badge label={featureLabel(f.feature)} />
                     </span>
                     <div class="bar-track">
                       <div class="bar-fill stacked" style="width: {(f.total_tokens / fmax) * 100}%" title={breakdownTitle(f)}>
@@ -919,7 +935,7 @@
                 {@const name = r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)}
                 <div class="budget-row" class:warn={r.warning && !r.exceeded} class:over={r.exceeded}>
                   <span class="budget-name" title="{r.scope === 'workspace' ? 'Workspace' : 'Provider'}: {name}">
-                    <span class="kind-badge">{r.scope === 'workspace' ? 'Workspace' : 'Provider'}</span>
+                    <Badge label={r.scope === 'workspace' ? 'Workspace' : 'Provider'} />
                     <span class="ellip-any">{name}</span>
                   </span>
                   <div
@@ -1189,7 +1205,7 @@
                           {:else}
                             <span class="sess-name ellip-any">{s.title ?? 'Session outside Otto'}</span>
                           {/if}
-                          {#if s.kind}<span class="kind-badge">{s.kind}</span>{/if}
+                          {#if s.kind}<Badge label={kindLabel(s.kind)} />{/if}
                         </div>
                         <div class="sess-id mono">{s.session_id.slice(0, 12)}</div>
                       </div>
@@ -1213,7 +1229,7 @@
                       </div>
                       <div class="num" title={s.fallback_priced ? 'Estimated: this model isn’t in the rate table, so it is priced at the Opus tier' : undefined}>
                         {fmtCost(s.cost_usd)}
-                        {#if s.fallback_priced}<span class="est-tag">est.</span>{/if}
+                        {#if s.fallback_priced}<span class="est-tag"><Badge tone="warn" label="Est." /></span>{/if}
                       </div>
                       <div class="dim">{fmtLastActive(s.last_active)}</div>
                     </div>
@@ -1444,7 +1460,6 @@
     height: 100%;
     border-radius: var(--radius-s);
     background: var(--accent-solid);
-    transition: width var(--dur-enter) ease-out;
   }
   /* Stacked variant: width = provider share of max; segments = composition. */
   .bar-fill.stacked {
@@ -1612,18 +1627,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .kind-badge {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    font-weight: 500;
-    padding: 1px 7px;
-    border-radius: 999px;
-    /* Kinds are categories, not statuses: one neutral chip, told apart by the
-       word (foundations.md — no categorical rainbows). */
-    background: var(--surface-2);
-    color: var(--text-dim);
-    white-space: nowrap;
-  }
   .sess-row:hover {
     background: var(--hover);
   }
@@ -1655,13 +1658,7 @@
   }
   /* "Estimated" cost tag — the model is not in the rate table. */
   .est-tag {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 0 5px;
-    border-radius: 999px;
     margin-inline-start: 4px;
-    background: var(--warning-soft);
-    color: var(--warning);
   }
 
   /* By-feature rows: widen the label column so the feature badge fits. */

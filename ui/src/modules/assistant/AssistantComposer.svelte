@@ -177,7 +177,7 @@
   }
   .box:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .box > .icon-btn {
     width: 28px;
@@ -195,7 +195,7 @@
     font: inherit;
     font-size: var(--fs-m);
     line-height: 1.45;
-    padding: 5px 4px;
+    padding: 4px 4px;
     outline: none; /* the ring is drawn on .box:focus-within */
   }
   .ta::placeholder {
@@ -204,7 +204,7 @@
   .chip-btn {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 28px;
     padding: 0 10px;
     border: 1px solid var(--border);
@@ -270,7 +270,7 @@
     align-items: center;
     gap: 6px;
     min-height: 26px;
-    padding-block: 3px; padding-inline: 8px 4px;
+    padding-block: 2px; padding-inline: 8px 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);

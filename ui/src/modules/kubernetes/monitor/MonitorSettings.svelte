@@ -311,7 +311,7 @@
       </label>
       <label class="toggle small">
         <span class="sw-slot" data-testid="k8s-monitor-request-labels"><Switch checked={cfg.request_labels ?? false} onchange={(v) => { if (cfg) cfg.request_labels = v; }} label="Keep request path labels" disabled={!canEdit} /></span>
-        <span>Keep request path labels <span class="dim">(per-route <code>path</code> + <code>method</code> on the request / latency counters — never on histogram buckets — so the Fleet dashboard's Requests tab can drill down to a route; multiplies request rows per pod by the number of routes)</span></span>
+        <span>Keep request path labels <span class="dim">(per-route <code>path</code> + <code>method</code> on the request / latency counters — never on histogram buckets — so the Fleet dashboard’s Requests tab can drill down to a route; multiplies request rows per pod by the number of routes)</span></span>
       </label>
     </section>
 
@@ -325,7 +325,7 @@
           </div>
         {/if}
       </div>
-      <p class="dim help">Each probe is an HTTP GET on every running pod (port defaults to the container's first declared port). <b>json</b> probes map fields to metrics or labels, <b>prometheus</b> probes ingest the text format (globs bound cardinality), <b>health</b> probes record <code>up</code>.</p>
+      <p class="dim help">Each probe is an HTTP GET on every running pod (port defaults to the container’s first declared port). <b>json</b> probes map fields to metrics or labels, <b>prometheus</b> probes ingest the text format (globs bound cardinality), <b>health</b> probes record <code>up</code>.</p>
       {#if !cfg.probes.length}
         <div class="dim">No probes yet — pick a preset or add one.</div>
       {/if}
@@ -501,7 +501,7 @@
   .field {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-s);
     min-width: 0;
   }

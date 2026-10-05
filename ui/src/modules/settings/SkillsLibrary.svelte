@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
@@ -173,7 +174,7 @@
 
   async function remove(s: BundledSkill): Promise<void> {
     if (
-      !(await confirmer.ask(`Remove “${s.name}” from your library and from each agent CLI's skills folder? You can install it again from this page.`, {
+      !(await confirmer.ask(`Remove “${s.name}” from your library and from each agent CLI’s skills folder? You can install it again from this page.`, {
         title: 'Remove skill',
         confirmLabel: 'Remove',
       }))
@@ -206,8 +207,8 @@
       if (failed.length > 0) {
         // Name every failure: the rest of the batch still installed.
         toasts.error(
-          `${failed.length} ${category} skill${failed.length === 1 ? '' : 's'} failed to install`,
-          failed.map((f) => `${f.name}: ${f.error}`).join('\n') + (n > 0 ? `\nInstalled ${n} other${n === 1 ? '' : 's'}.` : ''),
+          `${plural(failed.length, `${category} skill`)} failed to install`,
+          failed.map((f) => `${f.name}: ${f.error}`).join('\n') + (n > 0 ? `\nInstalled ${plural(n, 'other')}.` : ''),
         );
       } else if (n === 0) {
         toasts.info(
@@ -218,11 +219,11 @@
         );
       } else if (b > 0) {
         toasts.success(
-          `Installed ${n} ${category} skill${n === 1 ? '' : 's'}`,
+          `Installed ${plural(n, `${category} skill`)}`,
           `${b} existing cop${b === 1 ? 'y was' : 'ies were'} backed up first.`,
         );
       } else {
-        toasts.success(`Installed ${n} ${category} skill${n === 1 ? '' : 's'}`);
+        toasts.success(`Installed ${plural(n, `${category} skill`)}`);
       }
       await load();
     } catch (e) {
@@ -252,7 +253,7 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('skills')} subtitle="Skills that ship with Otto" />
   <PageBody width="readable">
-  <SectionIntro>Installing a skill adds it to your library and to each agent CLI's global skills folder, so Claude, Codex and agy can all use it. Your edited copies are always backed up before being replaced.</SectionIntro>
+  <SectionIntro>Installing a skill adds it to your library and to each agent CLI’s global skills folder, so Claude, Codex and agy can all use it. Your edited copies are always backed up before being replaced.</SectionIntro>
 
   <LoadState what="bundled skills" {loading} error={loadError} empty={skills.length === 0} rows={5} onretry={() => void load()}>
     {#snippet emptyView()}
@@ -260,7 +261,7 @@
         variant="page"
         icon="box"
         title="No bundled skills"
-        body="This build of Otto doesn't ship any skills. Add your own in Settings → Context library."
+        body="This build of Otto doesn’t ship any skills. Add your own in Settings → Context library."
       />
     {/snippet}
     <div class="toolbar">
@@ -270,7 +271,7 @@
           type="search"
           class="filter-input"
           bind:value={query}
-          placeholder="Filter skills"
+          placeholder="Filter skills…"
           aria-label="Filter skills"
           autocomplete="off"
           spellcheck="false"
@@ -378,7 +379,7 @@
   }
   .filter:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .filter-input {
     flex: 1;
@@ -449,7 +450,7 @@
   /* Two lines, full text in the tooltip — some descriptions run 6+ lines. */
   .skill-desc {
     font-size: var(--fs-s);
-    margin-top: 3px;
+    margin-top: 2px;
     line-height: 1.45;
     display: -webkit-box;
     -webkit-line-clamp: 2;

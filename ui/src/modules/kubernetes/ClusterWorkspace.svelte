@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { NO_WORKSPACE } from '../../lib/labels';
+  import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { actionOperation, readOperation } from './permissions';
   // k9s-like cluster workspace. Top bar: cluster switcher · namespace combobox
@@ -113,7 +115,9 @@
   let bodyWidth = $state(0);
   // A useful table needs 280px beside the 168px kind rail and 320px detail.
   const detailSheet = $derived(viewport.isPhone || (bodyWidth > 0 && bodyWidth < 780));
-  const maxDrawerW = $derived(Math.max(320, bodyWidth - 168 - 280 - 6));
+  // Also ≤ 55% of the row: DockedDrawer caps its column there, and the
+  // splitter's value must match what's drawn.
+  const maxDrawerW = $derived(Math.max(320, Math.min(bodyWidth - 168 - 280 - 6, Math.floor((bodyWidth - 168) * 0.55))));
   const visibleDrawerW = $derived(Math.min(drawerW, maxDrawerW));
   function saveDrawerWidth(): void {
     try { localStorage.setItem(DRAWER_KEY, String(Math.round(drawerW))); } catch { /* ignore */ }
@@ -261,7 +265,7 @@
     }
     const wsId = ws.currentId;
     if (!wsId) {
-      toasts.error('No workspace', 'Select a workspace to attach the k9s session to.');
+      toasts.error(NO_WORKSPACE, 'The k9s session is attached to a workspace.');
       return;
     }
     k9sOpening = true;
@@ -269,7 +273,7 @@
       const s = await k8sApi.k9s(cluster.id, { workspace_id: wsId, ns: k8s.namespace || null });
       k8s.k9sSessionId = s.id;
     } catch (e) {
-      toasts.error('k9s failed to start', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start k9s', e);
     } finally {
       k9sOpening = false;
     }
@@ -492,12 +496,10 @@
 
       {#if drawerOpen && sel}
         {#if !detailSheet}
-          <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End). -->
-          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+          <!-- A focusable separator is the ARIA window-splitter widget (paneResizer sets its tabIndex and value, and adds ←/→, Home/End). -->
           <div
             class="splitter"
             role="separator"
-            tabindex="0"
             aria-orientation="vertical"
             aria-label="Resize details"
             title={RESIZE_TITLE}
@@ -505,10 +507,10 @@
             use:paneResizer={{ value: visibleDrawerW, min: 320, max: maxDrawerW, invert: true, onChange: (w) => { drawerW = w; saveDrawerWidth(); }, text: pxWide }}
           ></div>
         {/if}
-        <div class="drawer-host" class:sheet={detailSheet} style={detailSheet ? '' : `width:${visibleDrawerW}px`}>
-          {#key `${cluster.id}/${kind}/${sel.ns}/${sel.name}`}
+        {#key `${cluster.id}/${kind}/${sel.ns}/${sel.name}`}
             <ResourceDrawer
               modal={detailSheet}
+              width="{visibleDrawerW}px"
               clusterId={cluster.id}
               {kind}
               ns={sel.ns}
@@ -524,8 +526,7 @@
               reloadNonce={drawerNonce}
               onmonitor={openInMonitor}
             />
-          {/key}
-        </div>
+        {/key}
       {/if}
     </div>
   {/if}
@@ -588,7 +589,7 @@
 {#snippet filterBox()}
   <div class="filter">
     <Icon name="search" size={12} />
-    <input bind:this={filterEl} class="filter-in" placeholder="Filter  ( / )" bind:value={k8s.filter} aria-label="Filter rows" data-testid="k8s-filter" />
+    <input bind:this={filterEl} class="filter-in" placeholder="Filter rows…" bind:value={k8s.filter} aria-label="Filter rows" aria-keyshortcuts="/" title="Filter rows (/)" data-testid="k8s-filter" />
     {#if k8s.filter}<button class="icon-btn" onclick={() => (k8s.filter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>{/if}
   </div>
 {/snippet}
@@ -637,7 +638,7 @@
   }
   .filter:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .filter-in {
     flex: 1;
@@ -685,14 +686,14 @@
     border: none;
     background: transparent;
     text-align: start;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-radius: var(--radius-s);
     font-size: var(--fs-m);
     color: var(--text-dim);
     cursor: pointer;
   }
   .kind:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .kind.active {
@@ -710,8 +711,7 @@
   .kinds-mobile {
     position: absolute;
     top: 6px;
-    left: 10px;
-    right: 10px;
+    inset-inline: 10px;
     z-index: 2;
   }
   .kinds-mobile {
@@ -783,20 +783,6 @@
     background: var(--text-dim);
     opacity: 0.6;
   }
-  .drawer-host {
-    flex-shrink: 0;
-    min-width: 0;
-    height: 100%;
-    overflow: hidden;
-    border-inline-start: 1px solid var(--border);
-  }
-  .drawer-host.sheet {
-    position: fixed;
-    inset: 0;
-    z-index: var(--z-modal);
-    width: auto;
-    border-inline-start: none;
-  }
   .k9s {
     flex: 1;
     min-height: 0;
@@ -832,7 +818,7 @@
   kbd {
     display: inline-block;
     min-width: 18px;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);

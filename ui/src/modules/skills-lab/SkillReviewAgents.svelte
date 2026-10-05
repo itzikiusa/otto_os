@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Per-agent results block for a Skills Lab review — the same embedded-terminal
   // pattern as the code-review ReviewAgents: Open mounts a live <Terminal> for
   // the agent's session inline (multiple can be open at once), Retry re-runs one
@@ -11,7 +12,9 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { runStatus } from '../../lib/status';
+  import { runStatus, type BadgeTone } from '../../lib/status';
+  import { severityLabel } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
 
   interface Props {
     review: SkillReview;
@@ -54,8 +57,10 @@
     }
   }
 
-  function sevClass(sev: string): string {
-    return `sev-${sev.toLowerCase()}`;
+  // Review severity → the shared Badge tone + wording (lib/labels severityLabel).
+  const SEV_TONE: Record<string, BadgeTone> = { critical: 'bad', high: 'bad', medium: 'warn', low: 'info' };
+  function sevTone(sev: string): BadgeTone {
+    return SEV_TONE[sev.toLowerCase()] ?? 'neutral';
   }
 </script>
 
@@ -78,7 +83,7 @@
         {/if}
         {#if agent.findings && agent.findings.length > 0}
           <button class="btn small ghost" aria-expanded={!!agentExpanded[agent.name]} onclick={() => toggleAgent(agent.name)}>
-            {agentExpanded[agent.name] ? 'Hide findings' : `${agent.findings.length} finding${agent.findings.length === 1 ? '' : 's'}`}
+            {agentExpanded[agent.name] ? 'Hide findings' : `${plural(agent.findings.length, 'finding')}`}
           </button>
         {/if}
         <span class="rp-status-pill" data-status={agent.status}><StatusBadge status={runStatus(agent.status)} /></span>
@@ -102,7 +107,7 @@
         <ul class="rp-agent-findings">
           {#each agent.findings as f, i (i + f.code)}
             <li class="rp-finding">
-              <span class="severity-chip {sevClass(f.severity)}">{f.severity}</span>
+              <Badge tone={sevTone(f.severity)} label={severityLabel(f.severity.toLowerCase())} />
               {#if f.code}<span class="mono rp-loc">{f.code}</span>{/if}
               <span class="rp-finding-body"><strong>{f.title}</strong>{f.fix ? ` — ${f.fix}` : ''}</span>
             </li>
@@ -129,19 +134,11 @@
     height: min(360px, 65vh); margin: 8px 0 2px; border: 1px solid var(--border);
     border-radius: var(--radius-m); overflow: hidden; overscroll-behavior: contain; background: var(--term-bg);
   }
-  .rp-agent-findings { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+  .rp-agent-findings { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .rp-finding { display: flex; align-items: baseline; gap: 6px; font-size: var(--fs-xs); line-height: 1.4; }
   .rp-finding-body { flex: 1; min-width: 0; }
   .rp-loc { font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
 
-  .severity-chip {
-    display: inline-block; padding: 1px 8px; border-radius: 999px;
-    font-size: var(--fs-xs); font-weight: 500; text-transform: capitalize;
-  }
-  .sev-critical { background: var(--danger-soft); color: var(--danger); }
-  .sev-high { background: var(--danger-soft); color: var(--danger); }
-  .sev-medium { background: var(--warning-soft); color: var(--warning); }
-  .sev-low { background: var(--info-soft); color: var(--info); }
 
   .grow { flex: 1; }
   .mono { font-family: var(--font-mono); }

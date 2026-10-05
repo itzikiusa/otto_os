@@ -21,6 +21,7 @@ import type {
   DesignVariantsReq,
   DesignVersion,
 } from '../../../lib/api/types';
+import { plural } from '../../../lib/plural.ts';
 
 export type Tone = 'neutral' | 'info' | 'warn' | 'ok' | 'bad';
 
@@ -239,7 +240,7 @@ export interface QuickAction {
 export const QUICK_ACTIONS: readonly QuickAction[] = [
   { id: 'engaging', label: 'More engaging', icon: 'sparkle', hint: 'Stronger hierarchy, social proof and motion — within the brand' },
   { id: 'a11y_check', label: 'Check accessibility', icon: 'eye', hint: 'Contrast, text alternatives, tap targets, heading order. Otto reports first; you choose what to fix' },
-  { id: 'brand_check', label: 'On-brand check', icon: 'palette', hint: 'Colours, type and spacing against the brand kit. Reports first' },
+  { id: 'brand_check', label: 'On-brand check', icon: 'palette', hint: 'Colors, type and spacing against the brand kit. Reports first' },
   { id: 'mobile', label: 'Fix mobile', icon: 'layout', hint: 'Make it work at phone width' },
   { id: 'copy', label: 'Real copy from story', icon: 'note', hint: 'Replace placeholder copy with text from the linked story' },
   { id: 'variants', label: '3 variants', icon: 'columns', hint: 'Three directions side by side. Nothing changes until you apply one' },
@@ -283,7 +284,7 @@ const QUICK_PROMPTS: Record<Exclude<QuickActionId, 'variants'>, { mode: DesignAs
   brand_check: {
     mode: 'critique',
     prompt:
-      'Check this against the brand kit: colours, typography, spacing and radius that are not brand tokens, and copy ' +
+      'Check this against the brand kit: colors, typography, spacing and radius that are not brand tokens, and copy ' +
       'tone. Report each problem as a finding with the token it should use. Do not edit.',
   },
   mobile: {
@@ -638,7 +639,7 @@ export function assistSignalSummary(kind: string, payload: Record<string, unknow
       const d = str('direction');
       const cited = Array.isArray(p.cited) ? p.cited.length : 0;
       const what = mode === 'variant' ? `a “${directionName(d)}” variant` : mode === 'a11y' ? 'an accessibility fix' : 'a new version';
-      return `Otto drafted ${what}${cited ? ` · cited ${cited} reference${cited === 1 ? '' : 's'}` : ''}`;
+      return `Otto drafted ${what}${cited ? ` · cited ${plural(cited, 'reference')}` : ''}`;
     }
     case 'a11y_fix': {
       const rule = str('rule');

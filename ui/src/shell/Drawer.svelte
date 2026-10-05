@@ -26,6 +26,10 @@
     title?: string;
     /** Panel width (CSS length). Defaults to a touch-friendly, viewport-capped value. */
     width?: string;
+    /** Called after the drawer dismisses itself (✕, backdrop, Esc). */
+    onclose?: () => void;
+    /** Richer header content in place of the plain `title` heading (titled drawers only). */
+    head?: Snippet;
     children: Snippet;
   }
 
@@ -36,11 +40,14 @@
     label = 'Panel',
     title,
     width = 'min(86vw, 320px)',
+    onclose,
+    head,
     children,
   }: Props = $props();
 
   function close(): void {
     open = false;
+    onclose?.();
   }
 
   let panel: HTMLDivElement | undefined = $state();
@@ -74,11 +81,10 @@
 </script>
 
 {#if open && !inline}
-  <!-- Backdrop: dismiss on tap. role/handlers kept minimal; the panel stops
-       propagation so taps inside don't close it. -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="drawer-backdrop" onclick={close}></div>
+  <!-- Backdrop: a pointer-only dismiss target (presentation — keyboard and
+       AT users close with Esc or the ✕). It is a sibling of the panel, so
+       taps inside the panel never reach it. -->
+  <div class="drawer-backdrop" role="presentation" onclick={close}></div>
 {/if}
 {#if open || inline || kept}
   <div
@@ -95,7 +101,7 @@
          a wide drawer is hard on a phone, so give an explicit ✕. -->
     {#if !inline && title}
       <header class="drawer-head">
-        <h2>{title}</h2>
+        {#if head}<div class="drawer-head-main">{@render head()}</div>{:else}<h2>{title}</h2>{/if}
         <button class="icon-btn" onclick={close} aria-label="Close {title}" title="Close {title}" aria-keyshortcuts="Escape">
           <Icon name="x" size={14} />
         </button>
@@ -128,7 +134,7 @@
     display: flex;
     flex-direction: column;
     background: var(--bg);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     overflow: hidden;
   }
   .drawer.inline {
@@ -152,6 +158,10 @@
     font-size: var(--fs-l);
     font-weight: 600;
   }
+  .drawer-head-main {
+    flex: 1;
+    min-width: 0;
+  }
   .drawer-body {
     flex: 1;
     min-height: 0;
@@ -170,7 +180,7 @@
     color: var(--text);
   }
   .drawer-close:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   /* `side` is the reading-direction side: in RTL the Navigator drawer comes
      from the right (logical insets + a mirrored slide). */

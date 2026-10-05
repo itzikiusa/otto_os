@@ -138,7 +138,7 @@
   }
   .mfb-input:focus {
     outline: none;
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   /* Two-way segmented toggle (mirrors the results view switcher). */
   .mfb-mode {
@@ -169,7 +169,7 @@
     align-items: center;
     gap: 4px;
     height: 22px;
-    padding: 0 9px;
+    padding: 0 8px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -178,7 +178,7 @@
     cursor: pointer;
   }
   .mfb-run:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
     color: var(--accent-text);
   }
   .mfb-chips {
@@ -190,7 +190,7 @@
   }
   .mfb-chip {
     height: 18px;
-    padding: 0 7px;
+    padding: 0 6px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: transparent;
@@ -200,7 +200,7 @@
   }
   .mfb-chip:hover {
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
   }
   .mfb-more {
     color: var(--text-dim);

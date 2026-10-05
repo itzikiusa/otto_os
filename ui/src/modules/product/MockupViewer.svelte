@@ -82,7 +82,7 @@
   /** Wrap an SVG string in a minimal sandboxed HTML doc for iframe srcdoc. */
   function svgDoc(svg: string): string {
     return `<!doctype html><html><head><meta charset="utf-8">` +
-      `<style>html,body{margin:0;padding:8px;background:#fff;}` +
+      `<style>html,body{margin:0;padding:8px;background:#fff;}` + // ui-guards: allow — rendered page canvas (the mockup’s own white page)
       `svg{max-width:100%;height:auto;display:block;margin:0 auto;}</style></head>` +
       `<body>${svg}</body></html>`;
   }
@@ -181,7 +181,7 @@
   {#if kind === 'html' && allowScripts}
     <div class="warn">
       <Icon name="info" size={13} />
-      Interactivity is ON — this mockup's scripts run inside a sandboxed iframe
+      Interactivity is ON — this mockup’s scripts run inside a sandboxed iframe
       (no same-origin access). Only enable for content you trust.
     </div>
   {/if}
@@ -243,7 +243,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
@@ -265,7 +265,7 @@
     margin-inline-start: auto;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     cursor: pointer;
@@ -298,7 +298,7 @@
   .render-box {
     position: relative;
     min-height: 200px;
-    background: #fff;
+    background: #fff; /* ui-guards: allow — rendered page canvas (the mockup’s own white page) */
     border-radius: var(--radius-s);
     box-shadow: 0 0 0 1px var(--border);
     overflow: hidden;
@@ -323,6 +323,6 @@
     width: 100%;
     min-height: 480px;
     border: none;
-    background: #fff;
+    background: #fff; /* ui-guards: allow — rendered page canvas (the mockup’s own white page) */
   }
 </style>

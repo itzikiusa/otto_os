@@ -282,7 +282,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 7px 0;
+    padding: 6px 0;
     border: none;
     background: transparent;
     color: var(--text);
@@ -298,7 +298,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 7px 9px;
+    padding: 6px 8px;
     font-size: var(--fs-m);
   }
   textarea {
@@ -323,8 +323,8 @@
     font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-soft-strong);
     border-radius: var(--radius-s);
     padding: 8px 10px;
   }

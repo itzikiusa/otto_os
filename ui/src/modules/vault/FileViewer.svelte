@@ -5,6 +5,7 @@
   // images/PDF display inline, and everything else falls back to
   // syntax-highlighted code. Content is loaded by the store (vault.openFile).
   import { onMount } from 'svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import { formatHtml } from '../../lib/formatHtml';
@@ -271,7 +272,7 @@
 
   <div class="body">
     {#if vault.fileLoading}
-      <div class="notice" role="status">Loading file…</div>
+      <LoadState what="the file" loading empty />
     {:else if vault.fileError}
       <div class="notice err">{vault.fileError}</div>
     {:else if isImage && vault.fileBlobUrl}
@@ -385,7 +386,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 4px 9px;
+    padding: 4px 10px;
     cursor: pointer;
     font-size: var(--fs-s);
     white-space: nowrap;
@@ -418,7 +419,7 @@
   .img-wrap img {
     max-width: 100%;
     max-height: 100%;
-    border-radius: 8px;
+    border-radius: var(--radius-m);
   }
   .d2-wrap {
     /* d2 renders theme-aware (dark themeID in dark mode) — no forced bg. */
@@ -442,7 +443,7 @@
     border: none;
     min-height: 0;
     /* Mockups usually assume a light page; srcdoc iframes are transparent. */
-    background: #fff;
+    background: #fff; /* ui-guards: allow — rendered HTML file canvas (the page’s own white page) */
   }
   .table-wrap {
     padding: 12px 14px;

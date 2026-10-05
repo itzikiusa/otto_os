@@ -54,7 +54,7 @@
   </div>
 {:else if mode === 'working'}
   <div class="live-line" data-live-status="working" role="status">
-    <span class="spin" aria-hidden="true"></span>
+    <span class="spinner" style:--spinner-size="11px" aria-hidden="true"></span>
     <span class="who">{agentName} is working</span>
     <span class="doing" title={line?.hint || doing}><span class="sep" aria-hidden="true">·</span> <span class:mono={!!line?.mono}>{doing}</span></span>
     {#if elapsed}<span class="elapsed" aria-hidden="true">{elapsed}</span>{/if}
@@ -74,7 +74,7 @@
           </ul>
         {/if}
       {/each}
-      <p class="w-body">Pick an answer in the terminal — the chat can't send a choice for you.</p>
+      <p class="w-body">Pick an answer in the terminal — the chat can’t send a choice for you.</p>
     {:else if line}
       <p class="w-body">
         {agentName} wants to {line.base}
@@ -97,7 +97,7 @@
     gap: 8px;
     padding-block: 6px;
     padding-inline: 8px;
-    margin-inline-start: 11px;
+    margin-inline-start: 10px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     min-width: 0;
@@ -126,26 +126,13 @@
     font-size: var(--fs-xs);
     font-variant-numeric: tabular-nums;
   }
-  .spin {
-    width: 11px;
-    height: 11px;
-    flex-shrink: 0;
-    border-radius: 50%;
-    border: 2px solid var(--border-strong);
-    border-top-color: var(--text-dim);
-  }
-  @media (prefers-reduced-motion: no-preference) {
-    .spin {
-      animation: otto-spin 0.8s linear infinite;
-    }
-  }
   
   /* "Needs you" is the one amber state (patterns §1). */
   .waiting {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin-inline-start: 11px;
+    margin-inline-start: 10px;
     padding: 10px 12px;
     border-radius: var(--radius-m);
     background: var(--warning-soft);

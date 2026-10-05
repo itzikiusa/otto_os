@@ -4,7 +4,7 @@
   // Watch (opens the live tab), Take over (pauses the agent so you can type a
   // password, 2FA or CAPTCHA) and Hand back.
   import ActionCard from './ActionCard.svelte';
-  import StatePill from './StatePill.svelte';
+  import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { authedBlobUrl } from '../../../lib/api/client';
   import { assistant, describeError } from '../../../lib/stores/assistant.svelte';
@@ -76,9 +76,9 @@
 <ActionCard icon="compass" heading="Browser" summary={task.title} attention={youHaveIt} testid="card-browser">
   {#snippet pill()}
     {#if youHaveIt && task.kind !== 'delegation'}
-      <StatePill tone="warn" label="You have control" />
+      <Badge tone="warn" label="You have control" />
     {:else}
-      <StatePill tone={taskTone(task)} label={taskStateLabel(task)} live={task.state === 'running'} />
+      <Badge tone={taskTone(task)} label={taskStateLabel(task)} live={task.state === 'running'} />
     {/if}
   {/snippet}
   <div class="wrap"><div class="grid">

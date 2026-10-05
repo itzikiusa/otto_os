@@ -8,6 +8,11 @@
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { sentenceCase } from '../../lib/labels';
 
   interface Props {
     sessionId: string;
@@ -30,7 +35,7 @@
       .get<ProductStory[]>(`/workspaces/${wsId}/product/stories`)
       .then((s) => { stories = s; loading = false; })
       .catch((e) => {
-        loadError = e instanceof Error ? e.message : String(e);
+        loadError = loadErrorText(e);
         loading = false;
       });
   }
@@ -71,25 +76,29 @@
     into the running agent session.
   </div>
 
-  <!-- svelte-ignore a11y_autofocus -->
   <input
     class="search-input"
     type="search"
     placeholder="Filter by title or key…"
     bind:value={query}
-    autofocus
+    data-autofocus
   />
 
-  {#if loading}
-    <p class="dim">Loading stories…</p>
-  {:else if loadError}
-    <p class="dim" role="alert">
-      Couldn’t load product stories: {loadError}
-      <button class="btn small" onclick={() => ws.currentId && load(ws.currentId)}>Retry</button>
-    </p>
-  {:else if filtered.length === 0}
-    <p class="dim">{stories.length === 0 ? 'No product stories in this workspace.' : 'No stories match your filter.'}</p>
-  {:else}
+  <LoadState
+    what="product stories"
+    {loading}
+    error={loadError}
+    empty={filtered.length === 0}
+    onretry={() => ws.currentId && load(ws.currentId)}
+    rows={3}
+  >
+    {#snippet emptyView()}
+      <EmptyState
+        icon={stories.length === 0 ? 'box' : 'search'}
+        title={stories.length === 0 ? 'No product stories in this workspace' : 'No stories match your filter'}
+        body={stories.length === 0 ? 'Refine a story in Product first, then attach it here.' : undefined}
+      />
+    {/snippet}
     <ul class="story-list">
       {#each filtered as story (story.id)}
         <li>
@@ -100,12 +109,12 @@
           >
             <span class="story-key">{story.source_key}</span>
             <span class="story-title">{story.title}</span>
-            <span class="story-stage chip">{story.stage}</span>
+            <Badge label={sentenceCase(story.stage)} />
           </button>
         </li>
       {/each}
     </ul>
-  {/if}
+  </LoadState>
 
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>
@@ -132,7 +141,7 @@
     outline: none;
   }
   .search-input:focus {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .story-list {
     list-style: none;
@@ -140,7 +149,7 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     max-height: 340px;
     overflow-y: auto;
   }
@@ -153,14 +162,14 @@
     background: transparent;
     border: 1px solid transparent;
     border-radius: var(--radius-m);
-    padding: 7px 10px;
+    padding: 6px 10px;
     cursor: pointer;
     color: var(--text);
     font-size: var(--fs-m);
   }
   .story-row:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
   }
   .story-row:disabled {
     opacity: 0.5;
@@ -179,18 +188,5 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .story-stage {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    height: 16px;
-  }
-  .dim {
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    text-align: center;
-    padding: 20px 0;
   }
 </style>

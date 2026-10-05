@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Focus view (GitKraken-style): everything "mine" across the whole install in
   // one place — MY PULL REQUESTS (open PRs aggregated across every registered
   // repo, grouped by forge) and MY WORK (Jira issues assigned to me, rebuilt
@@ -348,12 +349,12 @@
       {:else if prGroups.length === 0}
         <div class="fx-empty dim">
           No open pull requests{prFilter === 'mine' ? ' opened by you' : ''} across
-          {git.allRepos.length} registered repo{git.allRepos.length === 1 ? '' : 's'}.
-          {#if prErrors > 0}({prErrors} repo{prErrors === 1 ? '' : 's'} failed to list){/if}
+          {plural(git.allRepos.length, 'registered repository', 'registered repositories')}.
+          {#if prErrors > 0}({plural(prErrors, 'repo')} failed to list){/if}
         </div>
       {:else}
         {#if prErrors > 0}
-          <div class="fx-warn dim">{prErrors} repo{prErrors === 1 ? '' : 's'} failed to list PRs (missing account/permissions) — showing the rest.</div>
+          <div class="fx-warn dim">{plural(prErrors, 'repo')} failed to list PRs (missing account/permissions) — showing the rest.</div>
         {/if}
         {#each prGroups as [forge, rows] (forge)}
           <div class="fx-group-head">
@@ -548,9 +549,9 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     min-width: 16px;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     text-align: center;
   }
@@ -582,7 +583,7 @@
   .fx-group-head {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     padding: 8px 4px 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -603,7 +604,7 @@
     min-height: 28px;
   }
   .fx-pr:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .fx-ago {
     font-size: var(--fs-xs);
@@ -639,7 +640,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
@@ -665,7 +666,7 @@
     align-items: center;
     gap: 4px;
     border: none;
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border-radius: 999px;
     font-size: var(--fs-xs);
@@ -678,7 +679,7 @@
     white-space: nowrap;
   }
   .fx-repo-link:hover {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft-strong);
   }
   .fx-repo-link > :global(svg) {
     flex-shrink: 0;
@@ -725,8 +726,8 @@
   .fx-parent {
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 5px 6px 3px;
+    gap: 6px;
+    padding: 4px 6px 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -745,7 +746,7 @@
     border-radius: var(--radius-s);
   }
   .fx-issue:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .fx-issue-main {
     display: flex;
@@ -764,14 +765,14 @@
     border-radius: var(--radius-s);
   }
   .fx-issue-main.quick-open {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .fx-type {
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .06em;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
@@ -799,7 +800,7 @@
   .fx-status {
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);
@@ -832,7 +833,7 @@
   }
   .fx-ext:hover {
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .fx-account {
     height: 26px;
@@ -870,7 +871,7 @@
   }
   .fx-quick-close:hover {
     color: var(--text);
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .fx-quick-body {
     flex: 1;
@@ -918,7 +919,7 @@
       bottom: 0;
       width: min(92vw, 380px);
       z-index: 5;
-      box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+      box-shadow: var(--shadow-card);
     }
     .focus {
       position: relative;

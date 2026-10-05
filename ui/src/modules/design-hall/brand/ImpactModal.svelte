@@ -5,6 +5,8 @@
   // contrast warnings for the proposed colours. Nothing is saved from here
   // unless the person presses "Save as vN".
   import type { BrandConsumer, BrandImpactResp, BrandTokenChange } from '../../../lib/api/types';
+  import Badge from '../../../lib/components/Badge.svelte';
+  import type { BadgeTone } from '../../../lib/status';
   import Modal from '../../../lib/components/Modal.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
@@ -30,7 +32,7 @@
   const affected = $derived(impact?.consumers.filter((c) => c.affected.length > 0) ?? []);
   const untouched = $derived(impact ? impact.artifact_count - affected.length : 0);
 
-  function when(c: BrandConsumer): { text: string; tone: string } {
+  function when(c: BrandConsumer): { text: string; tone: BadgeTone } {
     if (c.policy === 'pinned') return { text: 'pinned · stays until updated', tone: 'warn' };
     if (c.policy === 'follow_latest') return { text: 'follows latest · changes on save', tone: 'info' };
     return { text: `follows approved · changes when you approve v${nextSeq}`, tone: 'accent' };
@@ -89,7 +91,7 @@
             <li>
               <StudioBadge studio={c.artifact.studio} />
               <button class="linkish t" onclick={() => openArtifact(c.artifact.id)} title="Open {c.artifact.title}">{c.artifact.title}</button>
-              <span class="pill {w.tone}">{w.text}</span>
+              <Badge tone={w.tone} label={w.text} />
               <span class="mono dim aff" title={c.affected.join(', ')}>{c.whole_kit ? 'whole kit' : c.affected.join(', ')}</span>
             </li>
           {/each}
@@ -155,7 +157,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     min-width: 0;
   }
   .changes li + li,
@@ -230,24 +232,6 @@
   .linkish:hover {
     color: var(--accent-text);
     text-decoration: underline;
-  }
-  .pill {
-    font-size: var(--fs-xs);
-    padding: 1px 8px;
-    border-radius: 999px;
-    white-space: nowrap;
-  }
-  .pill.warn {
-    color: var(--warning);
-    background: var(--warning-soft);
-  }
-  .pill.info {
-    color: var(--info);
-    background: var(--info-soft);
-  }
-  .pill.accent {
-    color: var(--accent-text);
-    background: var(--accent-soft);
   }
   .aff {
     font-size: var(--fs-xs);

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   // Drawer "HTTP" tab (K-3): call an HTTP endpoint inside one pod or every pod
   // of a workload — e.g. Spring Boot actuator loggers — through the daemon's
   // kubectl-proxy gateway (port-forward fallback). Left: saved per-workload
@@ -10,6 +12,8 @@
   import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { copyText } from '../../lib/clipboard';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -66,7 +70,7 @@
       saved = r.actions;
       savedError = '';
     } catch (e) {
-      savedError = e instanceof Error ? e.message : String(e);
+      savedError = loadErrorText(e);
     } finally {
       savedLoading = false;
     }
@@ -146,8 +150,8 @@
       openRow = r.results.length === 1 ? r.results[0].pod : null;
       const failed = r.results.filter((x) => x.error || (x.status ?? 0) >= 400).length;
       if (mutating) {
-        if (failed) toasts.warn(`${method} ${req.path}`, `${failed} of ${r.results.length} pod${r.results.length === 1 ? '' : 's'} failed`);
-        else toasts.success(`${method} ${req.path}`, `${r.results.length} pod${r.results.length === 1 ? '' : 's'} answered`);
+        if (failed) toasts.warn(`${method} ${req.path}`, `${failed} of ${plural(r.results.length, 'pod')} failed`);
+        else toasts.success(`${method} ${req.path}`, `${plural(r.results.length, 'pod')} answered`);
       }
     } catch (e) {
       runError = e instanceof ApiError && e.status === 409 ? `The daemon wants the target name confirmed: ${e.message}` : e instanceof Error ? e.message : String(e);
@@ -183,7 +187,7 @@
       loadedFrom = a.id;
       toasts.success('Action saved', a.name);
     } catch (e) {
-      toasts.error("Couldn’t save the action", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t save the action", e);
     }
   }
 
@@ -195,7 +199,7 @@
       saved = saved.filter((s) => s.id !== a.id);
       if (loadedFrom === a.id) loadedFrom = null;
     } catch (e) {
-      toasts.error("Couldn’t delete the action", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t delete the action", e);
     }
   }
 
@@ -215,13 +219,8 @@
   <aside class="ph-side" aria-label="Saved actions and presets">
     {#if workload}
       <div class="ph-sec">Saved for {workload.name}</div>
-      {#if savedLoading && !saved.length}
-        <div class="dim small pad">Loading…</div>
-      {:else if savedError}
-        <div class="dim small pad">Couldn’t load saved actions. <button class="btn small" onclick={() => void loadSaved()}>Retry</button></div>
-      {:else if !saved.length}
-        <div class="dim small pad">None yet — build a request and Save it.</div>
-      {:else}
+      <LoadState what="saved actions" variant="compact" loading={savedLoading} error={savedError} empty={!saved.length} onretry={() => void loadSaved()}>
+        {#snippet emptyView()}<div class="dim small pad">None yet — build a request and Save it.</div>{/snippet}
         {#each saved as a (a.id)}
           <div class="ph-item-row">
             <button class="ph-item" class:active={loadedFrom === a.id} onclick={() => applyPreset({ ...a, body: a.body_template })} title="{a.method} :{a.port}{a.path}">
@@ -230,7 +229,7 @@
             {#if canMutate}<button class="icon-btn" onclick={() => void deleteAction(a)} aria-label="Delete {a.name}" title="Delete saved action"><Icon name="trash" size={12} /></button>{/if}
           </div>
         {/each}
-      {/if}
+      </LoadState>
     {/if}
     <div class="ph-sec">Spring Boot actuator</div>
     {#each ACTUATOR_PRESETS as p (p.id)}
@@ -290,7 +289,7 @@
       </button>
     </div>
     {#if problem && path}<div class="dim small">{problem}</div>{/if}
-    {#if mutating && guarded}<div class="guard small" role="note"><Icon name="warning" size={12} /> {isProdEnv(cluster?.environment) ? 'Production' : 'Read-only'} cluster — you'll be asked to type the target name.</div>{/if}
+    {#if mutating && guarded}<div class="guard small" role="note"><Icon name="warning" size={12} /> {isProdEnv(cluster?.environment) ? 'Production' : 'Read-only'} cluster — you’ll be asked to type the target name.</div>{/if}
 
     {#if runError}
       <div class="err" role="alert">{runError}</div>
@@ -325,7 +324,7 @@
         {/each}
       </ul>
     {:else}
-      <div class="dim small">Pick a preset or type a path, then Send. Calls go through the cluster API server's pod proxy; nothing is exposed outside this Mac.</div>
+      <div class="dim small">Pick a preset or type a path, then Send. Calls go through the cluster API server’s pod proxy; nothing is exposed outside this Mac.</div>
     {/if}
   </section>
 </div>
@@ -372,7 +371,7 @@
     cursor: pointer;
   }
   .ph-item:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .ph-item.active {
     background: var(--accent-soft);
@@ -468,7 +467,7 @@
     align-items: center;
     gap: 8px;
     inline-size: 100%;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);

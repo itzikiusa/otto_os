@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { pluralNoun } from '../../lib/plural';
   // Result view orchestrator: sticky-header grid (GridView), a JSON array view
   // (JsonView) or a vertical row-per-record layout (VerticalView) over the same
   // rows, plus everything around them — result-set switcher, running overlay,
@@ -1319,7 +1320,7 @@
   <!-- Inline running card (mini grids only — the main grid keeps its frame). -->
   <div class="rg-overlay rg-inline" role="status" aria-live="polite">
     <div class="rg-overlay-card">
-      <span class="rg-spin"><Icon name="refresh" size={16} /></span>
+      <span class="spinner" style="--spinner-size: 16px" aria-hidden="true"></span>
       <span class="rg-overlay-text">Running… {elapsed}s</span>
       {#if cancelQuery}
         <button class="rg-cancel" onclick={cancelQuery} title="Cancel the running query">
@@ -1348,7 +1349,7 @@
       </div>
     </div>
     <div class="grid-foot">
-      <span class="rg-spin sm"><Icon name="refresh" size={11} /></span>
+      <span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span>
       <span class="rg-overlay-text">Running… {elapsed}s</span>
       {#if cancelQuery}
         <button class="pg-btn" onclick={cancelQuery} title="Cancel the running query">Cancel</button>
@@ -1444,8 +1445,8 @@
           <input
             class="gt-search-input mono"
             type="text"
-            placeholder="Search rows…"
-            aria-label="Search rows"
+            placeholder="Filter rows…"
+            aria-label="Filter rows"
             value={searchInput}
             oninput={(e) => setSearch(e.currentTarget.value, true)}
             onfocus={onSearchFocus}
@@ -1454,7 +1455,7 @@
             autocomplete="off"
           />
           {#if filtering || searchInput}
-            <button class="gt-search-clear" title="Clear search" aria-label="Clear search" onclick={() => setSearch('')}>
+            <button class="gt-search-clear" title="Clear filter" aria-label="Clear filter" onclick={() => setSearch('')}>
               <Icon name="x" size={10} />
             </button>
           {/if}
@@ -1536,7 +1537,7 @@
         </button>
         {/if}
         <button class="sel-clear" onclick={() => flow.clearSelection()}>Clear</button>
-        {#if flow.editable}<span class="sel-hint">you'll review the statement before it runs</span>{/if}
+        {#if flow.editable}<span class="sel-hint">you’ll review the statement before it runs</span>{/if}
       </div>
     {/if}
 
@@ -1545,32 +1546,32 @@
         <span class="fb-label"><Icon name="search" size={11} />Filters</span>
         {#each database.filters as cond, ci (ci)}
           {#if cond.kind === 'raw'}
-            <span class="chip raw" title="Existing WHERE condition">
-              <span class="chip-text mono">{cond.text}</span>
-              <button class="chip-x" title="Remove" aria-label="Remove" onclick={() => database.removeFilterCond(ci)}><Icon name="x" size={9} /></button>
+            <span class="cond raw" title="Existing WHERE condition">
+              <span class="cond-text mono">{cond.text}</span>
+              <button class="cond-x" title="Remove" aria-label="Remove" onclick={() => database.removeFilterCond(ci)}><Icon name="x" size={9} /></button>
             </span>
           {:else}
-            <span class="chip" class:exclude={cond.op === 'not_in'}>
+            <span class="cond" class:exclude={cond.op === 'not_in'}>
               <button
-                class="chip-op"
+                class="cond-op"
                 title={cond.op === 'in' ? 'Include (click to exclude)' : 'Exclude (click to include)'}
                 onclick={() => database.toggleFilterMode(ci)}
               >{cond.op === 'in' ? '=' : '≠'}</button>
-              <span class="chip-col mono">{cond.column}</span>
+              <span class="cond-col mono">{cond.column}</span>
               {#each cond.values as val, vi (vi)}
-                <span class="chip-val mono">
+                <span class="cond-val mono">
                   {val.isNull ? 'NULL' : val.raw}
                   <button class="val-x" aria-label="Remove value" title="Remove value" onclick={() => database.removeFilterValue(ci, vi)}><Icon name="x" size={9} /></button>
                 </span>
               {/each}
               <input
-                class="chip-add mono"
+                class="cond-add mono"
                 placeholder="+ value"
                 aria-label="Add a value to the {cond.column} filter"
                 bind:value={addValText[ci]}
                 onkeydown={(e) => { if (e.key === 'Enter') submitFilterValue(ci); }}
               />
-              <button class="chip-x" title="Remove filter" aria-label="Remove filter" onclick={() => database.removeFilterCond(ci)}><Icon name="x" size={9} /></button>
+              <button class="cond-x" title="Remove filter" aria-label="Remove filter" onclick={() => database.removeFilterCond(ci)}><Icon name="x" size={9} /></button>
             </span>
           {/if}
         {/each}
@@ -1664,8 +1665,8 @@
       <div class="pending-bar" data-testid="pending-edits-bar">
         <Icon name="edit" size={12} />
         <span>
-          <strong>{flow.pendingCells}</strong> pending change{flow.pendingCells === 1 ? '' : 's'} on
-          <strong>{flow.pendingEdits.size}</strong> row{flow.pendingEdits.size === 1 ? '' : 's'} — nothing
+          <strong>{flow.pendingCells}</strong> {pluralNoun(flow.pendingCells, 'pending change')} on
+          <strong>{flow.pendingEdits.size}</strong> {pluralNoun(flow.pendingEdits.size, 'row')} — nothing
           is written until you review &amp; run.
         </span>
         <span class="pending-spacer"></span>
@@ -1678,9 +1679,9 @@
            probe's verdict) land in its trailing slot without moving anything. -->
       <div class="grid-foot">
         {#if filtering || chipFiltering}
-          <span><strong>{viewRows.length.toLocaleString()}</strong> of {liveRows.length.toLocaleString()} row{liveRows.length === 1 ? '' : 's'}</span>
+          <span><strong>{viewRows.length.toLocaleString()}</strong> of {liveRows.length.toLocaleString()} {pluralNoun(liveRows.length, 'row')}</span>
         {:else}
-          <span><strong>{result.stats.row_count.toLocaleString()}</strong> row{result.stats.row_count === 1 ? '' : 's'}</span>
+          <span><strong>{result.stats.row_count.toLocaleString()}</strong> {pluralNoun(result.stats.row_count, 'row')}</span>
         {/if}
         {#if sorting && sortCol !== null}
           <button class="sort-chip" title="Clear sort on {result.columns[sortCol].name}" onclick={() => { sortCol = null; sortDir = null; }}>
@@ -1746,7 +1747,7 @@
            flight, with an elapsed counter + inline Cancel (client + engine stop). -->
       <div class="rg-overlay" role="status" aria-live="polite">
         <div class="rg-overlay-card">
-          <span class="rg-spin"><Icon name="refresh" size={16} /></span>
+          <span class="spinner" style="--spinner-size: 16px" aria-hidden="true"></span>
           <span class="rg-overlay-text">Running… {elapsed}s</span>
           {#if cancelQuery}
             <button class="rg-cancel" onclick={cancelQuery} title="Cancel the running query">
@@ -1843,7 +1844,7 @@
   .rg-switch {
     display: flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     flex-wrap: wrap;
     padding: 2px 2px 8px;
     flex-shrink: 0;
@@ -1851,7 +1852,7 @@
   .rg-seg {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 24px;
     padding: 0 10px;
     border: 1px solid var(--border);
@@ -1866,8 +1867,8 @@
     color: var(--text);
   }
   .rg-seg.on {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    border-color: var(--accent-line-strong);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .rg-seg.err {
@@ -1904,15 +1905,9 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     font-size: var(--fs-m);
     color: var(--text);
-  }
-  .rg-spin {
-    display: grid;
-    place-items: center;
-    color: var(--accent-text);
-    animation: otto-spin 0.8s linear infinite;
   }
   
   .rg-overlay-text {
@@ -1928,7 +1923,7 @@
     border-radius: var(--radius-s);
     font-size: var(--fs-s);
     font-weight: 600;
-    padding: 3px 9px;
+    padding: 2px 8px;
     cursor: pointer;
   }
   .rg-cancel:hover {
@@ -2082,25 +2077,13 @@
       var(--surface-2) 100%
     );
     background-size: 200% 100%;
-    animation: skel-shimmer 1.5s ease-in-out infinite;
-  }
-  @keyframes skel-shimmer {
-    from {
-      background-position: 100% 0;
-    }
-    to {
-      background-position: -100% 0;
-    }
+    animation: otto-shimmer 1.5s ease-in-out infinite;
   }
   .skel-box {
     opacity: 0.6;
   }
-  .rg-spin.sm {
-    color: var(--text-dim);
-  }
   @media (prefers-reduced-motion: reduce) {
-    .skel-bar,
-    .rg-spin {
+    .skel-bar {
       animation: none;
     }
   }
@@ -2108,8 +2091,8 @@
   .grid-notice {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 9%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-soft-strong);
     border-radius: var(--radius-s);
     padding: 4px 8px;
     margin-bottom: 6px;
@@ -2137,25 +2120,25 @@
     font-weight: 600;
     color: var(--text-dim);
   }
-  .chip {
+  .cond {
     display: inline-flex;
     align-items: center;
     gap: 4px;
     height: 22px;
     padding-block: 0; padding-inline: 0 4px;
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: 999px;
     background: var(--surface);
     font-size: var(--fs-xs);
   }
-  .chip.exclude {
+  .cond.exclude {
     border-color: color-mix(in srgb, var(--status-exited) 45%, transparent);
   }
-  .chip.raw {
-    padding-block: 0; padding-inline: 9px 4px;
+  .cond.raw {
+    padding-block: 0; padding-inline: 8px 4px;
     border-style: dashed;
   }
-  .chip-op {
+  .cond-op {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -2164,24 +2147,24 @@
     margin-block: 0; margin-inline: 1px 0;
     border: none;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     font-weight: 600;
     cursor: pointer;
   }
-  .chip.exclude .chip-op {
+  .cond.exclude .cond-op {
     background: color-mix(in srgb, var(--status-exited) 16%, transparent);
     color: var(--danger);
   }
-  .chip-col {
+  .cond-col {
     font-weight: 600;
     color: var(--text);
   }
-  .chip-val {
+  .cond-val {
     display: inline-flex;
     align-items: center;
     gap: 2px;
-    padding-block: 0; padding-inline: 6px 3px;
+    padding-block: 0; padding-inline: 6px 2px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text);
@@ -2203,7 +2186,7 @@
     background: color-mix(in srgb, var(--status-exited) 20%, transparent);
     color: var(--danger);
   }
-  .chip-add {
+  .cond-add {
     width: 64px;
     height: 18px;
     border: none;
@@ -2213,14 +2196,14 @@
     font-size: var(--fs-xs);
     outline: none;
   }
-  .chip-text {
+  .cond-text {
     color: var(--text-dim);
     max-width: 280px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .chip-x {
+  .cond-x {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -2232,7 +2215,7 @@
     color: var(--text-dim);
     cursor: pointer;
   }
-  .chip-x:hover {
+  .cond-x:hover {
     background: color-mix(in srgb, var(--status-exited) 20%, transparent);
     color: var(--danger);
   }
@@ -2259,7 +2242,7 @@
   .gt-search {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 26px;
     box-sizing: border-box;
     padding: 0 8px;
@@ -2271,7 +2254,7 @@
     min-width: 96px;
   }
   .gt-search:focus-within {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
     color: var(--accent-text);
   }
   .gt-search-input {
@@ -2308,7 +2291,7 @@
     align-items: center;
     gap: 4px;
     height: 18px;
-    padding: 0 7px;
+    padding: 0 6px;
     border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 500;
@@ -2335,7 +2318,7 @@
   }
   .vs {
     height: 22px;
-    padding: 0 9px;
+    padding: 0 8px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -2351,7 +2334,7 @@
     background: var(--surface);
     color: var(--text);
     font-weight: 500;
-    box-shadow: 0 1px 1px rgba(0, 0, 0, 0.08);
+    box-shadow: var(--shadow-xs);
   }
   /* "Auto" is an escape hatch, not a fourth view — dimmed and italic so it
      reads as "clear my pick" next to the three real modes. */
@@ -2365,19 +2348,19 @@
   }
   /* Nudge the user toward the full export when the shown result is capped. */
   .export-nudge {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
     color: var(--accent-text);
   }
   /* Server-side masking badge — shown in toolbar when result.masked is true. */
   .tb-masked {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 22px;
-    padding: 0 9px;
+    padding: 0 8px;
     border-radius: var(--radius-s);
-    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border: 1px solid var(--accent-line-strong);
+    background: var(--accent-soft);
     color: var(--accent-text);
     font-size: var(--fs-s);
     font-weight: 600;
@@ -2387,7 +2370,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 10px;
+    padding: 4px 10px;
     border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
     font-size: var(--fs-xs);
@@ -2400,8 +2383,8 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 3px 9px;
-    border-radius: 5px;
+    padding: 2px 8px;
+    border-radius: var(--radius-s);
     border: 1px solid color-mix(in srgb, var(--danger) 50%, transparent);
     background: color-mix(in srgb, var(--danger) 14%, transparent);
     color: var(--danger);
@@ -2415,8 +2398,8 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 3px 9px;
-    border-radius: 5px;
+    padding: 2px 8px;
+    border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text-dim);
@@ -2427,8 +2410,8 @@
     border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
   }
   .sel-clear {
-    padding: 3px 8px;
-    border-radius: 5px;
+    padding: 2px 8px;
+    border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: transparent;
     color: var(--text-dim);
@@ -2446,7 +2429,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-top: 7px;
+    margin-top: 8px;
     padding: 6px 10px;
     border: 1px solid color-mix(in srgb, var(--status-warn) 45%, transparent);
     background: color-mix(in srgb, var(--status-warn) 10%, transparent);
@@ -2465,7 +2448,7 @@
   .grid-foot {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     height: 24px;
     margin-top: 4px;
     padding: 0 2px;
@@ -2500,16 +2483,16 @@
     gap: 4px;
     height: 16px;
     padding: 0 6px;
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     cursor: pointer;
   }
   .sort-chip:hover {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft-strong);
   }
   .sort-chip-name {
     max-width: 180px;
@@ -2518,7 +2501,7 @@
     white-space: nowrap;
   }
   .trunc-badge {
-    padding: 0 7px;
+    padding: 0 6px;
     height: 16px;
     line-height: 16px;
     border-radius: 999px;

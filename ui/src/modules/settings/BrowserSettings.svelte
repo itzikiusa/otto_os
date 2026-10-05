@@ -6,10 +6,12 @@
   // The Chromium download is never silent: choosing a build that isn't
   // installed only offers a Download button that says how big it is.
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { browserLive } from '../../lib/stores/browserLive.svelte';
   import { nativeBrowserAvailable } from '../../lib/nativeBrowser';
   import { formatBytes } from '../../lib/metric-format';
@@ -68,10 +70,41 @@
   <PageHeader title={sectionLabel('browser')} subtitle="Live tabs and the browser engine that runs them" />
   <PageBody width="readable">
     <SectionIntro>
-      A live tab is a real browser. In the desktop app it can use this Mac's web view; everywhere
+      A live tab is a real browser. In the desktop app it can use this Mac’s web view; everywhere
       else (a remote session, your phone, and whenever an agent drives a page) it runs in a
       Chromium the Otto daemon manages and streams to you.
     </SectionIntro>
+
+    <section class="card bs-card" aria-labelledby="bs-panel">
+      <h2 id="bs-panel" class="row-title">Browser beside a session</h2>
+      <p class="row-desc">What the Browser tab of the Session panel (⌘J) shows on this device.</p>
+      <div class="choices" role="radiogroup" aria-labelledby="bs-panel">
+        <label class="choice">
+          <input
+            type="radio"
+            name="panel-browser"
+            checked={ui.browserPanelVersion === 'v2'}
+            onchange={() => ui.setBrowserPanelVersion('v2')}
+          />
+          <span>
+            <span class="choice-title">The Browser module</span>
+            <span class="row-desc">Reader and live tabs, saved marks, and an ask bar aimed at the session beside it. The default.</span>
+          </span>
+        </label>
+        <label class="choice">
+          <input
+            type="radio"
+            name="panel-browser"
+            checked={ui.browserPanelVersion === 'v1'}
+            onchange={() => ui.setBrowserPanelVersion('v1')}
+          />
+          <span>
+            <span class="choice-title">Classic session browser</span>
+            <span class="row-desc">The earlier per-session panel: native tabs and the take-over picker.</span>
+          </span>
+        </label>
+      </div>
+    </section>
 
     {#if nativeBrowserAvailable}
       <section class="card bs-card" aria-labelledby="bs-renderer">
@@ -85,8 +118,8 @@
               onchange={() => browserLive.setPref('native')}
             />
             <span>
-              <span class="choice-title">This Mac's web view</span>
-              <span class="row-desc">Fastest. Only in the desktop app; agents can't drive it.</span>
+              <span class="choice-title">This Mac’s web view</span>
+              <span class="row-desc">Fastest. Only in the desktop app; agents can’t drive it.</span>
             </span>
           </label>
           <label class="choice">
@@ -97,8 +130,8 @@
               onchange={() => browserLive.setPref('remote')}
             />
             <span>
-              <span class="choice-title">Otto's Chromium</span>
-              <span class="row-desc">Streams to any device, uses Otto's network guard, and agents can drive it while you watch.</span>
+              <span class="choice-title">Otto’s Chromium</span>
+              <span class="row-desc">Streams to any device, uses Otto’s network guard, and agents can drive it while you watch.</span>
             </span>
           </label>
         </div>
@@ -107,7 +140,7 @@
 
     {#if browserLive.supported === false}
       <section class="card bs-card">
-        <p class="row-desc">This Otto daemon doesn't include the live browser engine. Update Otto to use it.</p>
+        <p class="row-desc">This Otto daemon doesn’t include the live browser engine. Update Otto to use it.</p>
       </section>
     {:else if browserLive.loadError && !st}
       <section class="card bs-card err-card" role="alert">
@@ -115,7 +148,7 @@
         <button class="btn small" onclick={() => void browserLive.load()}><Icon name="refresh" size={12} /> Retry</button>
       </section>
     {:else if !st}
-      <section class="card bs-card"><p class="row-desc" role="status">Loading browser engine settings…</p></section>
+      <section class="card bs-card"><Skeleton rows={2} height={28} label="browser engine settings" /></section>
     {:else}
       <section class="card bs-card" aria-labelledby="bs-engine">
         <h2 id="bs-engine" class="row-title">Browser engine</h2>
@@ -123,7 +156,7 @@
           <p class="row-desc">The live browser engine runs on Apple silicon Macs only for now.</p>
         {:else}
           <p class="row-desc">
-            Downloaded once into Otto's data folder and checked against a pinned checksum. It is never
+            Downloaded once into Otto’s data folder and checked against a pinned checksum. It is never
             bundled or updated silently.
           </p>
           <div class="choices" role="radiogroup" aria-labelledby="bs-engine">
@@ -149,7 +182,7 @@
                   <!-- The size is on the Download button when there is one; saying it twice read as clutter. -->
                   <span class="row-desc">{b.blurb}{#if !(isAdmin && info && !info.installed && info.sha256_pinned)}{' '}About {formatBytes(browserLive.downloadBytes(b.build))}.{/if}</span>
                   {#if info && !info.sha256_pinned}
-                    <span class="row-desc">This Otto build has no checksum for it, so it can't be downloaded.</span>
+                    <span class="row-desc">This Otto build has no checksum for it, so it can’t be downloaded.</span>
                   {/if}
                 </label>
                 {#if isAdmin && info && !info.installed && info.sha256_pinned}
@@ -301,7 +334,7 @@
     gap: 10px;
   }
   .choice input {
-    margin-top: 3px;
+    margin-top: 2px;
   }
   .choice-text {
     flex: 1;

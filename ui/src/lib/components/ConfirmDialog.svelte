@@ -17,13 +17,12 @@
     {#if confirmer.message}<p class="cf-msg">{confirmer.message}</p>{/if}
     {#if confirmer.isPrompt}
       {#snippet promptInput()}
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="input cf-input"
         aria-label={confirmer.message || confirmer.title}
         bind:value={confirmer.inputValue}
         placeholder={confirmer.placeholder}
-        autofocus
+        data-autofocus
         spellcheck="false"
         onkeydown={(e) => {
           if (e.key === 'Enter') {

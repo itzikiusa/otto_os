@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import PathField from '../../lib/components/PathField.svelte';
   // Proof section: a two-pane viewer of proof packs. Left = status filter chips
   // + the pack list; right = the open pack's detail (badges, artifacts grouped
@@ -170,7 +172,7 @@
     const c = filterCounts;
     if (!c || !c.all) return '';
     const parts = STATUS_FILTERS.filter((f) => f !== 'all' && (c[f] ?? 0) > 0).map((f) => `${c[f]} ${f}`);
-    return `${c.all} pack${c.all === 1 ? '' : 's'}${parts.length ? ` · ${parts.join(' · ')}` : ''}. `;
+    return `${plural(c.all, 'pack')}${parts.length ? ` · ${parts.join(' · ')}` : ''}. `;
   });
 
   // Group the open pack's artifacts by kind for display.
@@ -655,7 +657,7 @@
     if (!detail) return;
     const t = detail.pack.title || 'this pack';
     const n = detail.artifacts.length;
-    if (!(await confirmer.ask(`Delete proof pack “${t}”? Its ${n} artifact${n === 1 ? '' : 's'} and snapshots are deleted too.`, { title: 'Delete proof pack' }))) {
+    if (!(await confirmer.ask(`Delete proof pack “${t}”? Its ${plural(n, 'artifact')} and snapshots are deleted too.`, { title: 'Delete proof pack' }))) {
       return;
     }
     try {
@@ -682,7 +684,7 @@
       }
       const n = dry.matched;
       const ok = await confirmer.ask(
-        `Archive ${n} session proof pack${n === 1 ? '' : 's'} with no evidence, untouched for 30+ days? They're hidden from the Proof list and the sidebar chips, not deleted — a pack comes back by itself as soon as it changes or gets evidence.`,
+        `Archive ${plural(n, 'session proof pack')} with no evidence, untouched for 30+ days? They’re hidden from the Proof list and the sidebar chips, not deleted — a pack comes back by itself as soon as it changes or gets evidence.`,
         { title: 'Archive stale session packs', confirmLabel: 'Archive' },
       );
       if (!ok) return;
@@ -955,7 +957,7 @@
                         <Icon name="play" size={12} /> Load video
                       </button>
                     {:else}
-                      <p class="dim media-loading" use:whenVisible={() => void fetchMedia(a.id)}>Loading media…</p>
+                      <div class="media-loading" use:whenVisible={() => void fetchMedia(a.id)}><Skeleton rows={1} height={120} label="the media" /></div>
                     {/if}
                   {/if}
                   {#if a.kind === 'pr_check'}
@@ -1207,7 +1209,7 @@
 {#if cfgOpen && detail}
   <Modal title="Proof requirements" width={480} onclose={() => (cfgOpen = false)}>
     {#if cfgLoading}
-      <p class="dim" role="status">Loading requirements…</p>
+      <LoadState what="the proof requirements" loading empty />
     {:else}
       <p class="modal-hint">Per-repo gates. These can only strengthen the default proof contract.</p>
       <label class="check-row">
@@ -1290,7 +1292,7 @@
   }
   .chip-btn.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   .chip-n {
@@ -1307,7 +1309,7 @@
   .pack-item {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     padding: 8px 10px;
     border: 1px solid transparent;
     background: transparent;
@@ -1321,7 +1323,7 @@
   }
   .pack-item.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    border-color: var(--accent-line);
   }
   .pack-top {
     display: flex;
@@ -1525,18 +1527,18 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
     cursor: pointer;
     text-align: start;
-    margin-bottom: 5px;
+    margin-bottom: 4px;
     font-size: var(--fs-s);
   }
   .child-link:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .icon-btn.small {
     width: 22px;

@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -250,7 +251,7 @@
     <EmptyState
       variant="page"
       icon="folder"
-      title="No workspace selected"
+      title={NO_WORKSPACE}
       body="Workspace context belongs to a workspace. Pick one from the workspace menu at the top of the sidebar to edit its shared project context."
     />
   {:else if (loading && !cfg) || (!cfg && loadError)}
@@ -279,7 +280,7 @@
       <!-- Active skills -->
       <div class="field">
         <span class="lbl" id="cs-skills-lbl">Active skills</span>
-        <SettingToggle label="All library skills active" hint="Uncheck to pick the skills this workspace's agents get." checked={allSkills} onchange={(v) => toggleAllSkills(v)} />
+        <SettingToggle label="All library skills active" hint="Uncheck to pick the skills this workspace’s agents get." checked={allSkills} onchange={(v) => toggleAllSkills(v)} />
         {#if !allSkills}
           {#if skills.length === 0}
             <span class="hint">The library has no skills yet. Add some in Settings → Context library.</span>
@@ -301,7 +302,7 @@
             </div>
           {/if}
           <span class="hint">
-            {selectedSkills.size} of {skills.length} checked. Only the checked skills are injected into this workspace's agents.
+            {selectedSkills.size} of {skills.length} checked. Only the checked skills are injected into this workspace’s agents.
           </span>
         {/if}
       </div>
@@ -345,7 +346,7 @@
           spellcheck="false"
           placeholder="Always run the tests before committing."
         ></textarea>
-        <span class="hint">Markdown, added to the context Otto hands each new or restarted agent session (kept outside the repo — your CLAUDE.md / AGENTS.md aren't edited).</span>
+        <span class="hint">Markdown, added to the context Otto hands each new or restarted agent session (kept outside the repo — your CLAUDE.md / AGENTS.md aren’t edited).</span>
       </div>
 
       <div class="field">
@@ -377,13 +378,13 @@
       <div class="card toggles">
         <SettingToggle
           label="Inline the workspace MEMORY.md"
-          hint="Adds the workspace's MEMORY.md file to the context, not just the curated memory above."
+          hint="Adds the workspace’s MEMORY.md file to the context, not just the curated memory above."
           checked={cfg.include_memory}
           onchange={(v) => { if (cfg) cfg.include_memory = v; }}
         />
         <SettingToggle
           label="Inject a repo map (tree-sitter)"
-          hint="A map of the repo's most-referenced symbols (tree-sitter + PageRank), so agents find their way faster."
+          hint="A map of the repo’s most-referenced symbols (tree-sitter + PageRank), so agents find their way faster."
           checked={cfg.include_repo_map ?? false}
           testid="context-repomap"
           onchange={(v) => { if (cfg) cfg.include_repo_map = v; }}

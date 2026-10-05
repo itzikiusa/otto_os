@@ -130,14 +130,14 @@
   </div>
 {:else if kind === 'image' || kind === 'pdf'}
   {#if mediaLoading}
-    <div role="status"><p class="pv-dim">Loading preview…</p><Skeleton rows={4} /></div>
+    <div><Skeleton rows={4} label="preview" /></div>
   {:else if mediaError}
     <p class="pv-err" role="alert">{mediaError} <button class="btn small" onclick={() => mediaTry++}>Retry preview</button></p>
   {:else if mediaUrl && kind === 'image'}
     <div class="pv-media"><img src={mediaUrl} alt={`Preview of ${obj.key}`} /></div>
   {:else if mediaUrl}
     <object class="pv-pdf" data={mediaUrl} type="application/pdf" title={`PDF preview of ${obj.key}`}>
-      <p class="pv-dim">This PDF can't be shown inline. <button class="btn small" onclick={ondownload}>Download</button></p>
+      <p class="pv-dim">This PDF can’t be shown inline. <button class="btn small" onclick={ondownload}>Download</button></p>
     </object>
   {/if}
 {:else if kind === 'binary'}

@@ -246,7 +246,7 @@
     {:else}
       <label class="search">
         <Icon name="search" size={12} />
-        <input class="input" placeholder="Search blocks" bind:value={query} aria-label="Search blocks" data-testid="site-block-search" />
+        <input class="input" placeholder="Filter blocks…" bind:value={query} aria-label="Filter blocks" data-testid="site-block-search" />
       </label>
       {#if readonly}<p class="dim hint">Read-only — blocks can’t be added.</p>{/if}
       {#each groups as g (g.id)}
@@ -323,7 +323,7 @@
   .tabs button {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .body {
     flex: 1;
@@ -504,7 +504,7 @@
   }
   .tile:hover {
     border-color: var(--accent);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .tile:focus-visible {
     outline: 2px solid var(--accent-text);

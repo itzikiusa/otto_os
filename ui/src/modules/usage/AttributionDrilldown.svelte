@@ -334,12 +334,6 @@
     height: 100%;
     background: var(--accent-solid);
     border-radius: var(--radius-s);
-    transition: width var(--dur-enter);
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .bar-fill {
-      transition: none;
-    }
   }
   .col-cost,
   .col-pct,

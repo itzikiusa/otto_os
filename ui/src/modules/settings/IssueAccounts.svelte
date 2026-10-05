@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -86,7 +87,7 @@
 
   function testLabel(r: Exclude<TestResult, 'busy'>): string {
     return r.ok
-      ? `Connected · ${r.projects} project${r.projects === 1 ? '' : 's'} visible`
+      ? `Connected · ${plural(r.projects, 'project')} visible`
       : `Couldn’t connect: ${r.error}`;
   }
 
@@ -199,7 +200,7 @@
     {#snippet actions()}
       <!-- While the list is empty the EmptyState owns the one "Add account". -->
       {#if accounts.length > 0}
-        <button class="btn primary" onclick={openAdd}><Icon name="plus" size={13} /> Add account</button>
+        <button class="btn small primary" onclick={openAdd}><Icon name="plus" size={13} /> Add account</button>
       {/if}
     {/snippet}
   </PageHeader>
@@ -221,8 +222,9 @@
       {#each accounts as a (a.id)}
         {@const warn = expiryWarning(a.token_expires_at)}
         {@const r = testResults[a.id]}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- Right-click is a pointer shortcut; Test / Edit / Delete are buttons on the card. -->
         <div
+          role="presentation"
           class="acct card"
           oncontextmenu={(e) => ctxMenu.show(e, [
             { label: 'Test connection', icon: 'refresh', action: () => testAccount(a) },
@@ -333,7 +335,7 @@
     <div class="field">
       <label for="ia-expiry">Token expiry <span class="dim">(optional)</span></label>
       <input id="ia-expiry" class="input" type="date" bind:value={tokenExpiresAt} />
-      <span class="hint">Set the token's expiry date to get a reminder before it lapses.</span>
+      <span class="hint">Set the token’s expiry date to get a reminder before it lapses.</span>
     </div>
 
     {#snippet footer()}
@@ -421,7 +423,7 @@
   .test-result {
     display: flex;
     align-items: flex-start;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     margin-top: 4px;
     overflow-wrap: anywhere;

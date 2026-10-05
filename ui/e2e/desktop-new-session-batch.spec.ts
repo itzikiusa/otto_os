@@ -93,7 +93,7 @@ test.describe('new-session batch', () => {
     await dialog.locator('#ns-cwd').fill('~');
     await dialog.getByRole('button', { name: 'Browse…' }).first().click();
 
-    const picker = page.locator('.sheet[role="dialog"][aria-label="Choose working directory"]');
+    const picker = page.locator('.sheet[role="dialog"][aria-label="Choose working folder"]');
     await expect(picker).toBeVisible();
     // The daemon resolved `~` to an absolute path and listed it.
     await expect(picker.locator('.crumb')).toContainText('/');

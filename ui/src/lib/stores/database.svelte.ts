@@ -3002,7 +3002,7 @@ class DatabaseStore {
           `MySQL returned no body for ${node.label} — the connected account likely lacks privilege to view routine definitions (needs SHOW_ROUTINE, or SELECT on the routine).`,
         );
       } else {
-        toasts.error('No create statement', `Could not derive the DDL for ${node.label}.`);
+        toasts.error('Couldn’t build the create statement', `Otto couldn’t derive the DDL for ${node.label}.`);
       }
       return;
     }
@@ -3010,7 +3010,7 @@ class DatabaseStore {
       await copyTextOrThrow(ddl);
       toasts.success('Create statement copied', node.label);
     } catch {
-      toasts.error('Clipboard unavailable', 'Could not copy the create statement.');
+      toasts.error('Couldn’t copy the create statement', 'The clipboard isn’t available here.');
     }
   }
 
@@ -3242,7 +3242,7 @@ class DatabaseStore {
             ? await this.confirmGuardedWrite(e, opts?.agentLabel)
             : await (opts?.confirmWrite?.() ?? Promise.resolve(false));
           if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
-            toasts.info('Write cancelled');
+            toasts.info('Write canceled');
             this.clearPending(t);
             if (outcome) Object.assign(outcome, { status: 'cancelled', error: 'the user declined the write' });
             return null;
@@ -3256,7 +3256,7 @@ class DatabaseStore {
           opts?.awaitingHuman?.('Waiting for the typed write confirm');
           const ok = await this.confirmGuardedWrite(e, opts?.agentLabel);
           if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
-            toasts.info('Write cancelled');
+            toasts.info('Write canceled');
             this.clearPending(t);
             if (outcome) Object.assign(outcome, { status: 'cancelled', error: 'the user declined the write' });
             return null;

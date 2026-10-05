@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../../lib/plural';
   import { loadErrorText } from '../../../lib/loadError';
   import { radioKey } from '../../../lib/radioKey';
   // Per-cluster Monitor view — the Monitor half of the cluster workspace
@@ -403,7 +404,7 @@
     if (e.kind === 'k8s_event') return (e.detail?.message as string | undefined) ?? '';
     if (e.kind === 'version') {
       const pods = e.detail?.next_restarts as number | undefined;
-      return `new version ${e.reason}${pods ? ` · ${pods} pod${pods === 1 ? '' : 's'} on it` : ''}`;
+      return `new version ${e.reason}${pods ? ` · ${plural(pods, 'pod')} on it` : ''}`;
     }
     if (e.kind === 'restart') {
       const p = e.detail?.prev_restarts as number | undefined;
@@ -478,7 +479,7 @@
             <span class="tdot" style="background: {classColor(e.class)}"></span>
             <span class="tts mono">{fmtTs(e.ts)}</span>
             <span class="tclass" style="color: {e.kind === 'version' ? 'var(--status-working)' : classColor(e.class)}">{e.kind === 'k8s_event' ? e.reason : e.kind === 'version' ? 'New version' : classLabel(e.class)}</span>
-            <span class="twl"><span class="dim">{e.namespace}/</span><b>{e.workload || e.pod}</b>{#if e.pod && e.pod !== e.workload}<span class="dim"> · </span><button class="linkish mono" onclick={() => openPod(e.namespace, e.pod, 'events')} title="Open this pod's Events in Resources">{e.pod}</button>{/if}</span>
+            <span class="twl"><span class="dim">{e.namespace}/</span><b>{e.workload || e.pod}</b>{#if e.pod && e.pod !== e.workload}<span class="dim"> · </span><button class="linkish mono" onclick={() => openPod(e.namespace, e.pod, 'events')} title="Open this pod’s Events in Resources">{e.pod}</button>{/if}</span>
             <span class="tmsg dim">{eventMsg(e)}</span>
           </li>
         {/each}
@@ -668,7 +669,7 @@
   }
   .cluster-pick:hover {
     border-color: var(--border);
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .dot {
     width: 9px;
@@ -738,7 +739,7 @@
     color: var(--text);
   }
   .wl td {
-    padding: 7px 10px;
+    padding: 6px 10px;
     border-bottom: 1px solid var(--border);
     vertical-align: top;
   }
@@ -765,7 +766,7 @@
     cursor: pointer;
   }
   .wl-row:hover {
-    background: color-mix(in srgb, var(--accent) 4%, transparent);
+    background: var(--accent-faint);
   }
   .wl-row.open {
     background: var(--surface-2);
@@ -867,12 +868,12 @@
     grid-template-columns: 10px 150px 80px minmax(120px, 1fr) 2fr;
     gap: 8px;
     align-items: baseline;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-radius: var(--radius-s);
     font-size: var(--fs-s);
   }
   .timeline li:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .tdot {
     width: 8px;

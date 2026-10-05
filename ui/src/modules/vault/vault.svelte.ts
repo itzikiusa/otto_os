@@ -41,6 +41,7 @@ import { authedBlobUrl } from '../../lib/api/client';
 import { assetPath } from '../../lib/api/vault';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
+import { loadErrorText } from '../../lib/loadError';
 import { confirmer } from '../../lib/confirm.svelte';
 import { lsGet, lsSet } from '../../lib/storage';
 import { pollWhileVisible, type Poller } from '../../lib/poll';
@@ -820,7 +821,7 @@ class VaultStore {
       this.visibleBacklinks = Math.max(this.visibleBacklinks, offset + 100);
       return true;
     } catch (e) {
-      if (current()) toasts.error('Couldn’t load backlink contexts', String(e));
+      if (current()) toasts.error('Couldn’t load backlink contexts', loadErrorText(e));
       return false;
     } finally {
       if (current()) this.loadingBacklinkContexts = false;

@@ -13,6 +13,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -68,6 +69,19 @@
   );
   const primaryAgent = $derived(agents.find((a) => autonomyById[a.id]?.primary) ?? null);
   const loadError = $derived(loadErrorOf(personalAgents, 'agentsError'));
+
+  // ⌘K verbs while the module is open: create, the rooms tab, and one
+  // Open / Chat pair per agent.
+  $effect(() =>
+    registry.register('personal-agents', [
+      { id: 'personal-agents.new', title: 'New personal agent…', group: 'Personal Agents', keywords: 'create agent assistant schedule', run: () => { if (sub) router.go('personal-agents'); creating = true; } },
+      { id: 'personal-agents.rooms', title: 'Open agent rooms', group: 'Personal Agents', keywords: 'rooms channel agents talk', run: () => router.go('personal-agents/rooms') },
+      ...agents.flatMap((a) => [
+        { id: `personal-agents.open.${a.id}`, title: `Open ${a.name}`, group: 'Personal Agents', detail: 'Personal agent', keywords: 'agent page settings runs', run: () => router.go(`personal-agents/${a.id}`) },
+        { id: `personal-agents.chat.${a.id}`, title: `Chat with ${a.name}`, group: 'Personal Agents', keywords: 'agent message talk', run: () => router.go(`personal-agents/${a.id}/chat`) },
+      ]),
+    ]),
+  );
 
   async function toggle(a: PersonalAgent): Promise<void> {
     busyId = a.id;
@@ -144,7 +158,7 @@
       <!-- One primary per view: Rooms has its own create (the list's name
            field / the empty state's "Create a room"). -->
       {#if ws.currentId && sub !== 'rooms' && agents.length > 0}
-        <button class="btn primary" data-icon="plus" onclick={() => (creating = true)}><Icon name="plus" size={12} /> New agent</button>
+        <button class="btn small primary" data-icon="plus" onclick={() => (creating = true)}><Icon name="plus" size={12} /> New agent</button>
       {/if}
     {/snippet}
   </PageHeader>
@@ -270,7 +284,7 @@
   .name:focus-visible { outline: none; }
   .name:focus-visible::after { outline: 2px solid var(--accent-text); outline-offset: -1px; }
   .paused .name { color: var(--text-dim); }
-  .prov { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: var(--fs-s); color: var(--text-dim); }
+  .prov { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: var(--fs-s); color: var(--text-dim); }
   .prov :global(svg) { flex-shrink: 0; }
   .prov-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Positioned + later in the DOM than .name::after, so they paint above it
@@ -280,6 +294,6 @@
   .meta { color: var(--text-dim); font-size: var(--fs-s); }
   .card-actions { display: flex; gap: 6px; margin-top: auto; flex-wrap: wrap; }
   .pa-card.primary { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-  .pa-accent { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 35%, transparent); display: inline-flex; align-items: center; gap: 4px; }
+  .pa-accent { color: var(--accent-text); border-color: var(--accent-line); display: inline-flex; align-items: center; gap: 4px; }
   .pa-hint { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; color: var(--text-dim); font-size: var(--fs-s); }
 </style>

@@ -408,7 +408,7 @@ test('SQS: count 3 → peek 3 bodies → send → 4 → purge (typed) → 0', as
   await expect(page.getByRole('heading', { name: 'SQS', level: 2 })).toBeVisible({ timeout: 15_000 });
   const row = page.locator('tr.trow').filter({ has: page.locator('.qn', { hasText: new RegExp(`^${QUEUE}$`) }) });
   await expect(row).toBeVisible({ timeout: 20_000 });
-  await expect(page.locator('tr.trow', { hasText: FIFO_QUEUE }).locator('.tag', { hasText: 'FIFO' })).toBeVisible();
+  await expect(page.locator('tr.trow', { hasText: FIFO_QUEUE }).locator('.badge', { hasText: 'FIFO' })).toBeVisible();
   await expect(row.locator('td.num').first()).toHaveText('3', { timeout: 20_000 });
   await row.click();
 
@@ -448,13 +448,13 @@ test('EC2: the seeded instance is running → Stop with typed id → stopped', a
   await expect(row.locator('.badge')).toHaveText('Running');
 
   await row.getByRole('button', { name: `Actions for ${env.instanceId}` }).click();
-  await page.getByRole('menuitem', { name: 'Stop', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Stop…', exact: true }).click();
   const dlg = page.getByRole('dialog', { name: 'Stop instance' });
   await expect(dlg).toBeVisible();
   await expect(dlg).toContainText(env.instanceId);
   await dlg.locator('input.cf-input').fill(env.instanceId);
   await dlg.getByRole('button', { name: 'Stop', exact: true }).click();
-  await expect(page.getByText('stop sent')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText('Stop sent')).toBeVisible({ timeout: 15_000 });
   await pollWithRefresh(page, 'Refresh', () => row.locator('.badge').innerText(), /^Stopp(ed|ing)$/);
   expect(realErrors(errors), `console errors: ${errors.join('\n')}`).toEqual([]);
 });

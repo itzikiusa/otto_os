@@ -221,7 +221,7 @@
     color: var(--warning);
     background: var(--warning-soft);
     border-radius: 999px;
-    padding: 0 7px;
+    padding: 0 6px;
   }
   .intro {
     margin: 0;
@@ -240,7 +240,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 9px 12px;
+    padding: 8px 12px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
   .rule:last-child {
@@ -252,7 +252,7 @@
   .meta {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     min-width: 0;
     flex: 1 1 auto;
   }
@@ -271,7 +271,7 @@
     color: var(--text-dim);
     background: var(--surface-2);
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 1px 6px;
     overflow-wrap: anywhere;
   }
   .aa-chip.danger {

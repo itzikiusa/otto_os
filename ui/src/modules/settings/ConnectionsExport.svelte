@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { api } from '../../lib/api/client';
   import type { ConnectionExportFormat, ConnectionExportResult } from '../../lib/api/types';
   import { downloadText } from '../../lib/components/exporters';
@@ -55,7 +56,7 @@
   <h2 class="card-title">Export connections</h2>
   <p>Export connection profiles across Otto, including database and SSH connections. Use JSON or CSV
     for all connection types, or choose a format supported by your database application.</p>
-  {#if loading}<p class="dim" role="status">Loading export formats…</p>{:else if formats.length}
+  {#if loading}<Skeleton rows={2} height={28} label="export formats" />{:else if formats.length}
     <div class="controls">
       <div class="field"><label for="{uid}-format">Export format</label><select id="{uid}-format" class="input" bind:value={format} disabled={busy} onchange={clearResult}>{#each formats as item}<option value={item.id}>{item.label}</option>{/each}</select></div>
       <div class="field"><label for="{uid}-scope">Connections to export</label><select id="{uid}-scope" class="input" bind:value={scope} disabled={busy} onchange={clearResult}><option value="all">All workspaces</option><option value="workspaces">Selected workspaces</option></select></div>
@@ -93,7 +94,7 @@
   .controls .field { margin: 0; max-width: 100%; }
   select { max-width: 100%; }
   .dim { color: var(--text-dim); }
-  .password-option, .workspaces label { display: flex; align-items: center; gap: 7px; font-size: var(--fs-m); margin: 0 0 6px; }
+  .password-option, .workspaces label { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); margin: 0 0 6px; }
   .password-note { color: var(--warning); }
   .workspaces { display: grid; gap: 6px; max-height: 220px; overflow: auto; margin: 12px 0; }
   .result { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 12px; }

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import LoadState from '../../lib/components/LoadState.svelte';
   // Lobby rail: "What Otto learned from your team". The real pending rule
   // proposals for this workspace (Learning v1, suggest-only) with Keep
   // (approve), Dismiss (reject) and Details — each decision asks first — plus
@@ -78,18 +80,12 @@
     <span class="ico"><Icon name="bulb" size={14} /></span>
     <h2 id="dh-learned-h">What Otto learned from your team</h2>
   </header>
-  {#if loading}
-    <p class="dim small" role="status">Loading…</p>
-  {:else if error}
-    <div class="err">
-      <Icon name="warning" size={14} />
-      <span>Couldn’t load team rules.</span>
-      <button class="btn small ghost" onclick={() => void load()}>Retry</button>
-    </div>
+  {#if loading || error}
+    <LoadState what="team rules" variant="compact" {loading} {error} empty onretry={() => void load()} />
   {:else if learned}
     <p class="counts">
       {#if pending.length}<span class="chip new">{pending.length} new</span>{/if}
-      <span class="dim">{learned.active.length} active rule{learned.active.length === 1 ? '' : 's'}</span>
+      <span class="dim">{plural(learned.active.length, 'active rule')}</span>
       {#if learned.mode === 'off'}<span class="dim">· learning off</span>{/if}
     </p>
     {#if pending.length === 0}
@@ -155,7 +151,7 @@
   }
   .new {
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    border-color: var(--accent-line);
   }
   .dim {
     color: var(--text-dim);

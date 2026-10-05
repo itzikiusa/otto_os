@@ -69,7 +69,7 @@
     width: 100%;
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     padding: 12px 16px;
     border: none;
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);

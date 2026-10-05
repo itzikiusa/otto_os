@@ -153,7 +153,7 @@
     {#if skillState === 'missing'}
       <p class="skill-warn" role={anyOn ? 'alert' : undefined}>
         <Icon name="warning" size={12} />
-        <span>The <span class="mono">insights</span> skill isn't installed, so {anyOn ? 'scheduled reports can’t be generated' : 'reports can’t be generated yet'}.</span>
+        <span>The <span class="mono">insights</span> skill isn’t installed, so {anyOn ? 'scheduled reports can’t be generated' : 'reports can’t be generated yet'}.</span>
         <button class="btn small" onclick={() => router.go('settings/skills')}>Open Skills</button>
       </p>
     {/if}
@@ -190,7 +190,7 @@
         <ModelPicker
           provider={cfg.provider || defaultAgentProvider()}
           value={modelDraft}
-          hint="Model the report agent runs with (blank = the provider's default)."
+          hint="Model the report agent runs with (blank = the provider’s default)."
           onchange={onModelChange}
         />
       </div>
@@ -266,7 +266,7 @@
   .mono {
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);

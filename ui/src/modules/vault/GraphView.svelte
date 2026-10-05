@@ -19,6 +19,7 @@
   import type { VaultGraphPayload, VaultSwitchHit } from '../../lib/api/types';
   import { vault } from './vault.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -194,24 +195,25 @@
   let didFit = false; // auto zoom-to-fit once, on the first tick of a payload
   let ticks = 0;
 
-  // Theme colors read from the app's CSS variables (dark fallbacks).
+  // Theme colors read from the app's tokens (lib/tokens.css) at mount and on
+  // every theme/scheme flip — nothing is drawn before the first read.
   let theme = {
-    text: '#f2f2f5',
-    dim: '#98989f',
-    accent: '#0a84ff',
-    surface: '#2a2a30',
+    text: '',
+    dim: '',
+    accent: '',
+    surface: '',
     dark: true,
   };
   let groupColors: string[] = [];
 
   function readTheme(): void {
     const cs = getComputedStyle(document.documentElement);
-    const v = (name: string, fb: string) => cs.getPropertyValue(name).trim() || fb;
+    const v = (name: string) => cs.getPropertyValue(name).trim();
     theme = {
-      text: v('--text', '#f2f2f5'),
-      dim: v('--text-dim', '#98989f'),
-      accent: v('--accent', '#0a84ff'),
-      surface: v('--surface', '#1c1c1e'),
+      text: v('--text'),
+      dim: v('--text-dim'),
+      accent: v('--accent'),
+      surface: v('--surface'),
       dark: document.documentElement.getAttribute('data-scheme') !== 'light',
     };
     buildColors();
@@ -1023,7 +1025,8 @@
     // fillStyle changes are batched implicitly: folder-grouped payloads keep
     // same-group nodes index-adjacent, so the cache below rarely misses.
     let lastFill = '';
-    const ghostFill = theme.dark ? '#77777f' : '#9a9aa2';
+    // Ghost (unresolved-link) nodes: the dim text token, never a hex.
+    const ghostFill = theme.dim;
     for (let i = 0; i < n; i++) {
       const x = pos[i * 2], y = pos[i * 2 + 1];
       if (x < wx0 || x > wx1 || y < wy0 || y > wy1) continue;
@@ -1319,12 +1322,12 @@
       {/if}
     </span>
     {#if truncated}
-      <span class="chip warn" title="Edge budget hit — some links were omitted by the server">truncated</span>
+      <Badge tone="warn" label="Truncated" title="Edge budget hit — some links were omitted by the server" />
     {/if}
     {#if loading}
-      <span class="chip">loading…</span>
+      <Badge label="Loading graph…" />
     {:else if alphaLive > 0.02 && !stopped}
-      <span class="chip sim">simulating…</span>
+      <Badge tone="accent" label="Simulating…" />
     {/if}
     {#if nodeCount > 0}
       <button class="mini" onclick={toggleSim}>{stopped ? 'Resume' : 'Stop'} layout</button>
@@ -1336,16 +1339,12 @@
     <!-- Drag handle on the panel's outer edge. Its own element (not a border) so
          it has a comfortable grab area without shifting the panel's layout.
          Mirrors .graph-resizer / .refs-resizer on the Git page. -->
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="panel-resizer"
       role="separator"
-      tabindex="0"
       aria-label="Resize the graph controls panel"
       title={RESIZE_TITLE}
-      onmousedown={startPanelResize}
-      ondblclick={() => ui.setVaultGraphPanelWidth(210)}
-      use:paneResizer={{ value: ui.vaultGraphPanelWidth, min: 200, max: 560, invert: true, onChange: (w) => ui.setVaultGraphPanelWidth(w), onReset: () => ui.setVaultGraphPanelWidth(210), text: pxWide }}
+      use:paneResizer={{ value: ui.vaultGraphPanelWidth, min: 200, max: 560, invert: true, onChange: (w) => ui.setVaultGraphPanelWidth(w), onReset: () => ui.setVaultGraphPanelWidth(210), onDragStart: startPanelResize, text: pxWide }}
     ></div>
     <button class="panel-head" onclick={() => (panelOpen = !panelOpen)} aria-expanded={panelOpen}>
       <span>Graph</span>
@@ -1367,11 +1366,11 @@
           <div class="chips">
             {#each anchorPaths as a (a)}
               <button
-                class="pill"
+                class="ftoken"
                 title={a}
                 onclick={() => (anchorPaths = anchorPaths.filter((x) => x !== a))}
               >
-                <span class="pill-t">{a.split('/').pop()?.replace(/\.md$/, '')}</span>
+                <span class="ftoken-t">{a.split('/').pop()?.replace(/\.md$/, '')}</span>
                 <Icon name="x" size={10} />
               </button>
             {/each}
@@ -1496,7 +1495,7 @@
           {#if expandedGroups.length}
             <div class="chips">
               {#each expandedGroups as g (g)}
-                <button class="pill" title="Collapse {g}" onclick={() => toggleGroup(g)}><span class="pill-t">{g}</span> <Icon name="x" size={10} /></button>
+                <button class="ftoken" title="Collapse {g}" onclick={() => toggleGroup(g)}><span class="ftoken-t">{g}</span> <Icon name="x" size={10} /></button>
               {/each}
             </div>
           {/if}
@@ -1625,29 +1624,16 @@
     gap: 8px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: var(--glass-tint-raised);
-    border: 1px solid var(--glass-border);
+    /* Opaque over the live canvas: a blur would re-composite every frame. */
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: var(--radius-m);
+    box-shadow: var(--shadow-card);
     padding: 4px 8px;
-    backdrop-filter: var(--glass-blur-raised);
-    -webkit-backdrop-filter: var(--glass-blur-raised);
-  }
-  .chip {
-    padding: 1px 6px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    font-size: var(--fs-xs);
-  }
-  .chip.warn {
-    color: var(--warning);
-    background: var(--status-warn-soft);
-  }
-  .chip.sim {
-    color: var(--accent-text);
   }
   .mini {
     font-size: var(--fs-xs);
-    padding: 2px 7px;
+    padding: 2px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -1664,12 +1650,10 @@
     inset-inline-end: 8px;
     /* Width comes from the store (drag-resizable); this is the fallback. */
     width: 210px;
-    background: var(--glass-tint-raised);
-    border: 1px solid var(--glass-border);
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--glass-shadow);
-    backdrop-filter: var(--glass-blur-raised);
-    -webkit-backdrop-filter: var(--glass-blur-raised);
+    box-shadow: var(--shadow-card);
     font-size: var(--fs-xs);
     color: var(--text);
     /* Never taller than the view — the body scrolls (floating-UI rule). */
@@ -1728,7 +1712,7 @@
   }
   .panel-resizer:hover,
   .panel.resizing .panel-resizer {
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-line);
   }
   /* Suspend hover affordances mid-drag so the pointer doesn't flicker. */
   .panel.resizing {
@@ -1760,7 +1744,7 @@
     position: sticky;
     top: 0;
     z-index: 1;
-    padding-block: 3px;
+    padding-block: 2px;
     background: var(--surface);
   }
   .sec.sub {
@@ -1815,11 +1799,12 @@
   .chips {
     display: flex;
     flex-wrap: wrap;
-    gap: 3px;
+    gap: 2px;
   }
   /* Label ellipsizes in its own span; the × icon stays whole (ellipsis on
      the button itself would clip the icon, not the text). */
-  .pill {
+  /* A removable filter token (button) — not a status pill. */
+  .ftoken {
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -1833,12 +1818,12 @@
     cursor: pointer;
     white-space: nowrap;
   }
-  .pill-t {
+  .ftoken-t {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .pill:hover {
+  .ftoken:hover {
     border-color: var(--accent);
   }
 
@@ -1858,7 +1843,7 @@
   .hits button {
     display: block;
     width: 100%;
-    padding: 3px 6px;
+    padding: 2px 6px;
     border: none;
     background: none;
     color: var(--text);
@@ -1870,7 +1855,7 @@
     white-space: nowrap;
   }
   .hits button:hover {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
   }
   .chk {
     display: flex;
@@ -1913,13 +1898,13 @@
   .tooltip {
     position: absolute;
     max-width: 260px;
-    padding: 3px 8px;
+    padding: 2px 8px;
     font-size: var(--fs-xs);
     color: var(--text);
     background: color-mix(in srgb, var(--surface) 94%, transparent);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     pointer-events: none;
     white-space: nowrap;
     overflow: hidden;

@@ -7,6 +7,7 @@
   // tool and writes its proposed SQL, surfaced below with Insert / Run. The
   // session is hidden from the Agents section (meta.source = 'db_assist').
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
@@ -153,8 +154,9 @@
       {/key}
     {:else}
       <div class="da-empty">
-        <p class="lead">{info.title}</p>
-        <p class="hint">{info.hint}</p>
+        <!-- Nothing running yet: the shared empty state names the mode; the
+             composer under it starts the agent. -->
+        <EmptyState icon="db" title={info.title} body={info.hint} />
         {#if providers.length > 1}
           <div class="da-providers" role="radiogroup" aria-label="Agent">
             {#each providers as p (p)}
@@ -184,7 +186,7 @@
           <p class="sub warn">This is taking longer than usual — the agent may be stuck.
             You can Stop (top right) and ask again.</p>
         {/if}
-        <p class="sub">The agent's live shell appears here once it starts — you then
+        <p class="sub">The agent’s live shell appears here once it starts — you then
           keep the conversation going by typing directly in it.</p>
       </div>
     {/if}
@@ -253,7 +255,7 @@
   .da-title {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-m);
     font-weight: 600;
     white-space: nowrap;
@@ -264,14 +266,14 @@
     color: var(--text);
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
-    padding: 2px 5px;
+    padding: 2px 4px;
     cursor: pointer;
     text-transform: capitalize;
   }
   .da-working {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--accent-text);
     font-weight: 600;
@@ -308,17 +310,6 @@
     gap: 10px;
     max-width: 360px;
   }
-  .da-empty .lead {
-    margin: 0;
-    font-size: var(--fs-l);
-    font-weight: 600;
-    color: var(--text);
-  }
-  .da-empty .hint {
-    margin: 0;
-    font-size: var(--fs-s);
-    line-height: 1.5;
-  }
   .da-empty .sub {
     margin: 0;
     font-size: var(--fs-xs);
@@ -337,7 +328,7 @@
     color: var(--text-dim);
     border-radius: 999px;
     font-size: var(--fs-s);
-    padding: 3px 11px;
+    padding: 2px 10px;
     cursor: pointer;
     text-transform: capitalize;
   }
@@ -347,7 +338,7 @@
   }
   .da-prov.on {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--text);
   }
   .da-ask {
@@ -370,7 +361,7 @@
     outline: none;
   }
   .da-ask textarea:focus {
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .da-send {
     align-self: center;

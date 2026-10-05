@@ -195,7 +195,7 @@
     </div>
   {/if}
 
-  {#if apiClient.historyLoadingId}<div class="state" role="status">Loading request…</div>{/if}
+  {#if apiClient.historyLoadingId}<div class="state" role="status"><span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Loading request…</div>{/if}
 
   {#if apiClient.history.length === 0 && (apiClient.historyLoadError || !apiClient.historyLoaded)}
     <LoadState
@@ -247,7 +247,7 @@
     margin-inline: 8px;
     padding: 8px 10px;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     background: var(--info-soft);
     font-size: var(--fs-s);
     color: var(--text);
@@ -289,7 +289,7 @@
   }
   .search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .search input {
     flex: 1;
@@ -367,7 +367,7 @@
     color: var(--text);
   }
   .l2 {
-    padding-inline-start: 42px;
+    padding-inline-start: 40px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

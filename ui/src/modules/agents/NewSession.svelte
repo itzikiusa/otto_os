@@ -300,7 +300,7 @@
   async function create(): Promise<void> {
     if (busy || total === 0) return;
     const unavailable = chosen.find((p) => !providerReadiness(p).available);
-    if (unavailable) { toasts.error(`Cannot start ${unavailable}`, providerReadiness(unavailable).message); return; }
+    if (unavailable) { toasts.error(`Couldn’t start ${unavailable}`, providerReadiness(unavailable).message); return; }
     busy = true;
     try {
       // Fold a pending draft (typed but not yet "Add"-ed) into the list.
@@ -521,13 +521,13 @@
         placeholder="What should the agent start on? Sent once it is ready."
       ></textarea>
       <span class="hint">
-        {total > 1 ? 'Sent to every agent in this batch. ' : ''}⌘↩ creates the session{total > 1 ? 's' : ''}.
+        {total > 1 ? 'Sent to every agent in this batch. ' : ''}⌘↩ {total > 1 ? 'creates the sessions' : 'creates the session'}.
       </span>
     </div>
   {/if}
 
   <div class="field">
-    <label for="ns-cwd">Working directory</label>
+    <label for="ns-cwd">Working folder</label>
     <div class="dir-add">
       <input
         id="ns-cwd"
@@ -537,7 +537,7 @@
         list="ns-recent-dirs"
         placeholder="/absolute/path/to/folder"
       />
-      <button type="button" class="btn" title="Browse for a working directory" onclick={() => (browsing = 'cwd')}>Browse…</button>
+      <button type="button" class="btn" title="Browse for a working folder" onclick={() => (browsing = 'cwd')}>Browse…</button>
     </div>
     <datalist id="ns-recent-dirs">
       {#each recentDirs as d (d)}<option value={d}></option>{/each}
@@ -634,7 +634,7 @@
 
 {#if browsing}
   <FolderPicker
-    title={browsing === 'cwd' ? 'Choose working directory' : 'Choose an additional directory'}
+    title={browsing === 'cwd' ? 'Choose working folder' : 'Choose an additional folder'}
     start={(browsing === 'cwd' ? cwd : dirDraft) ||
       (scratchMode ? scratchHome : ws.current?.root_path) ||
       '~'}
@@ -666,7 +666,7 @@
   .seg {
     display: flex;
     gap: 4px;
-    padding: 3px;
+    padding: 2px;
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
@@ -690,7 +690,7 @@
   .seg-btn.active {
     background: var(--surface);
     color: var(--text);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .seg + .hint {
     display: block;
@@ -814,7 +814,7 @@
     letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .provider-desc {
@@ -824,7 +824,7 @@
   .toggle-row {
     display: flex;
     align-items: flex-start;
-    gap: 9px;
+    gap: 8px;
     padding: 4px 0;
     cursor: pointer;
   }
@@ -853,7 +853,7 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);

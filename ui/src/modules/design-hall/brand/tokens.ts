@@ -477,7 +477,7 @@ export function validateBrandDoc(doc: unknown): string[] {
   };
   if (root.color !== undefined) {
     group('color', (p, t) => {
-      if (!normalizeHex(str(t.$value) ?? '')) out.push(`${p}: use a hex colour like #5B3DF5`);
+      if (!normalizeHex(str(t.$value) ?? '')) out.push(`${p}: use a hex color like #5B3DF5`);
     });
   }
   if (root.font !== undefined) {

@@ -55,7 +55,7 @@
     if (untrack(() => announced) === key) return;
     announced = key;
     if (st === 'done') toasts.success(`${label} installed`);
-    else if (st === 'failed') toasts.error(`${label} install failed`, job?.error ?? undefined);
+    else if (st === 'failed') toasts.error(`Couldn’t install ${label}`, job?.error ?? undefined);
   });
 
   async function start(): Promise<void> {
@@ -87,12 +87,12 @@
       {#if k8s.status?.[tool].path}<span class="dim mono">{k8s.status?.[tool].path}</span>{/if}
     </div>
   {:else if job?.state === 'running'}
-    <div class="progress" role="progressbar" aria-label="Installing {label}" aria-busy="true"><div class="bar"></div></div>
+    <div class="indeterminate" role="progressbar" aria-label="Installing {label}" aria-busy="true"></div>
     <div class="dim">Installing… this can take a minute (polling every 1.5 s).</div>
   {:else if job?.state === 'failed'}
     <div class="fail">
-      <Icon name="info" size={14} />
-      <span>Install failed{job.error ? `: ${job.error}` : ''}.</span>
+      <Icon name="warning" size={14} />
+      <span>Couldn’t install {label}{job.error ? `: ${job.error}` : ''}.</span>
     </div>
   {/if}
 
@@ -153,7 +153,7 @@
     border-radius: var(--radius-m);
     display: grid;
     place-items: center;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .compact .install-icon {
@@ -179,27 +179,6 @@
     color: var(--success);
     font-size: var(--fs-m);
     flex-wrap: wrap;
-  }
-  .progress {
-    height: 6px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    overflow: hidden;
-  }
-  .bar {
-    width: 40%;
-    height: 100%;
-    border-radius: 999px;
-    background: var(--accent);
-    animation: slide 1.2s ease-in-out infinite;
-  }
-  @keyframes slide {
-    0% {
-      transform: translateX(-100%);
-    }
-    100% {
-      transform: translateX(260%);
-    }
   }
   .fail {
     display: flex;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Settings → Backup & restore → "Design Hall storage" (root only).
   // Every Design Hall content save keeps a full copy, so the blob store only
   // grows. Auto-tidy squashes OLD autosave versions (older than a week, one
@@ -47,7 +48,7 @@
       const ok = await confirmer.ask(
         `Once a day, Otto will delete Design Hall autosave versions older than ${days} days, keeping the last one ` +
           'of each 10-minute editing window. Named, agent, approved, pinned and published versions and the current ' +
-          `version are never touched. Right now this would remove ${r.versions} version${r.versions === 1 ? '' : 's'} ` +
+          `version are never touched. Right now this would remove ${plural(r.versions, 'version')} ` +
           `and free about ${formatBytes(r.bytes)}. Deleted autosaves can’t be restored.`,
         { title: 'Turn on auto-tidy', confirmLabel: 'Turn on', danger: true },
       );
@@ -79,7 +80,7 @@
         <dt>Auto-tidy would free</dt>
         <dd data-testid="design-storage-reclaim">
           {formatBytes(report.reclaimable.bytes)}
-          <span class="dim">({report.reclaimable.versions.toLocaleString()} old autosave{report.reclaimable.versions === 1 ? '' : 's'})</span>
+          <span class="dim">({report.reclaimable.versions.toLocaleString()} {report.reclaimable.versions === 1 ? 'old autosave' : 'old autosaves'})</span>
         </dd>
       </div>
     </dl>
@@ -102,10 +103,7 @@
     />
     {#if report.last_prune}
       <p class="dim" role="status">
-        Last tidy {new Date(report.last_prune.at).toLocaleString()}: removed {report.last_prune.versions_removed} version{report
-          .last_prune.versions_removed === 1
-          ? ''
-          : 's'}.
+        Last tidy {new Date(report.last_prune.at).toLocaleString()}: removed {plural(report.last_prune.versions_removed, 'version')}.
       </p>
     {/if}
   {/if}

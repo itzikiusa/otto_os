@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { focusOnMount } from '../../lib/focusOnMount';
   // Browser tab: a real inline browser with TABS. Each tab is its own native
   // child webview (Tauri), so switching tabs is instant and preserves the page's
   // scroll/form/login state. A `window.open()` / `target=_blank` inside a tab is
@@ -473,7 +474,6 @@
       {#each tabs as t (t.id)}
         <!-- The tab and its close are TWO real buttons (no control nested in a
              role=tab); ←/→/Home/End move between tabs (roving tabindex). -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="btab"
           class:active={t.id === activeId}
@@ -608,14 +608,13 @@
         onkeydown={popoverKeydown}
       >
         <div class="popover-desc" title={popover.desc}>{popover.desc}</div>
-        <!-- svelte-ignore a11y_autofocus -->
         <textarea
           class="input popover-textarea"
           bind:value={popoverComment}
           placeholder="Your comment…"
           rows={3}
           onkeydown={popoverKeydown}
-          autofocus
+          use:focusOnMount
         ></textarea>
         <div class="popover-actions">
           <button class="btn" onclick={closePopover}>
@@ -661,7 +660,7 @@
           arrow button in the toolbar) for anything that should leave Otto.
         {:else}
           Enter a URL above to browse it here. Sites that block embedding (Jira,
-          Google, GitHub) won't load here — open them with Open in system
+          Google, GitHub) won’t load here — open them with Open in system
           browser (the arrow button in the toolbar).
         {/if}
       </p>
@@ -742,7 +741,7 @@
     transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .btab:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .btab.active {
     background: var(--surface);
@@ -808,14 +807,14 @@
     cursor: pointer;
   }
   .btab-new:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
 
   .toolbar {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     padding: 8px 8px;
     border-bottom: 1px solid var(--border);
     border-top: 1px solid var(--border);
@@ -838,7 +837,7 @@
     min-height: 0;
     width: 100%;
     border: none;
-    background: #fff;
+    background: #fff; /* ui-guards: allow — a web page’s default canvas, not app chrome */
   }
   /* Crosshair cursor hint while take-over is on */
   .frame.takeover-cursor {
@@ -849,7 +848,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 10px;
+    padding: 4px 10px;
     border-top: 1px solid var(--border);
     flex-shrink: 0;
   }
@@ -917,8 +916,8 @@
     width: 100%;
   }
   .quick-link:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
   }
   .ql-text {
     display: flex;
@@ -964,10 +963,10 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     padding: 4px 6px;
     border-radius: var(--radius-s);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border: 1px solid var(--accent-line);
   }
   .popover-textarea {
     width: 100%;
@@ -994,7 +993,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 5px 8px;
+    padding: 4px 8px;
     box-shadow: var(--glass-shadow);
   }
   .annot-count {

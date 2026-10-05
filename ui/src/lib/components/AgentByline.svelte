@@ -70,7 +70,7 @@
   .ab-who {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     color: var(--text);
     font-weight: 500;
   }

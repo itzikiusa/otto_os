@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../../lib/plural';
   // DesignArena — the Product → **Design** tab (design/product-design-arena.md §4).
   // ONE arena for every design artifact of a story: a Figma/Canva-style 2D side
   // (HTML screens in device frames, Excalidraw boards, Mermaid diagrams) and a
@@ -226,7 +227,7 @@
   onDestroy(() => clearInterval(ticker));
   const saveLabel = $derived.by(() => {
     if (!att) return '';
-    if (localInvalid) return `invalid document — not saved (${localInvalid.length} issue${localInvalid.length === 1 ? '' : 's'})`;
+    if (localInvalid) return `invalid document — not saved (${plural(localInvalid.length, 'issue')})`;
     switch (saveState) {
       case 'dirty': return 'unsaved';
       case 'saving': return 'saving…';
@@ -495,7 +496,7 @@
       // The viewport/hierarchy/inspector go through C's ops, so this is a
       // programming error rather than user input — surface it, don't save it.
       localInvalid = r.issues;
-      toasts.error('Scene edit rejected by the validator', r.issues[0]?.message ?? 'invalid document');
+      toasts.error('Couldn’t apply that scene edit', r.issues[0]?.message ?? 'The edit would make the scene invalid, so it wasn’t saved.');
       return;
     }
     applyLocalEdit(serializeScene(r.doc));
@@ -679,7 +680,7 @@
       { label: 'Rename…', icon: 'edit', action: () => void rename(att!) },
       { label: 'Refresh list', icon: 'refresh', action: () => void loadAll() },
       { separator: true },
-      { label: 'Delete artifact', icon: 'trash', danger: true, action: () => void remove(att!) },
+      { label: 'Delete artifact…', icon: 'trash', danger: true, action: () => void remove(att!) },
     ];
     ctxMenu.show(e, items);
   }
@@ -708,7 +709,7 @@
     }
   }
   async function remove(a: ProductAttachment): Promise<void> {
-    const ok = await confirmer.ask(`Delete "${a.filename}"? Its pinned annotations go with it.`, {
+    const ok = await confirmer.ask(`Delete “${a.filename}”? Its pinned annotations go with it.`, {
       title: 'Delete artifact', confirmLabel: 'Delete', danger: true,
     });
     if (!ok) return;
@@ -941,10 +942,8 @@
 
       <div class="stage-body" class:split={codeView && isText}>
         <div class="viewport" bind:this={viewportEl}>
-          {#if sourceLoading}
-            <div class="stage-msg">Loading {att.filename}…</div>
-          {:else if sourceError}
-            <LoadState what={att.filename} error={sourceError} empty onretry={() => void loadSource(att)} />
+          {#if sourceLoading || sourceError}
+            <LoadState what={att.filename} loading={sourceLoading} error={sourceError} empty onretry={() => void loadSource(att)} />
           {:else if kind === 'html'}
             <DeviceFrame {device} {scheme}>
               <MockupViewer attachment={att} {source} hideToolbar bind:allowScripts />
@@ -1074,7 +1073,7 @@
                 <button class="btn small" onclick={downloadBlenderScript}>Download script</button>
               </div>
             {:else}
-              <p class="insp-hint">Blender isn't installed (set <span class="mono">OTTO_BLENDER</span> or install it in /Applications). You can still download the generated script and open it in Blender by hand.</p>
+              <p class="insp-hint">Blender isn’t installed (set <span class="mono">OTTO_BLENDER</span> or install it in /Applications). You can still download the generated script and open it in Blender by hand.</p>
               <div class="insp-actions">
                 <button class="btn small" onclick={downloadBlenderScript}>Download script</button>
               </div>
@@ -1154,7 +1153,7 @@
   }
   .ss {
     height: 20px;
-    padding: 0 7px;
+    padding: 0 6px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -1170,7 +1169,7 @@
   .list-actions {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex-wrap: wrap;
     width: 100%;
   }
@@ -1206,9 +1205,9 @@
   .group-head {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     width: 100%;
-    padding: 7px 10px 3px;
+    padding: 6px 10px 2px;
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -1237,7 +1236,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: none;
     background: transparent;
     color: var(--text);
@@ -1282,7 +1281,7 @@
   }
   .refine-btn:hover,
   .row-more:hover {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .mockup-type {
@@ -1291,7 +1290,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .06em;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);
     color: var(--text-dim);
@@ -1315,7 +1314,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .06em;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: 999px;
     max-width: 80px;
     overflow: hidden;
@@ -1394,7 +1393,7 @@
   .da-toggle.on {
     background: var(--accent-soft);
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+    border-color: var(--accent-line);
   }
   .stage-body {
     flex: 1;
@@ -1431,6 +1430,10 @@
     outline: none;
     tab-size: 2;
   }
+  /* The editor fills its pane edge to edge: the ring is drawn inside. */
+  .code-view:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--accent-text);
+  }
   .render-wrap {
     position: relative;
     flex: 1;
@@ -1446,7 +1449,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    background: #fff;
+    background: #fff; /* ui-guards: allow — rendered page canvas (the artifact’s own white page) */
   }
   .render-box > :global(*) {
     flex: 1;

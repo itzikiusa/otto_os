@@ -19,6 +19,7 @@ import { listVaults, vaultNote, writeVaultNote } from '../../../lib/api/vault';
 import type { Session, WorkbenchDocFull } from '../../../lib/api/types';
 import { dbHandoff } from '../../database/handoff.svelte';
 import { fillPlaceholders } from '../lib/placeholders';
+import { plural } from '../../../lib/plural';
 
 export interface SendCtx {
   ws: string;
@@ -167,7 +168,7 @@ export async function pasteIntoSession(ctx: SendCtx, session: Session): Promise<
   const text = filled(ctx);
   const lines = text.split('\n').length;
   const ok = await confirmer.ask(
-    `Paste ${lines} line${lines === 1 ? '' : 's'} from “${ctx.doc.name}” into “${session.title || session.id}”? ` +
+    `Paste ${plural(lines, 'line')} from “${ctx.doc.name}” into “${session.title || session.id}”? ` +
       'It is pasted only — nothing runs until you press Enter in that session.',
     { title: 'Paste into session', confirmLabel: 'Paste' },
   );

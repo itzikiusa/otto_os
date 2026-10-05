@@ -141,7 +141,7 @@
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text);
-    font-size: 14px;
+    font-size: var(--fs-l);
     font-family: 'SF Mono', SFMono-Regular, Menlo, monospace;
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
@@ -169,11 +169,11 @@
 
   .key-btn.arrow {
     min-width: 44px;
-    font-size: 18px;
+    font-size: var(--fs-xl);
   }
 
   .key-btn.sym {
-    font-size: 16px;
+    font-size: var(--fs-l);
     min-width: 44px;
   }
 

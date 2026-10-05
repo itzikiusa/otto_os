@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   // Per-server discovered tools with their governance controls (enable,
   // require-approval, risk-label override) plus a governed tool tester: run a
   // tool with JSON arguments through the full invoke pipeline (optionally
@@ -7,6 +8,7 @@
   import { toastError } from '../../lib/toastError';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import Switch from '../../lib/components/Switch.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
@@ -191,16 +193,18 @@
 
   {#if !server}
     <p class="muted pad">Pick a server above (or add one under External servers) to manage its tools.</p>
-  {:else if loadError && tools.length === 0}
-    <LoadState what="tools" {loading} error={loadError} empty onretry={() => void loadTools()} />
-  {:else if loading && tools.length === 0}
-    <p class="muted pad">Loading tools…</p>
   {:else if tools.length === 0}
-    <div class="empty">
-      <Icon name="zap" size={24} />
-      <p>No tools discovered yet for <strong>{server.name}</strong>.</p>
-      <button class="btn primary" disabled={!can('configure')} title={can('configure') ? undefined : NO_CONFIGURE} onclick={() => void discover()}>Discover tools</button>
-    </div>
+    <LoadState what="tools" {loading} error={loadError} empty onretry={() => void loadTools()}>
+      {#snippet emptyView()}
+        <EmptyState
+          icon="zap"
+          title={`No tools discovered yet for ${server?.name ?? 'this server'}`}
+          body={can('configure') ? 'Discover asks the server which tools it offers.' : `${NO_CONFIGURE} to discover its tools.`}
+          actionLabel={can('configure') ? 'Discover tools' : undefined}
+          onaction={() => void discover()}
+        />
+      {/snippet}
+    </LoadState>
   {:else}
     <div class="grid">
       <div class="thead">
@@ -311,8 +315,8 @@
           <div class="result">
             <div class="rhead">
               <McpPill kind="decision" value={result.decision} />
-              {#if result.dry_run}<span class="tag">dry run</span>{/if}
-              {#if result.is_error}<span class="tag bad">tool error</span>{/if}
+              {#if result.dry_run}<Badge tone="info" label="Dry run" />{/if}
+              {#if result.is_error}<Badge tone="bad" label="Tool error" />{/if}
               {#if result.reason}<span class="reason">{result.reason}</span>{/if}
             </div>
             {#if result.decision === 'pending_approval'}
@@ -412,7 +416,7 @@
   .cell {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .pinned {
     color: var(--text-dim);
@@ -423,7 +427,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 5px 8px;
+    padding: 4px 8px;
     font-size: var(--fs-m);
   }
   .tester {
@@ -439,7 +443,7 @@
     align-self: flex-start;
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     margin: 8px 10px;
     padding: 4px 0;
     border: none;
@@ -514,19 +518,6 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
   }
-  .tag {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
-    border-radius: var(--radius-s);
-    padding: 1px 6px;
-  }
-  .tag.bad {
-    color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 18%, transparent);
-  }
   .json {
     margin: 0;
     font-family: var(--font-mono);
@@ -555,15 +546,6 @@
   }
   .pad {
     padding: 16px;
-  }
-  .empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    color: var(--text-dim);
-    text-align: center;
-    padding: 36px 24px;
   }
 
   @media (max-width: 640px) {

@@ -85,7 +85,7 @@
       onclick={openRecent}
       aria-haspopup="menu"
       aria-label="Recent agent actions"
-      title="This window's recent agent actions"
+      title="This window’s recent agent actions"
       data-testid="agent-driving-recent"
     ><Icon name="clock" size={12} /><span class="adb-btn-label">Recent</span></button>
     <button
@@ -114,7 +114,7 @@
     gap: 8px;
     min-width: 0;
     min-height: 30px;
-    padding-block: 3px;
+    padding-block: 2px;
     padding-inline: 20px 12px;
     border-top: 1px solid var(--separator);
     /* Agent identity is a neutral 2 px start rule (patterns §2), the live

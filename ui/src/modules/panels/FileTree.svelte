@@ -360,7 +360,7 @@
                   <Icon name={node.open ? 'chevronDown' : 'chevronRight'} size={10} />
                 </span>
                 {#if node.loading}
-                  <span class="spin"><Icon name="refresh" size={12} /></span>
+                  <span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>
                 {:else}
                   <Icon name="folder" size={12} />
                 {/if}
@@ -441,7 +441,7 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    padding-block: 3px; padding-inline: 8px 4px;
+    padding-block: 2px; padding-inline: 8px 4px;
     border-bottom: 1px solid var(--border);
     background: var(--surface-2);
     flex-shrink: 0;
@@ -523,7 +523,7 @@
     transition: background var(--dur-fast) ease-out;
   }
   .tree-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .tree-row.is-dir {
     color: var(--text);
@@ -559,11 +559,6 @@
     align-items: center;
   }
 
-  .spin {
-    display: flex;
-    align-items: center;
-    animation: otto-spin 0.8s linear infinite;
-  }
 
   .empty-dir {
     padding: 8px 12px;
@@ -609,9 +604,9 @@
   }
   .truncated-badge {
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     flex-shrink: 0;
   }

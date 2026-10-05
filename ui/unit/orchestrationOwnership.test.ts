@@ -140,7 +140,7 @@ function missionDetail() {
       type(goal='draft', result='draft result', risk='high'){editGoal=goal;editResult=result;editRisk=risk;},
       switchTo(next){id=next;return load();},
       read(){return {detail,editing,editGoal,editResult,editRisk,dirty:isDirty(),loading,busy,err};}};
-  `, { initial, toasts: toast, onChange() {}, ApiError: Error,
+  `, { initial, toasts: toast, toastError: (title: string) => (toast.error as (t: string) => void)(title), onChange() {}, ApiError: Error,
     missionControlApi: {
       item(_ws: string, id: string) { const result = deferred<any>(); reads.push({id,result}); return result.promise; },
       patch(_ws: string, _id: string, body: any) { const result = deferred<any>(); writes.push({body,result}); return result.promise; },

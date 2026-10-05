@@ -98,11 +98,17 @@
     items.push(
       { separator: true },
       {
-        label: 'Delete state',
+        label: 'Delete state…',
         icon: 'trash',
         danger: true,
         disabled: readonly,
-        action: () => {
+        action: async () => {
+          const ok = await confirmer.ask(`Delete the state “${st.name ?? st.id}”? Its recorded differences go with it.`, {
+            title: 'Delete state',
+            confirmLabel: 'Delete',
+            danger: true,
+          });
+          if (!ok) return;
           onchange(removeState(doc, st.id));
           onpick(null);
         },
@@ -149,11 +155,11 @@
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    padding-block: 5px; padding-inline: 12px 6px;
+    padding-block: 4px; padding-inline: 12px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-l);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .k {
     font-size: var(--fs-xs);
@@ -175,7 +181,7 @@
     background: transparent;
     color: var(--text-dim);
     font: var(--fs-s) / 1 var(--font-ui);
-    padding: 6px 11px;
+    padding: 6px 10px;
     border-radius: var(--radius-s);
     cursor: pointer;
   }

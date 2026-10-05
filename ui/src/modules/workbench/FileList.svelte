@@ -70,7 +70,7 @@
       { label: 'Duplicate', icon: 'copy', action: () => void act('duplicate', () => workbench.duplicate(d.id)) },
       { separator: true },
       {
-        label: 'Move to trash',
+        label: 'Move to trash', // ui-guards: allow — reversible (restore from the trash), so no confirm
         icon: 'trash',
         danger: true,
         action: () =>
@@ -253,11 +253,11 @@
     background: transparent;
     color: var(--text);
     font-size: var(--fs-s);
-    padding-block: 5px;
+    padding-block: 4px;
     outline: none;
   }
   .wb-search:focus-within {
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .wb-files-body {
     flex: 1;
@@ -283,7 +283,7 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 0;
     border-radius: var(--radius-s);
     background: transparent;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // One repo: toolbar header + tabs (Graph / Pull Requests / Review). Staging
   // and history both live on the graph now (WIP row + detail panel), so there
   // are no separate Changes/History tabs.
@@ -292,7 +293,7 @@
         ...(others.length > 0 ? [{ separator: true }] : []),
         ...tail,
       ],
-      others.length > 8 ? { filter: true, filterPlaceholder: 'Search repositories…', maxVisible: 12 } : undefined,
+      others.length > 8 ? { filter: true, filterPlaceholder: 'Filter repositories…', maxVisible: 12 } : undefined,
     );
   }
 </script>
@@ -333,10 +334,10 @@
         >
           {t.label}
           {#if t.id === 'graph' && status && status.changes.length > 0}
-            <span class="count" title="{status.changes.length} uncommitted change{status.changes.length === 1 ? '' : 's'} (WIP)">{status.changes.length}</span>
+            <span class="count" title="{plural(status.changes.length, 'uncommitted change')} (WIP)">{status.changes.length}</span>
           {/if}
           {#if t.id === 'graph' && conflictedPaths.length > 0}
-            <span class="count conflict-count" title="{conflictedPaths.length} conflicted file{conflictedPaths.length === 1 ? '' : 's'}"><Icon name="warning" size={12} />{conflictedPaths.length}</span>
+            <span class="count conflict-count" title={plural(conflictedPaths.length, 'conflicted file')}><Icon name="warning" size={12} />{conflictedPaths.length}</span>
           {/if}
         </button>
       {/each}
@@ -525,7 +526,7 @@
     flex-wrap: wrap;
     gap: 8px 10px;
     min-height: 46px;
-    padding: 7px 14px;
+    padding: 6px 14px;
     box-sizing: border-box;
     border-bottom: 1px solid var(--border);
   }
@@ -565,18 +566,18 @@
     background: transparent;
     color: var(--text);
     cursor: pointer;
-    padding: 3px 7px;
+    padding: 2px 6px;
     border-radius: var(--radius-s);
   }
   .rv-switch:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     border-color: var(--border);
   }
   .rv-count {
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 0 5px;
-    border-radius: 8px;
+    padding: 0 4px;
+    border-radius: var(--radius-m);
     background: var(--surface-2);
     color: var(--text-dim);
   }
@@ -606,17 +607,17 @@
     height: 15px;
     padding: 0 4px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 3px;
+    gap: 2px;
   }
   .rv-tabs > .conflict-tab,
   .rv-tabs > .conflict-tab.active {
     color: var(--warning);
-    gap: 5px;
+    gap: 4px;
   }
   .conflict-count {
     background: var(--warning-soft);
@@ -668,7 +669,7 @@
     width: min(520px, 90vw);
     z-index: 6;
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   /* The back chevron mirrors under RTL via Icon's DIRECTIONAL set. */
   .rv-back-arrow {
@@ -687,11 +688,7 @@
     height: 26px;
     background: var(--surface-2);
     border-radius: var(--radius-s);
-    animation: pulse 1.4s ease-in-out infinite;
-  }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
 
   /* ── Mobile + tablet (≤1024px): keep the header + toolbar + tabs usable on a

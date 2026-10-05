@@ -39,10 +39,10 @@
 {/if}
 <style>
   form { display: grid; gap: 8px; padding: 6px; }
-  label { display: grid; gap: 3px; font-size: var(--fs-s); color: var(--text-dim); }
+  label { display: grid; gap: 2px; font-size: var(--fs-s); color: var(--text-dim); }
   input { width: 100%; min-width: 0; box-sizing: border-box; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-s); padding: 6px; }
-  button { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-s); padding: 5px 8px; cursor: pointer; }
-  .actions { display: flex; gap: 6px; flex-wrap: wrap; } .edit { margin: 5px; }
+  button { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-s); padding: 4px 8px; cursor: pointer; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; } .edit { margin: 4px; }
   .error { color: var(--danger); font-size: var(--fs-s); }
   pre { max-height: 250px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-xs); }
   summary { cursor: pointer; font-size: var(--fs-s); }

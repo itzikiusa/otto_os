@@ -177,7 +177,7 @@
   }
   .rule {
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    border-color: var(--accent-line);
     cursor: pointer;
     max-width: 100%;
     overflow: hidden;
@@ -272,12 +272,12 @@
   }
   .hex:hover:not(:disabled) {
     border-color: var(--border);
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .hex:focus {
     border-color: var(--accent-text);
     background: var(--surface-2);
-    outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    outline: none; box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .hex.bad {
     color: var(--danger);

@@ -69,7 +69,7 @@
           action: () => onopen(r.id),
         })),
       ],
-      { filter: true, filterPlaceholder: 'Search repositories…', maxVisible: 12 },
+      { filter: true, filterPlaceholder: 'Filter repositories…', maxVisible: 12 },
     );
   }
 
@@ -250,7 +250,7 @@
     white-space: nowrap;
   }
   .git-tab:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .git-tab.active {
     background: var(--surface-2);
@@ -290,7 +290,7 @@
   .git-tab-branch {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     min-width: 0;
     flex-shrink: 4;
     font-size: var(--fs-xs);
@@ -335,12 +335,12 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    padding: 0 7px;
+    padding: 0 6px;
     border-radius: var(--radius-s);
     flex-shrink: 0;
   }
   .git-tab-new:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--accent-text);
   }
   /* Auto-fetch toggle: dim when paused, accent when on. */
@@ -358,7 +358,7 @@
     opacity: 0.55;
   }
   .git-autofetch:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
     opacity: 1;
   }
@@ -378,7 +378,7 @@
     border-bottom: none;
     min-width: 0;
     max-width: 100%;
-    gap: 3px;
+    gap: 2px;
   }
   .embedded .git-tablist {
     align-items: center;
@@ -386,7 +386,7 @@
   .embedded .git-tab {
     border: 1px solid transparent;
     border-radius: var(--radius-s);
-    padding-block: 4px; padding-inline: 9px 6px;
+    padding-block: 4px; padding-inline: 8px 6px;
   }
   .embedded .git-tab.active {
     background: var(--surface-2);

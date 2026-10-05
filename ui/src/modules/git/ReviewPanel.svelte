@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // AI review panel: start review agents, refresh via WS reviewBus (no poll),
   // approve/decline individual draft comments. Supports live per-agent progress
   // cards, a configure-agents modal, and a merge-readiness panel.
@@ -588,7 +589,7 @@
       // network, 5xx — never retried, a 5xx may have created it): the comment
       // is approved in Otto but `posted` stays false. Never report that as sent.
       if (!updated.posted) {
-        if (!quiet) toasts.error("Couldn’t post the comment", `${prWhere} refused it — it's approved in Otto but not on the PR. Check the repository's git account.`);
+        if (!quiet) toasts.error("Couldn’t post the comment", `${prWhere} refused it — it’s approved in Otto but not on the PR. Check the repository’s git account.`);
         return false;
       }
       if (!confirmed) toasts.success('Comment posted', prWhere);
@@ -623,7 +624,7 @@
       postingAll = false;
     }
     const failed = drafts.length - posted;
-    if (failed === 0) toasts.success(`${posted} comment${posted === 1 ? '' : 's'} posted`, prWhere);
+    if (failed === 0) toasts.success(`${plural(posted, 'comment')} posted`, prWhere);
     else {
       // ONE summary instead of a toast per failure; the failed comments stay
       // in the list (not posted) so they can be retried individually.
@@ -1100,7 +1101,7 @@
     </div>
   {:else if review.status === 'running'}
     <div class="rp-running-header">
-      <div class="spinner"></div>
+      <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
       <span class="rp-running-title">Reviewing…</span>
       <span class="grow"></span>
       <button
@@ -1122,7 +1123,7 @@
   {:else if review.status === 'cancelled'}
     <div class="rp-error card" data-testid="review-cancelled">
       <Icon name="x" size={14} />
-      <span class="rp-error-msg">Review cancelled.</span>
+      <span class="rp-error-msg">Review canceled.</span>
       <button class="btn small" disabled={starting} onclick={startReview}>
         {starting ? 'Starting…' : 'Run again'}
       </button>
@@ -1150,7 +1151,7 @@
     <!-- status === 'done' -->
     <div class="rp-header">
       <span class="rp-stats">
-        <span class="rp-stat">{totalCount} comment{totalCount === 1 ? '' : 's'}</span>
+        <span class="rp-stat">{plural(totalCount, 'comment')}</span>
         {#if review.summary_fallback}
           <span
             class="chip warn rp-fallback-badge"
@@ -1207,7 +1208,7 @@
         {#if mergeReady}
           <Icon name="check" size={13} /> Merge-ready — no bug-severity blockers
         {:else}
-          <Icon name="zap" size={13} /> {blockerCount} blocker{blockerCount === 1 ? '' : 's'} before merge
+          <Icon name="zap" size={13} /> {plural(blockerCount, 'blocker')} before merge
         {/if}
         {#if review.verdict}
           <span class="rp-verdict">Verdict: {verdictLabel(review.verdict)}</span>
@@ -1235,14 +1236,14 @@
             <!-- Approvals -->
             {@const approvals = (mergeReadiness as any).approvals ?? 0}
             {#if approvals > 0}
-              <span class="chip ok rp-readiness-chip">{approvals} approval{approvals === 1 ? '' : 's'}</span>
+              <span class="chip ok rp-readiness-chip">{plural(approvals, 'approval')}</span>
             {:else}
               <span class="chip rp-readiness-chip dim">0 approvals</span>
             {/if}
             <!-- Unresolved findings -->
             {@const unresolved = mergeReadiness.unresolved_total}
             {#if unresolved > 0}
-              <span class="chip rp-readiness-chip" style="background:var(--danger-soft);color:var(--danger)">{unresolved} open finding{unresolved === 1 ? '' : 's'}</span>
+              <span class="chip rp-readiness-chip" style="background:var(--danger-soft);color:var(--danger)">{plural(unresolved, 'open finding')}</span>
             {:else}
               <span class="chip ok rp-readiness-chip">No open findings</span>
             {/if}
@@ -1388,7 +1389,7 @@
                 {#if run.agents && run.agents.length > 0}
                   <span class="dim" style="font-size:var(--fs-xs)">{run.agents.filter(a => a.status === 'done').length}/{run.agents.length} agents</span>
                 {/if}
-                <span class="dim" style="font-size:var(--fs-xs)">{run.comments.length} comment{run.comments.length === 1 ? '' : 's'}</span>
+                <span class="dim" style="font-size:var(--fs-xs)">{plural(run.comments.length, 'comment')}</span>
                 <span class="grow"></span>
                 <span class="dim" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /></span>
               </button>
@@ -1638,7 +1639,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     margin: 0 0 8px;
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
@@ -1681,7 +1682,7 @@
   }
   .rp-readiness-chip {
     font-size: var(--fs-xs);
-    padding: 2px 7px;
+    padding: 2px 6px;
   }
   /* CI status pill colours */
   .rp-ci-success { background: var(--success-soft); color: var(--success); }
@@ -1694,7 +1695,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     margin: 0 0 10px;
     border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
     background: var(--warning-soft);
@@ -1746,29 +1747,6 @@
     font-size: var(--fs-m);
     font-weight: 600;
   }
-  .spinner {
-    width: 18px;
-    height: 18px;
-    border: 2.5px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    flex-shrink: 0;
-  }
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    vertical-align: middle;
-    margin-inline-end: 3px;
-  }
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
 
   /* Live agent cards */
   .rp-agents {
@@ -1806,7 +1784,7 @@
   .rp-agent-count {
     font-size: var(--fs-xs);
     display: block;
-    margin-top: 3px;
+    margin-top: 2px;
   }
 
 
@@ -1832,7 +1810,7 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .rp-finding {
     display: flex;
@@ -1925,13 +1903,13 @@
     font-size: var(--fs-xs);
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
   }
 
   /* Severity chips */
   .severity-chip {
     display: inline-block;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -1939,7 +1917,7 @@
     text-transform: uppercase;
   }
   .sev-info {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .sev-warn {
@@ -2093,7 +2071,7 @@
   .cfg-field {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .cfg-label {
     font-size: var(--fs-xs);
@@ -2172,8 +2150,8 @@
     gap: 4px;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 20px;
-    padding-block: 3px; padding-inline: 10px 8px;
+    border-radius: 999px;
+    padding-block: 2px; padding-inline: 10px 8px;
     font-size: var(--fs-xs);
   }
   .cfg-preset-name {
@@ -2298,7 +2276,7 @@
        tap height. */
     .rp-history-toggle { padding: 6px 0; min-height: 36px; }
     /* 16px input text prevents iOS Safari from auto-zooming on focus. */
-    .rp-context-input { font-size: 16px; }
+    .rp-context-input { font-size: 16px; } /* ui-guards: allow — 16px stops iOS zoom-on-focus */
   }
   @media (max-width: 640px) {
     .rp-header .btn,
@@ -2363,7 +2341,7 @@
     flex-wrap: wrap;
   }
   .rp-history-run-header:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .rp-history-run-body {
     padding: 4px 8px 8px;

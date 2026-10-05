@@ -3,6 +3,7 @@
   // with its author (agents marked). Clicking chips selects up to two for
   // Compare; versions are the undo model, so nothing here ever deletes.
   import Icon from '../../lib/components/Icon.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import type { DesignVersion } from '../../lib/api/types';
   import { stripOrder, versionAuthor } from './model';
@@ -57,9 +58,9 @@
 
 <div class="strip" data-testid="design-version-strip">
   <span class="label"><Icon name="clock" size={14} /> Versions</span>
-  <div class="chips" bind:this={scroller} role="group" aria-label="Versions">
+  <div class="chips scroll-thin" bind:this={scroller} role="group" aria-label="Versions">
     {#if loading && !versions.length}
-      <span class="dim">Loading versions…</span>
+      <div class="strip-skel"><Skeleton rows={1} height={22} label="versions" /></div>
     {:else if error && !versions.length}
       <LoadState what="versions" variant="compact" {loading} {error} empty={true} {onretry} />
     {:else}
@@ -125,16 +126,15 @@
     align-items: center;
     gap: 6px;
     overflow-x: auto;
-    scrollbar-width: thin;
     padding-block: 4px;
   }
   .vchip {
     flex: none;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 24px;
-    padding: 0 9px;
+    padding: 0 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface);
@@ -152,7 +152,7 @@
   }
   .vchip.sel {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .av {
     width: 8px;
@@ -203,5 +203,9 @@
     .hint {
       display: none;
     }
+  }
+  .strip-skel {
+    flex: none;
+    inline-size: 200px;
   }
 </style>

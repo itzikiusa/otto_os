@@ -348,7 +348,7 @@
   {#if loading}
     <div class="split">
       <aside class="list-pane" aria-busy="true"><div class="pad"><Skeleton rows={10} height={40} /></div></aside>
-      <section class="detail-pane"><p class="dim pad" role="status">Loading skills…</p></section>
+      <section class="detail-pane"><div class="pad"><Skeleton rows={6} height={28} announce={false} /></div></section>
     </div>
   {:else if loadError}
     <LoadState what="skills" variant="page" loading={retrying} error={loadError} empty={true} onretry={retryLoad} />
@@ -370,7 +370,7 @@
         <div class="list-tools">
           <label class="search">
             <Icon name="search" size={14} />
-            <input type="search" placeholder="Search skills" bind:value={query} aria-label="Search skills" />
+            <input type="search" placeholder="Filter skills…" bind:value={query} aria-label="Filter skills" />
           </label>
           <div class="chips" role="group" aria-label="Filter by source">
             <button class="fchip" class:active={source === 'all'} aria-pressed={source === 'all'} onclick={() => (source = 'all')}>All <span class="n">{groups.length}</span></button>
@@ -428,7 +428,7 @@
                      option still reads as the skill first). -->
                 <span class="badges" aria-label="Copies: {g.variants.map((v) => sourceLabel(v.source)).join(', ')} · {syncTitle(g).split('\n')[0]}">
                   {#each g.variants as v (v.source)}
-                    <span class="badge" class:drift={g.driftedSources.includes(v.source)} title="{sourceLabel(v.source)}{g.driftedSources.includes(v.source) ? ' — differs' : ''}">
+                    <span class="src-tile" class:drift={g.driftedSources.includes(v.source)} title="{sourceLabel(v.source)}{g.driftedSources.includes(v.source) ? ' — differs' : ''}">
                       {#if v.source === 'library'}<Icon name="book" size={12} />{:else if v.source === 'bundled'}<Icon name="box" size={12} />{:else}<ProviderIcon provider={v.source} size={12} />{/if}
                     </span>
                   {/each}
@@ -437,7 +437,7 @@
             {/each}
           {:else}
             <div class="no-match">
-              <p class="dim">No skills match{query.trim() ? ` "${query.trim()}"` : ''}.</p>
+              <p class="dim">No skills match{query.trim() ? ` “${query.trim()}”` : ''}.</p>
               {#if filtering}<button class="btn small ghost" onclick={clearFilters}>Clear filters</button>{/if}
             </div>
           {/each}
@@ -546,7 +546,7 @@
   }
   .search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   /* The focus ring is drawn on the .search wrapper (:focus-within above). */
   .search input {
@@ -583,7 +583,7 @@
   }
   .fchip.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   .fchip.warn {
@@ -620,7 +620,7 @@
     gap: 8px;
     width: 100%;
     min-height: 40px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 1px solid transparent;
     border-radius: var(--radius-m);
     background: transparent;
@@ -634,7 +634,7 @@
   }
   .row.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+    border-color: var(--accent-soft-strong);
   }
   .row-main {
     flex: 1;
@@ -660,7 +660,8 @@
     gap: 2px;
     flex: none;
   }
-  .badge {
+  /* A copy's source icon tile (square) — not a status pill. */
+  .src-tile {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -670,7 +671,7 @@
     background: var(--surface-2);
     color: var(--text-dim);
   }
-  .badge.drift {
+  .src-tile.drift {
     box-shadow: inset 0 0 0 1.5px var(--status-warn);
   }
   .sdot {
@@ -701,7 +702,7 @@
   .legend > span {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .partial {
     display: flex;

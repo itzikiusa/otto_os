@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Inline note for an "All enabled regions" list: the regions that failed
   // (denied, opt-in disabled, throttled…) while the rest still rendered.
   import Icon from '../../lib/components/Icon.svelte';
@@ -14,7 +15,7 @@
 {#if errors.length}
   <div class="rerr" role="status">
     <Icon name="warning" size={13} />
-    <span>{errors.length} region{errors.length === 1 ? '' : 's'} could not be listed — the rows below come from the others.</span>
+    <span>{plural(errors.length, 'region')} could not be listed — the rows below come from the others.</span>
     <button class="link" onclick={() => (open = !open)} aria-expanded={open}>{open ? 'Hide' : 'Details'}</button>
     {#if open}
       <ul>

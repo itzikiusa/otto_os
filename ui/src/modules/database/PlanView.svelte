@@ -32,7 +32,7 @@
       class="plan-btn"
       class:on={rawMode}
       onclick={() => (rawMode = !rawMode)}
-      title="Toggle the engine's raw EXPLAIN JSON"
+      title="Toggle the engine’s raw EXPLAIN JSON"
     >
       <Icon name="grid" size={12} />{rawMode ? 'Tree' : 'Raw JSON'}
     </button>
@@ -104,7 +104,7 @@
     color: var(--text-dim);
     background: var(--surface);
     border: 1px solid var(--border);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
   }
   .plan-grow {
@@ -113,7 +113,7 @@
   .plan-btn {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text-dim);
@@ -160,7 +160,7 @@
   .plan-row {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     min-height: 24px;
     font-size: var(--fs-s);
     color: var(--text);
@@ -208,12 +208,12 @@
   .plan-warn {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     color: var(--danger);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
     border: 1px solid color-mix(in srgb, var(--status-exited) 35%, transparent);
     border-radius: 999px;
-    padding: 0 7px;
+    padding: 0 6px;
   }
 </style>

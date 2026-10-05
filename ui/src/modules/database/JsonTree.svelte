@@ -227,7 +227,7 @@
   }
   .sep {
     color: var(--text-dim);
-    margin-inline-start: -3px;
+    margin-inline-start: -2px;
   }
   .sum {
     color: var(--text-dim);
@@ -240,8 +240,8 @@
   }
   /* Indent guide: children hang off a hairline so deep nesting stays readable. */
   .kids {
-    margin-inline-start: 5px;
-    padding-inline-start: 9px;
+    margin-inline-start: 4px;
+    padding-inline-start: 8px;
     border-inline-start: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
   }
   .more {

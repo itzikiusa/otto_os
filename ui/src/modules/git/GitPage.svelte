@@ -265,7 +265,7 @@
         r.name,
       );
     } catch (e) {
-      toasts.error('Couldn’t link account', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t link account', e);
       // Snap the <select> back to the stored binding — the change never landed.
       await git.loadAllRepos(true);
     }
@@ -308,7 +308,7 @@
       await git.loadAllRepos(true);
       toasts.info('Repository removed', r.name);
     } catch (e) {
-      toasts.error('Couldn’t remove the repository', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove the repository', e);
     }
   }
 </script>
@@ -358,7 +358,7 @@
         {:else if !landingFocus && git.allRepos.length > 0}
           <!-- Adding a repository lives in the + tab (and the empty state) —
                no second "Add repository" primary here. -->
-          <button class="btn ghost" data-icon="zap" onclick={() => (landingFocus = true)} title="Your pull requests and Jira work across repositories">
+          <button class="btn small ghost" data-icon="zap" onclick={() => (landingFocus = true)} title="Your pull requests and Jira work across repositories">
             <Icon name="zap" size={14} /> Focus
           </button>
         {/if}
@@ -423,7 +423,8 @@
                 class="repo-search-input"
                 type="search"
                 bind:value={repoFilter}
-                placeholder="Search repositories by name, path or remote…"
+                placeholder="Filter repositories by name, path or remote…"
+                aria-label="Filter repositories"
                 spellcheck="false"
                 onkeydown={(e) => {
                   if (e.key === 'Escape' && repoFilter !== '') {
@@ -767,7 +768,7 @@
   }
   .repo-search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .repo-search-input {
     flex: 1;
@@ -816,7 +817,7 @@
   .repo-name {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-m);
     font-weight: 600;
     min-width: 0;

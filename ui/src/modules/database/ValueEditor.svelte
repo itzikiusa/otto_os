@@ -136,8 +136,8 @@
   });
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<span class="ve" bind:this={root} onkeydown={onKeydown} onfocusout={onFocusOut}>
+<!-- A keydown / focus-out catcher around the editor's own controls. -->
+<span class="ve" role="presentation" bind:this={root} onkeydown={onKeydown} onfocusout={onFocusOut}>
   <select class="ve-kind mono" bind:value={kind} aria-label="Value type" title="Value type">
     {#each kinds as k (k)}
       <option value={k}>{LABEL[k]}</option>
@@ -149,7 +149,6 @@
       <option value="false">false</option>
     </select>
   {:else if kind !== 'null'}
-    <!-- svelte-ignore a11y_autofocus -->
     <input
       class="ve-input mono"
       class:bad={err !== null}

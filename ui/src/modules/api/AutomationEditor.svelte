@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // One automation, edited in the main area: an ordered list of saved requests
   // ("steps"). Each step can CHECK its response (assertions) and SAVE values
   // from it into variables that later steps use as {{name}}. Edits are a
@@ -398,7 +399,7 @@
         </div>
         {#if runDetails && runDetails.automation_id === automationId}
           <p class="run-meta">
-            Run <span class="mono" title="Run id">{runDetails.id}</span> · {RUN_STATUS[runDetails.status]} · {rel(runDetails.created_at)}{#if runDetails.dataset_rows}{' '}· {runDetails.dataset_rows} data row{runDetails.dataset_rows === 1 ? '' : 's'}{/if}
+            Run <span class="mono" title="Run id">{runDetails.id}</span> · {RUN_STATUS[runDetails.status]} · {rel(runDetails.created_at)}{#if runDetails.dataset_rows}{' '}· {plural(runDetails.dataset_rows, 'data row')}{/if}
           </p>
           {#if runDetails.error}<p class="err" role="status">{runDetails.error}</p>{/if}
         {/if}
@@ -578,7 +579,7 @@
   .req-pick:focus-visible {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .step-idx {
     display: grid;

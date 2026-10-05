@@ -136,7 +136,7 @@
         <div class="field">
           <label for="ob-pass2">Confirm password</label>
           <input id="ob-pass2" aria-describedby="ob-mismatch" aria-invalid={password2.length > 0 && password !== password2} class="input" type="password" bind:value={password2} autocomplete="new-password" />
-          <span id="ob-mismatch" class="hint err" role="status">{password2.length > 0 && password !== password2 ? "Passwords don't match" : ''}</span>
+          <span id="ob-mismatch" class="hint err" role="status">{password2.length > 0 && password !== password2 ? "Passwords don’t match" : ''}</span>
         </div>
 
         <div class="ob-actions">
@@ -260,7 +260,7 @@
   .ob-card {
     width: 440px;
     max-width: calc(100vw - 32px);
-    padding: 22px 30px 28px;
+    padding: 22px 28px 28px;
   }
   .ob-progress {
     display: flex;
@@ -283,7 +283,7 @@
   .ob-mark {
     font-size: var(--fs-hero);
     font-weight: 600;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.01em;
     text-align: center;
     margin-bottom: 4px;
     background: linear-gradient(120deg, var(--accent), color-mix(in srgb, var(--accent) 50%, var(--text)));
@@ -325,7 +325,7 @@
     height: 100%;
     border-radius: 2px;
     background: var(--status-exited);
-    transition: width var(--dur-enter) ease-out, background var(--dur-enter) ease-out;
+    transition: background var(--dur-enter) ease-out;
   }
   .strength-fill.s2 {
     background: var(--status-warn);

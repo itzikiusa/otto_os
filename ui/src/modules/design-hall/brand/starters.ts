@@ -106,7 +106,7 @@ export const STARTER_KITS: readonly StarterKit[] = [
       logos: logos(),
       imagery: {
         summary: 'Natural light and real places; illustration for abstract ideas.',
-        do: ['Photos in natural light', 'Simple two-colour illustration'],
+        do: ['Photos in natural light', 'Simple two-color illustration'],
         dont: ['Heavy filters or neon gradients'],
       },
       voice: {

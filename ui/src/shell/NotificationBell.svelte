@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../lib/plural';
+  import Skeleton from '../lib/components/Skeleton.svelte';
   // Notification center bell: unread badge + an anchored popover of notices.
   //
   // It lives in the Navigator header / collapsed Rail (`side`: the panel opens
@@ -275,7 +277,7 @@
     close();
     const n = notifications.notices.length;
     const ok = await confirmer.ask(
-      `Delete all ${n} notification${n === 1 ? '' : 's'}? This can't be undone.`,
+      `Delete all ${plural(n, 'notification')}? This can’t be undone.`,
       { title: 'Clear all notifications', confirmLabel: 'Clear all' },
     );
     if (ok) await notifications.clear();
@@ -324,14 +326,13 @@
   >
     <Icon name="bell" size={15} />
     {#if unreadCount > 0}
-      <span class="badge sev-{notifications.unreadSeverity ?? 'info'}" aria-hidden="true">{badge}</span>
+      <span class="count-bubble sev-{notifications.unreadSeverity ?? 'info'}" aria-hidden="true">{badge}</span>
     {/if}
   </button>
 
   {#if open}
     <div class="bell-layer" use:portal>
       <!-- Backdrop closes the panel on any outside interaction. -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="bell-backdrop"
         onclick={() => close()}
@@ -387,12 +388,12 @@
             {:else if !notifications.loaded}
               <div class="panel-empty" aria-busy="true">
                 <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
-                <p>Loading notifications…</p>
+                <Skeleton rows={3} height={36} label="notifications" />
               </div>
             {:else if notifications.rows.length === 0}
               <div class="panel-empty">
                 <Icon name="bell" size={22} />
-                <p>You're all caught up</p>
+                <p>You’re all caught up</p>
               </div>
             {:else}
               {#each sections as sec (sec.bucket)}
@@ -500,14 +501,14 @@
   }
   /* Coloured by the most severe UNREAD notice: accent for info, then warning /
      danger. The semantic colours are text-safe on --bg, so --bg on them is too. */
-  .badge {
+  .count-bubble {
     position: absolute;
     top: -2px;
     inset-inline-end: -3px;
     min-width: 16px;
     height: 16px;
     padding: 0 4px;
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     background: var(--accent-solid);
     color: var(--accent-contrast);
     font-size: var(--fs-xs);
@@ -516,11 +517,11 @@
     text-align: center;
     box-shadow: 0 0 0 1.5px var(--bg);
   }
-  .badge.sev-warn {
+  .count-bubble.sev-warn {
     background: var(--warning);
     color: var(--bg);
   }
-  .badge.sev-error {
+  .count-bubble.sev-error {
     background: var(--danger);
     color: var(--bg);
   }
@@ -560,20 +561,20 @@
     transform: rotate(45deg);
   }
   .nb-caret.at-left {
-    left: -6px;
+    left: -6px; /* ui-guards: allow — physical: --caret and the side come from measured screen geometry */
     top: calc(var(--caret) - 7px);
     border-width: 0 0 1px 1px;
     clip-path: polygon(0 0, 0 100%, 100% 100%);
   }
   .nb-caret.at-right {
-    right: -6px;
+    right: -6px; /* ui-guards: allow — physical: --caret and the side come from measured screen geometry */
     top: calc(var(--caret) - 7px);
     border-width: 1px 1px 0 0;
     clip-path: polygon(0 0, 100% 0, 100% 100%);
   }
   .nb-caret.at-top {
     top: -6px;
-    left: calc(var(--caret) - 7px);
+    left: calc(var(--caret) - 7px); /* ui-guards: allow — physical: --caret and the side come from measured screen geometry */
     border-width: 1px 0 0 1px;
     clip-path: polygon(0 0, 100% 0, 0 100%);
   }
@@ -629,7 +630,7 @@
   }
 
   .nb-section {
-    padding: 8px 14px 3px;
+    padding: 8px 14px 2px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
@@ -648,7 +649,7 @@
     min-height: 48px;
     padding-block: 8px;
     /* The trailing gutter holds the dismiss button. */
-    padding-inline: 4px 30px;
+    padding-inline: 4px 28px;
     border: none;
     border-radius: inherit;
     background: transparent;
@@ -722,7 +723,7 @@
   }
   .nb-count {
     flex-shrink: 0;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
@@ -757,7 +758,7 @@
     align-items: center;
     gap: 4px;
     margin: -4px 0 6px;
-    margin-inline-start: 41px;
+    margin-inline-start: 40px;
     padding: 1px 4px;
     border: none;
     border-radius: var(--radius-s);
@@ -772,7 +773,7 @@
   .nb-detail {
     position: relative;
     margin: 0 8px 8px;
-    margin-inline-start: 41px;
+    margin-inline-start: 40px;
   }
   .nb-detail pre {
     margin: 0;

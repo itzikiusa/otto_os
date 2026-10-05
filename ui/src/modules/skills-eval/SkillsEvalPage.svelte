@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Skills Evaluator module: a left list of past runs + "New evaluation", and a
   // right pane showing either the start form or a selected run's live report.
   import { untrack } from 'svelte';
@@ -110,7 +111,7 @@
   // ⌘K: the Evaluator's verbs while it's on screen.
   $effect(() =>
     registry.register('skills-eval', [
-      { id: 'skills-eval.new', title: 'New skill evaluation', group: 'Skills Lab', keywords: 'evaluate eval start run score', run: () => { setTab('runs'); compareMode = false; newRun(); } },
+      { id: 'skills-eval.new', title: 'New skill evaluation…', group: 'Skills Lab', keywords: 'evaluate eval start run score', run: () => { setTab('runs'); compareMode = false; newRun(); } },
       { id: 'skills-eval.golden', title: 'Open golden tasks', group: 'Skills Lab', keywords: 'regression corpus eval', run: () => setTab('golden') },
       { id: 'skills-eval.matrix', title: 'Open eval matrix', group: 'Skills Lab', keywords: 'provider skill prompt grid compare', run: () => setTab('matrix') },
     ]),
@@ -199,7 +200,7 @@
       runs = [...runs, ...page.items.filter((r) => !have.has(r.id))];
       nextCursor = page.next_cursor;
     } catch (e) {
-      toasts.error("Couldn’t load more evaluations", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t load more evaluations", e);
     } finally {
       loadingMore = false;
     }
@@ -229,7 +230,7 @@
       mode = 'detail';
       toasts.success('Evaluation started', 'Watch progress in the report.');
     } catch (e) {
-      toasts.error("Couldn’t start the evaluation", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t start the evaluation", e);
     } finally {
       starting = false;
     }
@@ -278,7 +279,6 @@
       <span class="se-side-title">Evaluations</span>
       <button
         class="icon-btn"
-        class:active={compareMode}
         aria-pressed={compareMode}
         onclick={toggleCompare}
         title={compareTitle}
@@ -332,7 +332,7 @@
         {/each}
         {#if nextCursor}
           <button class="btn small ghost se-more" onclick={() => void loadMore()} disabled={loadingMore}>
-            {loadingMore ? 'Loading…' : 'Load older evaluations'}
+            {loadingMore ? 'Loading older evaluations…' : 'Load older evaluations'}
           </button>
         {/if}
       {/if}
@@ -450,14 +450,14 @@
     cursor: pointer;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .se-item:hover {
     background: var(--hover);
   }
   .se-item.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    border-color: var(--accent-line);
   }
   .se-item-top {
     display: flex;
@@ -484,7 +484,7 @@
   .se-item-meta {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -507,7 +507,7 @@
   }
   .se-dot.st-running {
     background: var(--info);
-    animation: pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   .se-dot.st-done {
     background: var(--status-working);
@@ -540,11 +540,6 @@
       animation: none;
     }
   }
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
-  }
   .se-main {
     flex: 1;
     min-width: 0;
@@ -569,10 +564,6 @@
     background: var(--accent-solid);
     color: var(--accent-contrast);
     border-color: var(--accent-solid);
-  }
-  .btn.active {
-    background: var(--accent-soft);
-    color: var(--text);
   }
   .grow {
     flex: 1;

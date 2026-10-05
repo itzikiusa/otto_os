@@ -329,7 +329,7 @@
     {#if hasMore}
       <div class="more">
         <button class="btn small" disabled={sLoading} onclick={() => void loadScoped(true)} data-testid="design-collection-more">
-          {sLoading ? 'Loading…' : 'Load more'}
+          {sLoading ? 'Loading more…' : 'Load more'}
         </button>
       </div>
     {/if}

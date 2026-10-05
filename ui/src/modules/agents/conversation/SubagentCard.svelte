@@ -4,6 +4,7 @@
   // on first expand and rendered with the same turn renderer. Children come
   // from `Transcript.subagents[]` (parent_agent_id), never from the body.
   import { getContext } from 'svelte';
+  import Skeleton from '../../../lib/components/Skeleton.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import TurnItem from './TurnItem.svelte';
   import SubagentCard from './SubagentCard.svelte';
@@ -48,7 +49,7 @@
     {#if meta?.model}<span class="chip sub-model">{meta.model}</span>{/if}
     {#if children.length}<span class="chip sub-kids" title="{children.length} nested agents">{children.length} ⤵</span>{/if}
     <span class="sub-status {status ?? 'unknown'}" role="img" aria-label={STATUS_LABEL[status ?? 'unknown']} title={STATUS_LABEL[status ?? 'unknown']}>
-      {#if status === 'running'}<span class="spin"></span>
+      {#if status === 'running'}<span class="spinner" style:--spinner-size="10px" aria-hidden="true"></span>
       {:else if status === 'done'}<Icon name="check" size={12} />
       {:else if status === 'error'}<Icon name="x" size={12} />
       {:else}<Icon name="minus" size={12} />{/if}
@@ -58,7 +59,7 @@
   {#if open}
     <div class="sub-body">
       {#if body?.loading && !body.turns.length}
-        <div class="dim sub-note">Loading subagent transcript…</div>
+        <div class="sub-note"><Skeleton rows={2} height={18} label="the subagent transcript" /></div>
       {:else if body?.error}
         <div class="sub-note err">Could not load: {body.error}</div>
       {:else if !items.length}
@@ -66,7 +67,7 @@
       {:else}
         {#if body?.has_earlier}
           <button class="btn small ghost" disabled={body.loading} onclick={() => ctx.conv.loadSubagentEarlier(agentId)}>
-            {body.loading ? 'Loading…' : 'Load earlier'}
+            {body.loading ? 'Loading earlier turns…' : 'Load earlier'}
           </button>
         {/if}
         {#each items as item (item.id)}
@@ -155,18 +156,6 @@
   }
   .sub-status.error {
     color: var(--danger);
-  }
-  .spin {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
-    border-top-color: var(--accent);
-  }
-  @media (prefers-reduced-motion: no-preference) {
-    .spin {
-      animation: otto-spin 0.8s linear infinite;
-    }
   }
   
   .sub-caret {

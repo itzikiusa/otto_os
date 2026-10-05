@@ -208,6 +208,7 @@
 </script>
 
 <script lang="ts">
+  import { toastError } from '../toastError';
   // xterm.js terminal bound to WS /ws/term/{id} per docs/contracts/ws.md.
   // Binary frames → term.write; JSON control frames for status/exit/scrollback.
   import { untrack } from 'svelte';
@@ -241,6 +242,7 @@
   import TermKeysBar from './TermKeysBar.svelte';
   import Icon from './Icon.svelte';
   import { terminalReply } from './terminalInput';
+  import { plural } from '../plural';
 
   interface Props {
     sessionId: string;
@@ -343,6 +345,8 @@
     findRank?: number;
   }
   let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true, findRank = 0 }: Props = $props();
+  // Scrollback results: a listbox driven from the find input (aria-activedescendant).
+  const findId = $props.id();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -761,7 +765,7 @@
       const frame = targetTransform ? targetTransform(input) : input;
       if (frame !== null) targetSocket.send(JSON.stringify(frame));
     } catch (e) {
-      toasts.error('Couldn’t paste image', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t paste image', e);
     }
   }
 
@@ -2794,6 +2798,8 @@
           bind:value={findQuery}
           placeholder="Find in terminal"
           aria-label="Find in terminal"
+          aria-controls={serverMatches.length > 0 ? `${findId}-results` : undefined}
+          aria-activedescendant={serverMatches.length > 0 && serverMatchIdx >= 0 ? `${findId}-match-${serverMatchIdx}` : undefined}
           onfocus={onFindFocus}
           onblur={onFindBlur}
           oninput={() => {
@@ -2807,7 +2813,7 @@
         <!-- Local match position (client buffer), then the scrollback count
              (spinner while the ring-buffer search is in flight). -->
         {#if findQuery && localCount > 0}
-          <span class="find-status" aria-live="polite" title="{localCount}{localIdx < 0 ? '+' : ''} match{localCount === 1 ? '' : 'es'} on screen and in the loaded scrollback">
+          <span class="find-status" aria-live="polite" title="{localCount}{localIdx < 0 ? '+' : ''} {localCount === 1 ? 'match' : 'matches'} on screen and in the loaded scrollback">
             {localIdx >= 0 ? `${localIdx + 1}/${localCount}` : `${localCount}+`}
           </span>
         {:else if findQuery && localMiss && !serverSearchPending && serverMatches.length === 0}
@@ -2816,7 +2822,7 @@
         {#if serverSearchPending}
           <span class="find-status" title="Searching scrollback…">…</span>
         {:else if serverMatches.length > 0}
-          <span class="find-status server" title="{serverMatches.length} scrollback match{serverMatches.length === 1 ? '' : 'es'} (↑↓ to step)">
+          <span class="find-status server" title="{plural(serverMatches.length, 'scrollback match', 'scrollback matches')} (↑↓ to step)">
             <Icon name="clock" size={10} />{serverMatchIdx >= 0 ? serverMatchIdx + 1 : '–'}/{serverMatches.length}
           </span>
         {/if}
@@ -2833,17 +2839,18 @@
       {#if serverMatches.length > 0}
         <!-- Server ring-buffer match list (≤200, the list scrolls). Clicking a
              row — or ↑↓ in the input — jumps the viewport to that line. -->
-        <div class="find-results" role="listbox" aria-label="Scrollback search results" bind:this={findResultsEl}>
+        <div class="find-results" id="{findId}-results" role="listbox" aria-label="Scrollback search results" bind:this={findResultsEl}>
           {#each serverMatches as m, i (i)}
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- Picked on press (focus stays in the find input; ↑/↓ there step). -->
             <div
+              id="{findId}-match-{i}"
               class="find-result-row"
               class:active={i === serverMatchIdx}
               role="option"
               aria-selected={i === serverMatchIdx}
               tabindex="-1"
               data-match={i}
-              onclick={() => goToServerMatch(i)}
+              onmousedown={(e) => { e.preventDefault(); goToServerMatch(i); }}
             >
               <span class="find-result-line">{m.line + 1}</span>
               <span class="find-result-text">{m.text}</span>
@@ -2868,28 +2875,28 @@
     {#if !viewport.isPhone && ui.termToolbar && showToolbar}
       <div class="desk-toolbar" role="toolbar" aria-label="Terminal controls">
         <button
-          class="tb-btn"
+          class="icon-btn"
           onclick={() => ui.termZoomOut()}
           title="Zoom out" aria-keyshortcuts="Meta+-"
           aria-label="Zoom out"
-        >−</button>
-        <button class="tb-btn tb-size" onclick={() => ui.termZoomReset()}
+        ><Icon name="minus" size={12} /></button>
+        <button class="btn small ghost tb-size" onclick={() => ui.termZoomReset()}
           title="Reset terminal zoom" aria-keyshortcuts="Meta+0" aria-label="Reset terminal zoom">{fittedFontSize}px</button>
         <button
-          class="tb-btn"
+          class="icon-btn"
           onclick={() => ui.termZoomIn()}
           title="Zoom in" aria-keyshortcuts="Meta+="
           aria-label="Zoom in"
-        >+</button>
+        ><Icon name="plus" size={12} /></button>
         <span class="tb-sep" aria-hidden="true"></span>
         <button
-          class="tb-btn"
+          class="btn small ghost tb-copy"
           class:tb-active={ui.termCopyOnSelect}
           onclick={() => ui.setTermCopyOnSelect(!ui.termCopyOnSelect)}
           title={ui.termCopyOnSelect ? 'Copy-on-select: on — click to disable' : 'Copy-on-select: off — click to enable'}
           aria-pressed={ui.termCopyOnSelect}
           aria-label="Copy on select"
-        >copy</button>
+        >Copy</button>
       </div>
     {/if}
 
@@ -2922,7 +2929,7 @@
       {@const ex = exitState(exitCode, resumable || dormantView)}
       {@const hint = dormantView && ex.key === 'suspended' ? (readOnly ? 'Suspended' : 'Suspended — type or Resume to continue') : ex.hint}
       <div class="term-overlay">
-        <span class="badge {ex.tone}" data-exit={ex.key} data-dormant={dormantView || undefined} title={hint}>{ex.key === 'suspended' ? hint : ex.label}</span>
+        <span class="ov-status {ex.tone}" data-exit={ex.key} data-dormant={dormantView || undefined} title={hint}>{ex.key === 'suspended' ? hint : ex.label}</span>
         {#if (restartable || resumable || dormantView) && !readOnly}
           <button
             class="btn"
@@ -2936,16 +2943,16 @@
       </div>
     {:else if reconnecting}
       <div class="term-overlay dim">
-        <span class="badge">Reconnecting…</span>
+        <span class="ov-status">Reconnecting…</span>
         <button class="btn" onclick={() => { reconnectAttempts = 0; connect({ view: false }); }}>Reconnect now</button>
       </div>
     {:else if disconnected}
       <div class="term-overlay">
-        <span class="badge bad">Disconnected</span>
+        <span class="ov-status danger">Disconnected</span>
         <button class="btn" onclick={() => connect({ view: false })}>Reconnect</button>
       </div>
     {:else if !connected}
-      <div class="term-overlay dim"><span class="badge">Connecting…</span></div>
+      <div class="term-overlay dim"><span class="ov-status">Connecting…</span></div>
     {/if}
 
     {#if readOnly}
@@ -2970,14 +2977,14 @@
           class="phone-btn"
           onclick={() => ui.termZoomOut()}
           aria-label="Zoom out terminal"
-          title="Zoom out"
-        >−</button>
+          title="Zoom out terminal"
+        ><Icon name="minus" size={14} /></button>
         <button
           class="phone-btn"
           onclick={() => ui.termZoomIn()}
           aria-label="Zoom in terminal"
-          title="Zoom in"
-        >+</button>
+          title="Zoom in terminal"
+        ><Icon name="plus" size={14} /></button>
         <!-- Task 5.1: keyboard toggle — focuses term.textarea (real user gesture) -->
         <button
           class="phone-btn"
@@ -3054,7 +3061,10 @@
      paint clip can't cut them off. */
   .term-host {
     position: absolute;
-    inset: 6px 0 4px 8px;
+    /* Logical insets resolve against this box's own `direction: ltr`, so the
+       8 px gutter stays on the left (the terminal grid is always LTR). */
+    inset-block: 6px 4px;
+    inset-inline: 8px 0;
     overflow-x: auto;
     overflow-y: hidden;
     direction: ltr;
@@ -3092,12 +3102,12 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     max-width: calc(100% - 32px);
   }
   .find-bar:focus-within {
     border-color: var(--accent-text);
-    box-shadow: var(--shadow), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: var(--glass-shadow), 0 0 0 3px var(--accent-soft-strong);
   }
   .find-bar input {
     width: 180px;
@@ -3131,7 +3141,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     width: 340px;
     max-width: calc(100% - 32px);
     max-height: 200px;
@@ -3143,7 +3153,7 @@
     display: flex;
     align-items: baseline;
     gap: 8px;
-    padding: 3px 8px;
+    padding: 2px 8px;
     cursor: pointer;
     color: var(--text);
   }
@@ -3187,27 +3197,24 @@
   .term-overlay.dim {
     opacity: 0.7;
   }
-  .term-overlay .badge {
+  /* The capsule is the overlay itself; its status word is plain text in the
+     tone colour (Ended / Suspended / Failed / Disconnected). */
+  .ov-status {
     font-size: var(--fs-xs);
-    padding: 0;
-    background: none;
-    border: none;
+    color: var(--text-dim);
+  }
+  .ov-status.danger {
+    color: var(--danger);
+  }
+  .ov-status.warning {
+    color: var(--warning);
+  }
+  .ov-status.success {
+    color: var(--success);
   }
   .term-overlay .btn {
     padding: 1px 8px;
     font-size: var(--fs-xs);
-  }
-  .badge {
-    font-size: var(--fs-xs);
-    padding: 3px 8px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-  }
-  .badge.danger {
-    color: var(--danger);
-    background: var(--danger-soft);
   }
   /* Read-only notice: a slim strip across the top; the host starts below it. */
   .term-host.ro {
@@ -3339,33 +3346,14 @@
   .desk-toolbar:hover {
     opacity: 1;
   }
-  .tb-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 18px;
-    min-width: 18px;
-    padding: 0 4px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    cursor: pointer;
-    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
-  }
-  .tb-btn:hover {
-    background: var(--surface-2);
-    color: var(--text);
-  }
-  .tb-btn.tb-active {
+  /* Shared .icon-btn / .btn.small.ghost; only the active copy toggle and the
+     size readout differ. */
+  .tb-copy.tb-active {
     color: var(--accent-text);
   }
   .tb-size {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
     min-width: 28px;
-    text-align: center;
+    color: var(--text-dim);
     user-select: none;
   }
   .tb-sep {

@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   // PublishDialog — shared modal for both "Publish as Jira Story" and
   // "Publish as Confluence RFC" actions. Also used for "Convert RFC → Story".
   import Modal from '../../lib/components/Modal.svelte';
@@ -51,7 +54,7 @@
       if (e.status === 401 || e.status === 403) why = ' The account was refused — check its token in Settings → Integrations → Jira.';
       else if (e.status === 404) why = ' The project, space or parent page was not found.';
       else if (e.status === 409) why = ' It conflicts with the current state on the server.';
-    } else if (e instanceof TypeError) why = " Otto can't reach the daemon.";
+    } else if (e instanceof TypeError) why = " Otto can’t reach the daemon.";
     formError = `${what}.${why}`;
     formErrorDetail = raw;
   }
@@ -231,7 +234,7 @@
 <Modal {title} width={440} {onclose}>
   {#snippet children()}
     {#if accountsLoading}
-      <div class="loading">Loading accounts…</div>
+      <LoadState what="your publishing accounts" variant="compact" loading empty />
     {:else if accounts.length === 0 && formError}
       <!-- A failed accounts load is an error with Retry, not "no accounts yet". -->
       <div class="field-error">
@@ -266,7 +269,7 @@
         <div class="field">
           <label class="label" for="pd-project">Project</label>
           {#if projectsLoading}
-            <div class="loading-inline">Loading projects…</div>
+            <Skeleton rows={1} height={27} label="projects" />
           {:else}
             <select
               id="pd-project"
@@ -290,7 +293,7 @@
         <div class="field">
           <label class="label" for="pd-issuetype">Issue type</label>
           {#if issueTypesLoading}
-            <div class="loading-inline">Loading types…</div>
+            <Skeleton rows={1} height={27} label="issue types" />
           {:else}
             <select
               id="pd-issuetype"
@@ -314,7 +317,7 @@
         <div class="field">
           <label class="label" for="pd-space">Space</label>
           {#if spacesLoading}
-            <div class="loading-inline">Loading spaces…</div>
+            <Skeleton rows={1} height={27} label="spaces" />
           {:else}
             <select
               id="pd-space"
@@ -368,13 +371,13 @@
           <div class="field-error" role="alert">{previewError}</div>
           <button class="btn small" onclick={() => void loadPreview(product.selectedId)}>Retry preview</button>
         {:else if previewBody === null}
-          <div class="loading-inline">Loading the content…</div>
+          <Skeleton rows={4} height={14} label="the content" />
         {:else if previewLines.head.length === 0}
           <div class="loading-inline">No body — only the title is published.</div>
         {:else}
           <pre class="pd-preview-body">{previewLines.head.join('\n')}</pre>
           {#if previewLines.more > 0}
-            <div class="pd-preview-more">+{previewLines.more} more line{previewLines.more === 1 ? '' : 's'}</div>
+            <div class="pd-preview-more">+{plural(previewLines.more, 'more line')}</div>
           {/if}
         {/if}
         {#if visibility}

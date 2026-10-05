@@ -188,7 +188,7 @@
   .pp-breakdown {
     display: flex;
     flex-wrap: wrap;
-    gap: 5px;
+    gap: 4px;
     margin-bottom: 12px;
   }
   .pp-chip { font-size: var(--fs-xs); }
@@ -220,7 +220,7 @@
     max-height: 180px;
   }
   .pp-reason { margin: 4px 0; font-size: var(--fs-s); line-height: 1.5; }
-  .pp-artifacts { display: flex; flex-wrap: wrap; gap: 5px; margin: 4px 0; }
+  .pp-artifacts { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
   .pp-artifact {
     font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--success) 16%, transparent);
@@ -231,7 +231,7 @@
   .pp-event-kind { font-weight: 600; }
   .pp-section { font-size: var(--fs-s); font-weight: 600; margin: 14px 0 6px; }
   .pp-rules { margin: 0; padding-inline-start: 18px; }
-  .pp-rule { font-size: var(--fs-s); line-height: 1.5; margin-bottom: 3px; }
+  .pp-rule { font-size: var(--fs-s); line-height: 1.5; margin-bottom: 2px; }
   .pp-export {
     margin: 0;
     padding: 8px 10px;
@@ -250,7 +250,7 @@
 
   /* Status chips (shared vocabulary; high-contrast for verified). */
   .status-open { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
-  .status-accepted { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
+  .status-accepted { background: var(--accent-soft-strong); color: var(--accent-text); }
   .status-fixed { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
   .status-verified { background: var(--success-soft); color: var(--success); }
   .status-false_positive { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
@@ -260,6 +260,6 @@
   .sev2-critical { background: var(--danger-soft); color: var(--danger); font-weight: 600; }
   .sev2-high { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
   .sev2-medium { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
-  .sev2-low { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
+  .sev2-low { background: var(--accent-soft); color: var(--accent-text); }
   .sev2-info { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 </style>

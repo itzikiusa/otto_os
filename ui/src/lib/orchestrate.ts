@@ -17,6 +17,7 @@ import { api } from './api/client';
 import type { Action, BroadcastResp, ExecuteResult, Id, OrchestrateResp, Session } from './api/types';
 import { parseCommand, parseClose, startsWithCloseVerb, type CloseRequest } from './commandParser';
 import { allProviders } from './providers';
+import { plural } from './plural';
 
 export interface OrchestrateCtx {
   workspaceId: string;
@@ -307,7 +308,7 @@ export async function runEnglish(text: string, ctx: OrchestrateCtx): Promise<Eng
 export function describeAction(a: Action): string {
   switch (a.action) {
     case 'spawn_sessions':
-      return `Spawn ${a.count} ${a.provider} session${a.count === 1 ? '' : 's'}`;
+      return `Spawn ${plural(a.count, `${a.provider} session`)}`;
     case 'broadcast':
       return `Broadcast to all sessions: "${a.text}"`;
     case 'open_connection':
@@ -319,4 +320,4 @@ export function describeAction(a: Action): string {
 
 /** Plural helper for outcome copy — the shared one (lib/plural.ts),
  *  re-exported for existing importers. */
-export { plural } from './plural';
+export { plural };

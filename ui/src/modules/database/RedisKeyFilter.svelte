@@ -49,7 +49,7 @@
   .kf {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 24px;
     padding-inline-end: 6px;
     color: var(--text-dim);
@@ -67,7 +67,7 @@
     outline: none;
   }
   .kf-input:focus {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .kf-clear {
     display: grid;

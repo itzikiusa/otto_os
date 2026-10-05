@@ -309,16 +309,13 @@
     style={forceOpen ? undefined : `width:${ui.rightWidth}px`}
   >
     {#if !forceOpen}
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <!-- The window splitter (paneResizer: focus, keys, drag, double-click reset). -->
       <div
         class="resize-handle"
         role="separator"
-        tabindex="0"
         aria-label="Resize the {SESSION_PANEL}"
-        onmousedown={startResize}
-        ondblclick={() => ui.setRightWidth(300)}
         title={RESIZE_TITLE}
-        use:paneResizer={{ value: ui.rightWidth, min: RIGHT_MIN, max: Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, (typeof window === 'undefined' ? RIGHT_MAX : window.innerWidth) - 360)), invert: true, onChange: (w) => ui.setRightWidth(w), onReset: () => ui.setRightWidth(300), text: pxWide }}
+        use:paneResizer={{ value: ui.rightWidth, min: RIGHT_MIN, max: Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, (typeof window === 'undefined' ? RIGHT_MAX : window.innerWidth) - 360)), invert: true, onChange: (w) => ui.setRightWidth(w), onReset: () => ui.setRightWidth(300), onDragStart: startResize, text: pxWide }}
       ></div>
     {/if}
     <header class="rpanel-head">
@@ -373,28 +370,10 @@
         {@render lazyPanel(ui.rightTab as PanelKey)}
       {/if}
       {#if browserShown || (browserKept && ui.browserPanelVersion === 'v1')}
-        <!-- Transitional v1/v2 switch: v1 is the original per-session panel,
-             v2 embeds the Browser module (persisted tabs/marks + ask bar).
-             Only here, in agent mode — the Browser page itself is always v2.
-             v1 stays mounted while hidden (see `browserKept`). -->
+        <!-- v2 embeds the Browser module (persisted tabs/marks + ask bar); v1 is
+             the classic per-session panel, chosen in Settings → Browser and
+             kept mounted while hidden (see `browserKept`). -->
         <div class="browser-host" hidden={!browserShown}>
-          <div class="browser-ver" role="group" aria-label="Browser version">
-            <span class="dim">Browser</span>
-            <button
-              class="ver"
-              class:active={ui.browserPanelVersion === 'v1'}
-              aria-pressed={ui.browserPanelVersion === 'v1'}
-              onclick={() => ui.setBrowserPanelVersion('v1')}
-              title="v1 — per-session browser: native tabs + take-over picker"
-            >v1</button>
-            <button
-              class="ver"
-              class:active={ui.browserPanelVersion === 'v2'}
-              aria-pressed={ui.browserPanelVersion === 'v2'}
-              onclick={() => ui.setBrowserPanelVersion('v2')}
-              title="v2 — the Browser module: reader/live tabs, saved marks, ask the agent"
-            >v2</button>
-          </div>
           {#if ui.browserPanelVersion === 'v2'}
             {@render lazyPanel('browserV2')}
           {:else}
@@ -502,8 +481,8 @@
     background: linear-gradient(
       to right,
       transparent 0,
-      color-mix(in srgb, var(--accent) 40%, transparent) 45%,
-      color-mix(in srgb, var(--accent) 40%, transparent) 55%,
+      var(--accent-line) 45%,
+      var(--accent-line) 55%,
       transparent 100%
     );
   }
@@ -511,7 +490,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 7px 8px 6px;
+    padding: 6px 8px 6px;
     border-bottom: 1px solid var(--border);
   }
   .rpanel-tabs {
@@ -547,7 +526,7 @@
     transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .rtab:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .rtab.active {
     background: var(--surface-2);
@@ -564,37 +543,9 @@
     display: flex;
     flex-direction: column;
   }
-  .browser-host > :global(:not(.browser-ver)) {
+  .browser-host > :global(*) {
     flex: 1;
     min-height: 0;
-  }
-  .browser-ver {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    padding: 0.25rem 0.6rem;
-    border-bottom: 1px solid var(--border);
-    font-size: var(--fs-xs);
-  }
-  .browser-ver .dim {
-    color: var(--text-dim);
-    margin-inline-end: auto;
-  }
-  .ver {
-    height: 20px;
-    padding: 0 0.5rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--fs-xs);
-    cursor: pointer;
-  }
-  .ver.active {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    border-color: var(--accent);
   }
   .rstrip {
     width: 36px;

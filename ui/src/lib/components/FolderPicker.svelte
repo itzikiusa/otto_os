@@ -6,6 +6,8 @@
   // When `files` is true, files are shown and can be picked directly (for
   // identity-file selection etc.); directories still navigate on click.
   import { untrack, onDestroy, onMount, tick } from 'svelte';
+  import Skeleton from './Skeleton.svelte';
+  import Badge from './Badge.svelte';
   import { emptyHistory, recordFolder, historyTarget, folderCrumbs, emptyShortcuts, parseShortcuts, rememberFolder, toggleFavorite } from './folderNavigation';
   import { auth } from '../stores/auth.svelte';
   import { api, baseUrl } from '../api/client';
@@ -204,8 +206,7 @@
   {/if}
 
   <div class="pick-tools">
-    <!-- svelte-ignore a11y_autofocus -->
-    <input class="input filter-input" placeholder="Filter…" aria-label="Filter folders" bind:this={filterElement} bind:value={filter} autofocus />
+    <input class="input filter-input" placeholder="Filter…" aria-label="Filter folders" bind:this={filterElement} bind:value={filter} data-autofocus />
     <label class="hidden-toggle" title="Show dotfiles (names starting with .)">
       <input type="checkbox" bind:checked={showHidden} />
       Show hidden
@@ -237,7 +238,7 @@
     </aside>
   <div class="browser">
     {#if loading}
-      <div class="dim pad" role="status">Loading folders…</div>
+      <div class="pad"><Skeleton rows={4} height={28} label="folders" /></div>
     {:else if error}
       <div class="err pad" role="alert">
         <div>Could not open <code data-testid="attempted-folder">{lastAttempt.path || '~'}</code></div>
@@ -266,7 +267,7 @@
                   <button class="row" class:file-row={!e.is_dir} tabindex="-1" onclick={() => activate(index, 0)}>
                     <Icon name={e.is_dir ? (e.is_git_repo ? 'branch' : 'folder') : 'file'} size={14} />
                     <span class="grow ellipsis">{e.name}</span>
-                    {#if e.is_git_repo}<span class="chip">git</span>{/if}
+                    {#if e.is_git_repo}<Badge tone="accent" label="Git" />{/if}
                     {#if !e.is_dir}<span class="dim use-file">select</span>{/if}
                   </button>
                 </div>
@@ -317,12 +318,12 @@
   .favorite-action { margin-inline-start: auto; }
   .pick-content { display: flex; gap: 10px; min-width: 0; }
   .shortcuts { flex: 0 0 145px; min-width: 0; }
-  .shortcuts h4 { font-size: var(--fs-xs); color: var(--text-dim); margin: 5px 6px; }
+  .shortcuts h4 { font-size: var(--fs-xs); color: var(--text-dim); margin: 6px; }
   .shortcuts section + section { margin-top: 10px; }
   .shortcut-list { max-height: 130px; overflow-y: auto; }
   .shortcut-list p { font-size: var(--fs-xs); margin: 6px; }
   .shortcut-list button {
-    display: block; width: 100%; padding: 5px 6px; border: 0;
+    display: block; width: 100%; padding: 4px 6px; border: 0;
     border-radius: var(--radius-s); background: transparent; color: var(--text);
     text-align: start; font-size: var(--fs-s); cursor: pointer;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -330,7 +331,7 @@
   .favorite-row { display: flex; align-items: center; min-width: 0; }
   .favorite-row > button:first-child { flex: 1; min-width: 0; }
   .shortcut-list .remove-favorite { width: 24px; flex: 0 0 24px; display: grid; place-items: center; color: var(--text-dim); }
-  .shortcut-list button:hover, .shortcut-list button.current { background: var(--surface-2); }
+  .shortcut-list button:hover, .shortcut-list button.current { background: var(--hover); }
   @media (max-width: 640px) {
     .pick-content { flex-direction: column; }
     .shortcuts { flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -360,7 +361,7 @@
     padding: 4px;
     cursor: pointer;
   }
-  .crumb button:hover { background: var(--surface-2); color: var(--text); }
+  .crumb button:hover { background: var(--hover); color: var(--text); }
   .crumb button[aria-current] { color: var(--text); }
   .retry { margin: 0 14px 14px; }
   .pick-tools {
@@ -430,7 +431,7 @@
   }
   .file-row:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
   }
   .use-file {
     font-size: var(--fs-xs);
@@ -452,20 +453,11 @@
     border-color: var(--accent);
     color: var(--accent-text);
   }
-  .chip {
-    font-size: var(--fs-xs);
-    padding: 2px 6px;
-    border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent-text);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-  }
   .pad {
     padding: 16px;
     font-size: var(--fs-s);
   }
-  .last-opened { font-size: var(--fs-xs); margin-bottom: 3px; }
+  .last-opened { font-size: var(--fs-xs); margin-bottom: 4px; }
   .err {
     overflow-wrap: anywhere;
     color: var(--danger);

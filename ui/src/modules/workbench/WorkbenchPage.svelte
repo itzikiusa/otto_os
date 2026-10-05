@@ -13,6 +13,7 @@
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import { registry } from '../../lib/commands.svelte';
+  import { router } from '../../lib/router.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -74,6 +75,38 @@
   $effect(() => {
     const id = wsId;
     if (id) untrack(() => void workbench.attach(id));
+  });
+
+  // ── The open file is in the URL (`#/workbench/<file id>`) ──────────────────
+  // so a reload, a shared link or Back lands on it. The store keeps restoring
+  // the last tabs; on arrival a link naming a DIFFERENT file wins (the second
+  // effect opens it) instead of being replaced by the restored tab.
+  function routeFileId(): string | null {
+    const [mod, id] = router.parts;
+    return mod === 'workbench' && id ? id : null;
+  }
+  let routedId: string | null = null;
+  let arrived = false;
+  $effect(() => {
+    if (!workbench.loaded) return;
+    const id = workbench.active;
+    const was = routedId;
+    routedId = id;
+    const first = !arrived;
+    arrived = true;
+    if (!id && !was) return;
+    if (first && untrack(() => routeFileId()) && untrack(() => routeFileId()) !== id) return;
+    untrack(() => {
+      if (router.module === 'workbench' && routeFileId() !== id) router.replace(id ? `workbench/${id}` : 'workbench');
+    });
+  });
+  // A route change while the page is up (a link, Back/Forward) opens that file.
+  $effect(() => {
+    const linked = routeFileId();
+    if (!linked || !workbench.loaded) return;
+    untrack(() => {
+      if (linked !== workbench.active && workbench.docs.some((d) => d.id === linked)) open(linked);
+    });
   });
 
   onMount(() => {
@@ -307,7 +340,7 @@
       { label: 'Download', icon: 'download', disabled: !has || isImage, action: download },
       { separator: true },
       { label: workbench.showTrash ? 'Back to files' : 'Show trash', icon: 'trash', action: toggleTrash },
-      { label: 'Move to trash', icon: 'trash', danger: true, disabled: !has, action: () => void trashActive() },
+      { label: 'Move to trash', icon: 'trash', danger: true, disabled: !has, action: () => void trashActive() }, // ui-guards: allow — reversible (restore from the trash), so no confirm
     ];
     ctxMenu.show(e, items);
   }

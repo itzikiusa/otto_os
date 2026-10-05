@@ -84,7 +84,7 @@
   <div class="bar">
     <span class="hint">
       A <strong>deny</strong> wins over an allow; leave the tool blank to cover the whole server. No
-      match falls back to the server's default tool access.
+      match falls back to the server’s default tool access.
     </span>
     <span class="grow"></span>
     <button class="btn small" onclick={addRow} disabled={servers.length === 0}>
@@ -100,7 +100,7 @@
   {:else}
     <LoadState what="the allowlist" {loading} error={loadError} empty={rows.length === 0} onretry={() => void load()}>
       {#snippet emptyView()}
-        <EmptyState icon="eye" title="No allowlist entries yet" body="Without any, each server's default tool access applies." actionLabel="Add an entry" actionIcon="plus" actionKind="secondary" onaction={addRow} />
+        <EmptyState icon="eye" title="No allowlist entries yet" body="Without any, each server’s default tool access applies." actionLabel="Add an entry" actionIcon="plus" actionKind="secondary" onaction={addRow} />
       {/snippet}
     <div class="grid">
       <div class="thead">
@@ -161,7 +161,7 @@
     grid-template-columns: minmax(160px, 1fr) minmax(160px, 1.4fr) 110px 40px;
     align-items: center;
     gap: 8px;
-    padding: 7px 14px;
+    padding: 6px 14px;
   }
   .thead {
     border-bottom: 1px solid var(--border);

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { loadErrorText } from '../../lib/loadError';
   // What Otto learned from your team (`#/design/learned[/pending|rules|memory|
   // signals|settings][/<edit id>]`). Learning v1 is suggest-only: a
   // deterministic extractor turns repeated design signals (≥ 3 across ≥ 2
@@ -241,7 +243,7 @@
     try {
       const r = await extractRules(w);
       if (r.mode === 'off') toasts.info('Learning is off', 'Turn it on in Settings to get rule proposals.');
-      else if (r.proposed.length) toasts.success(`${r.proposed.length} new rule${r.proposed.length === 1 ? '' : 's'} to review`, 'Nothing applies until you accept it.');
+      else if (r.proposed.length) toasts.success(`${plural(r.proposed.length, 'new rule')} to review`, 'Nothing applies until you accept it.');
       else toasts.info('No new rules', `${r.candidates.filter((c) => !c.ready).length} pattern(s) are still forming.`);
       await load();
     } catch (e) {
@@ -264,7 +266,7 @@
     } catch (e) {
       toasts.error(
         'Couldn’t change learning mode',
-        e instanceof ApiError && e.status === 403 ? 'Only workspace admins can change this.' : e instanceof Error ? e.message : String(e),
+        e instanceof ApiError && e.status === 403 ? 'Only workspace admins can change this.' : loadErrorText(e),
       );
     } finally {
       savingMode = false;
@@ -396,7 +398,7 @@
         body="Atomic preferences (“avoid”, “prefer”, “pattern”) land here when agents or people save them to the design collection." />
     {:else}
       <label class="search"><Icon name="search" size={13} />
-        <input class="input" type="search" placeholder="Search memories" aria-label="Search design memories" bind:value={memQ} /></label>
+        <input class="input" type="search" placeholder="Filter memories…" aria-label="Filter design memories" bind:value={memQ} /></label>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Kind</th><th>Memory</th><th>Source</th><th>Created</th></tr></thead>
@@ -434,7 +436,7 @@
         </div>
         <div class="set">
           <div><strong>Where rules live</strong>
-            <p class="dim">Skill <code>{learned.skill}</code> · <span class="path" title={learned.skill_path}>{learned.skill_path}</span> · {learned.active.length} rule{learned.active.length === 1 ? '' : 's'}</p></div>
+            <p class="dim">Skill <code>{learned.skill}</code> · <span class="path" title={learned.skill_path}>{learned.skill_path}</span> · {plural(learned.active.length, 'rule')}</p></div>
           <button class="btn small" onclick={exportRules}><Icon name="download" size={12} /> Export rules (.md)</button>
         </div>
         <div class="set">
@@ -514,7 +516,7 @@
                     <span class="meta">
                       <span class="chip"><Icon name="file" size={11} /> skill: {learned.skill}</span>
                       {#if r.applied_at}<span class="dim small">accepted {rel(r.applied_at)}</span>{/if}
-                      <span class="dim small">{r.evidence.length} signal{r.evidence.length === 1 ? '' : 's'}</span>
+                      <span class="dim small">{plural(r.evidence.length, 'signal')}</span>
                     </span>
                   </button>
                   <button class="icon-btn" onclick={(ev) => ruleMenu(ev, r)} aria-label="Rule actions" title="Rule actions" aria-haspopup="menu"
@@ -586,7 +588,7 @@
   .split.with-evidence {
     grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
   }
-  @media (max-width: 1000px) {
+  @media (max-width: 1024px) {
     .split.with-evidence {
       grid-template-columns: minmax(0, 1fr);
     }
@@ -774,7 +776,7 @@
     border-block-end: 1px solid var(--border);
   }
   td {
-    padding: 7px 12px;
+    padding: 6px 12px;
     border-block-end: 1px solid var(--border);
     white-space: nowrap;
   }
@@ -802,7 +804,7 @@
   .kind {
     font-size: var(--fs-xs);
     font-weight: 500;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);

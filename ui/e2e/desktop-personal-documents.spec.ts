@@ -30,11 +30,11 @@ test('memory edits preserve notes, report conflicts, and folder selection never 
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('Memory changed');
   await expect(page.getByLabel('Memory Markdown')).toHaveValue('Stale editor text');
-  await page.getByRole('button', { name: 'Reload saved version' }).click();
+  await page.getByRole('button', { name: 'Load saved version' }).click();
   await expect(page.getByTestId('agent-document')).toContainText('Agent updated this concurrently');
   await page.getByTitle('Browse folders').click();
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await expect(page.getByLabel('Working directory')).toHaveValue('~/original');
+  await expect(page.getByLabel('Working folder')).toHaveValue('~/original');
   await page.getByTitle('Browse folders').click();
   await page.getByRole('button', { name: 'child', exact: true }).click();
   await expect(page.locator('output')).toHaveText('not submitted');
@@ -42,7 +42,7 @@ test('memory edits preserve notes, report conflicts, and folder selection never 
   await expect(page.getByTitle('Browse folders')).toBeFocused();
   await page.getByTitle('Browse folders').click();
   await page.getByRole('button', { name: 'Use this folder', exact: true }).click();
-  await expect(page.getByLabel('Working directory')).toHaveValue('/fixture/chosen');
+  await expect(page.getByLabel('Working folder')).toHaveValue('/fixture/chosen');
   await expect(page.locator('output')).toHaveText('not submitted');
   await page.goto('/e2e/fixtures/personal-documents.html?viewer');
   await expect(page.getByTestId('agent-document')).toContainText('Agent updated this concurrently');

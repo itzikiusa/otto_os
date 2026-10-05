@@ -133,8 +133,8 @@
       {#if updatedAt}{' '}· updated {fmtUpdated(updatedAt)}{/if}
       · auto-refresh 60 s
     </span>
-    <button class="icon-btn" class:spin={loading} onclick={() => void load()} disabled={loading} title="Refresh" aria-label="Refresh metrics">
-      <Icon name="refresh" size={13} />
+    <button class="icon-btn" onclick={() => void load()} disabled={loading} title="Refresh metrics" aria-label="Refresh metrics">
+      {#if loading}<span class="spinner" style="--spinner-size: 13px" aria-hidden="true"></span>{:else}<Icon name="refresh" size={13} />{/if}
     </button>
   </div>
 
@@ -143,7 +143,7 @@
       <EmptyState
         icon="lock"
         title="CloudWatch access denied"
-        body={`This account's IAM identity needs cloudwatch:GetMetricData. ${error}`}
+        body={`This account’s IAM identity needs cloudwatch:GetMetricData. ${error}`}
         actionLabel="Retry"
         onaction={() => void load()}
       />
@@ -157,7 +157,7 @@
       />
     {/if}
   {:else if !resp}
-    <div class="pad" role="status"><p class="load-note">Loading metrics…</p><Skeleton rows={4} height={120} /></div>
+    <div class="pad"><Skeleton rows={4} height={120} label="metrics" /></div>
   {:else}
     {#if error}
       <p class="stale">Showing the last successful load — refresh failed: {error}</p>
@@ -192,11 +192,6 @@
 </div>
 
 <style>
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .mp {
     display: flex;
     flex-direction: column;
@@ -221,7 +216,7 @@
     border: 0;
     background: transparent;
     color: var(--text-dim);
-    padding: 4px 9px;
+    padding: 4px 8px;
     font: inherit;
     font-size: var(--fs-s);
     cursor: pointer;
@@ -230,7 +225,7 @@
     border-inline-start: 1px solid var(--border);
   }
   .ranges button.on {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--text);
     font-weight: 600;
   }
@@ -244,9 +239,6 @@
   }
   .dim {
     color: var(--text-dim);
-  }
-  .icon-btn.spin :global(svg) {
-    animation: otto-spin 0.8s linear infinite;
   }
   .pad {
     padding: 4px 0;

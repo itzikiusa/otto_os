@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   // Per-session Canvas references: the scenes attached to the focused agent
   // session (via GET/POST/DELETE /sessions/{id}/canvas-refs). Each row shows a
   // format chip + an expandable inline SVG preview (mermaid/d2 — rendered from
@@ -275,7 +276,7 @@
                   <span class="ref-text">
                     <span class="ref-title">{label(ref)}</span>
                     <span class="ref-meta">
-                      <span class="chip fmt-{formatOf(ref)}">{FORMAT_LABEL[formatOf(ref)]}</span>
+                      <Badge tone={formatOf(ref) === 'd2' ? 'accent' : 'neutral'} label={FORMAT_LABEL[formatOf(ref)]} />
                       <span class="ref-time mono" title={new Date(ref.updated_at).toLocaleString()}>{rel(ref.updated_at)}</span>
                     </span>
                   </span>
@@ -324,8 +325,8 @@
         <div class="attach-picker">
           <input
             class="attach-search"
-            placeholder="Search scenes to attach…"
-            aria-label="Search scenes to attach"
+            placeholder="Filter scenes to attach…"
+            aria-label="Filter scenes to attach"
             bind:value={attachQuery}
             spellcheck="false"
           />
@@ -399,7 +400,7 @@
     cursor: pointer;
   }
   .ref-main:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .ref-chevron {
     flex-shrink: 0;
@@ -437,19 +438,6 @@
     align-items: center;
     gap: 6px;
     margin-top: 2px;
-  }
-  .chip {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    padding: 1px 6px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  .chip.fmt-d2 {
-    color: var(--accent-text);
   }
   .ref-time {
     font-size: var(--fs-xs);
@@ -495,9 +483,9 @@
   .footer-btn {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 24px;
-    padding: 0 9px;
+    padding: 0 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -533,13 +521,13 @@
     background: var(--bg);
     color: var(--text);
     font-size: var(--fs-xs);
-    padding: 0 7px;
+    padding: 0 6px;
     outline: none;
     box-sizing: border-box;
   }
   .attach-search:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .candidates {
     list-style: none;

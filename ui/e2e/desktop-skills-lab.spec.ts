@@ -164,7 +164,7 @@ test('UI: Skills Lab tabs, skills browser, and preserved evaluator', async ({ pa
 
   // Search narrows the list; the detail shows the rendered SKILL.md with its
   // frontmatter as a metadata card.
-  await page.getByRole('searchbox', { name: 'Search skills' }).fill(SKILL);
+  await page.getByRole('searchbox', { name: 'Filter skills' }).fill(SKILL);
   await expect(page.locator('[data-testid="skill-row"]')).toHaveCount(1);
   await row.click();
   await expect(page.locator('[data-testid="skill-name"]')).toHaveText(SKILL);
@@ -190,7 +190,7 @@ test('UI: Skills Lab tabs, skills browser, and preserved evaluator', async ({ pa
   await expect(page.locator('[data-testid="tpl-bundled"]')).toBeVisible();
   await expect(page.locator('[data-testid="tpl-import"]')).toBeVisible();
   await page.locator('[data-testid="new-skill-name"]').fill(SKILL);
-  await expect(page.getByText(`A skill named "${SKILL}" already exists`)).toBeVisible();
+  await expect(page.getByText(`A skill named “${SKILL}” already exists`)).toBeVisible();
   await expect(page.locator('[data-testid="create-skill"]')).toBeDisabled();
   await page.locator('[data-testid="new-skill-name"]').fill(`${SKILL}-two`);
   await page.locator('[data-testid="create-skill"]').click();

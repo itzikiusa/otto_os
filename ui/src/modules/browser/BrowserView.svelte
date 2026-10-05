@@ -12,6 +12,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { nativeBrowser, nativeBrowserAvailable, type Rect } from '../../lib/nativeBrowser';
   import * as browserApi from '../../lib/api/browser';
   import type { BrowserCredential } from '../../lib/api/types';
@@ -125,12 +126,12 @@
     const cur = browserLive.renderer;
     ctxMenu.show(e, [
       {
-        label: "This Mac's web view",
+        label: "This Mac’s web view",
         icon: cur === 'native' ? 'check' : 'globe',
         action: () => browserLive.setPref('native'),
       },
       {
-        label: "Otto's Chromium (streams anywhere, agents can drive it)",
+        label: "Otto’s Chromium (streams anywhere, agents can drive it)",
         icon: cur === 'remote' ? 'check' : 'compass',
         action: () => browserLive.setPref('remote'),
       },
@@ -381,19 +382,19 @@
       return;
     }
     const id = active.id;
-    let cancelled = false;
+    let stopped = false;
     const check = async (): Promise<void> => {
       const raw = await nativeBrowser.eval(
         id,
         "window.__ottoOverlay && window.__ottoOverlay.hasLoginForm ? window.__ottoOverlay.hasLoginForm() : false",
       );
-      if (!cancelled) hasLoginForm = raw === 'true';
+      if (!stopped) hasLoginForm = raw === 'true';
     };
     // In-flight guard + hidden pause (SB-14): a stalled `browser_eval` used to
     // stack one more call every second.
     const p = pollWhileVisible(() => untrack(() => check()), { ms: 1000, maxBackoff: 4 });
     return () => {
-      cancelled = true;
+      stopped = true;
       p.stop();
     };
   });
@@ -644,6 +645,22 @@
     }));
     ctxMenu.show(e, items);
   }
+
+  // ⌘K: the page's verbs (the module page only — the docked panel copy of this
+  // view would register the same commands twice).
+  $effect(() => {
+    if (embedded) return;
+    const tab = browser.activeTab;
+    const hasUrl = !!tab?.url;
+    return registry.register('browser', [
+      { id: 'browser.newTab', title: 'New browser tab', group: 'Browser', keywords: 'open url page', run: () => { newTab(); requestAnimationFrame(focusUrl); } },
+      { id: 'browser.address', title: 'Go to an address…', group: 'Browser', keywords: 'url location bar navigate', run: focusUrl },
+      { id: 'browser.summarize', title: 'Summarize this page', group: 'Browser', keywords: 'tl;dr digest ai', disabled: !hasUrl, run: () => void doSummarize() },
+      { id: 'browser.reader', title: 'Use Reader view', group: 'Browser', keywords: 'markdown text mode', disabled: !tab || tab.mode === 'reader', run: () => toggleMode('reader') },
+      { id: 'browser.live', title: 'Use Live view', group: 'Browser', keywords: 'chromium interactive mode', disabled: !tab || tab.mode === 'live', run: () => toggleMode('live') },
+      { id: 'browser.external', title: 'Open this page in your browser', group: 'Browser', keywords: 'safari chrome external system', disabled: !hasUrl, run: openInOwnBrowser },
+    ]);
+  });
 </script>
 
 <div class="browser">
@@ -737,8 +754,8 @@
           onclick={chooseRenderer}
           aria-label="Live engine"
           title={browserLive.renderer === 'native'
-            ? "Live engine: this Mac's web view"
-            : "Live engine: Otto's Chromium"}
+            ? "Live engine: this Mac’s web view"
+            : "Live engine: Otto’s Chromium"}
         >
           <Icon name="chevronDown" size={14} />
         </button>
@@ -827,7 +844,7 @@
       {#if liveUnavailable}
         <div class="live-note" role="status">
           <Icon name="globe" size={13} />
-          <span>This tab is in live mode, but this Otto daemon has no live browser. You're seeing Reader view here.</span>
+          <span>This tab is in live mode, but this Otto daemon has no live browser. You’re seeing Reader view here.</span>
           <span class="grow"></span>
           <button class="btn" onclick={openInOwnBrowser}>Open in new tab</button>
           <button class="btn ghost" onclick={() => browser.activeTab && void browser.setMode(browser.activeTab.id, 'reader')}>Switch to Reader</button>

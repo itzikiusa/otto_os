@@ -33,9 +33,10 @@ loopback, private, and cloud-metadata addresses are refused with a `400`.
   **ask bar** that sends one turn carrying the page you're on, the marks on
   it, and your question, so "what does the element I marked do?" needs no
   further explanation. See "Embedded agent & the ask bar" below.
-- **Agent-mode v1/v2 switch** — the right panel's Browser tab in an agent
-  session can host either the original per-session browser (v1) or this
-  module (v2). See "Two browsers, one switch" below.
+- **Agent-mode v1/v2 setting** — the right panel's Browser tab in an agent
+  session hosts this module (v2) by default; the original per-session browser
+  (v1) stays available under Settings → Browser. See "Two browsers, one
+  setting" below.
 - **Save to Vault** — write an OKF-flavored note (front-matter, summary, one
   `## Mark N` section per annotation) into a doc vault.
 - **Agent MCP tools** — `browser_navigate` / `browser_page` / `browser_query` /
@@ -197,15 +198,16 @@ question typed straight into the terminal, are covered by the agent's own
 `browser_marks` tool. Typing into the terminal itself sends nothing extra —
 the ask bar is the only path that attaches page context.
 
-## Two browsers, one switch
+## Two browsers, one setting
 
 Otto currently has two in-app browsers: the original per-session one in an
 agent session's right panel (`ui/src/modules/panels/BrowserPanel.svelte` —
 native tabs, a "take over" picker whose comments post straight into the
 active session, no persistence) and this module. They are meant to converge
-on this module; until then the right panel's **Browser** tab carries a
-**v1 / v2** switch (`ui.browserPanelVersion`, persisted, default `v1` so
-nothing changes for existing users). `v2` mounts this module inside the panel
+on this module; until then **Settings → Browser → "Browser beside a
+session"** chooses between them (`ui.browserPanelVersion`, persisted). The
+default is `v2` for anyone who never chose; an explicitly stored `v1` keeps
+working. The panel itself no longer carries a toggle. `v2` mounts this module inside the panel
 (`BrowserPanelV2.svelte` → `BrowserView embedded`) with its tabs, marks and
 the ask bar aimed at the *active* agent session — no second dock, since the
 session is the pane beside it. The switch exists only in agent mode; the

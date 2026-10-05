@@ -12,6 +12,7 @@
   import { snipApi } from '../../lib/snip';
   import { ApiError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { isTauri, ui } from '../../lib/stores/ui.svelte';
@@ -332,11 +333,11 @@
           if (!allowed || disposed) return;
           allowClose = true;
           try { await win.close(); }
-          catch (e) { allowClose = false; toasts.error('Couldn’t close the editor', String(e)); }
+          catch (e) { allowClose = false; toastError('Couldn’t close the editor', e); }
         });
       });
       if (disposed) stop(); else unlisten = stop;
-    }).catch((e) => toasts.error('Couldn’t register the close guard', String(e)));
+    }).catch((e) => toasts.warn('Closing this window won’t ask about unsaved annotations', loadErrorText(e)));
     return () => { disposed = true; unlisten?.(); };
   });
 
@@ -800,7 +801,7 @@
 
   <div class="snip-body" bind:this={wrapEl}>
     {#if loading}
-      <div class="snip-empty" role="status">Loading the snip…</div>
+      <div class="snip-empty" role="status" aria-label="Loading the snip"><span class="spinner" style:--spinner-size="24px" aria-hidden="true"></span></div>
     {:else if loadError}
       <div class="snip-empty" role="alert">
         <p class="snip-missing-title">Could not load the snip</p>
@@ -831,7 +832,6 @@
       <p id="snip-keyboard-help" class="snip-keyboard-help">Choose a tool, then press Enter on the image to add it. Use [ and ] to select annotations, arrow keys to move, and Delete to remove. Enter edits selected text.</p>
       <span class="sr-only" role="status">{selected === null ? `${annos.length} annotations` : `Selected ${annos.find(a => a.id === selected)?.tool ?? 'annotation'} ${annos.findIndex(a => a.id === selected) + 1} of ${annos.length}`}</span>
       {#if textDraft}
-        <!-- svelte-ignore a11y_autofocus -->
         <textarea
           class="snip-textentry"
           aria-label="Annotation text"
@@ -977,7 +977,7 @@
   .snip-canvas {
     max-width: 100%;
     max-height: 100%;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     border-radius: var(--radius-s);
     touch-action: none;
     cursor: crosshair;
@@ -995,6 +995,11 @@
     line-height: 1.25;
     resize: both;
     outline: none;
+  }
+  .snip-textentry:focus {
+    border-style: solid;
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .snip-empty {
     display: flex;

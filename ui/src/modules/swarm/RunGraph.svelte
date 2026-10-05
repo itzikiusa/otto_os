@@ -264,7 +264,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 3px;
+    padding: 4px;
   }
   .canvas {
     position: absolute;
@@ -297,7 +297,7 @@
     stroke-width: 1.5;
   }
   .edge.review {
-    stroke: color-mix(in srgb, var(--accent) 60%, transparent);
+    stroke: var(--accent-line-strong);
     stroke-dasharray: 4 3;
   }
   .node {
@@ -330,7 +330,7 @@
     color: var(--text-dim);
   }
   .node-badge.done {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .node-badge.run {

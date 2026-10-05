@@ -1,4 +1,6 @@
 <script lang="ts">
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   // SFTP file browser for an SSH connection — a "MobaXterm-lite" pane that
   // browses, transfers, and edits files over the connection's existing SSH
   // auth (the daemon drives the system `sftp` binary). Opened from the
@@ -121,7 +123,7 @@
     running: 'Running', finalizing: 'Finalizing', completed: 'Completed', cancelled: 'Canceled',
     failed: 'Failed', timed_out: 'Timed out', outcome_unknown: 'Outcome unknown',
   };
-  const WRITE_DENIED = "You don't have write access to this connection's files";
+  const WRITE_DENIED = "You don’t have write access to this connection’s files";
 
   function humanSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -351,9 +353,9 @@
     <!-- Listing -->
     <div class="list" bind:this={listEl} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
       {#if view.loading}
-        <div class="dim pad">Loading files…</div>
+        <div class="pad"><Skeleton rows={8} height={24} label="files" /></div>
       {:else if view.error}
-        <div class="err pad">{view.error} <button class="btn small" onclick={() => sftp.refresh(conn.id)}>Retry</button></div>
+        <div class="pad"><LoadState what="the folder" variant="compact" error={view.error} empty onretry={() => sftp.refresh(conn.id)} /></div>
       {:else if view.entries.length === 0}
         <div class="dim pad">Empty directory.</div>
       {:else if shownEntries.length === 0}
@@ -503,7 +505,7 @@
   .sftp-search:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .sftp-search::placeholder {
     color: var(--text-dim);
@@ -522,7 +524,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    padding: 1px 3px;
+    padding: 1px 2px;
     border-radius: var(--radius-s);
     font: inherit;
   }
@@ -576,7 +578,7 @@
   .cell.name.nav {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     border: none;
     background: transparent;
     color: var(--text);

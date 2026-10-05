@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // One conflict segment, GitKraken-style: side A (ours) and side B (theirs)
   // shown side-by-side, each with a HEADER CHECKBOX (take the whole side) and
   // PER-LINE CHECKBOXES — so a resolution can mix parts of both sides. The
@@ -188,7 +189,7 @@
         >
           <Icon name={showBase ? 'chevronDown' : 'chevronRight'} size={11} />
           <span class="base-label">BASE</span>
-          <span class="base-hint dim">original — {base.length} line{base.length === 1 ? '' : 's'}</span>
+          <span class="base-hint dim">original — {plural(base.length, 'line')}</span>
         </button>
         {#if showBase}
           <pre class="base-code mono">{base.join('\n')}</pre>
@@ -293,7 +294,7 @@
     {/if}
     {#if hiddenLines > 0}
       <button class="more-lines" onclick={() => (shown += LINE_PAGE * 10)}>
-        Show {Math.min(hiddenLines, LINE_PAGE * 10)} more line{hiddenLines === 1 ? '' : 's'} ({hiddenLines} hidden) — or take a whole side / Edit
+        Show {plural(Math.min(hiddenLines, LINE_PAGE * 10), 'more line')} ({hiddenLines} hidden) — or take a whole side / Edit
       </button>
     {/if}
   {/if}
@@ -303,7 +304,7 @@
   .more-lines {
     display: block;
     width: 100%;
-    padding: 5px 10px;
+    padding: 4px 10px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
@@ -311,7 +312,7 @@
     border-top: 1px solid var(--border);
   }
   .more-lines:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .hunk {
     border: 1px solid var(--border);
@@ -326,7 +327,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 10px;
+    padding: 4px 10px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-xs);
@@ -334,14 +335,14 @@
   .hunk-label {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-weight: 600;
     color: var(--text);
   }
   .resolved-badge {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
@@ -359,7 +360,7 @@
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    padding: 3px 9px;
+    padding: 2px 8px;
     cursor: pointer;
     transition: background var(--dur-fast), color var(--dur-fast);
   }
@@ -389,7 +390,7 @@
     padding: 4px 10px;
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     cursor: pointer;
     user-select: none;
@@ -405,7 +406,7 @@
     border-inline-end: none;
   }
   .side-head.theirs {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
   }
   .side-tag {
     display: inline-grid;
@@ -421,7 +422,7 @@
     color: var(--success);
   }
   .tag-b {
-    background: color-mix(in srgb, var(--accent) 26%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .side-name {
@@ -434,7 +435,7 @@
     font-weight: 600;
     letter-spacing: 0;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     border-radius: 999px;
     padding: 0 6px;
     flex-shrink: 0;
@@ -458,7 +459,7 @@
     background: color-mix(in srgb, var(--success) 5%, transparent);
   }
   .split-col.theirs {
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    background: var(--accent-faint);
   }
   .pick-line {
     display: flex;
@@ -479,7 +480,7 @@
     background: color-mix(in srgb, var(--success) 18%, transparent);
   }
   .pick-line.picked.theirs {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
   }
   .pick-box {
     display: inline-grid;
@@ -536,9 +537,9 @@
   .base-toggle {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     width: 100%;
-    padding: 3px 10px;
+    padding: 2px 10px;
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -579,7 +580,7 @@
     background: color-mix(in srgb, var(--success) 5%, transparent);
   }
   .stack-side.theirs {
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    background: var(--accent-faint);
   }
 
   /* ── Mobile + tablet (≤1024px): real touch targets. ── */
@@ -587,7 +588,7 @@
     .hunk-bar {
       flex-wrap: wrap;
       gap: 6px 8px;
-      padding: 7px 10px;
+      padding: 6px 10px;
     }
     .hunk-label {
       font-size: var(--fs-s);

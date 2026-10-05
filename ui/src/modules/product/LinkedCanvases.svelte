@@ -240,7 +240,7 @@
     background: var(--bg);
     color: var(--text);
     border-radius: var(--radius-s);
-    padding: 3px 9px;
+    padding: 2px 8px;
     font-size: var(--fs-s);
     font-weight: 600;
     cursor: pointer;
@@ -275,8 +275,8 @@
     width: 100%;
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 5px 7px;
+    gap: 6px;
+    padding: 4px 6px;
     border: none;
     background: none;
     color: var(--text);
@@ -286,7 +286,7 @@
     font-size: var(--fs-s);
   }
   .lc-cand:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .lc-busy {
     color: var(--text-dim);
@@ -318,7 +318,7 @@
     text-align: start;
   }
   .lc-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .lc-name {
     flex: 1 1 auto;
@@ -332,7 +332,7 @@
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;

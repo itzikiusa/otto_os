@@ -4,7 +4,10 @@
   // Multi-series line/area over a shared time axis: y ticks in human units
   // (bytes / percent / seconds / rates), x ticks in local time, gaps (`null`)
   // break the line, hover snaps to the nearest sample and shows time + every
-  // series' value. Width is fluid (`viewBox` + `width:100%`), so it fits a
+  // series' value. The keyboard gets the same inspection: the plot is a slider
+  // over the samples (←/→ step, Home/End jump, PageUp/PageDown by ten) that
+  // moves the crosshair + tooltip and reads the values out, and a "Show data"
+  // disclosure renders the whole series as a table. Width is fluid (`viewBox` + `width:100%`), so it fits a
   // phone; colours come from the theme's CSS vars. Shapes + formatters live
   // in `lib/metric-format.ts` so stat rows can share them.
   import {
@@ -206,15 +209,61 @@
     }
     const cand = [times[a], times[a - 1]].filter((v): v is number => v != null);
     const nearest = cand.reduce((best, c) => (Math.abs(c - t) < Math.abs(best - t) ? c : best), cand[0]);
-    hover = {
-      t: nearest,
-      px: x(nearest),
-      values: series.map((s) => s.points.find((p) => p.t === nearest)?.v ?? null),
-    };
+    hoverAt(nearest);
+  }
+  function hoverAt(t: number): void {
+    hover = { t, px: x(t), values: valuesAt(t) };
+  }
+  function valuesAt(t: number): (number | null)[] {
+    return series.map((s) => s.points.find((p) => p.t === t)?.v ?? null);
   }
   function onLeave(): void {
+    // A keyboard crosshair outlives the pointer leaving.
+    hover = kbIdx >= 0 && times[kbIdx] != null ? { t: times[kbIdx], px: x(times[kbIdx]), values: valuesAt(times[kbIdx]) } : null;
+  }
+
+  // ── keyboard ───────────────────────────────────────────────────────────────
+  /** Sample index of the keyboard crosshair (-1 = none yet). */
+  let kbIdx = $state(-1);
+  /** Polite readout, written only on keyboard steps (pointer hover stays quiet). */
+  let readout = $state('');
+  function describe(t: number): string {
+    const vals = valuesAt(t);
+    return `${fmtFull(t)}: ${series.map((s, i) => `${s.label} ${vals[i] == null ? 'no data' : fmt(vals[i] as number)}`).join(', ')}`;
+  }
+  function onKey(e: KeyboardEvent): void {
+    const n = times.length;
+    if (n === 0) return;
+    const cur = kbIdx < 0 ? (e.key === 'ArrowLeft' || e.key === 'End' ? n : -1) : kbIdx;
+    const next =
+      e.key === 'ArrowRight' || e.key === 'ArrowUp' ? cur + 1
+      : e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? cur - 1
+      : e.key === 'PageUp' ? cur + 10
+      : e.key === 'PageDown' ? cur - 10
+      : e.key === 'Home' ? 0
+      : e.key === 'End' ? n - 1
+      : e.key === 'Escape' && kbIdx >= 0 ? -2
+      : null;
+    if (next == null) return;
+    e.preventDefault();
+    if (next === -2) {
+      kbIdx = -1;
+      hover = null;
+      readout = '';
+      return;
+    }
+    kbIdx = Math.max(0, Math.min(n - 1, next));
+    hoverAt(times[kbIdx]);
+    readout = describe(times[kbIdx]);
+  }
+  function onBlur(): void {
+    kbIdx = -1;
     hover = null;
   }
+  const chartLabel = $derived(`${series.map((s) => s.label).join(', ')} over time`);
+
+  /** The data-table disclosure renders its rows only while open. */
+  let dataOpen = $state(false);
 
   // Tooltip sits left of the cursor once past the midpoint so it never leaves
   // the chart's own box (which is what the parent's overflow clips to).
@@ -226,15 +275,28 @@
   {#if !hasData}
     <div class="mc-empty" style="height:{H}px">{emptyText}</div>
   {:else}
-    <div class="mc-plot">
+    <!-- The plot is a slider over the samples so the keyboard can inspect what
+         a pointer hover shows; the SVG itself is decorative to AT (the
+         slider's value text and the data table carry the numbers). -->
+    <div
+      class="mc-plot"
+      role="slider"
+      tabindex="0"
+      aria-label={chartLabel}
+      aria-valuemin={0}
+      aria-valuemax={Math.max(0, times.length - 1)}
+      aria-valuenow={Math.max(0, kbIdx)}
+      aria-valuetext={kbIdx >= 0 && times[kbIdx] != null ? describe(times[kbIdx]) : `${times.length} samples — use the arrow keys to read values`}
+      onkeydown={onKey}
+      onblur={onBlur}
+    >
       <svg
         bind:this={svgEl}
         viewBox="0 0 {W} {H}"
         preserveAspectRatio="none"
         class="mc-svg"
         style="height:{H}px"
-        role="img"
-        aria-label={series.map((s) => s.label).join(', ')}
+        aria-hidden="true"
         onpointermove={onMove}
         onpointerleave={onLeave}
         onpointercancel={onLeave}
@@ -286,6 +348,7 @@
         </div>
       {/if}
     </div>
+    <p class="sr-only" aria-live="polite">{readout}</p>
     {#if showLegend && series.length > 1}
       <ul class="mc-legend">
         {#each series as s, i (s.label)}
@@ -293,6 +356,28 @@
         {/each}
       </ul>
     {/if}
+    <details class="mc-data" bind:open={dataOpen}>
+      <summary>Show data</summary>
+      {#if dataOpen}
+        <div class="mc-table-wrap">
+          <table>
+            <caption class="sr-only">{chartLabel}</caption>
+            <thead>
+              <tr><th scope="col">Time</th>{#each series as s (s.label)}<th scope="col">{s.label}</th>{/each}</tr>
+            </thead>
+            <tbody>
+              {#each times as t (t)}
+                {@const vals = valuesAt(t)}
+                <tr>
+                  <th scope="row">{fmtFull(t)}</th>
+                  {#each vals as v, i (i)}<td class="mono">{v == null ? '—' : fmt(v)}</td>{/each}
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    </details>
   {/if}
 </div>
 
@@ -307,6 +392,11 @@
   .mc-plot {
     position: relative;
     width: 100%;
+    border-radius: var(--radius-s);
+  }
+  .mc-plot:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
   }
   .mc-svg {
     display: block;
@@ -346,7 +436,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     padding: 6px 8px;
     font-size: var(--fs-xs);
     min-width: 120px;
@@ -399,5 +489,49 @@
   }
   .mono {
     font-family: var(--font-mono);
+  }
+  /* The table equivalent of the plot (time × series), opened on demand. */
+  .mc-data summary {
+    width: fit-content;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .mc-data summary:hover {
+    color: var(--text);
+  }
+  .mc-table-wrap {
+    max-height: 220px;
+    overflow: auto;
+    margin-top: 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+  }
+  .mc-data table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--fs-xs);
+  }
+  .mc-data th,
+  .mc-data td {
+    padding: 2px 8px;
+    text-align: end;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+  }
+  .mc-data th[scope='row'],
+  .mc-data thead th:first-child {
+    text-align: start;
+    font-weight: 500;
+    color: var(--text-dim);
+  }
+  .mc-data thead th {
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+    font-weight: 600;
+  }
+  .mc-data td {
+    font-variant-numeric: tabular-nums;
   }
 </style>

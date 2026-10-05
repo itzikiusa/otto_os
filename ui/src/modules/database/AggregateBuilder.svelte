@@ -260,7 +260,7 @@
     padding: 6px 8px;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .ab-stage.err {
     border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);

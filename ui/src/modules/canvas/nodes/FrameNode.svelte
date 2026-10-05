@@ -5,6 +5,7 @@
   // nodes. Not connectable — frames don't carry edges — so no Handles.
   // Double-click the title chip to rename the frame.
   import type { CanvasNode } from '../types';
+  import { focusOnMount } from '../../../lib/focusOnMount';
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import Resizer from './Resizer.svelte';
 
@@ -39,12 +40,11 @@
 <div class="frame" class:selected>
   <Resizer {id} visible={selected} minWidth={200} minHeight={140} />
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="chip" ondblclick={startEdit}>
+  <div class="frame-label" ondblclick={startEdit}>
     {#if editing}
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         bind:value={draft}
-        autofocus
+        use:focusOnMount
         onblur={commit}
         onkeydown={(e) => {
           if (e.key === 'Enter') commit();
@@ -70,7 +70,7 @@
   .frame.selected {
     border-color: var(--accent);
   }
-  .chip {
+  .frame-label {
     position: absolute;
     top: -11px;
     inset-inline-start: 8px;
@@ -86,7 +86,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .chip input {
+  .frame-label input {
     border: none;
     outline: none;
     background: transparent;

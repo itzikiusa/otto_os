@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // CloudWatch Logs: log groups (server-side prefix search, paged) on the left;
   // on the right either the Events view — stream picker, time-range presets,
@@ -26,6 +27,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import ResultsGrid from '../database/ResultsGrid.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import { awsErrorText, fmtBytes, logsRoute } from './util';
@@ -76,6 +79,7 @@
   let groupsLoading = $state(false);
   let groupsError = $state('');
   let selected = $state<string>(linkIsPrefix ? '' : linkGroup);
+  let groupsW = $state(loadPaneWidth('aws.logs.groupsW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let groupSeq = 0;
 
   async function loadGroups(more = false): Promise<void> {
@@ -479,9 +483,9 @@
 </ViewToolbar>
 
 <div class="logs">
-  <aside class="groups" aria-label="Log groups">
+  <aside class="groups" aria-label="Log groups" style:--groups-w="{groupsW}px">
     {#if groupsLoading && !groups}
-      <div class="pad" role="status"><p class="load-note">Loading log groups…</p><Skeleton rows={8} /></div>
+      <div class="pad"><Skeleton rows={8} label="log groups" /></div>
     {:else if groupsError && !groups}
       <EmptyState
         actionKind={groupsLogin ? 'primary' : 'secondary'}
@@ -523,11 +527,14 @@
       {/if}
     {/if}
   </aside>
+  <PaneDivider bind:width={groupsW} storageKey="aws.logs.groupsW" label="Resize log groups list" />
 
   <section class="main">
     {#if tab === 'events'}
       {#if !selected}
-        <EmptyState icon="file" title="Pick a log group" body="Choose a log group on the left to read its events." />
+        <!-- A group opens automatically when the list has one; this is only
+             the nothing-to-read case. -->
+        <EmptyState icon="file" title="No log group open" body="Log groups in this region list on the left; their events show here." />
       {:else}
         <div class="bar">
           <span class="gtitle mono" title={selected}>{selected}</span>
@@ -560,7 +567,7 @@
         <div class="ev-body">
           <div class="tbl-wrap" class:windowed={tw.active(events.length)} bind:this={listEl} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
             {#if eventsLoading && !events.length}
-              <div class="pad" role="status"><p class="load-note">Loading events…</p><Skeleton rows={8} /></div>
+              <div class="pad"><Skeleton rows={8} label="events" /></div>
             {:else if eventsError && !events.length}
               <EmptyState
                 actionKind={eventsLogin ? 'primary' : 'secondary'}
@@ -615,7 +622,7 @@
     {:else}
       <div class="ins">
         <div class="bar">
-          <span class="lbl">{insightGroups.length ? `${insightGroups.length} group${insightGroups.length === 1 ? '' : 's'}` : 'Tick log groups on the left'}</span>
+          <span class="lbl">{insightGroups.length ? `${plural(insightGroups.length, 'group')}` : 'Tick log groups on the left'}</span>
           <div class="seg" role="group" aria-label="Time range">
             {#each RANGES as r (r.id)}
               <button class:on={rangeId === r.id} aria-pressed={rangeId === r.id} onclick={() => (rangeId = r.id)}>{r.label}</button>
@@ -682,11 +689,6 @@
 </div>
 
 <style>
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .pad {
     padding: 12px;
   }
@@ -726,7 +728,7 @@
     color: var(--text-dim);
     font: inherit;
     font-size: var(--fs-s);
-    padding: 3px 8px;
+    padding: 2px 8px;
     cursor: pointer;
   }
   .seg button + button {
@@ -739,11 +741,11 @@
   .logs {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: 260px minmax(0, 1fr);
+    display: flex;
     overflow: hidden;
   }
   .groups {
+    flex: 0 0 var(--groups-w);
     border-inline-end: 1px solid var(--border);
     overflow-y: auto;
     min-height: 0;
@@ -764,7 +766,7 @@
     color: var(--text);
     font: inherit;
     text-align: start;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-radius: var(--radius-m);
     cursor: pointer;
   }
@@ -775,7 +777,7 @@
   }
   .gi:hover,
   .gi:focus-visible {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .gi.on {
     background: var(--accent-soft);
@@ -797,6 +799,7 @@
     margin: 6px 8px 10px;
   }
   .main {
+    flex: 1;
     min-width: 0;
     min-height: 0;
     display: flex;
@@ -858,7 +861,7 @@
     text-transform: uppercase;
     letter-spacing: .06em;
     color: var(--text-dim);
-    padding: 5px 10px;
+    padding: 4px 10px;
     border-bottom: 1px solid var(--border);
   }
   .tbl th.ts {
@@ -882,10 +885,10 @@
     cursor: pointer;
   }
   .trow:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .trow:focus-visible {
-    background: var(--surface-2);
+    background: var(--hover);
     outline: none;
     box-shadow: inset 0 0 0 2px var(--accent-text);
   }
@@ -978,10 +981,10 @@
     cursor: pointer;
   }
   .chip-l {
-    padding-block: 2px; padding-inline: 9px 4px;
+    padding-block: 2px; padding-inline: 8px 4px;
   }
   .chip-x {
-    padding-block: 2px; padding-inline: 3px 7px;
+    padding-block: 2px; padding-inline: 2px 6px;
     color: var(--text-dim);
   }
   .ins-res {
@@ -998,14 +1001,19 @@
   }
   @media (max-width: 640px) {
     .logs {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: minmax(120px, 30%) minmax(0, 1fr);
+      flex-direction: column;
     }
     .groups {
+      flex: 0 0 30%;
+      min-block-size: 120px;
       border-inline-end: 0;
       border-bottom: 1px solid var(--border);
     }
     .hide-sm {
+      display: none;
+    }
+    /* Stacked on phone: nothing to resize sideways. */
+    .logs > :global(.pane-divider) {
       display: none;
     }
   }

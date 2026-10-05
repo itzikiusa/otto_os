@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   // Lag alert configuration UI. Lists configured alerts for a cluster,
   // showing breach status when the last metrics sweep detected a threshold
   // crossing. Allows creating and deleting alerts.
@@ -92,7 +93,7 @@
 <div class="lag-alerts">
   <h5>Lag Alerts</h5>
   <p class="muted small">
-    Alerts fire when the group's lag for a topic exceeds the threshold.
+    Alerts fire when the group’s lag for a topic exceeds the threshold.
     Breach status is evaluated each time metrics are refreshed and shown here.
   </p>
 
@@ -115,13 +116,11 @@
               <td>{a.threshold.toLocaleString()}</td>
               <td>
                 {#if a.breach_lag !== undefined}
-                  <span class="badge breach">
-                    Breached ({a.breach_lag.toLocaleString()})
-                  </span>
+                  <Badge tone="bad" label={`Breached (${a.breach_lag.toLocaleString()})`} />
                 {:else if a.enabled}
-                  <span class="badge ok">Active</span>
+                  <Badge tone="ok" label="Active" />
                 {:else}
-                  <span class="badge dim">Disabled</span>
+                  <Badge label="Disabled" />
                 {/if}
               </td>
               <td>
@@ -196,24 +195,6 @@
     font-family: var(--font-mono);
     font-size: var(--fs-s);
   }
-  .badge {
-    font-size: var(--fs-xs);
-    padding: 1px 6px;
-    border-radius: var(--radius-s);
-  }
-  .badge.breach {
-    background: var(--danger-soft);
-    color: var(--danger);
-    font-weight: 600;
-  }
-  .badge.ok {
-    background: var(--success-soft);
-    color: var(--success);
-  }
-  .badge.dim {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    color: var(--text-dim);
-  }
   .create-row {
     display: flex;
     gap: 8px;
@@ -225,7 +206,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 5px 7px;
+    padding: 4px 6px;
     color: var(--text);
     font-size: var(--fs-m);
     min-width: 120px;
@@ -237,7 +218,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 5px 7px;
+    padding: 4px 6px;
     color: var(--text);
     font-size: var(--fs-m);
     width: 90px;
@@ -245,7 +226,7 @@
   .thresh-label {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

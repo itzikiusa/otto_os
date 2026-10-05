@@ -8,9 +8,10 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import type { K8sResourceKind, K8sRow } from '../../lib/api/types';
   import { columnsFor, gridTemplate } from './columns';
-  import { healthClass, kindDef, kubectlErrorSummary } from './k8s-util';
+  import { healthTone, kindDef, kubectlErrorSummary } from './k8s-util';
 
   interface Props {
     kind: K8sResourceKind;
@@ -114,7 +115,7 @@
       <VirtualList items={rows} estimateHeight={ROW_H} class="rt-vlist">
         {#snippet row(r, i)}
           <div
-            class="rt-row {healthClass(r.health, r.status)}"
+            class="rt-row"
             class:selected={isSel(r)}
             role="option"
             aria-selected={isSel(r)}
@@ -131,7 +132,8 @@
               {@const v = c.value(r)}
               <div class="rt-cell" class:num={c.num} class:mono={c.mono} title={v}>
                 {#if c.status}
-                  <span class="status-pill"><span class="hdot"></span><span class="st-txt">{v}</span></span>
+                  {@const tone = healthTone(r.health, r.status)}
+                  <Badge {tone} dot live={tone === 'info'}><span class="st-txt">{v}</span></Badge>
                 {:else}
                   {v}
                 {/if}
@@ -204,13 +206,13 @@
     box-sizing: border-box;
   }
   .rt-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .rt-row.selected {
     background: var(--accent-soft);
   }
   .rt-row:focus-visible {
-    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+    box-shadow: inset 0 0 0 2px var(--accent-line-strong);
   }
   .rt-cell,
   .rt-hcell {
@@ -226,12 +228,10 @@
     font-family: var(--font-mono);
     font-size: var(--fs-s);
   }
-  .status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
+  /* The status Badge may shrink to the column so a long status ellipsizes
+     (the cell's title carries the full text). */
+  .rt-cell :global(.badge) {
     max-width: 100%;
-    overflow: hidden;
   }
   /* Ellipsis only applies to a block-level text box, not to a bare text node
      inside an inline-flex pill (long statuses were cut mid-character). */
@@ -240,44 +240,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .hdot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .health-ok .hdot {
-    background: var(--status-working);
-  }
-  .health-ok .status-pill {
-    color: var(--success);
-  }
-  .health-bad .hdot {
-    background: var(--status-exited);
-  }
-  .health-bad .status-pill {
-    color: var(--danger);
-  }
-  .health-warn .hdot {
-    background: var(--status-warn);
-  }
-  .health-warn .status-pill {
-    color: var(--warning);
-  }
-  .health-progressing .hdot {
-    background: var(--accent);
-    animation: otto-pulse 1.4s ease-in-out infinite;
-  }
-  .health-progressing .status-pill {
-    color: var(--accent-text);
-  }
-  
-  @media (prefers-reduced-motion: reduce) {
-    .health-progressing .hdot {
-      animation: none;
-    }
   }
   .rt-state {
     padding: 12px;
