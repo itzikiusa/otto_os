@@ -63,7 +63,7 @@ test('Canvas panel: attach a scene, preview it, open in Canvas, detach', async (
   await panel.locator('.candidates').getByRole('button', { name: SCENE_TITLE }).click();
   const row = panel.locator('.ref-row', { hasText: SCENE_TITLE });
   await expect(row).toBeVisible({ timeout: 15_000 });
-  await expect(row.locator('.chip.fmt-mermaid')).toHaveText('mermaid');
+  await expect(row.locator('.badge')).toHaveText('mermaid');
 
   // The reference is real on the server too (not just optimistic UI state).
   const { ctx, base } = await apiCtx();

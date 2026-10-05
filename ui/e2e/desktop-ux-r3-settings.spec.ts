@@ -14,7 +14,7 @@ async function skills(page: Page) {
  const names = [`r3-alpha-${Date.now()}`, `r3-beta-${Date.now()}`];
  for (const name of names) expect((await ctx.post(`${base}/api/v1/library/skills`, { data: { name, category: 'review', description: 'Synthetic skill', body: `# ${name}\n\nA document for editing.` } })).ok()).toBeTruthy();
  await page.goto('/#/skills-eval');
- await page.getByRole('searchbox', { name: 'Search skills' }).fill('r3-');
+ await page.getByRole('searchbox', { name: 'Filter skills' }).fill('r3-');
  await page.getByTestId('skill-row').filter({ hasText: names[0] }).click();
  return { ctx, names };
 }
@@ -37,7 +37,7 @@ test('tablet Skills can hide navigation while editing and preserve its draft', a
  expect((await page.getByTestId('skill-editor').boundingBox())!.width).toBeGreaterThan(480); await expect(editor).toContainText('# Keep tablet draft');
  await page.screenshot({ path: '/tmp/otto-ux-r3-settings-skills-tablet-focused.png' });
  await page.getByRole('button', { name: 'Show skills list', exact: true }).click();
- await expect(page.getByRole('searchbox', { name: 'Search skills' })).toBeVisible(); await expect(editor).toContainText('# Keep tablet draft'); await ctx.dispose();
+ await expect(page.getByRole('searchbox', { name: 'Filter skills' })).toBeVisible(); await expect(editor).toContainText('# Keep tablet draft'); await ctx.dispose();
 });
 test('an old skill load failure cannot replace the newly selected skill', async ({ page }) => {
  const { ctx, names } = await skills(page); await expect(page.getByTestId('skill-preview')).toContainText(names[0]);

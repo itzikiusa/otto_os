@@ -56,23 +56,25 @@ async function openWorkbench(page: import('@playwright/test').Page): Promise<voi
   await expect(page.locator('.schema-tree')).toBeVisible({ timeout: 30_000 });
 }
 
-test('⌘B collapses the schema sidebar to a rail and back', async ({ page }) => {
+test('⌘B collapses the schema sidebar and the header toggle brings it back', async ({ page }) => {
   await openWorkbench(page);
   const side = page.locator('aside.db-side');
   await expect(side).toBeVisible();
+  const hide = page.getByRole('button', { name: 'Hide sidebar', exact: true });
+  await expect(hide).toHaveAttribute('aria-expanded', 'true');
 
   await page.keyboard.press('Meta+b');
-  const rail = page.locator('.side-rail');
-  await expect(rail).toBeVisible();
-  // The rail must keep real width — a zero-width sidebar cannot be brought back.
-  const box = await rail.boundingBox();
-  expect(box!.width).toBeGreaterThan(10);
-  await expectFullyInViewport(page, rail, 'collapsed sidebar rail');
+  await expect(side).toBeHidden();
+  // The one collapse control (header `sidebar` icon) stays reachable, so a
+  // hidden sidebar can always be brought back.
+  const show = page.getByRole('button', { name: 'Show schema sidebar', exact: true });
+  await expect(show).toHaveAttribute('aria-expanded', 'false');
+  await expectFullyInViewport(page, show, 'show-sidebar toggle');
 
-  // Restoring works from the rail button as well as the chord.
-  await rail.locator('button').click();
+  // Restoring works from the header toggle as well as the chord.
+  await show.click();
   await expect(page.locator('.schema-tree')).toBeVisible();
-  await expect(rail).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Hide sidebar', exact: true })).toHaveAttribute('aria-expanded', 'true');
 });
 
 test('the editor keeps its own height per query tab', async ({ page }) => {

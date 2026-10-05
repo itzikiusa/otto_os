@@ -419,7 +419,7 @@
     padding: 12px;
     margin: 8px 0;
   }
-  article .badge {
+  article :global(.badge) {
     margin-inline-start: 8px;
   }
   article p {

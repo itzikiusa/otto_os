@@ -148,7 +148,7 @@ async function openSession(page: Page, id: string): Promise<void> {
   await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 30_000 });
   await page.waitForLoadState('networkidle').catch(() => {});
   // Wait until the "connecting…/reconnecting…" overlay is gone (WS attached).
-  await expect(page.locator('.term-overlay .badge').filter({ hasText: /[Cc]onnecting|[Rr]econnecting/ }))
+  await expect(page.locator('.term-overlay .ov-status').filter({ hasText: /[Cc]onnecting|[Rr]econnecting/ }))
     .toHaveCount(0, { timeout: 20_000 });
 }
 

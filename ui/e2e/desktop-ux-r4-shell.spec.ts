@@ -117,7 +117,7 @@ test('standalone bar answers, exposes errors, and cancels a proposed plan withou
   const turn = page.locator('.turn').last();
   await expect(turn).toContainText('Here’s the plan');
   await turn.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await expect(turn).toContainText('Cancelled — nothing ran.');
+  await expect(turn).toContainText('Canceled — nothing ran.');
   expect(executions).toBe(0);
   fail = true;
   await input.fill('Check another synthetic request'); await input.press('Meta+Enter');

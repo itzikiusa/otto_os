@@ -352,6 +352,7 @@
         aria-selected={swarm.selectedSessionId === s.id}
         tabindex={tabStop === s.id ? 0 : -1}
         onclick={() => (swarm.selectedSessionId = s.id)}
+        onkeydown={(e) => { if (e.key === ' ') { e.preventDefault(); swarm.selectedSessionId = s.id; } }}
         onfocus={() => (focusId = s.id)}
         title="Open session: {s.title || s.provider}"
       >

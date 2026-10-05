@@ -86,7 +86,7 @@ test('first-account steps announce their heading and associate password validati
   await expect(page.getByRole('heading',{name:'Set the root password'})).toBeFocused();
   await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Mismatch');
   await expect(page.getByLabel('Confirm password')).toHaveAttribute('aria-invalid','true');
-  await expect(page.getByRole('status')).toContainText("Passwords don't match");
+  await expect(page.getByRole('status')).toContainText("Passwords don’t match");
   await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Continue',exact:true}).click();
   await expect(page.getByRole('heading',{name:'Create your first workspace'})).toBeFocused();
   await page.getByRole('button',{name:'Skip',exact:true}).click();await expect(page.getByRole('heading',{name:'Usage tracking'})).toBeFocused();

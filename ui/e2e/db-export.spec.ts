@@ -214,7 +214,7 @@ test.describe('DB Explorer · export', () => {
 
     // Fix #2: the progress region appears with a live "bytes written" readout
     // while the export streams (no frozen spinner / idle timeout).
-    await expect(page.locator('.exp-progress .exp-bar')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.exp-progress [role="progressbar"]')).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('.exp-prog-text')).toContainText(/written…/, { timeout: 15_000 });
 
     // …and it completes with the streamed summary.

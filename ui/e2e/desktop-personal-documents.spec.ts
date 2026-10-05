@@ -30,7 +30,7 @@ test('memory edits preserve notes, report conflicts, and folder selection never 
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('Memory changed');
   await expect(page.getByLabel('Memory Markdown')).toHaveValue('Stale editor text');
-  await page.getByRole('button', { name: 'Reload saved version' }).click();
+  await page.getByRole('button', { name: 'Load saved version' }).click();
   await expect(page.getByTestId('agent-document')).toContainText('Agent updated this concurrently');
   await page.getByTitle('Browse folders').click();
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();

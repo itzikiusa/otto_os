@@ -389,8 +389,5 @@
       grid-template-columns: 1fr;
       padding: 8px 10px 24px;
     }
-    .head {
-      padding: 12px 10px 4px;
-    }
   }
 </style>

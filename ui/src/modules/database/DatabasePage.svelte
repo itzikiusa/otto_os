@@ -1031,7 +1031,7 @@
            the list takes the full sidebar height instead of a capped section. -->
       <div class="side-switch">
         <!-- The tabs get their own tablist: the strip also carries plain
-             buttons (Refresh, Hide sidebar), which a tablist may not own. -->
+             buttons (Refresh), which a tablist may not own. -->
         <div class="ss-tabs" role="tablist" aria-label="Sidebar view" tabindex="-1" onkeydown={onTabKey}>
           <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} tabindex={database.sideTab === 'connections' ? 0 : -1} onclick={() => database.setSideTab('connections')}>Connections</button>
           <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} tabindex={database.sideTab === 'schema' ? 0 : -1} onclick={() => database.setSideTab('schema')}>Schema</button>

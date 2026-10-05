@@ -205,7 +205,7 @@ test('loaded Review report stays readable across themes and tablet history can c
   await page.screenshot({ path: `/tmp/otto-ux-r4-settings-review-${v.key}-before.png` });
   if(v.width === 834) { await page.getByRole('button', { name: 'Hide reviews list', exact: true }).click(); expect((await page.locator('.lr-main').boundingBox())!.width).toBeGreaterThan(480); await page.getByRole('button', { name: 'Show reviews list', exact: true }).press('Enter'); await expect(page.locator('.lr-item.active')).toContainText('alpha synthetic review'); await page.getByRole('button', { name: 'Hide reviews list', exact: true }).press('Enter'); }
   for(const row of await page.locator('.lr-static, .lr-score, .lr-verdict, .lr-fix').all()) expect(await row.evaluate(e => e.scrollWidth <= e.clientWidth + 1)).toBeTruthy();
-  for(const sel of ['.lr-detail h3', '.lr-notes', '.lr-verdict-badge', '.severity-chip']) { expect(await contrastOf(page, sel)).toBeGreaterThanOrEqual(4.5); expect(await page.locator(sel).first().evaluate(e => parseFloat(getComputedStyle(e).fontSize))).toBeGreaterThanOrEqual(11); }
+  for(const sel of ['.lr-detail h3', '.lr-notes', '.lr-verdict-badge', '.lr-detail .badge']) { expect(await contrastOf(page, sel)).toBeGreaterThanOrEqual(4.5); expect(await page.locator(sel).first().evaluate(e => parseFloat(getComputedStyle(e).fontSize))).toBeGreaterThanOrEqual(11); }
   await expectNoHorizontalOverflow(page); await page.screenshot({ path: `/tmp/otto-ux-r4-settings-review-${v.key}.png` });
  }
 });

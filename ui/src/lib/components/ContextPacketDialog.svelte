@@ -198,8 +198,7 @@
     color: var(--text-dim);
     margin-bottom: 12px;
   }
-  .preview-loading,
-  .preview-err {
+  .preview-loading {
     font-size: var(--fs-m);
     color: var(--text-dim);
     margin-bottom: 8px;

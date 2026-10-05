@@ -402,6 +402,6 @@ async function contrastOf(page: Page, sel: string): Promise<number> {
 
 test('Monitor overview cluster card opens with Space', async ({ page }) => {
   await overview(page); await monitoring(page); await openPage(page, 'kubernetes/monitor');
-  await page.getByTestId('k8s-monitor-card').focus(); await page.keyboard.press('Space');
+  await page.getByTestId('k8s-monitor-card-open').first().focus(); await page.keyboard.press('Space');
   await expect(page).toHaveURL(/ux-cluster\/monitor\/workloads$/);
 });
