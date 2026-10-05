@@ -64,18 +64,18 @@ test('coach failed skill discovery has inline retry and skill installation recov
   });
   await page.goto('/#/agents');
   const coach = page.locator('.coach');
-  await expect(coach.getByText('Could not load recommended skills.')).toBeVisible();
-  await coach.getByRole('button', { name: 'Retry skills' }).scrollIntoViewIfNeeded();
-  await expect(coach.getByRole('button', { name: 'Retry skills' })).toBeInViewport();
+  await expect(coach.getByText(/Couldn’t load recommended skills/)).toBeVisible();
+  await coach.getByTestId('load-error').getByRole('button', { name: 'Retry', exact: true }).scrollIntoViewIfNeeded();
+  await expect(coach.getByTestId('load-error').getByRole('button', { name: 'Retry', exact: true })).toBeInViewport();
   await page.screenshot({ path: info.outputPath('coach-skill-error.png'), animations: 'disabled' });
   discoveryFailed = false;
-  await coach.getByRole('button', { name: 'Retry skills' }).click();
+  await coach.getByTestId('load-error').getByRole('button', { name: 'Retry', exact: true }).click();
   await coach.getByRole('button', { name: 'Install', exact: true }).click();
   await expect(page.getByText('Synthetic install failure')).toBeVisible();
   await expect(coach.getByRole('button', { name: 'Install', exact: true })).toBeEnabled();
   installFailed = false;
   await coach.getByRole('button', { name: 'Install', exact: true }).click();
-  await expect(coach.getByText('installed', { exact: true })).toBeVisible();
+  await expect(coach.getByText('Installed', { exact: true })).toBeVisible();
 });
 
 async function realMedia(page: Page) {
