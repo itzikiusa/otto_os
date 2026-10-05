@@ -139,6 +139,81 @@ impl ConfluenceClient {
         }
     }
 
+    /// Resolve a v1 collection's `_links.next` against this site. Confluence
+    /// returns it relative to the context path (`/rest/api/...?start=25&...`,
+    /// sometimes with the `/wiki` prefix); an absolute link is followed only
+    /// when it stays on this site (the auth header must never leave it).
+    fn next_link(&self, body: &serde_json::Value) -> Option<String> {
+        let next = body.get("_links")?.get("next")?.as_str()?;
+        if next.is_empty() {
+            return None;
+        }
+        if next.starts_with("http://") || next.starts_with("https://") {
+            let same_site = next
+                .strip_prefix(self.site_base.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+            return same_site.then(|| next.to_string());
+        }
+        if next.starts_with("/wiki/") {
+            Some(format!("{}{next}", self.site_base))
+        } else if next.starts_with('/') {
+            Some(format!("{}/wiki{next}", self.site_base))
+        } else {
+            None
+        }
+    }
+
+    /// GET a v1 collection, following `_links.next` until it is absent (or a
+    /// page comes back empty), at most `max_pages` pages. The page size is a
+    /// REQUEST — Cloud lowers the effective limit (notably with `body.*`
+    /// expands) — so a short page is NOT the end; only a missing `next` is.
+    async fn get_all_pages(
+        &self,
+        url: &str,
+        query: &[(&str, &str)],
+        max_pages: usize,
+        what: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut all = Vec::new();
+        let mut next: Option<String> = None;
+        for _ in 0..max_pages {
+            let req = match &next {
+                // The next link already carries start/limit/expand.
+                Some(n) => self.http.get(n),
+                None => self.http.get(url).query(query),
+            };
+            let resp = req
+                .header("Authorization", &self.auth_header)
+                .header("Accept", "application/json")
+                .send()
+                .await
+                .map_err(|e| Error::Upstream(format!("confluence {what} request: {e}")))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(Error::Upstream(format!(
+                    "confluence {what} failed ({status}): {body}"
+                )));
+            }
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| Error::Upstream(format!("confluence {what} parse: {e}")))?;
+            let page = body
+                .get("results")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let got = page.len();
+            all.extend(page);
+            next = self.next_link(&body);
+            if got == 0 || next.is_none() {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
     /// Fetch a page by its numeric ID.
     ///
     /// Uses `?expand=body.storage,version,space`.
@@ -368,39 +443,20 @@ impl ConfluenceClient {
         })
     }
 
-    /// List all current Confluence spaces (up to 200).
+    /// List all current Confluence spaces, following `_links.next` (capped
+    /// at 20 pages — 4000 spaces at the requested size).
     pub async fn list_spaces(&self) -> Result<Vec<ConfluenceSpace>> {
         self.ensure_tls()?;
         let url = self.api("/space");
-
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", &self.auth_header)
-            .header("Accept", "application/json")
-            .query(&[("limit", "200"), ("status", "current")])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("confluence list_spaces request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "confluence list_spaces failed ({status}): {body}"
-            )));
-        }
-
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::Upstream(format!("confluence list_spaces parse: {e}")))?;
-
-        let results_arr = body
-            .get("results")
-            .and_then(|v| v.as_array())
-            .map(|a| a.as_slice())
-            .unwrap_or(&[]);
+        let all = self
+            .get_all_pages(
+                &url,
+                &[("limit", "200"), ("status", "current")],
+                20,
+                "list_spaces",
+            )
+            .await?;
+        let results_arr = all.as_slice();
 
         let mut spaces = Vec::with_capacity(results_arr.len());
         for s in results_arr {
@@ -544,54 +600,19 @@ impl ConfluenceClient {
             crate::jira::path_seg(page_id)
         ));
 
-        // Paginate with start/limit to the last page: the endpoint returns one
-        // default-sized page, so newer comments past it were silently invisible
-        // to the story watcher. Capped at 20 pages of 100 (2000 comments).
-        const PAGE: u64 = 100;
-        const MAX_PAGES: u64 = 20;
-        let mut all: Vec<serde_json::Value> = Vec::new();
-        let mut start: u64 = 0;
-        for _ in 0..MAX_PAGES {
-            let start_s = start.to_string();
-            let limit_s = PAGE.to_string();
-            let resp = self
-                .http
-                .get(&url)
-                .header("Authorization", &self.auth_header)
-                .header("Accept", "application/json")
-                .query(&[
-                    ("expand", "body.storage,version,history"),
-                    ("start", start_s.as_str()),
-                    ("limit", limit_s.as_str()),
-                ])
-                .send()
-                .await
-                .map_err(|e| Error::Upstream(format!("confluence list_comments request: {e}")))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(Error::Upstream(format!(
-                    "confluence list_comments page {page_id} failed ({status}): {body}"
-                )));
-            }
-
-            let body: serde_json::Value = resp
-                .json()
-                .await
-                .map_err(|e| Error::Upstream(format!("confluence list_comments parse: {e}")))?;
-            let page: Vec<serde_json::Value> = body
-                .get("results")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let got = page.len() as u64;
-            all.extend(page);
-            start += got;
-            if got < PAGE {
-                break;
-            }
-        }
+        // Follow `_links.next` to the last page: the endpoint returns one
+        // default-sized page, and Cloud lowers the effective limit below the
+        // requested 100 when `body.storage` is expanded — stopping on the
+        // first short page left later comments invisible to the story
+        // watcher. Capped at 40 pages.
+        let all = self
+            .get_all_pages(
+                &url,
+                &[("expand", "body.storage,version,history"), ("limit", "100")],
+                40,
+                &format!("list_comments page {page_id}"),
+            )
+            .await?;
 
         let results_arr = all.as_slice();
 
@@ -2669,5 +2690,99 @@ mod tests {
         let md = storage_to_markdown(&fixture);
         // Golden values recorded from the pre-SE-18 (quadratic) converter.
         assert_eq!((md.len(), fnv1a(md.as_bytes())), (GOLDEN_LEN, GOLDEN_FNV));
+    }
+
+    /// Serve `router` on an ephemeral loopback port; returns its origin.
+    async fn fixture(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn comment(i: usize) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("c{i}"),
+            "body": {"storage": {"value": format!("<p>n{i}</p>")}},
+            "history": {"createdBy": {"displayName": "A"}, "createdDate": "2026-01-01T00:00:00Z"},
+        })
+    }
+
+    #[tokio::test]
+    async fn comment_walk_follows_next_past_a_short_page() {
+        use axum::extract::Query;
+        use std::collections::HashMap;
+        // Cloud lowers the effective limit to 25 with `body.storage` expanded:
+        // the first page is SHORT yet more follow. Only a missing
+        // `_links.next` ends the walk.
+        let router = axum::Router::new().route(
+            "/wiki/rest/api/content/P1/child/comment",
+            axum::routing::get(|Query(q): Query<HashMap<String, String>>| async move {
+                let start: usize = q.get("start").and_then(|s| s.parse().ok()).unwrap_or(0);
+                let (results, next) = match start {
+                    0 => (
+                        (0..25).map(comment).collect::<Vec<_>>(),
+                        Some("/rest/api/content/P1/child/comment?start=25&limit=25&expand=body.storage"),
+                    ),
+                    25 => (
+                        (25..50).map(comment).collect(),
+                        Some("/wiki/rest/api/content/P1/child/comment?start=50&limit=25"),
+                    ),
+                    _ => ((50..53).map(comment).collect(), None),
+                };
+                let mut links = serde_json::json!({"base": "ignored"});
+                if let Some(n) = next {
+                    links["next"] = serde_json::json!(n);
+                }
+                axum::Json(serde_json::json!({"results": results, "size": results.len(), "_links": links}))
+            }),
+        );
+        let base = fixture(router).await;
+        let c = ConfluenceClient::new(&format!("{base}/wiki"), "e", "t");
+        let comments = c.list_comments("P1").await.unwrap();
+        assert_eq!(comments.len(), 53, "every page walked");
+    }
+
+    #[tokio::test]
+    async fn next_link_never_leaves_the_site() {
+        let c = ConfluenceClient::new("http://127.0.0.1:9", "e", "t");
+        let b = |n: &str| serde_json::json!({"_links": {"next": n}});
+        assert_eq!(
+            c.next_link(&b("/rest/api/space?start=2")).as_deref(),
+            Some("http://127.0.0.1:9/wiki/rest/api/space?start=2")
+        );
+        assert_eq!(c.next_link(&b("https://evil.example/rest/api/space")), None);
+        assert_eq!(c.next_link(&b("http://127.0.0.1:99/x")), None);
+        assert_eq!(c.next_link(&serde_json::json!({"_links": {}})), None);
+    }
+
+    #[tokio::test]
+    async fn list_spaces_follows_next() {
+        use axum::extract::Query;
+        use std::collections::HashMap;
+        let router = axum::Router::new().route(
+            "/wiki/rest/api/space",
+            axum::routing::get(|Query(q): Query<HashMap<String, String>>| async move {
+                if q.get("start").map(String::as_str) == Some("2") {
+                    axum::Json(
+                        serde_json::json!({"results": [{"key": "C", "name": "c"}], "_links": {}}),
+                    )
+                } else {
+                    axum::Json(serde_json::json!({
+                        "results": [{"key": "A", "name": "a"}, {"key": "B", "name": "b"}],
+                        "_links": {"next": "/rest/api/space?start=2&limit=2&status=current"}
+                    }))
+                }
+            }),
+        );
+        let base = fixture(router).await;
+        let spaces = ConfluenceClient::new(&base, "e", "t")
+            .list_spaces()
+            .await
+            .unwrap();
+        let keys: Vec<_> = spaces.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, ["A", "B", "C"]);
     }
 }

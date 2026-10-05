@@ -131,14 +131,25 @@ impl CdpClient {
         if let Some(sid) = session_id {
             frame["sessionId"] = json!(sid);
         }
-        self.out
+        if self
+            .out
             .send(Message::Text(frame.to_string().into()))
-            .map_err(|_| CdpError::Closed)?;
+            .is_err()
+        {
+            self.pending.lock().await.remove(&id);
+            return Err(CdpError::Closed);
+        }
 
-        let resp = tokio::time::timeout(Duration::from_secs(PAGE_TIMEOUT_SECS), rx)
-            .await
-            .map_err(|_| CdpError::Timeout(method.to_string()))?
-            .map_err(|_| CdpError::Closed)?;
+        let resp = match tokio::time::timeout(Duration::from_secs(PAGE_TIMEOUT_SECS), rx).await {
+            Ok(r) => r.map_err(|_| CdpError::Closed)?,
+            Err(_) => {
+                // No reply will ever be awaited for this id: drop its sender,
+                // or every timed-out call leaks a `pending` entry for the life
+                // of the connection.
+                self.pending.lock().await.remove(&id);
+                return Err(CdpError::Timeout(method.to_string()));
+            }
+        };
         if let Some(err) = resp.get("error") {
             return Err(CdpError::Protocol(err.to_string()));
         }
