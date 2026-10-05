@@ -254,8 +254,11 @@ impl AuthRepo {
         // Session-managed credentials retain the owner's permissions, but only
         // while their originating session exists. Never cache this liveness
         // check: deleting a session must close access even after a restart.
-        let managed_session: Option<String> = if kind == "api" {
-            row.get("session_scope")
+        // `agent_mcp` (the session's MCP credential) is held to the same rule
+        // and is likewise never cached (S8-14).
+        let managed_session: Option<String> = if kind == "api" || kind == "agent_mcp" {
+            row.get::<Option<String>, _>("session_scope")
+                .filter(|value| !value.is_empty())
         } else {
             None
         };
@@ -2297,7 +2300,7 @@ mod tests {
         let pool = mem_pool().await;
         let repo = AuthRepo::new(pool.clone());
         let uid = seed_user(&pool, "vault-reviewer").await;
-        let session_id = Id::from("review-session-1");
+        let session_id = seed_managed_session(&pool, &uid).await;
         let workspace_id = Id::from("workspace-1");
 
         let (token, token_id) = repo
@@ -2328,6 +2331,18 @@ mod tests {
         assert!(scope
             .deny_reason("vault_read", false, Some("workspace-2"))
             .is_some());
+
+        // S8-14: like a session `api` token, it lives only while its session
+        // row does — and is never served from the auth cache.
+        sqlx::query("DELETE FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.authenticate(&token).await,
+            Err(Error::Unauthorized)
+        ));
 
         assert!(repo
             .revoke_vault_reviewer_token(&uid, &token_id)
