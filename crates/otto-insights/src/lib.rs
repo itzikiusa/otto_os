@@ -1146,20 +1146,34 @@ async fn post_run<C: InsightsCtx>(
             attached: true,
         }));
     }
+    let (dir2, key2) = (dir.clone(), key.clone());
     let report_revision = ctx::blocking(move || report_status(&dir, &key, false))
         .await
         .map_err(ApiError)?
         .html_revision;
 
+    let t0 = Utc::now();
     match run_insights(&ctx, kind, offset, as_of, RunMode::Manual).await {
-        Ok(Some(id)) => Ok(Json(RunResp {
-            started: true,
-            run_id: Some(id.to_string()),
-            report_key: Some(period_key(kind, start, end)),
-            report_revision,
-            reason: None,
-            attached: false,
-        })),
+        Ok(Some(id)) => {
+            // `run_insights` may have ATTACHED to a run another request
+            // registered concurrently (S4-19d): report that run's own
+            // pre-run revision and `attached: true`, not ours.
+            let registered = ACTIVE_RUNS.lock().await.live(&dir2, &key2, |_| true);
+            let (attached, report_revision) = match registered {
+                Some(r) if r.run_id == id.as_str() && r.started_at < t0 => {
+                    (true, r.report_revision)
+                }
+                _ => (false, report_revision),
+            };
+            Ok(Json(RunResp {
+                started: true,
+                run_id: Some(id.to_string()),
+                report_key: Some(period_key(kind, start, end)),
+                report_revision,
+                reason: None,
+                attached,
+            }))
+        }
         Ok(None) => Ok(Json(RunResp {
             started: false,
             run_id: None,
