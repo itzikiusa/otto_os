@@ -7229,6 +7229,71 @@ mod tests {
         assert!(mgr.capture_probes.get(&other).is_none());
     }
 
+    /// The sweep's reap of an unresumable session re-checks the idle guards
+    /// under the resume lock: an engine turn (or viewer) that appeared after
+    /// the sweep's slow reads must win over the kill.
+    #[tokio::test]
+    async fn kill_if_idle_rechecks_guards_under_the_lock() {
+        let (mgr, repo, ws, owner) = test_manager().await;
+        let id = seed_session(&repo, &ws, &owner, None).await;
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: Some("/".into()),
+            env: vec![],
+        };
+        let handle = Arc::new(PtyHandle::spawn(&spec).unwrap());
+        mgr.live.insert(id.clone(), Arc::clone(&handle));
+        let turn = mgr.hold_for_turn(&id);
+        assert!(!mgr.kill_if_idle(&id, Duration::ZERO).await.unwrap());
+        assert!(
+            handle.on_exit().borrow().is_none(),
+            "held session not killed"
+        );
+        drop(turn);
+        // Too-recent output (a huge grace) also holds it.
+        assert!(!mgr
+            .kill_if_idle(&id, Duration::from_secs(3600))
+            .await
+            .unwrap());
+        assert!(mgr.kill_if_idle(&id, Duration::ZERO).await.unwrap());
+        assert_eq!(repo.get(&id).await.unwrap().status, SessionStatus::Exited);
+    }
+
+    /// Rapid resizes persist the LATEST grid: each write stores the handle's
+    /// size at its turn, serialized, so an older write can't land last.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saved_grid_is_the_latest_after_rapid_resizes() {
+        let (mgr, repo, ws, owner) = test_manager().await;
+        let id = seed_session(&repo, &ws, &owner, None).await;
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: Some("/".into()),
+            env: vec![],
+        };
+        let handle = Arc::new(PtyHandle::spawn(&spec).unwrap());
+        mgr.live.insert(id.clone(), Arc::clone(&handle));
+        for cols in 81..=120u16 {
+            mgr.resize(&id, cols, 30).await.unwrap();
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let meta = repo.get(&id).await.unwrap().meta;
+            if meta.get("pty_cols").and_then(|v| v.as_u64()) == Some(120) {
+                // Give any straggler a chance to (wrongly) overwrite it.
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let meta = repo.get(&id).await.unwrap().meta;
+                assert_eq!(meta["pty_cols"], 120);
+                assert_eq!(meta["pty_rows"], 30);
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "grid never persisted");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let _ = handle.kill();
+    }
+
     /// A viewer's zero/huge grid is `Invalid` and never reaches the PTY (a
     /// 65535² grid aborted the daemon; rows=0 froze the session's output).
     #[tokio::test]
