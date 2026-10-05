@@ -13,6 +13,7 @@ export const KIND_LABEL: Record<WorkKind, string> = {
   product_story: 'Product Story',
   pr: 'Pull Request',
   external_trigger: 'External Trigger',
+  otto_run: 'Otto Run',
 };
 
 export const KIND_ICON: Record<WorkKind, IconName> = {
@@ -24,6 +25,7 @@ export const KIND_ICON: Record<WorkKind, IconName> = {
   product_story: 'note',
   pr: 'pr',
   external_trigger: 'bell',
+  otto_run: 'play',
 };
 
 /** A work status in the shared run vocabulary (lib/status.ts): pending →
@@ -80,6 +82,7 @@ export const WORK_KINDS: WorkKind[] = [
   'product_story',
   'pr',
   'external_trigger',
+  'otto_run',
 ];
 export const WORK_STATUSES: WorkStatus[] = [
   'pending',

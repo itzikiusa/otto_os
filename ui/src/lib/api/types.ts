@@ -2019,7 +2019,8 @@ export type WorkKind =
   | 'review'
   | 'product_story'
   | 'pr'
-  | 'external_trigger';
+  | 'external_trigger'
+  | 'otto_run';
 export type WorkStatus =
   | 'pending'
   | 'running'

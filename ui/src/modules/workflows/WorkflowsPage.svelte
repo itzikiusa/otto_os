@@ -47,6 +47,7 @@
   import { workflowRunBus } from '../../lib/events.svelte';
   import { workflowsPagePort } from '../../lib/uiCommands/workflows';
   import { router } from '../../lib/router.svelte';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import { registry } from '../../lib/commands.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
@@ -177,6 +178,16 @@
     return () => { clearTimeout(timer); ctl.abort(); };
   });
   const instructionsDirty = $derived(wfInstructions !== (current?.instructions ?? ''));
+  // Leaving the module (sidebar, ⌘K, a link) or switching workspace with an
+  // unsaved canvas / instructions edit asks first — `discardEditsOk` only
+  // covered switching workflows inside the page. Moving within Workflows
+  // (`workflows/<id>`) is handled by `openGuarded`, so it's allowed here.
+  $effect(() =>
+    guardUnsaved(() => (dirty || instructionsDirty) && !!current, {
+      what: current ? `“${current.name}”` : 'this workflow',
+      allow: (to) => to === 'workflows' || to.startsWith('workflows/'),
+    }),
+  );
 
   $effect(() => {
     if (ws.currentId) {

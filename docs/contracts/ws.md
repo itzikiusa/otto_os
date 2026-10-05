@@ -1043,7 +1043,7 @@ blind timer.
 - Emitted by the `workgraph_projector` when a Mission Control work item is
   created or its normalized status changes (cost/title-only refreshes stay
   quiet). `kind` is the work kind (`session|swarm|goal_loop|workflow|review|
-  product_story|pr|external_trigger`); `status` is the normalized lifecycle.
+  product_story|pr|external_trigger|otto_run`); `status` is the normalized lifecycle.
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Mission Control page re-fetches the workspace summary/list on a matching
   tick instead of polling.
