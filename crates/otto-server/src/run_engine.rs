@@ -601,18 +601,17 @@ fn truncate(s: &str, cap: usize) -> String {
 }
 
 async fn e2e_commit_note(wt: &str, run: &OttoRun) {
-    use tokio::process::Command;
     let note = format!(
         "# Otto run {}\n\nGoal: {}\n\nThis file was committed by the Run with Otto \
          engine under OTTO_E2E to provide a deterministic diff.\n",
         run.id, run.goal
     );
     let _ = tokio::fs::write(format!("{wt}/OTTO_RUN_NOTE.md"), note).await;
-    let _ = Command::new("git")
+    let _ = otto_git::hardened_command()
         .args(["-C", wt, "add", "-A"])
         .status()
         .await;
-    let _ = Command::new("git")
+    let _ = otto_git::hardened_command()
         .args([
             "-C",
             wt,

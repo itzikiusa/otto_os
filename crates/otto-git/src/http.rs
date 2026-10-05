@@ -285,7 +285,10 @@ pub(crate) async fn repo_ctx<S: GitCtx>(
 ) -> Result<(Repo, LocalGit)> {
     let repo = s.store().get_repo(repo_id).await?;
     s.roles().check(&user.0, &repo.workspace_id, min).await?;
-    let git = LocalGit::new(&repo.path);
+    // A git route call is a person's deliberate act: their hooks run, an
+    // in-work-tree `core.hooksPath` (husky) included. (An agent's own token
+    // calling these routes is the open outward-route decision, S11-05.)
+    let git = LocalGit::new(&repo.path).person_initiated();
     Ok((repo, git))
 }
 

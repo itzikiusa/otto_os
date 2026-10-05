@@ -221,7 +221,11 @@ impl LocalGit {
         mode: PullMode,
     ) -> Result<(PullOutcome, Option<String>)> {
         let dirty = !self
-            .run(&["status", "--porcelain"])
+            .run(&[
+                "status",
+                "--porcelain",
+                crate::local::STATUS_IGNORE_SUBMODULES,
+            ])
             .await?
             .trim()
             .is_empty();

@@ -1784,6 +1784,10 @@ pub struct SessionManager {
         otto_state::provider_accounts::ProviderAccountsRepo,
         std::path::PathBuf,
     )>,
+    /// The daemon's configured data dir (`$OTTO_DATA_DIR` or the default),
+    /// which the process sandbox write-denies (and whose secrets / state DB it
+    /// read-denies). `None` ⇒ resolved like `ottod`'s config does.
+    data_dir: Option<std::path::PathBuf>,
     /// Absolute path to the `ottod` binary that backs the `otto` MCP tool server
     /// (`<path> mcp-tools`). Defaults to the running executable's own path so the
     /// tools subcommand is always the same build as the daemon.
@@ -1871,6 +1875,7 @@ impl SessionManager {
             settings: None,
             auth: None,
             provider_accounts: None,
+            data_dir: None,
             // Default to this daemon's own binary so `mcp-tools` is the same build.
             mcp_tools_bin: std::env::current_exe()
                 .ok()
@@ -1987,6 +1992,27 @@ impl SessionManager {
     pub fn with_auth_repo(mut self, auth: AuthRepo) -> Self {
         self.auth = Some(auth);
         self
+    }
+
+    /// The daemon's configured data dir — the one the process sandbox must
+    /// protect. Without it the sandbox falls back to `$OTTO_DATA_DIR` / the
+    /// default location, which is wrong for a daemon started with a custom
+    /// `--data-dir`-style config.
+    pub fn with_data_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.data_dir = Some(dir.into());
+        self
+    }
+
+    /// The data dir the sandbox protects: the configured one, else resolved
+    /// exactly like `ottod::config` (`$OTTO_DATA_DIR`, then the default).
+    fn sandbox_data_dir(&self, home: &std::path::Path) -> std::path::PathBuf {
+        if let Some(d) = &self.data_dir {
+            return d.clone();
+        }
+        std::env::var_os("OTTO_DATA_DIR")
+            .filter(|d| !d.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join("Library/Application Support/Otto"))
     }
 
     pub fn with_provider_accounts(
@@ -2425,7 +2451,7 @@ impl SessionManager {
         let home = std::env::var("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_default();
-        let data_dir = home.join("Library/Application Support/Otto");
+        let data_dir = self.sandbox_data_dir(&home);
         // Resolve the git dir so commits in a worktree (whose .git lives outside
         // cwd) still work. Best-effort; absent for non-repos.
         let mut extra: Vec<std::path::PathBuf> = Vec::new();
@@ -2438,8 +2464,7 @@ impl SessionManager {
         if let Some(account_home) = self.provider_home(session) {
             extra.push(account_home);
         }
-        let policy =
-            otto_sandbox::SandboxPolicy::for_agent(&cwd, &home, &data_dir, &extra, network);
+        let policy = sandbox_policy(&cwd, &home, &data_dir, &extra, network, forced);
         let (program, args) = policy.wrap(&spec.program, &spec.args);
         spec.program = program;
         spec.args = args;
@@ -2448,6 +2473,37 @@ impl SessionManager {
             provider = %session.provider,
             "process sandbox enabled (network={network:?})"
         );
+    }
+
+    /// The `process_sandbox` policy for a NON-PTY process the daemon runs on a
+    /// user's behalf as `provider` in `cwd` — today a scheduled `shell` task's
+    /// `/bin/sh -c`. Same decision and profile as a session spawn
+    /// ([`Self::apply_sandbox`]): `None` when the setting is off or excludes
+    /// `provider`, or on a host without Seatbelt.
+    pub async fn process_sandbox_policy(
+        &self,
+        provider: &str,
+        cwd: &std::path::Path,
+    ) -> Option<otto_sandbox::SandboxPolicy> {
+        if !otto_sandbox::is_supported() {
+            return None;
+        }
+        let cfg = self
+            .settings
+            .as_ref()?
+            .get("process_sandbox")
+            .await
+            .ok()??;
+        let network = sandbox_decision(&cfg, SessionKind::Agent, provider)?;
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let data_dir = self.sandbox_data_dir(&home);
+        let extra: Vec<std::path::PathBuf> =
+            resolve_git_common_dir(cwd).await.into_iter().collect();
+        Some(sandbox_policy(
+            cwd, &home, &data_dir, &extra, network, false,
+        ))
     }
 
     /// Is Otto's first-party MCP tool server enabled for `workspace_id`?
@@ -6112,8 +6168,29 @@ fn sandbox_decision(
 /// main repo's `.git` (which holds the objects + the worktree's gitdir), which
 /// lives OUTSIDE `cwd` — without it a sandboxed agent in a worktree couldn't
 /// commit. Best-effort: `None` when `cwd` isn't a git repo.
+/// The Seatbelt policy for one agent session. A read-only session (untrusted
+/// input, always confined) additionally may not plant project-scope claude
+/// config (`.claude/settings*.json`, hooks, `.mcp.json`) in its own folder —
+/// Otto pre-trusts every cwd, so the user's next unconfined `claude` there
+/// would load it without a prompt.
+fn sandbox_policy(
+    cwd: &std::path::Path,
+    home: &std::path::Path,
+    data_dir: &std::path::Path,
+    extra: &[std::path::PathBuf],
+    network: otto_sandbox::NetworkPolicy,
+    read_only: bool,
+) -> otto_sandbox::SandboxPolicy {
+    let policy = otto_sandbox::SandboxPolicy::for_agent(cwd, home, data_dir, extra, network);
+    if read_only {
+        policy.deny_project_agent_config(cwd)
+    } else {
+        policy
+    }
+}
+
 async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
-    let out = tokio::process::Command::new("git")
+    let out = otto_git::hardened_command()
         .arg("-C")
         .arg(cwd)
         .args(["rev-parse", "--git-common-dir"])
@@ -8962,6 +9039,53 @@ mod tests {
         let (rows, cols) = handle.screen_size();
         assert_eq!(cols, 132, "restored cols");
         assert_eq!(rows, 50, "restored rows");
+    }
+
+    /// S1-10: the sandbox protects the CONFIGURED data dir, not a hard-coded
+    /// default — a daemon on `$OTTO_DATA_DIR` must not leave its real
+    /// `secrets.json` / `otto.db` / `bin/ottod` open to the agent.
+    #[tokio::test]
+    async fn sandbox_protects_the_configured_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        let (events, _rx) = broadcast::channel(16);
+        let home = std::path::Path::new("/nonexistent-otto-home/u");
+        let custom = std::path::PathBuf::from("/nonexistent-otto-data/custom");
+        let mgr = SessionManager::new(SessionsRepo::new(pool), events, ProviderRegistry::new(None))
+            .with_data_dir(custom.clone());
+        assert_eq!(mgr.sandbox_data_dir(home), custom);
+        let sbpl = sandbox_policy(
+            std::path::Path::new("/nonexistent-otto-work/p"),
+            home,
+            &mgr.sandbox_data_dir(home),
+            &[],
+            otto_sandbox::NetworkPolicy::Full,
+            false,
+        )
+        .to_sbpl();
+        assert!(sbpl.contains("(deny file-write* (subpath \"/nonexistent-otto-data/custom\"))"));
+        assert!(sbpl.contains("(literal \"/nonexistent-otto-data/custom/secrets.json\")"));
+        assert!(!sbpl.contains("Library/Application Support/Otto"));
+    }
+
+    /// S1-03(d): only read-only sessions lose write access to the project's
+    /// claude config.
+    #[test]
+    fn read_only_sandbox_denies_project_claude_config() {
+        let p = |ro| {
+            sandbox_policy(
+                std::path::Path::new("/nonexistent-otto-work/p"),
+                std::path::Path::new("/nonexistent-otto-home/u"),
+                std::path::Path::new("/nonexistent-otto-data/d"),
+                &[],
+                otto_sandbox::NetworkPolicy::Full,
+                ro,
+            )
+            .to_sbpl()
+        };
+        let needle = "(literal \"/nonexistent-otto-work/p/.mcp.json\")";
+        assert!(p(true).contains(needle));
+        assert!(!p(false).contains(needle));
     }
 
     #[test]

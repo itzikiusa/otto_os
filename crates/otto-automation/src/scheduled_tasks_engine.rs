@@ -797,6 +797,12 @@ async fn run_one_agent_session(
 /// resolved cwd, capturing stdout/stderr + exit code as the Markdown report.
 async fn execute_shell(ctx: &impl AutomationCtx, task: &ScheduledTask) -> ExecResult {
     let cwd = resolve_cwd(ctx, task).await?;
+    // The `process_sandbox` setting covers `shell` by default: a scheduled
+    // shell task is confined exactly like a shell session would be.
+    let sandbox = ctx
+        .manager()
+        .process_sandbox_policy("shell", std::path::Path::new(&cwd))
+        .await;
     let _permit = run_semaphore()
         .acquire()
         .await
@@ -804,8 +810,15 @@ async fn execute_shell(ctx: &impl AutomationCtx, task: &ScheduledTask) -> ExecRe
     let cmd = task.prompt.clone();
     // The retry policy applies to shell tasks too: a failing command (spawn error,
     // timeout, or non-zero exit) is retried up to `1 + max_retries` times.
-    let (res, attempts) =
-        run_shell_with_retry(&cmd, &cwd, task.max_retries, SHELL_TIMEOUT, &RETRY_BACKOFF).await;
+    let (res, attempts) = run_shell_with_retry(
+        &cmd,
+        &cwd,
+        sandbox.as_ref(),
+        task.max_retries,
+        SHELL_TIMEOUT,
+        &RETRY_BACKOFF,
+    )
+    .await;
     // A spawn error / timeout on the final attempt → no report.
     let run = res.map_err(|error| ExecFailure {
         attempts,
@@ -848,6 +861,7 @@ async fn execute_shell(ctx: &impl AutomationCtx, task: &ScheduledTask) -> ExecRe
 async fn run_shell_with_retry(
     cmd: &str,
     cwd: &str,
+    sandbox: Option<&otto_sandbox::SandboxPolicy>,
     max_retries: i64,
     timeout: Duration,
     backoff: &[Duration],
@@ -857,7 +871,7 @@ async fn run_shell_with_retry(
     let mut last: Option<Result<std::process::Output>> = None;
     for i in 0..max_attempts {
         attempts += 1;
-        let res = run_shell_once(cmd, cwd, timeout).await;
+        let res = run_shell_once(cmd, cwd, sandbox, timeout).await;
         let success = matches!(&res, Ok(out) if out.status.success());
         last = Some(res);
         if success {
@@ -911,10 +925,30 @@ async fn drain_shell_stream(
 /// every timed-out attempt left its shell (and whatever it started: `ssh`, a
 /// test run stuck on a prompt) running, each retry added another copy, and the
 /// released permit let the next scheduled occurrence stack more on top.
-async fn run_shell_once(cmd: &str, cwd: &str, timeout: Duration) -> Result<std::process::Output> {
-    let mut spec = tokio::process::Command::new("/bin/sh");
-    spec.arg("-c")
-        .arg(cmd)
+///
+/// With a `sandbox` policy (the `process_sandbox` setting covers `shell`) the
+/// shell runs under Seatbelt, and Otto's own `OTTO_*` variables (ingest /
+/// MCP wiring, data-dir overrides) are not passed to it.
+async fn run_shell_once(
+    cmd: &str,
+    cwd: &str,
+    sandbox: Option<&otto_sandbox::SandboxPolicy>,
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    let shell_args = ["-c".to_string(), cmd.to_string()];
+    let (program, args) = match sandbox {
+        Some(p) => p.wrap("/bin/sh", &shell_args),
+        None => ("/bin/sh".to_string(), shell_args.to_vec()),
+    };
+    let mut spec = tokio::process::Command::new(program);
+    if sandbox.is_some() {
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy().starts_with("OTTO_") {
+                spec.env_remove(k);
+            }
+        }
+    }
+    spec.args(args)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1760,6 +1794,7 @@ mod tests {
         let out = run_shell_once(
             "head -c 700000 /dev/zero; head -c 700000 /dev/zero >&2; exit 7",
             "/tmp",
+            None,
             Duration::from_secs(10),
         )
         .await
@@ -1771,6 +1806,43 @@ mod tests {
         }
     }
 
+    /// S3-04: with the `process_sandbox` policy a scheduled shell task runs
+    /// under Seatbelt — it writes its own cwd but nothing outside it.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sandboxed_shell_task_is_confined_to_its_cwd() {
+        if !otto_sandbox::is_supported() {
+            return;
+        }
+        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let cwd = root_path.join("task");
+        let outside = root_path.join("outside.txt");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let policy = otto_sandbox::SandboxPolicy::for_agent(
+            &cwd,
+            &root_path.join("home"),
+            &root_path.join("Otto"),
+            &[],
+            otto_sandbox::NetworkPolicy::None,
+        );
+        let cwd_s = cwd.to_string_lossy().to_string();
+        let out = run_shell_once(
+            &format!("echo in > inside.txt; echo out > '{}'", outside.display()),
+            &cwd_s,
+            Some(&policy),
+            Duration::from_secs(20),
+        )
+        .await
+        .unwrap();
+        assert!(cwd.join("inside.txt").exists(), "cwd must stay writable");
+        assert!(!outside.exists(), "a sandboxed task wrote outside its cwd");
+        assert!(
+            !out.status.success(),
+            "the denied write must fail the command"
+        );
+    }
+
     #[tokio::test]
     async fn shell_retry_counts_attempts_and_stops_on_success() {
         let cwd = std::env::temp_dir();
@@ -1779,18 +1851,18 @@ mod tests {
         // An always-failing command runs 1 + max_retries times, and still returns
         // its (failed) output so a report can be built.
         let (res, attempts) =
-            run_shell_with_retry("exit 3", &cwd, 2, Duration::from_secs(10), &zero).await;
+            run_shell_with_retry("exit 3", &cwd, None, 2, Duration::from_secs(10), &zero).await;
         assert_eq!(attempts, 3);
         let out = res.expect("output captured even when the command fails");
         assert!(!out.status.success());
         // A succeeding command runs exactly once.
         let (res, attempts) =
-            run_shell_with_retry("exit 0", &cwd, 2, Duration::from_secs(10), &zero).await;
+            run_shell_with_retry("exit 0", &cwd, None, 2, Duration::from_secs(10), &zero).await;
         assert_eq!(attempts, 1);
         assert!(res.unwrap().status.success());
         // max_retries = 0 ⇒ a single attempt even on failure.
         let (_res, attempts) =
-            run_shell_with_retry("exit 1", &cwd, 0, Duration::from_secs(10), &zero).await;
+            run_shell_with_retry("exit 1", &cwd, None, 0, Duration::from_secs(10), &zero).await;
         assert_eq!(attempts, 1);
     }
 
@@ -1805,6 +1877,7 @@ mod tests {
         let res = run_shell_once(
             "(sleep 1; touch orphan-ran) & sleep 30",
             &cwd,
+            None,
             Duration::from_millis(300),
         )
         .await;

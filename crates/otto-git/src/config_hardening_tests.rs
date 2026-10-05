@@ -126,3 +126,168 @@ async fn a_person_s_commit_still_runs_the_repo_hooks() {
         "the user's pre-commit hook runs on their commit"
     );
 }
+
+/// S2-02(a): an agent plants an embedded repo whose OWN config names a clean
+/// filter, then `git add sub`. Deciding whether that gitlink's work tree is
+/// dirty means running git inside it — with its filters. Daemon status and
+/// diffs skip submodule work-tree dirt, so the filter never runs.
+#[tokio::test]
+async fn an_embedded_submodule_filter_never_runs_on_daemon_status_or_diff() {
+    let (tmp, repo) = repo();
+    let ran = tmp.path().join("filter-ran");
+    let filt = script(tmp.path(), "clean.sh", &ran);
+    let sub = repo.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    sh(&sub, &["init", "-q", "-b", "main"]);
+    std::fs::write(sub.join("f"), "a").unwrap();
+    sh(&sub, &["add", "f"]);
+    sh(
+        &sub,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "s",
+        ],
+    );
+    sh(&sub, &["config", "filter.x.clean", filt.to_str().unwrap()]);
+    std::fs::write(sub.join(".gitattributes"), "* filter=x\n").unwrap();
+    std::fs::write(sub.join("f"), "b").unwrap();
+    sh(&repo, &["add", "sub"]);
+    let _ = std::fs::remove_file(&ran);
+
+    let git = LocalGit::new(&repo);
+    let st = git.status().await.expect("status");
+    git.status_full().await.expect("status_full");
+    git.working_diff_text().await.expect("working diff");
+    assert!(
+        !ran.exists(),
+        "daemon status ran the embedded repo's filter"
+    );
+    // The gitlink itself is still reported (only its work-tree dirt is not).
+    assert!(
+        format!("{st:?}").contains("sub"),
+        "the staged gitlink must still show: {st:?}"
+    );
+    assert!(crate::local::DIFF_FORMAT.contains(&"--ignore-submodules=dirty"));
+}
+
+#[test]
+fn hooks_path_inside_resolves_relative_absolute_and_escapes() {
+    use crate::local::hooks_path_inside;
+    let tmp = tempfile::tempdir().unwrap();
+    let top = std::fs::canonicalize(tmp.path()).unwrap();
+    let t = top.to_str().unwrap();
+    assert!(hooks_path_inside(".husky/_", Some(t)));
+    assert!(hooks_path_inside(&format!("{t}/.husky"), Some(t)));
+    assert!(!hooks_path_inside("../outside/hooks", Some(t)));
+    assert!(!hooks_path_inside("/usr/share/hooks", Some(t)));
+    assert!(!hooks_path_inside(".husky/_", None));
+}
+
+/// S11-07: husky-style `core.hooksPath=.husky/_` lives in the work tree, so an
+/// agent there can rewrite the hook. A daemon-initiated commit (workflow,
+/// Run with Otto, swarm) runs without it; a person's commit through the git
+/// routes (`person_initiated`) still runs it.
+#[tokio::test]
+async fn an_in_worktree_hooks_path_runs_only_for_a_person_s_commit() {
+    let (tmp, repo) = repo();
+    let ran = tmp.path().join("husky-ran");
+    let hooks = repo.join(".husky/_");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::copy(script(tmp.path(), "pc.sh", &ran), hooks.join("pre-commit")).unwrap();
+    sh(&repo, &["config", "core.hooksPath", ".husky/_"]);
+
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    let daemon = LocalGit::new(&repo);
+    daemon.run(&["add", "a.txt"]).await.expect("add");
+    daemon.run(&["commit", "-m", "auto"]).await.expect("commit");
+    assert!(
+        !ran.exists(),
+        "a daemon-initiated commit ran an in-worktree hook"
+    );
+
+    std::fs::write(repo.join("b.txt"), "x").unwrap();
+    let person = LocalGit::new(&repo).person_initiated();
+    person.run(&["add", "b.txt"]).await.expect("add");
+    person.run(&["commit", "-m", "mine"]).await.expect("commit");
+    assert!(
+        ran.exists(),
+        "the person's own commit keeps their husky hook"
+    );
+}
+
+/// S2-02(b): the worktree probe only runs `git status` in trees that
+/// round-trip to this repo — not in one whose admin `gitdir` (or `.git`
+/// file) was re-pointed at an agent-built repo.
+#[test]
+fn worktree_round_trip_rejects_forged_pointers() {
+    use crate::local::worktree_round_trips;
+    let (tmp, repo) = repo();
+    let common = repo.join(".git");
+    let wt = tmp.path().join("wt");
+    sh(
+        &repo,
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "side"],
+    );
+    let wt = std::fs::canonicalize(&wt).unwrap();
+    assert!(worktree_round_trips(&repo, &common), "main tree");
+    assert!(worktree_round_trips(&wt, &common), "linked tree");
+
+    // A foreign repo the pointer is aimed at.
+    let evil = tmp.path().join("evil");
+    std::fs::create_dir(&evil).unwrap();
+    sh(&evil, &["init", "-q"]);
+    assert!(!worktree_round_trips(&evil, &common), "foreign repo");
+    // A tree whose `.git` file names some other admin dir.
+    let fake = tmp.path().join("fake");
+    std::fs::create_dir(&fake).unwrap();
+    std::fs::write(
+        fake.join(".git"),
+        format!("gitdir: {}\n", evil.join(".git").display()),
+    )
+    .unwrap();
+    assert!(!worktree_round_trips(&fake, &common), "forged .git file");
+    // The admin `gitdir` re-pointed elsewhere: the real tree no longer
+    // round-trips.
+    let admin = std::fs::read_dir(common.join("worktrees"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", fake.join(".git").display()),
+    )
+    .unwrap();
+    assert!(
+        !worktree_round_trips(&wt, &common),
+        "re-pointed admin gitdir"
+    );
+}
+
+/// S2-11: the exported helpers carry the same hardening as `base_cmd`.
+#[test]
+fn hardened_command_helpers_carry_the_hardened_config() {
+    let tokio_cmd = crate::hardened_command();
+    let std_cmd = crate::hardened_std_command();
+    for cmd in [tokio_cmd.as_std(), &std_cmd] {
+        let env: Vec<_> = cmd.get_envs().collect();
+        let get = |k: &str| {
+            env.iter()
+                .find(|(n, _)| *n == k)
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        assert_eq!(cmd.get_program(), "git");
+        assert_eq!(
+            get("GIT_CONFIG_PARAMETERS").as_deref(),
+            Some(HARDENED_GIT_CONFIG)
+        );
+        assert_eq!(get("GIT_TERMINAL_PROMPT").as_deref(), Some("0"));
+        assert_eq!(get("GIT_PAGER").as_deref(), Some("cat"));
+    }
+}

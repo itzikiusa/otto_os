@@ -231,6 +231,9 @@ fn session_manager(
                 otto_state::provider_accounts::ProviderAccountsRepo::new(pool.clone()),
                 cfg.data_dir.join("provider-accounts"),
             )
+            // The process sandbox protects THIS data dir (`$OTTO_DATA_DIR`
+            // aware), not a hard-coded default.
+            .with_data_dir(cfg.data_dir.clone())
             // Auto-name new agent sessions from the creating user's active theme.
             .with_name_themes_repo(otto_state::NameThemesRepo::new(pool.clone()))
             .with_pre_spawn_hook(provisioner.clone())

@@ -250,6 +250,117 @@ pub(crate) fn hardened_config_for(verb: &str) -> &'static str {
     }
 }
 
+/// A `git` command for code OUTSIDE [`LocalGit`] (rev-parse probes, goal-loop
+/// evidence, skill-eval scratch repos, plugin clones…) with the same
+/// hardening every daemon git gets: repo config can't pick a program for it
+/// to run ([`HARDENED_GIT_CONFIG`]: fsmonitor off, hooks off), no pager, no
+/// credential prompt, stdin closed, killed when dropped. Prefer `LocalGit`
+/// (output cap + timeouts) where it fits; spawning a bare
+/// `Command::new("git")` outside otto-git is refused by a guard test
+/// (`otto-server` `no_bare_git_spawns`).
+pub fn hardened_command() -> Command {
+    let mut cmd = Command::new("git");
+    harden(cmd.as_std_mut());
+    cmd.kill_on_drop(true);
+    cmd
+}
+
+/// [`hardened_command`] for synchronous callers.
+pub fn hardened_std_command() -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    harden(&mut cmd);
+    cmd
+}
+
+fn harden(cmd: &mut std::process::Command) {
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_PARAMETERS", HARDENED_GIT_CONFIG)
+        .env("GIT_PAGER", "cat")
+        .stdin(Stdio::null());
+}
+
+/// Does the work tree at `path` round-trip to the repo whose common git dir
+/// is `common`? The main tree's `.git` must BE `common`; a linked tree's
+/// `.git` file must name `<common>/worktrees/<id>`, whose `gitdir` file must
+/// name that same `.git` back. Anything else (a forged pointer, a foreign
+/// repo) is not probed.
+pub(crate) fn worktree_round_trips(path: &Path, common: &Path) -> bool {
+    let canon = |p: &Path| std::fs::canonicalize(p).ok();
+    let Some(common) = canon(common) else {
+        return false;
+    };
+    let dot_git = path.join(".git");
+    let Ok(meta) = std::fs::symlink_metadata(&dot_git) else {
+        return false;
+    };
+    if meta.is_dir() {
+        return canon(&dot_git).is_some_and(|g| g == common);
+    }
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(&dot_git) else {
+        return false;
+    };
+    let Some(target) = text.trim().strip_prefix("gitdir:").map(str::trim) else {
+        return false;
+    };
+    let target = Path::new(target);
+    let admin = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        path.join(target)
+    };
+    let Some(admin) = canon(&admin) else {
+        return false;
+    };
+    if admin.parent() != Some(common.join("worktrees").as_path()) {
+        return false;
+    }
+    let Ok(back) = std::fs::read_to_string(admin.join("gitdir")) else {
+        return false;
+    };
+    canon(Path::new(back.trim())).is_some_and(|b| Some(b) == canon(&dot_git))
+}
+
+/// Does a `core.hooksPath` value point inside the work tree `toplevel`?
+/// Relative values resolve against the work tree root (git's rule), so they
+/// are inside unless they climb out with `..`; `~/` expands to `$HOME`.
+pub(crate) fn hooks_path_inside(hooks: &str, toplevel: Option<&str>) -> bool {
+    let Some(top) = toplevel else {
+        return false;
+    };
+    let top = std::fs::canonicalize(top).unwrap_or_else(|_| PathBuf::from(top));
+    let raw = if let Some(rest) = hooks.strip_prefix("~/") {
+        match std::env::var_os("HOME") {
+            Some(h) => PathBuf::from(h).join(rest),
+            None => return false,
+        }
+    } else {
+        PathBuf::from(hooks)
+    };
+    let abs = if raw.is_absolute() {
+        raw
+    } else {
+        top.join(raw)
+    };
+    // Resolve `..` / symlinks where the dir exists; else normalise lexically.
+    let resolved = std::fs::canonicalize(&abs).unwrap_or_else(|_| {
+        let mut out = PathBuf::new();
+        for c in abs.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => out.push(other),
+            }
+        }
+        out
+    });
+    resolved.starts_with(&top)
+}
+
 /// The git subcommand in an argv, for error text: `args[0]`, or `args[2]` when
 /// the call is prefixed with `-c <key=value>` (the diff family does that).
 fn verb_of<'a>(args: &'a [&'a str]) -> &'a str {
@@ -425,14 +536,27 @@ async fn kill_group(pid: libc::pid_t) {
 /// `diff --git` block with `Submodule sub a..b:` summary lines (hashed into the
 /// PREVIOUS file's fingerprint) or inlined the submodule's own files as if
 /// they were this repo's.
-pub(crate) const DIFF_FORMAT: [&str; 6] = [
+///
+/// `--ignore-submodules=dirty`: deciding whether a gitlink's WORK TREE is
+/// dirty means running `git status` INSIDE it, with that repo's own config —
+/// and an agent can plant an embedded repo (`sub/.git/config` with a
+/// `filter.<x>.clean` program + `sub/.gitattributes`, then `git add sub`)
+/// whose filters the daemon's unconfined git would run. A gitlink's moved
+/// HEAD still shows; only its work-tree dirt does not. The same flag is on
+/// every daemon `status` ([`STATUS_IGNORE_SUBMODULES`]).
+pub(crate) const DIFF_FORMAT: [&str; 7] = [
     "--no-color",
     "--no-ext-diff",
     "--no-textconv",
     "--src-prefix=a/",
     "--dst-prefix=b/",
     "--submodule=short",
+    "--ignore-submodules=dirty",
 ];
+
+/// Every daemon `git status` skips submodule work-tree dirt (see
+/// [`DIFF_FORMAT`]): never recurse into a repo whose config the agent wrote.
+pub(crate) const STATUS_IGNORE_SUBMODULES: &str = "--ignore-submodules=dirty";
 
 /// One git invocation — argv, per-spawn env and spawn class. Every call that
 /// names FILES, or whose output is parsed as file names/diffs, is built here:
@@ -775,6 +899,12 @@ pub struct LocalGit {
     git_bin: PathBuf,
     /// Test-only override of BOTH spawn budgets.
     budget_override: Option<std::time::Duration>,
+    /// A person asked for this git (the git routes' [`crate::http`] handle).
+    /// Only then do [`HOOK_VERBS`] run hooks from a `core.hooksPath` INSIDE
+    /// the work tree (husky / lefthook: `.husky/_`), which any agent working
+    /// there can edit; daemon-initiated commits / merges / pushes (workflows,
+    /// Run with Otto, swarm, scheduled tasks) run with hooks off in that case.
+    person_initiated: bool,
 }
 
 impl LocalGit {
@@ -783,7 +913,48 @@ impl LocalGit {
             repo_path: repo_path.into(),
             git_bin: PathBuf::from("git"),
             budget_override: None,
+            person_initiated: false,
         }
+    }
+
+    /// Mark this handle as acting on a person's request (see
+    /// `person_initiated`): hooks from an in-work-tree `core.hooksPath` run.
+    pub fn person_initiated(mut self) -> Self {
+        self.person_initiated = true;
+        self
+    }
+
+    /// Is `core.hooksPath` set to a directory inside this work tree (where an
+    /// agent session can rewrite the hooks)? A relative value is resolved
+    /// against the work tree root, so it counts as inside. Errors (no repo,
+    /// unset key) are `false`: the repo's own `.git/hooks` is Seatbelt-denied.
+    async fn hooks_path_in_worktree(&self) -> bool {
+        let run = |args: &'static [&'static str]| {
+            let mut cmd = self.base_cmd();
+            // Read the REPO's value: the hardened `core.hooksPath=/dev/null`
+            // would otherwise answer for it. Neither `config --get` nor
+            // `rev-parse` runs a hook; fsmonitor stays off.
+            cmd.env("GIT_CONFIG_PARAMETERS", HOOKED_GIT_CONFIG)
+                .args(args)
+                .kill_on_drop(true);
+            async move {
+                let out = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
+                    .await
+                    .ok()?
+                    .ok()?;
+                out.status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                    .filter(|s| !s.is_empty())
+            }
+        };
+        let Some(hooks) = run(&["config", "--get", "core.hooksPath"]).await else {
+            return false;
+        };
+        hooks_path_inside(
+            &hooks,
+            run(&["rev-parse", "--show-toplevel"]).await.as_deref(),
+        )
     }
 
     /// Spawn `bin` instead of `git` (tests: a shim that sleeps/traps signals).
@@ -1208,7 +1379,20 @@ impl LocalGit {
         mut limit: StdoutLimit,
     ) -> Result<(std::process::Output, Cut)> {
         cmd.process_group(0).kill_on_drop(true);
-        cmd.env("GIT_CONFIG_PARAMETERS", hardened_config_for(verb));
+        let config = if HOOK_VERBS.contains(&verb)
+            && !self.person_initiated
+            && self.hooks_path_in_worktree().await
+        {
+            tracing::info!(
+                repo = %self.repo_path.display(),
+                verb,
+                "core.hooksPath lies inside the work tree; daemon-initiated git runs without hooks"
+            );
+            HARDENED_GIT_CONFIG
+        } else {
+            hardened_config_for(verb)
+        };
+        cmd.env("GIT_CONFIG_PARAMETERS", config);
         if class == SpawnClass::LocalRead {
             // A read must never take `index.lock`: `git status` otherwise
             // refreshes the index opportunistically, and an agent's concurrent
@@ -1347,6 +1531,7 @@ impl LocalGit {
             "--branch",
             "-z",
             "--untracked-files=all",
+            STATUS_IGNORE_SUBMODULES,
         ]);
         let out = self.exec_text(&GitCmd::read(&args)).await?;
         // 100k rows is tens of ms of parsing — off the async workers.
@@ -1418,6 +1603,7 @@ impl LocalGit {
                 "--porcelain=v2",
                 "-z",
                 "--untracked-files=no",
+                STATUS_IGNORE_SUBMODULES,
             ]))
             .await?;
         Ok(crate::parse::parse_status(&out))
@@ -1847,15 +2033,34 @@ impl LocalGit {
         let out = self.run_read(&["worktree", "list", "--porcelain"]).await?;
         let mut rows = crate::parse::parse_worktree_list(&out);
         let bin = self.git_bin.clone();
+        // Only probe trees that really belong to THIS repo: an agent can
+        // rewrite a `worktrees/<id>/gitdir` pointer (or a tree's `.git` file)
+        // to aim the probe's unconfined `git status` at a repo it built.
+        let common = self
+            .run_read(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .await
+            .ok()
+            .map(|s| PathBuf::from(s.trim()));
         crate::worktree_probe::probe(&mut rows, admission, phase_budget, move |path| {
+            let owned = common
+                .as_deref()
+                .is_some_and(|c| worktree_round_trips(Path::new(&path), c));
             let git = LocalGit::new(path)
                 .with_git_bin(bin.clone())
                 .with_budget(probe_budget);
             async move {
+                if !owned {
+                    return None;
+                }
                 // The subprocess itself checks the worktree. Avoid a separate
                 // filesystem metadata await before this optional bounded probe.
                 let mut cmd = git.base_cmd();
-                cmd.args(["status", "--porcelain", "--untracked-files=normal"]);
+                cmd.args([
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=normal",
+                    STATUS_IGNORE_SUBMODULES,
+                ]);
                 match git
                     .spawn_output(cmd, SpawnClass::LocalRead, "status", None)
                     .await
@@ -2731,7 +2936,7 @@ impl LocalGit {
     pub async fn checkout_autostash(&self, branch: &str, create: bool) -> Result<CheckoutOutcome> {
         Self::guard_ref(branch)?;
         let mut dirty = !self
-            .run(&["status", "--porcelain"])
+            .run(&["status", "--porcelain", STATUS_IGNORE_SUBMODULES])
             .await?
             .trim()
             .is_empty();
@@ -3232,7 +3437,7 @@ impl LocalGit {
         token: Option<String>,
     ) -> Result<(PullOutcome, Option<String>)> {
         let dirty = !self
-            .run(&["status", "--porcelain"])
+            .run(&["status", "--porcelain", STATUS_IGNORE_SUBMODULES])
             .await?
             .trim()
             .is_empty();

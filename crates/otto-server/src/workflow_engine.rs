@@ -7822,7 +7822,7 @@ fn match_repo_path(target: &str, repos: &[(String, String)]) -> Option<String> {
 async fn git_main_worktree(path: &str) -> Option<String> {
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
-        let out = std::process::Command::new("git")
+        let out = otto_git::hardened_std_command()
             .arg("-C")
             .arg(&path)
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
