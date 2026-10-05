@@ -942,12 +942,13 @@ fn refs_need_lookup(tool: &str, args: &Value, pinned: bool) -> bool {
     {
         return true;
     }
-    // An id-only object is ALWAYS probed: a caller-supplied `workspace_id`
-    // (which the executor ignores) proves nothing, and the probed workspace
-    // is what the pin, the audit and the approval decision key on.
+    // An id-only object is probed for a pinned token ALWAYS (a caller-supplied
+    // `workspace_id`, which the executor ignores, proves nothing), and for any
+    // caller of an approval-gated tool — the probed workspace is what the
+    // approval / auto-approve decision keys on.
     PIN_PROBES
         .iter()
-        .any(|(t, arg, ..)| *t == tool && (pinned || s(arg).is_some()))
+        .any(|(t, arg, ..)| *t == tool && (pinned || (tool_is_dangerous(tool) && s(arg).is_some())))
 }
 
 /// Resolve every friendly reference in a governed call (see [`REF_ARGS`]), a
@@ -1108,10 +1109,11 @@ async fn fill_refs_with(
     // echoing the pin back must not pass the pin check); no id, a failed
     // probe or a probe without a workspace leaves none ⇒ `pin_verdict`
     // denies (fail closed).
-    // Unpinned callers are probed too (when they name the object), so the
-    // approval decision keys on the object's workspace, never a spoofed one.
+    // Unpinned callers of an approval-gated tool are probed too (when they
+    // name the object), so the approval decision keys on the object's
+    // workspace, never a spoofed one.
     if let Some((_, arg, prefix, ptr)) = PIN_PROBES.iter().find(|(t, ..)| *t == tool) {
-        if pinned || text(&out, arg).is_some() {
+        if pinned || (tool_is_dangerous(tool) && text(&out, arg).is_some()) {
             out.remove("workspace_id");
             if let Some(id) = text(&out, arg) {
                 let v = caller.get(&format!("{prefix}{}", seg(&id))).await?;
@@ -1973,10 +1975,16 @@ mod tests {
                 "{t}"
             );
         }
-        // Unpinned too: the probed workspace keys the approval decision.
-        assert!(refs_need_lookup(
+        // Unpinned: only an approval-gated tool (the probed workspace keys
+        // the approval decision); a plain read is not probed.
+        assert!(!refs_need_lookup(
             "get_session",
             &json!({"session_id": id}),
+            false
+        ));
+        assert!(refs_need_lookup(
+            "send_message",
+            &json!({"session_id": id, "workspace_id": "elsewhere"}),
             false
         ));
     }
