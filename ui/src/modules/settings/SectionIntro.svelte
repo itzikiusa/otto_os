@@ -33,7 +33,7 @@
   .settings-intro :global(.intro-link:focus-visible) {
     outline: 2px solid var(--accent-solid);
     outline-offset: 2px;
-    border-radius: 3px;
+    border-radius: var(--radius-s);
   }
   .settings-intro :global(code) {
     font-family: var(--font-mono);

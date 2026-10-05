@@ -545,7 +545,7 @@
     font-size: var(--fs-s);
     line-height: 1.5;
   }
-  .ungoverned > :global(svg) { color: var(--warning); margin-block-start: 3px; flex-shrink: 0; }
+  .ungoverned > :global(svg) { color: var(--warning); margin-block-start: 2px; flex-shrink: 0; }
   .ungoverned-text { flex: 1 1 260px; min-width: 0; }
   .ungoverned-text code { font-family: var(--font-mono); font-size: var(--fs-xs); }
   .srv-move { white-space: nowrap; }

@@ -155,7 +155,7 @@
     cursor: pointer;
   }
   .link-btn:hover { text-decoration: underline; }
-  .link-btn:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; border-radius: 3px; }
+  .link-btn:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; border-radius: var(--radius-s); }
   .sr-only {
     position: absolute;
     width: 1px;

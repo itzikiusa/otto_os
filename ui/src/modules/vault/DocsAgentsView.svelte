@@ -1071,7 +1071,7 @@
     padding: 8px 10px;
     margin-block-end: 10px;
     border: 1px solid var(--danger);
-    border-radius: 6px;
+    border-radius: var(--radius-m);
     background: var(--danger-soft);
     font-size: var(--fs-s);
   }
