@@ -250,6 +250,50 @@ pub(crate) fn hardened_config_for(verb: &str) -> &'static str {
     }
 }
 
+/// Does the work tree at `path` round-trip to the repo whose common git dir
+/// is `common`? The main tree's `.git` must BE `common`; a linked tree's
+/// `.git` file must name `<common>/worktrees/<id>`, whose `gitdir` file must
+/// name that same `.git` back. Anything else (a forged pointer, a foreign
+/// repo) is not probed.
+pub(crate) fn worktree_round_trips(path: &Path, common: &Path) -> bool {
+    let canon = |p: &Path| std::fs::canonicalize(p).ok();
+    let Some(common) = canon(common) else {
+        return false;
+    };
+    let dot_git = path.join(".git");
+    let Ok(meta) = std::fs::symlink_metadata(&dot_git) else {
+        return false;
+    };
+    if meta.is_dir() {
+        return canon(&dot_git).is_some_and(|g| g == common);
+    }
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(&dot_git) else {
+        return false;
+    };
+    let Some(target) = text.trim().strip_prefix("gitdir:").map(str::trim) else {
+        return false;
+    };
+    let target = Path::new(target);
+    let admin = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        path.join(target)
+    };
+    let Some(admin) = canon(&admin) else {
+        return false;
+    };
+    if admin.parent() != Some(common.join("worktrees").as_path()) {
+        return false;
+    }
+    let Ok(back) = std::fs::read_to_string(admin.join("gitdir")) else {
+        return false;
+    };
+    canon(Path::new(back.trim())).is_some_and(|b| Some(b) == canon(&dot_git))
+}
+
 /// Does a `core.hooksPath` value point inside the work tree `toplevel`?
 /// Relative values resolve against the work tree root (git's rule), so they
 /// are inside unless they climb out with `..`; `~/` expands to `$HOME`.
@@ -1955,11 +1999,25 @@ impl LocalGit {
         let out = self.run_read(&["worktree", "list", "--porcelain"]).await?;
         let mut rows = crate::parse::parse_worktree_list(&out);
         let bin = self.git_bin.clone();
+        // Only probe trees that really belong to THIS repo: an agent can
+        // rewrite a `worktrees/<id>/gitdir` pointer (or a tree's `.git` file)
+        // to aim the probe's unconfined `git status` at a repo it built.
+        let common = self
+            .run_read(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .await
+            .ok()
+            .map(|s| PathBuf::from(s.trim()));
         crate::worktree_probe::probe(&mut rows, admission, phase_budget, move |path| {
+            let owned = common
+                .as_deref()
+                .is_some_and(|c| worktree_round_trips(Path::new(&path), c));
             let git = LocalGit::new(path)
                 .with_git_bin(bin.clone())
                 .with_budget(probe_budget);
             async move {
+                if !owned {
+                    return None;
+                }
                 // The subprocess itself checks the worktree. Avoid a separate
                 // filesystem metadata await before this optional bounded probe.
                 let mut cmd = git.base_cmd();

@@ -219,3 +219,53 @@ async fn an_in_worktree_hooks_path_runs_only_for_a_person_s_commit() {
         "the person's own commit keeps their husky hook"
     );
 }
+
+/// S2-02(b): the worktree probe only runs `git status` in trees that
+/// round-trip to this repo — not in one whose admin `gitdir` (or `.git`
+/// file) was re-pointed at an agent-built repo.
+#[test]
+fn worktree_round_trip_rejects_forged_pointers() {
+    use crate::local::worktree_round_trips;
+    let (tmp, repo) = repo();
+    let common = repo.join(".git");
+    let wt = tmp.path().join("wt");
+    sh(
+        &repo,
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "side"],
+    );
+    let wt = std::fs::canonicalize(&wt).unwrap();
+    assert!(worktree_round_trips(&repo, &common), "main tree");
+    assert!(worktree_round_trips(&wt, &common), "linked tree");
+
+    // A foreign repo the pointer is aimed at.
+    let evil = tmp.path().join("evil");
+    std::fs::create_dir(&evil).unwrap();
+    sh(&evil, &["init", "-q"]);
+    assert!(!worktree_round_trips(&evil, &common), "foreign repo");
+    // A tree whose `.git` file names some other admin dir.
+    let fake = tmp.path().join("fake");
+    std::fs::create_dir(&fake).unwrap();
+    std::fs::write(
+        fake.join(".git"),
+        format!("gitdir: {}\n", evil.join(".git").display()),
+    )
+    .unwrap();
+    assert!(!worktree_round_trips(&fake, &common), "forged .git file");
+    // The admin `gitdir` re-pointed elsewhere: the real tree no longer
+    // round-trips.
+    let admin = std::fs::read_dir(common.join("worktrees"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", fake.join(".git").display()),
+    )
+    .unwrap();
+    assert!(
+        !worktree_round_trips(&wt, &common),
+        "re-pointed admin gitdir"
+    );
+}
