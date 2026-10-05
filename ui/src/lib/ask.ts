@@ -32,8 +32,10 @@ export interface AskReply {
   source: string;
   /** A plan the person must confirm (Run / Cancel). */
   plan?: Action[];
-  /** Sessions a permanent delete would remove (Delete / Cancel). */
+  /** Sessions a close would end (Delete or Archive / Cancel). */
   closeIds?: Id[];
+  /** The confirmed close deletes for good (else it archives). */
+  closePermanent?: boolean;
 }
 
 /** What differs between the main window and the ⌥Space panel. */
@@ -107,6 +109,7 @@ export function storeContext(workspaceId: string): OrchestrateCtx {
     order: paneOrder(),
     archive: (id) => ws.archiveSession(id),
     kill: (id) => ws.killSession(id),
+    isWorking: (id) => ws.statusMap[id] === 'working',
     ...orchestratorPrefs(),
     confirmDestructive: true,
   };
@@ -155,14 +158,20 @@ async function toReply(
         route: 'agents',
         source: SOURCE,
       };
-    case 'confirm-close':
+    case 'confirm-close': {
+      const busy =
+        out.working > 0 ? ` ${plural(out.working, 'session')} ${out.working === 1 ? 'is' : 'are'} working and will stop mid-turn.` : '';
       return {
         tone: 'pending',
-        text: `Delete ${plural(out.ids.length, 'session')} for good? Their history goes too.`,
+        text: out.permanent
+          ? `Delete ${plural(out.ids.length, 'session')} for good? Their history goes too.${busy}`
+          : `Archive ${plural(out.ids.length, 'session')}? They stop and stay under Agents › Archived.${busy}`,
         detail: out.titles.join(', '),
         closeIds: out.ids,
+        closePermanent: out.permanent,
         source: SOURCE,
       };
+    }
     case 'nothing-to-close':
       return { tone: 'warn', text: 'No open session matches that.', source: SOURCE };
     case 'no-session':
@@ -254,14 +263,19 @@ export async function confirmPlan(plan: Action[], space: BarSpace, host: AskHost
   }
 }
 
-/** Run a permanent delete the person confirmed in the thread. */
-export async function confirmClose(ids: Id[], space: BarSpace, host: AskHost = windowHost): Promise<AskReply> {
+/** Run a close (permanent delete, or archive) the person confirmed in the thread. */
+export async function confirmClose(
+  ids: Id[],
+  space: BarSpace,
+  host: AskHost = windowHost,
+  permanent = true,
+): Promise<AskReply> {
   const wsId = workspaceFor(space, host);
   if (!wsId) return noWorkspace;
   try {
     const ctx = await host.context(wsId);
-    const count = await applyClose(ctx, ids, true);
-    return await toReply({ kind: 'closed', count, permanent: true }, wsId, ctx, host);
+    const count = await applyClose(ctx, ids, permanent);
+    return await toReply({ kind: 'closed', count, permanent }, wsId, ctx, host);
   } catch (e) {
     return failure(e);
   }
