@@ -1,7 +1,7 @@
 import {test, expect} from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import {apiCtx, seedWorkspace} from './seed';
-import {openApiEditor, expectFullyInViewport} from './helpers';
+import {expectFullyInViewport} from './helpers';
 import {mkdtempSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
