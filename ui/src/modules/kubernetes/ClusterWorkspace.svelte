@@ -154,7 +154,11 @@
   function goKind(k: K8sResourceKind): void {
     router.go(`${base}/${k}`);
   }
-  function openRow(r: K8sRow, tab?: K8sDrawerTab): void {
+  /** `exec` = open the pod's shell straight away (the `s` key / "Shell" menu
+   *  item). One-shot: every other open clears it, so moving through rows with
+   *  j/k while the drawer sits on Terminal never opens a shell unasked. */
+  function openRow(r: K8sRow, tab?: K8sDrawerTab, exec = false): void {
+    autoExec = exec;
     if (tab) k8s.drawerTab = tab;
     router.go(`${base}/${kind}/${encodeURIComponent(r.namespace || '-')}/${encodeURIComponent(r.name)}`);
   }
@@ -249,7 +253,7 @@
     ];
     if (kind === 'pods') {
       if (can('logs', r.namespace)) items.push({ label: 'Logs', icon: 'file', action: () => openRow(r, 'logs') });
-      if (can('exec', r.namespace)) items.push({ label: 'Shell (exec)', icon: 'terminal', action: () => { autoExec = true; openRow(r, 'terminal'); } });
+      if (can('exec', r.namespace)) items.push({ label: 'Shell (exec)', icon: 'terminal', action: () => openRow(r, 'terminal', true) });
     } else if (r.extra?.selector) {
       items.push({ label: 'Pods', icon: 'box', action: () => openRow(r, 'pods') });
       if (can('logs', r.namespace)) items.push({ label: 'Logs (all pods)', icon: 'file', action: () => openRow(r, 'logs') });
@@ -358,8 +362,7 @@
         case 's':
           if (kind === 'pods' && row && can('exec', row.namespace)) {
             e.preventDefault();
-            autoExec = true;
-            openRow(row, 'terminal');
+            openRow(row, 'terminal', true);
           }
           break;
         case 'd':
