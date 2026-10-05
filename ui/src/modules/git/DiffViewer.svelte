@@ -42,6 +42,7 @@
     COLLAPSE_ALL_FILES,
     COLLAPSE_ALL_LINES,
     FILE_COLLAPSE_LINES,
+    ROW_KEY_SEP,
     buildFileRows,
     estimateRow,
     fileMatches,
@@ -526,7 +527,7 @@
     for (let i = s; i < e && i < rs.length; i++) {
       const r = rs[i];
       if (inHunk(r)) {
-        const gk = `${r.file.path}\u0000g${r.hi}`;
+        const gk = `${r.file.path}${ROW_KEY_SEP}g${r.hi}`;
         if (!g || g.key !== gk) {
           g = { key: gk, group: true, split: r.kind === 'split' || effMode === 'split', items: [] };
           out.push(g);
@@ -1067,7 +1068,7 @@
     readView();
     await tick();
     requestAnimationFrame(() => {
-      const el = rootEl?.querySelector(`[data-rk="${CSS.escape(`${path}\u0000f`)}"]`);
+      const el = rootEl?.querySelector(`[data-rk="${CSS.escape(`${path}${ROW_KEY_SEP}f`)}"]`);
       el?.scrollIntoView({ block: 'start' });
     });
   }

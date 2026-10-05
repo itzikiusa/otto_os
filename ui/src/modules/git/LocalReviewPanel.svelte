@@ -205,9 +205,16 @@
    *  doesn't count toward the fallback budget. */
   async function poll(fromBus = false): Promise<void> {
     if (!alive) return;
-    if (!fromBus) pollCount++;
-    if (pollCount > MAX_POLLS) {
-      toasts.warn('Review is taking too long', 'Try refreshing manually.');
+    // Only the TIMER safety net has a budget. A bus/visibility poll is proof
+    // the review is alive: it always re-reads and resets the budget — gating
+    // it too froze the panel (and re-toasted) on every event after 15 min.
+    if (fromBus) {
+      pollCount = 0;
+    } else if (++pollCount > MAX_POLLS) {
+      if (!budgetWarned) {
+        budgetWarned = true;
+        toasts.warn('Review is taking too long', 'Still running — it refreshes on its next update, or refresh manually.');
+      }
       return;
     }
     try {
@@ -230,6 +237,9 @@
     }
   }
 
+  /** The over-budget toast fires once per review, not once per event. */
+  let budgetWarned = false;
+
   async function startReview(): Promise<void> {
     if (!selectedBase) {
       toasts.warn('Select a base branch first');
@@ -238,6 +248,7 @@
     if (pollTimer !== null) clearTimeout(pollTimer);
     starting = true;
     pollCount = 0;
+    budgetWarned = false;
     checked = {};
     try {
       const newRun = await api.post<Review>(`/repos/${repoId}/local-review`, { base: selectedBase });
