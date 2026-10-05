@@ -157,7 +157,7 @@ shell crates `crates/otto-aws` + `crates/otto-k8s` (ctx trait + empty
 |---|---|---|
 | `GET /aws/accounts/{id}/sqs/queues?prefix=` | View | `{ queues: { url, name, fifo: bool }[] }` |
 | `GET /aws/accounts/{id}/sqs/queues/attributes?url=` | View | `{ attributes: Record<string,string> }` (All) + parsed `{ approx_messages, approx_not_visible, approx_delayed, dlq_target_arn? }` |
-| `POST /aws/accounts/{id}/sqs/queues/peek` | View | `{ url, max?: 1..10, visibility_timeout?: 0 }` → `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` (`receive-message --visibility-timeout 0 --wait-time-seconds 1 --attribute-names All --message-attribute-names All`) |
+| `POST /aws/accounts/{id}/sqs/queues/peek` | Edit (bumps receive count) | `{ url, max?: 1..10, visibility_timeout?: 0 }` → `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` (`receive-message --visibility-timeout 0 --wait-time-seconds 1 --attribute-names All --message-attribute-names All`) |
 | `POST /aws/accounts/{id}/sqs/queues/send` | Edit | `{ url, body, delay_seconds?, group_id?, dedup_id?, message_attributes? }` → `{ message_id }` |
 | `POST /aws/accounts/{id}/sqs/queues/delete-message` | Edit | `{ url, receipt_handle }` → 204 |
 | `POST /aws/accounts/{id}/sqs/queues/purge` | Edit | `{ url, confirm_name }` (must equal queue name) → 204 |
@@ -516,9 +516,11 @@ change, but these are the argument names and bindings agents see):**
   (§3.2). The tools translate. `namespace` omitted on `k8s_get_resources` /
   `k8s_top` ⇒ the `ns` param is **not sent** (the route's all-namespaces
   default), not sent as empty.
-- **`aws_sqs_peek` is a POST but a read**: the tool pins `visibility_timeout: 0`
-  and clamps `max` into 1..10 client-side; it lives with the reads on both
-  surfaces (policy already grades `/peek` as `aws_sqs:View`).
+- **`aws_sqs_peek` is NOT a read**: the route pins `visibility_timeout` to 0
+  (messages stay visible) and the tool clamps `max` into 1..10, but every
+  receive increments the receive count — on a queue with a redrive policy
+  repeated peeks dead-letter messages. So `/peek` is `aws_sqs:Edit`
+  (`sqs_send`) and the tool is mutating / approval-gated like `aws_sqs_send`.
 - **`k8s_logs`** returns `{ text, truncated }` (not raw text). `follow` is never
   forwarded (a streaming response would hang a tool call). The text is capped
   at **256 KiB keeping the tail** (newest lines) on both surfaces; the inward

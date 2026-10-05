@@ -324,15 +324,16 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 | **Self-Improvement** | ✅ get_config / list_runs / get_run / list_edits | ⚠ run, approve_edit, reject_edit, rollback_edit |
 | **Scheduled Tasks** | ✅ list (every workspace) / get / list_runs | ⚠ create / update / set_enabled / run / delete |
 | **Personal Agents** | ✅ list_agent_rooms / room_read / room_post (never approval-gated — persisted + user-visible) | — |
-| **AWS** | ✅ aws_list_accounts / aws_s3_list_buckets / aws_s3_list_objects / aws_s3_preview / aws_sqs_list_queues / aws_sqs_peek³ / aws_ec2_list_instances / aws_athena_list_tables / aws_athena_get_query / aws_eks_list_clusters / aws_logs_list_groups / aws_logs_filter / aws_logs_insights (billed per GB scanned) / aws_logs_get_insights | ⚠ aws_athena_query (starts a billed Athena scan; poll `aws_athena_get_query`), aws_sqs_send (produces one message) — no S3 write, no EC2 start/stop |
+| **AWS** | ✅ aws_list_accounts / aws_s3_list_buckets / aws_s3_list_objects / aws_s3_preview / aws_sqs_list_queues / aws_ec2_list_instances / aws_athena_list_tables / aws_athena_get_query / aws_eks_list_clusters / aws_logs_list_groups / aws_logs_filter / aws_logs_insights (billed per GB scanned) / aws_logs_get_insights | ⚠ aws_athena_query (starts a billed Athena scan; poll `aws_athena_get_query`), aws_sqs_send (produces one message), aws_sqs_peek³ — no S3 write, no EC2 start/stop |
 | **Kubernetes** | ✅ k8s_list_clusters / k8s_get_resources / k8s_describe / k8s_logs (text tail, never `follow`) / k8s_top | ⚠ k8s_action (restart / scale / delete_pod / rollout_* / Argo Rollouts promote-abort-retry / argocd_sync-refresh-terminate_op-app_restart / cronjob_*; destructive ones need `params.confirm_name == name`) |
 | **Code & Context / Agents / Approvals** | ✅ list_workspaces / list_goal_loops / *search_codebase*¹ / get_context_packet / get_proof_pack / ask_human_approval | ⚠ run_goal_loop |
 
 ¹ Off by default (opt-in): non-mutating tools that stream large/sensitive *content*
 (messages, recalled knowledge, code, rows) are defined but not in `DEFAULT_ENABLED`.
 ² `create_work_item` is the Swarm-task create (mutating).
-³ `aws_sqs_peek` is a POST but a read: `receive-message` with visibility timeout 0
-(nothing consumed), graded `aws_sqs:View` by the policy table. The AWS/K8s tools carry
+³ `aws_sqs_peek` is `receive-message` with visibility timeout 0 (messages stay
+visible) but it increments each message's receive count — repeated peeks can
+dead-letter on a queue with a redrive policy — so it is `aws_sqs:Edit` and approval-gated. The AWS/K8s tools carry
 no `workspace_id` (accounts/clusters are global rows); the self-call reuses the
 per-service feature grants (`aws_s3`/`aws_sqs`/`aws_ec2`/`aws_athena`/`aws_eks`,
 `kubernetes`) — see [aws-console](./aws-console.md) / [kubernetes-console](./kubernetes-console.md).

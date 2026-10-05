@@ -3080,6 +3080,8 @@ mod cache_isolation_tests {
             "CREATE TEMPORARY TABLE t (id INT)",
             "SELECT GET_LOCK('x', 10)",
             "CALL refresh_stats()",
+            "SELECT id INTO @last FROM t LIMIT 1",
+            "SELECT @n := COUNT(*) FROM t",
         ] {
             assert!(types::sql_leaves_session_state(sql), "{sql}");
         }
@@ -3087,6 +3089,8 @@ mod cache_isolation_tests {
             "SELECT * FROM t",
             "DELETE FROM t WHERE id = 1",
             "SHOW TABLES",
+            "SELECT into_count FROM t",
+            "INSERT INTO t VALUES (1)",
         ] {
             assert!(!types::sql_leaves_session_state(sql), "{sql}");
         }

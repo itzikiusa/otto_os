@@ -3286,10 +3286,10 @@ It runs as `ottod mcp-tools` (stdio JSON-RPC) exposing read-only, redacted, row/
 audited tools — `otto_db_schema`, `otto_git_pr_review`, `otto_product_story` (db_query / swarm_task /
 broker_topic deferred), the per-feature reads (see `docs/features/mcp-control-plane.md` §9), and the
 AWS / Kubernetes console tools that wrap `/aws/*` and `/k8s/*` — reads `aws_list_accounts`,
-`aws_s3_list_buckets` / `aws_s3_list_objects` / `aws_s3_preview`, `aws_sqs_list_queues` / `aws_sqs_peek`,
+`aws_s3_list_buckets` / `aws_s3_list_objects` / `aws_s3_preview`, `aws_sqs_list_queues`,
 `aws_ec2_list_instances`, `aws_athena_list_tables` / `aws_athena_get_query`, `aws_eks_list_clusters`, `aws_logs_list_groups` / `aws_logs_filter` / `aws_logs_insights` / `aws_logs_get_insights`,
 `k8s_list_clusters`, `k8s_get_resources`, `k8s_describe`, `k8s_logs` (text tail), `k8s_top`; and the
-three Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `k8s_action` (same set, `otto.`-prefixed,
+Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `aws_sqs_peek` (a receive bumps the receive count), `k8s_action` (same set, `otto.`-prefixed,
 on the outward server with the writers in `DANGEROUS`). The outward `otto.run_workflow` tool takes
 `workflow_id` plus the optional `input`, `start_node` and `review_mode` (`"fan_out"`|`"orchestrator"`,
 forwarded verbatim to `POST /workflows/{id}/run`, which validates it). Tool calls are logged to
@@ -5034,7 +5034,7 @@ the cache.
 |---|---|---|---|
 | GET /aws/accounts/{id}/sqs/queues | AwsSqs:View | `?prefix=&region=` | `{ queues: { url, name, fifo }[] }` |
 | GET /aws/accounts/{id}/sqs/queues/attributes | AwsSqs:View | `?url=&region=` | `{ attributes: Record<string,string>, approx_messages, approx_not_visible, approx_delayed, dlq_target_arn? }` (`get-queue-attributes --attribute-names All`; `dlq_target_arn` parsed from `RedrivePolicy`) |
-| POST /aws/accounts/{id}/sqs/queues/peek | AwsSqs:View | `{ url, max?: 1..10, visibility_timeout?: 0 }` (`?region=`) | `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` — `receive-message --visibility-timeout 0 --wait-time-seconds 1`, so peeking does not hide messages |
+| POST /aws/accounts/{id}/sqs/queues/peek | AwsSqs:Edit (`sqs_send`) | `{ url, max?: 1..10, visibility_timeout?: ignored }` (`?region=`) | `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` — `receive-message --visibility-timeout 0 --wait-time-seconds 1` (the timeout is always 0), so peeking does not hide messages; it DOES increment each message's receive count (a queue with a redrive policy can dead-letter after enough peeks), hence Edit |
 | POST /aws/accounts/{id}/sqs/queues/send | AwsSqs:Edit | `{ url, body, delay_seconds?, group_id?, dedup_id?, message_attributes? }` | `{ message_id }` — audited `aws.sqs.send` |
 | POST /aws/accounts/{id}/sqs/queues/delete-message | AwsSqs:Edit | `{ url, receipt_handle }` | 204 — audited `aws.sqs.delete_message` |
 | POST /aws/accounts/{id}/sqs/queues/purge | AwsSqs:Edit | `{ url, confirm_name }` (must equal the queue name) | 204 — audited `aws.sqs.purge` |

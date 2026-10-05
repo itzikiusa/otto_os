@@ -660,26 +660,49 @@ pub async fn download(
         .stdout
         .take()
         .ok_or_else(|| Error::Internal("no stdout on aws s3 cp".into()))?;
-    // The child rides along in the unfold state so it is killed (kill_on_drop)
-    // exactly when the response body is dropped — client disconnect included.
-    let stream = futures_util::stream::unfold((child, stdout), |(child, mut stdout)| async move {
+    // The caps above trust the head; the object can be replaced by a bigger
+    // one between head and `cp`, so the stream enforces the same cap itself.
+    let cap = if inline {
+        INLINE_PREVIEW_CAP
+    } else {
+        DOWNLOAD_CAP
+    };
+    svc.repo.touch_used(&a.id).await;
+    Ok(DownloadStream {
+        head,
+        body: axum::body::Body::from_stream(capped_child_stream(child, stdout, cap)),
+    })
+}
+
+/// Stream `stdout` in 64 KiB chunks, ending with an error once more than
+/// `cap` bytes arrived. The child rides along in the unfold state so it is
+/// killed (kill_on_drop) exactly when the stream is dropped — client
+/// disconnect or the cap included.
+fn capped_child_stream(
+    child: tokio::process::Child,
+    stdout: tokio::process::ChildStdout,
+    cap: u64,
+) -> impl futures_util::Stream<Item = std::result::Result<bytes::Bytes, std::io::Error>> {
+    futures_util::stream::unfold(Some((child, stdout, 0u64)), move |state| async move {
         use tokio::io::AsyncReadExt;
+        let (child, mut stdout, sent) = state?;
         let mut buf = vec![0u8; 64 * 1024];
         match stdout.read(&mut buf).await {
             Ok(0) | Err(_) => None,
             Ok(n) => {
+                let sent = sent + n as u64;
+                if sent > cap {
+                    // Abort the body (the client sees a truncated
+                    // transfer, never a silently short file).
+                    let e = std::io::Error::other(format!(
+                        "object grew past the {cap}-byte cap during the transfer"
+                    ));
+                    return Some((Err(e), None));
+                }
                 buf.truncate(n);
-                Some((
-                    Ok::<_, std::io::Error>(bytes::Bytes::from(buf)),
-                    (child, stdout),
-                ))
+                Some((Ok(bytes::Bytes::from(buf)), Some((child, stdout, sent))))
             }
         }
-    });
-    svc.repo.touch_used(&a.id).await;
-    Ok(DownloadStream {
-        head,
-        body: axum::body::Body::from_stream(stream),
     })
 }
 
@@ -1061,6 +1084,40 @@ pub async fn presign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn download_stream_stops_at_the_cap() {
+        use futures_util::StreamExt;
+        let spawn = || {
+            let mut child = tokio::process::Command::new("sh")
+                .args(["-c", "head -c 300000 /dev/zero"])
+                .stdout(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let out = child.stdout.take().unwrap();
+            (child, out)
+        };
+        let (c, o) = spawn();
+        let items: Vec<_> = capped_child_stream(c, o, 100_000).collect().await;
+        let ok: usize = items
+            .iter()
+            .filter_map(|r| r.as_ref().ok())
+            .map(|b| b.len())
+            .sum();
+        assert!(ok <= 100_000, "{ok}");
+        assert!(items.last().unwrap().is_err(), "must end with an error");
+        let (c, o) = spawn();
+        let items: Vec<_> = capped_child_stream(c, o, 300_000).collect().await;
+        assert!(items.iter().all(|r| r.is_ok()));
+        assert_eq!(
+            items
+                .iter()
+                .map(|r| r.as_ref().unwrap().len())
+                .sum::<usize>(),
+            300_000
+        );
+    }
 
     #[test]
     fn ranged_meta_total_size() {
