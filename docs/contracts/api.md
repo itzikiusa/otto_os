@@ -4649,7 +4649,7 @@ by-id routes load the row first and check the role on its `workspace_id` (the
 IDOR guard, like Scheduled Tasks). Persistence: `otto_state::browser`
 (`BrowserTab`, `BrowserAnnotation`).
 
-`GET /browser/page` fetches a caller-supplied URL **on the daemon's behalf**,
+`GET /workspaces/{wid}/browser/page` fetches a caller-supplied URL **on the daemon's behalf**,
 so it netguard-checks it (`otto_netguard::check_url`) before the fetch — a
 blocked address (loopback/private/metadata) is a `400`. Navigating a
 reader-mode tab (`PATCH .../tabs/{id}` with a new `url` while `mode ==
