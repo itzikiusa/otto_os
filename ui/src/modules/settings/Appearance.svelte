@@ -275,7 +275,7 @@
     />
     <SettingToggle
       label="Use Option as Meta key"
-      hint="⌥ sends Meta, so ⌥← / ⌥→ jump words and ⌥⌫ deletes a word in shells and agents. Turn it off if your keyboard layout types characters such as @ { } [ ] | or accents with ⌥."
+      hint="⌥ sends Meta, so ⌥← / ⌥→ jump words and ⌥⌫ deletes a word in shells and agents. Turn it off if your keyboard layout types characters such as @, braces, brackets, | or accents with ⌥."
       checked={ui.termOptionAsMeta}
       onchange={(v) => ui.setTermOptionAsMeta(v)}
     />
