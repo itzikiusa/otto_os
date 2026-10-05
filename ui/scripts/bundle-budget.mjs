@@ -33,6 +33,7 @@
 //                must stay behind a dynamic import (LazyTerminal / LazyMount).
 //                Byte budgets have 3 % slack and a page can shrink elsewhere;
 //                this pins the specific regression.
+//                LAZY_ONLY_PKG does the same for a whole npm package (`three`).
 //   duplicates   no npm package may be bundled from two node_modules locations
 //                (e.g. a nested mermaid under @excalidraw/mermaid-to-excalidraw
 //                next to the top-level one) — pin it with package.json
@@ -158,6 +159,13 @@ const LAZY_ONLY = {
   ],
   'src/lib/components/CodeEditor.svelte': ['settings'],
 };
+/** npm package → the page keys whose STATIC import set must not reach it
+ *  (same rule as LAZY_ONLY, for a whole package). `three` (~650 kB) is only
+ *  ever behind a dynamic import: Home's Classrooms widget and the Design Hall
+ *  3D surfaces load it on first mount (classrooms/scene.ts, scene3d/build.ts). */
+const LAZY_ONLY_PKG = {
+  three: ['home', 'agents'],
+};
 const ruleFailures = [];
 /** Output files holding `src`'s own code: its chunk when it is a dynamic entry
  *  (with Rollup's `_<Name>-<hash>.js` split when it is ALSO imported
@@ -186,6 +194,27 @@ for (const [src, keys] of Object.entries(LAZY_ONLY)) {
       ruleFailures.push(
         `lazy-only: page:${key} statically imports ${src} (${leaked.join(', ')}) — load it through a dynamic import (LazyTerminal / lazyComponent)`,
       );
+    }
+  }
+}
+
+for (const [pkg, keys] of Object.entries(LAZY_ONLY_PKG)) {
+  const prefix = `node_modules/${pkg}/`;
+  const heavy = new Set(
+    Object.entries(manifest)
+      .filter(([k, c]) => k.includes(prefix) || (c.src ?? '').includes(prefix))
+      .map(([, c]) => c.file),
+  );
+  if (heavy.size === 0) continue;
+  for (const key of keys) {
+    const page = pages.get(key);
+    if (!page || !manifest[page]) {
+      ruleFailures.push(`lazy-only: page "${key}" is not in shell/pages.svelte.ts LOADERS — update LAZY_ONLY_PKG`);
+      continue;
+    }
+    const leaked = [...closure(page)].filter((f) => heavy.has(f));
+    if (leaked.length) {
+      ruleFailures.push(`lazy-only: page:${key} statically imports the ${pkg} package (${leaked.join(', ')}) — load it through a dynamic import`);
     }
   }
 }
