@@ -1,4 +1,4 @@
-import { plural } from '../plural';
+import { plural } from '../plural.ts';
 // Search for the response JSON tree: which nodes match a query (by key or by
 // primitive value) and which containers must stay expanded to reveal them.
 // Paths use JSONPath-ish notation (`$.data[0].id`) so a row can offer
