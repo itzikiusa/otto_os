@@ -71,6 +71,7 @@ connection library unusable for every non-root account.)
 | 15 | GET /api/v1/workspaces/{id}/members | ws admin | — | `MemberEntry[]` |
 | 16 | PUT /api/v1/workspaces/{id}/members | ws admin | SetMembersReq | `MemberEntry[]` |
 | 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…`, plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above): every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
+| 16b | PATCH\|DELETE /api/v1/workspaces/scratch | Agents:View | — | always **409** `the scratch workspace is system-owned` — the scratch workspace cannot be renamed or deleted |
 | 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `foreground=true` = the rows the sidebar lists — every connection session plus the agents `Session::is_foreground_agent` accepts (no string `meta.source` in `BACKGROUND_SESSION_SOURCES`), plus agents whose source is in the comma list `with_sources` (≤ 64; e.g. `channel` for the Slack/Telegram groups); `foreground=false` = background agents only; `ids` = comma list of session ids (≤ 64, more → 400) — fetch-by-id for open tabs; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number`. Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table). The Agents sidebar asks for `?archived=false&foreground=true&with_sources=channel` (+ sources a mounted panel needs, e.g. `swarm`), pages the Archived section with `?archived=true&limit=100&before=…` and probes it with `?archived=true&limit=1` — a workspace's background review agents (~99 % of its rows) are never shipped to it |
 | 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here unless `ids` is given (a fetch-by-id returns the rows whatever their archived state — the UI's `ensureSession` / open-tab path) | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
 | 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session |
@@ -95,6 +96,7 @@ connection library unusable for every non-root account.)
 | 31 | GET /api/v1/git/accounts | member | — | `GitAccount[]` (own accounts only; token never present) |
 | 32 | POST /api/v1/git/accounts | member | CreateGitAccountReq | GitAccount |
 | 33 | DELETE /api/v1/git/accounts/{id} | member (owner) | — | 204 |
+| 33a | PATCH /api/v1/git/accounts/{id} | member (owner) | `UpdateGitAccountReq {label?, username?, namespace?, api_base_url?, token?}` — `namespace`/`api_base_url` `""` clears; a non-empty `token` rotates the Keychain secret, empty/absent keeps it | GitAccount |
 | 34 | GET /api/v1/workspaces/{id}/repos | ws viewer | — | `Repo[]` |
 | 35 | POST /api/v1/workspaces/{id}/repos | ws editor | AddRepoReq | Repo (clone runs async; Notice events report progress/done) |
 | 36 | DELETE /api/v1/repos/{id} | ws editor | — | 204 (unregisters; never deletes files) |
@@ -1443,7 +1445,7 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | GET /product/transcripts/{trid} | owning story ws viewer | — | Full `Transcript` (authorization precedes body read) |
 | POST /product/stories/{sid}/transcripts | ws editor | CreateTranscriptReq | Transcript |
 | DELETE /product/transcripts/{trid} | ws editor | — | 204 |
-| POST /product/stories/{sid}/draft (PATCH) | ws editor | — | create/update the working RFC draft |
+| PATCH /product/stories/{sid}/draft | ws editor | — | create/update the working RFC draft |
 | POST /product/stories/{sid}/publish-as-rfc | ws editor + account owner/root | `PublishAsRfcReq` | Published story detail; 409 if reviewed identity is missing/stale, no outbound call |
 | POST /product/stories/{sid}/publish-as-story | ws editor + account owner/root | `PublishAsStoryReq` | Published story detail; 409 if reviewed identity is missing/stale, no outbound call |
 | GET /workspaces/{ws}/product/learnings | ws viewer | — | `Learning[]` |
@@ -1451,7 +1453,7 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | PATCH /product/learnings/{lid} | ws editor | UpdateLearningReq | Learning |
 | DELETE /product/learnings/{lid} | ws editor | — | 204 |
 | POST /product/learnings/{lid}/accept | ws editor | — | accept a proposed learning |
-| GET /workspaces/{ws}/product/drafts | ws viewer | — | `Draft[]` |
+| POST /workspaces/{ws}/product/drafts | ws editor | `NewDraftReq {title?}` | the new standalone draft's detail (a draft story not yet tied to an epic) |
 
 ### Transcript pages and publication review
 
@@ -2488,7 +2490,7 @@ Plugins are external sidecar processes installed at runtime under `~/otto-plugin
 |---|---|---|
 | GET `/plugins` | member | Enabled plugins `[{slug,name,icon,has_ui}]` for the sidebar; UI filters by grant. Exempt in policy. |
 | ANY `/plugins/{slug}` · ANY `/plugins/{slug}/{*rest}` | plugin `<slug>` grant (GET=view, else=edit); root bypass | Reverse-proxied to the sidecar. Gated by the dedicated plugin branch in the feature guard. |
-| GET `/plugins/{slug}/ui` · GET `/plugins/{slug}/ui/{*path}` | public static | Iframe assets served from the plugin's `ui` dir (root-mounted). |
+| GET `/plugins/{slug}/ui` · GET `/plugins/{slug}/ui/` · GET `/plugins/{slug}/ui/{*path}` | public static | Iframe assets served from the plugin's `ui` dir (root-mounted). |
 | GET `/plugin-admin` | root | Installed-plugin list (full records, no token). |
 | POST `/plugin-admin/install` | root | `{source}` = local path or git URL → installs into the plugins home (disabled). Reinstall is serialized with enable/disable/remove: disables old credentials and stops the sidecar before replacing local files, then installs the new executable metadata/token disabled. A failed replacement remains disabled. Explicitly enable to start the replacement. |
 | POST `/plugin-admin/{slug}/enable` · POST `/plugin-admin/{slug}/disable` | root | Spawn / stop the sidecar. |
@@ -3407,6 +3409,7 @@ Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The ric
 
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
+| 101a | GET /api/v1/canvas/scenes | member · Canvas feature | — | `CanvasSceneSummary[]` — the caller's own scenes across every workspace (Canvas is workspace-independent) |
 | 102 | GET /api/v1/workspaces/{ws}/canvas/scenes | ws viewer | — | `CanvasSceneSummary[]` (newest-updated first) |
 | 103 | POST /api/v1/workspaces/{ws}/canvas/scenes | ws editor | `{title, doc?, story_id?, provider?, section?}` | CanvasScene (201; `doc` defaults to an empty scene) |
 | 104 | GET /api/v1/canvas/scenes/{id}[?files=ref] | ws viewer | — | CanvasScene (full `doc_json`). Excalidraw images are stored as `otto-canvas-file:<sha256>` refs (migration 0163); by default they are put back inline (`dataURL`) so the doc is self-contained. `?files=ref` (also accepted on #103, #105 and #106b) returns the stored doc with refs — the Canvas editor's read; it resolves each ref through #106c |
@@ -5462,7 +5465,7 @@ recorded in history. Root must also obtain an independent artifact approval.
   policy. Validation does not guarantee eventual execution success.
 - `POST /database-changes/{id}/submit` accepts `{revision,note?}` and moves a validated change to
   `awaiting_review`, after checking current author eligibility and bindings.
-- `POST /database-changes/{id}/approve` or `/database-changes/{id}/reject` accepts `{revision,note?}`; rejection requires
+- `POST /database-changes/{id}/approve` or `POST /database-changes/{id}/reject` accepts `{revision,note?}`; rejection requires
   a note. Approval requires `change_approve` on every target and an approver
   independent of both the effective and real author, including impersonation.
   Every reviewed change requires one independent approval, including development.
