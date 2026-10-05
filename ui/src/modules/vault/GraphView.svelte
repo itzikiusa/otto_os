@@ -1301,7 +1301,12 @@
 </script>
 
 <div class="graph-root" bind:this={rootEl}>
-  <canvas bind:this={canvasEl} class:grabbable={hoverIdx < 0}></canvas>
+  <canvas
+    bind:this={canvasEl}
+    class:grabbable={hoverIdx < 0}
+    role="img"
+    aria-label={nodeCount ? `Link graph of ${vault.current?.name ?? 'this vault'}: ${nodeCount} notes. Use the file tree or search to open a note.` : 'Link graph'}
+  ></canvas>
 
   {#if !vault.current}
     <div class="empty">No vault selected</div>
