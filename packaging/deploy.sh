@@ -81,7 +81,7 @@ done
 
 if [[ "$WANT_STATUS" == 1 ]]; then
     latest="$LOG_DIR_DEFAULT/deploy-finish-latest.log"
-    if [[ -d "$LOCK_DIR" ]] && read -r holder _ < "$LOCK_DIR/pid" 2>/dev/null && kill -0 "$holder" 2>/dev/null; then
+    if [[ -d "$LOCK_DIR" ]] && read -r holder _ 2>/dev/null < "$LOCK_DIR/pid" && kill -0 "$holder" 2>/dev/null; then
         echo "== deploy lock held by pid $holder"
     fi
     app_rc=0
@@ -506,7 +506,7 @@ lock_acquire() {
     mkdir -p "$(dirname "$LOCK_DIR")"
     while ! mkdir "$LOCK_DIR" 2>/dev/null; do
         holder=""; start=""
-        read -r holder start < "$LOCK_DIR/pid" 2>/dev/null || true
+        read -r holder start 2>/dev/null < "$LOCK_DIR/pid" || true
         if [[ -n "$holder" && "$holder" == "${OTTO_DEPLOY_LOCK_HANDOFF:-}" ]]; then
             break   # handed to us by the build foreground
         fi
@@ -527,7 +527,7 @@ lock_acquire() {
         command rm -rf "$stale"
         mv "$LOCK_DIR" "$stale" 2>/dev/null || continue
         moved=""
-        read -r moved _ < "$stale/pid" 2>/dev/null || true
+        read -r moved _ 2>/dev/null < "$stale/pid" || true
         if [[ "$moved" != "$holder" ]]; then
             # Another deploy swept it and re-locked in between: that's theirs.
             mv "$stale" "$LOCK_DIR" 2>/dev/null || true
@@ -542,7 +542,7 @@ lock_acquire() {
 lock_release() {
     local holder=""
     [[ "$LOCK_HELD" == 1 ]] || return 0
-    read -r holder _ < "$LOCK_DIR/pid" 2>/dev/null || true
+    read -r holder _ 2>/dev/null < "$LOCK_DIR/pid" || true
     [[ "$holder" == "$$" ]] && rm -rf "$LOCK_DIR"
     LOCK_HELD=0
 }

@@ -195,9 +195,9 @@ const MAX_LOG_FILES: usize = 30;
 const HTTP_DRAIN_CAP: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The whole post-drain teardown (sessions, live browser, telemetry,
-/// ClickHouse) shares this one deadline. Worst case from SIGTERM: drain 3 s
-/// + secondary listeners 1 s + teardown 18 s + runtime shutdown 2 s = 24 s,
-/// leaving ≥6 s of launchd's 30 s `ExitTimeOut` for the log flush and exit.
+/// ClickHouse) shares this one deadline. Worst case from SIGTERM: the 3 s
+/// drain, 1 s of secondary listeners, this 18 s and the 2 s runtime shutdown
+/// make 24 s, leaving ≥6 s of launchd's 30 s `ExitTimeOut` for the log flush.
 const TEARDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(18);
 
 /// Reserved out of [`TEARDOWN_BUDGET`] for the ClickHouse stop (SIGTERM →
