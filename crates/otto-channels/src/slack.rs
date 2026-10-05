@@ -852,7 +852,7 @@ async fn handle_event(
         debug!(event_type, "slack: ignored non-message event");
         return;
     }
-    info!(event_type, "slack: message-like event received");
+    debug!(event_type, "slack: message-like event received");
 
     // Loop prevention — the ONLY thing we ever drop. Never forward the bot's
     // own messages, including the nested message of an edit (`message_changed`):
@@ -860,7 +860,7 @@ async fn handle_event(
     // edit emits a message_changed event authored by the bot. Without this the
     // relay would feed its own output back to the agent in a tight loop.
     if event["bot_id"].is_string() || event["message"]["bot_id"].is_string() {
-        info!(event_type, "slack: bot message skipped (loop prevention)");
+        debug!(event_type, "slack: bot message skipped (loop prevention)");
         return;
     }
 

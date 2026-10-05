@@ -7706,7 +7706,7 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
         return; // nothing provisioned
     };
     if run_worktrees_in_use(ctx, run_id, &dir).await {
-        tracing::info!(
+        tracing::debug!(
             "wf reap: keeping {} — a step session there can still be reopened",
             dir.display()
         );
@@ -7761,14 +7761,8 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
             .await
             .map(|out| !out.trim().is_empty())
             .unwrap_or(false);
-        let pushed = repo_git
-            .run(&[
-                "rev-parse",
-                "--verify",
-                &format!("refs/remotes/origin/{branch}"),
-            ])
-            .await
-            .is_ok();
+        // Quiet probe: a deleted remote ref is the common case, not an error.
+        let pushed = repo_git.origin_branch_exists(&branch).await;
         if merged || pushed {
             let _ = repo_git.run(&["branch", "-D", &branch]).await;
         } else {

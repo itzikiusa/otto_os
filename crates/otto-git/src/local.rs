@@ -1494,6 +1494,22 @@ impl LocalGit {
         Ok(nul_records(&out).map(str::to_string).collect())
     }
 
+    /// True when the remote-tracking branch `origin/<branch>` exists. A
+    /// probe, not a failure: `--quiet` + the raw runner keep a missing ref (the
+    /// workflow reaper asking about an already-deleted `otto-wf/*` branch) out
+    /// of the "git failed … code 128" warn log.
+    pub async fn origin_branch_exists(&self, branch: &str) -> bool {
+        if Self::guard_ref(branch).is_err() {
+            return false;
+        }
+        let refname = format!("refs/remotes/origin/{branch}");
+        matches!(
+            self.run_raw(&["rev-parse", "--verify", "--quiet", &refname], &[])
+                .await,
+            Ok((true, _, _, _))
+        )
+    }
+
     /// True when a local branch already exists. Lets Goal Loops re-attach an
     /// existing loop branch NON-destructively instead of `-B`-resetting it.
     pub async fn branch_exists(&self, branch: &str) -> bool {
