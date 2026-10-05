@@ -955,7 +955,16 @@
       if (dirty) await save();
       if (!ownsView() || dirty) return null;
       const r = await api.post<WorkflowRun>(`/workflows/${workflowId}/run`, body);
-      if (ownsView()) { requestedRunId = r.id; run = r; }
+      if (ownsView()) {
+        requestedRunId = r.id;
+        run = r;
+        // The engine starts the run before this POST answers, so its first
+        // workflow_run_updated events can reach the page while `run` is still
+        // unset — the fast path drops them, and the view would sit on this
+        // creation snapshot ("Queued") until the run's NEXT event, possibly a
+        // whole step later. Catch up once (rev-guarded, single-flight).
+        if (r.status === 'pending' || r.status === 'running') void refetchRun(r.id);
+      }
       return r;
     } catch (e) {
       toastError('Couldn’t start the run', e);
