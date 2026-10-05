@@ -177,7 +177,7 @@ opt-level = 1
 # rebuilds everything (slower once), subsequent ones are faster.
 [profile.release]
 lto = false
-strip = true
+strip = "debuginfo"
 
 # Vendored vt100 fork: top-anchored scroll regions feed scrollback so codex
 # (ratatui insert_before) transcript history survives reattach snapshots.
