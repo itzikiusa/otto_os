@@ -358,15 +358,28 @@
     });
   }
 
+  /** Turns whose conflict draft is being applied — a double-click (or a
+   *  second click during the confirm) must not create two forced versions. */
+  let applyingConflict = $state<ReadonlySet<string>>(new Set());
   async function applyConflict(turn: DesignAssistTurn): Promise<void> {
-    if (!turn.version_id) return;
+    if (!turn.version_id || applyingConflict.has(turn.turn_id)) return;
+    applyingConflict = new Set([...applyingConflict, turn.turn_id]);
+    try {
+      await applyConflictNow(turn, turn.version_id);
+    } finally {
+      const next = new Set(applyingConflict);
+      next.delete(turn.turn_id);
+      applyingConflict = next;
+    }
+  }
+  async function applyConflictNow(turn: DesignAssistTurn, versionId: string): Promise<void> {
     const ok = await confirmer.ask(
       `Apply Otto’s draft on top of ${head ? `v${head.seq}` : 'the current version'}? It becomes a new version; ${head ? `v${head.seq}` : 'the current version'} and everything before it stay in history.`,
       { title: 'Apply Otto’s draft', confirmLabel: 'Apply on top', danger: false },
     );
     if (!ok) return;
     try {
-      const res = await acceptVariant(artifact.id, turn.version_id, true);
+      const res = await acceptVariant(artifact.id, versionId, true);
       appliedNote = `Applied Otto’s draft as v${res.version.seq}.`;
       void loadRuns().catch(() => {});
     } catch (e) {

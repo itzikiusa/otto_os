@@ -139,13 +139,21 @@
   let memories = $state<Memory[] | null>(null);
   let memError = $state<string | null>(null);
   let memQ = $state('');
+  let memSeq = 0;
   async function loadMemory(): Promise<void> {
     const w = wsId;
     if (!w) return;
+    // Newest call for the CURRENT workspace wins: the old workspace's
+    // memories must never land in the new one's list (S18-24).
+    const my = ++memSeq;
+    const current = () => my === memSeq && wsId === w;
     try {
-      memories = await listDesignMemories(w);
+      const rows = await listDesignMemories(w);
+      if (!current()) return;
+      memories = rows;
       memError = null;
     } catch (e) {
+      if (!current()) return;
       memError =
         e instanceof ApiError && e.status === 403
           ? 'Design memory lives in Otto memory, which needs Product view access.'
